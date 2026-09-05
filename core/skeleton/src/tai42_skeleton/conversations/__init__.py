@@ -21,13 +21,14 @@ if TYPE_CHECKING:
         start_delivery_sweep,
         stop_delivery_sweep,
     )
-    from tai42_skeleton.conversations.turn import accept, redrive_accepted, submit_api_message
+    from tai42_skeleton.conversations.turn import accept, redrive_accepted, submit_api_message, submit_event
 
 # Lazy so importing a lightweight submodule (settings, the routing manager) does not drag
 # in the agent contract, the execution-identity authorizer and the HTTP client.
 _LAZY: dict[str, tuple[str, str]] = {
     "accept": ("turn", "accept"),
     "submit_api_message": ("turn", "submit_api_message"),
+    "submit_event": ("turn", "submit_event"),
     "record_delivery_status": ("delivery", "record_delivery_status"),
     "redrive_pending": ("delivery", "redrive_pending"),
     "redrive_accepted": ("turn", "redrive_accepted"),
@@ -56,4 +57,5 @@ __all__ = [
     "start_delivery_sweep",
     "stop_delivery_sweep",
     "submit_api_message",
+    "submit_event",
 ]

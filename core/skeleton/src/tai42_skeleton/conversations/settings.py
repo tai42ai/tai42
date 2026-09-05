@@ -224,7 +224,7 @@ class ConversationsSettings(TaiBaseSettings):
 
     # -- Keyspace helpers ----------------------------------------------------
     #
-    # The nineteen conversation keyspaces. Every literal key string lives ONLY here. A
+    # The twenty conversation keyspaces. Every literal key string lives ONLY here. A
     # provider-supplied id sits LAST in its key and the segment before it is checked
     # ``:``-free, so no provider value can bleed across a segment boundary — the sole
     # exceptions are ``open_code_key`` and the two redeem-throttle keys, whose variable
@@ -237,6 +237,15 @@ class ConversationsSettings(TaiBaseSettings):
         _require_qualifier_segment("channel", channel)
         _require_key_segment("provider_message_id", provider_message_id)
         return f"{self.prefix}:dedupe:{channel}:{provider_message_id}"
+
+    def event_dedupe_key(self, route_name: str, event_id: str) -> str:
+        """Event-dedupe marker key, route-qualified (an event id is unique only within its
+        route). Its OWN family, distinct from :meth:`dedupe_key`'s channel namespace, so a
+        channel provider id and an event id sharing a value never collide on one marker; the
+        same ``inbound_dedupe_ttl_seconds`` governs both. Both halves must be non-blank."""
+        _require_qualifier_segment("route_name", route_name)
+        _require_key_segment("event_id", event_id)
+        return f"{self.prefix}:event-dedupe:{route_name}:{event_id}"
 
     def record_key(self, message_id: str) -> str:
         """Answer/delivery record key, keyed by the record's uuid4 ``message_id``."""

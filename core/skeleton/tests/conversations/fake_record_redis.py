@@ -102,6 +102,9 @@ class FakeRecordRedis:
     async def zcard(self, key: str) -> int:
         return len(self._zsets.get(key, {}))
 
+    async def zscore(self, key: str, member: str) -> float | None:
+        return self._zsets.get(key, {}).get(member)
+
     async def exists(self, key: str) -> int:
         return 1 if any(key in store for store in (self._strings, self._hashes, self._lists, self._zsets)) else 0
 

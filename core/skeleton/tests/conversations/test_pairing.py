@@ -796,15 +796,16 @@ async def test_greeting_due_first_contact_with_an_error_outcome_keeps_the_greeti
 
 
 async def test_tool_payload_off_carries_no_person_keys(env, monkeypatch):
-    # Multichannel OFF (no config row): the payload the tool sees is exactly today's four
-    # keys — no person_id / person_addresses. ``payload_expr="."`` echoes the whole payload.
+    # Multichannel OFF (no config row): the payload the tool sees carries the base keys plus
+    # the generic turn block — no person_id / person_addresses. ``payload_expr="."`` echoes
+    # the whole payload.
     seen: list[dict] = []
     _wire(monkeypatch, FakeManager(_tool_route(payload_expr=".")), FakeChannel())
     _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
     await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
     await _settle()
     assert len(seen) == 1
-    assert set(seen[0]) == {"message", "sender", "our_identity", "channel", "thread_id"}
+    assert set(seen[0]) == {"message", "sender", "our_identity", "channel", "thread_id", "turn"}
 
 
 async def test_tool_payload_on_carries_a_stable_person_id(env, monkeypatch):

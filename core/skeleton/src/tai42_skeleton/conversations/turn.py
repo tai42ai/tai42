@@ -39,6 +39,7 @@ from tai42_contract.conversations import (
     BlankInboundTextError,
     ConversationAnswer,
     ConversationDoor,
+    ConversationEventSubmission,
     ConversationRoute,
     CrossTargetMergeError,
     NotLinkedError,
@@ -178,6 +179,18 @@ class UnauthenticatedApiCallerError(NotSupportedError):
     """The API door was reached with no authenticated caller principal. The turn is refused:
     every thread and rate bucket on that door is keyed by its caller, and an anonymous one
     would be shared by everybody."""
+
+
+class ThreadNotFoundError(LookupError):
+    """The event door named a thread that does not exist on the route. An event enters an
+    EXISTING thread as a turn and never mints one, so an unknown (route, address) or thread
+    id is refused rather than opening a new conversation."""
+
+
+class EventTargetNotToolError(NotSupportedError):
+    """The event door named a route whose target is an AGENT. An event carries a structured
+    payload and no rendered text, so there is nothing to hand an agent turn; only a tool
+    target (which maps the payload through its ``payload_expr``) may run an event."""
 
 
 @dataclass(frozen=True)
@@ -775,6 +788,29 @@ def _result_shape(result: object) -> str:
     return "; ".join(parts)
 
 
+def _turn_block(record: ConversationRecord, route: ConversationRoute) -> dict[str, object]:
+    """The generic ``turn`` block surfaced on EVERY tool turn's payload: the turn id (the
+    record's ``message_id``, no new mint) and the inbound descriptor. ``inbound.id`` is the
+    channel provider id / the event id / the api record id; ``inbound.kind`` is
+    ``message``/``event``; ``inbound.source`` is the channel name / ``event:{kind}`` /
+    ``api`` — the door the turn entered through, named generically."""
+    if record.inbound_kind == "event":
+        # The model invariant guarantees an event record carries its ``inbound_event``.
+        event = record.inbound_event or {}
+        inbound_id: str | None = event["event_id"]
+        source = f"event:{event['kind']}"
+    elif record.door == "channel":
+        inbound_id = record.provider_message_id
+        source = route.channel
+    else:
+        inbound_id = record.message_id
+        source = "api"
+    return {
+        "id": record.message_id,
+        "inbound": {"id": inbound_id, "kind": record.inbound_kind, "source": source},
+    }
+
+
 async def _run_tool_turn(
     route: ConversationRoute,
     text: str,
@@ -785,12 +821,14 @@ async def _run_tool_turn(
     form: dict[str, Any] | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
+    *,
+    record: ConversationRecord,
 ) -> _ToolOutcome:
     """Dispatch one tool turn as the route's execution key and return its resolved outcome
     (a :class:`_SilentOutcome` or a :class:`_ResolvedOutcome`).
 
     Stateless per message — no conversation memory. The inbound payload maps to
-    the tool kwargs (``payload_expr`` or a fixed ``{message, sender}``), the tool runs under
+    the tool kwargs (``payload_expr`` or a fixed ``{message, sender, turn}``), the tool runs under
     the bound execution identity (whose ``run_tool`` seam authorizes the dispatch), and the
     result maps to the reply (``reply_expr`` or a null/string pass-through). The payload
     always carries ``thread_id`` — this turn's canonical thread id, the same opaque string the
@@ -802,11 +840,13 @@ async def _run_tool_turn(
     A structured inbound ``form`` (an ask-less form's submission) rides the payload under a
     ``form`` key ONLY when the inbound carried one, so an existing ``payload_expr`` over a
     form-less inbound sees a byte-identical payload; the default no-``payload_expr`` kwargs
-    stay the fixed ``{message, sender}`` either way — a route maps the form deliberately or
+    stay the fixed ``{message, sender, turn}`` either way — a route maps the form deliberately or
     not at all. Structured inbound ``attachments`` (the guest's media, as JSON ``MediaItem``
     objects) and a ``location`` (a JSON ``LocationElement``) ride the payload under those stable
     keys under the SAME rule — present ONLY when the inbound carried them, so a media-/location-
     unaware route sees a byte-identical payload and still reads the whole turn as ``message``.
+    Every tool turn's payload carries a generic ``turn`` block (:func:`_turn_block`);
+    an EVENT turn additionally carries ``event`` and nulls ``message``/``sender``.
     A reply that is ``None`` or blank is a deliberate silent outcome; a mapping fault, a
     denied or failed dispatch, or a wrong-typed result is a client-safe ``error`` outcome
     whose detail is logged, never delivered.
@@ -832,7 +872,16 @@ async def _run_tool_turn(
         "our_identity": route.our_identity,
         "channel": route.channel,
         "thread_id": thread_id,
+        "turn": _turn_block(record, route),
     }
+    if record.inbound_kind == "event":
+        # An event turn has no human text and no sender; its structured payload rides the
+        # dedicated ``event`` key, and ``message``/``sender`` are null so a payload_expr
+        # (and the default kwargs) never read an event as a text message.
+        event = record.inbound_event or {}
+        payload["message"] = None
+        payload["sender"] = None
+        payload["event"] = {"id": event["event_id"], "kind": event["kind"], "payload": event["payload"]}
     if person is not None:
         payload["person_id"] = person.person_id
         payload["person_addresses"] = [a.model_dump(mode="json") for a in person.addresses]
@@ -944,10 +993,17 @@ async def _run_tool_turn(
 
 async def _tool_kwargs(route: ConversationRoute, payload: dict[str, object]) -> dict[str, object]:
     """The kwargs the tool is dispatched with. No ``payload_expr`` → the fixed
-    ``{message, sender}``. Otherwise the jq program over the full payload, which MUST emit
-    exactly one value and it MUST be a JSON object."""
+    ``{message, sender, turn}`` (plus ``event`` on an event turn). Otherwise the jq program
+    over the full payload, which MUST emit exactly one value and it MUST be a JSON object."""
     if route.payload_expr is None:
-        return {"message": payload["message"], "sender": payload["sender"]}
+        kwargs: dict[str, object] = {
+            "message": payload["message"],
+            "sender": payload["sender"],
+            "turn": payload["turn"],
+        }
+        if "event" in payload:
+            kwargs["event"] = payload["event"]
+        return kwargs
     # Bounded at one, so an over-emitting program is capped rather than materialized whole.
     values = await run_jq_bounded(route.payload_expr, payload, 1)
     if len(values) != 1:
@@ -1054,6 +1110,9 @@ def _new_record(
     inbound_form: dict[str, Any] | None = None,
     inbound_attachments: list[MediaItem] | None = None,
     inbound_location: LocationElement | None = None,
+    inbound_kind: Literal["message", "event"] = "message",
+    inbound_event: dict[str, Any] | None = None,
+    submitted_by: str | None = None,
 ) -> ConversationRecord:
     """A freshly minted record for one accepted message, in the state its door commits it
     to (``accepted``, ``pending_delivery`` or ``shed``). ``inbound_text`` is the message
@@ -1093,6 +1152,9 @@ def _new_record(
         inbound_form=inbound_form,
         inbound_attachments=inbound_attachments,
         inbound_location=inbound_location,
+        inbound_kind=inbound_kind,
+        inbound_event=inbound_event,
+        submitted_by=submitted_by,
         delivery_status=delivery_status,
         answer_status=answer_status,
         answer=answer,
@@ -1207,7 +1269,16 @@ async def _target_outcome(
     with run_attribution(_conversation_attribution(route, intake, person)):
         if route.target_kind == "tool":
             return await _run_tool_turn(
-                route, text, intake.thread_id, intake.client_address, person, params, form, attachments, location
+                route,
+                text,
+                intake.thread_id,
+                intake.client_address,
+                person,
+                params,
+                form,
+                attachments,
+                location,
+                record=intake,
             )
         return await _run_agent_turn(route, text, intake.thread_id, intake.client_address)
 
@@ -1285,6 +1356,26 @@ def _outcome_record(intake: ConversationRecord, outcome: _ToolOutcome) -> Conver
     return _with_outcome(intake, outcome.answer_status, outcome.parts, outcome.error)
 
 
+async def _resolve_event_person(
+    route: ConversationRoute, intake: ConversationRecord, multichannel: _Multichannel | None
+) -> Person | None:
+    """The EXISTING person an event turn carries in its tool payload, resolved READ-ONLY:
+    a linked-person thread (``bridge:@person:{id}``) names it by id, otherwise a multichannel
+    route reads it by the sending address. An event NEVER mints identity, so a thread with no
+    such person carries no person fields — exactly like a plain, non-multichannel thread."""
+    if intake.thread_id.startswith(PERSON_THREAD_PREFIX):
+        return await _person_store().get_by_id(intake.thread_id[len(PERSON_THREAD_PREFIX) :])
+    if multichannel is None:
+        return None
+    return await _person_store().get_person(
+        multichannel.target,
+        door=multichannel.door,
+        channel=multichannel.channel,
+        our_identity=multichannel.our_identity,
+        address=multichannel.address,
+    )
+
+
 async def _resolve_turn_record(
     *,
     route: ConversationRoute,
@@ -1305,7 +1396,16 @@ async def _resolve_turn_record(
     PREPENDED into the answer before it is persisted. ``params`` and ``form`` reach only a
     tool target's payload; a pairing turn ignores them. ``classify`` runs on the rendered
     TEXT (the commands match only the whole trimmed message, so a form's label:value lines
-    can never classify as a command)."""
+    can never classify as a command).
+
+    An EVENT turn takes its own branch first: it resolves any existing person READ-ONLY
+    (:func:`_resolve_event_person`) and carries the person fields into the tool payload exactly
+    as a message turn would, but runs NONE of the person-WRITE path — no provisional mint, no
+    greeting, no classify — because a structured event has no human sender to admit."""
+    if intake.inbound_kind == "event":
+        person = await _resolve_event_person(route, intake, multichannel)
+        return _outcome_record(intake, await _target_outcome(route, intake, text, person, params, form))
+
     if multichannel is None:
         return _outcome_record(
             intake,
@@ -1906,18 +2006,25 @@ async def submit_api_message(
         location=checked_location,
     )
 
+    return await _api_wait_or_callback(task, message_id, thread_id, wait_seconds)
+
+
+async def _api_wait_or_callback(
+    task: asyncio.Task[ConversationRecord], message_id: str, thread_id: str, wait_seconds: int
+) -> ApiSubmitResult:
+    """The api door's sync-wait / async-callback split, shared by every api-door turn (the
+    message door and an event's turn on an api-door thread). Within ``wait_seconds`` a turn
+    that finished — an answer or an explicit silent marker — is returned inline in the
+    ``200`` and its callback suppressed; otherwise, or on a lost claim to a racing delivery,
+    the delivery spawn is attached to the task's completion so exactly one of the wait path
+    and the callback delivers, and the ``202`` shape is returned."""
     if wait_seconds > 0:
         done, _pending = await asyncio.wait({task}, timeout=wait_seconds)
         if task in done and task.exception() is None:
             record = task.result()
             if await mark_wait_delivered(message_id):
-                # A turn finished in time — an answer or an explicit silent marker — is
-                # returned inline and its callback suppressed exactly as an answer's is.
                 return ApiSubmitResult(message_id=message_id, thread_id=thread_id, answer=record.answer_payload())
             # Lost the claim to a racing delivery — fall through to the async shape.
-
-    # Async path: attach the delivery spawn to the task's completion, so exactly one of the
-    # wait path and the callback delivers.
     _deliver_when_done(task, message_id)
     return ApiSubmitResult(message_id=message_id, thread_id=thread_id, answer=None)
 
@@ -1927,6 +2034,182 @@ async def _get_api_route(route_name: str) -> ConversationRoute:
     if route is None or route.door != "api":
         raise ConversationRouteResolutionError(f"no api conversation route named {route_name!r}")
     return route
+
+
+# -- the event door ----------------------------------------------------------
+
+
+async def _get_event_route(route_name: str) -> ConversationRoute:
+    """The route the event door runs on — door-agnostic (channel or api), tool-target only.
+    A missing route is refused as unresolved (404); an AGENT target is refused with
+    :class:`EventTargetNotToolError` (409) — an event has no rendered text to hand an agent."""
+    route = await get_conversations_manager().get_route(route_name)
+    if route is None:
+        raise ConversationRouteResolutionError(f"no conversation route named {route_name!r}")
+    if route.target_kind != "tool":
+        raise EventTargetNotToolError(
+            f"conversation route {route_name!r} targets an agent; an event can only run a tool target"
+        )
+    return route
+
+
+async def _resolve_event_thread(
+    store: ConversationRecordStore,
+    route: ConversationRoute,
+    submission: ConversationEventSubmission,
+    caller_principal: str,
+) -> tuple[str, str, str | None, _Multichannel | None]:
+    """Resolve the EXISTING thread an event enters, returning
+    ``(thread_id, client_address, record_caller_principal, multichannel)``.
+
+    Addressed by ``thread_id``: the id is verified live on the route's thread index and its
+    latest record supplies the delivery ``client_address`` (a person-aggregated thread has
+    no single address of its own). Addressed by ``address``: the address is composed exactly
+    as the TARGET route's own door composes it — a channel route by
+    :func:`canonical_address`, an api route by :func:`_api_client_address` (so by ``address``
+    a caller reaches only its own api threads), then :func:`_resolve_thread_id` and the same
+    existence check. A missing thread raises :class:`ThreadNotFoundError` (404) — an event
+    never mints a thread. ``record_caller_principal`` honours ``_new_record``'s door
+    invariant: ``None`` for a channel target, the qualifying principal for an api target.
+
+    The multichannel context of the sending address is resolved and returned so the turn can
+    read (never write) the linked person whose fields it carries into the tool payload."""
+    if submission.thread_id is not None:
+        thread_id = submission.thread_id.strip()
+        latest = await store.latest_thread_record(route.route_name, thread_id)
+        if latest is None:
+            raise ThreadNotFoundError(f"no thread {thread_id!r} on conversation route {route.route_name!r}")
+        record_caller_principal = latest.caller_principal if route.door == "api" else None
+        multichannel = await _multichannel_context(
+            route,
+            door=route.door,
+            channel=route.channel,
+            our_identity=route.our_identity,
+            address=latest.client_address,
+            accountable=caller_principal,
+        )
+        return thread_id, latest.client_address, record_caller_principal, multichannel
+    address = canonical_address(submission.address or "")
+    if route.door == "channel":
+        composed = address
+        record_caller_principal = None
+    else:
+        composed = _api_client_address(caller_principal, address)
+        record_caller_principal = caller_principal
+    multichannel = await _multichannel_context(
+        route,
+        door=route.door,
+        channel=route.channel,
+        our_identity=route.our_identity,
+        address=composed,
+        accountable=caller_principal,
+    )
+    thread_id = await _resolve_thread_id(route, multichannel, composed)
+    if not await store.thread_exists(route.route_name, thread_id):
+        raise ThreadNotFoundError(f"no thread for address on conversation route {route.route_name!r}")
+    return thread_id, composed, record_caller_principal, multichannel
+
+
+async def submit_event(
+    route_name: str,
+    submission: ConversationEventSubmission,
+    caller_principal: str | None,
+) -> ApiSubmitResult:
+    """Run a structured event as a turn ON an existing thread of ``route_name``.
+
+    The event enters the thread's FIFO exactly like an inbound message — reserve the thread
+    slot, persist a durable event record, run the tool target AS the route's execution key —
+    and its answer is delivered by the TARGET route's door: a channel route texts the
+    thread's address, an api route POSTs the route's signed callback (or returns the answer
+    inline within ``wait_seconds``). It never mints a thread and never runs an agent target.
+
+    ``caller_principal`` is MANDATORY: it is the accountable party the rate cap buckets on
+    and the authorizing principal recorded on the event (``submitted_by``). Admission runs
+    in the channel door's order — a cheap owner read-check, the rate cap, the thread slot,
+    the durable record, and the idempotency claim LAST — so a refused admission (an unknown
+    thread, a rate cap, a full queue) writes nothing and never burns the ``event_id`` key: a
+    redelivery of a rate-capped event runs cleanly, and a redelivery of an ACCEPTED one
+    returns the original turn's ``message_id`` (``202``) and starts no second turn."""
+    if caller_principal is None or not caller_principal.strip():
+        raise UnauthenticatedApiCallerError(
+            f"event conversation route {route_name!r} needs an authenticated caller principal and this "
+            "deployment resolved none; the event door requires access control to be enabled"
+        )
+    route = await _get_event_route(route_name)
+    store = _store()
+    thread_id, client_address, record_caller_principal, multichannel = await _resolve_event_thread(
+        store, route, submission, caller_principal
+    )
+    event = submission.event
+    event_id = event.event_id
+
+    # Cheap read-check before any admission write: an already-claimed event returns the
+    # owning turn's identity and runs nothing (idempotency).
+    owner = await store.get_event_owner(route_name, event_id)
+    if owner is not None:
+        return ApiSubmitResult(message_id=owner, thread_id=thread_id, answer=None)
+
+    message_id = str(uuid4())
+    caps = get_turn_caps()
+    admission = caps.admit_address(_api_bucket_key(route.route_name, caller_principal), route.turns_per_hour_override)
+    if admission is not AddressAdmission.ADMIT:
+        effective_rate = route.turns_per_hour_override or caps.settings.per_address_turns_per_hour
+        raise AddressRateLimitedError(
+            f"caller {caller_principal!r} is over its rate cap of "
+            f"{effective_rate}/hour on route {route.route_name!r}; "
+            "retry after a short wait"
+        )
+
+    caps.reserve_thread_slot(thread_id)
+    intake_token = uuid4().hex
+    intake = _new_record(
+        route=route,
+        message_id=message_id,
+        thread_id=thread_id,
+        client_address=client_address,
+        caller_principal=record_caller_principal,
+        provider_message_id=None,
+        inbound_text="",
+        inbound_kind="event",
+        inbound_event=event.model_dump(mode="json"),
+        submitted_by=caller_principal,
+        delivery_status=DeliveryStatus.ACCEPTED,
+    )
+    try:
+        await store.create_record(intake, intake_token=intake_token)
+        await _refresh_thread_mode_ttl(thread_id)
+        # The claim is the LAST mutation, mirroring the channel door: an owner id always
+        # names a durable record, and a lost claim discards the record just created.
+        claimed_owner = await store.claim_event(route_name, event_id, message_id)
+    except asyncio.CancelledError:
+        caps.release_thread_slot(thread_id)
+        _spawn_intake_resolution(message_id)
+        raise
+    except Exception:
+        caps.release_thread_slot(thread_id)
+        await _resolve_stranded_intake(message_id)
+        raise
+    if claimed_owner != message_id:
+        caps.release_thread_slot(thread_id)
+        await store.delete_record(intake)
+        return ApiSubmitResult(message_id=claimed_owner, thread_id=thread_id, answer=None)
+
+    deliver_on_completion = route.door == "channel"
+    task = _schedule_turn(
+        caps,
+        route=route,
+        intake=intake,
+        text="",
+        intake_token=intake_token,
+        deliver_on_completion=deliver_on_completion,
+        multichannel=multichannel,
+    )
+    if deliver_on_completion:
+        # A channel-target event delivers to the thread's address on completion, exactly as
+        # the channel door does; the caller gets the accepted id back.
+        return ApiSubmitResult(message_id=message_id, thread_id=thread_id, answer=None)
+    wait_seconds = min(submission.wait_seconds, caps.settings.sync_wait_max_seconds)
+    return await _api_wait_or_callback(task, message_id, thread_id, wait_seconds)
 
 
 # -- the operator send door --------------------------------------------------
@@ -2559,13 +2842,23 @@ async def _resolve_stranded_intake(message_id: str) -> None:
 
 
 async def _arbitrate_stranded_intake(store: ConversationRecordStore, record: ConversationRecord) -> None:
-    """Resolve one record left at intake against its inbound pair: the record the pair is
-    committed to takes the error outcome and delivers it; one that lost the pair to another
-    attempt owns nothing and is discarded."""
+    """Resolve one record left at intake against its inbound claim (channel pair or event
+    id): the record the claim is committed to takes the error outcome and delivers it; one
+    that lost the claim to another attempt owns nothing and is discarded."""
     if await _owns_inbound_claim(store, record):
         await _fail_stranded_turn(store, record)
         return
     await store.delete_record(record)
+    if record.inbound_kind == "event":
+        event = record.inbound_event or {}
+        logger.warning(
+            "conversations: intake event record %s lost the event claim for %r on route %r to another attempt and "
+            "was discarded",
+            record.message_id,
+            event.get("event_id"),
+            record.route_name,
+        )
+        return
     logger.warning(
         "conversations: intake record %s lost the inbound claim for %r on channel %r to another attempt and was "
         "discarded",
@@ -2612,8 +2905,15 @@ async def redrive_accepted() -> None:
 
 
 async def _owns_inbound_claim(store: ConversationRecordStore, record: ConversationRecord) -> bool:
-    """Whether ``record`` is the one its inbound pair is committed to. An api-door record
-    has no provider id to dedupe on, so it is its own authority."""
+    """Whether ``record`` is the one its inbound claim is committed to — claim-family-aware.
+    An event record arbitrates against the event dedupe family
+    (``get_event_owner``/``claim_event`` on ``(route, event_id)``); a channel message record
+    against the channel pair; an api-door message record has no provider id to dedupe on and
+    is its own authority."""
+    if record.inbound_kind == "event":
+        event = record.inbound_event or {}
+        owner = await store.claim_event(record.route_name, event["event_id"], record.message_id)
+        return owner == record.message_id
     if record.channel is None or record.provider_message_id is None:
         return True
     owner = await store.claim_inbound(record.channel, record.provider_message_id, record.message_id)
@@ -2662,7 +2962,9 @@ __all__ = [
     "ApiSubmitResult",
     "CompletionDeliveryError",
     "ConversationRouteResolutionError",
+    "EventTargetNotToolError",
     "OperatorAppendError",
+    "ThreadNotFoundError",
     "UnauthenticatedApiCallerError",
     "accept",
     "deliver_agent_completion",
@@ -2670,4 +2972,5 @@ __all__ = [
     "operator_send",
     "redrive_accepted",
     "submit_api_message",
+    "submit_event",
 ]

@@ -2,8 +2,11 @@
 transient runtime state (NOT a backup section) and all Redis-backed:
 
 1. Inbound dedupe: ``conversations:dedupe:{channel}:{provider_message_id}`` → the
-   ``message_id`` that first claimed the pair. The claim has no release path, so it is
-   taken only once a durable record already stands behind it.
+   ``message_id`` that first claimed the pair, plus its event sibling
+   ``conversations:event-dedupe:{route_name}:{event_id}`` → the ``message_id`` that first
+   claimed an event turn. A distinct family, so a channel provider id and an event id
+   sharing a value never collide on one marker. Neither claim has a release path, so each
+   is taken only once a durable record already stands behind it.
 2. Answer record: ``conversations:record:{message_id}`` — intake, produced answer and
    delivery state, split into a content blob plus the delivery-control fields the atomic
    transitions mutate. The retention TTL is applied ONLY on reaching a terminal state.
@@ -558,27 +561,51 @@ class ConversationRecordStore:
 
     # -- inbound dedupe (keyspace 1) -----------------------------------------
 
-    async def get_inbound_owner(self, channel: str, provider_message_id: str) -> str | None:
-        """The ``message_id`` owning ``(channel, provider_message_id)``, or ``None`` when
-        unclaimed — a door's redelivery fast path. It claims nothing, so
-        :meth:`claim_inbound` stays the authority concurrent accepts arbitrate through."""
+    async def _dedupe_owner(self, key: str) -> str | None:
+        """The ``message_id`` owning a dedupe marker key, or ``None`` when unclaimed — the
+        shared read behind every door's redelivery fast path. It claims nothing, so
+        :meth:`_claim_dedupe` stays the authority concurrent accepts arbitrate through."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            owner = await awaited(r.get(self.settings.dedupe_key(channel, provider_message_id)))
+            owner = await awaited(r.get(key))
         if owner is None:
             return None
         return owner.decode() if isinstance(owner, bytes) else owner
 
-    async def claim_inbound(self, channel: str, provider_message_id: str, message_id: str) -> str:
-        """Claim ``(channel, provider_message_id)`` for ``message_id``, returning the
-        ``message_id`` that OWNS the pair — the passed one on a fresh claim, the prior
-        turn's on a redelivery. The claim has no release path, so the caller must take it
-        only once its record is durably persisted, and discard that record on a loss."""
-        key = self.settings.dedupe_key(channel, provider_message_id)
+    async def _claim_dedupe(self, key: str, message_id: str) -> str:
+        """Atomic get-or-set of a dedupe marker for ``message_id`` under the shared
+        ``inbound_dedupe_ttl_seconds``, returning the ``message_id`` that OWNS the key — the
+        passed one on a fresh claim, the prior turn's on a redelivery. Every dedupe family
+        (channel and event) runs the SAME ``_CLAIM_INBOUND_LUA`` through here, so their
+        arbitration is byte-identical. The claim has no release path, so the caller must
+        take it only once its record is durably persisted, and discard that record on a
+        loss."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             owner = await eval_script(
                 r, _CLAIM_INBOUND_LUA, 1, key, message_id, self.settings.inbound_dedupe_ttl_seconds
             )
         return owner.decode() if isinstance(owner, bytes) else owner
+
+    async def get_inbound_owner(self, channel: str, provider_message_id: str) -> str | None:
+        """The ``message_id`` owning ``(channel, provider_message_id)``, or ``None`` when
+        unclaimed — the channel door's redelivery fast path."""
+        return await self._dedupe_owner(self.settings.dedupe_key(channel, provider_message_id))
+
+    async def claim_inbound(self, channel: str, provider_message_id: str, message_id: str) -> str:
+        """Claim ``(channel, provider_message_id)`` for ``message_id`` in the channel dedupe
+        family, returning the owning ``message_id``."""
+        return await self._claim_dedupe(self.settings.dedupe_key(channel, provider_message_id), message_id)
+
+    async def get_event_owner(self, route_name: str, event_id: str) -> str | None:
+        """The ``message_id`` owning ``(route_name, event_id)``, or ``None`` when unclaimed —
+        the event door's redelivery fast path, over the event dedupe family."""
+        return await self._dedupe_owner(self.settings.event_dedupe_key(route_name, event_id))
+
+    async def claim_event(self, route_name: str, event_id: str, message_id: str) -> str:
+        """Claim ``(route_name, event_id)`` for ``message_id`` in the event dedupe family,
+        returning the owning ``message_id``. Runs the SAME claim as :meth:`claim_inbound`
+        over its own key family, so a channel dedupe and an event dedupe of the same id are
+        distinct markers."""
+        return await self._claim_dedupe(self.settings.event_dedupe_key(route_name, event_id), message_id)
 
     # -- answer record (keyspace 2) ------------------------------------------
 
@@ -939,6 +966,27 @@ class ConversationRecordStore:
         return records
 
     # -- thread indexes (keyspaces 7-8) --------------------------------------
+
+    async def thread_exists(self, route_name: str, thread_id: str) -> bool:
+        """Whether ``thread_id`` is a live thread of ``route_name`` — one ZSCORE on the
+        route's thread index, the membership check a door takes before entering a thread it
+        did not itself just create."""
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            score = await awaited(r.zscore(self.settings.route_threads_key(route_name), thread_id))
+        return score is not None
+
+    async def latest_thread_record(self, route_name: str, thread_id: str) -> ConversationRecord | None:
+        """The newest readable record of a thread, read through its transcript index
+        (newest first, keyspace 7). ``None`` when the thread has no readable record — a
+        member whose row is gone or unparseable is logged and skipped by the shared loader,
+        never a silent empty result."""
+        thread_key = self.settings.thread_index_key(route_name, thread_id)
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            for member in await awaited(r.zrevrange(thread_key, 0, 0)):
+                record = await self._load_searched_record(r, _member(member))
+                if record is not None:
+                    return record
+        return None
 
     async def list_route_threads(
         self,

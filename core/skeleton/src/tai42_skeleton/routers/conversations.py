@@ -89,14 +89,23 @@ from pydantic import ValidationError
 from starlette.responses import JSONResponse, Response
 from tai42_contract.access_control import get_current_user_id
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ConversationMessage, ConversationRouteCreate, TargetConversationConfig
+from tai42_contract.conversations import (
+    ConversationEventSubmission,
+    ConversationMessage,
+    ConversationRouteCreate,
+    TargetConversationConfig,
+)
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.conversations.caps import AddressRateLimitedError, ThreadQueueOverflowError
 from tai42_skeleton.conversations.settings import ConversationsSettings
-from tai42_skeleton.conversations.turn import ConversationRouteResolutionError
+from tai42_skeleton.conversations.turn import (
+    ConversationRouteResolutionError,
+    EventTargetNotToolError,
+    ThreadNotFoundError,
+)
 from tai42_skeleton.operations import (
     BadRequestError,
     operation_metadata_of,
@@ -591,6 +600,82 @@ async def send_conversation_message(request: Request) -> Response:
     if result.answer is not None:
         # ``exclude_none`` drops the ``answer`` field for a silent outcome, so a silent turn
         # answers 200 with ``{message_id, thread_id, status: "silent"}`` and no answer key.
+        payload["answer"] = result.answer.model_dump(mode="json", exclude_none=True)
+        return JSONResponse({"data": payload}, status_code=200)
+    return JSONResponse({"data": payload}, status_code=202)
+
+
+@http_surface().custom_route(
+    "/api/conversations/{route_name}/events",
+    methods=["POST"],
+    summary="Deliver a structured event to a conversation thread as a turn",
+    tags=["conversations"],
+    request_model=ConversationEventSubmission,
+    response_model=None,
+    declared=DeclaredRouteMetadata(
+        reload_gated=True,
+        reads_body=True,
+        error_statuses=(400, 401, 404, 409, 429, 501, 503),
+        success_status=202,
+        additional_success_statuses=(200,),
+    ),
+    action="write",
+)
+async def send_conversation_event(request: Request) -> Response:
+    """Run a structured event as a turn on an EXISTING thread of ``route_name``.
+
+    The thread must already exist: an event enters a conversation as a turn and never mints a
+    thread. Address it by the ``address`` its listing shows or by its ``thread_id`` (exactly
+    one). The turn runs the route's TOOL target AS the route's execution key — an
+    agent-target route is refused (``409``) since an event carries no rendered text. The
+    event is IDEMPOTENT on ``event_id``: a redelivery returns the original turn's
+    ``message_id`` (``202``) and runs no second turn.
+
+    The answer is delivered by the TARGET route's door — a channel route texts the thread's
+    address, an api route POSTs the route's signed callback (a ``wait_seconds`` body field,
+    clamped to ``sync_wait_max_seconds``, returns a finished turn's answer inline in the
+    ``200`` and suppresses the callback). Default is ``202 {message_id, thread_id}``.
+
+    This is a TRUSTED-integration door: an authorized writer may address ANY existing thread
+    of the route by ``thread_id`` (a channel guest's included), so a deployment grants its
+    write action to service principals, not to low-trust API keys.
+    """
+    if reload_gate.locked:
+        return reload_gate.reject_response()
+    route_name = request.path_params["route_name"]
+    try:
+        body = await request.json()
+    except ValueError:
+        return _error("invalid JSON body", 400)
+    if not isinstance(body, dict):
+        return _error("body must be a JSON object", 400)
+    try:
+        submission = ConversationEventSubmission.model_validate(body)
+    except ValidationError as exc:
+        # VALUE-FREE: render each error's ``msg`` (which names the violated bound, never the
+        # value), never ``str(exc)`` or the error dicts — both reflect the opaque input.
+        detail = "; ".join(error["msg"] for error in exc.errors())
+        return _error(f"invalid conversation event: {detail}", 400)
+
+    from tai42_skeleton.conversations import submit_event
+
+    try:
+        result = await submit_event(route_name, submission, get_current_user_id())
+    except ThreadNotFoundError as exc:
+        return _error(str(exc), 404)
+    except ConversationRouteResolutionError as exc:
+        return _error(str(exc), 404)
+    except EventTargetNotToolError as exc:
+        return _error(str(exc), 409)
+    except AddressRateLimitedError as exc:
+        return _error(str(exc), 429)
+    except ThreadQueueOverflowError as exc:
+        return _error(str(exc), 503)
+    except NotSupportedError as exc:
+        return _error(str(exc), 501)
+
+    payload: dict[str, object] = {"message_id": result.message_id, "thread_id": result.thread_id}
+    if result.answer is not None:
         payload["answer"] = result.answer.model_dump(mode="json", exclude_none=True)
         return JSONResponse({"data": payload}, status_code=200)
     return JSONResponse({"data": payload}, status_code=202)

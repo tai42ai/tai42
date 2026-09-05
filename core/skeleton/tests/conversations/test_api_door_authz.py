@@ -156,3 +156,95 @@ def test_an_authorized_caller_is_admitted_and_invokes_the_turn_as_itself(client,
     # The turn carries the authorized CALLER — the principal the caller-scoped read door
     # later matches on — not the route's execution key.
     assert turns.calls == [("chat", "u-7", "sender")]
+
+
+# -- the event door: same write action, same caller-principal wiring -----------
+
+_EVENTS_PATTERN = r"/api/conversations/.+/events"
+_EVENT_PATH = "/api/conversations/chat/events"
+
+
+def _event_door():
+    """The event door handler, imported with the real app bound exactly as a boot does."""
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.app.instance import app as skeleton_app
+
+    with tai42_app.bound(skeleton_app):
+        from tai42_skeleton.routers import conversations as router
+
+    return router.send_conversation_event
+
+
+class _EventRecorder:
+    """Stands in for the event engine: every call reaching it is recorded, so a denied
+    caller must produce none and an admitted one must carry the caller principal."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    async def __call__(self, route_name, submission, caller_principal):
+        self.calls.append((route_name, submission.event.event_id, caller_principal))
+        return ApiSubmitResult(message_id="e-1", thread_id=f"bridge:{route_name}:x", answer=None)
+
+
+@pytest.fixture
+def event_turns(monkeypatch) -> _EventRecorder:
+    recorder = _EventRecorder()
+    monkeypatch.setattr(conversations_package, "submit_event", recorder)
+    return recorder
+
+
+@pytest.fixture
+def event_client(monkeypatch, bound_app) -> TestClient:
+    """The event door behind the same real auth stack the message door uses — the event
+    route matches the same write-action template, so the two share one authorization model."""
+    ac_settings = AccessControlSettings(path_patterns={_EVENTS_PATTERN: _TEMPLATE})
+    redis = FakeRedis(
+        hashes={
+            f"{ac_settings.key_prefix}{hash_api_key(_SENDER_KEY)}": {"user_id": "sender", "description": "d"},
+            f"{ac_settings.key_prefix}{hash_api_key(_STRANGER_KEY)}": {"user_id": "stranger", "description": "d"},
+        }
+    )
+    pg = FakeAccessControlPg()
+    pg.add_route(_TEMPLATE, _SCOPE)
+    pg.add_policy("sender", scopes=[_SCOPE])
+    pg.add_policy("stranger", scopes=["unrelated"])
+
+    ctx = make_client_ctx(redis)
+    monkeypatch.setattr(verifier_module, "client_ctx", ctx)
+    monkeypatch.setattr(policy_module, "client_ctx", ctx)
+    monkeypatch.setattr(provider_module, "client_ctx", ctx)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
+    monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
+    role_grants_module.reset_role_grants_cache()
+
+    routes = [Route("/api/conversations/{route_name}/events", _event_door(), methods=["POST"])]
+    app = Starlette(routes=routes, middleware=AuthAdapter(ac_settings).get_middleware())
+    return TestClient(app)
+
+
+def _send_event(client: TestClient, key: str | None = None):
+    headers = {"X-API-Key": key} if key is not None else {}
+    body = {"address": "u-7", "event": {"event_id": "evt-1", "kind": "provider.update"}}
+    return client.post(_EVENT_PATH, json=body, headers=headers)
+
+
+def test_an_uncredentialed_caller_never_reaches_the_event_engine(event_client, event_turns):
+    response = _send_event(event_client)
+    assert response.status_code == 401
+    assert event_turns.calls == []
+
+
+def test_a_caller_without_the_event_doors_scope_is_denied(event_client, event_turns):
+    response = _send_event(event_client, _STRANGER_KEY)
+    assert response.status_code == 403
+    assert event_turns.calls == []
+
+
+def test_an_authorized_caller_reaches_the_event_engine_as_itself(event_client, event_turns):
+    response = _send_event(event_client, _SENDER_KEY)
+    assert response.status_code == 202
+    # The event engine carries the authorized CALLER — the accountable principal recorded as
+    # the event's authorizer — never the route's execution key.
+    assert event_turns.calls == [("chat", "evt-1", "sender")]

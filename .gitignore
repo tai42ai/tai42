@@ -33,3 +33,6 @@ REAL_E2E_CREDENTIALS.env
 .coverage
 .cache/
 site/
+
+# pytest --basetemp scratch of the e2e suites (CI and host runs)
+.stacks-tmp*/

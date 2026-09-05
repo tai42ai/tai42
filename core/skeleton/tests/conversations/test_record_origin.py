@@ -123,3 +123,49 @@ def test_client_address_refuses_an_oversized_value():
     # value is refused loudly rather than forming an unbounded key.
     with pytest.raises(ValueError, match="client_address"):
         _record(client_address="a" * 257)
+
+
+def _event(**overrides):
+    """An event record's happy shape: a ``client`` turn with no human text, carrying its
+    structured ``inbound_event``."""
+    fields = {
+        "inbound_kind": "event",
+        "inbound_text": "",
+        "inbound_event": {"event_id": "E1", "kind": "provider.update", "payload": {}},
+    }
+    fields.update(overrides)
+    return _record(**fields)
+
+
+def test_event_record_is_valid_with_empty_text_and_an_event_payload():
+    record = _event()
+    assert record.inbound_kind == "event"
+    assert record.inbound_text == ""
+    assert record.inbound_event == {"event_id": "E1", "kind": "provider.update", "payload": {}}
+
+
+def test_event_record_refuses_a_nonempty_inbound_text():
+    with pytest.raises(ValueError, match="event record carries no inbound_text"):
+        _event(inbound_text="typed by a human")
+
+
+def test_event_record_requires_its_event_payload():
+    with pytest.raises(ValueError, match="event record carries its structured inbound_event"):
+        _event(inbound_event=None)
+
+
+def test_message_record_refuses_an_event_payload():
+    with pytest.raises(ValueError, match="a message record carries no inbound_event"):
+        _record(inbound_event={"event_id": "E1"})
+
+
+def test_operator_record_is_never_an_event():
+    with pytest.raises(ValueError, match="never an event"):
+        _record(origin="operator", inbound_kind="event", inbound_text="", caller_principal="op-1")
+
+
+def test_caller_view_publishes_the_event_provenance():
+    view = _event(submitted_by="svc-1").caller_view()
+    assert view["inbound_kind"] == "event"
+    assert view["inbound_event"] == {"event_id": "E1", "kind": "provider.update", "payload": {}}
+    assert view["submitted_by"] == "svc-1"

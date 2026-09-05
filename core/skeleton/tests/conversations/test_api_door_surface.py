@@ -17,7 +17,12 @@ from tai42_contract.conversations import ConversationAnswer
 
 import tai42_skeleton.conversations as conversations_package
 from tai42_skeleton.conversations.caps import AddressRateLimitedError, ThreadQueueOverflowError
-from tai42_skeleton.conversations.turn import ApiSubmitResult, ConversationRouteResolutionError
+from tai42_skeleton.conversations.turn import (
+    ApiSubmitResult,
+    ConversationRouteResolutionError,
+    EventTargetNotToolError,
+    ThreadNotFoundError,
+)
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations.errors import NotSupportedError
 
@@ -270,6 +275,97 @@ def test_invalid_params_are_a_400_that_never_echoes_the_value(monkeypatch):
     # The bound is named; the offending VALUE never appears in the response.
     assert "character limit" in body
     assert secret not in body
+    assert engine.calls == []
+
+
+# -- the event door surface ---------------------------------------------------
+
+
+_EVENT_PATH = "/api/conversations/chat/events"
+_EVENT_BODY = {"address": "u-7", "event": {"event_id": "evt-1", "kind": "provider.update"}}
+
+
+class _EventEngine:
+    """A stub event engine recording its call and returning a fixed result or raising."""
+
+    def __init__(self, *, result: ApiSubmitResult | None = None, raises: Exception | None = None) -> None:
+        self._result = result
+        self._raises = raises
+        self.calls: list[tuple] = []
+
+    async def __call__(self, route_name, submission, caller_principal):
+        self.calls.append((route_name, submission, caller_principal))
+        if self._raises is not None:
+            raise self._raises
+        return self._result or ApiSubmitResult(message_id="e-1", thread_id="t-1", answer=None)
+
+
+def _event_client(monkeypatch, engine: _EventEngine) -> TestClient:
+    router = _router()
+    monkeypatch.setattr(conversations_package, "submit_event", engine)
+    monkeypatch.setattr(router, "get_current_user_id", lambda: "caller")
+    routes = [Route("/api/conversations/{route_name}/events", router.send_conversation_event, methods=["POST"])]
+    return TestClient(Starlette(routes=routes))
+
+
+def test_event_unfinished_turn_answers_202_without_an_answer(monkeypatch):
+    engine = _EventEngine(result=ApiSubmitResult(message_id="e-1", thread_id="t-1", answer=None))
+    client = _event_client(monkeypatch, engine)
+    response = client.post(_EVENT_PATH, json=_EVENT_BODY)
+    assert response.status_code == 202
+    assert response.json()["data"]["message_id"] == "e-1"
+    assert "answer" not in response.json()["data"]
+
+
+def test_event_finished_turn_answers_200_with_the_answer_inline(monkeypatch):
+    answer = ConversationAnswer(message_id="e-1", thread_id="t-1", status="answered", answer="event handled")
+    engine = _EventEngine(result=ApiSubmitResult(message_id="e-1", thread_id="t-1", answer=answer))
+    client = _event_client(monkeypatch, engine)
+    response = client.post(_EVENT_PATH, json={**_EVENT_BODY, "wait_seconds": 5})
+    assert response.status_code == 200
+    assert response.json()["data"]["answer"]["answer"] == "event handled"
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (ThreadNotFoundError("no such thread"), 404),
+        (ConversationRouteResolutionError("no such route"), 404),
+        (EventTargetNotToolError("agent target"), 409),
+        (AddressRateLimitedError("over cap"), 429),
+        (ThreadQueueOverflowError("full"), 503),
+        (NotSupportedError("no backend"), 501),
+    ],
+)
+def test_a_typed_event_engine_error_maps_to_its_status(monkeypatch, error, status):
+    engine = _EventEngine(raises=error)
+    client = _event_client(monkeypatch, engine)
+    response = client.post(_EVENT_PATH, json=_EVENT_BODY)
+    assert response.status_code == status
+    assert response.json()["error"] == str(error)
+
+
+def test_event_body_needs_exactly_one_thread_ref(monkeypatch):
+    engine = _EventEngine()
+    client = _event_client(monkeypatch, engine)
+    # Neither address nor thread_id.
+    both_absent = client.post(_EVENT_PATH, json={"event": {"event_id": "evt-1", "kind": "k"}})
+    assert both_absent.status_code == 400
+    assert "invalid conversation event" in both_absent.json()["error"]
+    # Both address and thread_id.
+    both_present = client.post(
+        _EVENT_PATH, json={"address": "u-7", "thread_id": "bridge:chat:x", "event": {"event_id": "evt-1", "kind": "k"}}
+    )
+    assert both_present.status_code == 400
+    assert engine.calls == []
+
+
+def test_event_blank_id_is_a_400_that_never_reaches_the_engine(monkeypatch):
+    engine = _EventEngine()
+    client = _event_client(monkeypatch, engine)
+    response = client.post(_EVENT_PATH, json={"address": "u-7", "event": {"event_id": "   ", "kind": "k"}})
+    assert response.status_code == 400
+    assert "invalid conversation event" in response.json()["error"]
     assert engine.calls == []
 
 

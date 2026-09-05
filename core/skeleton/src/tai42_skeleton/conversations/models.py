@@ -106,6 +106,19 @@ class ConversationRecord(BaseModel):
     inbound_attachments: list[MediaItem] | None = None
     inbound_location: LocationElement | None = None
 
+    # What kind of inbound this record's turn ran on: ``message`` is an inbound text/form
+    # turn (the default every channel/api message and operator send carries); ``event`` is
+    # a structured turn entered on an existing thread, carrying no human text.
+    inbound_kind: Literal["message", "event"] = "message"
+    # The structured event payload an ``event`` turn ran on (a ``ConversationEvent`` dump),
+    # stored as opaque untrusted data. Present exactly on an ``event`` record; ``None`` on
+    # every ``message`` record.
+    inbound_event: dict[str, Any] | None = None
+    # The principal that AUTHORIZED this record's turn — provenance only, never a key
+    # segment and never used to key a thread. An event turn records its authorizing caller
+    # here; ``None`` when no distinct authorizer applies.
+    submitted_by: str | None = None
+
     # ``None`` exactly while the record carries no turn outcome (``accepted``, ``shed``,
     # channel-door ``silent``); set on every state carrying one.
     answer_status: AnswerStatus | None = None
@@ -184,8 +197,13 @@ class ConversationRecord(BaseModel):
     def _origin_matches_fields(self) -> ConversationRecord:
         """A ``client`` record answers a non-blank inbound message; an ``operator`` record
         carries no inbound (``""``) and is always an ``answered`` outcome with non-blank
-        answer text — it IS the operator's reply, sent into the thread with no turn to run."""
+        answer text — it IS the operator's reply, sent into the thread with no turn to run.
+        An ``event`` inbound is a structured ``client`` turn with no human text: it carries
+        its ``inbound_event`` and an empty ``inbound_text``, while a ``message`` inbound
+        carries no ``inbound_event``."""
         if self.origin == "operator":
+            if self.inbound_kind != "message":
+                raise ValueError("an operator record is a message send, never an event")
             if self.inbound_text != "":
                 raise ValueError("an operator record carries no inbound_text (must be '')")
             if self.inbound_form is not None:
@@ -198,8 +216,15 @@ class ConversationRecord(BaseModel):
                 raise ValueError(f"an operator record is always answered, got answer_status {self.answer_status!r}")
             if not (self.caller_principal or "").strip():
                 raise ValueError("an operator record must name the operator that sent it in caller_principal")
+        elif self.inbound_kind == "event":
+            if self.inbound_text != "":
+                raise ValueError("an event record carries no inbound_text (must be '')")
+            if self.inbound_event is None:
+                raise ValueError("an event record carries its structured inbound_event")
         elif not self.inbound_text.strip():
             raise ValueError("a client record carries non-blank inbound_text")
+        if self.inbound_kind == "message" and self.inbound_event is not None:
+            raise ValueError("a message record carries no inbound_event")
         return self
 
     def answer_payload(self) -> ConversationAnswer:
@@ -228,9 +253,9 @@ class ConversationRecord(BaseModel):
         and where delivery stands. An allow-list, so a newly added field stays withheld
         until deliberately published here. ``error`` and the delivery bookkeeping are
         withheld — the turn ran as the ROUTE's key, not the caller's. ``inbound_text``,
-        ``inbound_form``, ``inbound_attachments`` and ``inbound_location`` are
-        published: they are the message (and the structured submission / media / location) this
-        caller sent.
+        ``inbound_form``, ``inbound_attachments``, ``inbound_location``, ``inbound_kind``,
+        ``inbound_event`` and ``submitted_by`` are published: they are the message (and the
+        structured submission / media / location / event) this caller sent.
         """
         return self.model_dump(
             mode="json",
@@ -246,6 +271,9 @@ class ConversationRecord(BaseModel):
                 "inbound_form",
                 "inbound_attachments",
                 "inbound_location",
+                "inbound_kind",
+                "inbound_event",
+                "submitted_by",
                 "answer_status",
                 "answer",
                 "answer_parts",

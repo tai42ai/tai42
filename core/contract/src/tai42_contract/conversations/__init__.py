@@ -75,49 +75,57 @@ INBOUND_FORM_MAX_BYTES = 32 * 1024
 INBOUND_FORM_MAX_DEPTH = 64
 
 
-def validate_inbound_form(form: object) -> dict[str, Any]:
+def validate_bounded_object(value: object, *, what: str) -> dict[str, Any]:
     """Refuse (``ValueError`` naming the first violated bound) or return the dict unchanged.
 
-    Checks, in order: the value is a JSON object (a dict — never a list or a scalar); every
-    object key is a string (a non-string key would be silently coerced by serialization,
-    altering the submission); nesting stays within ``INBOUND_FORM_MAX_DEPTH`` container
-    levels — checked ITERATIVELY, so an arbitrarily deep (or self-referential) payload is a
-    clean refusal, never a ``RecursionError`` from the interpreter stack; every number is
-    finite (``allow_nan=False`` — ``NaN``/``Infinity`` are not JSON) and every value
-    JSON-serializable; the serialized form fits in ``INBOUND_FORM_MAX_BYTES`` UTF-8 bytes.
-    Messages name the violated bound and NEVER a submitted value — the contents are opaque
-    guest data and must never surface in a log or an error.
+    The shared bounded-transport check for an opaque caller-supplied JSON object; ``what``
+    names the object in every message. Checks, in order: the value is a JSON object (a dict —
+    never a list or a scalar); every object key is a string (a non-string key would be
+    silently coerced by serialization, altering the object); nesting stays within
+    ``INBOUND_FORM_MAX_DEPTH`` container levels — checked ITERATIVELY, so an arbitrarily deep
+    (or self-referential) payload is a clean refusal, never a ``RecursionError`` from the
+    interpreter stack; every number is finite (``allow_nan=False`` — ``NaN``/``Infinity`` are
+    not JSON) and every value JSON-serializable; the serialized form fits in
+    ``INBOUND_FORM_MAX_BYTES`` UTF-8 bytes. Messages name the violated bound and NEVER a
+    submitted value — the contents are opaque data and must never surface in a log or an error.
     """
-    if not isinstance(form, dict):
-        raise ValueError("form must be a JSON object")
+    if not isinstance(value, dict):
+        raise ValueError(f"{what} must be a JSON object")
     # Iterative depth walk: bounds nesting BEFORE the recursive ``json.dumps`` below, so a
     # deeply nested payload refuses cleanly here instead of overflowing the interpreter
     # stack. A self-referential container revisits itself one level deeper each time, so it
     # trips the same bound rather than looping.
-    stack: list[tuple[object, int]] = [(form, 1)]
+    stack: list[tuple[object, int]] = [(value, 1)]
     while stack:
         node, depth = stack.pop()
         if depth > INBOUND_FORM_MAX_DEPTH:
-            raise ValueError(f"form nests deeper than the {INBOUND_FORM_MAX_DEPTH} container levels allowed")
+            raise ValueError(f"{what} nests deeper than the {INBOUND_FORM_MAX_DEPTH} container levels allowed")
         if isinstance(node, dict):
             children = cast("Mapping[object, object]", node)
             for key in children:
                 if not isinstance(key, str):
-                    raise ValueError("form object keys must be strings")
+                    raise ValueError(f"{what} object keys must be strings")
             stack.extend((child, depth + 1) for child in children.values())
         elif isinstance(node, (list, tuple)):
             stack.extend((child, depth + 1) for child in cast("Sequence[object]", node))
     try:
-        serialized = json.dumps(form, allow_nan=False, separators=(",", ":"), sort_keys=True)
+        serialized = json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True)
     except ValueError as exc:
-        raise ValueError("form numbers must be finite (NaN and Infinity are not JSON)") from exc
+        raise ValueError(f"{what} numbers must be finite (NaN and Infinity are not JSON)") from exc
     except TypeError as exc:
-        raise ValueError("form must contain only JSON-serializable values") from exc
+        raise ValueError(f"{what} must contain only JSON-serializable values") from exc
     total_bytes = len(serialized.encode())
     if total_bytes > INBOUND_FORM_MAX_BYTES:
-        raise ValueError(f"form serializes to {total_bytes} bytes, over the {INBOUND_FORM_MAX_BYTES} allowed")
+        raise ValueError(f"{what} serializes to {total_bytes} bytes, over the {INBOUND_FORM_MAX_BYTES} allowed")
     # Honest by construction: the walk above verified every object key is a string.
-    return cast("dict[str, Any]", form)
+    return cast("dict[str, Any]", value)
+
+
+def validate_inbound_form(form: object) -> dict[str, Any]:
+    """Refuse (``ValueError``) or return the guest submission dict unchanged — the ask-less
+    form's answers bounded as pure transport by :func:`validate_bounded_object` (``what="form"``);
+    the contents stay opaque, untrusted guest data, never schema-conformant."""
+    return validate_bounded_object(form, what="form")
 
 
 class BlankInboundTextError(ValueError):
@@ -232,6 +240,84 @@ class ConversationMessage(BaseModel):
         if value is not None:
             check_media_list(value)
         return value
+
+
+# An event ``kind`` is a namespaced identifier-like label (e.g. ``provider.update``): the
+# dot/colon segments the module's ``:``-free slug patterns do not admit, capped at 128 chars.
+EVENT_KIND_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+#: The idempotency key length cap, measured after trimming surrounding whitespace.
+EVENT_ID_MAX_CHARS = 256
+
+
+class ConversationEvent(BaseModel):
+    """A structured event delivered to an existing thread as a turn.
+
+    ``event_id`` (non-blank after trim, ≤ ``EVENT_ID_MAX_CHARS``) is the idempotency key;
+    ``kind`` is an identifier-like label matching ``EVENT_KIND_RE``; ``payload`` is opaque,
+    untrusted data bounded as pure transport by :func:`validate_bounded_object`. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    event_id: str
+    kind: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("event_id")
+    @classmethod
+    def _check_event_id(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("event_id must be non-blank")
+        if len(trimmed) > EVENT_ID_MAX_CHARS:
+            raise ValueError(f"event_id must be at most {EVENT_ID_MAX_CHARS} characters after trimming")
+        return value
+
+    @field_validator("kind")
+    @classmethod
+    def _check_kind(cls, value: str) -> str:
+        if not EVENT_KIND_RE.fullmatch(value):
+            raise ValueError(f"kind must match {EVENT_KIND_RE.pattern!r}")
+        return value
+
+    @field_validator("payload")
+    @classmethod
+    def _check_payload(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return validate_bounded_object(value, what="event payload")
+
+
+class ConversationEventSubmission(BaseModel):
+    """The inbound body of the event door ``POST /api/conversations/{route_name}/events``.
+
+    An :class:`ConversationEvent` addressed to an EXISTING thread by EXACTLY ONE (non-blank)
+    of ``address`` (the thread's client address) or ``thread_id`` (the id the monitoring
+    listing exposes). ``wait_seconds`` bounds a sync-wait window exactly as
+    :attr:`ConversationMessage.wait_seconds`. There is NO callback field — an event's answer
+    is delivered against the target thread's route. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    address: str | None = None
+    thread_id: str | None = None
+    event: ConversationEvent
+    wait_seconds: int = Field(
+        default=0,
+        ge=0,
+        description="Bounded sync-wait window (seconds); 0 = async 202. The door clamps to its runtime cap.",
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_thread_ref(self) -> ConversationEventSubmission:
+        # A present-but-blank reference is malformed, never "absent": the door branches on
+        # presence, so blank and None must not be admitted as the same thing.
+        for name in ("address", "thread_id"):
+            value = getattr(self, name)
+            if value is not None and not value.strip():
+                raise ValueError(f"{name} must be non-blank when given")
+        if (self.address is None) == (self.thread_id is None):
+            raise ValueError("exactly one of address or thread_id is required")
+        return self
 
 
 with warnings.catch_warnings():
@@ -494,6 +580,8 @@ class ConversationRouteCreate(BaseModel):
                         ("form", "a structured form submission, present only when the inbound carried one"),
                         ("attachments", "inbound media the guest sent, present only when the inbound carried some"),
                         ("location", "a geographic point the guest shared, present only when the inbound carried one"),
+                        ("turn", "the turn ids: {id, inbound: {id, kind, source}}"),
+                        ("event", "an event turn's structured payload {id, kind, payload}; absent on a message turn"),
                     ],
                     returns="the JSON object dispatched as the tool/flow kwargs",
                 )
@@ -810,6 +898,8 @@ __all__ = [
     "ENTRY_PARAMS_MAX_TOTAL_BYTES",
     "ENTRY_PARAM_KEY_RE",
     "ENTRY_PARAM_VALUE_MAX_CHARS",
+    "EVENT_ID_MAX_CHARS",
+    "EVENT_KIND_RE",
     "GREETING_PLACEHOLDER",
     "INBOUND_FORM_MAX_BYTES",
     "INBOUND_FORM_MAX_DEPTH",
@@ -819,6 +909,8 @@ __all__ = [
     "BlankInboundTextError",
     "ConversationAnswer",
     "ConversationDoor",
+    "ConversationEvent",
+    "ConversationEventSubmission",
     "ConversationMessage",
     "ConversationMode",
     "ConversationRoute",
@@ -833,6 +925,7 @@ __all__ = [
     "PersonAddress",
     "TargetConversationConfig",
     "joined_answer_text",
+    "validate_bounded_object",
     "validate_entry_params",
     "validate_inbound_form",
 ]

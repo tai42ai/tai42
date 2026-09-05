@@ -164,6 +164,7 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
 
 _EXPECTED_503_BOTH: set[tuple[str, str]] = {
     ("DELETE", "/api/schedules/{schedule_name}"),
+    ("POST", "/api/conversations/{route_name}/events"),
     ("POST", "/api/conversations/{route_name}/messages"),
     # The marketplace mutations keep a declared 503 beside the reload gate: it is the
     # transient fleet-advisory-lock UnavailableError (retriable), NOT the store gate,
@@ -275,6 +276,7 @@ _EXPECTED_RELOAD_GATED: set[tuple[str, str]] = {
     ("POST", "/api/config/env"),
     ("POST", "/api/config/profiles/{name}/apply"),
     ("POST", "/api/config/reload"),
+    ("POST", "/api/conversations/{route_name}/events"),
     ("POST", "/api/conversations/{route_name}/messages"),
     ("POST", "/api/manifest/replace"),
     ("POST", "/api/marketplace/install"),
@@ -342,6 +344,7 @@ _EXPECTED_READS_BODY: set[tuple[str, str]] = {
     ("PATCH", "/api/connectors/connections/{connection_id}/sub-services"),
     ("POST", "/api/connectors/oauth/complete"),
     ("POST", "/api/conversations/{route_name}"),
+    ("POST", "/api/conversations/{route_name}/events"),
     ("POST", "/api/conversations/{route_name}/messages"),
     ("PUT", "/api/conversation-configs/{target_kind}/{target_name}"),
     ("POST", "/api/delete-template"),
@@ -632,14 +635,17 @@ def test_conversation_message_door_documents_both_success_codes(spec: dict) -> N
 
 
 def test_declared_additional_success_set_matches_ground_truth(api_routes: list[RouteMetadata]) -> None:
-    # Ground-truth set: only the conversation send door declares a second success code.
+    # Ground-truth set: the conversation send and event doors declare a second success code.
     declared = {
         (method, meta.path): meta.additional_success_statuses
         for meta in api_routes
         if meta.additional_success_statuses
         for method in meta.methods
     }
-    assert declared == {("POST", "/api/conversations/{route_name}/messages"): (200,)}
+    assert declared == {
+        ("POST", "/api/conversations/{route_name}/events"): (200,),
+        ("POST", "/api/conversations/{route_name}/messages"): (200,),
+    }
 
 
 def test_conversation_message_body_requires_speaker_and_text(spec: dict) -> None:

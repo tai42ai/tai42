@@ -23,6 +23,7 @@ _ROUTES = [
     Route("/api/conversations/{route_name}", router.create_conversation_route, methods=["POST"]),
     Route("/api/conversations/{route_name}", router.delete_conversation_route, methods=["DELETE"]),
     Route("/api/conversations/{route_name}/messages", router.send_conversation_message, methods=["POST"]),
+    Route("/api/conversations/{route_name}/events", router.send_conversation_event, methods=["POST"]),
     Route(
         "/api/conversations/{route_name}/messages/{message_id}",
         router.get_conversation_message,
@@ -72,6 +73,7 @@ _STANCES = {
     r"/api/conversations/messages/failed": AUTHED,
     r"/api/conversations/[^/]+": AUTHED,
     r"/api/conversations/[^/]+/messages": AUTHED,
+    r"/api/conversations/[^/]+/events": AUTHED,
     r"/api/conversations/[^/]+/messages/[^/]+": AUTHED,
     r"/api/conversations/[^/]+/threads": AUTHED,
     r"/api/conversations/[^/]+/thread": AUTHED,
@@ -111,6 +113,11 @@ def test_delete_route_rejected_without_auth(monkeypatch):
 def test_send_message_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
     assert client.post("/api/conversations/chat/messages", json={}).status_code in (401, 403)
+
+
+def test_send_event_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.post("/api/conversations/chat/events", json={}).status_code in (401, 403)
 
 
 def test_get_message_rejected_without_auth(monkeypatch):
@@ -191,6 +198,7 @@ _REGISTERED_AUTHED = {
     ("/api/conversations/{route_name}", ("POST",)): True,
     ("/api/conversations/{route_name}", ("DELETE",)): True,
     ("/api/conversations/{route_name}/messages", ("POST",)): True,
+    ("/api/conversations/{route_name}/events", ("POST",)): True,
     ("/api/conversations/{route_name}/messages/{message_id}", ("GET",)): True,
     ("/api/conversations/{route_name}/messages/search", ("GET",)): True,
     ("/api/conversations/{route_name}/threads", ("GET",)): True,

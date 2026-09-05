@@ -99,6 +99,32 @@ async def test_the_inbound_claim_carries_the_dedupe_ttl(store, lua_redis):
     assert 0 < ttl <= ConversationsSettings().inbound_dedupe_ttl_seconds
 
 
+# -- the event claim (conversations:event-dedupe, same Lua as the inbound claim) --
+
+
+async def test_the_event_claim_is_get_or_set(store, lua_redis):
+    assert await store.claim_event("line", "E1", "first") == "first"
+    # A redelivery of the same (route, event_id) is answered with the id that owns it and
+    # does not overwrite it — the same arbitration the channel claim runs, over its family.
+    assert await store.claim_event("line", "E1", "second") == "first"
+    assert await lua_redis.get(ConversationsSettings().event_dedupe_key("line", "E1")) == "first"
+
+
+async def test_the_event_claim_carries_the_dedupe_ttl(store, lua_redis):
+    await store.claim_event("line", "E1", "first")
+    ttl = await lua_redis.ttl(ConversationsSettings().event_dedupe_key("line", "E1"))
+    assert 0 < ttl <= ConversationsSettings().inbound_dedupe_ttl_seconds
+
+
+async def test_the_event_claim_never_collides_with_a_channel_dedupe(store, lua_redis):
+    # The same id string in both families keys two distinct markers, so a channel message
+    # id and an event id can never be deduped against each other.
+    assert await store.claim_inbound("event", "dup", "chan-owner") == "chan-owner"
+    assert await store.claim_event("event", "dup", "event-owner") == "event-owner"
+    assert await store.get_inbound_owner("event", "dup") == "chan-owner"
+    assert await store.get_event_owner("event", "dup") == "event-owner"
+
+
 # -- record creation (conversations:record:create) ----------------------------
 
 
