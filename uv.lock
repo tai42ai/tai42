@@ -5148,7 +5148,7 @@ provides-extras = ["park", "dev"]
 
 [[package]]
 name = "tai42-backend-arq"
-version = "2.0.6"
+version = "2.0.7"
 source = { editable = "plugins/backend-arq" }
 dependencies = [
     { name = "arq" },
@@ -5201,7 +5201,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-celery"
-version = "2.2.2"
+version = "2.2.3"
 source = { editable = "plugins/backend-celery" }
 dependencies = [
     { name = "celery" },
@@ -5313,7 +5313,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "3.0.0"
+version = "3.0.1"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -5356,7 +5356,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-telegram"
-version = "3.0.0"
+version = "3.0.1"
 source = { editable = "plugins/channel-telegram" }
 dependencies = [
     { name = "httpx" },
@@ -5399,7 +5399,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-twilio"
-version = "3.0.0"
+version = "3.0.1"
 source = { editable = "plugins/channel-twilio" }
 dependencies = [
     { name = "httpx" },
@@ -5442,7 +5442,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "4.0.1"
+version = "4.0.2"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5485,7 +5485,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "3.0.0"
+version = "3.0.1"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "httpx" },
@@ -5616,7 +5616,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "7.0.1"
+version = "7.0.2"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
