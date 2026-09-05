@@ -922,7 +922,7 @@ def test_notifications_notify_media_and_template_ride_validated_body(monkeypatch
         assert json.loads(request.content) == {
             "message": "photo",
             "channel": "whatsapp",
-            "media": [{"kind": "image", "url": "https://example.com/a.png", "caption": None}],
+            "media": [{"kind": "image", "url": "https://example.com/a.png", "caption": None, "filename": None}],
         }
         return data_response("notification sent via 'whatsapp'")
 
@@ -945,7 +945,13 @@ def test_notifications_notify_media_and_template_ride_validated_body(monkeypatch
         assert json.loads(request.content) == {
             "message": "shipped",
             "channel": "whatsapp",
-            "template": {"name": "status_update", "language": "en_US", "parameters": ["A-42"]},
+            "template": {
+                "name": "status_update",
+                "language": "en_US",
+                "header_media": None,
+                "body_parameters": ["A-42"],
+                "buttons": [],
+            },
         }
         return data_response("notification sent via 'whatsapp'")
 
@@ -959,7 +965,7 @@ def test_notifications_notify_media_and_template_ride_validated_body(monkeypatch
             "--channel",
             "whatsapp",
             "--template",
-            '{"name": "status_update", "language": "en_US", "parameters": ["A-42"]}',
+            '{"name": "status_update", "language": "en_US", "body_parameters": ["A-42"]}',
         ],
     )
     assert result.exit_code == 0, result.output
@@ -1053,12 +1059,16 @@ def test_notifications_notify_non_object_schema_raises_before_request(monkeypatc
 
 
 def test_notifications_notify_options_ride_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The --options JSON array is validated into a list of strings and posted on the body.
+    # The --options JSON array is validated into the contract's discriminated Option union
+    # (reply/link) and posted on the body with every field of each variant.
     def handler(request: httpx.Request) -> httpx.Response:
         assert json.loads(request.content) == {
             "message": "pick one",
             "channel": "whatsapp",
-            "options": ["Item A", "Item B"],
+            "options": [
+                {"kind": "reply", "text": "Item A", "description": None, "id": None},
+                {"kind": "link", "label": "Docs", "url": "https://x.example/d"},
+            ],
         }
         return data_response("notification sent via 'whatsapp'")
 
@@ -1072,7 +1082,7 @@ def test_notifications_notify_options_ride_validated_body(monkeypatch: pytest.Mo
             "--channel",
             "whatsapp",
             "--options",
-            '["Item A", "Item B"]',
+            '[{"kind": "reply", "text": "Item A"}, {"kind": "link", "label": "Docs", "url": "https://x.example/d"}]',
         ],
     )
     assert result.exit_code == 0, result.output
@@ -1084,8 +1094,11 @@ def test_notifications_notify_options_and_media_ride_together(monkeypatch: pytes
         assert json.loads(request.content) == {
             "message": "photo",
             "channel": "whatsapp",
-            "media": [{"kind": "image", "url": "https://example.com/a.png", "caption": None}],
-            "options": ["Yes", "No"],
+            "media": [{"kind": "image", "url": "https://example.com/a.png", "caption": None, "filename": None}],
+            "options": [
+                {"kind": "reply", "text": "Yes", "description": None, "id": None},
+                {"kind": "reply", "text": "No", "description": None, "id": None},
+            ],
         }
         return data_response("notification sent via 'whatsapp'")
 
@@ -1101,7 +1114,7 @@ def test_notifications_notify_options_and_media_ride_together(monkeypatch: pytes
             "--media",
             '[{"kind": "image", "url": "https://example.com/a.png"}]',
             "--options",
-            '["Yes", "No"]',
+            '[{"kind": "reply", "text": "Yes"}, {"kind": "reply", "text": "No"}]',
         ],
     )
     assert result.exit_code == 0, result.output
@@ -1114,8 +1127,14 @@ def test_notifications_notify_options_and_template_still_post(monkeypatch: pytes
         assert json.loads(request.content) == {
             "message": "shipped",
             "channel": "whatsapp",
-            "template": {"name": "status_update", "language": "en_US", "parameters": []},
-            "options": ["Yes", "No"],
+            "template": {
+                "name": "status_update",
+                "language": "en_US",
+                "header_media": None,
+                "body_parameters": [],
+                "buttons": [],
+            },
+            "options": [{"kind": "reply", "text": "Yes", "description": None, "id": None}],
         }
         return data_response("notification sent via 'whatsapp'")
 
@@ -1131,7 +1150,7 @@ def test_notifications_notify_options_and_template_still_post(monkeypatch: pytes
             "--template",
             '{"name": "status_update", "language": "en_US"}',
             "--options",
-            '["Yes", "No"]',
+            '[{"kind": "reply", "text": "Yes"}]',
         ],
     )
     assert result.exit_code == 0, result.output
@@ -1171,6 +1190,196 @@ def test_notifications_notify_non_string_option_entry_raises_before_request(monk
     )
     assert result.exit_code != 0
     assert "options" in result.output.lower()
+
+
+def test_notifications_notify_sections_ride_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The --sections JSON array is validated into the contract's OptionSection list and
+    # posted with each row expanded to its full ReplyOption shape.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "message": "pick one",
+            "channel": "whatsapp",
+            "sections": [
+                {
+                    "title": "Fruit",
+                    "rows": [
+                        {"kind": "reply", "text": "Apple", "description": None, "id": None},
+                        {"kind": "reply", "text": "Pear", "description": "green", "id": None},
+                    ],
+                }
+            ],
+        }
+        return data_response("notification sent via 'whatsapp'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "pick one",
+            "--channel",
+            "whatsapp",
+            "--sections",
+            '[{"title": "Fruit", "rows": [{"kind": "reply", "text": "Apple"}, '
+            '{"kind": "reply", "text": "Pear", "description": "green"}]}]',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_location_rides_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The --location JSON object is validated into a LocationElement and posted verbatim.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "message": "meet here",
+            "channel": "whatsapp",
+            "location": {"latitude": 51.5, "longitude": -0.12, "name": "HQ", "address": None},
+        }
+        return data_response("notification sent via 'whatsapp'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "meet here",
+            "--channel",
+            "whatsapp",
+            "--location",
+            '{"latitude": 51.5, "longitude": -0.12, "name": "HQ"}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_header_and_footer_ride_with_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --header (a display MediaItem) and --footer (a trailing line) compose an interactive
+    # message alongside --options; each rides the body in its serialized shape.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "message": "choose",
+            "channel": "whatsapp",
+            "options": [{"kind": "reply", "text": "Yes", "description": None, "id": None}],
+            "header": {"kind": "image", "url": "https://example.com/h.png", "caption": None, "filename": None},
+            "footer": "powered by tai42",
+        }
+        return data_response("notification sent via 'whatsapp'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "choose",
+            "--channel",
+            "whatsapp",
+            "--options",
+            '[{"kind": "reply", "text": "Yes"}]',
+            "--header",
+            '{"kind": "image", "url": "https://example.com/h.png"}',
+            "--footer",
+            "powered by tai42",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_unknown_template_key_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The pre-7 ``parameters`` key (now ``body_parameters``) is not a ChannelTemplate field.
+    # The CLI rejects it LOUDLY rather than letting model_validate silently drop it — no request
+    # leaves and the accepted keys are named.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for an unknown template key")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "shipped",
+            "--channel",
+            "whatsapp",
+            "--template",
+            '{"name": "status_update", "language": "en_US", "parameters": ["A-42"]}',
+        ],
+    )
+    assert result.exit_code != 0
+    assert "parameters" in result.output.lower()
+    assert "body_parameters" in result.output.lower()
+
+
+def test_notifications_notify_unknown_location_key_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An unknown --location key is rejected before any request — LocationElement has no
+    # extra="forbid", so the CLI guards its own seam.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for an unknown location key")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "here",
+            "--channel",
+            "whatsapp",
+            "--location",
+            '{"latitude": 1, "longitude": 2, "altitude": 30}',
+        ],
+    )
+    assert result.exit_code != 0
+    assert "location" in result.output.lower()
+    assert "altitude" in result.output.lower()
+
+
+def test_notifications_notify_invalid_sections_shape_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A section with empty rows is refused by the contract model before any request leaves.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for an invalid section")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "hi",
+            "--channel",
+            "whatsapp",
+            "--sections",
+            '[{"title": "Fruit", "rows": []}]',
+        ],
+    )
+    assert result.exit_code != 0
+    assert "sections" in result.output.lower()
+
+
+def test_notifications_notify_invalid_header_shape_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A malformed header MediaItem (an insecure http image url) is refused by the contract
+    # model before any request leaves. The display-item composition rule (header requires a
+    # non-link kind and a choice surface) is the server's; the CLI checks only the item shape.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for an invalid header")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "hi",
+            "--channel",
+            "whatsapp",
+            "--header",
+            '{"kind": "image", "url": "http://insecure.example/h.png"}',
+        ],
+    )
+    assert result.exit_code != 0
+    assert "header" in result.output.lower()
 
 
 # -- auth whoami -------------------------------------------------------------
