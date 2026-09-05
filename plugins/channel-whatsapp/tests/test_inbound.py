@@ -2120,14 +2120,14 @@ async def test_inbound_document_carries_filename_in_text_and_params(
         "id": _WAMID,
         "from": WA_ID,
         "type": "document",
-        "document": {"id": "doc-1", "mime_type": "application/pdf", "filename": "invoice.pdf"},
+        "document": {"id": "doc-1", "mime_type": "application/pdf", "filename": "report.pdf"},
     }
     result = await handler(signed_request(_params_envelope(message)))
 
     assert result.status_code == 200
     (call,) = stub_app.conversations.accept_calls
-    assert call["text"] == "[document: invoice.pdf]"
-    assert call["params"]["media_filename"] == "invoice.pdf"
+    assert call["text"] == "[document: report.pdf]"
+    assert call["params"]["media_filename"] == "report.pdf"
     assert call["params"]["media_kind"] == "document"
 
 

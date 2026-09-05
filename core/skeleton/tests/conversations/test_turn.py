@@ -3730,7 +3730,7 @@ async def test_api_submit_with_form_stamps_the_record_and_the_tool_payload(env, 
 
 # -- inbound structured attachments + location -----------------------------------------
 
-_DOC = MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.example/invoice.pdf", filename="invoice.pdf")
+_DOC = MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.example/report.pdf", filename="report.pdf")
 _LOCATION = LocationElement(latitude=51.5, longitude=-0.12, name="HQ")
 
 
