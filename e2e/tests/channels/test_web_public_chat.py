@@ -370,7 +370,8 @@ async def test_notify_list_over_web_carries_tappable_options_on_the_card(
     message = uniq("web_list")
     option = uniq("web_item")
 
-    confirmation = await _notify_over_web(case, message, options=[option, "Item B"])
+    options = [{"kind": "reply", "text": option}, {"kind": "reply", "text": "Item B"}]
+    confirmation = await _notify_over_web(case, message, options=options)
     assert "notification sent via 'web'" in confirmation
 
     def _is_card(event: str, data: dict) -> bool:
@@ -378,7 +379,8 @@ async def test_notify_list_over_web_carries_tappable_options_on_the_card(
 
     frames = await case.web.frames(until=_is_card)
     card = next(data for event, data in frames if _is_card(event, data))
-    assert card["options"] == [option, "Item B"]
+    # Each option rides the card as its serialized reply frame item (optional keys omitted).
+    assert card["options"] == options
     assert "media" not in card
 
     # The tappable option list is durable: a reconnect replay carries it unchanged (a tap
@@ -386,8 +388,7 @@ async def test_notify_list_over_web_carries_tappable_options_on_the_card(
     # send is the bridge suite's ``test_l25_web_notify_options``).
     replayed = await case.web.frames()
     assert any(
-        event == "chat.media" and data["text"] == message and data["options"] == [option, "Item B"]
-        for event, data in replayed
+        event == "chat.media" and data["text"] == message and data["options"] == options for event, data in replayed
     )
 
 

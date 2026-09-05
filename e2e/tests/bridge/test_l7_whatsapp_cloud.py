@@ -514,6 +514,54 @@ async def test_notify_media_sends_body_then_one_image_per_item(
     assert all(record["wamid"] for record in sends)
 
 
+async def test_notify_interactive_options_render_native_with_header_and_footer(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    """Composed-path proof for the rich notify vocabulary end to end over the live stack:
+    ``notify_user`` carries typed reply + link options, a media header and a footer, and the
+    whatsapp renderer emits ONE native interactive-buttons message whose wire payload carries
+    the reply buttons, the link option as a body line, the image header object and the footer
+    — contract model → skeleton ``notify_user`` operation → channel renderer → FakeWhatsApp
+    wire, the same path an operator's rich notification travels."""
+    marker = uniq("l7-rich")
+    wa_id = _fresh_wa_id()  # freeform interactive reaches any recipient (no allowlist fence)
+    header_url = f"https://cdn.example.com/{marker}-hdr.png"
+    docs_url = f"https://docs.example.com/{marker}"
+
+    async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+        result = await mcp.call_tool(
+            "notify_user",
+            {
+                "message": marker,
+                "channel": "whatsapp",
+                "recipient": wa_id,
+                "options": [
+                    {"kind": "reply", "text": "Yes"},
+                    {"kind": "reply", "text": "No"},
+                    {"kind": "link", "label": "Docs", "url": docs_url},
+                ],
+                "header": {"kind": "image", "url": header_url},
+                "footer": "powered by tai42",
+            },
+        )
+    assert "notification sent via 'whatsapp'" in tool_text(result)
+
+    sends = [record for record in bridge.fake_whatsapp.sent if record["to"] == wa_id]
+    assert len(sends) == 1  # one native interactive frame, not a text downgrade
+    interactive = sends[0]["payload"]["interactive"]
+    # The reply options render as native reply buttons, one per reply option, in order.
+    assert sends[0]["type"] == "interactive"
+    assert interactive["type"] == "button"
+    assert [button["reply"]["title"] for button in interactive["action"]["buttons"]] == ["Yes", "No"]
+    # A reply-buttons interactive carries no URL button, so the link option is appended to the
+    # body as a "label: url" line — surfaced, never silently dropped.
+    assert marker in interactive["body"]["text"]
+    assert f"Docs: {docs_url}" in interactive["body"]["text"]
+    # The media header and the footer ride the same interactive frame.
+    assert interactive["header"] == {"type": "image", "image": {"link": header_url}}
+    assert interactive["footer"] == {"text": "powered by tai42"}
+
+
 async def test_notify_template_sends_template_payload_to_allowlisted_recipient(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -526,7 +574,7 @@ async def test_notify_template_sends_template_payload_to_allowlisted_recipient(
                 "channel": "whatsapp",
                 # env-allowlisted -> the template recipient fence admits it.
                 "recipient": BRIDGE_WHATSAPP_CLIENT,
-                "template": {"name": name, "language": "en_US", "parameters": ["Ada", "3pm"]},
+                "template": {"name": name, "language": "en_US", "body_parameters": ["Ada", "3pm"]},
             },
         )
     assert "notification sent via 'whatsapp'" in tool_text(result)
