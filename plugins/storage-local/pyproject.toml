@@ -27,7 +27,7 @@ dependencies = [
     # handle, the Storage base, the assert_not_root guard, and ObjectStat.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=7,<8",
+    "tai42-contract>=6.5,<8",
     # Leaf helpers: the settings base class and the settings-cache decorator.
     "tai42-kit>=3.8,<4",
     # Async file I/O for the driver's non-blocking reads/writes.
