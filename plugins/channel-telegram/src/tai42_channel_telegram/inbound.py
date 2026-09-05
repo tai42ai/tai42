@@ -28,14 +28,40 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError, InboundAnswerOutcome, InboundBridge
-from tai42_contract.conversations import BlankInboundTextError
+from tai42_contract.conversations import (
+    ENTRY_PARAM_VALUE_MAX_CHARS,
+    BlankInboundTextError,
+    validate_entry_params,
+)
 from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.client import answer_callback_query, send_chat_action
-from tai42_channel_telegram.correlation import get_options, scoped_correlation_key, telegram_correlation_store
+from tai42_channel_telegram.correlation import (
+    StoredOption,
+    get_options,
+    scoped_correlation_key,
+    telegram_correlation_store,
+)
 from tai42_channel_telegram.settings import TelegramSettings, bot_numeric_id, telegram_settings
 
 logger = logging.getLogger(__name__)
+
+# Inbound entry-params vocabulary — the channel's PUBLIC contract for the opaque
+# ``payload["params"]`` a channel-agnostic tool consumer reads. Params ride ONLY on the
+# BRIDGE path (a tap that is not, or is no longer, an answer to a pending ask): a tap that
+# ANSWERS forwards ``{"answer": …}`` to the callback door alongside these params, and the
+# tap's token is already consumed there to select the option. The keys:
+#
+#   reply_id           — the AUTHOR-SET id of the tapped reply option / list row, echoed
+#                        back so a consumer sees WHICH option was tapped, not just its label.
+#                        Absent when the option carried no author-set id (a plain option, or
+#                        a select/suggested-reply ask whose options carry none).
+#   reply_description  — a tapped sectioned-row's secondary description line, when it had one.
+#
+# All values are transport-bounded by the contract (:func:`validate_entry_params`); a value
+# over ``ENTRY_PARAM_VALUE_MAX_CHARS`` is dropped (never truncated), and in the rare event
+# the aggregate still overflows a bound the whole set is dropped and the turn bridges without
+# it — a guest message is never lost to a params bound.
 
 _SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 # Bound what an unauthenticated door reads into memory — loud 413, never truncation.
@@ -85,6 +111,45 @@ def _ignored(reason: str) -> JSONResponse:
     return JSONResponse({"data": {"status": "ignored"}}, status_code=200)
 
 
+def _put_param(params: dict[str, str], key: str, value: str | None) -> None:
+    """Add ``key`` iff ``value`` is a non-empty string within the contract's per-value cap.
+    An over-cap opaque value is dropped (never truncated — truncation would silently corrupt
+    an opaque token); a debug line records the drop without ever logging the value."""
+    if not value:
+        return
+    if len(value) > ENTRY_PARAM_VALUE_MAX_CHARS:
+        logger.debug("dropping telegram inbound param %r: value over the %d-char cap", key, ENTRY_PARAM_VALUE_MAX_CHARS)
+        return
+    params[key] = value
+
+
+def _reply_params(option: StoredOption) -> dict[str, str] | None:
+    """The opaque entry-params a bridged tap carries from the tapped option: the author-set
+    ``reply_id`` and a sectioned-row's ``reply_description`` (each bounded, absent when the
+    option carried none). ``None`` when the option carries neither — a select/suggested-reply
+    ask's minted options, say."""
+    params: dict[str, str] = {}
+    _put_param(params, "reply_id", option.id)
+    _put_param(params, "reply_description", option.description)
+    return params or None
+
+
+def _sanitize_params(params: dict[str, str] | None) -> dict[str, str] | None:
+    """``params`` validated against the contract's transport bounds, or ``None`` when empty or
+    a bound is violated. A violation drops the WHOLE set (which would otherwise 5xx and have
+    Telegram redeliver the same poison update forever) and lets the turn proceed without
+    params — the guest's message is never lost to a params bound; the refusal names the
+    bound/key, never an opaque value."""
+    if not params:
+        return None
+    try:
+        validate_entry_params(params)
+    except ValueError as exc:
+        logger.warning("telegram inbound params rejected (%s); proceeding without params", exc)
+        return None
+    return params
+
+
 def _is_recipient_chat(chat: dict[str, object], settings: TelegramSettings) -> bool:
     """Whether ``chat`` is a configured recipient — matched by numeric id or
     ``@username``. Only these chats may ANSWER an ask_user question."""
@@ -101,6 +166,7 @@ async def _resolve_answer(
     chat_id: int,
     text: str,
     update: dict[str, object],
+    params: dict[str, str] | None = None,
 ) -> Response | None:
     """Resolve a ForceReply answer against its pending ask via the ONE shared ladder.
 
@@ -143,6 +209,9 @@ async def _resolve_answer(
             cap_key=str(chat_id),
             provider_message_id=str(update_id),
             bridge_text=text,
+            # Opaque tap enrichment (reply_id / reply_description); the ladder threads it to
+            # the callback door on a forward and onto the bridged turn when the reply digresses.
+            params=_sanitize_params(params),
         ),
     )
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
@@ -153,13 +222,15 @@ async def _resolve_answer(
 async def _resolve_callback(settings: TelegramSettings, update: dict[str, object]) -> Response:
     """Resolve an inline-keyboard button tap (a ``callback_query`` update).
 
-    The tapped button's ``callback_data`` is the option's index; the anchor
-    ``message_id`` the query reports keys the side record holding that ask's option
-    list, so the index maps back to the exact option text. A select / suggested-reply
-    tap from a recipient chat resolves through the shared ladder (like a typed reply);
-    a notify-option tap (no pending ask — a correlation miss) enters the conversation
-    as a visitor message via the bridge. A tap for a message with no live option
-    record (an expired ask, a stale keyboard) is acked and ignored.
+    The tapped button's ``callback_data`` is the option's wire token; the anchor
+    ``message_id`` the query reports keys the side record holding that message's option
+    records, so the token maps back to the exact :class:`StoredOption` — its text (submitted
+    as the turn) and its author-set id / description (carried as ``params.reply_id`` /
+    ``params.reply_description`` on a BRIDGED tap). A select / suggested-reply tap from a
+    recipient chat resolves through the shared ladder (like a typed reply); a notify-option
+    tap (no pending ask — a correlation miss) enters the conversation as a visitor message
+    via the bridge. A tap for a message with no live option record (an expired ask, a stale
+    keyboard), or one whose token matches no record, is acked and ignored.
 
     The callback query is answered first (best-effort) so the button's spinner clears
     regardless of the routing outcome; a failure there is logged, never raised (an
@@ -183,34 +254,46 @@ async def _resolve_callback(settings: TelegramSettings, update: dict[str, object
     data = callback_query.get("data")
     if not isinstance(message_id, int) or not isinstance(chat, dict) or not isinstance(chat_id, int):
         return _ignored("callback query carries no anchor message/chat id")
-    if not isinstance(data, str) or not (data.isascii() and data.isdigit()):
-        return _ignored("callback query carries no integer option index")
+    if not isinstance(data, str) or not data:
+        return _ignored("callback query carries no callback_data token")
 
     options = await get_options(str(chat_id), str(message_id))
     if options is None:
         return _ignored("callback query for a message with no live option record")
-    index = int(data)
-    if index >= len(options):
-        return _ignored("callback query option index is out of range")
-    text = options[index]
+    matched = next((option for option in options if option.callback_data == data), None)
+    if matched is None:
+        return _ignored("callback query token matches no live option")
+    text = matched.text
+    # Opaque tap enrichment carried onto a BRIDGED turn (never surfaced on a clean answer
+    # forward, whose seam takes only the answer): the author-set id and any row description.
+    reply_params = _reply_params(matched)
 
     # A recipient-chat tap on a select/suggested-reply ask resolves via the ladder; a
     # miss (a notify option, or an expired ask) falls through to the bridge — the same
     # split the typed-reply path takes, keyed on the anchor message id.
     if _is_recipient_chat(chat, settings):
-        resolved = await _resolve_answer(settings, message_id, chat_id, text, update)
+        resolved = await _resolve_answer(settings, message_id, chat_id, text, update, params=reply_params)
         if resolved is not None:
             return resolved
-    return await _bridge(settings, chat_id, text, update)
+    return await _bridge(settings, chat_id, text, update, params=reply_params)
 
 
-async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: dict[str, object]) -> Response:
+async def _bridge(
+    settings: TelegramSettings,
+    chat_id: int,
+    text: str,
+    update: dict[str, object],
+    params: dict[str, str] | None = None,
+) -> Response:
     """Hand an uncorrelated user message to the conversation bridge.
 
     ``our_identity`` is this bot's numeric id (malformed token -> loud 500);
     ``client_address`` is the numeric chat id; ``provider_message_id`` is the
-    update id. No route bound or blank text -> ack + log; a transient failure
-    propagates (500).
+    update id. ``params`` are the channel's opaque tap enrichment (reply_id /
+    reply_description — see the module's vocabulary block), validated against the
+    contract's transport bounds and dropped whole on a violation so a poison value never
+    5xx-loops. No route bound or blank text -> ack + log; a transient failure propagates
+    (500).
     """
     update_id = update.get("update_id")
     if not isinstance(update_id, int):
@@ -232,6 +315,7 @@ async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: d
             cap_key=str(chat_id),
             text=text,
             provider_message_id=str(update_id),
+            params=_sanitize_params(params),
         )
     except BlankInboundTextError:
         # A whitespace-only message is nothing to bridge — ack so Telegram stops

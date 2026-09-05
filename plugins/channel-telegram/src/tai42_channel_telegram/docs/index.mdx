@@ -47,6 +47,22 @@ tai conversations create tg-chat \
   --channel telegram --identity 123456
 ```
 
+## Rich messages
+
+A notification's rich shapes map onto native Bot API sends: tappable **options**
+render as an inline keyboard (reply options as callback buttons, link options as url
+buttons), **sections** degrade to grouped buttons with each title as a text header
+(Telegram has no native sectioned list), a media **header** rides the body as its
+caption when it fits (else a separate message), a **footer** is a trailing italic
+line, file **media** sends by kind (`sendPhoto`/`sendDocument`/`sendVideo`/`sendAudio`),
+and a **location** is `sendLocation` (or `sendVenue` with a name and address). Telegram
+has no vendor **templates** and no ask-less **form** notifications, so the channel
+declines those capabilities rather than silently dropping them.
+
+A bridged tap on an option with an **author-set id** carries that id back as
+`params.reply_id` (and a sectioned row's description as `params.reply_description`) —
+opaque enrichment a `tool` target can read from the turn's `params`.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.

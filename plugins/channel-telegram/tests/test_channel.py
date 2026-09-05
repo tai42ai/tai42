@@ -8,14 +8,32 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification, Correlation
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.channels import (
+    ChannelDelivery,
+    ChannelDeliveryError,
+    ChannelNotification,
+    Correlation,
+    LinkOption,
+    Option,
+    OptionSection,
+    ReplyOption,
+)
+from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_telegram.channel import TelegramChannel
 
 _CALLBACK = "https://example.test/api/interactions/callback/tkt"
 _TOKEN = "123456:test-token"
+
+
+def _records(*entries: tuple[str, str, str | None, str | None]) -> list[dict]:
+    """The stored option side-record shape (a list of ``StoredOption`` dumps) for the given
+    ``(callback_data, text, id, description)`` tuples — the JSON the reader parses back."""
+    return [
+        {"callback_data": cb, "text": text, "id": option_id, "description": description}
+        for cb, text, option_id, description in entries
+    ]
 
 
 def _stored_correlation(fake_redis, key: str = "channel:telegram:corr:777:42") -> Correlation:
@@ -91,7 +109,11 @@ async def test_select_renders_options_as_inline_keyboard(http_recorder, fake_red
     # keyed by the chat-scoped anchor {chat_id}:{message_id}, TTL = the remaining budget.
     assert set(fake_redis.data) == {"channel:telegram:corr:777:42", "channel:telegram:opts:777:42"}
     assert _stored_correlation(fake_redis).callback_url == _CALLBACK
-    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == ["red", "blue"]
+    # The side record maps each button's wire token back to its option; an ask carries no
+    # author-set ids, so the token is the index and id/description are null.
+    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(
+        ("0", "red", None, None), ("1", "blue", None, None)
+    )
     assert 599 <= fake_redis.ttls["channel:telegram:opts:777:42"] <= 601
 
 
@@ -108,7 +130,9 @@ async def test_text_ask_with_suggested_replies_renders_inline_keyboard(http_reco
         ]
     }
     assert set(fake_redis.data) == {"channel:telegram:corr:777:42", "channel:telegram:opts:777:42"}
-    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == ["yes please", "no thanks"]
+    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(
+        ("0", "yes please", None, None), ("1", "no thanks", None, None)
+    )
 
 
 async def test_deliver_sends_image_media_then_question(http_recorder, fake_redis):
@@ -290,8 +314,9 @@ async def test_notify_options_store_failure_is_loud(http_recorder, fake_redis, m
         raise RuntimeError("opts store down")
 
     monkeypatch.setattr("tai42_channel_telegram.channel.set_options", broken_set_options)
+    options: list[Option] = [ReplyOption(text="a"), ReplyOption(text="b")]
     with pytest.raises(ChannelDeliveryError, match="button taps cannot be routed") as excinfo:
-        await TelegramChannel().notify(ChannelNotification(message="Pick one:", options=["a", "b"]))
+        await TelegramChannel().notify(ChannelNotification(message="Pick one:", options=options))
     assert "was sent" in str(excinfo.value)
 
 
@@ -374,7 +399,9 @@ async def test_at_username_recipient_scopes_keys_by_numeric_response_chat_id(
     resolved = await telegram_correlation_store.get_correlation(scoped_correlation_key(str(numeric_chat_id), "42"))
     assert resolved is not None
     assert resolved.interaction_id == "int-1"
-    assert await get_options(str(numeric_chat_id), "42") == ["red", "blue"]
+    stored = await get_options(str(numeric_chat_id), "42")
+    assert stored is not None
+    assert [(option.callback_data, option.text) for option in stored] == [("0", "red"), ("1", "blue")]
 
 
 async def test_caller_recipient_not_on_allowlist_refuses_without_sending(http_recorder, fake_redis):
@@ -576,10 +603,11 @@ async def test_notify_media_only_with_a_link_renders_the_link_as_the_body(http_r
 
 
 async def test_notify_options_render_keyboard_and_store_side_record(http_recorder, fake_redis):
-    # Notify options render as an inline keyboard on the body message; the option
-    # list is kept in a side record (keyed by the anchor message id) so a later tap
+    # Notify reply options render as an inline keyboard on the body message; the option
+    # records are kept in a side record (keyed by the anchor message id) so a later tap
     # bridges the option text, with the operator-set notify TTL.
-    result = await TelegramChannel().notify(ChannelNotification(message="Pick one:", options=["a", "b", "c"]))
+    options: list[Option] = [ReplyOption(text="a"), ReplyOption(text="b"), ReplyOption(text="c")]
+    result = await TelegramChannel().notify(ChannelNotification(message="Pick one:", options=options))
 
     body = json.loads(http_recorder.requests[0].content)
     assert body["reply_markup"] == {
@@ -590,10 +618,196 @@ async def test_notify_options_render_keyboard_and_store_side_record(http_recorde
         ]
     }
     assert result == ["42"]
-    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == ["a", "b", "c"]
+    # No author-set ids: the wire token is the index, id/description null.
+    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(
+        ("0", "a", None, None), ("1", "b", None, None), ("2", "c", None, None)
+    )
     assert fake_redis.ttls["channel:telegram:opts:777:42"] == 86_400  # the default option-tap TTL
     # No correlation record — a notify has no callback/ask.
     assert "channel:telegram:corr:777:42" not in fake_redis.data
+
+
+async def test_notify_reply_option_authored_id_rides_callback_data_and_side_record(http_recorder, fake_redis):
+    # An author-set id on a reply option rides verbatim on the wire as callback_data (within
+    # Telegram's 64-byte cap) so a tap echoes it back, and is kept in the side record so a
+    # bridged tap surfaces it as params.reply_id. A description rides the record too.
+    options: list[Option] = [
+        ReplyOption(text="Yes", id="yes-1", description="the affirmative"),
+        ReplyOption(text="No"),
+    ]
+    await TelegramChannel().notify(ChannelNotification(message="Pick one:", options=options))
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "Yes", "callback_data": "yes-1"}],  # the author-set id, verbatim
+            [{"text": "No", "callback_data": "1"}],  # minted index (no author id)
+        ]
+    }
+    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(
+        ("yes-1", "Yes", "yes-1", "the affirmative"), ("1", "No", None, None)
+    )
+
+
+async def test_notify_link_option_renders_native_url_button_no_record(http_recorder, fake_redis):
+    # A link option renders as a native inline url button (a tap opens the url, no message)
+    # and keeps no side record; a reply option beside it still gets a callback button + record.
+    options: list[Option] = [
+        ReplyOption(text="Chat", id="chat"),
+        LinkOption(label="Docs", url="https://docs.test/x"),
+    ]
+    await TelegramChannel().notify(ChannelNotification(message="Pick one:", options=options))
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "Chat", "callback_data": "chat"}],
+            [{"text": "Docs", "url": "https://docs.test/x"}],
+        ]
+    }
+    # Only the reply option is kept as a record; the link button carries no callback.
+    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(("chat", "Chat", "chat", None))
+
+
+async def test_notify_long_authored_id_falls_back_to_minted_index(http_recorder, fake_redis):
+    # An author-set id past Telegram's 64-byte callback_data cap cannot ride the wire; the
+    # button gets a minted index token, but the record STILL keeps the id so a tap surfaces
+    # params.reply_id.
+    long_id = "x" * 100
+    options: list[Option] = [ReplyOption(text="Yes", id=long_id)]
+    await TelegramChannel().notify(ChannelNotification(message="Pick one:", options=options))
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Yes", "callback_data": "0"}]]}
+    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(("0", "Yes", long_id, None))
+
+
+async def test_notify_sections_group_rows_and_render_titles_in_text(http_recorder, fake_redis):
+    # Telegram has no native sections: the section titles render as text header lines on the
+    # body, and the rows across every section render as callback buttons grouped in order.
+    sections = [
+        OptionSection(title="Fruit", rows=[ReplyOption(text="Apple", id="a"), ReplyOption(text="Pear")]),
+        OptionSection(title="Veg", rows=[ReplyOption(text="Kale")]),
+    ]
+    await TelegramChannel().notify(ChannelNotification(message="Choose:", sections=sections))
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["text"] == "Choose:\nFruit\nVeg"  # message then section titles
+    assert "parse_mode" not in body  # no footer -> plain text
+    assert body["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "Apple", "callback_data": "a"}],
+            [{"text": "Pear", "callback_data": "1"}],
+            [{"text": "Kale", "callback_data": "2"}],
+        ]
+    }
+    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(
+        ("a", "Apple", "a", None), ("1", "Pear", None, None), ("2", "Kale", None, None)
+    )
+
+
+async def test_notify_footer_renders_as_trailing_italic_line(http_recorder, fake_redis):
+    # A footer renders as a trailing muted italic line; a footer needs inline formatting, so
+    # the whole body is HTML-escaped and sent with parse_mode=HTML.
+    options: list[Option] = [ReplyOption(text="Go")]
+    await TelegramChannel().notify(ChannelNotification(message="Ready? <ok>", options=options, footer="expires soon"))
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["parse_mode"] == "HTML"
+    assert body["text"] == "Ready? &lt;ok&gt;\n<i>expires soon</i>"
+
+
+async def test_notify_header_media_carries_body_as_caption_with_keyboard(http_recorder, fake_redis):
+    # A media header rides the standard composition: the media is sent WITH the body as its
+    # caption and the keyboard attached, one message, when the body fits the caption cap.
+    header = MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/h.png")
+    options: list[Option] = [ReplyOption(text="Go", id="go")]
+    result = await TelegramChannel().notify(ChannelNotification(message="Look:", options=options, header=header))
+
+    methods = [str(r.url).rsplit("/", 1)[-1] for r in http_recorder.requests]
+    assert methods == ["sendPhoto"]  # one composed message
+    body = json.loads(http_recorder.requests[0].content)
+    assert body == {
+        "chat_id": "777",
+        "photo": "https://cdn.test/h.png",
+        "caption": "Look:",
+        "reply_markup": {"inline_keyboard": [[{"text": "Go", "callback_data": "go"}]]},
+    }
+    assert result == ["42"]
+    # The keyboard-carrying (caption) message anchors the option side record.
+    assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(("go", "Go", "go", None))
+
+
+async def test_notify_header_media_degrades_to_separate_message_when_body_too_long(http_recorder, fake_redis):
+    # A body past Telegram's caption cap cannot ride as a caption: the header media is sent
+    # alone, then the text-plus-keyboard message (which anchors the option record).
+    header = MediaItem(kind=MediaKind.VIDEO, url="https://cdn.test/h.mp4")
+    options: list[Option] = [ReplyOption(text="Go", id="go")]
+    long_message = "m" * 1025  # over the 1024-char caption cap
+    result = await TelegramChannel().notify(ChannelNotification(message=long_message, options=options, header=header))
+
+    methods = [str(r.url).rsplit("/", 1)[-1] for r in http_recorder.requests]
+    assert methods == ["sendVideo", "sendMessage"]
+    header_body = json.loads(http_recorder.requests[0].content)
+    assert header_body == {"chat_id": "777", "video": "https://cdn.test/h.mp4"}  # no caption
+    text_body = json.loads(http_recorder.requests[1].content)
+    assert text_body["text"] == long_message
+    assert text_body["reply_markup"] == {"inline_keyboard": [[{"text": "Go", "callback_data": "go"}]]}
+    assert result == ["42", "42"]
+
+
+async def test_notify_document_video_audio_send_by_kind(http_recorder, fake_redis):
+    # A document/video/audio media item is sent via its matching Bot API method (caption
+    # included when set), not only images.
+    media = [
+        MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/a.pdf", caption="the report", filename="report.pdf"),
+        MediaItem(kind=MediaKind.VIDEO, url="https://cdn.test/b.mp4", caption=None),
+        MediaItem(kind=MediaKind.AUDIO, url="https://cdn.test/c.mp3", caption="a clip"),
+    ]
+    result = await TelegramChannel().notify(ChannelNotification(message="Files:", media=media))
+
+    methods = [str(r.url).rsplit("/", 1)[-1] for r in http_recorder.requests]
+    assert methods == ["sendMessage", "sendDocument", "sendVideo", "sendAudio"]
+    assert json.loads(http_recorder.requests[1].content) == {
+        "chat_id": "777",
+        "document": "https://cdn.test/a.pdf",
+        "caption": "the report",
+    }
+    assert json.loads(http_recorder.requests[2].content) == {"chat_id": "777", "video": "https://cdn.test/b.mp4"}
+    assert json.loads(http_recorder.requests[3].content) == {
+        "chat_id": "777",
+        "audio": "https://cdn.test/c.mp3",
+        "caption": "a clip",
+    }
+    assert result == ["42", "42", "42", "42"]
+
+
+async def test_notify_location_sends_send_location(http_recorder, fake_redis):
+    # A bare location (no name+address) is a sendLocation pin.
+    location = LocationElement(latitude=51.5, longitude=-0.12)
+    result = await TelegramChannel().notify(ChannelNotification(message="Here:", location=location))
+
+    methods = [str(r.url).rsplit("/", 1)[-1] for r in http_recorder.requests]
+    assert methods == ["sendMessage", "sendLocation"]
+    assert json.loads(http_recorder.requests[1].content) == {"chat_id": "777", "latitude": 51.5, "longitude": -0.12}
+    assert result == ["42", "42"]
+
+
+async def test_notify_location_with_name_and_address_sends_venue(http_recorder, fake_redis):
+    # A location carrying BOTH a name and an address is a sendVenue (Telegram's venue send
+    # requires a title AND an address).
+    location = LocationElement(latitude=51.5, longitude=-0.12, name="The Office", address="1 High St")
+    await TelegramChannel().notify(ChannelNotification(message="", location=location))
+
+    methods = [str(r.url).rsplit("/", 1)[-1] for r in http_recorder.requests]
+    assert methods == ["sendVenue"]  # blank message -> no sendMessage
+    assert json.loads(http_recorder.requests[0].content) == {
+        "chat_id": "777",
+        "latitude": 51.5,
+        "longitude": -0.12,
+        "title": "The Office",
+        "address": "1 High St",
+    }
 
 
 async def test_notify_data_uri_image_is_refused_before_any_send(http_recorder, fake_redis):
