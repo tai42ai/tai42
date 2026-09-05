@@ -116,6 +116,8 @@ Requires **Python 3.13+** and a reachable OIDC issuer publishing standard
 discovery + JWKS. An unreachable or broken issuer is caught loudly by
 `healthcheck()` at startup rather than failing per-request.
 
+The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the
