@@ -65,6 +65,23 @@ else:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def _multiproc_lock_path(metrics_dir: str) -> str:
+    """Path of the exclusive lock file guarding the multiproc dir's lifecycle.
+
+    The lock sits *beside* the dir, never inside it: the dir may carry a trailing
+    slash, which would place the lock at ``dir/.lock`` where the wipe's rmtree would
+    take it along with the dir; stripping the slash keeps the lock next to the dir so
+    it survives the wipe. The parent directory is ensured to exist so the lock file
+    can be created (a parentless relative dir has no parent to create). Both the
+    non-wiping init and the master wipe lock on this one path, so their directory
+    lifecycle operations are mutually exclusive.
+    """
+    parent_dir = os.path.dirname(metrics_dir.rstrip("/"))
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    return f"{metrics_dir.rstrip('/')}.lock"
+
+
 def init_prometheus_multiproc_dir():
     """Ensure the multiproc dir exists WITHOUT wiping it.
 
@@ -72,9 +89,28 @@ def init_prometheus_multiproc_dir():
     ``create_app``) runs this: it creates the dir if missing but never removes a
     populated one, so a live worker's mmap files survive. The once-per-run wipe is
     the master's job (``wipe_prometheus_multiproc_dir``).
+
+    Ensuring the dir runs under the SAME exclusive lock as the wipe, because
+    ``os.makedirs(exist_ok=True)`` is NOT atomic against a concurrent remover: its
+    internal ``mkdir`` raises ``FileExistsError`` when the dir is present, and the
+    ``exist_ok`` shortcut only swallows that error if the dir still ``isdir`` at a
+    recheck. If the master's ``rmtree`` deletes the dir in the window between that
+    failed ``mkdir`` and the recheck, ``makedirs`` re-raises and this worker dies at
+    boot — exactly the window the wipe's rmtree opens when a sidecar inits
+    concurrently. Holding the wipe's lock closes it: while init holds the lock the
+    master's rmtree cannot run, and a wipe holding the lock blocks init, so the two
+    never interleave over the dir.
     """
     metrics_dir = metrics_settings().prometheus_multiproc_dir
-    os.makedirs(metrics_dir, exist_ok=True)
+    lock_file_path = _multiproc_lock_path(metrics_dir)
+
+    with open(lock_file_path, "w") as lock_file:
+        try:
+            _lock_exclusive(lock_file.fileno())
+            os.makedirs(metrics_dir, exist_ok=True)
+        finally:
+            _unlock(lock_file.fileno())
+
     return metrics_dir
 
 
@@ -84,20 +120,12 @@ def wipe_prometheus_multiproc_dir():
     Removes stale db files left by previous runs so a scrape does not merge dead
     processes' counters. Guarded by an exclusive lock and a per-run sentinel so
     exactly one caller of a run wipes; the backend worker and metrics server never
-    call this.
+    call this. The rmtree+makedirs below run under the lock, and the non-wiping init
+    shares that lock, so no unlocked ensure-exists can interleave with the wipe's
+    delete-then-recreate window.
     """
     metrics_dir = metrics_settings().prometheus_multiproc_dir
-
-    # Ensure the parent directory exists so we can place a lock file next to the
-    # metrics dir. A parentless relative dir has no parent to create.
-    parent_dir = os.path.dirname(metrics_dir.rstrip("/"))
-    if parent_dir:
-        os.makedirs(parent_dir, exist_ok=True)
-
-    # Use a lock file *outside* the directory we are about to wipe. The dir may
-    # carry a trailing slash, which would place the lock INSIDE it ("dir/.lock");
-    # strip it so the lock sits beside the dir.
-    lock_file_path = f"{metrics_dir.rstrip('/')}.lock"
+    lock_file_path = _multiproc_lock_path(metrics_dir)
 
     with open(lock_file_path, "w") as lock_file:
         try:

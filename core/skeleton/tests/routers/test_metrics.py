@@ -126,6 +126,76 @@ def test_wipe_rewipes_on_new_run_id(monkeypatch: pytest.MonkeyPatch, tmp_path) -
     assert not kept.exists()  # a new run id forced the wipe to re-run
 
 
+def test_init_does_not_die_when_master_wipe_races_its_makedirs(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A worker's ``init`` must survive the master's concurrent wipe of the SAME dir.
+
+    ``os.makedirs(exist_ok=True)`` is not atomic against a remover: its internal
+    ``mkdir`` raises ``FileExistsError`` when the dir is present, and the ``exist_ok``
+    shortcut only swallows that if the dir still ``isdir`` at its recheck. If the
+    master's ``rmtree`` deletes the dir in the window between that failed ``mkdir``
+    and the recheck, ``makedirs`` re-raises and the worker dies at boot.
+
+    This forces that exact interleave deterministically (no timing roulette):
+    ``os.path.isdir`` (the recheck ``makedirs`` performs on the target after its
+    ``mkdir`` fails) is hooked so, on the first recheck for the target, ``init`` parks
+    in the window and lets a real ``wipe`` thread run; ``shutil.rmtree`` is hooked to
+    park the wipe *after* its delete, before it recreates the dir. On the UNFIXED code
+    ``init`` holds no lock, so the wipe's rmtree runs and the recheck finds the dir
+    gone -> ``makedirs`` re-raises. With ``init`` and ``wipe`` sharing one lock, the
+    wipe blocks on ``init``'s lock, the recheck (bounded wait) finds the dir intact,
+    and ``init`` returns cleanly."""
+    import shutil
+    import threading
+
+    target = tmp_path / "metrics"
+    target.mkdir()  # pre-exists so init's internal mkdir fails into the exist_ok recheck
+    monkeypatch.setattr(prom_mod, "metrics_settings", lambda: _fake_settings(str(target)))
+
+    init_at_recheck = threading.Event()  # init has entered makedirs' exist_ok recheck
+    rmtree_done = threading.Event()  # the racing wipe has deleted the dir
+    init_left_window = threading.Event()  # init finished its recheck; wipe may recreate
+
+    real_isdir = os.path.isdir
+    real_rmtree = shutil.rmtree
+    target_abs = os.path.abspath(str(target))
+
+    def racing_isdir(path, *args, **kwargs):
+        # makedirs calls isdir(target) only in its except branch, i.e. exactly the
+        # post-mkdir recheck window. On the first such recheck, park here and let the
+        # concurrent wipe delete the dir; on fixed code init holds the lock so the
+        # wipe cannot run and this bounded wait simply times out.
+        if os.path.abspath(str(path)) == target_abs and not init_at_recheck.is_set():
+            init_at_recheck.set()
+            rmtree_done.wait(timeout=2.0)
+        return real_isdir(path, *args, **kwargs)
+
+    def racing_rmtree(path, *args, **kwargs):
+        real_rmtree(path, *args, **kwargs)
+        rmtree_done.set()
+        # Hold the wipe after its delete, before it recreates the dir, so init's
+        # recheck lands in the delete-then-recreate window (the production race).
+        init_left_window.wait(timeout=2.0)
+
+    def wipe_worker() -> None:
+        init_at_recheck.wait(timeout=2.0)  # only race once init is parked in its recheck
+        prom_mod.wipe_prometheus_multiproc_dir()
+
+    wiper = threading.Thread(target=wipe_worker)
+    wiper.start()
+    monkeypatch.setattr(os.path, "isdir", racing_isdir)
+    monkeypatch.setattr(shutil, "rmtree", racing_rmtree)
+    try:
+        # Must NOT raise: on the fixed code init holds the shared lock across its
+        # makedirs, so the master's rmtree cannot slip into the recheck window.
+        prom_mod.init_prometheus_multiproc_dir()
+    finally:
+        init_left_window.set()  # release the parked wipe so it can finish + the thread joins
+        rmtree_done.set()
+        wiper.join(timeout=5.0)
+
+    assert target.is_dir()
+
+
 def test_assert_multiproc_value_class_passes_under_mmap() -> None:
     # The suite freezes the mmap value backend (conftest sets the env before the
     # first ``prometheus_client`` import), so a writer's assert is satisfied.
