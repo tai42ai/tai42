@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from tai42_contract.app import TaiApp
     from tai42_contract.connectors.models import ResolvedConnectionAuth
     from tai42_contract.conversations import DeliveryReceipt
+    from tai42_contract.interactions.models import LocationElement, MediaItem
     from tai42_contract.presets import PresetStore
     from tai42_contract.tool_meta import ToolMetaStore
 
@@ -702,11 +703,22 @@ class TaiMCP(TaiMCPLifecycleMixin):
         provider_message_id: str,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
+        attachments: "list[MediaItem] | None" = None,
+        location: "LocationElement | None" = None,
     ) -> str:
         from tai42_skeleton.conversations import accept
 
         return await accept(
-            channel, our_identity, client_address, cap_key, text, provider_message_id, params=params, form=form
+            channel,
+            our_identity,
+            client_address,
+            cap_key,
+            text,
+            provider_message_id,
+            params=params,
+            form=form,
+            attachments=attachments,
+            location=location,
         )
 
     async def _conversation_record_delivery_status(

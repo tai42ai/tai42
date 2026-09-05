@@ -1143,7 +1143,7 @@ def test_media_rejects_interior_whitespace_and_control_chars():
 def test_media_rejects_unknown_kind():
     # A dict item with an unknown kind is rejected when it coerces through MediaItem.
     with pytest.raises(ValueError, match="'link'"):
-        _interaction(media=[{"kind": "video", "url": "https://h/x.mp4"}])
+        _interaction(media=[{"kind": "carrier-pigeon", "url": "https://h/x"}])
 
 
 def test_media_image_data_uri_over_cap_raises():

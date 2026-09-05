@@ -37,8 +37,10 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
+    Option,
+    OptionSection,
 )
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX, LocationElement, MediaItem, MediaKind
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -83,7 +85,11 @@ async def notify_user(
     audience: str | None = None,
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
-    options: list[str] | None = None,
+    options: list[Option] | None = None,
+    location: LocationElement | None = None,
+    sections: list[OptionSection] | None = None,
+    header: MediaItem | None = None,
+    footer: str | None = None,
     schema: dict[str, Any] | None = None,
 ) -> list[str]:
     """Notify a human of ``message``, fire-and-forget.
@@ -110,21 +116,29 @@ async def notify_user(
     so an addressed notification lands in the identity's feed even on the channel
     path. A blank value is rejected.
 
-    ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms (the contract
-    enforces media/template and options/template are each mutually exclusive; options may
-    combine with media). On a NAMED channel they are threaded onto the
-    ``ChannelNotification`` the channel receives — and an ``audience``-addressed channel
-    send stores them on the in-app feed record too, so the feed shows the same rich
-    content the channel delivered; on the INTERNAL sink (``channel=None``)
+    ``media``, ``template``, ``options``, ``location``, ``sections``, ``header`` and
+    ``footer`` are OPTIONAL richer-send forms — FULL parity with the flow answer path's
+    ``AnswerPart``/``ChannelNotification`` vocabulary. The contract's shared
+    ``check_interactive_composition`` enforces the same matrix (``options`` XOR ``sections``;
+    ``schema`` excludes both; ``header``/``footer`` require a choice surface; ``template`` is
+    the standalone out-of-window send exclusive with every other content/interactive field;
+    ``options``/``sections`` may each combine with ``media``/``location``). On a NAMED channel
+    they are threaded onto the ``ChannelNotification`` the channel receives — and an
+    ``audience``-addressed channel send stores them on the in-app feed record too, so the feed
+    shows the same rich content the channel delivered; on the INTERNAL sink (``channel=None``)
     they are STORED on the feed record and returned by the read doors (rendering them, media
     included, is the host inbox's own surface) — a clean break from the old
     sink-refuses-rich-content rule.
     On the channel path a channel advertises support with the OPTIONAL class attributes
     ``supports_media_notifications`` / ``supports_template_notifications`` /
-    ``supports_interactive_notifications`` (absent = unsupported); the matching field sent
-    to a channel that does not advertise it is a ``NotImplementedError`` (the operation
+    ``supports_interactive_notifications`` (both ``options`` and ``sections``, one choice
+    surface) / ``supports_location_notifications`` (absent = unsupported); the matching field
+    sent to a channel that does not advertise it is a ``NotImplementedError`` (the operation
     door maps it to a 501) — a sibling channel that reads only ``notification.message`` must
-    never accept the send while the extra content silently vanishes. The guard fires BEFORE
+    never accept the send while the extra content silently vanishes. ``header``/``footer`` ride
+    the already-gated choice surface (they require ``options``/``sections``), so they carry NO
+    capability gate of their own — mirroring the delivery path, a channel that renders the
+    choice surface but not the header/footer simply omits them. The guard fires BEFORE
     the in-app feed record, so a refused send leaves no phantom feed entry. (The sink path
     stores rich content unconditionally — there is no channel to advertise a capability.)
 
@@ -209,7 +223,15 @@ async def notify_user(
         # inline image can never outlive a served-media key the way a bounded interaction
         # record's substituted reference is kept alive by its group horizon.
         sink_notification = ChannelNotification(
-            message=message, recipient=recipient, media=media, template=template, options=options
+            message=message,
+            recipient=recipient,
+            media=media,
+            template=template,
+            options=options,
+            location=location,
+            sections=sections,
+            header=header,
+            footer=footer,
         )
         await record_notification(
             sink_notification.message,
@@ -218,6 +240,10 @@ async def notify_user(
             media=sink_notification.media,
             template=sink_notification.template,
             options=sink_notification.options,
+            location=sink_notification.location,
+            sections=sink_notification.sections,
+            header=sink_notification.header,
+            footer=sink_notification.footer,
         )
         return []
     channel_obj = _resolve_channel(channel)
@@ -228,9 +254,16 @@ async def notify_user(
     # must leave no phantom feed entry.
     if media is not None and not getattr(channel_obj, "supports_media_notifications", False):
         raise NotImplementedError(f"channel {channel!r} does not support media notifications")
+    if location is not None and not getattr(channel_obj, "supports_location_notifications", False):
+        raise NotImplementedError(f"channel {channel!r} does not support location notifications")
     if template is not None and not getattr(channel_obj, "supports_template_notifications", False):
         raise NotImplementedError(f"channel {channel!r} does not support template notifications")
     if options is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
+        raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
+    # A sectioned list IS an interactive choice surface — the SAME capability flag flat options
+    # ride, mirroring the delivery path (``_unsupported_rich_capability``). ``header``/``footer``
+    # ride the already-gated choice surface, so they carry NO gate of their own.
+    if sections is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
         raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
     if schema is not None and not getattr(channel_obj, "supports_form_notifications", False):
         raise NotImplementedError(f"channel {channel!r} does not support form notifications")
@@ -252,22 +285,33 @@ async def notify_user(
         # raising loudly on bad input (a ``ValueError`` the operation door maps to a 400).
         # The coerced items feed the data: scan, the public-base-url check and substitution.
         media = [item if isinstance(item, MediaItem) else MediaItem.model_validate(item) for item in media]
-    if media is not None and any(item.kind is MediaKind.IMAGE and item.url.startswith("data:image/") for item in media):
-        # A ``data:`` image cannot reach a channel as inline bytes — a vendor fetches an
-        # ABSOLUTE url from its own servers. Store it by reference and swap the url for an
-        # absolute served reference BEFORE the notification is built. The absolute url needs
-        # the public base url; its absence is a loud channel-input refusal naming the
-        # setting (the operation door maps it to a 400), never a silent drop.
+    if media is not None:
+        # Two rewrites reach a channel, mirroring the ask path (``substitute_media``): a
+        # ``data:`` image is stored by reference and its url swapped for an ABSOLUTE served
+        # reference; and an ALREADY-STORED same-origin route reference
+        # (``{MEDIA_ROUTE_PREFIX}{id}``, ANY media kind) is made absolute against the public
+        # base url. Both are because a channel vendor fetches media from its OWN servers, so a
+        # relative same-origin url is unfetchable off-origin.
+        has_data_image = any(item.kind is MediaKind.IMAGE and item.url.startswith("data:image/") for item in media)
         settings = interactions_settings()
-        if settings.public_base_url is None:
+        if has_data_image and settings.public_base_url is None:
+            # A ``data:`` image REQUIRES the public base url to mint its absolute served url;
+            # its absence is a loud channel-input refusal naming the setting (the operation
+            # door maps it to a 400), never a silent drop.
             raise ChannelInputError(
                 "a data: image on a channel notification requires INTERACTIONS_PUBLIC_BASE_URL to be set"
             )
-        store = InteractionStore(settings.key_prefix)
-        async with client_ctx(RedisClient, settings.redis) as r:
-            media = await substitute_media(
-                store, r, media, settings.idle_ttl_seconds, base_url=settings.public_base_url
-            )
+        has_route_ref = any(item.url.startswith(MEDIA_ROUTE_PREFIX) for item in media)
+        # Store a data: image, or absolutize a relative route reference when the public base
+        # url is set. With no data: image AND no absolutizable route reference (either no
+        # route ref, or no public base url to absolutize it with — pass-through as before)
+        # nothing touches the store, so a plain https-media send still needs no Redis.
+        if has_data_image or (has_route_ref and settings.public_base_url is not None):
+            store = InteractionStore(settings.key_prefix)
+            async with client_ctx(RedisClient, settings.redis) as r:
+                media = await substitute_media(
+                    store, r, media, settings.idle_ttl_seconds, base_url=settings.public_base_url
+                )
     # Construct (and thereby validate) the notification BEFORE the in-app feed record.
     # The contract's exclusivity validators (media+template, options+template) and the
     # present-but-empty ``media``/``options`` validators raise here as a pydantic
@@ -275,7 +319,16 @@ async def notify_user(
     # them ahead of the feed write keeps the no-phantom-feed guarantee for ALL rich-send
     # refusals — the capability guards above plus these — so none leaves a stray entry.
     notification = ChannelNotification(
-        message=message, recipient=recipient, media=media, template=template, options=options, schema=schema
+        message=message,
+        recipient=recipient,
+        media=media,
+        template=template,
+        options=options,
+        location=location,
+        sections=sections,
+        header=header,
+        footer=footer,
+        schema=schema,
     )
     # An addressed notification lands in the identity's in-app feed even on the
     # channel path, matching ``ask_user`` (which always persists). After the clamp a
@@ -293,6 +346,10 @@ async def notify_user(
             media=notification.media,
             template=notification.template,
             options=notification.options,
+            location=notification.location,
+            sections=notification.sections,
+            header=notification.header,
+            footer=notification.footer,
             schema=notification.schema,
         )
     # Tier 1 of the send-outcome monitoring layer: one structured ``send:<channel>`` span

@@ -90,12 +90,19 @@ async def substitute_media(
     *,
     base_url: str | None = None,
 ) -> list[MediaItem]:
-    """Store every ``data:image/*`` image item by reference, return the list with each
-    such item's url swapped for a served reference. Links and https images pass through
-    unchanged. Pure over the input (returns a new list; each item is coerced through
-    ``MediaItem`` so its input shape is validated before any store). ``base_url`` is
-    prepended to make an ABSOLUTE served url for a channel send (a vendor fetches it
-    from its own servers); None yields the relative same-origin url the inbox renders."""
+    """Store every ``data:image/*`` image item by reference and, when ``base_url`` is set,
+    absolutize every SAME-ORIGIN served-media reference (``{MEDIA_ROUTE_PREFIX}{id}``, ANY
+    media kind), returning the list with each such item's url rewritten. Links and absolute
+    ``https`` items pass through unchanged. Pure over the input (returns a new list; each item
+    is coerced through ``MediaItem`` so its input shape is validated before any store).
+
+    ``base_url`` makes an ABSOLUTE served url for a channel send: a vendor fetches media from
+    its own servers, so a RELATIVE ``{MEDIA_ROUTE_PREFIX}{id}`` is unfetchable off-origin —
+    both a freshly-stored ``data:`` image AND an already-stored relative route reference are
+    prefixed with ``base_url``. When ``base_url`` is None (an inbox-only send) both keep the
+    relative same-origin url the inbox renders — the pre-existing pass-through behavior. An
+    already-absolute served url (it does not start with ``MEDIA_ROUTE_PREFIX``) is left
+    untouched, so the rewrite is idempotent."""
     prefix = base_url.rstrip("/") + MEDIA_ROUTE_PREFIX if base_url is not None else MEDIA_ROUTE_PREFIX
     # Coerce (validating each item's shape) then apply the list-level caps BEFORE any
     # store write, so an over-count or over-budget request is refused before a single
@@ -107,5 +114,11 @@ async def substitute_media(
         if item.kind is MediaKind.IMAGE and item.url.startswith(_DATA_IMAGE_PREFIX):
             media_id = await store_data_image(store, r, item.url, ttl_seconds)
             item = MediaItem(kind=item.kind, url=prefix + media_id, caption=item.caption)
+        elif base_url is not None and item.url.startswith(MEDIA_ROUTE_PREFIX):
+            # An already-stored SAME-ORIGIN served reference (any kind — document/video/audio
+            # served by id, not only an image). A channel vendor fetches off-origin, so prepend
+            # ``base_url`` to make it absolute; caption/filename ride unchanged. With no
+            # ``base_url`` this branch is skipped and the relative url passes through as before.
+            item = item.model_copy(update={"url": base_url.rstrip("/") + item.url})
         result.append(item)
     return result

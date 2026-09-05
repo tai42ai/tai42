@@ -487,19 +487,45 @@ async def append_media(
     address: str,
     text: str,
     media: list[dict[str, Any]] | None = None,
-    options: list[str] | None = None,
+    options: list[dict[str, Any]] | None = None,
+    sections: list[dict[str, Any]] | None = None,
+    header: dict[str, Any] | None = None,
+    footer: str | None = None,
+    location: dict[str, Any] | None = None,
 ) -> str:
-    """Append one ``chat.media`` agent entry (a media card) and return its id.
+    """Append one ``chat.media`` agent entry (a rich card) and return its id.
 
-    ``media`` is the display items — each ``{"kind", "url", "caption"?}`` — carried in
-    the frame ONLY when non-empty; ``options`` is the tappable option list, carried ONLY
-    when present. Both keys are omitted when absent — there is no empty-value shape."""
+    Every optional key is carried in the frame ONLY when present — there is no
+    empty-value shape, so a reader tells "absent" from "empty" and never renders an
+    empty control row:
+
+    * ``media`` — the display items, each ``{"kind", "url", "caption"?, "filename"?}``
+      (``filename`` on a ``document`` only); carried only when non-empty.
+    * ``options`` — the flat tappable option list, each a serialized :data:`Option`
+      (``{"kind": "reply", "text", "description"?, "id"?}`` or
+      ``{"kind": "link", "label", "url"}``); carried only when present.
+    * ``sections`` — the sectioned alternative, each ``{"title", "rows": [reply, ...]}``;
+      carried only when present. ``options`` and ``sections`` are mutually exclusive by
+      contract, so at most one is ever set.
+    * ``header`` — a single display-media item shown above the body, the same shape as a
+      ``media`` entry; carried only when present.
+    * ``footer`` — the short trailing line under the card; carried only when present.
+    * ``location`` — a shared geographic point ``{"latitude", "longitude", "name"?,
+      "address"?}``, rendered as a map-pin element; carried only when present."""
     entry_id = _mint_id()
     data: dict[str, Any] = {"id": entry_id, "direction": "out", "text": text, "ts": _now_iso()}
     if media:
         data["media"] = media
     if options is not None:
         data["options"] = options
+    if sections is not None:
+        data["sections"] = sections
+    if header is not None:
+        data["header"] = header
+    if footer is not None:
+        data["footer"] = footer
+    if location is not None:
+        data["location"] = location
     await _append(identity, address, MEDIA_EVENT, data)
     return entry_id
 
@@ -528,10 +554,11 @@ async def append_question(
     the page's form widget renders, never a secret — carried in the frame ONLY when
     present (non-None exactly for the ``form`` format); otherwise the key is absent.
 
-    ``media`` is the question's display items — each ``{"kind", "url", "caption"?}``,
-    the SAME frame shape a ``chat.media`` card carries so the page renders them with
-    the same media-card component — carried in the frame ONLY when non-empty;
-    otherwise the key is absent. It is display-only, never part of the answer."""
+    ``media`` is the question's display items — each ``{"kind", "url", "caption"?,
+    "filename"?}`` (``filename`` on a ``document`` only), the SAME frame shape a
+    ``chat.media`` card carries so the page renders them with the same media-card
+    component — carried in the frame ONLY when non-empty; otherwise the key is absent.
+    It is display-only, never part of the answer."""
     entry_id = _mint_id()
     data: dict[str, Any] = {
         "id": entry_id,
@@ -572,6 +599,7 @@ async def append_form(
     schema: dict[str, Any],
     token: str,
     media: list[dict[str, Any]] | None = None,
+    location: dict[str, Any] | None = None,
 ) -> str:
     """Append one ``chat.form`` agent entry (an ask-less form card) and return its id.
 
@@ -581,11 +609,15 @@ async def append_form(
     the card's own conversation only — the door checks the record against the
     caller's session, so a token replayed from a foreign transcript resolves to
     nothing. ``media`` is the card's display items, the same ``{"kind", "url",
-    "caption"?}`` shape every other card carries, present ONLY when non-empty."""
+    "caption"?, "filename"?}`` shape every other card carries, present ONLY when
+    non-empty. ``location`` is a shared geographic point (the same map-pin shape a
+    media card carries) a form may ride alongside its fields, present ONLY when set."""
     entry_id = _mint_id()
     data: dict[str, Any] = {"id": entry_id, "text": text, "schema": schema, "token": token, "ts": _now_iso()}
     if media:
         data["media"] = media
+    if location is not None:
+        data["location"] = location
     await _append(identity, address, FORM_EVENT, data)
     return entry_id
 

@@ -56,10 +56,15 @@ async def test_web_notify_options_card_and_a_tapped_option_lands_as_a_message(
 
     # The agent-initiated notify appends ONE tappable card to the visitor's stream. The
     # notify_user door names the visitor pair as the composite recipient, exactly as a
-    # deliver does.
+    # deliver does. Options are the contract's discriminated reply/link vocabulary.
     await bridge.api().post(
         "/api/notifications",
-        json={"message": message, "channel": "web", "recipient": web.recipient, "options": [option, "Item B"]},
+        json={
+            "message": message,
+            "channel": "web",
+            "recipient": web.recipient,
+            "options": [{"kind": "reply", "text": option}, {"kind": "reply", "text": "Item B"}],
+        },
     )
 
     def _is_card(event: str, data: dict) -> bool:
@@ -67,7 +72,8 @@ async def test_web_notify_options_card_and_a_tapped_option_lands_as_a_message(
 
     frames = await web.frames(until=_is_card)
     card = next(data for event, data in frames if _is_card(event, data))
-    assert card["options"] == [option, "Item B"]
+    # Each option rides the card as its serialized frame item (optional keys omitted).
+    assert card["options"] == [{"kind": "reply", "text": option}, {"kind": "reply", "text": "Item B"}]
 
     # A tap sends the option's own text through the message door, exactly as a typed message
     # would — so it reaches the turn as the visitor's message and the tool records it.

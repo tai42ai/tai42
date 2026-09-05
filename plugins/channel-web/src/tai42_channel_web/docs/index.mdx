@@ -71,15 +71,30 @@ https://<your deployment>/api/channels/web/chat/desk
 ## Agent-sent cards and lists
 
 A `notify_user` addressed at a web visitor carries richer content than plain text. A
-notification's `media` renders as a **media card**: the message text and the media items,
-each optionally captioned — absolute-`https` images (an `http:` or `data:` image is refused loudly
-— the page renders an image only from an https source) and outbound links, which ride the
-card as safe link elements rather than folded into the body text. A notification's `options`
-renders a **tappable option list** (at most 10 options); a tap sends the option's own text
-through the message door as an ordinary visitor message, so it enters the conversation
-exactly as if the visitor had typed it. `options` may combine with `media` (a card with a
-list). Templates are **not** supported — a template is a vendor construct, refused loudly on
-this channel.
+notification's `media` renders as a **media card** — this channel renders the whole media
+vocabulary as real UI:
+
+- an **image** inline (an absolute-`https` source; an `http:` or `data:` image is refused
+  loudly — the page renders an image only from an https source),
+- a **document** as a download card (its `filename` is the label, its caption a secondary
+  line, with a download affordance),
+- a **video** and an **audio** item as native `<video>`/`<audio>` players,
+- a **link** as a safe outbound anchor (a new tab, `rel="noopener"`), rather than folded
+  into the body text.
+
+A notification's `options` renders a **tappable option list** (at most 10). Options are typed:
+a **reply** chip sends its own text through the message door as an ordinary visitor message —
+so it enters the conversation exactly as if the visitor had typed it — and, when the author set
+an `id`, that id rides the send as `params.reply_id` so the flow reads which option was chosen;
+a reply's optional `description` renders as a secondary line. A **link** option is a
+button-styled action that opens its URL in a new tab (`rel="noopener"`) and submits nothing —
+visually distinct from a reply chip. The sectioned alternative, `sections`, renders titled
+groups of reply rows. An interactive card may also carry a media **header** above the body and a
+muted **footer** beneath it. A notification's `location` renders as a **map-pin** element —
+readable coordinates, any name/address, and an OpenStreetMap link built from the coordinates
+alone (no external map tiles, so the page's CSP fetches nothing cross-origin). `options`,
+`sections`, `location`, `header` and `footer` combine with `media` on one card. Templates are
+**not** supported — a template is a vendor construct, refused loudly on this channel.
 
 ![A media card: an image with a caption and tappable option chips](images/media-card.png)
 
@@ -99,8 +114,8 @@ pending interaction; the card simply sits in the conversation, and a submission 
 it as an ordinary guest message: the agent sees a `label: value` text (labels come from
 the schema stored server-side; a tool target additionally receives the structured
 values on its payload under a `form` key). `schema` requires a non-blank message (the
-form needs a prompt), combines with `media` on the same card, and excludes `options`
-and `template` — one message, one interactive surface.
+form needs a prompt), combines with `media` and a `location` on the same card, and excludes
+`options`/`sections` and `template` — one message, one interactive surface.
 
 The card settles like an option list, not like a question: submitting shows a local
 "Sent" badge and the form **stays fillable** — a visitor may revise and submit again,

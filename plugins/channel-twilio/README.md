@@ -110,25 +110,62 @@ A `confirm` or `external` question arrives as a tappable link and is answered
 in the browser via the callback door — no SMS reply is expected or matched, and
 it never consumes the number pair.
 
-## Media and options (the medium's honest ceiling)
+## Media and the message vocabulary (the medium's honest ceiling)
 
 Both `deliver` (questions) and `notify` (fire-and-forget) support **display
-media**: an `image` media item attaches as MMS/WhatsApp media (a repeated Twilio
-`MediaUrl` — a public `https` url; an inline `data:` image is refused with
-`ChannelInputError`, since Twilio fetches the url), and a `link` item is appended
-to the message body as a labelled line (SMS has no rich link cards). This channel
-therefore advertises `supports_media_notifications`. A **media-only** notify (a
-caption-less image, blank message) sends a **body-less MMS**: the `Body` field is
-omitted and only the `MediaUrl` rides — Twilio accepts that when media is present.
+media**, degraded honestly per kind to this text-first medium — so this channel
+advertises `supports_media_notifications`:
 
-An SMS/MMS message has **no tappable buttons**. So this channel deliberately does
-**not** advertise `supports_interactive_notifications`: a `notify` carrying
-tappable options is refused up front by the runtime rather than sent with a fake
-affordance. A `select` **ask** still renders its options as numbered body lines,
-and the human answers by **typing** one option — the inbound webhook forwards the
-typed reply verbatim to the callback door, which validates it against the option
-set. That typed-reply mapping is a real answer path, and it is the medium's honest
-ceiling for choice input; there is no button-tap or reply-by-number machinery.
+| Media kind | SMS/MMS rendering |
+|---|---|
+| `image` / `video` / `audio` | A repeated Twilio `MediaUrl` attachment (a public `https` url Twilio fetches; the carrier applies its own per-type fallback). An inline `data:` image is refused with `ChannelInputError` — Twilio fetches a url, not inline bytes. The item's caption is alt-text a `MediaUrl` cannot carry, so it is dropped rather than leaked into the body. |
+| `document` | A `filename: url` body line (its suggested download name — which a `MediaUrl` cannot carry — followed by the link; `caption` then bare `url` are the fallbacks). MMS document rendering is carrier-unreliable, so a named tappable link is the honest degradation. |
+| `link` | A `caption: url` body line, or the bare `url` when no caption rides (SMS has no rich link cards; the human taps through). |
+
+A **content-only** notify (blank message) sends its media alone: an image/video/audio-only
+send goes out as a **body-less MMS** (the `Body` field is omitted, only the `MediaUrl`
+rides — Twilio accepts that when media is present); a document/link-only send renders that
+labelled line **as** the body.
+
+### What does NOT reach this channel (honest reachability)
+
+The new message vocabulary adds tappable options, sectioned option lists, shared
+locations, pre-approved templates, fillable forms, and interactive header/footer
+enhancements. **SMS/MMS supports none of them natively** — no tappable buttons, no map
+pin, no template component model, no form. So this channel advertises **only**
+`supports_media_notifications` and declares none of
+`supports_interactive_notifications` / `supports_location_notifications` /
+`supports_template_notifications` / `supports_form_notifications` /
+`supports_form_delivery`. The platform's central capability guard (`notify_user` and the
+conversations delivery executor) reads these flags and **refuses** a message carrying an
+unsupported shape *before it ever reaches this channel* — rather than letting the channel
+fake an affordance or silently drop the content:
+
+| Shape | Reaches this channel? | Why |
+|---|---|---|
+| `media` (image/video/audio/document/link) | **yes** | `supports_media_notifications = True`; rendered as above |
+| `options` (flat `ReplyOption`/`LinkOption`) | no | needs `supports_interactive_notifications` — refused upstream |
+| `sections` (titled `ReplyOption` groups) | no | needs `supports_interactive_notifications` — refused upstream |
+| `header` / `footer` | no | ride an interactive surface (options/sections), so refused transitively |
+| `location` | no | needs `supports_location_notifications` — refused upstream |
+| `template` (`ChannelTemplate`) | no | needs `supports_template_notifications` — refused upstream (see below) |
+| `schema` (ask-less form) | no | needs `supports_form_notifications` — refused upstream |
+| `form` delivery (an `ask_user` form) | no | needs `supports_form_delivery` — refused upstream |
+
+**Templates.** This channel does not use Twilio's Content API / `ContentSid` template
+sends today — every outbound is a freeform `Body` (plus any `MediaUrl`). It therefore does
+not advertise `supports_template_notifications`, so a `ChannelTemplate` is refused before it
+reaches here, keeping that behaviour coherent (approved-template sends over a `whatsapp:`
+number are the dedicated `channel-whatsapp` plugin's job).
+
+A `select` **ask** (the `deliver` path, whose `options` are a plain `list[str]`, not the
+notify vocabulary) still renders its options as numbered body lines, and the human answers
+by **typing** one option — the inbound webhook forwards the typed reply verbatim to the
+callback door, which validates it against the option set. That typed-reply mapping is a
+real answer path and the medium's honest ceiling for choice input; there is no button-tap
+or reply-by-number machinery. Because an inbound SMS matches purely by its **text**, an
+author-set option **id** can never round-trip over this channel — it is dropped, never
+echoed back on the reply.
 
 ## Security
 

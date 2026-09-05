@@ -58,6 +58,31 @@ def test_operator_record_refuses_a_nonempty_inbound_text():
         _record(origin="operator", inbound_text="something", caller_principal="op-1")
 
 
+def test_operator_record_refuses_inbound_attachments_and_location():
+    from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
+
+    with pytest.raises(ValueError, match="operator record carries no inbound attachments/location"):
+        _record(
+            origin="operator",
+            inbound_text="",
+            caller_principal="op-1",
+            inbound_attachments=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")],
+        )
+    with pytest.raises(ValueError, match="operator record carries no inbound attachments/location"):
+        _record(
+            origin="operator",
+            inbound_text="",
+            caller_principal="op-1",
+            inbound_location=LocationElement(latitude=1.0, longitude=2.0),
+        )
+
+
+def test_client_record_refuses_empty_inbound_attachments():
+    # A present-but-empty attachments list on a record is a caller bug (the shared media caps).
+    with pytest.raises(ValueError, match="non-empty list when present"):
+        _record(inbound_attachments=[])
+
+
 def test_operator_record_must_be_answered():
     with pytest.raises(ValueError, match="operator record is always answered"):
         _record(

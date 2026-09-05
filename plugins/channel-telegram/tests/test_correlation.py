@@ -12,10 +12,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from tai42_contract.channels import Correlation
 
-from tai42_channel_telegram.correlation import get_options, scoped_correlation_key, set_options
+from tai42_channel_telegram.correlation import StoredOption, get_options, scoped_correlation_key, set_options
 from tai42_channel_telegram.correlation import telegram_correlation_store as store
 
 _CALLBACK = "https://example.test/api/interactions/callback/tkt"
+
+
+def _opts(*texts: str) -> list[StoredOption]:
+    """Index-keyed StoredOption records (no author-set ids) for the given texts."""
+    return [StoredOption(callback_data=str(index), text=text) for index, text in enumerate(texts)]
 
 
 def _entry(callback_url: str = _CALLBACK, interaction_id: str = "int-1") -> Correlation:
@@ -127,9 +132,9 @@ async def test_scoped_key_isolates_the_same_message_id_across_chats(fake_redis):
 async def test_options_record_is_chat_scoped_the_same_way(fake_redis):
     # The option side record scopes by chat identically: a tap in chat B carrying the same
     # anchor message_id 42 finds no record, while chat A's own record resolves.
-    await set_options("chatA", "42", ["red", "blue"], ttl_seconds=600)
+    await set_options("chatA", "42", _opts("red", "blue"), ttl_seconds=600)
     assert await get_options("chatB", "42") is None
-    assert await get_options("chatA", "42") == ["red", "blue"]
+    assert await get_options("chatA", "42") == _opts("red", "blue")
     assert "channel:telegram:opts:chatA:42" in fake_redis.data
 
 
@@ -138,7 +143,7 @@ async def test_set_options_non_positive_ttl_raises(fake_redis, ttl: int):
     # A non-positive TTL would mint an options record with no expiry — refused loudly,
     # and nothing is written.
     with pytest.raises(ValueError, match="TTL must be positive"):
-        await set_options("chatA", "42", ["red", "blue"], ttl_seconds=ttl)
+        await set_options("chatA", "42", _opts("red", "blue"), ttl_seconds=ttl)
     assert fake_redis.data == {}
 
 
@@ -149,10 +154,19 @@ async def test_get_options_tolerates_non_json_record(fake_redis):
     assert await get_options("chatA", "42") is None
 
 
-@pytest.mark.parametrize("stored", ['{"a": 1}', "[1, 2, 3]", '["ok", 7]'])
-async def test_get_options_ignores_records_that_are_not_a_list_of_strings(fake_redis, stored: str):
-    # Valid JSON but the wrong shape (an object, or a list carrying a non-string) is not a
-    # usable option list: ignored as "no options", never handed to the index mapping.
+async def test_get_options_tolerates_a_legacy_bare_string_record(fake_redis):
+    # The pre-vocabulary channel stored options as a bare list[str] (callback_data = index).
+    # A tap resolving against such a record is a graceful miss — acked-ignored, never a
+    # crash — until the record's bounded TTL clears it.
+    fake_redis.data["channel:telegram:opts:chatA:42"] = '["red", "blue"]'
+    assert await get_options("chatA", "42") is None
+
+
+@pytest.mark.parametrize("stored", ['{"a": 1}', "[1, 2, 3]", '["ok", 7]', '[{"text": "no cb"}]'])
+async def test_get_options_ignores_records_that_are_not_the_stored_option_shape(fake_redis, stored: str):
+    # Valid JSON but the wrong shape (an object, a list carrying a non-object, or an object
+    # missing the required StoredOption fields) is not a usable option list: ignored as "no
+    # options", never handed to the token mapping.
     fake_redis.data["channel:telegram:opts:chatA:42"] = stored
     assert await get_options("chatA", "42") is None
 

@@ -135,8 +135,8 @@ describe('countdownAnnouncement', () => {
 describe('QuestionCard', () => {
   it('renders a question image and link through the shared media card', () => {
     const media: MediaItem[] = [
-      { kind: 'image', url: 'https://example.com/a.png', caption: 'A shot' },
-      { kind: 'link', url: 'https://docs.example/p', caption: 'The doc' },
+      { kind: 'image', url: 'https://example.com/a.png', caption: 'A shot', filename: null },
+      { kind: 'link', url: 'https://docs.example/p', caption: 'The doc', filename: null },
     ];
     renderCard(question('text', { media }));
 
@@ -152,7 +152,7 @@ describe('QuestionCard', () => {
   it('shows a question card image even after the question is answered', () => {
     renderCard(
       question('confirm', {
-        media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'A' }],
+        media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'A', filename: null }],
       }),
       {
         answered: true,

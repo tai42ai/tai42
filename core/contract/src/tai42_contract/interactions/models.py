@@ -18,7 +18,9 @@ from enum import StrEnum
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+from tai42_contract.entry_params import validate_entry_params
 
 
 class AnswerFormat(StrEnum):
@@ -29,9 +31,35 @@ class AnswerFormat(StrEnum):
     EXTERNAL = "external"
 
 
+class AnswerMismatchPolicy(StrEnum):
+    """What a channel-delivered ask does with a guest reply the answer door REJECTS (a 400 on a
+    live ask — the reply did not fit the question's format).
+
+    ``RETRY`` (the default, today's behavior): keep the ask parked and tell the guest what's
+    expected so they can answer again in place. ``BRIDGE``: treat an unmatched reply as a
+    DIGRESSION — keep the ask parked (no notice), and hand the reply to the conversation as a fresh
+    routed turn so the flow handles it; the ask then ends ONLY by a real answer or its timeout,
+    never by unmatched input. Set per ask by the tool author; a plain freeform/select ask keeps the
+    default.
+    """
+
+    RETRY = "retry"
+    BRIDGE = "bridge"
+
+
 class MediaKind(StrEnum):
     IMAGE = "image"
     LINK = "link"
+    DOCUMENT = "document"
+    VIDEO = "video"
+    AUDIO = "audio"
+
+
+# The media kinds that carry a fetchable file body (as opposed to ``LINK``, a labelled
+# anchor the human clicks through). They share one url discipline — an absolute https url, a
+# same-origin served-media reference, or an absolute served-media url — and only ``IMAGE``
+# additionally admits an inline ``data:image/*`` URI (the inbox CSP ``img-src`` renders it).
+FILE_MEDIA_KINDS = frozenset({MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.VIDEO, MediaKind.AUDIO})
 
 
 # Caps on the media attached to one question. They bound the ask/notify REQUEST
@@ -48,6 +76,21 @@ MEDIA_URL_MAX_CHARS = 8192
 MEDIA_DATA_URI_MAX_CHARS = 524_288
 MEDIA_CAPTION_MAX_CHARS = 1000
 MEDIA_TOTAL_URI_CHARS = 1_048_576
+
+# A document media item's suggested display filename (``document.pdf``): a short single-line
+# label the medium shows for the download, never a filesystem path. Meaningful only for a
+# DOCUMENT item; the model rejects it on any other kind.
+MEDIA_FILENAME_MAX_CHARS = 255
+
+# Caps on a shared location element's optional labels — a place name and a street address, each
+# a short single-line human label the medium renders beside the pin, not a message body.
+LOCATION_NAME_MAX_CHARS = 1000
+LOCATION_ADDRESS_MAX_CHARS = 1000
+
+# Cap on a per-ask custom mismatch notice — the guest-facing rejection text a ``retry``-policy ask
+# may substitute for the built-in one. A single guest reply, so a small bound (channels impose
+# their own tighter message caps); matches the conversation route's ``error_reply_text`` bound.
+MISMATCH_NOTICE_MAX_CHARS = 2000
 
 # Cap on the question text stored verbatim into the interaction state hash and the
 # per-group stream — a prompt authored by a server tool, so a few KB is generous.
@@ -183,28 +226,32 @@ def served_media_id(url: str) -> str | None:
 
 
 class MediaItem(BaseModel):
-    """One media item shown WITH a question — display-only, never part of the answer.
+    """One media item shown WITH a message — a display element, and inbound the shape a guest's
+    sent media takes.
 
-    ``kind`` selects how it renders: an ``image`` inline, a ``link`` as a labelled
-    anchor. ``url`` is the source — an ``image`` must be an absolute ``https`` URL, a
-    ``data:image/*`` URI, a same-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to
-    media the skeleton serves by id, or an absolute ``http(s)`` served reference of
-    that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a channel send mints from
-    ``public_base_url`` (remote images are https-only: the inbox CSP
-    ``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an
-    ``http:`` remote image would be an unrenderable record), while a ``link`` must be an
-    absolute ``http(s)`` URL (anchors are not governed
-    by ``img-src``; the human clicks through). A remote url names a host directly —
-    an ASCII DNS name, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply
-    punycode); an embedded ``user@`` credential form is rejected as it spoofs the
-    authority — and is always a single line — raw whitespace and control/format
-    characters are rejected. ``caption`` is the accessibility text — the image's alt text or the
-    link's display label.
+    ``kind`` selects how it renders: an ``image`` inline, a ``document``/``video``/``audio`` as
+    the matching file bubble, a ``link`` as a labelled anchor. ``url`` is the source. A file
+    kind (``image``/``document``/``video``/``audio``) must be an absolute ``https`` URL, a
+    same-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to media the skeleton serves by id, or an
+    absolute ``http(s)`` served reference of that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a
+    channel send mints from ``public_base_url`` (remote file media is https-only: the inbox CSP
+    ``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an ``http:``
+    remote source would be an unrenderable record); ``image`` ADDITIONALLY admits an inline
+    ``data:image/*`` URI — that inline form is image-only, a ``data:`` URI on any other file
+    kind is refused. A ``link`` must be an absolute ``http(s)`` URL (anchors are not governed by
+    ``img-src``; the human clicks through). A remote url names a host directly — an ASCII DNS
+    name, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply punycode); an embedded
+    ``user@`` credential form is rejected as it spoofs the authority — and is always a single
+    line — raw whitespace and control/format characters are rejected. ``caption`` is the
+    accessibility text — the image's alt text, a file's label, or the link's display label.
+    ``filename`` is the document's suggested display name; it is meaningful ONLY for a
+    ``document`` item and is refused on every other kind.
     """
 
     kind: MediaKind
     url: str
     caption: str | None = None
+    filename: str | None = None
 
     @field_validator("url")
     @classmethod
@@ -231,6 +278,31 @@ class MediaItem(BaseModel):
                 )
         return value
 
+    @field_validator("filename")
+    @classmethod
+    def _check_filename(cls, value: str | None) -> str | None:
+        # Shape only; the kind coupling (document-only) is decided in :meth:`_check_filename_kind`
+        # once ``kind`` is bound. A single-line non-blank label, capped — never a path, so raw
+        # whitespace/control characters (an embedded newline, a bidi spoof) are refused.
+        if value is not None:
+            if not value.strip():
+                raise ValueError("media filename must be non-blank when present")
+            if len(value) > MEDIA_FILENAME_MAX_CHARS:
+                raise ValueError(
+                    f"media filename must be at most {MEDIA_FILENAME_MAX_CHARS} characters, got {len(value)}"
+                )
+            if any((ch.isspace() and ch != " ") or not ch.isprintable() for ch in value):
+                raise ValueError("media filename must be a single-line label with no control characters")
+        return value
+
+    @model_validator(mode="after")
+    def _check_filename_kind(self) -> MediaItem:
+        # A filename names the download the medium offers, which only a ``document`` has; a
+        # filename on any other kind is a caller bug, refused rather than silently ignored.
+        if self.filename is not None and self.kind is not MediaKind.DOCUMENT:
+            raise ValueError(f"filename is meaningful only for document media, not {self.kind.value}")
+        return self
+
     @model_validator(mode="after")
     def _check_url_for_kind(self) -> MediaItem:
         if self.kind is MediaKind.LINK:
@@ -240,7 +312,14 @@ class MediaItem(BaseModel):
                 raise ValueError(
                     f"link media url must be at most {MEDIA_URL_MAX_CHARS} characters, got {len(self.url)}"
                 )
-        elif self.url.startswith(_DATA_IMAGE_PREFIX):
+            return self
+        # File media (image/document/video/audio): a same-origin served-media reference, an
+        # absolute served-media url, or an absolute https url. Only ``image`` additionally admits
+        # an inline ``data:image/*`` URI.
+        kind = self.kind.value
+        if self.url.startswith(_DATA_IMAGE_PREFIX):
+            if self.kind is not MediaKind.IMAGE:
+                raise ValueError(f"only image media may carry a data:image/* URI, not {kind}")
             if len(self.url) > MEDIA_DATA_URI_MAX_CHARS:
                 raise ValueError(
                     f"image media data: URI must be at most {MEDIA_DATA_URI_MAX_CHARS} characters, got {len(self.url)}"
@@ -254,15 +333,17 @@ class MediaItem(BaseModel):
             # http is allowed only here (that base is loopback-restricted at settings).
             if len(self.url) > MEDIA_URL_MAX_CHARS:
                 raise ValueError(
-                    f"image media url must be at most {MEDIA_URL_MAX_CHARS} characters, got {len(self.url)}"
+                    f"{kind} media url must be at most {MEDIA_URL_MAX_CHARS} characters, got {len(self.url)}"
                 )
         elif _is_absolute_web_url(self.url, schemes=("https",)):
             if len(self.url) > MEDIA_URL_MAX_CHARS:
                 raise ValueError(
-                    f"image media url must be at most {MEDIA_URL_MAX_CHARS} characters, got {len(self.url)}"
+                    f"{kind} media url must be at most {MEDIA_URL_MAX_CHARS} characters, got {len(self.url)}"
                 )
-        else:
+        elif self.kind is MediaKind.IMAGE:
             raise ValueError("image media url must be an absolute https URL or a data:image/* URI")
+        else:
+            raise ValueError(f"{kind} media url must be an absolute https URL or a served-media reference")
         return self
 
 
@@ -281,6 +362,84 @@ def check_media_list(items: Sequence[MediaItem]) -> None:
         raise ValueError(f"media total url length must be at most {MEDIA_TOTAL_URI_CHARS} characters, got {total}")
 
 
+def validate_action_url(value: str) -> str:
+    """Validate a tappable link-action URL — the ``url`` a link button/anchor opens when the
+    human taps it. An absolute ``http(s)`` URL, single-line (raw whitespace and control/format
+    characters rejected, as on a media url), within ``MEDIA_URL_MAX_CHARS``. Returns the value
+    unchanged or raises ``ValueError``. Shared by every link-action option shape."""
+    if not value.strip():
+        raise ValueError("link url must be non-blank")
+    if any(ch.isspace() or not ch.isprintable() for ch in value):
+        raise ValueError("link url must be a single-line URL with no whitespace or control characters")
+    if not _is_absolute_web_url(value, schemes=("http", "https")):
+        raise ValueError("link url must be an absolute http(s) URL")
+    if len(value) > MEDIA_URL_MAX_CHARS:
+        raise ValueError(f"link url must be at most {MEDIA_URL_MAX_CHARS} characters, got {len(value)}")
+    return value
+
+
+class LocationElement(BaseModel):
+    """A geographic point shared on a message — the one shape used BOTH ways: an outbound place a
+    flow shares and the inbound location a guest sent.
+
+    ``latitude``/``longitude`` are WGS84 decimal degrees, bounded to their valid ranges
+    (latitude -90..90, longitude -180..180). ``name`` is an optional place label and ``address``
+    an optional street address, each a single-line non-blank string within its cap when present
+    (raw whitespace and control/format characters are rejected, as on a media url — an embedded
+    newline or bidi spoof would corrupt the rendered pin label). A channel that cannot render a
+    map renders the coordinates (and any name/address) as text. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    latitude: float
+    longitude: float
+    name: str | None = None
+    address: str | None = None
+
+    @field_validator("latitude")
+    @classmethod
+    def _check_latitude(cls, value: float) -> float:
+        if not -90.0 <= value <= 90.0:
+            raise ValueError(f"latitude must be within -90..90 degrees, got {value}")
+        return value
+
+    @field_validator("longitude")
+    @classmethod
+    def _check_longitude(cls, value: float) -> float:
+        if not -180.0 <= value <= 180.0:
+            raise ValueError(f"longitude must be within -180..180 degrees, got {value}")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, value: str | None) -> str | None:
+        if value is not None:
+            if not value.strip():
+                raise ValueError("location name must be non-blank when present")
+            if len(value) > LOCATION_NAME_MAX_CHARS:
+                raise ValueError(
+                    f"location name must be at most {LOCATION_NAME_MAX_CHARS} characters, got {len(value)}"
+                )
+            if any((ch.isspace() and ch != " ") or not ch.isprintable() for ch in value):
+                raise ValueError("location name must be a single-line label with no control characters")
+        return value
+
+    @field_validator("address")
+    @classmethod
+    def _check_address(cls, value: str | None) -> str | None:
+        if value is not None:
+            if not value.strip():
+                raise ValueError("location address must be non-blank when present")
+            if len(value) > LOCATION_ADDRESS_MAX_CHARS:
+                raise ValueError(
+                    f"location address must be at most {LOCATION_ADDRESS_MAX_CHARS} characters, got {len(value)}"
+                )
+            if any((ch.isspace() and ch != " ") or not ch.isprintable() for ch in value):
+                raise ValueError("location address must be a single-line label with no control characters")
+        return value
+
+
 class InteractionRequest(BaseModel):
     """The durable question. One per stream entry."""
 
@@ -289,6 +448,20 @@ class InteractionRequest(BaseModel):
     question: str
     answer_format: AnswerFormat = AnswerFormat.TEXT
     format_payload: dict[str, Any] | None = None
+    # What a channel-delivered ask does with a guest reply the answer door REJECTS: ``retry``
+    # (default — keep the ask parked and tell the guest what's expected) or ``bridge`` (treat an
+    # unmatched reply as a digression — keep the ask parked with no notice and hand the reply to
+    # the conversation as a fresh routed turn). Set per ask by the tool author; the default is a
+    # zero-behavior-change for every existing ask.
+    on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY
+    # A per-ask custom guest-facing rejection notice, used ONLY under the ``retry`` policy: when
+    # set it REPLACES the platform's built-in retry notice. A literal ``{reason}`` token (if
+    # present) is filled with the door's rejection reason by a PLAIN substitution — a notice
+    # without the token is sent verbatim, and stray braces never raise (never ``str.format``). It
+    # customizes the CORE-sent notice only; a channel that owns its correction surface renders its
+    # own text off the door's reason and ignores this. Under the ``bridge`` policy it is IGNORED (a
+    # digression never notifies). ``None`` uses the built-in default.
+    mismatch_notice: str | None = None
     reply_to: str
     created_at: datetime
     timeout_at: datetime
@@ -351,6 +524,19 @@ class InteractionRequest(BaseModel):
     def _check_question(cls, value: str) -> str:
         if len(value) > QUESTION_MAX_CHARS:
             raise ValueError(f"question must be at most {QUESTION_MAX_CHARS} characters, got {len(value)}")
+        return value
+
+    @field_validator("mismatch_notice")
+    @classmethod
+    def _check_mismatch_notice(cls, value: str | None) -> str | None:
+        # None uses the built-in default; a set notice is non-blank and within the guest-reply cap.
+        if value is not None:
+            if not value.strip():
+                raise ValueError("mismatch_notice must be non-blank when set")
+            if len(value) > MISMATCH_NOTICE_MAX_CHARS:
+                raise ValueError(
+                    f"mismatch_notice must be at most {MISMATCH_NOTICE_MAX_CHARS} characters, got {len(value)}"
+                )
         return value
 
     @field_validator("media")
@@ -441,12 +627,31 @@ class InteractionRequest(BaseModel):
 
 
 class InteractionResponse(BaseModel):
-    """The answer. Validated server-side before it wakes the caller."""
+    """The answer. Validated server-side before it wakes the caller.
+
+    ``params`` is the OPTIONAL opaque channel enrichment carried WITH the answer — the answer-path
+    counterpart of the bridge path's :class:`~tai42_contract.channels.InboundBridge.params` and a
+    conversation entry's ``params``: when a tap/reply that ANSWERS a pending ask also carries
+    channel-specific context (a tapped reply id, a template button payload, a referral, the
+    reply-to context the guest quoted) the channel encodes it as string entries here so the asking
+    flow reads them beside ``answer``. The SAME transport vocabulary
+    (:func:`~tai42_contract.entry_params.validate_entry_params`) bounds it as every params seam;
+    the platform attaches no meaning and NO TRUST. ``None`` means no enrichment — a plain answer,
+    byte-identical to the pre-params envelope.
+    """
 
     interaction_id: str
     answer: Any
     answered_by: str
     answered_at: datetime
+    params: dict[str, str] | None = None
+
+    @field_validator("params")
+    @classmethod
+    def _check_params(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        if value is None:
+            return None
+        return validate_entry_params(value)
 
 
 class InteractionState(BaseModel):

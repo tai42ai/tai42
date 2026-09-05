@@ -108,11 +108,15 @@ Optional Redis connection tuning (see `TelegramCorrelationSettings`):
    that chat — the Bot API has
    no idempotency key, so a failed send raises `ChannelDeliveryError` instead
    of retrying (a blind retry could double-send).
-   - **`text` / `select` (typed reply):** the message carries
-     `reply_markup: {force_reply: true}`, and the sent `message_id →
-     callback_url` mapping is stored in plugin-owned Redis keys
-     (`channel:telegram:corr:{message_id}`, TTL = the question's remaining
-     budget). A `select` question lists its options as guided text.
+   - **`text` / `select` (typed reply):** a `text` ask with no suggested
+     replies carries `reply_markup: {force_reply: true}`; the sent `message_id →
+     callback_url` mapping is stored in a plugin-owned Redis key
+     (`channel:telegram:corr:{chat_id}:{message_id}`, TTL = the question's
+     remaining budget — chat-scoped because a Telegram `message_id` is unique
+     only per chat). A `select` ask (and a `text` ask carrying suggested
+     replies) renders its options as a native **inline keyboard**, one callback
+     button per option — a tap resolves through the correlation ladder, and a
+     typed reply to the same message still anchors the same correlation.
    - **`confirm` / `external` (tap):** the message carries a tappable URL
      button opening the callback door directly — no correlation state, no
      inbound involvement.
@@ -154,6 +158,59 @@ is the retry contract:
 | Callback door 404 (ticket terminally gone) | 200 "stale", mapping cleared |
 | Callback door 400 (answer rejected) | 200 "rejected", mapping KEPT — the human can reply again |
 | Callback door other status / unreachable | exception → 500, Telegram's redelivery is the recovery |
+
+## Notification vocabulary → Bot API
+
+`notify_user` (and the conversation delivery machine) may hand this channel a rich
+`ChannelNotification`. Each shape maps onto a native Bot API affordance; the channel
+advertises the matching capability flags (`supports_media_notifications`,
+`supports_location_notifications`, `supports_interactive_notifications`,
+`supports_form_delivery`) and honestly declines the rest.
+
+| Shape | Bot API mapping |
+| --- | --- |
+| `message` (+ `link` media) | `sendMessage` (each `link` item appended as a labelled text line) |
+| `media` — `image` / `document` / `video` / `audio` | one `sendPhoto` / `sendDocument` / `sendVideo` / `sendAudio` per item, the item's `caption` carried along. A document's `filename` is **not** separately settable on a remote-url send — Telegram derives it from the url |
+| `options` — `ReplyOption` | one inline-keyboard **callback button** per option; a tap submits the option's text |
+| `options` — `LinkOption` | a native inline **url button**; a tap opens the url, no message is submitted |
+| `sections` | Telegram has **no native sectioned list**: the rows across every section render as callback buttons grouped in section order, and each **section title renders as a text header line** above the keyboard (a clean, documented degradation) |
+| `header` (media) | the standard composition — the media is sent **with the body as its caption** and the keyboard attached (`sendPhoto`/`sendDocument`/`sendVideo`/`sendAudio` carrying `reply_markup`) when the body fits Telegram's 1024-UTF-16-unit caption cap (emoji count double); a longer body degrades to a separate media message followed by the text-plus-keyboard message |
+| `footer` | a trailing **muted italic line** under the body (`parse_mode=HTML` is set only when a footer is present, so a plain interactive send is byte-for-byte unchanged) |
+| `location` | `sendLocation` for a bare pin, or `sendVenue` when the location carries **both** a name and an address (Telegram's venue send requires a title *and* an address) |
+| `template` | **not supported** — Telegram has no vendor-template concept, so `supports_template_notifications` is absent and `notify_user` refuses a template send up front |
+| `schema` (ask-less form notification) | **not supported** — an ask-less form has no callback sink for an in-chat webview to POST to, so `supports_form_notifications` is absent and `notify_user` refuses it up front |
+
+### Callback-data id strategy
+
+A reply-option button's `callback_data` is the option's **author-set `id` sent verbatim**
+when it is set and fits Telegram's 64-byte cap (so the tap echoes it back on the wire),
+otherwise a **channel-minted token** — the option's index, or a short deterministic hash
+only when that index would collide with an author-set id on another button in the same
+keyboard. Either token is resolved back to the exact option through the per-anchor side
+record (`channel:telegram:opts:{chat_id}:{message_id}`), which **also** keeps the author-set
+id and any row description independently of the wire token — so a bridged tap can surface
+them as params (below) even when the id was too long to ride the wire.
+
+## Inbound entry parameters
+
+When a tapped option is **bridged** into the conversation as a fresh turn (a tap that is
+not, or is no longer, an answer to a pending ask — a `notify` option, or an expired ask),
+the channel forwards opaque **entry parameters** alongside the turn text. They ride verbatim
+to a `tool` target's payload under its own `params` key; the platform attaches **no meaning
+and no trust**. This is the channel's public inbound contract:
+
+| `params` key | Set when | Value |
+|---|---|---|
+| `reply_id` | A reply option / list row carrying an **author-set id** is tapped and bridged | that author-set id, verbatim |
+| `reply_description` | The tapped **sectioned-list row** carried a secondary description line | that description |
+
+Params ride **only on the bridge path**. A tap that **answers** a pending ask forwards
+`{"answer": …}` to the callback door alongside the same params (the tap's token is already
+consumed there to select the option). Values are transport-bounded (per the platform's
+entry-param limits); an over-cap value is dropped (never truncated), and if the aggregate
+still overflows the whole set is dropped and the turn bridges without it — a guest message
+is never lost to a params bound. An option with no author-set id (a `select`/suggested-reply
+ask, a plain notify option) carries no params.
 
 ### Setup
 

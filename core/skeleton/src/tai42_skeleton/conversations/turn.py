@@ -31,7 +31,7 @@ from uuid import uuid4
 
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal, SuspendedFinal
-from tai42_contract.channels import ChannelTemplate
+from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.conversations import (
     GREETING_PLACEHOLDER,
     AnswerPart,
@@ -51,8 +51,10 @@ from tai42_contract.conversations import (
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
+    LocationElement,
     MediaItem,
     SuspendedInteraction,
+    check_media_list,
     reset_park_completion,
     set_park_completion,
 )
@@ -145,6 +147,27 @@ def _checked_form(form: dict[str, Any] | None) -> dict[str, Any] | None:
     if form is None:
         return None
     return validate_inbound_form(form)
+
+
+def _checked_attachments(attachments: list[MediaItem] | None) -> list[MediaItem] | None:
+    """Run the shared list-level media caps defensively at the seam (the ``params`` pattern):
+    None passes through; a present list is non-empty, within the item-count and summed-URI caps,
+    each item already a validated ``MediaItem``. The api door's ``ConversationMessage`` validated
+    its body; a channel adapter calling the facet directly is defended here just the same. A
+    violation raises ``ValueError`` BEFORE any state is written."""
+    if attachments is None:
+        return None
+    check_media_list(attachments)
+    return attachments
+
+
+def _checked_location(location: LocationElement | None) -> LocationElement | None:
+    """Defensive seam guard for an inbound location: a ``LocationElement`` is self-validating
+    (coordinate ranges, label bounds), so this only refuses a wrong TYPE loudly, keeping garbage
+    out of the record and payload. ``None`` passes through."""
+    if location is not None and not isinstance(location, LocationElement):
+        raise ValueError(f"location must be a LocationElement or None, got {type(location).__name__}")
+    return location
 
 
 class ConversationRouteResolutionError(LookupError):
@@ -760,6 +783,8 @@ async def _run_tool_turn(
     person: Person | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> _ToolOutcome:
     """Dispatch one tool turn as the route's execution key and return its resolved outcome
     (a :class:`_SilentOutcome` or a :class:`_ResolvedOutcome`).
@@ -778,7 +803,10 @@ async def _run_tool_turn(
     ``form`` key ONLY when the inbound carried one, so an existing ``payload_expr`` over a
     form-less inbound sees a byte-identical payload; the default no-``payload_expr`` kwargs
     stay the fixed ``{message, sender}`` either way — a route maps the form deliberately or
-    not at all.
+    not at all. Structured inbound ``attachments`` (the guest's media, as JSON ``MediaItem``
+    objects) and a ``location`` (a JSON ``LocationElement``) ride the payload under those stable
+    keys under the SAME rule — present ONLY when the inbound carried them, so a media-/location-
+    unaware route sees a byte-identical payload and still reads the whole turn as ``message``.
     A reply that is ``None`` or blank is a deliberate silent outcome; a mapping fault, a
     denied or failed dispatch, or a wrong-typed result is a client-safe ``error`` outcome
     whose detail is logged, never delivered.
@@ -812,6 +840,10 @@ async def _run_tool_turn(
         payload["params"] = params
     if form is not None:
         payload["form"] = form
+    if attachments is not None:
+        payload["attachments"] = [a.model_dump(mode="json") for a in attachments]
+    if location is not None:
+        payload["location"] = location.model_dump(mode="json")
     try:
         kwargs = await _tool_kwargs(route, payload)
     except Exception as exc:
@@ -1020,12 +1052,15 @@ def _new_record(
     error: str | None = None,
     origin: Literal["client", "operator"] = "client",
     inbound_form: dict[str, Any] | None = None,
+    inbound_attachments: list[MediaItem] | None = None,
+    inbound_location: LocationElement | None = None,
 ) -> ConversationRecord:
     """A freshly minted record for one accepted message, in the state its door commits it
     to (``accepted``, ``pending_delivery`` or ``shed``). ``inbound_text`` is the message
     verbatim, durable from here so the record reads as a turn of a conversation and not
     only as its answer; ``inbound_form`` is the structured submission that rode WITH it
-    (an ask-less form's answers), stored beside the text — ``None`` for an ordinary
+    (an ask-less form's answers), and ``inbound_attachments``/``inbound_location`` are the media
+    and location the guest sent with it — all stored beside the text, ``None`` for an ordinary
     text-only inbound. A ``client`` api-door record MUST name the authenticated caller its
     thread and rate bucket are keyed by, and a ``client`` channel-door record names none; an
     ``operator`` record names the operator that sent it on EITHER door — it rides no rate
@@ -1056,6 +1091,8 @@ def _new_record(
         provider_message_id=provider_message_id,
         inbound_text=inbound_text,
         inbound_form=inbound_form,
+        inbound_attachments=inbound_attachments,
+        inbound_location=inbound_location,
         delivery_status=delivery_status,
         answer_status=answer_status,
         answer=answer,
@@ -1145,13 +1182,15 @@ async def _target_outcome(
     person: Person | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> _ToolOutcome:
     """The route's TARGET turn as an outcome: a tool dispatch (which may be silent) or an
     agent run (always answered/error). The single dispatch both the plain and the
-    multichannel paths route ordinary text to. ``person``, ``params`` and ``form`` (the
-    structured inbound submission) reach only the tool
-    payload; the agent branch ignores all three — an agent target reads the rendered TEXT
-    only, so a form-unaware agent still sees the whole turn.
+    multichannel paths route ordinary text to. ``person``, ``params``, ``form`` (the structured
+    inbound submission), ``attachments`` (the guest's media) and ``location`` reach only the tool
+    payload; the agent branch ignores them all — an agent target reads the rendered TEXT
+    only, so a form-/media-unaware agent still sees the whole turn.
 
     A thread whose effective mode is ``manual`` runs NO target turn: this is where the
     suppression lives, so a pairing turn — dispatched on its own path, never through here —
@@ -1167,7 +1206,9 @@ async def _target_outcome(
         return await _manual_target_outcome(route, intake, text)
     with run_attribution(_conversation_attribution(route, intake, person)):
         if route.target_kind == "tool":
-            return await _run_tool_turn(route, text, intake.thread_id, intake.client_address, person, params, form)
+            return await _run_tool_turn(
+                route, text, intake.thread_id, intake.client_address, person, params, form, attachments, location
+            )
         return await _run_agent_turn(route, text, intake.thread_id, intake.client_address)
 
 
@@ -1252,6 +1293,8 @@ async def _resolve_turn_record(
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> ConversationRecord:
     """Run the route's target (or a pairing turn) and build the completed record the
     transition persists. With ``multichannel`` off this is byte-identical to the target turn.
@@ -1264,13 +1307,18 @@ async def _resolve_turn_record(
     TEXT (the commands match only the whole trimmed message, so a form's label:value lines
     can never classify as a command)."""
     if multichannel is None:
-        return _outcome_record(intake, await _target_outcome(route, intake, text, params=params, form=form))
+        return _outcome_record(
+            intake,
+            await _target_outcome(
+                route, intake, text, params=params, form=form, attachments=attachments, location=location
+            ),
+        )
 
     person, created = await _person_store().ensure_provisional(multichannel.target, multichannel.address_row())
     greeting, greeting_code = await _greeting_and_code(multichannel) if created else (None, None)
     action = classify(text)
     if isinstance(action, Passthrough):
-        outcome = await _target_outcome(route, intake, text, person, params, form)
+        outcome = await _target_outcome(route, intake, text, person, params, form, attachments, location)
     else:
         # ``greeting_code`` is the greeting's already-minted code, if any: a first-contact
         # ``/link`` reuses it rather than minting a SECOND code that rotation would delete,
@@ -1411,6 +1459,8 @@ async def _complete_turn(
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> ConversationRecord:
     """Run the turn and move its intake record to its outcome (persist before send);
     delivery is the caller's to spawn. A produced answer goes to ``pending_delivery``; a
@@ -1419,7 +1469,14 @@ async def _complete_turn(
     re-drive resolved its record raises rather than overwriting the outcome the client was
     given."""
     completed = await _resolve_turn_record(
-        route=route, intake=intake, text=text, multichannel=multichannel, params=params, form=form
+        route=route,
+        intake=intake,
+        text=text,
+        multichannel=multichannel,
+        params=params,
+        form=form,
+        attachments=attachments,
+        location=location,
     )
     if completed.delivery_status is DeliveryStatus.SILENT:
         outcome = await _store().complete_silent(completed)
@@ -1450,6 +1507,8 @@ async def _shed_with_reply(
     text: str,
     provider_message_id: str,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> str:
     """Answer an over-limit address with its one paid slow-down reply, committed in the
     turn path's order: the record is persisted at ``accepted`` under an intake lease, the
@@ -1466,6 +1525,8 @@ async def _shed_with_reply(
         provider_message_id=provider_message_id,
         inbound_text=text,
         inbound_form=form,
+        inbound_attachments=attachments,
+        inbound_location=location,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -1504,6 +1565,8 @@ async def _shed_silently(
     text: str,
     provider_message_id: str,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> str:
     """Drop a message from an address already given its slow-down reply this window,
     leaving a terminal ``shed`` record. The claim behind that record is what makes a
@@ -1517,6 +1580,8 @@ async def _shed_silently(
         provider_message_id=provider_message_id,
         inbound_text=text,
         inbound_form=form,
+        inbound_attachments=attachments,
+        inbound_location=location,
         delivery_status=DeliveryStatus.SHED,
         error=f"address {client_address!r} was over its rate cap after a prior slow-down reply",
     )
@@ -1545,6 +1610,8 @@ async def accept(
     provider_message_id: str,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> str:
     """Accept one inbound channel message, persist-and-deliver its answer, and return its
     ``message_id`` (a uuid4). See :meth:`AppConversations.accept`.
@@ -1571,11 +1638,19 @@ async def accept(
     untrusted) BEFORE any state is written, and stored on the record's ``inbound_form``
     beside the text (shed records included).
 
+    ``attachments`` (the guest's structured media) and ``location`` (a geographic point the guest
+    shared) ride WITH the text the same way — validated here (the shared media list-level caps; a
+    ``LocationElement`` is self-validating) BEFORE any state is written, stored on the record's
+    ``inbound_attachments``/``inbound_location`` (shed records included), and surfaced to a tool
+    target's payload under the stable ``attachments``/``location`` keys only when present.
+
     A blank/whitespace-only ``text`` is refused with :class:`BlankInboundTextError` before
     any state is written — there is nothing to run a turn on — for the channel adapter to
     drop like an unrouted message."""
     checked_params = _checked_params(params)
     checked_form = _checked_form(form)
+    checked_attachments = _checked_attachments(attachments)
+    checked_location = _checked_location(location)
     if not text.strip():
         raise BlankInboundTextError(
             f"channel {channel!r} inbound {provider_message_id!r} carries blank text; nothing to run a turn on"
@@ -1615,6 +1690,8 @@ async def accept(
             text=text,
             provider_message_id=provider_message_id,
             form=checked_form,
+            attachments=checked_attachments,
+            location=checked_location,
         )
     if admission is AddressAdmission.SHED_SILENT:
         return await _shed_silently(
@@ -1627,6 +1704,8 @@ async def accept(
             text=text,
             provider_message_id=provider_message_id,
             form=checked_form,
+            attachments=checked_attachments,
+            location=checked_location,
         )
 
     return await _accept_for_turn(
@@ -1641,6 +1720,8 @@ async def accept(
         multichannel=multichannel,
         params=checked_params,
         form=checked_form,
+        attachments=checked_attachments,
+        location=checked_location,
     )
 
 
@@ -1657,6 +1738,8 @@ async def _accept_for_turn(
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> str:
     """Commit an admitted channel message to a turn in the one order that keeps the
     release-less inbound claim sound: reserve the per-thread FIFO slot (the last gate that
@@ -1675,6 +1758,8 @@ async def _accept_for_turn(
         provider_message_id=provider_message_id,
         inbound_text=text,
         inbound_form=form,
+        inbound_attachments=attachments,
+        inbound_location=location,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -1708,6 +1793,8 @@ async def _accept_for_turn(
         multichannel=multichannel,
         params=params,
         form=form,
+        attachments=attachments,
+        location=location,
     )
     return message_id
 
@@ -1723,6 +1810,8 @@ async def submit_api_message(
     wait_seconds: int,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> ApiSubmitResult:
     """Accept one authed API-door message and run its turn.
 
@@ -1748,9 +1837,15 @@ async def submit_api_message(
     (``ConversationMessage.form``), carried with the same record + payload semantics the
     channel door has: transport-bounds-checked here (defensively — the door's body model
     already validated it), stored on the record's ``inbound_form``, and surfaced to a tool
-    target's payload under ``form`` only when present."""
+    target's payload under ``form`` only when present. ``attachments`` and ``location``
+    (``ConversationMessage.attachments``/``.location``) ride WITH ``text`` under the SAME
+    record + payload semantics — validated defensively here, stored on the record's
+    ``inbound_attachments``/``inbound_location``, and surfaced to a tool target's payload under
+    the stable ``attachments``/``location`` keys only when present."""
     checked_params = _checked_params(params)
     checked_form = _checked_form(form)
+    checked_attachments = _checked_attachments(attachments)
+    checked_location = _checked_location(location)
     if caller_principal is None or not caller_principal.strip():
         raise UnauthenticatedApiCallerError(
             f"api conversation route {route_name!r} needs an authenticated caller principal and this "
@@ -1786,6 +1881,8 @@ async def submit_api_message(
         provider_message_id=None,
         inbound_text=text,
         inbound_form=checked_form,
+        inbound_attachments=checked_attachments,
+        inbound_location=checked_location,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -1805,6 +1902,8 @@ async def submit_api_message(
         multichannel=multichannel,
         params=checked_params,
         form=checked_form,
+        attachments=checked_attachments,
+        location=checked_location,
     )
 
     if wait_seconds > 0:
@@ -1848,7 +1947,11 @@ async def operator_send(
     operator_principal: str,
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
-    options: list[str] | None = None,
+    options: list[Option] | None = None,
+    location: LocationElement | None = None,
+    sections: list[OptionSection] | None = None,
+    header: MediaItem | None = None,
+    footer: str | None = None,
     schema: dict[str, Any] | None = None,
 ) -> str:
     """Send an operator's message ``text`` into ``thread_id`` on ``route``, returning its
@@ -1857,19 +1960,22 @@ async def operator_send(
     it from the route identity exactly as it sends a produced answer (same chunking, ledger
     and receipts). Allowed in either mode; it never flips the mode.
 
-    ``media``, ``template``, ``options`` and ``schema`` (an ask-less form's answer schema —
+    ``media``, ``template``, ``options``, ``location``, ``sections``, ``header``, ``footer``
+    and ``schema`` (an ask-less form's answer schema —
     the guest's submission enters the conversation as an ordinary inbound message) are
-    OPTIONAL richer-send forms: when any is set
+    OPTIONAL richer-send forms — FULL parity with the flow answer path's :class:`AnswerPart`
+    vocabulary: when any is set
     the reply is stored as a single rich :class:`AnswerPart` (``message=text`` carrying the
-    media/template/options/schema), so the delivery machine sends the operator's message with
+    rich fields), so the delivery machine sends the operator's message with
     its
     rich fields exactly as it sends a produced rich part — including the capability gate: a
     channel that does not advertise the matching ``supports_*_notifications`` flag never
     receives the part, and the record fails loudly instead of the field silently dropping.
     With none set the record stays a plain single-message answer (byte-parity with the
     pre-rich operator send). A contract-invalid value (an empty list/dict, an over-cap value,
-    or the mutually exclusive media+template / options+template / schema+template /
-    schema+options) raises before any state is
+    or a combination the shared composition matrix refuses — options XOR sections, schema
+    excludes both, header/footer require a choice surface, template standalone) raises before
+    any state is
     written.
 
     For an agent target that HOLDS thread memory (implements ``append_thread_messages``) the
@@ -1897,12 +2003,33 @@ async def operator_send(
     # carrying the text plus its rich fields — the shape the delivery machine sends as a rich
     # part. A plain send keeps ``answer=text`` with no parts, byte-identical to the pre-rich
     # path (and unbounded by the part message cap, which only governs a rich part's text).
-    if media is None and template is None and options is None and schema is None:
+    if (
+        media is None
+        and template is None
+        and options is None
+        and location is None
+        and sections is None
+        and header is None
+        and footer is None
+        and schema is None
+    ):
         answer: str = text
         answer_parts: list[AnswerPart] | None = None
     else:
         answer, answer_parts = _answer_fields(
-            [AnswerPart(message=text, media=media, template=template, options=options, schema=schema)]
+            [
+                AnswerPart(
+                    message=text,
+                    media=media,
+                    template=template,
+                    options=options,
+                    location=location,
+                    sections=sections,
+                    header=header,
+                    footer=footer,
+                    schema=schema,
+                )
+            ]
         )
     message_id = str(uuid4())
     caps = get_turn_caps()
@@ -2287,6 +2414,8 @@ def _schedule_turn(
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> asyncio.Task[ConversationRecord]:
     """Schedule ``intake``'s turn as a background task consuming the caller's reservation;
     returns the task whose result is the completed :class:`ConversationRecord`.
@@ -2298,7 +2427,14 @@ def _schedule_turn(
     async def _run() -> ConversationRecord:
         async with _intake_lease_held(intake.message_id, intake_token), caps.run_reserved(intake.thread_id):
             return await _complete_turn(
-                route=route, intake=intake, text=text, multichannel=multichannel, params=params, form=form
+                route=route,
+                intake=intake,
+                text=text,
+                multichannel=multichannel,
+                params=params,
+                form=form,
+                attachments=attachments,
+                location=location,
             )
 
     task = asyncio.create_task(_run())

@@ -1830,6 +1830,65 @@ async def test_callback_text_records_typed_str(wired):
     assert state.response.answer == "yes"  # the TYPED str, not the envelope dict
 
 
+async def test_callback_records_answer_params(wired):
+    # The inbound-answer ladder may forward channel enrichment beside the answer; the door
+    # validates it against the shared entry-param bounds and records it onto the response's
+    # params, the answer-seam counterpart of a bridged turn's entry params.
+    iid = await _seed_typed(wired, AnswerFormat.TEXT)
+    resp = await router.callback(
+        make_request(
+            "POST",
+            path_params={"ticket": "TKT"},
+            body=b'{"answer": "yes", "params": {"reply_id": "wamid.X"}}',
+        )
+    )
+    assert resp.status_code == 200
+    state = await wired.store.get_state(wired.fake, iid)
+    assert state is not None
+    assert state.response is not None
+    assert state.response.answer == "yes"
+    assert state.response.params == {"reply_id": "wamid.X"}
+
+
+async def test_callback_without_params_records_none(wired):
+    # Absent params keep the envelope byte-identical to a plain answer.
+    iid = await _seed_typed(wired, AnswerFormat.TEXT)
+    resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": "yes"}'))
+    assert resp.status_code == 200
+    state = await wired.store.get_state(wired.fake, iid)
+    assert state is not None
+    assert state.response is not None
+    assert state.response.params is None
+
+
+async def test_callback_rejects_invalid_params(wired):
+    # A params object over the shared transport bounds is refused with a 400 before the answer
+    # is recorded — the caller stays blocked.
+    await _seed_typed(wired, AnswerFormat.TEXT)
+    resp = await router.callback(
+        make_request(
+            "POST",
+            path_params={"ticket": "TKT"},
+            body=b'{"answer": "yes", "params": {"bad key": "x"}}',
+        )
+    )
+    assert resp.status_code == 400
+    state = await wired.store.get_state(wired.fake, "t1")
+    assert state is not None
+    assert state.status == "pending"
+
+
+async def test_callback_rejects_non_object_params(wired):
+    await _seed_typed(wired, AnswerFormat.TEXT)
+    resp = await router.callback(
+        make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": "yes", "params": ["nope"]}')
+    )
+    assert resp.status_code == 400
+    state = await wired.store.get_state(wired.fake, "t1")
+    assert state is not None
+    assert state.status == "pending"
+
+
 async def test_callback_confirm_records_typed_bool(wired):
     iid = await _seed_typed(wired, AnswerFormat.CONFIRM)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": false}'))

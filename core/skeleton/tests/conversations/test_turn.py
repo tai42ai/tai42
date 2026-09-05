@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute, DeliveryReceipt
 from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED
+from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import caps as caps_module
@@ -3725,3 +3726,149 @@ async def test_api_submit_with_form_stamps_the_record_and_the_tool_payload(env, 
     assert record is not None
     assert record.inbound_form == {"name": "Alice"}
     assert record.caller_view()["inbound_form"] == {"name": "Alice"}
+
+
+# -- inbound structured attachments + location -----------------------------------------
+
+_DOC = MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.example/invoice.pdf", filename="invoice.pdf")
+_LOCATION = LocationElement(latitude=51.5, longitude=-0.12, name="HQ")
+
+
+async def test_accept_with_attachments_and_location_stamps_record_and_the_tool_payload(env, monkeypatch):
+    # A channel door hands the turn the guest's structured media and shared location WITH the
+    # rendered text: the record stores them beside inbound_text, both read doors publish them,
+    # and a tool target's payload gains stable "attachments"/"location" keys.
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr=".")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "see attached",
+        "PID1",
+        attachments=[_DOC],
+        location=_LOCATION,
+    )
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {
+        **_BASELINE_CHANNEL_PAYLOAD,
+        "message": "see attached",
+        "attachments": [_DOC.model_dump(mode="json")],
+        "location": _LOCATION.model_dump(mode="json"),
+    }
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.inbound_attachments == [_DOC]
+    assert record.inbound_location == _LOCATION
+    assert record.caller_view()["inbound_attachments"] == [_DOC.model_dump(mode="json")]
+    assert record.caller_view()["inbound_location"] == _LOCATION.model_dump(mode="json")
+
+
+async def test_accept_without_attachments_or_location_keeps_payload_byte_identical(env, monkeypatch):
+    # A plain inbound emits NEITHER key — an existing payload_expr over the whole payload sees
+    # exactly the shape it saw before the fields existed.
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr=".")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    assert "attachments" not in tools.calls[0]["arguments"]
+    assert "location" not in tools.calls[0]["arguments"]
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.inbound_attachments is None
+    assert record.inbound_location is None
+
+
+async def test_accept_attachments_reach_an_agent_target_as_text_only(env, monkeypatch):
+    # An agent target sees the RENDERED TEXT only — the structured media/location stay on the
+    # record (and a tool payload), never in the agent's user message.
+    agent = EchoAgent()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
+
+    message_id = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "see attached", "PID1", attachments=[_DOC]
+    )
+    await _settle()
+
+    assert agent.calls == [("see attached", "bridge:line:+15550002222")]
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.inbound_attachments == [_DOC]
+
+
+async def test_accept_refuses_invalid_attachments_before_any_state(env, monkeypatch):
+    # The defensive list-level media check runs at the seam (the params pattern): a present-but-
+    # empty attachments list is refused loudly BEFORE any record or claim is written.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: "ok")
+
+    with pytest.raises(ValueError, match="non-empty list when present"):
+        await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", attachments=[])
+    await _settle()
+
+    assert await _store().get_inbound_owner("twilio", "PID1") is None
+
+
+async def test_shed_records_carry_attachments_and_location(env, monkeypatch):
+    # Both shed shapes stamp the structured media/location beside the verbatim text.
+    monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "1")
+    caps_module._CAPS_CACHE.clear()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: "ok")
+    store = _store()
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    await _settle()
+    shed_with_reply = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2", attachments=[_DOC]
+    )
+    await _settle()
+    shed_silent = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "three", "PID3", location=_LOCATION
+    )
+    await _settle()
+
+    replied = await store.get_record(shed_with_reply)
+    assert replied is not None
+    assert replied.inbound_attachments == [_DOC]
+    silent = await store.get_record(shed_silent)
+    assert silent is not None
+    assert silent.delivery_status is DeliveryStatus.SHED
+    assert silent.inbound_location == _LOCATION
+
+
+async def test_api_submit_with_attachments_and_location(env, monkeypatch):
+    # The api door twin: ConversationMessage.attachments/.location thread through
+    # submit_api_message with the same record + payload semantics the channel door has.
+    route = _tool_api_route(payload_expr="{msg: .message, attachments: .attachments, location: .location}")
+    _wire(monkeypatch, FakeManager(route))
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+
+    result = await turn_module.submit_api_message(
+        "tool-api", "u-7", "see attached", "caller", 2, attachments=[_DOC], location=_LOCATION
+    )
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {
+        "msg": "see attached",
+        "attachments": [_DOC.model_dump(mode="json")],
+        "location": _LOCATION.model_dump(mode="json"),
+    }
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.inbound_attachments == [_DOC]
+    assert record.inbound_location == _LOCATION

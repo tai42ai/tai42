@@ -248,7 +248,8 @@ async def test_append_answered_carries_answer(fake_redis: FakeRedis):
 
 async def test_append_media_carries_card_fields(fake_redis: FakeRedis):
     media = [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "a pattern"}]
-    entry_id = await append_media(IDENTITY, VISITOR_ID, "see this", media, ["Item A", "Item B"])
+    options = [{"kind": "reply", "text": "Item A"}, {"kind": "link", "label": "Read more", "url": "https://ex/more"}]
+    entry_id = await append_media(IDENTITY, VISITOR_ID, "see this", media, options)
     entry = _entries(fake_redis)[0]
     assert entry[1]["event"] == "chat.media"
     payload = _data(entry)
@@ -256,16 +257,40 @@ async def test_append_media_carries_card_fields(fake_redis: FakeRedis):
     assert payload["direction"] == "out"
     assert payload["text"] == "see this"
     assert payload["media"] == media
-    assert payload["options"] == ["Item A", "Item B"]
+    assert payload["options"] == options
+
+
+async def test_append_media_carries_sections_header_footer_and_location(fake_redis: FakeRedis):
+    # Every rich card field rides its own frame key when present: a sectioned reply list,
+    # a media header, a footer line, and a location map-pin.
+    sections = [{"title": "Today", "rows": [{"kind": "reply", "text": "09:00"}]}]
+    header = {"kind": "image", "url": "https://cdn.example/banner.png", "caption": "Banner"}
+    location = {"latitude": 51.5, "longitude": -0.12, "name": "London"}
+    await append_media(
+        IDENTITY,
+        VISITOR_ID,
+        "choose",
+        None,
+        None,
+        sections=sections,
+        header=header,
+        footer="Powered by TAI",
+        location=location,
+    )
+    payload = _data(_entries(fake_redis)[0])
+    assert payload["sections"] == sections
+    assert payload["header"] == header
+    assert payload["footer"] == "Powered by TAI"
+    assert payload["location"] == location
 
 
 async def test_append_media_omits_absent_fields(fake_redis: FakeRedis):
-    # No media and no options: the keys are omitted, never emitted empty.
+    # No card content: every optional key is omitted, never emitted empty.
     await append_media(IDENTITY, VISITOR_ID, "text only", None, None)
     payload = _data(_entries(fake_redis)[0])
     assert payload["text"] == "text only"
-    assert "media" not in payload
-    assert "options" not in payload
+    for key in ("media", "options", "sections", "header", "footer", "location"):
+        assert key not in payload
 
 
 async def test_append_media_replays_through_the_backlog_pager(fake_redis: FakeRedis):

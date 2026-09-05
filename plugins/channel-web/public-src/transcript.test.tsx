@@ -271,8 +271,14 @@ describe('Transcript', () => {
         kind: 'media',
         id: 'md1',
         text: 'Here you go',
-        media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'Item A' }],
-        options: ['See all'],
+        media: [
+          { kind: 'image', url: 'https://example.com/a.png', caption: 'Item A', filename: null },
+        ],
+        options: [{ kind: 'reply', text: 'See all', description: null, id: null }],
+        sections: null,
+        header: null,
+        footer: null,
+        location: null,
         ts: new Date(NOW).toISOString(),
       },
     };
@@ -281,7 +287,7 @@ describe('Transcript', () => {
     expect(screen.getByRole('img', { name: 'Item A' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'See all' }));
-    expect(onSend).toHaveBeenCalledWith('See all');
+    expect(onSend).toHaveBeenCalledWith('See all', null);
   });
 
   it('renders a form card entry and wires the submission door to it', async () => {
@@ -298,6 +304,7 @@ describe('Transcript', () => {
         schema: { type: 'object', properties: { note: { type: 'string' } } },
         token: 'tok-1',
         media: null,
+        location: null,
         ts: new Date(NOW).toISOString(),
       },
     };
@@ -320,7 +327,11 @@ describe('Transcript', () => {
         id: 'md1',
         text: 'Here you go',
         media: null,
-        options: ['See all'],
+        options: [{ kind: 'reply', text: 'See all', description: null, id: null }],
+        sections: null,
+        header: null,
+        footer: null,
+        location: null,
         ts: new Date(NOW).toISOString(),
       },
     };

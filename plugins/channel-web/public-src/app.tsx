@@ -41,6 +41,10 @@ interface OutboxItem {
   readonly messageId: string | null;
   /** This message's idempotency key, minted ONCE and re-sent by every retry. */
   readonly clientMessageId: string;
+  /** The tapped reply option's authored id, when this send is a reply chip carrying
+   * one. It rides the send (and every retry of it) as `params.reply_id`; `null` on a
+   * typed message or a chip without an id. */
+  readonly replyId: string | null;
 }
 
 /**
@@ -208,7 +212,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   }, [items, typingFrom, ended, streamHealthy]);
 
   const deliver = useCallback(
-    (localId: string, text: string, clientMessageId: string) => {
+    (localId: string, text: string, clientMessageId: string, replyId: string | null) => {
       // A message the visitor just sent always returns them to the tail.
       setPinToken((current) => current + 1);
       // The send this outcome belongs to. A "new conversation" started while it was
@@ -217,7 +221,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
       // waiting on a reply nobody owes, and a stale `session_missing` would kill a
       // session that is alive.
       const generation = generationRef.current;
-      sendMessage(identity, text, clientMessageId).then(
+      sendMessage(identity, text, clientMessageId, replyId).then(
         (messageId) => {
           if (generationRef.current !== generation) return;
           setOutbox((prev) =>
@@ -248,7 +252,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   // own text while the visitor's typed-but-unsent draft stays put. Reports whether a
   // message actually went out, which is what lets the composer clear its own draft.
   const send = useCallback(
-    (raw: string): boolean => {
+    (raw: string, replyId: string | null = null): boolean => {
       const text = raw.trim();
       if (text === '' || ended) return false;
       const localId = nextLocalId();
@@ -263,10 +267,11 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
           error: null,
           messageId: null,
           clientMessageId,
+          replyId,
         },
       ]);
       composerRef.current?.focus();
-      deliver(localId, text, clientMessageId);
+      deliver(localId, text, clientMessageId, replyId);
       return true;
     },
     [ended, deliver],
@@ -310,8 +315,9 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
         ),
       );
       // The SAME idempotency key as the first attempt: that is what lets the door
-      // recognise a retry of a delivery it already accepted.
-      deliver(localId, item.text, item.clientMessageId);
+      // recognise a retry of a delivery it already accepted. The tapped reply id (if
+      // any) rides the retry too, so a re-sent chip carries the same enrichment.
+      deliver(localId, item.text, item.clientMessageId, item.replyId);
     },
     [outbox, ended, deliver],
   );

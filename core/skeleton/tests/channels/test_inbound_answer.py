@@ -129,7 +129,16 @@ def wired(monkeypatch):
     accept_calls: list[SimpleNamespace] = []
 
     async def _fake_accept(
-        channel_id, our_identity, client_address, cap_key, text, provider_message_id, params=None, form=None
+        channel_id,
+        our_identity,
+        client_address,
+        cap_key,
+        text,
+        provider_message_id,
+        params=None,
+        form=None,
+        attachments=None,
+        location=None,
     ):
         accept_calls.append(
             SimpleNamespace(
@@ -139,6 +148,7 @@ def wired(monkeypatch):
                 cap_key=cap_key,
                 text=text,
                 provider_message_id=provider_message_id,
+                params=params,
             )
         )
         return "bridged-msg-1"
@@ -158,11 +168,11 @@ def wired(monkeypatch):
 
 def _stub_forward(monkeypatch, response: httpx.Response | None = None, *, raises: Exception | None = None):
     """Replace the httpx forward seam: return ``response`` or raise ``raises``.
-    Records the (callback_url, answer) it was called with."""
+    Records the (callback_url, answer, params) it was called with."""
     calls: list[SimpleNamespace] = []
 
-    async def _fake(callback_url, answer):
-        calls.append(SimpleNamespace(callback_url=callback_url, answer=answer))
+    async def _fake(callback_url, answer, params=None):
+        calls.append(SimpleNamespace(callback_url=callback_url, answer=answer, params=params))
         if raises is not None:
             raise raises
         assert response is not None
@@ -209,7 +219,7 @@ async def test_2xx_releases_and_forwards(wired, monkeypatch):
     assert result.retry_field is None
     # The answer reached the door verbatim; the correlation was released; nothing
     # else happened.
-    assert forward_calls == [SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes")]
+    assert forward_calls == [SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes", params=None)]
     assert store.released == ["k"]
     assert wired.channel.notifications == []
     assert wired.accept_calls == []
@@ -287,6 +297,8 @@ async def test_400_retryable_keeps_correlation_notifies_and_alerts_once(wired, m
         "retry_in_place": True,
         # Default bridge: core sent the generic notice, so it owns it.
         "notice_owner": "core",
+        # Default ask policy is retry (today's behavior).
+        "policy": "retry",
     }
 
 
@@ -498,7 +510,7 @@ async def test_callback_host_match_forwards(wired, monkeypatch):
     )
 
     assert result.outcome is InboundAnswerOutcome.FORWARDED
-    assert forward_calls == [SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes")]
+    assert forward_calls == [SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes", params=None)]
     assert store.released == ["k"]
 
 
@@ -605,3 +617,153 @@ async def test_malformed_400_body_defaults_to_retry_in_place(wired, monkeypatch)
     assert len(wired.channel.notifications) == 1
     assert len(wired.events) == 1
     assert wired.events[0].payload["reason"] == ""
+
+
+# -- params seam symmetry: bridge params ride BOTH arms --------------------------
+
+
+def _bridge_with_params() -> InboundBridge:
+    return InboundBridge(
+        channel_id="fakechan",
+        our_identity="op-1",
+        client_address="+15550001111",
+        cap_key="+15550001111",
+        provider_message_id="prov-msg-1",
+        bridge_text="hello there",
+        params={"reply_id": "wamid.X", "referral": "ad-42"},
+    )
+
+
+async def test_bridge_params_forward_to_the_door_alongside_the_answer(wired, monkeypatch):
+    # On the FORWARD arm the enrichment params ride to the callback door beside the answer,
+    # landing on InteractionResponse.params for the asking flow.
+    store = FakeStore(_entry())
+    forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge_with_params()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.FORWARDED
+    assert forward_calls == [
+        SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes", params={"reply_id": "wamid.X", "referral": "ad-42"})
+    ]
+
+
+async def test_bridge_params_pass_to_accept_on_the_bridge_arm(wired, monkeypatch):
+    # On the BRIDGE arm (a gone-ask 404) the SAME params reach accept as entry params — the
+    # seam symmetry, so enrichment is never dropped on either arm.
+    store = FakeStore(_entry())
+    _stub_forward(monkeypatch, httpx.Response(404))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="late", store=store, bridge=_bridge_with_params()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.BRIDGED
+    assert len(wired.accept_calls) == 1
+    assert wired.accept_calls[0].params == {"reply_id": "wamid.X", "referral": "ad-42"}
+
+
+# -- on_mismatch policy: retry (default) vs bridge (digression) at the 400 seam --------
+
+
+async def test_400_bridge_policy_keeps_correlation_bridges_and_sends_no_notice(wired, monkeypatch):
+    from tai42_contract.channels import InboundAnswerOutcome
+    from tai42_contract.interactions.models import AnswerMismatchPolicy
+
+    # A bridge-policy ask treats an unmatched reply as a DIGRESSION: the correlation is KEPT
+    # (the ask stays parked), NO guest notice is sent, and the reply is handed to the
+    # conversation as a fresh routed turn through the STANDARD target-agnostic accept door
+    # (a tool route and an agent route are dispatched identically — accept's tool-route
+    # dispatch is covered in test_turn.py). The operator event still fires, tagged bridge.
+    store = FakeStore(_entry(on_mismatch=AnswerMismatchPolicy.BRIDGE))
+    _stub_forward(monkeypatch, httpx.Response(400, json={"error": "not a valid choice", "retry_in_place": True}))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan",
+        correlation_key="k",
+        answer="tell me about refunds",
+        store=store,
+        bridge=_bridge_with_params(),
+    )
+
+    assert result.outcome is InboundAnswerOutcome.BRIDGED_KEPT
+    assert store.released == []  # the ask stays parked — only a real answer or timeout ends it
+    assert wired.channel.notifications == []  # no guest notice on the digression
+    # The reply entered through the standard accept door, carrying its enrichment params.
+    assert len(wired.accept_calls) == 1
+    assert wired.accept_calls[0].client_address == "+15550001111"
+    assert wired.accept_calls[0].params == {"reply_id": "wamid.X", "referral": "ad-42"}
+    # One operator event, tagged with the bridge policy and no guest notice owner.
+    assert len(wired.events) == 1
+    assert wired.events[0].payload["policy"] == "bridge"
+    assert wired.events[0].payload["notice_owner"] == "none"
+
+
+async def test_400_retry_policy_is_the_default_and_tags_the_event(wired, monkeypatch):
+    from tai42_contract.channels import InboundAnswerOutcome
+
+    # A default (retry) ask keeps today's behavior exactly: correlation kept, guest notified,
+    # reply NOT bridged, and the operator event carries policy="retry".
+    store = FakeStore(_entry())  # default on_mismatch == retry
+    _stub_forward(monkeypatch, httpx.Response(400, json={"error": "not a valid choice", "retry_in_place": True}))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="nope", store=store, bridge=_bridge()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.RETRY_KEPT
+    assert store.released == []
+    assert len(wired.channel.notifications) == 1  # the retry notice
+    assert wired.accept_calls == []  # a retry never bridges
+    assert len(wired.events) == 1
+    assert wired.events[0].payload["policy"] == "retry"
+
+
+# -- mismatch_notice: a per-ask custom retry notice (retry policy ONLY) ----------------
+
+
+async def test_retry_custom_mismatch_notice_replaces_default_and_fills_reason(wired, monkeypatch):
+    # A retry-policy ask with a custom notice REPLACES the built-in text; a literal {reason}
+    # token is filled by plain substitution with the door's reason.
+    store = FakeStore(_entry(mismatch_notice="Please pick a listed option ({reason})."))
+    _stub_forward(monkeypatch, httpx.Response(400, json={"error": "not a valid choice", "retry_in_place": True}))
+
+    await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())
+
+    assert len(wired.channel.notifications) == 1
+    assert wired.channel.notifications[0].message == "Please pick a listed option (not a valid choice)."
+
+
+async def test_retry_custom_mismatch_notice_without_placeholder_is_verbatim(wired, monkeypatch):
+    # A custom notice WITHOUT the {reason} token is sent verbatim; stray braces never raise.
+    store = FakeStore(_entry(mismatch_notice="That won't work here {oops}."))
+    _stub_forward(monkeypatch, httpx.Response(400, json={"error": "bad", "retry_in_place": True}))
+
+    await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())
+
+    assert wired.channel.notifications[0].message == "That won't work here {oops}."
+
+
+async def test_retry_default_mismatch_notice_unchanged_when_none(wired, monkeypatch):
+    # None keeps today's built-in notice (carrying the door reason).
+    store = FakeStore(_entry())  # mismatch_notice defaults to None
+    door_body = {"error": "Please answer with yes or no.", "retry_in_place": True}
+    _stub_forward(monkeypatch, httpx.Response(400, json=door_body))
+
+    await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())
+
+    assert "Please answer with yes or no." in wired.channel.notifications[0].message
+
+
+async def test_bridge_policy_ignores_mismatch_notice(wired, monkeypatch):
+    from tai42_contract.interactions.models import AnswerMismatchPolicy
+
+    # Under bridge policy a custom notice is IGNORED — a digression never notifies.
+    store = FakeStore(_entry(on_mismatch=AnswerMismatchPolicy.BRIDGE, mismatch_notice="You should never see this"))
+    _stub_forward(monkeypatch, httpx.Response(400, json={"error": "nope", "retry_in_place": True}))
+
+    await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())
+
+    assert wired.channel.notifications == []

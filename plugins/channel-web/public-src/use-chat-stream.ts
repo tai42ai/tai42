@@ -54,13 +54,57 @@ export type QuestionFacet =
       readonly schema: null;
     };
 
-/** One attachment on a media card: an inline image or a safe outbound link. The
- * url is already proven absolute — `https:` for an image, `http(s):` for a link —
- * by the reducer, so a renderer sets it as an attribute without re-checking. */
+/** The media kinds the page renders: an inline `image`, a `document` download
+ * card, native `video`/`audio` players, and a safe outbound `link` anchor. */
+export type MediaKind = 'image' | 'link' | 'document' | 'video' | 'audio';
+
+/** One attachment on a card or a question. The url is already proven absolute by
+ * the reducer — `https:` for a file kind (image/document/video/audio), `http(s):`
+ * for a link — so a renderer sets it as an attribute without re-checking.
+ * `filename` is the document's suggested download name and is `null` on every
+ * other kind (the server sends it on a document only). */
 export interface MediaItem {
-  readonly kind: 'image' | 'link';
+  readonly kind: MediaKind;
   readonly url: string;
   readonly caption: string | null;
+  readonly filename: string | null;
+}
+
+/** A tappable reply option: a tap SUBMITS `text` as the visitor's next message.
+ * `description` is an optional secondary line; `id` is the author-set stable id
+ * that rides the submission (`params.reply_id`) when set. */
+export interface ReplyOption {
+  readonly kind: 'reply';
+  readonly text: string;
+  readonly description: string | null;
+  readonly id: string | null;
+}
+
+/** A tappable link action: a tap OPENS `url` (a new tab), submitting nothing.
+ * The url is proven absolute `http(s):` by the reducer. Distinct from a reply. */
+export interface LinkOption {
+  readonly kind: 'link';
+  readonly label: string;
+  readonly url: string;
+}
+
+/** One tappable option on a card: a reply chip or a link action. */
+export type CardOption = ReplyOption | LinkOption;
+
+/** One titled section of a sectioned option list: a header and its non-empty
+ * reply rows (a section holds reply rows only — a link is a button, never a row). */
+export interface OptionSection {
+  readonly title: string;
+  readonly rows: readonly ReplyOption[];
+}
+
+/** A shared geographic point rendered as a map-pin element. The coordinates are
+ * finite and in WGS84 range; `name`/`address` are optional labels. */
+export interface LocationPoint {
+  readonly latitude: number;
+  readonly longitude: number;
+  readonly name: string | null;
+  readonly address: string | null;
 }
 
 /** Everything a question row carries apart from its ticket. */
@@ -70,9 +114,8 @@ interface QuestionBase {
   readonly interactionId: string;
   readonly question: string;
   readonly options: readonly string[] | null;
-  /** Display media shown WITH the question — inline images and safe outbound
-   * links, the same shape a media card carries. `null` when the question carries
-   * none. Display-only: never part of the answer. */
+  /** Display media shown WITH the question — the same shape a media card carries.
+   * `null` when the question carries none. Display-only: never part of the answer. */
   readonly media: readonly MediaItem[] | null;
   readonly timeoutAt: string;
   readonly ts: string;
@@ -91,6 +134,9 @@ export type ChatItem =
       readonly schema: JsonSchema;
       readonly token: string;
       readonly media: readonly MediaItem[] | null;
+      /** A shared location the form rides alongside its fields — a map-pin
+       * element. `null` when the form carries none. */
+      readonly location: LocationPoint | null;
       readonly ts: string;
     }
   | {
@@ -108,13 +154,20 @@ export type ChatItem =
       readonly clientMessageId: string | null;
     }
   | {
-      /** An agent-sent card: markdown text with any images/links and any tappable
-       * option chips. Always the agent's turn, so it carries no direction. */
+      /** An agent-sent rich card: markdown text with any media (image/document/
+       * video/audio/link), a flat option list (reply chips + link actions) OR a
+       * sectioned reply list, an optional media header and muted footer, and an
+       * optional location map-pin. Always the agent's turn, so it carries no
+       * direction. `options` and `sections` are mutually exclusive. */
       readonly kind: 'media';
       readonly id: string;
       readonly text: string;
       readonly media: readonly MediaItem[] | null;
-      readonly options: readonly string[] | null;
+      readonly options: readonly CardOption[] | null;
+      readonly sections: readonly OptionSection[] | null;
+      readonly header: MediaItem | null;
+      readonly footer: string | null;
+      readonly location: LocationPoint | null;
       readonly ts: string;
     }
   | (QuestionBase & QuestionFacet);
@@ -167,15 +220,123 @@ function optionsOf(raw: unknown): readonly string[] | null | undefined {
   return raw;
 }
 
-/** The tappable chips on a media card: absent, or a NON-EMPTY list of non-blank
- * labels. A blank chip has no text to feed back, and an empty list is a control
- * row with no controls — both are frames this page will not render: `undefined`
- * says malformed. */
-function chipOptionsOf(raw: unknown): readonly string[] | null | undefined {
+/** An optional non-blank secondary label (a reply option's `description`): a
+ * string when present, `null` when absent, `undefined` (malformed) otherwise. */
+function secondaryLabelOf(raw: unknown): string | null | undefined {
+  if (raw === undefined) return null;
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  return raw;
+}
+
+/** One reply option: a `reply` kind, a non-blank `text`, and an optional non-blank
+ * `description` and `id`. `undefined` on anything off-shape. */
+function replyOptionOf(raw: unknown): ReplyOption | undefined {
+  if (!isRecord(raw) || raw.kind !== 'reply') return undefined;
+  const { text } = raw;
+  if (typeof text !== 'string' || text.trim() === '') return undefined;
+  const description = secondaryLabelOf(raw.description);
+  if (description === undefined) return undefined;
+  const id = secondaryLabelOf(raw.id);
+  if (id === undefined) return undefined;
+  return { kind: 'reply', text, description, id };
+}
+
+/** One card option: a reply chip (a tap submits its text) or a link action (a tap
+ * opens its absolute `http(s):` url). `undefined` on anything off-shape. */
+function cardOptionOf(raw: unknown): CardOption | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (raw.kind === 'link') {
+    const { label, url } = raw;
+    if (typeof label !== 'string' || label.trim() === '') return undefined;
+    if (!isAbsoluteUrl(url, ['http:', 'https:'])) return undefined;
+    return { kind: 'link', label, url };
+  }
+  return replyOptionOf(raw);
+}
+
+/** The flat option list on a card: absent (`null`), or a NON-EMPTY list whose
+ * every entry is a valid reply/link option. An empty list is a control row with no
+ * controls, and one off-shape entry taints the whole list: `undefined` says
+ * malformed. */
+function cardOptionsOf(raw: unknown): readonly CardOption[] | null | undefined {
   if (raw === null || raw === undefined) return null;
   if (!Array.isArray(raw) || raw.length === 0) return undefined;
-  if (!raw.every((option) => typeof option === 'string' && option.trim() !== '')) return undefined;
+  const options: CardOption[] = [];
+  for (const one of raw) {
+    const option = cardOptionOf(one);
+    if (option === undefined) return undefined;
+    options.push(option);
+  }
+  return options;
+}
+
+/** One section of a sectioned list: a non-blank `title` and a NON-EMPTY list of
+ * reply rows. `undefined` on anything off-shape. */
+function sectionOf(raw: unknown): OptionSection | undefined {
+  if (!isRecord(raw)) return undefined;
+  const { title, rows } = raw;
+  if (typeof title !== 'string' || title.trim() === '') return undefined;
+  if (!Array.isArray(rows) || rows.length === 0) return undefined;
+  const parsed: ReplyOption[] = [];
+  for (const one of rows) {
+    const row = replyOptionOf(one);
+    if (row === undefined) return undefined;
+    parsed.push(row);
+  }
+  return { title, rows: parsed };
+}
+
+/** The sectioned option list on a card: absent (`null`), or a NON-EMPTY list whose
+ * every section validates. `undefined` says malformed. */
+function sectionsOf(raw: unknown): readonly OptionSection[] | null | undefined {
+  if (raw === null || raw === undefined) return null;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const sections: OptionSection[] = [];
+  for (const one of raw) {
+    const section = sectionOf(one);
+    if (section === undefined) return undefined;
+    sections.push(section);
+  }
+  return sections;
+}
+
+/** The card's media header: absent (`null`), or a single DISPLAY-media item — a
+ * `link` header is off-contract (an anchor is content, not a header). `undefined`
+ * says malformed. */
+function headerOf(raw: unknown): MediaItem | null | undefined {
+  if (raw === null || raw === undefined) return null;
+  const item = mediaItemOf(raw);
+  if (item === undefined || item.kind === 'link') return undefined;
+  return item;
+}
+
+/** The card's footer line: absent (`null`), or a non-blank string. `undefined`
+ * says malformed. */
+function footerOf(raw: unknown): string | null | undefined {
+  if (raw === undefined) return null;
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
   return raw;
+}
+
+/** A coordinate constrained to `[min, max]`, finite. */
+function coordinateOf(raw: unknown, min: number, max: number): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < min || raw > max) return undefined;
+  return raw;
+}
+
+/** A shared location: absent (`null`), or finite in-range coordinates plus an
+ * optional non-blank name/address. `undefined` says malformed. */
+function locationOf(raw: unknown): LocationPoint | null | undefined {
+  if (raw === null || raw === undefined) return null;
+  if (!isRecord(raw)) return undefined;
+  const latitude = coordinateOf(raw.latitude, -90, 90);
+  const longitude = coordinateOf(raw.longitude, -180, 180);
+  if (latitude === undefined || longitude === undefined) return undefined;
+  const name = secondaryLabelOf(raw.name);
+  if (name === undefined) return undefined;
+  const address = secondaryLabelOf(raw.address);
+  if (address === undefined) return undefined;
+  return { latitude, longitude, name, address };
 }
 
 /** An absolute URL whose scheme is one of `protocols` (each spelled WITH its
@@ -203,17 +364,43 @@ function captionOf(raw: unknown): string | null | undefined {
   return typeof raw === 'string' ? raw : undefined;
 }
 
+/** A document's suggested download filename: the wire carries a non-blank string
+ * or omits it (a blank name is no name — the server never sends one). Any other
+ * spelling is malformed (`undefined`); an absent one is `null`. */
+function filenameOf(raw: unknown): string | null | undefined {
+  if (raw === undefined) return null;
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  return raw;
+}
+
+/** The file media kinds — a fetchable body constrained to an absolute `https:`
+ * source (an `image`, `document`, `video`, or `audio`), as opposed to a `link`
+ * anchor which the human clicks through (`http(s):`). */
+const FILE_MEDIA_KINDS: ReadonlySet<string> = new Set<MediaKind>([
+  'image',
+  'document',
+  'video',
+  'audio',
+]);
+
 /** One media attachment, validated: a known kind, a scheme-appropriate absolute
- * URL, and an optional string caption. `undefined` on anything off-shape. */
+ * URL, an optional string caption, and a `filename` that rides a `document` ONLY
+ * (present on any other kind is off-contract and malformed). `undefined` on
+ * anything off-shape. */
 function mediaItemOf(raw: unknown): MediaItem | undefined {
   if (!isRecord(raw)) return undefined;
   const { kind, url } = raw;
-  if (kind !== 'image' && kind !== 'link') return undefined;
-  const protocols = kind === 'image' ? ['https:'] : ['http:', 'https:'];
+  if (typeof kind !== 'string' || (!FILE_MEDIA_KINDS.has(kind) && kind !== 'link'))
+    return undefined;
+  const protocols = kind === 'link' ? ['http:', 'https:'] : ['https:'];
   if (!isAbsoluteUrl(url, protocols)) return undefined;
   const caption = captionOf(raw.caption);
   if (caption === undefined) return undefined;
-  return { kind, url, caption };
+  const filename = filenameOf(raw.filename);
+  if (filename === undefined) return undefined;
+  // A filename names a download the medium offers, which only a document has.
+  if (filename !== null && kind !== 'document') return undefined;
+  return { kind: kind as MediaKind, url, caption, filename };
 }
 
 /** The card's attachments: absent, or a list whose every item validates. One
@@ -314,14 +501,40 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
     }
     const media = mediaOf(payload.media);
     if (media === undefined) return { kind: 'malformed', event: frame.event };
-    const options = chipOptionsOf(payload.options);
+    const options = cardOptionsOf(payload.options);
     if (options === undefined) return { kind: 'malformed', event: frame.event };
-    // A card with neither attachments nor chips is a plain notify, which the wire
-    // sends as `chat.message` — here it is a frame off its own contract.
-    if (media === null && options === null) return { kind: 'malformed', event: frame.event };
+    const sections = sectionsOf(payload.sections);
+    if (sections === undefined) return { kind: 'malformed', event: frame.event };
+    const header = headerOf(payload.header);
+    if (header === undefined) return { kind: 'malformed', event: frame.event };
+    const footer = footerOf(payload.footer);
+    if (footer === undefined) return { kind: 'malformed', event: frame.event };
+    const location = locationOf(payload.location);
+    if (location === undefined) return { kind: 'malformed', event: frame.event };
+    // Composition, mirroring the contract so a frame off its own rules never
+    // renders: one choice surface (options XOR sections); a header/footer rides an
+    // interactive card (it needs options or sections); a card with no content at all
+    // is a plain notify the wire sends as `chat.message`.
+    if (options !== null && sections !== null) return { kind: 'malformed', event: frame.event };
+    const hasChoice = options !== null || sections !== null;
+    if ((header !== null || footer !== null) && !hasChoice)
+      return { kind: 'malformed', event: frame.event };
+    if (media === null && !hasChoice && location === null)
+      return { kind: 'malformed', event: frame.event };
     return {
       kind: 'model',
-      model: withItem(model, { kind: 'media', id, text, media, options, ts }),
+      model: withItem(model, {
+        kind: 'media',
+        id,
+        text,
+        media,
+        options,
+        sections,
+        header,
+        footer,
+        location,
+        ts,
+      }),
     };
   }
 
@@ -339,9 +552,11 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
     }
     const media = mediaOf(payload.media);
     if (media === undefined) return { kind: 'malformed', event: frame.event };
+    const location = locationOf(payload.location);
+    if (location === undefined) return { kind: 'malformed', event: frame.event };
     return {
       kind: 'model',
-      model: withItem(model, { kind: 'form', id, text, schema, token, media, ts }),
+      model: withItem(model, { kind: 'form', id, text, schema, token, media, location, ts }),
     };
   }
 

@@ -14,7 +14,7 @@ import httpx
 import pytest
 from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
 
-from tai42_channel_slack.blocks import SELECT_ACTION_PREFIX
+from tai42_channel_slack.blocks import REPLY_ACTION_PREFIX, SELECT_ACTION_PREFIX, encode_reply_value
 from tai42_channel_slack.correlation import store_correlation, store_form_record
 from tai42_channel_slack.forms import (
     FIELD_ACTION_ID,
@@ -188,6 +188,79 @@ async def test_tap_from_non_allowlisted_channel_bridges_without_resolving(fake_r
     call = stub_conversations.accept_calls[0]
     assert call.text == "blue"
     assert call.client_address == "C0OUTSIDE"
+
+
+def _reply_tap(
+    index: int = 0,
+    text: str = "apples",
+    option_id: str | None = None,
+    message_ts: str = "123.456",
+    channel_id: str = TEST_DEFAULT_RECIPIENT,
+    action_ts: str = "1700.1",
+) -> dict[str, Any]:
+    action: dict[str, Any] = {
+        "action_id": f"{REPLY_ACTION_PREFIX}{index}",
+        "type": "button",
+        "action_ts": action_ts,
+        "value": encode_reply_value(text, option_id),
+    }
+    return {
+        "type": "block_actions",
+        "user": {"id": "U0GUEST"},
+        "container": {"type": "message", "message_ts": message_ts, "channel_id": channel_id},
+        "channel": {"id": channel_id, "name": "chan"},
+        "actions": [action],
+    }
+
+
+async def test_reply_option_tap_bridges_with_reply_id_param(fake_redis, channels, stub_conversations):
+    # A notify reply-option tap carries the submit text plus the author-set id in its value
+    # envelope. With no pending ask it bridges: the text is the turn, and the id rides as
+    # params.reply_id (the channel-agnostic tap enrichment a consumer reads).
+    response = await slack_interactive(_signed(_reply_tap(text="Refund me", option_id="opt-refund")))
+
+    assert response.status_code == 200
+    assert body_json(response) == {"status": "accepted"}
+    assert channels.inbound_calls == []
+    (call,) = stub_conversations.accept_calls
+    assert call.text == "Refund me"
+    assert call.params == {"reply_id": "opt-refund"}
+
+
+async def test_reply_option_tap_without_id_bridges_without_params(fake_redis, channels, stub_conversations):
+    # A reply option with no author-set id bridges the text with no enrichment params.
+    response = await slack_interactive(_signed(_reply_tap(text="Just this", option_id=None)))
+
+    assert body_json(response) == {"status": "accepted"}
+    (call,) = stub_conversations.accept_calls
+    assert call.text == "Just this"
+    assert call.params is None
+
+
+async def test_reply_option_tap_forwards_reply_id_on_the_answer_path(fake_redis, channels, stub_conversations):
+    # A reply-option tap that lands on a live ask resolves through the ladder; the author-set
+    # id rides the InboundBridge.params the ladder threads to the callback and the turn.
+    await store_correlation("123.456", _CALLBACK, "int-1", datetime.now(UTC) + timedelta(minutes=10))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    response = await slack_interactive(_signed(_reply_tap(text="Yes", option_id="opt-yes")))
+
+    assert body_json(response) == {"status": "forwarded"}
+    (call,) = channels.inbound_calls
+    assert call.answer == "Yes"
+    assert call.bridge.params == {"reply_id": "opt-yes"}
+
+
+async def test_link_option_tap_is_acked_ignored(fake_redis, channels, stub_conversations):
+    # A link (url) button tap opens the url and submits nothing, so the door acks and ignores
+    # it — never a bridged turn, never an answer.
+    tap = _reply_tap()
+    tap["actions"][0]["action_id"] = "tai42_link:0"
+    tap["actions"][0]["url"] = "https://app.test/dash"
+    response = await slack_interactive(_signed(tap))
+
+    assert body_json(response) == {"status": "ignored"}
+    assert channels.inbound_calls == []
+    assert stub_conversations.accept_calls == []
 
 
 async def test_select_tap_without_value_is_acked_ignored(fake_redis, channels, stub_conversations):

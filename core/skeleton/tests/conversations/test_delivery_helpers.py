@@ -9,8 +9,9 @@ import time
 from typing import cast
 
 import pytest
-from tai42_contract.channels import Channel
+from tai42_contract.channels import Channel, LinkOption, OptionSection, ReplyOption
 from tai42_contract.conversations import AnswerPart
+from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.delivery import (
@@ -128,3 +129,66 @@ def test_unsupported_rich_capability_names_form():
     assert _unsupported_rich_capability(cast("Channel", _PlainChannel()), [part]) == "form"
     assert _unsupported_rich_capability(cast("Channel", _FormChannel()), [part]) is None
     assert _unsupported_rich_capability(cast("Channel", _PlainChannel()), [AnswerPart(message="plain")]) is None
+
+
+# -- rich-part seams: the extended vocabulary (location / options / sections / header/footer) ---
+
+
+_IMG = MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")
+
+
+class _RichChannel(_PlainChannel):
+    supports_media_notifications = True
+    supports_location_notifications = True
+    supports_interactive_notifications = True
+    supports_template_notifications = True
+    supports_form_notifications = True
+
+
+def test_part_notification_maps_every_new_field_on_the_final_chunk():
+    # 1:1 mapping: every AnswerPart content/interactive field lands on the notification's FINAL
+    # chunk and is absent on an earlier chunk.
+    part = AnswerPart(
+        message="menu",
+        sections=[OptionSection(title="Fruit", rows=[ReplyOption(text="Apple", description="crisp")])],
+        header=_IMG,
+        footer="tap one",
+    )
+    record = _channel_record()
+    early = _part_notification(part, "me", record, final=False)
+    assert early.sections is None
+    assert early.header is None
+    assert early.footer is None
+    last = _part_notification(part, "nu", record, final=True)
+    assert last.sections == part.sections
+    assert last.header == _IMG
+    assert last.footer == "tap one"
+
+
+def test_part_notification_maps_location_and_link_options():
+    part = AnswerPart(
+        message="here",
+        location=LocationElement(latitude=1.0, longitude=2.0, name="HQ"),
+        options=[LinkOption(label="Map", url="https://maps.example/hq")],
+    )
+    record = _channel_record()
+    last = _part_notification(part, "here", record, final=True)
+    assert last.location == part.location
+    assert last.options == part.options
+
+
+def test_unsupported_rich_capability_names_location_and_sections():
+    location_part = AnswerPart(message="here", location=LocationElement(latitude=1.0, longitude=2.0))
+    assert _unsupported_rich_capability(cast("Channel", _PlainChannel()), [location_part]) == "location"
+    assert _unsupported_rich_capability(cast("Channel", _RichChannel()), [location_part]) is None
+
+    sections_part = AnswerPart(message="menu", sections=[OptionSection(title="s", rows=[ReplyOption(text="r")])])
+    assert _unsupported_rich_capability(cast("Channel", _PlainChannel()), [sections_part]) == "interactive sections"
+    assert _unsupported_rich_capability(cast("Channel", _RichChannel()), [sections_part]) is None
+
+
+def test_unsupported_rich_capability_ignores_header_and_footer():
+    # A header/footer is a pure enhancement of an already-gated interactive message; a channel
+    # with interactive support but no special header handling still renders the part.
+    part = AnswerPart(message="menu", options=[ReplyOption(text="a")], header=_IMG, footer="f")
+    assert _unsupported_rich_capability(cast("Channel", _RichChannel()), [part]) is None

@@ -450,8 +450,20 @@ def _callback_update(
 
 def _seed_options(fake_redis: Any, options: list[str], message_id: int = 42, chat_id: int = 777) -> None:
     # The option side record is chat-scoped, exactly as the reader (get_options) looks
-    # it up: {chat_id}:{message_id} (a Telegram message_id is unique only per chat).
-    fake_redis.data[f"channel:telegram:opts:{chat_id}:{message_id}"] = json.dumps(options)
+    # it up: {chat_id}:{message_id} (a Telegram message_id is unique only per chat). Plain
+    # texts seed index-keyed records with no author-set id/description (the select /
+    # suggested-reply ask shape); the wire token is the index.
+    records = [
+        {"callback_data": str(index), "text": text, "id": None, "description": None}
+        for index, text in enumerate(options)
+    ]
+    fake_redis.data[f"channel:telegram:opts:{chat_id}:{message_id}"] = json.dumps(records)
+
+
+def _seed_option_records(fake_redis: Any, records: list[dict], message_id: int = 42, chat_id: int = 777) -> None:
+    # Seed the side record with explicit StoredOption dumps (to exercise author-set ids /
+    # descriptions and their carry-back as params on a bridged tap).
+    fake_redis.data[f"channel:telegram:opts:{chat_id}:{message_id}"] = json.dumps(records)
 
 
 def _answered_callbacks(recorder: Any) -> list[httpx.Request]:
@@ -489,6 +501,55 @@ async def test_notify_option_tap_bridges_on_correlation_miss(http_recorder, fake
     assert len(conversations.accept_calls) == 1
     assert conversations.accept_calls[0].text == "c"  # options[2]
     assert conversations.accept_calls[0].client_address == "777"
+
+
+async def test_authored_id_tap_bridges_with_reply_id_and_description_params(
+    http_recorder, fake_redis, channels, conversations
+):
+    # A tap whose wire token is an author-set id resolves to its option text, and on the
+    # BRIDGE path (a notify option, no pending ask) carries the author-set id and the row's
+    # description back as params.reply_id / params.reply_description.
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    _seed_option_records(
+        fake_redis,
+        [{"callback_data": "yes-1", "text": "Yes", "id": "yes-1", "description": "the affirmative"}],
+    )
+    response = await inbound(make_inbound_request(_callback_update(data="yes-1"), headers=_VALID_HEADERS))
+
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "Yes"  # resolved by the authored-id token, not an index
+    assert call.params == {"reply_id": "yes-1", "reply_description": "the affirmative"}
+
+
+async def test_answering_tap_forwards_reply_id_on_the_bridge_seam(http_recorder, fake_redis, channels):
+    # A tap that ANSWERS a pending ask (recipient chat, FORWARDED) still hands the ladder the
+    # author-set id via the InboundBridge params seam (the ladder forwards it to the callback
+    # door alongside the answer); the answer text is the resolved option text.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    _seed_option_records(fake_redis, [{"callback_data": "yes-1", "text": "Yes", "id": "yes-1", "description": None}])
+    response = await inbound(make_inbound_request(_callback_update(data="yes-1"), headers=_VALID_HEADERS))
+
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "forwarded"}}
+    assert len(channels.inbound_calls) == 1
+    call = channels.inbound_calls[0]
+    assert call.answer == "Yes"
+    assert call.bridge.params == {"reply_id": "yes-1"}
+
+
+async def test_minted_option_tap_bridges_without_params(http_recorder, fake_redis, channels, conversations):
+    # A tap on an option with no author-set id (a select/suggested-reply ask, or a plain
+    # notify option) carries NO params on the bridge — there is nothing to echo back.
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    _seed_options(fake_redis, ["a", "b"])
+    await inbound(make_inbound_request(_callback_update(data="1"), headers=_VALID_HEADERS))
+
+    assert len(conversations.accept_calls) == 1
+    assert conversations.accept_calls[0].text == "b"
+    assert conversations.accept_calls[0].params is None
 
 
 async def test_tap_from_non_recipient_chat_bridges_without_ladder(http_recorder, fake_redis, channels, conversations):

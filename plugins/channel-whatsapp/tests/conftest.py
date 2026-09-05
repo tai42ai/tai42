@@ -151,6 +151,8 @@ class _StubConversations:
         provider_message_id: str,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
+        attachments: list[Any] | None = None,
+        location: Any = None,
     ) -> str:
         self.accept_calls.append(
             {
@@ -162,6 +164,8 @@ class _StubConversations:
                 "provider_message_id": provider_message_id,
                 "params": params,
                 "form": form,
+                "attachments": attachments,
+                "location": location,
             }
         )
         if self.accept_error is not None:

@@ -58,6 +58,33 @@ describe('sendMessage', () => {
     );
   });
 
+  it('carries a tapped reply option id as reply_id when one is passed', async () => {
+    fetchMock.mockResolvedValue(reply(200, { data: { message_id: 'msg-1' } }));
+
+    await sendMessage('site-alpha', 'Item A', KEY, 'opt-a');
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(
+      JSON.stringify({
+        identity: 'site-alpha',
+        text: 'Item A',
+        client_message_id: KEY,
+        reply_id: 'opt-a',
+      }),
+    );
+  });
+
+  it('omits reply_id when none is passed, so a typed message is byte-identical', async () => {
+    fetchMock.mockResolvedValue(reply(200, { data: { message_id: 'msg-1' } }));
+
+    await sendMessage('site-alpha', 'typed', KEY, null);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(
+      JSON.stringify({ identity: 'site-alpha', text: 'typed', client_message_id: KEY }),
+    );
+  });
+
   it('carries no credential of its own — the session cookie rides the request', async () => {
     fetchMock.mockResolvedValue(reply(200, { data: { message_id: 'msg-1' } }));
 

@@ -36,6 +36,7 @@ import json
 import logging
 from typing import cast
 
+from pydantic import BaseModel, ConfigDict, ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import Correlation
 from tai42_kit.clients.impl.redis import RedisClient
@@ -44,15 +45,39 @@ from tai42_channel_telegram.settings import TelegramCorrelationSettings, telegra
 
 logger = logging.getLogger(__name__)
 
+
+class StoredOption(BaseModel):
+    """One tappable option kept in a message's side record so an inbound
+    ``callback_query`` maps its ``callback_data`` back to the option it stands for.
+
+    ``callback_data`` is the token that rides the wire on the button — an author-set id
+    echoed verbatim when it fits Telegram's 64-byte cap, else a channel-minted token — and
+    is what the inbound tap reports; the reader matches it against this field. ``text`` is
+    the option label, submitted verbatim as the guest's turn (an answer, or a bridged
+    message). ``id`` is the author-set stable :class:`~tai42_contract.channels.ReplyOption`
+    id — kept independently of ``callback_data`` (the wire token may be minted even when an
+    id was set) and surfaced as ``params.reply_id`` on a bridged tap; ``None`` when the
+    author set none. ``description`` is a sectioned-row's optional secondary line, surfaced
+    as ``params.reply_description`` on a bridged tap. Frozen."""
+
+    model_config = ConfigDict(frozen=True)
+
+    callback_data: str
+    text: str
+    id: str | None = None
+    description: str | None = None
+
+
 _KEY_PREFIX = "channel:telegram:corr:"
 # A parallel per-anchor record holding the tappable option list for a message that
-# carries an inline keyboard (a select / suggested-reply ask, or a notify with
-# options). The contract :class:`Correlation` has no options field, so the index a
-# button tap carries in its ``callback_data`` is mapped back to the exact option text
-# through this side record — keyed by the SAME chat-scoped anchor the callback query
-# reports (a Telegram ``message_id`` is unique only per chat, so the chat id scopes it
-# exactly as the correlation key). It is independent of the correlation record (a
-# notify carries options but no correlation), so it is set and read on its own key.
+# carries an inline keyboard (a select / suggested-reply ask, or a notify with typed
+# options / sections). The contract :class:`Correlation` has no options field, so the
+# ``callback_data`` a button tap reports is mapped back to the exact :class:`StoredOption`
+# (its text, and any author-set id / description) through this side record — keyed by the
+# SAME chat-scoped anchor the callback query reports (a Telegram ``message_id`` is unique
+# only per chat, so the chat id scopes it exactly as the correlation key). It is
+# independent of the correlation record (a notify carries options but no correlation), so
+# it is set and read on its own key.
 _OPTIONS_KEY_PREFIX = "channel:telegram:opts:"
 
 
@@ -75,30 +100,35 @@ def _options_key(chat_id: str, message_id: str) -> str:
     return f"{_OPTIONS_KEY_PREFIX}{scoped_correlation_key(chat_id, message_id)}"
 
 
-async def set_options(chat_id: str, message_id: str, options: list[str], *, ttl_seconds: int) -> None:
+async def set_options(chat_id: str, message_id: str, options: list[StoredOption], *, ttl_seconds: int) -> None:
     """Store the tappable ``options`` for an inline-keyboard anchor under its
     chat-scoped ``{chat_id}:{message_id}`` with a ``ttl_seconds`` expiry.
 
-    A button tap reports only its ``callback_data`` (the option's index) and the
-    anchor ``message_id`` within its chat; this record resolves that index back to the
-    exact option text. Scoping by ``chat_id`` matches the correlation key: a Telegram
-    ``message_id`` is unique only per chat. ``ttl_seconds`` is the ask's remaining
-    budget (a select/suggested-reply ask) or the operator-set notify tap window, and
-    must be positive so the record always carries an expiry.
+    A button tap reports only its ``callback_data`` (the wire token) and the anchor
+    ``message_id`` within its chat; this record resolves that token back to the exact
+    :class:`StoredOption` — its text (submitted as the turn) and its author-set id /
+    description (surfaced as ``params.reply_id`` / ``params.reply_description`` on a bridged
+    tap). Scoping by ``chat_id`` matches the correlation key: a Telegram ``message_id`` is
+    unique only per chat. ``ttl_seconds`` is the ask's remaining budget (a
+    select/suggested-reply ask) or the operator-set notify tap window, and must be positive
+    so the record always carries an expiry.
     """
     if ttl_seconds <= 0:
         raise ValueError(f"options record TTL must be positive, got {ttl_seconds}")
+    payload = json.dumps([option.model_dump() for option in options])
     async with _redis_ctx() as r:
-        await r.set(_options_key(chat_id, message_id), json.dumps(options), ex=ttl_seconds)
+        await r.set(_options_key(chat_id, message_id), payload, ex=ttl_seconds)
 
 
-async def get_options(chat_id: str, message_id: str) -> list[str] | None:
-    """The tappable option list stored for ``{chat_id}:{message_id}``, or ``None``
-    (unknown / expired / a message that carried no options).
+async def get_options(chat_id: str, message_id: str) -> list[StoredOption] | None:
+    """The tappable option records stored for ``{chat_id}:{message_id}``, or ``None``
+    (unknown / expired / a message that carried no callback options / a malformed record).
 
     A non-destructive peek: a resolved tap leaves the record to expire (its anchor is
     single-use and the correlation record is the source of truth the ladder releases),
-    so a redelivered callback still resolves the same text rather than erroring.
+    so a redelivered callback still resolves the same option rather than erroring. A record
+    that is not valid JSON, not a list, or whose entries are not the :class:`StoredOption`
+    shape is treated as no options (a graceful miss so the tap bridges), never a raise.
     """
     async with _redis_ctx() as r:
         # decode_responses=True on this connection, so a hit is always ``str``.
@@ -114,14 +144,32 @@ async def get_options(chat_id: str, message_id: str) -> list[str] | None:
             chat_id,
         )
         return None
-    if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
+    if not isinstance(decoded, list):
         logger.warning(
-            "telegram: options record for message %r in chat %r is not a list of strings; ignoring",
+            "telegram: options record for message %r in chat %r is not a list; ignoring",
             message_id,
             chat_id,
         )
         return None
-    return decoded
+    options: list[StoredOption] = []
+    for item in decoded:
+        if not isinstance(item, dict):
+            logger.warning(
+                "telegram: options record for message %r in chat %r carries a non-object entry; ignoring",
+                message_id,
+                chat_id,
+            )
+            return None
+        try:
+            options.append(StoredOption.model_validate(item))
+        except ValidationError:
+            logger.warning(
+                "telegram: options record for message %r in chat %r is not the StoredOption shape; ignoring",
+                message_id,
+                chat_id,
+            )
+            return None
+    return options
 
 
 def _redis_settings() -> TelegramCorrelationSettings:

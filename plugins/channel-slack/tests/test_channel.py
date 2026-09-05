@@ -10,12 +10,34 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.channels import (
+    OPTION_ID_MAX_CHARS,
+    ChannelDeliveryError,
+    ChannelInputError,
+    ChannelNotification,
+    ChannelTemplate,
+    LinkOption,
+    Option,
+    OptionSection,
+    ReplyOption,
+)
+from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import reset_all_settings
 
-from tai42_channel_slack.blocks import SELECT_ACTION_PREFIX
+from tai42_channel_slack.blocks import (
+    LINK_ACTION_PREFIX,
+    REPLY_ACTION_PREFIX,
+    SELECT_ACTION_PREFIX,
+    _osm_url,
+    build_flat_option_blocks,
+    build_footer_block,
+    build_location_block,
+    build_media_blocks,
+    build_section_blocks,
+    decode_reply_value,
+    encode_reply_value,
+)
 from tai42_channel_slack.channel import SlackChannel, _deliver_form, _render_text, open_modal_view
 from tai42_channel_slack.correlation import remaining_seconds
 from tai42_channel_slack.forms import build_message_blocks
@@ -455,18 +477,174 @@ async def test_notify_sends_plain_payload_returns_ts_and_writes_nothing(http_scr
     assert fake_redis.ttls == {}
 
 
-async def test_notify_options_render_buttons_with_text_fallback(http_script, fake_redis):
-    # Options render as an actions block of buttons; the text fallback lists them as
-    # suggestion lines so the notification preview shows them too.
+async def test_notify_reply_options_render_buttons_with_text_fallback(http_script, fake_redis):
+    # Typed reply options render as an actions block of buttons: each button's value is a
+    # JSON envelope carrying the submit text (no author id here), and the text fallback lists
+    # them as suggestion lines so the notification preview shows them too.
     http_script.results.append(_ok_response(ts="1.1"))
-    result = await SlackChannel().notify(ChannelNotification(message="Pick one:", options=["a", "b"]))
+    options: list[Option] = [ReplyOption(text="a"), ReplyOption(text="b")]
+    result = await SlackChannel().notify(ChannelNotification(message="Pick one:", options=options))
 
     assert result == ["1.1"]
     payload = json.loads(http_script.requests[0].content)
     actions = payload["blocks"][-1]
     assert actions["type"] == "actions"
-    assert [e["value"] for e in actions["elements"]] == ["a", "b"]
+    assert [e["action_id"] for e in actions["elements"]] == [
+        f"{REPLY_ACTION_PREFIX}0",
+        f"{REPLY_ACTION_PREFIX}1",
+    ]
+    # Each value decodes back to its submit text with no id (none was authored).
+    assert [decode_reply_value(e["value"]) for e in actions["elements"]] == [("a", None), ("b", None)]
+    assert [e["text"]["text"] for e in actions["elements"]] == ["a", "b"]
     assert payload["text"] == "Pick one:\n• a\n• b"
+
+
+async def test_notify_reply_option_carries_authored_id_in_value_envelope(http_script, fake_redis):
+    # An author-set option id rides the button value verbatim so a tap can echo it back as
+    # params.reply_id; the display label stays the option text.
+    http_script.results.append(_ok_response(ts="1.1"))
+    options: list[Option] = [ReplyOption(text="Yes please", id="opt-yes"), ReplyOption(text="No thanks", id="opt-no")]
+    await SlackChannel().notify(ChannelNotification(message="Confirm?", options=options))
+
+    actions = json.loads(http_script.requests[0].content)["blocks"][-1]
+    assert [decode_reply_value(e["value"]) for e in actions["elements"]] == [
+        ("Yes please", "opt-yes"),
+        ("No thanks", "opt-no"),
+    ]
+
+
+async def test_notify_reply_option_description_folds_into_context_block(http_script, fake_redis):
+    # Slack buttons carry no description, so a reply option's description is folded into a
+    # preceding muted context block rather than dropped.
+    http_script.results.append(_ok_response(ts="1.1"))
+    options: list[Option] = [
+        ReplyOption(text="Refund", description="Money back to your card"),
+        ReplyOption(text="Replace"),
+    ]
+    await SlackChannel().notify(ChannelNotification(message="Choose:", options=options))
+
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    context = next(b for b in blocks if b["type"] == "context")
+    assert context["elements"] == [{"type": "mrkdwn", "text": "*Refund* — Money back to your card"}]
+    # The context precedes the actions block of buttons.
+    assert blocks.index(context) < blocks.index(next(b for b in blocks if b["type"] == "actions"))
+
+
+async def test_notify_link_option_renders_url_button(http_script, fake_redis):
+    # A link option renders as a url button (tap opens the url, submits nothing) — its
+    # action_id marks it a link tap the interactivity door acks and ignores.
+    http_script.results.append(_ok_response(ts="1.1"))
+    options: list[Option] = [LinkOption(label="Open dashboard", url="https://app.test/dash")]
+    await SlackChannel().notify(ChannelNotification(message="Here:", options=options))
+
+    actions = json.loads(http_script.requests[0].content)["blocks"][-1]
+    (button,) = actions["elements"]
+    assert button == {
+        "type": "button",
+        "action_id": f"{LINK_ACTION_PREFIX}0",
+        "text": {"type": "plain_text", "text": "Open dashboard"},
+        "url": "https://app.test/dash",
+    }
+
+
+async def test_notify_sections_render_titled_button_groups(http_script, fake_redis):
+    # A sectioned option list renders each section as a titled mrkdwn section followed by its
+    # reply rows as buttons; action_ids stay unique across sections.
+    http_script.results.append(_ok_response(ts="1.1"))
+    sections = [
+        OptionSection(title="Fruit", rows=[ReplyOption(text="Apple"), ReplyOption(text="Pear")]),
+        OptionSection(title="Veg", rows=[ReplyOption(text="Carrot")]),
+    ]
+    await SlackChannel().notify(ChannelNotification(message="Pick:", sections=sections))
+
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    titles = [b["text"]["text"] for b in blocks if b["type"] == "section" and b["text"]["type"] == "mrkdwn"]
+    assert titles == ["*Fruit*", "*Veg*"]
+    action_ids = [e["action_id"] for b in blocks if b["type"] == "actions" for e in b["elements"]]
+    assert action_ids == [f"{REPLY_ACTION_PREFIX}0", f"{REPLY_ACTION_PREFIX}1", f"{REPLY_ACTION_PREFIX}2"]
+    assert json.loads(http_script.requests[0].content)["text"] == "Pick:\nFruit:\n• Apple\n• Pear\nVeg:\n• Carrot"
+
+
+async def test_notify_header_and_footer_compose_the_interactive_message(http_script, fake_redis):
+    # A header image rides ABOVE the message body; a footer renders as a muted context block
+    # at the end. Both require an interactive surface (contract), so options are present.
+    http_script.results.append(_ok_response(ts="1.1"))
+    notification = ChannelNotification(
+        message="Menu",
+        options=[ReplyOption(text="Start")],
+        header=MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/banner.png", caption="banner"),
+        footer="Powered by tai42",
+    )
+    await SlackChannel().notify(notification)
+
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    assert blocks[0] == {"type": "image", "image_url": "https://cdn.test/banner.png", "alt_text": "banner"}
+    assert blocks[1] == {"type": "section", "text": {"type": "plain_text", "text": "Menu"}}
+    assert blocks[-1] == {"type": "context", "elements": [{"type": "mrkdwn", "text": "Powered by tai42"}]}
+
+
+async def test_notify_header_non_image_degrades_to_link_line(http_script, fake_redis):
+    # A non-image header (Slack cannot inline a file without an upload seam) degrades to a
+    # labelled link line, above the body.
+    http_script.results.append(_ok_response(ts="1.1"))
+    notification = ChannelNotification(
+        message="Report ready",
+        options=[ReplyOption(text="Ack")],
+        header=MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/q3.pdf", caption="Q3", filename="q3.pdf"),
+    )
+    await SlackChannel().notify(notification)
+
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    assert blocks[0] == {"type": "section", "text": {"type": "mrkdwn", "text": "<https://cdn.test/q3.pdf|Q3> (q3.pdf)"}}
+
+
+async def test_notify_file_media_degrades_to_labelled_link_lines(http_script, fake_redis):
+    # document/video/audio media cannot inline on chat.postMessage, so each degrades to a
+    # labelled mrkdwn link line (caption preferred, filename named for a document).
+    http_script.results.append(_ok_response(ts="1.1"))
+    media = [
+        MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/a.pdf", caption="Spec", filename="a.pdf"),
+        MediaItem(kind=MediaKind.VIDEO, url="https://cdn.test/clip.mp4", caption="Demo"),
+        MediaItem(kind=MediaKind.AUDIO, url="https://cdn.test/note.mp3"),
+    ]
+    await SlackChannel().notify(ChannelNotification(message="Files:", media=media))
+
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    assert {"type": "section", "text": {"type": "mrkdwn", "text": "<https://cdn.test/a.pdf|Spec> (a.pdf)"}} in blocks
+    assert {"type": "section", "text": {"type": "mrkdwn", "text": "<https://cdn.test/clip.mp4|Demo>"}} in blocks
+    assert {"type": "section", "text": {"type": "mrkdwn", "text": "<https://cdn.test/note.mp3|audio>"}} in blocks
+
+
+async def test_notify_location_renders_section_with_openstreetmap_link(http_script, fake_redis):
+    # A shared location renders as a section naming the place with an OpenStreetMap link.
+    http_script.results.append(_ok_response(ts="1.1"))
+    location = LocationElement(latitude=51.5, longitude=-0.12, name="HQ", address="1 Test St")
+    await SlackChannel().notify(ChannelNotification(message="We are here:", location=location))
+
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    # Inside an ``<url|…>`` link the url's ``&`` is mrkdwn-escaped to ``&amp;``.
+    osm = "https://www.openstreetmap.org/?mlat=51.5&amp;mlon=-0.12#map=16/51.5/-0.12"
+    assert {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f"*HQ*\n1 Test St\n<{osm}|View on OpenStreetMap>"},
+    } in blocks
+
+
+async def test_notify_template_is_refused_before_any_send(http_script, fake_redis):
+    # Slack has no vendor-template registry, so a template carries only substitution
+    # parameters with no skeleton to render — refused loudly, never a meaningless dump.
+    template = ChannelTemplate(name="welcome", language="en_US", body_parameters=["Ada"])
+    with pytest.raises(ChannelInputError, match="vendor template"):
+        await SlackChannel().notify(ChannelNotification(message="Hi", template=template))
+    assert http_script.requests == []
+
+
+async def test_notify_channel_advertises_location_capability():
+    # The location send rides supports_location_notifications; the vendor-template capability
+    # is honestly NOT advertised (Slack cannot render one).
+    assert SlackChannel.supports_location_notifications is True
+    assert getattr(SlackChannel, "supports_template_notifications", False) is False
+    assert getattr(SlackChannel, "supports_form_notifications", False) is False
 
 
 async def test_notify_media_renders_image_and_link_blocks(http_script, fake_redis):
@@ -630,3 +808,84 @@ async def test_rotated_token_lands_on_next_deliver(http_script, fake_redis, monk
     first, second = http_script.requests
     assert first.headers["Authorization"] == f"Bearer {TEST_BOT_TOKEN}"
     assert second.headers["Authorization"] == "Bearer xoxb-rotated-token"
+
+
+# -- mrkdwn escaping ---------------------------------------------------------
+
+
+def test_link_caption_mrkdwn_control_chars_are_escaped_inside_the_link():
+    # A caption carrying an mrkdwn control char must be escaped so the ``<url|caption>``
+    # link stays intact — an unescaped ``>`` would close the link early and leak markup.
+    media = [MediaItem(kind=MediaKind.LINK, url="https://docs.test/q", caption="Q3 > Q2")]
+    blocks = build_media_blocks(media)
+    assert blocks == [{"type": "section", "text": {"type": "mrkdwn", "text": "<https://docs.test/q|Q3 &gt; Q2>"}}]
+
+
+def test_location_name_and_address_mrkdwn_control_chars_are_escaped():
+    # An author-set place name with ``&`` and angle brackets is escaped in the mrkdwn
+    # section, never rendered as markup.
+    location = LocationElement(latitude=1.0, longitude=2.0, name="Joe & <b>Co</b>", address="A & B St")
+    text = build_location_block(location)["text"]["text"]
+    assert text.startswith("*Joe &amp; &lt;b&gt;Co&lt;/b&gt;*")
+    assert "\nA &amp; B St\n" in text
+
+
+def test_footer_mrkdwn_control_chars_are_escaped():
+    # A footer carrying ``&`` and angle brackets renders as literal text in the context block.
+    block = build_footer_block("Terms & <conditions>")
+    assert block == {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": "Terms &amp; &lt;conditions&gt;"}],
+    }
+
+
+def test_section_title_mrkdwn_control_chars_are_escaped():
+    # An author-set section title with ``&`` and angle brackets is escaped in its mrkdwn
+    # header, never rendered as markup.
+    sections = [OptionSection(title="Docs & <links>", rows=[ReplyOption(text="Open")])]
+    blocks = build_section_blocks(sections)
+    assert blocks[0] == {"type": "section", "text": {"type": "mrkdwn", "text": "*Docs &amp; &lt;links&gt;*"}}
+
+
+def test_over_cap_link_option_degrades_to_mrkdwn_section_with_escaped_url():
+    # An over-cap option group degrades to an mrkdwn section (not plain_text), so a link
+    # option's ``<url|label>`` renders as a link and its ``&`` is url-escaped rather than
+    # printed literally.
+    options: list[Option] = [LinkOption(label="A" * 80, url="https://app.test/x?a=1&b=2")]
+    blocks = build_flat_option_blocks(options)
+    assert blocks == [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"• <https://app.test/x?a=1&amp;b=2|{'A' * 80}>"}}
+    ]
+
+
+# -- decode_reply_value id clamp ---------------------------------------------
+
+
+def test_decode_reply_value_clamps_an_oversized_forged_id():
+    # A forged-signed oversized id must be dropped here (the text still bridges), so it can
+    # never reach validate_entry_params to raise and 5xx-loop the webhook.
+    oversized = "x" * (OPTION_ID_MAX_CHARS + 1)
+    value = encode_reply_value("Yes", oversized)
+    text, reply_id = decode_reply_value(value)
+    assert (text, reply_id) == ("Yes", None)
+
+
+def test_decode_reply_value_keeps_a_max_length_id():
+    # An id exactly at the bound is legitimate and survives the round trip.
+    at_max = "x" * OPTION_ID_MAX_CHARS
+    text, reply_id = decode_reply_value(encode_reply_value("Yes", at_max))
+    assert (text, reply_id) == ("Yes", at_max)
+
+
+# -- coordinate formatting ---------------------------------------------------
+
+
+def test_osm_url_renders_near_zero_coordinate_as_plain_decimal():
+    # A near-zero coordinate must render as a plain decimal, never scientific notation
+    # (``1e-07``), which OpenStreetMap would not parse.
+    url = _osm_url(0.0000001, -0.0000002)
+    assert url == "https://www.openstreetmap.org/?mlat=0.0000001&mlon=-0.0000002#map=16/0.0000001/-0.0000002"
+
+
+def test_osm_url_trims_trailing_zeros_on_short_coordinates():
+    assert _osm_url(51.5, -0.12) == "https://www.openstreetmap.org/?mlat=51.5&mlon=-0.12#map=16/51.5/-0.12"

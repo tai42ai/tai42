@@ -119,6 +119,40 @@ async def test_record_notification_defaults_recipient_to_none(sink_redis) -> Non
     assert records[0]["recipient"] is None
 
 
+async def test_record_notification_stores_full_vocabulary(sink_redis) -> None:
+    # Full parity: the sink writer serializes and stores location/sections/header/footer
+    # alongside the message, returned by the read doors for the inbox to render.
+    from tai42_contract.channels import OptionSection, ReplyOption
+    from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
+
+    location = LocationElement(latitude=51.5, longitude=-0.12, name="HQ")
+    section = OptionSection(title="Pick", rows=[ReplyOption(text="Item A")])
+    header = MediaItem(kind=MediaKind.IMAGE, url="https://example.com/h.png")
+
+    await notifications_sink.record_notification("we are here", location=location)
+    await notifications_sink.record_notification("choose", sections=[section], header=header, footer="ps")
+
+    records = await notifications_sink.read_notifications()
+    assert records[1]["location"] == location.model_dump(mode="json")
+    assert records[1]["sections"] is None
+    assert records[1]["header"] is None
+    assert records[1]["footer"] is None
+    assert records[0]["sections"] == [section.model_dump(mode="json")]
+    assert records[0]["header"] == header.model_dump(mode="json")
+    assert records[0]["footer"] == "ps"
+    assert records[0]["location"] is None
+
+
+async def test_record_defaults_full_vocabulary_to_none(fake_redis) -> None:
+    # A plain record carries None for every richer-send field — the plain shape.
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
+    record = await sink.record(fake_redis, "plain", None)
+    assert record["location"] is None
+    assert record["sections"] is None
+    assert record["header"] is None
+    assert record["footer"] is None
+
+
 # -- per-identity feed (audience) --------------------------------------------
 
 

@@ -23,12 +23,24 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 
 from tai42_contract.channels import (
     NOTIFICATION_MESSAGE_MAX_CHARS,
-    NOTIFICATION_OPTION_MAX_CHARS,
-    NOTIFICATION_OPTIONS_MAX,
     ChannelTemplate,
+    Option,
+    OptionSection,
+    check_footer,
+    check_header,
+    check_interactive_composition,
+    check_options,
+    check_sections,
+)
+from tai42_contract.entry_params import (
+    ENTRY_PARAM_KEY_RE,
+    ENTRY_PARAM_VALUE_MAX_CHARS,
+    ENTRY_PARAMS_MAX_COUNT,
+    ENTRY_PARAMS_MAX_TOTAL_BYTES,
+    validate_entry_params,
 )
 from tai42_contract.errors import ErrorKind
-from tai42_contract.interactions.models import MediaItem, check_media_list
+from tai42_contract.interactions.models import LocationElement, MediaItem, check_media_list
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
 
 #: Which door a route is reached through: ``api`` delivers by signed callback,
@@ -54,43 +66,6 @@ AnswerStatus = Literal["answered", "error", "silent"]
 # Route names key the ``bridge:{route_name}:{address}`` thread namespace, so the
 # vocabulary must exclude ``:``.
 ROUTE_NAME_RE = re.compile(r"^[a-z0-9-]+$")
-
-# Entry-param transport bounds. The platform carries opaque caller-supplied params to a
-# tool target's payload and attaches NO meaning and NO trust; these bounds cap the
-# transport alone (count, key shape, value length, total serialized size).
-ENTRY_PARAMS_MAX_COUNT = 16
-ENTRY_PARAM_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-ENTRY_PARAM_VALUE_MAX_CHARS = 512
-ENTRY_PARAMS_MAX_TOTAL_BYTES = 2048  # len(json.dumps(params, separators=(",", ":"), sort_keys=True).encode())
-
-
-def validate_entry_params(params: dict[str, str]) -> dict[str, str]:
-    """Refuse (``ValueError`` naming the first violated bound) or return the dict unchanged.
-
-    Checks, in order: count, key regex, value type is ``str``, value length, total
-    serialized bytes. The message names the violated bound and MAY name the offending KEY,
-    but NEVER a value — an entry-param value is opaque and must never surface in a log or an
-    error. Duplicate keys cannot reach a dict; the web door refuses duplicates at parse time
-    before building the dict.
-    """
-    if len(params) > ENTRY_PARAMS_MAX_COUNT:
-        raise ValueError(f"params carries {len(params)} keys, over the {ENTRY_PARAMS_MAX_COUNT} allowed")
-    # Values are validated as untrusted objects: the annotation promises ``str``, but a
-    # non-str value would serialize silently through ``json.dumps`` below, so the type is
-    # enforced loudly here (the object view keeps the check genuine, not redundant).
-    untrusted = cast("Mapping[str, object]", params)
-    for key, value in untrusted.items():
-        if not ENTRY_PARAM_KEY_RE.fullmatch(key):
-            raise ValueError(f"params key {key!r} must match {ENTRY_PARAM_KEY_RE.pattern!r}")
-        if not isinstance(value, str):
-            raise ValueError(f"params value for key {key!r} must be a string")
-        if len(value) > ENTRY_PARAM_VALUE_MAX_CHARS:
-            raise ValueError(f"params value for key {key!r} is over the {ENTRY_PARAM_VALUE_MAX_CHARS}-character limit")
-    total_bytes = len(json.dumps(params, separators=(",", ":"), sort_keys=True).encode())
-    if total_bytes > ENTRY_PARAMS_MAX_TOTAL_BYTES:
-        raise ValueError(f"params serialize to {total_bytes} bytes, over the {ENTRY_PARAMS_MAX_TOTAL_BYTES} allowed")
-    return params
-
 
 # Inbound-form transport bounds. The platform carries a guest's structured submission (an
 # ask-less form's answers) to the turn as opaque, untrusted data; these bounds cap the
@@ -203,9 +178,26 @@ class ConversationMessage(BaseModel):
             "text. ``text`` stays required and non-blank — it is the CARRIER every reader "
             "consumes: a channel submits a faithful text form of the submission alongside "
             "the structured data, so a form-unaware consumer still sees the whole turn, "
-            "and a future ``media`` sibling rides the same pattern without a break. The "
+            "and the ``attachments``/``location`` siblings ride the same pattern. The "
             "platform attaches no meaning and NO TRUST to the contents: guest-shaped "
             "data, never schema-conformant — a target that reads it validates it itself."
+        ),
+    )
+    attachments: list[MediaItem] | None = Field(
+        default=None,
+        description=(
+            "Structured media the caller sent WITH the text (image/document/video/audio) — the "
+            "inbound counterpart of an outbound answer's media. Delivered to a tool target's "
+            "payload under ``attachments`` only when present; the ``text`` stays the whole turn "
+            "every reader consumes."
+        ),
+    )
+    location: LocationElement | None = Field(
+        default=None,
+        description=(
+            "A geographic point the caller shared WITH the text. Delivered to a tool target's "
+            "payload under ``location`` only when present; the ``text`` stays the whole turn "
+            "every reader consumes."
         ),
     )
 
@@ -232,6 +224,15 @@ class ConversationMessage(BaseModel):
             return None
         return validate_inbound_form(value)
 
+    @field_validator("attachments")
+    @classmethod
+    def _check_attachments(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
+        # None means no inbound media; a present list carries the same list-level caps (non-empty,
+        # item count, summed URI) every media door shares — each item's own shape is MediaItem's.
+        if value is not None:
+            check_media_list(value)
+        return value
+
 
 with warnings.catch_warnings():
     # The ``schema`` field intentionally shadows pydantic's deprecated
@@ -245,16 +246,16 @@ with warnings.catch_warnings():
         """One message of an ordered multi-message answer — the platform's rich part shape.
 
         It mirrors :class:`ChannelNotification`'s CONTENT surface exactly (``message`` plus the
-        optional ``media`` / ``template`` / ``options`` / ``schema`` richer-send forms and their
-        validators), MINUS the per-delivery routing fields (``recipient`` / ``sender_identity``)
-        — those stay on the single delivery, never per part. The delivery machine sends each part
-        as its own ``ChannelNotification``, in order, chunking the ``message`` text at the
-        channel width and carrying the part's richer forms alongside it, exactly as a single
-        notification does today. ``schema`` is the ask-less form's answer schema and follows the
-        notification's rules: a present schema is a non-empty dict, REQUIRES a non-blank
-        ``message`` (the form's prompt), is MUTUALLY EXCLUSIVE with ``template`` and with
-        ``options`` (one message carries ONE interactive surface), MAY combine with ``media``,
-        and rides the channel's ``supports_form_notifications`` capability flag.
+        optional ``media`` / ``location`` / ``template`` / ``options`` / ``sections`` / ``header``
+        / ``footer`` / ``schema`` richer-send forms and their validators), MINUS the per-delivery
+        routing fields (``recipient`` / ``sender_identity``) — those stay on the single delivery,
+        never per part. The delivery machine sends each part as its own ``ChannelNotification``,
+        in order, chunking the ``message`` text at the channel width and carrying the part's
+        richer forms alongside it, exactly as a single notification does today. Every
+        cross-field rule (content-only blank message, ``options`` XOR ``sections``, ``schema``
+        excludes both, ``header``/``footer`` require a choice surface, ``template`` standalone) is
+        the SHARED :func:`~tai42_contract.channels.check_interactive_composition`, so an authored
+        part and a delivered notification can never diverge.
 
         A part is a NEW authoring surface, so it is STRICT FROM BIRTH: unknown keys are refused
         (``extra="forbid"``) rather than silently dropped. A tool route authors parts as a JSON
@@ -273,10 +274,14 @@ with warnings.catch_warnings():
 
         model_config = ConfigDict(frozen=True, extra="forbid")
 
-        message: str = ""  # human-readable text; blank/omitted ONLY for a media-only part (media carries it)
+        message: str = ""  # human-readable text; blank/omitted ONLY for a content-only part (media/location carries it)
         media: list[MediaItem] | None = None  # display media sent WITH the message; None -> none
+        location: LocationElement | None = None  # a shared geographic point; None -> none
         template: ChannelTemplate | None = None  # out-of-window template send; None -> freeform
-        options: list[str] | None = None  # tappable options; a tap enters the conversation; None -> none
+        options: list[Option] | None = None  # flat tappable options (reply/link); None -> none
+        sections: list[OptionSection] | None = None  # a sectioned option list; None -> none
+        header: MediaItem | None = None  # single media header above an interactive message; None -> none
+        footer: str | None = None  # short trailing line under an interactive message; None -> none
         # The form answer schema for an ask-less form; the submission enters the conversation as
         # a guest message. Intentionally named ``schema`` (matches the payload it carries);
         # shadows the deprecated ``BaseModel.schema()`` alias, which this model never uses.
@@ -302,21 +307,23 @@ with warnings.catch_warnings():
 
         @field_validator("options")
         @classmethod
-        def _options_valid(cls, value: list[str] | None) -> list[str] | None:
-            if value is None:
-                return value
-            if not value:
-                raise ValueError("options must be a non-empty list when present")
-            if len(value) > NOTIFICATION_OPTIONS_MAX:
-                raise ValueError(f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries, got {len(value)}")
-            for option in value:
-                if not option.strip():
-                    raise ValueError("each option must be a non-blank string")
-                if len(option) > NOTIFICATION_OPTION_MAX_CHARS:
-                    raise ValueError(
-                        f"each option must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(option)}"
-                    )
-            return value
+        def _options_valid(cls, value: list[Option] | None) -> list[Option] | None:
+            return check_options(value)
+
+        @field_validator("sections")
+        @classmethod
+        def _sections_valid(cls, value: list[OptionSection] | None) -> list[OptionSection] | None:
+            return check_sections(value)
+
+        @field_validator("footer")
+        @classmethod
+        def _footer_valid(cls, value: str | None) -> str | None:
+            return check_footer(value)
+
+        @field_validator("header")
+        @classmethod
+        def _header_valid(cls, value: MediaItem | None) -> MediaItem | None:
+            return check_header(value)
 
         @field_validator("schema")
         @classmethod
@@ -329,52 +336,39 @@ with warnings.catch_warnings():
             return value
 
         @model_validator(mode="after")
-        def _message_or_media(self) -> AnswerPart:
-            # Mirrors ChannelNotification._message_or_media: a part is non-blank text OR a
-            # media-only part (blank message carried by non-empty media). A blank message with no
-            # media has nothing to deliver; options require a non-blank message (a choice needs a
-            # prompt) and a schema does too (a form needs a prompt); a template rides a non-blank
-            # message (its ``not self.media`` branch).
-            if not self.message.strip():
-                if not self.media:
-                    raise ValueError("message must be non-blank unless media carries the content")
-                if self.options is not None:
-                    raise ValueError("a media-only (blank-message) part carries no options; a choice needs a prompt")
-                if self.schema is not None:
-                    raise ValueError("a media-only (blank-message) part carries no schema; a form needs a prompt")
-            return self
-
-        @model_validator(mode="after")
-        def _media_template_exclusive(self) -> AnswerPart:
-            if self.media is not None and self.template is not None:
-                raise ValueError("media and template are mutually exclusive on one part")
-            return self
-
-        @model_validator(mode="after")
-        def _options_template_exclusive(self) -> AnswerPart:
-            if self.options is not None and self.template is not None:
-                raise ValueError("options and template are mutually exclusive on one part")
-            return self
-
-        @model_validator(mode="after")
-        def _schema_template_exclusive(self) -> AnswerPart:
-            if self.schema is not None and self.template is not None:
-                raise ValueError("schema and template are mutually exclusive on one part")
-            return self
-
-        @model_validator(mode="after")
-        def _schema_options_exclusive(self) -> AnswerPart:
-            # One message carries ONE interactive surface: a form's fields or a tap list, never both.
-            if self.schema is not None and self.options is not None:
-                raise ValueError("schema and options are mutually exclusive on one part")
+        def _check_composition(self) -> AnswerPart:
+            # The SAME shared cross-field rules ChannelNotification enforces, so the flow-message
+            # authoring surface and the delivery frame can never drift.
+            check_interactive_composition(
+                message=self.message,
+                media=self.media,
+                location=self.location,
+                template=self.template,
+                options=self.options,
+                sections=self.sections,
+                schema=self.schema,
+                header=self.header,
+                footer=self.footer,
+                noun="part",
+            )
             return self
 
         def is_plain_text(self) -> bool:
             """Whether this part carries nothing beyond its ``message`` — the case a
             single-message answer degenerates to (``parts`` then adds nothing over the joined
-            ``answer`` and is dropped). A media-only part (blank message carrying media) is NOT
-            plain text — it adds the media the joined ``answer`` cannot carry."""
-            return self.media is None and self.template is None and self.options is None and self.schema is None
+            ``answer`` and is dropped). A part carrying media, a location, a template, options,
+            sections, a header, a footer or a schema is NOT plain text — it adds what the joined
+            ``answer`` cannot carry."""
+            return (
+                self.media is None
+                and self.location is None
+                and self.template is None
+                and self.options is None
+                and self.sections is None
+                and self.header is None
+                and self.footer is None
+                and self.schema is None
+            )
 
 
 def joined_answer_text(parts: Sequence[AnswerPart]) -> str:
@@ -498,6 +492,8 @@ class ConversationRouteCreate(BaseModel):
                         ("person_addresses", "multichannel only: the person's known addresses"),
                         ("params", "non-empty entry params, nested under this key"),
                         ("form", "a structured form submission, present only when the inbound carried one"),
+                        ("attachments", "inbound media the guest sent, present only when the inbound carried some"),
+                        ("location", "a geographic point the guest shared, present only when the inbound carried one"),
                     ],
                     returns="the JSON object dispatched as the tool/flow kwargs",
                 )

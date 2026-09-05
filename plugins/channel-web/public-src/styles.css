@@ -438,11 +438,173 @@
   overflow-wrap: anywhere;
 }
 
+/* Native players fill the card's reading width and keep the card's own radius. */
+.tcw-media-video {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--tai-radius-md);
+  border: 1px solid var(--tai-color-border);
+  background: var(--tai-color-bg);
+}
+
+.tcw-media-audio {
+  display: block;
+  width: 100%;
+}
+
+/* A document download: an icon, its name + optional caption, and a "Download" hint,
+   the whole row a single tap target that reads as a surface, not a bare link. */
+.tcw-doc-card {
+  display: flex;
+  align-items: center;
+  gap: var(--tai-space-3);
+  padding: var(--tai-space-2) var(--tai-space-3);
+  border-radius: var(--tai-radius-md);
+  border: 1px solid var(--tai-color-border);
+  background: var(--tai-color-bg);
+  color: var(--tai-color-text);
+  text-decoration: none;
+}
+
+.tcw-doc-card:hover {
+  border-color: var(--tai-color-border-strong);
+}
+
+.tcw-doc-card:focus-visible {
+  outline: 2px solid var(--tai-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.tcw-doc-icon {
+  flex: none;
+  display: flex;
+  color: var(--tai-color-text-muted);
+}
+
+.tcw-doc-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.tcw-doc-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.tcw-doc-caption {
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-sm);
+  overflow-wrap: anywhere;
+}
+
+.tcw-doc-hint {
+  color: var(--tai-color-prose-link);
+  font-size: var(--tai-text-sm);
+}
+
+/* A muted trailing line under an interactive card. */
+.tcw-media-footer {
+  margin: 0;
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-sm);
+}
+
 .tcw-media-options {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: stretch;
   gap: var(--tai-space-2);
+}
+
+/* Sectioned reply lists: each titled group stacks its header above its chips. */
+.tcw-media-sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-3);
+}
+
+.tcw-media-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-1);
+}
+
+.tcw-section-title {
+  margin: 0;
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* A reply chip's optional secondary line stacks under its label. */
+.tcw-chip-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.tcw-chip-desc {
+  font-size: var(--tai-text-xs);
+  font-weight: 400;
+  color: var(--tai-color-text-muted);
+}
+
+/* A link ACTION is visually distinct from a reply chip: it wears the ghost button's
+   lighter chrome and leads with the external-link glyph. */
+.tcw-link-option {
+  gap: var(--tai-space-2);
+  text-decoration: none;
+}
+
+/* A shared location as a map-pin: the glyph beside a stacked name/address, the
+   coordinates, and an OpenStreetMap link (no external tiles, CSP-safe). */
+.tcw-location {
+  display: flex;
+  gap: var(--tai-space-2);
+  padding: var(--tai-space-2) var(--tai-space-3);
+  border-radius: var(--tai-radius-md);
+  border: 1px solid var(--tai-color-border);
+  background: var(--tai-color-bg);
+}
+
+.tcw-location-pin {
+  flex: none;
+  line-height: 1.4;
+}
+
+.tcw-location-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.tcw-location-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.tcw-location-address {
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-sm);
+  overflow-wrap: anywhere;
+}
+
+.tcw-location-coords {
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-xs);
+}
+
+.tcw-location-link {
+  align-self: flex-start;
+  margin-top: 2px;
+  color: var(--tai-color-prose-link);
+  font-size: var(--tai-text-sm);
 }
 
 /* -- Ask-less form cards ---------------------------------------------------- */

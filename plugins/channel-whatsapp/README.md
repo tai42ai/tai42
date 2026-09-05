@@ -143,14 +143,38 @@ pair's pending question, so one question can be pending per pair at a time; a
 second concurrent one is rejected loudly.
 
 An agent notification (`notify_user`) advertises the full capability set —
-`supports_media_notifications`, `supports_template_notifications`,
-`supports_interactive_notifications`, and `supports_form_notifications` — so a
-notification may carry **media** (images sent as image messages, links appended
-to the message text), tappable **options** (native reply buttons/list; a tap
-enters the conversation as a visitor message), an **ask-less form** (`schema`),
-or, for a send outside the 24-hour window, a pre-approved **template**
-referenced by name. Template, options, and schema are mutually exclusive on one
-notification.
+`supports_media_notifications`, `supports_location_notifications`,
+`supports_template_notifications`, `supports_interactive_notifications`, and
+`supports_form_notifications` — so a notification may carry the full outbound
+vocabulary:
+
+- **Media** — each file item sends as its own native message: an `image`,
+  `document` (with `caption`/`filename`), `video` (with `caption`), or `audio`
+  (voice/clip; the Cloud API audio object carries no caption/filename); a `link`
+  item is appended to the body text as a `label: url` line.
+- **Options** (`list[Option]`, a typed union, never bare strings) — a
+  `ReplyOption` renders as a native reply **button** (or a **list** row past the
+  button caps / for a described option), sending its **authored `id`** on the
+  wire when set (echoed back on tap) else a minted index; a tap enters the
+  conversation as a visitor message. A lone `LinkOption` renders as a `cta_url`
+  interactive (one URL button); mixed reply+link or multiple links append the
+  link(s) to the body as `label: url` lines (WhatsApp has no multi-URL button).
+- **Sections** (`list[OptionSection]`) — a multi-section interactive **list**,
+  each row carrying an optional **description** secondary line.
+- **Header + footer** — a media `header` (image/video/document) rides the
+  interactive header (an `audio` header is sent as its own message ahead of it);
+  a text `footer` rides the interactive footer. Both require options/sections.
+- **Location** (`LocationElement`) — a native location message (a pin with an
+  optional name/address).
+- **Template** — for a send outside the 24-hour window, a pre-approved
+  `ChannelTemplate` by name: its `header_media` (image/video/document),
+  `body_parameters` (positional body-text fills), and `buttons` (per-button
+  quick-reply `payload` / url suffix) map onto the template-message components.
+- **Ask-less form** (`schema`) — an in-chat WhatsApp Flow (see below).
+
+`template`, a choice surface, and `schema` are mutually exclusive on one
+notification; `options` and `sections` are mutually exclusive with each other;
+media and location may combine with a choice surface.
 
 An **ask-less form** notification renders exactly like a form ask — any media
 first, then a WhatsApp Flow whose body is the message — but stores **no
@@ -192,6 +216,37 @@ whichever keys it understands. This is the channel's public inbound contract:
 | `referral_ctwa_clid` | " | `referral.ctwa_clid` (the click-to-WhatsApp click id) |
 | `referral_headline` | " (when present) | `referral.headline` |
 | `referral_body` | " (when present) | `referral.body` |
+| `media_kind` | An inbound **media** message (image/document/audio/video/sticker) | The wire type |
+| `media_id` | " | The Graph media id (re-fetch handle — see the design note below) |
+| `media_mime_type` | " | The media object's `mime_type` |
+| `media_sha256` | " | The media object's `sha256` (content integrity) |
+| `media_filename` | An inbound **document** | `document.filename` |
+| `media_voice` | An inbound **audio** that is a voice note | `"true"` (`audio.voice`) |
+| `sticker_animated` | An animated **sticker** | `"true"` (`sticker.animated`) |
+| `reaction_emoji` | An inbound **reaction** (absent = a removed reaction) | `reaction.emoji` |
+| `reaction_message_id` | An inbound **reaction** | The `wamid` it was applied to (`reaction.message_id`) |
+| `contacts_count` | An inbound **contacts** message | The number of shared contact cards |
+| `contacts` | " | The raw `contacts` array as compact JSON (dropped when over the per-value cap; `contacts_count` still rides) |
+
+Guest **media** and **location** and **reactions** and **contacts** now bridge
+as turns (previously inbound-dropped). The caption of a media message becomes the
+turn text (a faithful `[image]` / `[document: file]` / `[voice message]` / … 
+placeholder when caption-less); an inbound **location** lands as a typed
+`LocationElement` on the turn's `location` (a machine-consumable field, not a
+param), with the place name/coordinates as the text.
+
+> **Inbound media design note (design gap).** WhatsApp inbound media arrives as a
+> Graph media **id**; resolving it to bytes is a two-step Graph call that returns a
+> **short-lived, Bearer-authenticated** lookaside URL — not a durable public
+> `https` URL and not a valid `MediaItem` source. Minting a durable **typed
+> `attachments`** entry needs a served-media **ingestion** seam (fetch → persist →
+> mint a `{MEDIA_ROUTE_PREFIX}{id}` served reference); the platform's served-media
+> store is not reachable from a channel plugin and handles only outbound
+> `data:image` substitution, so no such seam exists today. Rather than invent
+> infrastructure or fabricate an unfetchable URL, inbound media therefore bridges
+> **without** a typed `attachments` entry — its identity rides the `media_*` params
+> above and a consumer re-fetches via `media_id` with operator credentials. The
+> durable fix is a platform served-media ingestion seam on the app handle.
 
 Params ride **only on the bridge path**. A tap or quick-reply that **answers** a
 pending question does not surface them: the answer path forwards `{"answer": …}`
@@ -250,9 +305,9 @@ status is acknowledged, never retried.
 | One pending question per `(phone_number_id, wa_id)` pair | A second concurrent `ask_user` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired |
 | Freeform sends need the 24h window | A freeform send (question, reply, media) outside the human's 24-hour session window is rejected by Meta (error 131047), synchronously as a delivery error or asynchronously as a `failed` status. A template is the only send Meta accepts outside the window |
 | Single send attempt per part | A transient Cloud API outage fails the send instead of retrying (no idempotency key → a blind retry risks double-messaging). A multi-part media send that fails on the Nth part raises naming the wamids already delivered |
-| Guest-sent media stays inbound-dropped | Inbound **media/location/contacts/reactions** are acknowledged and logged at info naming the type, not bridged (a later lane carries them). Inbound **text**, **interactive** taps, **template quick-replies** (`button` type), and completed **Flow forms** ARE bridged, with referral / reply-to context / tap ids carried as entry `params`. Outbound supports text, interactive buttons/list, interactive Flow (form), image, and template |
+| Inbound media carries no typed attachment | Inbound **media** (image/document/audio/video/sticker) bridges as a turn (caption → text, identity → `media_*` params) but **without** a typed `attachments` entry: the Graph media id is not a durable `MediaItem` source and no served-media ingestion seam is reachable from a channel (see the inbound media design note). A consumer re-fetches bytes via `media_id` + operator credentials. Inbound **location** DOES land a typed `LocationElement`; **contacts**/**reactions** ride `params` |
 | Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel |
-| Template scope is body-text | A `ChannelTemplate` carries positional body-text parameters only — header media, button, and typed (currency, date-time) parameters are out of scope |
+| Template audio header unsupported | A `ChannelTemplate` maps `header_media` (image/video/document), `body_parameters`, and quick-reply/url `buttons` onto the template-message components. An **audio** `header_media` has no Cloud API template representation and is refused loudly (`ChannelInputError`); an audio interactive **header** on a notification is instead sent as its own message ahead of the interactive |
 | No timestamp in Meta's signature scheme | Replay of a captured request validates forever for that body; `wamid` dedupe (48h default window) + HTTPS are the guards (a Meta protocol property) |
 
 ## Development

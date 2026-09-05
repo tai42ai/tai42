@@ -44,6 +44,7 @@ from tai42_contract.channels import (
     InboundBridge,
 )
 from tai42_contract.conversations import BlankInboundTextError
+from tai42_contract.interactions.models import AnswerMismatchPolicy
 from tai42_kit.clients.impl.http import HttpxClient
 
 from tai42_skeleton.channels.send_span import send_span
@@ -159,12 +160,17 @@ def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id:
     return "host_mismatch"
 
 
-async def _forward_answer(callback_url: str, answer: Any) -> httpx.Response:
-    """POST ``{"answer": <value>}`` to the interaction's callback door and return
-    its response; the caller applies the status policy. Mirrors each channel's
-    ``_forward_answer`` — a bounded-timeout app-pooled httpx client."""
+async def _forward_answer(callback_url: str, answer: Any, params: dict[str, str] | None) -> httpx.Response:
+    """POST ``{"answer": <value>}`` (plus ``"params"`` when the inbound reply carried channel
+    enrichment) to the interaction's callback door and return its response; the caller applies the
+    status policy. Mirrors each channel's ``_forward_answer`` — a bounded-timeout app-pooled httpx
+    client. Absent params keep the body byte-identical to the pre-enrichment forward, so the seam
+    is opt-in and back-compatible."""
+    body: dict[str, Any] = {"answer": answer}
+    if params:
+        body["params"] = params
     async with tai42_app.clients.client_ctx(HttpxClient, timeout=_FORWARD_TIMEOUT_SECONDS) as client:
-        return await client.post(callback_url, json={"answer": answer})
+        return await client.post(callback_url, json=body)
 
 
 async def _bridge(bridge: InboundBridge) -> None:
@@ -186,6 +192,7 @@ async def _bridge(bridge: InboundBridge) -> None:
             cap_key=bridge.cap_key,
             text=bridge.bridge_text,
             provider_message_id=bridge.provider_message_id,
+            params=bridge.params,
         )
     except BlankInboundTextError:
         logger.warning(
@@ -199,6 +206,16 @@ async def _bridge(bridge: InboundBridge) -> None:
             bridge.client_address,
             bridge.channel_id,
         )
+
+
+def _retry_notice_text(custom: str | None, reason: str) -> str:
+    """The guest-facing retry notice for a ``retry``-policy rejection. ``None`` uses the built-in
+    :data:`ANSWER_REJECTED_RETRY_NOTICE`; a per-ask ``custom`` notice REPLACES it, with a literal
+    ``{reason}`` token filled by a PLAIN substitution (``str.replace``, never ``str.format``) so a
+    notice without the token is sent verbatim and stray braces in authored text never raise."""
+    if custom is None:
+        return ANSWER_REJECTED_RETRY_NOTICE.format(reason=reason)
+    return custom.replace("{reason}", reason)
 
 
 async def _notify_guest(bridge: InboundBridge, message: str) -> None:
@@ -238,6 +255,7 @@ async def _emit_answer_rejected(
     field: str | None,
     retry_in_place: bool,
     notice_owner: str,
+    policy: str = "retry",
 ) -> None:
     """Emit the ``interactions_answer_rejected`` platform event ONCE for a
     door-rejected answer.
@@ -246,10 +264,11 @@ async def _emit_answer_rejected(
     ``notify_user`` tool) to decide what an operator sees. ``notice_owner`` records
     WHO messaged the guest about this rejection — ``"core"`` when this handler sent
     the generic retry/final notice, ``"channel"`` when the channel owns the guest
-    correction surface (a re-opened Flow/modal) and core skipped its notice — so an
-    operator reading the event knows whether the guest was already told. Best-effort:
-    a hooks-manager failure is logged and swallowed so it never fails the inbound
-    webhook — the guest notice and the ladder outcome are unaffected.
+    correction surface (a re-opened Flow/modal) and core skipped its notice, ``"none"``
+    when the ask's ``bridge`` digression policy sent no notice at all. ``policy`` records
+    the ask's mismatch policy (``"retry"`` / ``"bridge"``) so an operator sees which arm
+    handled the reply. Best-effort: a hooks-manager failure is logged and swallowed so it
+    never fails the inbound webhook — the guest notice and the ladder outcome are unaffected.
     """
     # Local import: reach the hooks-manager accessor only when emitting, keeping
     # this module's load-time import surface to the contract + kit (the codebase's
@@ -265,6 +284,7 @@ async def _emit_answer_rejected(
         "field": field,
         "retry_in_place": retry_in_place,
         "notice_owner": notice_owner,
+        "policy": policy,
     }
     try:
         await get_hooks_manager().on_event(topic=ANSWER_REJECTED_EVENT_TOPIC, payload=payload)
@@ -318,9 +338,13 @@ async def handle_inbound_answer(
     """Resolve one inbound guest reply against its pending ask — the shared ladder.
 
     ``correlation_key`` is the channel's opaque key for this address; ``answer`` is
-    the value forwarded to the door as ``{"answer": answer}``; ``store`` is the
-    channel's :class:`~tai42_contract.channels.CorrelationStore`; ``bridge`` carries
-    the fields a bridged turn needs. Returns an
+    the value forwarded to the door as ``{"answer": answer}`` (plus ``"params"`` when the
+    reply carried channel enrichment on ``bridge.params``, landing on
+    :attr:`~tai42_contract.interactions.models.InteractionResponse.params` for the asking flow);
+    ``store`` is the channel's :class:`~tai42_contract.channels.CorrelationStore`; ``bridge``
+    carries the fields a bridged turn needs — including ``params``, which on the BRIDGE arm is
+    passed to ``accept`` (the same seam symmetry, so enrichment is never dropped either way).
+    Returns an
     :class:`~tai42_contract.channels.InboundAnswerResult` — the outcome plus the door's
     ``retry_reason``/``retry_field`` when it rejected the answer's content.
 
@@ -333,8 +357,15 @@ async def handle_inbound_answer(
     * The door returns 404 (the ask was withdrawn/expired/cancelled, including the
       post-cascade thread-delete case) -> release, bridge the reply as a fresh
       turn, return :attr:`~InboundAnswerOutcome.BRIDGED`.
-    * The door returns 400 (the LIVE ask rejected this answer's format) -> read the
-      door's ``retry_in_place`` (default True):
+    * The door returns 400 (the LIVE ask rejected this answer's format) -> FIRST read the
+      ask's ``on_mismatch`` policy off the correlation entry:
+
+      - ``bridge`` (the DIGRESSION policy): KEEP the correlation (the ask stays parked, no
+        guest notice) and bridge the reply as a fresh routed turn through the STANDARD
+        target-agnostic bridge path, fire ONE operator alert tagged ``policy="bridge"``,
+        return :attr:`~InboundAnswerOutcome.BRIDGED_KEPT`. The ask ends only by a real
+        answer or its timeout — unmatched input never closes it.
+      - ``retry`` (the default): fall through to the door's ``retry_in_place`` (default True):
 
       - True: KEEP the correlation, notify the guest what's expected (unless the
         channel owns its notice), fire ONE operator alert, return
@@ -365,7 +396,7 @@ async def handle_inbound_answer(
         return InboundAnswerResult(outcome=InboundAnswerOutcome.NO_CORRELATION)
 
     try:
-        forwarded = await _forward_answer(entry.callback_url, answer)
+        forwarded = await _forward_answer(entry.callback_url, answer, bridge.params)
     except httpx.HTTPError as exc:
         # Transport fault forwarding to the door — indeterminate. Keep the
         # correlation and fail loudly so the webhook redelivery re-resolves it.
@@ -397,6 +428,31 @@ async def handle_inbound_answer(
         # re-answerable in place. Default RETRYABLE (text/select/confirm/form
         # wrong-format cases): the guest can answer again on the same ask.
         error, field, retry_in_place = _parse_rejection(forwarded)
+        if entry.on_mismatch is AnswerMismatchPolicy.BRIDGE:
+            # DIGRESSION policy: an unmatched reply is not a failed answer. KEEP the ask
+            # parked (no guest notice) and hand the reply to the conversation as a fresh
+            # routed turn through the STANDARD bridge path — target-agnostic, so a tool route
+            # and an agent route are handled identically, with the reply's enrichment params
+            # carried exactly as any bridged turn. The ask ends only by a real answer or its
+            # timeout, never by unmatched input (so ``retry_in_place`` does not gate this).
+            # The operator event still fires once, tagged with the ``bridge`` policy.
+            await _emit_answer_rejected(
+                bridge,
+                interaction_id=entry.interaction_id,
+                error=error,
+                field=field,
+                retry_in_place=retry_in_place,
+                notice_owner="none",
+                policy="bridge",
+            )
+            await _bridge(bridge)
+            logger.info(
+                "inbound: answer door rejected the answer for interaction %s on channel %r (400); the ask's "
+                "bridge policy kept the correlation and bridged the reply as a digression turn",
+                entry.interaction_id,
+                channel_id,
+            )
+            return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED_KEPT)
         if retry_in_place:
             # KEEP the correlation so the guest's next reply resolves the same ask.
             # When the channel owns the retry notice (its correction surface is a
@@ -405,7 +461,7 @@ async def handle_inbound_answer(
             # correlation and still emits the operator event (tagged notice_owner).
             reason = error or "The answer wasn't in the expected format."
             if not bridge.owns_retry_notice:
-                await _notify_guest(bridge, ANSWER_REJECTED_RETRY_NOTICE.format(reason=reason))
+                await _notify_guest(bridge, _retry_notice_text(entry.mismatch_notice, reason))
             await _emit_answer_rejected(
                 bridge,
                 interaction_id=entry.interaction_id,

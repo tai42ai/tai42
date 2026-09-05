@@ -58,6 +58,7 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from tai42_contract.app import tai42_app
+from tai42_contract.conversations import validate_entry_params
 from tai42_contract.interactions import (
     AnswerFormat,
     InteractionResponse,
@@ -714,14 +715,19 @@ async def _record_callback_answer(
     interaction_id: str,
     state: InteractionState,
     answer: Any,
+    params: dict[str, str] | None = None,
 ) -> JSONResponse:
     """Atomically claim ``answer`` for the ticketed question. A lost race maps
-    to the same idempotent 200 already_answered."""
+    to the same idempotent 200 already_answered. ``params`` is the OPTIONAL channel enrichment the
+    inbound-answer ladder forwarded alongside the answer (the answer-seam counterpart of a bridged
+    turn's entry params); it rides the stored :class:`InteractionResponse.params` for the asking
+    flow to read beside ``answer``. ``None`` keeps the envelope byte-identical to a plain answer."""
     response = InteractionResponse(
         interaction_id=interaction_id,
         answer=answer,
         answered_by=_EXTERNAL_ANSWERED_BY,
         answered_at=datetime.now(UTC),
+        params=params,
     )
     # An async park enqueues its durable continuation-due record atomically with the
     # claim; a sync question passes no timing and enqueues nothing.
@@ -861,6 +867,7 @@ async def _callback_post(request: Request, r: Any, store: InteractionStore, sett
         # against the STORED format (the authed door's exact rules) and record
         # the TYPED value. Query params never carry the answer here.
         value: Any
+        answer_params: dict[str, str] | None = None
         if not raw:
             if fmt is AnswerFormat.CONFIRM:
                 # The GET-confirm page's form POSTs an empty body — an
@@ -879,6 +886,17 @@ async def _callback_post(request: Request, r: Any, store: InteractionStore, sett
             if "answer" not in parsed:
                 return _callback_json({"error": "body must contain 'answer'"}, 400)
             value = parsed["answer"]
+            # OPTIONAL channel enrichment the inbound-answer ladder forwarded alongside the
+            # answer (the answer-seam counterpart of a bridged turn's entry params); validated
+            # against the shared transport bounds and carried onto the stored response.
+            if "params" in parsed:
+                raw_params = parsed["params"]
+                if not isinstance(raw_params, dict):
+                    return _callback_json({"error": "params must be a JSON object"}, 400)
+                try:
+                    answer_params = validate_entry_params(raw_params)
+                except ValueError as exc:
+                    return _callback_json({"error": f"invalid params: {exc}"}, 400)
         try:
             validated = _validate_answer(state.request, value)
         except _AnswerInvalid as exc:
@@ -891,7 +909,9 @@ async def _callback_post(request: Request, r: Any, store: InteractionStore, sett
             if exc.field is not None:
                 body["field"] = exc.field
             return _callback_json(body, 400)
-        return await _record_callback_answer(r, store, settings, ticket, interaction_id, state, validated)
+        return await _record_callback_answer(
+            r, store, settings, ticket, interaction_id, state, validated, params=answer_params
+        )
 
     # EXTERNAL: verbatim payload semantics. Dispatch on the body FIRST —
     # empty-body branch first (``json.loads("")`` raises). Body wins: query

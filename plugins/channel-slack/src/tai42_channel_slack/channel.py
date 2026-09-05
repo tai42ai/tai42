@@ -29,13 +29,26 @@ from typing import Any, ClassVar
 
 import httpx
 from pydantic import SecretStr
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_contract.channels import (
+    ChannelDelivery,
+    ChannelDeliveryError,
+    ChannelInputError,
+    ChannelNotification,
+)
 from tai42_kit.settings import require, require_secret
 
 from tai42_channel_slack.blocks import (
+    build_flat_option_blocks,
+    build_footer_block,
+    build_header_blocks,
+    build_location_block,
     build_media_blocks,
     build_option_blocks,
+    build_section_blocks,
+    flat_options_text_lines,
+    location_text_line,
     options_text_lines,
+    sections_text_lines,
     text_section,
 )
 from tai42_channel_slack.client import slack_http
@@ -116,6 +129,66 @@ def _display_blocks(body_text: str, media: list[Any] | None, options: list[str] 
         return None
     body_section = [text_section(body_text)] if body_text.strip() else []
     return [*body_section, *media_blocks, *option_blocks]
+
+
+def _notification_blocks(notification: ChannelNotification) -> list[dict[str, Any]] | None:
+    """The Block Kit blocks for a ``notify`` send, or ``None`` for a plain text-only send.
+
+    Order: an optional header display item, then the message body section (omitted when the
+    message is blank — a content-only send), then display media, a shared location, the
+    interactive choice surface (flat options OR a sectioned list), and finally the footer.
+    A ``data:`` image (header or media) raises :class:`ChannelInputError` here, before any
+    send. A :class:`ChannelTemplate` and a form ``schema`` are not renderable on this channel
+    (see the capability notes on :class:`SlackChannel`) and are refused loudly rather than
+    silently dropped, defending the channel even if a caller reaches it past the guards.
+    """
+    if notification.template is not None:
+        raise ChannelInputError(
+            "slack cannot render a vendor template: it has no approved-template registry, so the "
+            "template's substitution parameters have no message skeleton to render into"
+        )
+    if notification.schema is not None:
+        raise ChannelInputError(
+            "slack does not render ask-less form notifications; it has no notify-form submission surface"
+        )
+    # The rich content that WARRANTS Block Kit (header/media/location/options/sections/
+    # footer). With none of it a plain message posts text only (no blocks), unchanged.
+    header_blocks = build_header_blocks(notification.header)
+    media_blocks = build_media_blocks(notification.media)
+    location_blocks = [build_location_block(notification.location)] if notification.location is not None else []
+    option_blocks = build_flat_option_blocks(notification.options) if notification.options else []
+    section_blocks = build_section_blocks(notification.sections) if notification.sections else []
+    footer_blocks = [build_footer_block(notification.footer)] if notification.footer is not None else []
+    rich = [*header_blocks, *media_blocks, *location_blocks, *option_blocks, *section_blocks, *footer_blocks]
+    if not rich:
+        return None
+    # A blank message (a content-only send) OMITS the body section — Slack rejects an empty
+    # plain_text — so the rich blocks carry it alone. The header stays ABOVE the body.
+    body_section = [text_section(notification.message)] if notification.message.strip() else []
+    return [
+        *header_blocks,
+        *body_section,
+        *media_blocks,
+        *location_blocks,
+        *option_blocks,
+        *section_blocks,
+        *footer_blocks,
+    ]
+
+
+def _notification_text_fallback(notification: ChannelNotification) -> str:
+    """The ``text`` field Slack requires alongside blocks. It carries the message plus the
+    interactive/location content as suggestion lines so the notification PREVIEW (the push
+    Slack shows before blocks render) still surfaces them; visual-only content (media,
+    header, footer) rides the blocks alone. Blank for a content-only send."""
+    parts = [notification.message] if notification.message.strip() else []
+    if notification.options:
+        parts.append(flat_options_text_lines(notification.options))
+    if notification.sections:
+        parts.append(sections_text_lines(notification.sections))
+    if notification.location is not None:
+        parts.append(location_text_line(notification.location))
+    return "\n".join(parts)
 
 
 def _resolve_recipient(settings: SlackSettings, requested: str | None) -> str:
@@ -243,11 +316,25 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
 class SlackChannel:
     """Registered under ``"slack"``; satisfies ``tai42_contract.channels.Channel``."""
 
-    # This channel renders display media (Block Kit image/section blocks) and tappable
-    # options (Block Kit buttons); the central notify_user guard reads these before
-    # handing a media or options notification over.
+    # Advertised richer-send capabilities the central notify/answer-delivery guards read
+    # before handing a rich notification over:
+    #   * media — Block Kit image blocks (image) and labelled link lines (link and, absent
+    #     a files.upload seam, document/video/audio);
+    #   * interactive — Block Kit option buttons (typed reply/link options) and titled
+    #     sectioned option lists;
+    #   * location — a section naming the place with an OpenStreetMap link.
+    # NOT advertised (honest capability decline, so the platform refuses the send loudly
+    # rather than dropping content or sending a meaningless payload):
+    #   * template — a :class:`ChannelTemplate` is a pre-approved VENDOR template referenced
+    #     by name+language whose body/button text lives in the provider's approved registry;
+    #     Slack has no such registry (and no out-of-window restriction), so the model carries
+    #     only substitution parameters with no template skeleton to render them into. Slack
+    #     cannot reconstruct the message, so it declines the capability;
+    #   * form notifications — this channel delivers ask-bound forms (supports_form_delivery)
+    #     but has no ask-less notify-form submission surface.
     supports_media_notifications: ClassVar[bool] = True
     supports_interactive_notifications: ClassVar[bool] = True
+    supports_location_notifications: ClassVar[bool] = True
     supports_form_delivery: ClassVar[bool] = True
 
     def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
@@ -327,16 +414,18 @@ class SlackChannel:
             )
         else:
             target = _resolve_recipient(settings, notification.recipient)
-        # Display media and tappable options ride as Block Kit blocks; a tap on an
-        # option button enters the conversation as a visitor message (the interactivity
-        # door bridges it). The text fallback carries any options as suggestion lines so
-        # the notification preview still shows them. A MEDIA-ONLY notify (blank message)
-        # posts image block(s) alone with an empty text fallback — Slack accepts that when
-        # blocks carry the content. A data: image is refused before the send.
-        blocks = _display_blocks(notification.message, notification.media, notification.options)
-        text = notification.message
-        if notification.options:
-            text = f"{text}\n{options_text_lines(notification.options)}"
+        # The full richer-send vocabulary rides as Block Kit blocks: header/media/location,
+        # typed options (reply buttons submit their text; link buttons open a url) or a
+        # sectioned option list, and a footer. A tap on a reply button enters the
+        # conversation as a visitor message (the interactivity door bridges it, echoing any
+        # author-set option id back as ``params.reply_id``). The text fallback carries the
+        # message plus the interactive/location content as suggestion lines so the
+        # notification preview still shows them. A MEDIA-ONLY notify (blank message) posts
+        # the media block(s) alone with an empty text fallback — Slack accepts that when
+        # blocks carry the content. A data: image, a vendor template, or a form schema is
+        # refused before the send.
+        blocks = _notification_blocks(notification)
+        text = _notification_text_fallback(notification)
         body = await _post_message(token, target, text, blocks=blocks)
         ts = body.get("ts")
         if not isinstance(ts, str) or not ts:

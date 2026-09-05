@@ -42,6 +42,10 @@ _BUILD_STEP = "`pnpm install && pnpm build` in plugins/channel-web"
 # agent-sent media card (the contract constrains a media-card image to an absolute https
 # source, never http) and ``data:`` for the bundled schema-form media field's inline
 # ``<img>`` preview of a visitor-picked image, whose source is a ``data:`` URL.
+# ``media-src`` admits ``'self'`` and ``https:`` for an agent-sent card's native
+# ``<video>``/``<audio>`` players, whose sources the contract constrains to an absolute
+# https (or same-origin served) reference — without it ``default-src 'none'`` would block
+# the media fetch and the players would never load.
 PAGE_CSP = "; ".join(
     [
         "default-src 'none'",
@@ -50,6 +54,7 @@ PAGE_CSP = "; ".join(
         "font-src 'self'",
         "connect-src 'self'",
         "img-src 'self' data: https:",
+        "media-src 'self' https:",
         "base-uri 'none'",
         "frame-ancestors 'none'",
         "form-action 'self'",

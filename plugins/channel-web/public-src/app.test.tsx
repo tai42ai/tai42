@@ -71,8 +71,12 @@ function agentSentMedia(id: string, options: readonly string[]): ChatItem {
     kind: 'media',
     id,
     text: 'Here you go',
-    media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'Item A' }],
-    options,
+    media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'Item A', filename: null }],
+    options: options.map((text) => ({ kind: 'reply', text, description: null, id: null })),
+    sections: null,
+    header: null,
+    footer: null,
+    location: null,
     ts: TS,
   };
 }
@@ -136,6 +140,7 @@ describe('sending', () => {
       'site-alpha',
       'hello there',
       expect.stringMatching(CLIENT_MESSAGE_ID),
+      null,
     );
   });
 
@@ -166,6 +171,7 @@ describe('sending', () => {
       'site-alpha',
       'line one\nline two',
       expect.stringMatching(CLIENT_MESSAGE_ID),
+      null,
     );
   });
 
@@ -201,6 +207,7 @@ describe('sending', () => {
         'site-alpha',
         'にほんご',
         expect.stringMatching(CLIENT_MESSAGE_ID),
+        null,
       ),
     );
     expect(api.sendMessage).toHaveBeenCalledTimes(1);
@@ -315,6 +322,7 @@ describe('invite pairing', () => {
         'site-alpha',
         'LINK-ABCD1234',
         expect.stringMatching(CLIENT_MESSAGE_ID),
+        null,
       ),
     );
     expect(api.sendMessage).toHaveBeenCalledTimes(1);
@@ -363,6 +371,7 @@ describe('invite pairing', () => {
       'site-alpha',
       'LINK-ABCD1234',
       expect.stringMatching(CLIENT_MESSAGE_ID),
+      null,
     );
     expect(window.location.search).toBe('');
   });
@@ -747,6 +756,7 @@ describe('form cards', () => {
       schema: { type: 'object', properties: { note: { type: 'string' } } },
       token: 'tok-1',
       media: null,
+      location: null,
       ts: TS,
     };
   }
@@ -801,6 +811,36 @@ describe('media cards', () => {
         'site-alpha',
         'See all',
         expect.stringMatching(CLIENT_MESSAGE_ID),
+        null,
+      ),
+    );
+  });
+
+  it('threads a tapped reply option authored id to the send door', async () => {
+    const user = userEvent.setup();
+    const withId: ChatItem = {
+      kind: 'media',
+      id: 'md-id',
+      text: 'Pick one',
+      media: null,
+      options: [{ kind: 'reply', text: 'Item A', description: null, id: 'opt-a' }],
+      sections: null,
+      header: null,
+      footer: null,
+      location: null,
+      ts: TS,
+    };
+    stream.state = streamState({ items: [withId] });
+    render(app());
+
+    await user.click(screen.getByRole('button', { name: /Item A/ }));
+
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(
+        'site-alpha',
+        'Item A',
+        expect.stringMatching(CLIENT_MESSAGE_ID),
+        'opt-a',
       ),
     );
   });
@@ -823,6 +863,7 @@ describe('media cards', () => {
         'site-alpha',
         'See all',
         expect.stringMatching(CLIENT_MESSAGE_ID),
+        null,
       ),
     );
     expect(field).toHaveValue('half a thought');

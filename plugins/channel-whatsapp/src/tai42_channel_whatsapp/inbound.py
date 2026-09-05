@@ -47,6 +47,7 @@ from tai42_contract.conversations import (
     DeliveryReceipt,
     validate_entry_params,
 )
+from tai42_contract.interactions.models import LocationElement, MediaItem
 from tai42_kit.settings import require_secret
 
 from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX
@@ -130,6 +131,38 @@ assert len(_FORM_REJECTION_LEAD) + 1 + _DOOR_REJECTION_MAX_CHARS <= _FLOW_BODY_M
 #   referral_ctwa_clid  — the click-to-WhatsApp click id ``referral.ctwa_clid``.
 #   referral_headline   — the referral's ``headline`` when present.
 #   referral_body       — the referral's ``body`` when present.
+#   media_kind          — an inbound media message's wire type
+#                         (``image``/``document``/``audio``/``video``/``sticker``).
+#   media_id            — the Graph media id of an inbound media object; a consumer with
+#                         operator credentials fetches the bytes off the Graph media endpoint
+#                         (see the INBOUND MEDIA design note below — the channel does not
+#                         re-host the bytes, so the file is reached through this id).
+#   media_mime_type     — the media object's ``mime_type``.
+#   media_sha256        — the media object's ``sha256`` (content integrity).
+#   media_filename      — an inbound document's ``filename`` (document only).
+#   media_voice         — ``"true"`` when an inbound audio is a voice note (``audio.voice``).
+#   sticker_animated    — ``"true"`` for an animated sticker (``sticker.animated``).
+#   reaction_emoji      — a reaction message's ``reaction.emoji`` (absent = a REMOVED reaction).
+#   reaction_message_id — the ``wamid`` a reaction was applied to (``reaction.message_id``).
+#   contacts_count      — the number of contact cards in a ``contacts`` message.
+#   contacts            — the raw ``contacts`` array as a compact JSON string (dropped when it
+#                         exceeds the per-value transport cap; ``contacts_count`` still rides).
+#
+# INBOUND MEDIA DESIGN NOTE (design gap — see the plugin README and this lane's report):
+# WhatsApp inbound media arrives as a Graph media ``id`` (``GET {graph}/{id}`` returns a
+# SHORT-LIVED, Bearer-AUTHENTICATED lookaside url — not a durable public https url, and not a
+# valid :class:`MediaItem` source). Turning that id into a durable typed ``attachments`` entry
+# needs a served-media INGESTION seam (fetch the bytes, persist them, mint a
+# ``{MEDIA_ROUTE_PREFIX}{id}`` served reference). The platform's served-media store
+# (``tai42_skeleton.interactions.media``) is NOT reachable from a channel plugin and handles
+# only outbound ``data:image`` substitution, so NO such seam exists for a channel today.
+# Rather than invent infrastructure or fabricate an unfetchable url, inbound media therefore
+# bridges as a turn WITHOUT a typed ``attachments`` entry: the caption becomes the turn text
+# (a faithful ``[kind]`` placeholder when caption-less) and the media's identity rides the
+# ``media_*`` params above (a consumer re-fetches via ``media_id`` with operator credentials).
+# The durable fix is a platform served-media ingestion seam on the app handle; until then this
+# is the honest minimal alternative. Inbound LOCATION, by contrast, has a fully in-contract
+# typed shape (:class:`LocationElement`) and DOES land on ``accept(location=...)``.
 #
 # All values are transport-bounded by the contract (:func:`validate_entry_params`); an
 # individual value over ``ENTRY_PARAM_VALUE_MAX_CHARS`` is dropped at extraction and, in
@@ -142,6 +175,21 @@ _REFERRAL_PARAM_KEYS: dict[str, str] = {
     "ctwa_clid": "referral_ctwa_clid",
     "headline": "referral_headline",
     "body": "referral_body",
+}
+
+# Inbound media message types whose object lives under ``message[type]`` (image/document/
+# audio/video/sticker). Each bridges as a turn (caption → text, identity → ``media_*`` params);
+# see the INBOUND MEDIA design note above for why no typed ``attachments`` entry is minted.
+_MEDIA_TYPES = frozenset({"image", "document", "audio", "video", "sticker"})
+
+# The faithful, ALWAYS non-blank placeholder text a caption-less media/location/contacts/
+# reaction turn carries (``accept`` refuses blank text — the message must never be lost).
+_MEDIA_PLACEHOLDERS = {
+    "image": "[image]",
+    "document": "[document]",
+    "audio": "[audio]",
+    "video": "[video]",
+    "sticker": "[sticker]",
 }
 
 
@@ -383,13 +431,26 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
         # shape from an interactive reply: fields live under ``button`` (visible ``text`` +
         # developer ``payload``), not ``interactive``.
         await _handle_button(message, phone_number_id, wa_id, wamid, context_params)
+    elif message_type in _MEDIA_TYPES:
+        # Guest media (image/document/audio/video/sticker): bridge as a turn — caption → text,
+        # identity → ``media_*`` params (see the INBOUND MEDIA design note; no typed attachment).
+        await _handle_media(message, message_type, phone_number_id, wa_id, wamid, context_params)
+    elif message_type == "location":
+        # A shared geographic point: bridge as a turn carrying a typed ``LocationElement``.
+        await _handle_location(message, phone_number_id, wa_id, wamid, context_params)
+    elif message_type == "contacts":
+        # Shared contact card(s): bridge as a turn, cards forwarded verbatim in ``params``.
+        await _handle_contacts(message, phone_number_id, wa_id, wamid, context_params)
+    elif message_type == "reaction":
+        # An emoji reaction to an earlier message: bridge as a turn, emoji + target in ``params``.
+        await _handle_reaction(message, phone_number_id, wa_id, wamid, context_params)
     elif message.get("errors"):
         # A Meta inbound error notice (e.g. an unsupported message type the guest sent):
         # never a guest turn — surface it loudly for the operator, do not bridge.
         logger.warning("whatsapp inbound error notice for %s: %r", wamid, message.get("errors"))
     else:
-        # Media/location/contacts/reactions and any other type are not bridged yet; name the
-        # type so an operator sees WHAT was dropped, not just that something was.
+        # Any other/future type is not bridged; name the type so an operator sees WHAT was
+        # dropped, not just that something was.
         logger.info("unhandled whatsapp message type %r for %s; not bridged", message_type, wamid)
 
 
@@ -585,6 +646,145 @@ async def _handle_button(
     await _resolve_answer(
         phone_number_id, wa_id, wamid, text.strip(), pending, params=_merged_params(params, button_params)
     )
+
+
+def _media_placeholder(message_type: str, media: dict[str, Any]) -> str:
+    """A faithful, non-blank turn text for a caption-less media message — the bracketed type
+    label, enriched for a document with a filename and a voice note. Never blank (``accept``
+    refuses blank text)."""
+    if message_type == "document":
+        filename = media.get("filename")
+        if isinstance(filename, str) and filename.strip():
+            return f"[document: {filename.strip()}]"
+    if message_type == "audio" and media.get("voice") is True:
+        return "[voice message]"
+    return _MEDIA_PLACEHOLDERS.get(message_type, "[media]")
+
+
+async def _handle_media(
+    message: dict[str, Any], message_type: str, phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+) -> None:
+    """Bridge an inbound media message (image/document/audio/video/sticker) as a fresh turn.
+
+    The caption becomes the turn text (a faithful ``[kind]`` placeholder when caption-less),
+    and the media's identity rides ``params`` (``media_kind``/``media_id``/``media_mime_type``/
+    ``media_sha256``/``media_filename``/``media_voice``/``sticker_animated``). No typed
+    ``attachments`` entry is minted — the Graph media id is not a durable :class:`MediaItem`
+    source and no served-media ingestion seam is reachable from a channel; see the module's
+    INBOUND MEDIA design note. Media never answers a pending ask (a photo cannot satisfy a
+    text/select/form question): it always bridges, leaving any parked ask untouched.
+    """
+    if await already_seen(wamid):
+        return
+    media = message.get(message_type)
+    media = media if isinstance(media, dict) else {}
+    caption = media.get("caption")
+    text = caption.strip() if isinstance(caption, str) and caption.strip() else _media_placeholder(message_type, media)
+
+    media_params: dict[str, str] = {}
+    _put_param(media_params, "media_kind", message_type)
+    _put_param(media_params, "media_id", media.get("id"))
+    _put_param(media_params, "media_mime_type", media.get("mime_type"))
+    _put_param(media_params, "media_sha256", media.get("sha256"))
+    _put_param(media_params, "media_filename", media.get("filename"))
+    if media.get("voice") is True:
+        _put_param(media_params, "media_voice", "true")
+    if media.get("animated") is True:
+        _put_param(media_params, "sticker_animated", "true")
+
+    await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=_merged_params(params, media_params))
+
+
+async def _handle_location(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+) -> None:
+    """Bridge an inbound location as a fresh turn carrying a typed :class:`LocationElement`.
+
+    ``latitude``/``longitude`` build the typed ``location`` handed to ``accept`` (a
+    machine-consumable field, not a param); the turn text is the shared ``name`` or
+    ``address``, else the coordinates (never blank). A location whose coordinates are missing
+    or out of the contract's ranges (or whose labels carry control characters) degrades to a
+    text-only bridge — the reply is never lost. Location never answers a pending ask.
+    """
+    if await already_seen(wamid):
+        return
+    location_field = message.get("location")
+    location_field = location_field if isinstance(location_field, dict) else {}
+    latitude = location_field.get("latitude")
+    longitude = location_field.get("longitude")
+    name = location_field.get("name")
+    address = location_field.get("address")
+    name = name.strip() if isinstance(name, str) and name.strip() else None
+    address = address.strip() if isinstance(address, str) and address.strip() else None
+
+    location: LocationElement | None = None
+    if isinstance(latitude, int | float) and isinstance(longitude, int | float):
+        try:
+            location = LocationElement(latitude=float(latitude), longitude=float(longitude), name=name, address=address)
+        except ValueError as exc:
+            logger.warning("whatsapp inbound location %s rejected (%s); bridging as text only", wamid, exc)
+
+    if name:
+        text = name
+    elif address:
+        text = address
+    elif isinstance(latitude, int | float) and isinstance(longitude, int | float):
+        text = f"location: {latitude}, {longitude}"
+    else:
+        text = "[location]"
+
+    await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=params or None, location=location)
+
+
+async def _handle_contacts(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+) -> None:
+    """Bridge inbound contact card(s) as a fresh turn.
+
+    Contacts have no shared typed shape, so they ride ``params`` (per the contract's
+    contacts→params guidance): ``contacts_count`` and the raw ``contacts`` array as compact
+    JSON (dropped when it exceeds the per-value transport cap — ``contacts_count`` still
+    rides). The turn text is the shared contact name(s), else a placeholder.
+    """
+    if await already_seen(wamid):
+        return
+    contacts = message.get("contacts")
+    contacts = contacts if isinstance(contacts, list) else []
+    names: list[str] = []
+    for contact in contacts:
+        name = contact.get("name") if isinstance(contact, dict) else None
+        formatted = name.get("formatted_name") if isinstance(name, dict) else None
+        if isinstance(formatted, str) and formatted.strip():
+            names.append(formatted.strip())
+    text = ", ".join(names) if names else "[contact card]"
+
+    contact_params: dict[str, str] = {}
+    _put_param(contact_params, "contacts_count", str(len(contacts)))
+    _put_param(contact_params, "contacts", json.dumps(contacts, ensure_ascii=False))
+    await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=_merged_params(params, contact_params))
+
+
+async def _handle_reaction(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+) -> None:
+    """Bridge an inbound emoji reaction as a fresh turn.
+
+    The reaction rides ``params`` (``reaction_emoji`` + ``reaction_message_id``, the ``wamid``
+    it was applied to); an empty emoji is a REMOVED reaction (``reaction_emoji`` omitted). The
+    turn text is the emoji, or a ``[reaction removed]`` placeholder. A reaction never answers a
+    pending ask.
+    """
+    if await already_seen(wamid):
+        return
+    reaction = message.get("reaction")
+    reaction = reaction if isinstance(reaction, dict) else {}
+    emoji = reaction.get("emoji")
+    text = emoji.strip() if isinstance(emoji, str) and emoji.strip() else "[reaction removed]"
+
+    reaction_params: dict[str, str] = {}
+    _put_param(reaction_params, "reaction_emoji", emoji)
+    _put_param(reaction_params, "reaction_message_id", reaction.get("message_id"))
+    await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=_merged_params(params, reaction_params))
 
 
 def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None:
@@ -930,17 +1130,22 @@ async def _bridge_inbound(
     wamid: str,
     form: dict[str, Any] | None = None,
     params: dict[str, str] | None = None,
+    attachments: list[MediaItem] | None = None,
+    location: LocationElement | None = None,
 ) -> None:
     """Route an uncorrelated inbound message into the conversation bridge.
 
     ``our_identity`` = phone_number_id, ``client_address`` = wa_id (verbatim);
     ``form`` is an ask-less form submission's structured copy, riding beside its
     rendered ``text``; ``params`` are the channel's opaque entry-params (reply ids,
-    referral, reply-to context — see the module's vocabulary block) forwarded verbatim to
-    the tool target's payload. A message with no route bound, or with blank text (a
-    media-only message or an empty interactive title), is logged and skipped; a
-    retryable overflow or infrastructure failure propagates as a 5xx so Meta
-    redelivers.
+    referral, reply-to context, media identity — see the module's vocabulary block)
+    forwarded verbatim to the tool target's payload. ``attachments`` (typed guest media) and
+    ``location`` (a shared geographic point) are the structured inbound content that lands on
+    a tool target's payload under the stable ``attachments``/``location`` keys; inbound media
+    currently carries none (see the INBOUND MEDIA design note), while an inbound location
+    passes its typed :class:`LocationElement`. A message with no route bound, or with blank
+    text (an empty interactive title), is logged and skipped; a retryable overflow or
+    infrastructure failure propagates as a 5xx so Meta redelivers.
 
     ``params`` are validated against the contract's transport bounds HERE before accept: a
     bound violation (which would otherwise 5xx and have Meta redeliver the same poison
@@ -966,6 +1171,8 @@ async def _bridge_inbound(
             provider_message_id=wamid,
             params=params,
             form=form,
+            attachments=attachments,
+            location=location,
         )
     except BlankInboundTextError as exc:
         logger.warning("blank whatsapp inbound %s dropped: %s", wamid, exc)

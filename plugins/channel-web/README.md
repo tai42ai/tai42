@@ -310,8 +310,9 @@ unknown token.
   and the query string's [link parameters](#link-parameters) are captured with the
   session. Carries a strict CSP (`default-src 'none'`,
   `script-src 'self'`, `connect-src 'self'`, `font-src 'self'`,
-  `img-src 'self' data: https:` for agent-sent media cards, no framing, no
-  inline script; `style-src` admits `'unsafe-inline'` because the bundled
+  `img-src 'self' data: https:` for agent-sent media-card images and
+  `media-src 'self' https:` for their native `<video>`/`<audio>` players, no framing,
+  no inline script; `style-src` admits `'unsafe-inline'` because the bundled
   design-system overlays inject a `<style>` element for their scroll lock).
 
   This door is reached by **navigating** to it, so it never answers JSON: every
@@ -433,14 +434,23 @@ the `form` entry carries the interaction's answer schema, which the page renders
 schema-driven form widget (the visitor's answer posts back as a JSON object through
 this plugin's own answer door), and only the `external` entry carries the
 interaction's `callback_url`, because only its widget opens one. A `notify` also carries
-media cards (text + media items — absolute-`https` images and outbound links, each
-optionally captioned) and interactive option lists (at most 10 options), appended as one `chat.media`
-entry the page renders as a card; a link item rides the card as a safe outbound link
-element, never folded into the body text, and a tap on an option sends the option's own text
-through the message door as an ordinary visitor message. A `notify` carrying a `schema`
-(an **ask-less form**) lands as one `chat.form` entry: the message is the form's prompt,
-the schema is the fillable widget (any media rides the same card; options are impossible
-beside a schema by contract), and the frame carries a server-minted submission token —
+the full rich-card vocabulary, appended as one `chat.media` entry the page renders as a card:
+media items rendered by kind (an `image` inline, a `document` as a download card labelled by
+its `filename`, a `video`/`audio` as a native player, a `link` as a safe outbound anchor —
+file kinds are absolute-`https`, each optionally captioned); a flat interactive option list
+(at most 10) of typed **reply** chips (a tap sends the reply's text as an ordinary visitor
+message, and its authored `id`, when set, rides the send as `params.reply_id`; an optional
+`description` is a secondary line) and **link** actions (a button-styled anchor that opens the
+url in a new tab and submits nothing); the sectioned alternative `sections` (titled groups of
+reply rows); a media `header` above the body and a muted `footer` beneath it; and a `location`
+rendered as a map-pin element (readable coordinates/name/address + an OpenStreetMap link built
+from the coordinates alone — no external tiles, CSP-safe). The channel declares
+`supports_media_notifications`, `supports_interactive_notifications`,
+`supports_location_notifications` and `supports_form_notifications` — it renders everything.
+A `notify` carrying a `schema` (an **ask-less form**) lands as one `chat.form` entry: the
+message is the form's prompt, the schema is the fillable widget (media and a location may ride
+the same card; options/sections are impossible beside a schema by contract), and the frame
+carries a server-minted submission token —
 `uuid4().hex`, stored under `channel:web:form:{token}` for the transcript TTL — naming
 the form door the submission posts back through. Unlike a question the card has no
 deadline and no answered state: it settles like the option chips — a local "Sent" badge

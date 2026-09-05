@@ -15,8 +15,11 @@ from tai42_contract.channels import (
     ChannelDeliveryError,
     ChannelNotification,
     ChannelTemplate,
+    LinkOption,
+    OptionSection,
+    ReplyOption,
 )
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 
 from tai42_channel_web import channel as channel_module
 from tai42_channel_web.channel import WebChannel
@@ -442,20 +445,31 @@ async def test_notify_served_reference_image_rides_the_card(fake_redis: FakeRedi
 
 
 async def test_notify_options_appends_a_card_with_options(fake_redis: FakeRedis):
-    # A text-only-with-options notification also lands as ONE chat.media card.
+    # A text-with-options notification lands as ONE chat.media card. Options are the
+    # typed vocabulary now: reply chips (a tap submits their text; an authored id and a
+    # secondary description ride the frame) and link-action buttons (a tap opens a url).
     ids = await WebChannel().notify(
         ChannelNotification(
             message="pick one",
             recipient=VISITOR_ID,
             sender_identity=IDENTITY,
-            options=["Item A", "Item B"],
+            options=[
+                ReplyOption(text="Item A", id="opt-a", description="the first one"),
+                ReplyOption(text="Item B"),
+                LinkOption(label="Read more", url="https://example.com/more"),
+            ],
         )
     )
     payload = _only_media_entry(fake_redis)
     assert payload["id"] == ids[0]
     assert payload["text"] == "pick one"
-    assert payload["options"] == ["Item A", "Item B"]
+    assert payload["options"] == [
+        {"kind": "reply", "text": "Item A", "description": "the first one", "id": "opt-a"},
+        {"kind": "reply", "text": "Item B"},
+        {"kind": "link", "label": "Read more", "url": "https://example.com/more"},
+    ]
     assert "media" not in payload
+    assert "sections" not in payload
 
 
 async def test_notify_options_and_media_appends_a_card_with_both(fake_redis: FakeRedis):
@@ -465,12 +479,106 @@ async def test_notify_options_and_media_appends_a_card_with_both(fake_redis: Fak
             recipient=VISITOR_ID,
             sender_identity=IDENTITY,
             media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png")],
-            options=["Item A"],
+            options=[ReplyOption(text="Item A")],
         )
     )
     payload = _only_media_entry(fake_redis)
     assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/p.png"}]
-    assert payload["options"] == ["Item A"]
+    assert payload["options"] == [{"kind": "reply", "text": "Item A"}]
+
+
+async def test_notify_sections_append_a_card_with_a_sectioned_list(fake_redis: FakeRedis):
+    # A sectioned reply list rides the card's ``sections`` key: each section is a title
+    # and its non-empty reply rows; options and sections are mutually exclusive, so a
+    # sectioned card never carries a flat ``options`` list.
+    ids = await WebChannel().notify(
+        ChannelNotification(
+            message="choose a slot",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            sections=[
+                OptionSection(title="Today", rows=[ReplyOption(text="09:00", id="t-9"), ReplyOption(text="10:00")]),
+                OptionSection(title="Tomorrow", rows=[ReplyOption(text="11:00")]),
+            ],
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["id"] == ids[0]
+    assert payload["sections"] == [
+        {
+            "title": "Today",
+            "rows": [{"kind": "reply", "text": "09:00", "id": "t-9"}, {"kind": "reply", "text": "10:00"}],
+        },
+        {"title": "Tomorrow", "rows": [{"kind": "reply", "text": "11:00"}]},
+    ]
+    assert "options" not in payload
+
+
+async def test_notify_header_and_footer_ride_the_interactive_card(fake_redis: FakeRedis):
+    # A header (a single display-media item above the body) and a footer (a muted
+    # trailing line) compose an interactive card, so they ride WITH options.
+    await WebChannel().notify(
+        ChannelNotification(
+            message="pick one",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            header=MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/banner.png", caption="Banner"),
+            footer="Powered by TAI",
+            options=[ReplyOption(text="Item A")],
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["header"] == {"kind": "image", "url": "https://cdn.example/banner.png", "caption": "Banner"}
+    assert payload["footer"] == "Powered by TAI"
+    assert payload["options"] == [{"kind": "reply", "text": "Item A"}]
+
+
+async def test_notify_location_appends_a_card_with_a_map_pin(fake_redis: FakeRedis):
+    # A location notification lands as a chat.media card carrying a ``location`` map-pin
+    # element (coordinates + any name/address); a content-only location keeps an empty text.
+    ids = await WebChannel().notify(
+        ChannelNotification(
+            message="",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            location=LocationElement(latitude=51.5074, longitude=-0.1278, name="London", address="Trafalgar Square"),
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["id"] == ids[0]
+    assert payload["text"] == ""
+    assert payload["location"] == {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "name": "London",
+        "address": "Trafalgar Square",
+    }
+    assert "media" not in payload
+
+
+async def test_notify_document_media_carries_its_filename(fake_redis: FakeRedis):
+    # A document media item carries its suggested display filename on the frame, so the
+    # page renders a download card labelled by it; video/audio ride as their own kinds.
+    await WebChannel().notify(
+        ChannelNotification(
+            message="the report",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            media=[
+                MediaItem(
+                    kind=MediaKind.DOCUMENT, url="https://cdn.example/r.pdf", caption="Q3", filename="report.pdf"
+                ),
+                MediaItem(kind=MediaKind.VIDEO, url="https://cdn.example/clip.mp4"),
+                MediaItem(kind=MediaKind.AUDIO, url="https://cdn.example/note.mp3"),
+            ],
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["media"] == [
+        {"kind": "document", "url": "https://cdn.example/r.pdf", "caption": "Q3", "filename": "report.pdf"},
+        {"kind": "video", "url": "https://cdn.example/clip.mp4"},
+        {"kind": "audio", "url": "https://cdn.example/note.mp3"},
+    ]
 
 
 def _only_form_entry(fake: FakeRedis) -> dict:
@@ -545,7 +653,20 @@ async def test_notify_schema_with_media_rides_the_same_card(fake_redis: FakeRedi
 
 async def test_notify_schema_without_media_omits_the_key(fake_redis: FakeRedis):
     await WebChannel().notify(make_notification(schema=_FORM_SCHEMA))
-    assert "media" not in _only_form_entry(fake_redis)
+    payload = _only_form_entry(fake_redis)
+    assert "media" not in payload
+    assert "location" not in payload
+
+
+async def test_notify_schema_with_location_rides_the_form_card(fake_redis: FakeRedis):
+    # A location may ride a form card (schema excludes options/sections, not location):
+    # the map-pin element renders alongside the fillable fields.
+    await WebChannel().notify(
+        make_notification(schema=_FORM_SCHEMA, location=LocationElement(latitude=51.5, longitude=-0.12, name="London"))
+    )
+    payload = _only_form_entry(fake_redis)
+    assert payload["schema"] == _FORM_SCHEMA
+    assert payload["location"] == {"latitude": 51.5, "longitude": -0.12, "name": "London"}
 
 
 async def test_notify_schema_without_sender_identity_splits_composite_recipient(fake_redis: FakeRedis):
@@ -569,7 +690,7 @@ async def test_notify_schema_and_options_rejected_at_contract(fake_redis: FakeRe
             recipient=VISITOR_ID,
             sender_identity=IDENTITY,
             schema=_FORM_SCHEMA,
-            options=["Item A"],
+            options=[ReplyOption(text="Item A")],
         )
 
 
@@ -580,7 +701,7 @@ async def test_notify_options_and_template_rejected_at_contract(fake_redis: Fake
             message="x",
             recipient=VISITOR_ID,
             sender_identity=IDENTITY,
-            options=["Item A"],
+            options=[ReplyOption(text="Item A")],
             template=ChannelTemplate(name="welcome", language="en"),
         )
 

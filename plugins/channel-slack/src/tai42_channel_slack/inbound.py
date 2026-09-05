@@ -49,7 +49,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import BlankInboundTextError
 
-from tai42_channel_slack.blocks import is_select_action
+from tai42_channel_slack.blocks import decode_reply_value, is_option_tap, is_reply_action
 from tai42_channel_slack.channel import open_modal_view
 from tai42_channel_slack.correlation import (
     claim_dedupe,
@@ -270,13 +270,22 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     return await _bridge(settings.bot_user_id, channel, text, event_id)
 
 
-async def _bridge(our_identity: str | None, channel: object, text: object, event_id: str) -> Response:
+async def _bridge(
+    our_identity: str | None,
+    channel: object,
+    text: object,
+    event_id: str,
+    *,
+    params: dict[str, str] | None = None,
+) -> Response:
     """Hand one uncorrelated human message to the conversation bridge.
 
     ``our_identity`` (the bot user id) is required here — a bridge route with it
     unset is operator misconfig, raised loudly. A message with no text/channel, or
-    with whitespace-only text, is nothing to bridge and is acked. No route bound acks
-    with a debug log; an infrastructure failure propagates so Slack redelivers.
+    with whitespace-only text, is nothing to bridge and is acked. ``params`` is the
+    optional opaque channel enrichment the turn carries (e.g. ``reply_id`` from a tapped
+    reply option); ``None`` for a plain message. No route bound acks with a debug log; an
+    infrastructure failure propagates so Slack redelivers.
     """
     if not isinstance(text, str) or not text or not isinstance(channel, str) or not channel:
         return JSONResponse({"status": "ignored"})
@@ -292,6 +301,7 @@ async def _bridge(our_identity: str | None, channel: object, text: object, event
             cap_key=channel,
             text=text,
             provider_message_id=event_id,
+            params=params,
         )
     except BlankInboundTextError:
         logger.debug("slack inbound: blank text for channel=%s; acking", channel)
@@ -303,7 +313,13 @@ async def _bridge(our_identity: str | None, channel: object, text: object, event
 
 
 async def _resolve_answer(
-    thread_ts: str, text: object, our_identity: str | None, channel: str, event_id: str
+    thread_ts: str,
+    text: object,
+    our_identity: str | None,
+    channel: str,
+    event_id: str,
+    *,
+    params: dict[str, str] | None = None,
 ) -> Response:
     """Resolve a correlated threaded reply against its pending ask via the ONE shared
     ladder, or bridge it on a correlation miss.
@@ -320,7 +336,7 @@ async def _resolve_answer(
     entry = await slack_thread_correlation_store.get_correlation(thread_ts)
     if entry is None:
         # No pending ask on this thread (expired / never ours) — bridge like any message.
-        return await _bridge(our_identity, channel, text, event_id)
+        return await _bridge(our_identity, channel, text, event_id, params=params)
     if not isinstance(text, str) or not text:
         raise ValueError(f"correlated slack reply in thread {thread_ts} carries no text")
 
@@ -344,10 +360,14 @@ async def _resolve_answer(
             provider_message_id=event_id,
             bridge_text=text,
             owns_retry_notice=False,
+            # Opaque enrichment (e.g. ``reply_id`` from a tapped reply option) the ladder
+            # threads to the ask callback and, when the reply is bridged instead, onto the
+            # turn — so a tap's author-set id is never dropped on either arm.
+            params=params,
         ),
     )
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
-        return await _bridge(our_identity, channel, text, event_id)
+        return await _bridge(our_identity, channel, text, event_id, params=params)
     return JSONResponse({"status": _EVENTS_ACK[result.outcome]})
 
 
@@ -469,9 +489,11 @@ async def slack_interactive(request: Request) -> Response:
 async def _handle_block_actions(payload: dict[str, Any]) -> Response:
     """Route one ``block_actions`` click.
 
-    A ``tai42_form_open`` click opens the form modal; a ``tai42_select:<index>`` click
-    (a select-answer or suggested-reply tap, or a notify option) resolves the option
-    text; every other action is acked-ignored.
+    A ``tai42_form_open`` click opens the form modal; an option tap that SUBMITS a reply —
+    a ``tai42_select:<index>`` ask-path tap (select answer / suggested reply) or a
+    ``tai42_reply:<index>`` notify-path reply tap — resolves the reply; every other action,
+    including a ``tai42_link:<index>`` url-button tap (it opens a url and submits nothing),
+    is acked-ignored.
     """
     actions = payload.get("actions")
     action = actions[0] if isinstance(actions, list) and actions and isinstance(actions[0], dict) else None
@@ -480,26 +502,37 @@ async def _handle_block_actions(payload: dict[str, Any]) -> Response:
     action_id = action.get("action_id")
     if action_id == FORM_OPEN_ACTION_ID:
         return await _open_form_modal(payload, action)
-    if isinstance(action_id, str) and is_select_action(action_id):
+    if isinstance(action_id, str) and is_option_tap(action_id):
         return await _resolve_option_tap(payload, action)
     return JSONResponse({"status": "ignored"})
 
 
 async def _resolve_option_tap(payload: dict[str, Any], action: dict[str, Any]) -> Response:
-    """Resolve an option-button tap (``tai42_select:<index>``) to its option text.
+    """Resolve an option-button tap to its submit text (and any author-set reply id).
 
-    The button's ``value`` IS the option text; the anchor message's ``ts`` (from the
-    payload container) is the correlation key the same as an in-thread reply. The tap
-    is gated by the SAME allowlist the typed-reply path applies (``_process_event``): a
-    tap from an allowlisted channel resolves against a live select/suggested-reply ask
-    through the shared ladder, or (a notify option / a correlation miss) enters the
-    conversation as a visitor message; a tap from a channel outside the allowlist bridges
-    directly, exactly as a typed message from that channel would, never touching a pending
-    ask. A malformed tap (no value, no anchor) is acked-ignored, never a 5xx.
+    An ask-path ``tai42_select:<index>`` tap carries the option text verbatim in ``value``;
+    a notify-path ``tai42_reply:<index>`` tap carries a JSON envelope of the submit text and
+    the author-set option id (decoded via :func:`decode_reply_value`), and that id rides the
+    resolved turn as ``params.reply_id`` — the opaque channel enrichment the shared answer
+    ladder threads BOTH ways (to the ask callback and, when bridged, onto the turn). The
+    anchor message's ``ts`` (from the payload container) is the correlation key the same as
+    an in-thread reply. The tap is gated by the SAME allowlist the typed-reply path applies
+    (``_process_event``): a tap from an allowlisted channel resolves against a live
+    select/suggested-reply ask through the shared ladder, or (a notify option / a
+    correlation miss) enters the conversation as a visitor message; a tap from a channel
+    outside the allowlist bridges directly, exactly as a typed message from that channel
+    would, never touching a pending ask. A malformed tap (no value, no anchor) is
+    acked-ignored, never a 5xx.
     """
-    value = action.get("value")
-    if not isinstance(value, str) or not value:
+    raw_value = action.get("value")
+    if not isinstance(raw_value, str) or not raw_value:
         return JSONResponse({"status": "ignored"})
+    action_id = action.get("action_id")
+    if isinstance(action_id, str) and is_reply_action(action_id):
+        value, reply_id = decode_reply_value(raw_value)
+        params = {"reply_id": reply_id} if reply_id else None
+    else:
+        value, params = raw_value, None
     container = payload.get("container")
     message_ts = container.get("message_ts") if isinstance(container, dict) else None
     channel_obj = payload.get("channel")
@@ -519,9 +552,9 @@ async def _resolve_option_tap(payload: dict[str, Any], action: dict[str, Any]) -
     if channel not in recipients:
         # Defense-in-depth, mirroring the typed-reply gate: a tap from a non-allowlisted
         # channel is not an answer to any ask — it bridges exactly as a typed message
-        # from that channel would.
-        return await _bridge(settings.bot_user_id, channel, value, dedupe_id)
-    return await _resolve_answer(message_ts, value, settings.bot_user_id, channel, dedupe_id)
+        # from that channel would (carrying any reply id as enrichment params).
+        return await _bridge(settings.bot_user_id, channel, value, dedupe_id, params=params)
+    return await _resolve_answer(message_ts, value, settings.bot_user_id, channel, dedupe_id, params=params)
 
 
 async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> Response:

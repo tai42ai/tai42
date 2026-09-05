@@ -23,6 +23,7 @@ function formItem(overrides: Partial<FormCardItem> = {}): FormCardItem {
     schema: SCHEMA,
     token: 'tok-0123456789abcdef0123456789abcdef',
     media: null,
+    location: null,
     ts: new Date().toISOString(),
     ...overrides,
   };
@@ -52,8 +53,8 @@ describe('FormCard', () => {
 
   it('renders the card media through the shared media components', () => {
     const media: MediaItem[] = [
-      { kind: 'image', url: 'https://example.com/a.png', caption: 'A shot' },
-      { kind: 'link', url: 'https://docs.example/p', caption: 'The doc' },
+      { kind: 'image', url: 'https://example.com/a.png', caption: 'A shot', filename: null },
+      { kind: 'link', url: 'https://docs.example/p', caption: 'The doc', filename: null },
     ];
     renderCard(formItem({ media }));
 
