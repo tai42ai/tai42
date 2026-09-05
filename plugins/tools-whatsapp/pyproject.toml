@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-tools-whatsapp"
-version = "1.0.8"
+version = "1.0.9"
 description = "WhatsApp provisioning tools for the TAI ecosystem: manifest-loaded Meta Graph tools that register a WhatsApp message template, list the account's message templates, delete a message template by name, and subscribe the app to a WhatsApp Business Account's webhooks."
 readme = "README.md"
 requires-python = ">=3.13"

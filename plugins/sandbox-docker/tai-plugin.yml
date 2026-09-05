@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: sandbox-docker
 package: tai42-sandbox-docker
-version: 1.0.2
+version: 1.0.3
 description: >-
   Docker sandbox provider for the TAI ecosystem — per-session containers on a
   remote engine over the Docker Engine API.
