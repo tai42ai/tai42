@@ -181,8 +181,11 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # ``prune_runs`` — the retention purge, tier-0 default-projected like its
             # ``delete_conversation_config`` sibling (destructive/fenced but not
             # authority_changing, so it stays on the default surface; the HTTP fenced
-            # action-class fences the door, not the MCP projection).
-            assert total == 183, total
+            # action-class fences the door, not the MCP projection). The +1 to 184 is
+            # ``cancel_interaction`` — the per-interaction withdraw door, tier-0
+            # default-projected like its ``answer_interaction`` sibling (destructive but not
+            # authority_changing, so it rides the default surface under expose_destructive).
+            assert total == 184, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -242,28 +245,30 @@ def test_d1_projected_surface_is_the_expected_op_count():
                 "validate_condition",
             }, tier2
 
-            # The default-projected surface = 138 (the +2 are ``sandbox_info`` and
-            # ``list_interactions``; the +1 is ``list_pending_interactions``; the final +2 are
-            # ``list_runs`` and ``prune_runs``), measured two ways.
+            # The default-projected surface = 139 (the +2 are ``sandbox_info`` and
+            # ``list_interactions``; the +1 is ``list_pending_interactions``; the +2 are
+            # ``list_runs`` and ``prune_runs``; the final +1 is ``cancel_interaction`` — a
+            # destructive tier-0 op projected under the default ``expose_destructive`` like
+            # ``answer_interaction``), measured two ways.
             recorder = _RecordingApp()
             projected = project_operations(recorder, ApiToolsConfig(), registry=reg)
-            assert len(projected) == 138, len(projected)
-            assert total - len(tier2) - len(tier1) == 138
+            assert len(projected) == 139, len(projected)
+            assert total - len(tier2) - len(tier1) == 139
 
-            # The LIVE booted tool surface is the 138 projected ops PLUS the two
+            # The LIVE booted tool surface is the 139 projected ops PLUS the two
             # force-registered hidden mechanism tools the conversations router installs at
             # startup: ``conversation_deliver`` (a parked AGENT turn's resumed answer) and
             # ``deliver_tool_completion`` (a parked TOOL turn's terminal, mapped via reply_expr),
             # both fired through ``run_tool`` by the resumer. Neither is an api_tools projection
-            # (``projected`` stays 138) — they are mandatory bridges registered independently of
+            # (``projected`` stays 139) — they are mandatory bridges registered independently of
             # the api_tools toggle and carried on the live surface like any hidden tool, so the
-            # live count is 140.
+            # live count is 141.
             hidden_bridges = {"conversation_deliver", "deliver_tool_completion"}
             live = await app.tools.get_tools()
             assert set(live) == set(projected) | hidden_bridges
             for name in hidden_bridges:
                 assert (live[name].meta or {}).get("tai42/hidden") is True
-            assert len(live) == 140
+            assert len(live) == 141
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -297,6 +302,50 @@ def test_d1_destructive_hint_present_on_mutations_absent_on_reads():
             assert hint("list_system_kinds") in (None, False)
             assert hint("list_hooks") in (None, False)
             assert hint("list_channels") in (None, False)
+
+    asyncio.run(run())
+
+
+# -- interactions read tools are agent-callable through the projected surface ---
+
+
+def test_d1_interactions_read_tools_are_agent_callable():
+    """``list_interactions`` and ``list_pending_interactions`` are agent-callable platform
+    tools via the SAME operation-projection surface (and the SAME ``tai42_app.tools``
+    registry + ``run_tool`` dispatch) that carries ``ask_user`` and ``answer_interaction``:
+    both are default-projected reads, so an agent dispatches them by name. A same-named
+    ``tools/builtin`` shim is impossible — it would trip the duplicate-bind boot guard
+    (checklist 3) — so the projected surface IS the agent tool. This pins registration +
+    invocation returning the operation's own result, and the ``status`` filter honored
+    through the tool (an unknown value is a loud ``ToolError``)."""
+
+    async def run():
+        from fastmcp.exceptions import ToolError
+
+        async with app.app_context(_manifest()):
+            live = await app.tools.get_tools()
+            assert "list_interactions" in live
+            assert "list_pending_interactions" in live
+
+            # Dispatched by name through the shared run_tool seam, returning the
+            # operation's own result. The interactions store is unconfigured in this
+            # harness, so each read answers its honest empty payload.
+            page = await app.tools.run_tool("list_interactions", {"status": "pending"})
+            assert page == {
+                "items": [],
+                "total": 0,
+                "page": 1,
+                "page_size": 50,
+                "next_page": None,
+                "truncated": False,
+            }
+            parked = await app.tools.run_tool("list_pending_interactions", {})
+            assert parked == {"items": [], "count": 0}
+
+            # The status filter is honored THROUGH the tool: an unknown value is a loud
+            # ToolError naming the valid set (mapped from the operation's BadRequestError).
+            with pytest.raises(ToolError, match="unknown status"):
+                await app.tools.run_tool("list_interactions", {"status": "bogus"})
 
     asyncio.run(run())
 
@@ -424,13 +473,13 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             }
         )
         async with app.app_context(manifest):
-            # api_tools projected the surface: the 138 projected ops plus the two
+            # api_tools projected the surface: the 139 projected ops plus the two
             # force-registered hidden completion mechanisms the conversations router installs at
-            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 140 live.
+            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 141 live.
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 140
+            assert len(live) == 141
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process

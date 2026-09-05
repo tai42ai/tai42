@@ -97,6 +97,24 @@ async def test_answered_removed_events_carry_audience(fake_redis):
     assert "audience" not in terminal["i2"]  # unaddressed -> no audience field
 
 
+async def test_prune_pending_reason_tags_the_removed_event(fake_redis):
+    # A per-interaction cancel prunes with ``reason="cancelled"``, which TAGS the removed
+    # event so a live operator surface tells a deliberate withdrawal apart from a
+    # timeout/expiry removal. An UNTAGGED prune (the timeout path / thread cascade) emits
+    # the removed event with NO reason field, byte-identical to before.
+    store = InteractionStore("t:")
+    await store.add(fake_redis, _request("cx", "gc", store), idle_ttl=100)
+    await store.add(fake_redis, _request("tx", "gt", store), idle_ttl=100)
+
+    assert await store.prune_pending(fake_redis, "cx", "gc", reason="cancelled") == "pruned"
+    assert await store.prune_pending(fake_redis, "tx", "gt") == "pruned"
+
+    events = await fake_redis.xrange(store.events_key)
+    removed = {f["interaction_id"]: f for _id, f in events if f["type"] == "interaction.removed"}
+    assert removed["cx"]["reason"] == "cancelled"
+    assert "reason" not in removed["tx"]  # untagged removal -> no reason field
+
+
 async def test_add_indexes_media_and_extends_to_group_horizon(fake_redis):
     # A question referencing served media joins the group's media index, and its media
     # key TTL is set-or-extended to the group horizon so the bytes never expire before

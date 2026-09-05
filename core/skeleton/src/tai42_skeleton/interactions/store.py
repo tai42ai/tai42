@@ -46,13 +46,21 @@ REMOVED_EVENT = "interaction.removed"
 _EVENTS_MAXLEN = 10000
 
 
-def _event_fields(event_type: str, interaction_id: str, group_id: str, audience: str | None) -> dict[str, str]:
+def _event_fields(
+    event_type: str, interaction_id: str, group_id: str, audience: str | None, *, reason: str | None = None
+) -> dict[str, str]:
     # An answered/removed event frame. ``audience`` rides it so the tail-only SSE
     # filters the frame directly (a restricted caller sees only its own); it is
     # omitted when None (an unaddressed question) — a redis stream field is never None.
+    # ``reason`` TAGS a removed event with WHY the question left pending (``"cancelled"``
+    # for an operator per-interaction cancel), so a live operator surface can tell a
+    # deliberate withdrawal apart from a timeout/expiry removal; omitted (untagged) for
+    # every other removal, exactly as before.
     fields = {"type": event_type, "interaction_id": interaction_id, "group_id": group_id}
     if audience is not None:
         fields["audience"] = audience
+    if reason is not None:
+        fields["reason"] = reason
     return fields
 
 
@@ -863,12 +871,20 @@ class InteractionStore:
                 except WatchError:
                     continue
 
-    async def prune_pending(self, r: Redis, interaction_id: str, group_id: str) -> PruneResult:
+    async def prune_pending(
+        self, r: Redis, interaction_id: str, group_id: str, *, reason: str | None = None
+    ) -> PruneResult:
         """Remove a still-open question that is being abandoned (cancel-cleanup or
         the timeout path). Status-gated exactly like ``record_answer``, INCLUDING
         its ``except WatchError: continue`` retry loop: an answer committing
         between the status read and EXEC fires WatchError, the retry then reads
         ``answered`` and returns ``"answered"`` cleanly.
+
+        ``reason`` TAGS the emitted ``interaction.removed`` event with WHY the question
+        left pending (``"cancelled"`` for the operator per-interaction cancel door); it
+        rides the event so a live operator surface can distinguish a deliberate withdrawal
+        from a timeout/expiry removal. It defaults to ``None`` — the timeout path and the
+        thread-delete cascade emit an UNTAGGED removed event, byte-identical to before.
 
         WATCHes the state key AND the count key — the count WATCH for the same
         reason ``record_answer`` has it: a concurrent ``add()`` to the group INCRs
@@ -941,7 +957,10 @@ class InteractionStore:
                         pipe.delete(count_key)
                     pipe.xadd(
                         self.events_key,
-                        cast("dict[Any, Any]", _event_fields(REMOVED_EVENT, interaction_id, group_id, audience)),
+                        cast(
+                            "dict[Any, Any]",
+                            _event_fields(REMOVED_EVENT, interaction_id, group_id, audience, reason=reason),
+                        ),
                         maxlen=_EVENTS_MAXLEN,
                         approximate=True,
                     )

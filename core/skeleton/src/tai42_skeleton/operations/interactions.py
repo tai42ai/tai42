@@ -278,6 +278,77 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
     return {"interaction_id": interaction_id, "status": "answered"}
 
 
+@operation(
+    name="cancel_interaction",
+    summary="Cancel a pending interaction",
+    tags=["interactions"],
+    destructive=True,
+    errors=[ConflictError, ForbiddenError, NotFoundError],
+)
+async def cancel_interaction(interaction_id: str) -> dict:
+    """Cancel a pending interaction — WITHDRAW one specific ask without answering it and
+    without deleting its conversation thread.
+
+    The mirror of ``answer_interaction`` for the terminal-without-an-answer case: it
+    tears the pending question down via the store's status-gated ``prune_pending`` (the
+    same primitive the timeout path and the thread-delete cascade use), so NO continuation
+    fires — a parked async flow is never resumed — and the removed event rides tagged
+    ``reason="cancelled"`` so a live operator surface tells a deliberate withdrawal apart
+    from a timeout/expiry removal.
+
+    Status-gated exactly like the answer door: only a PENDING (or parked) question cancels.
+    A question already ``answered`` (its state retained) is a loud ``409`` conflict; a
+    question whose state is GONE — expired, already cancelled, or never existed (all
+    leave no distinguishable tombstone, the same limit the answer door has) — is a ``404``.
+    Idempotent at the store seam: ``prune_pending`` re-run on a withdrawn question is a
+    clean no-op, so a re-cancel simply reports the question gone (``404``) rather than
+    double-tearing anything down. Unlike the answer door it is answer-format-AGNOSTIC: an
+    EXTERNAL ask is a pending ask an operator may withdraw, so it is cancellable too.
+
+    Channel-blind by construction: a channel-side pending correlation is NOT proactively
+    torn down. A later guest reply forwarded to the callback door finds the state gone and
+    the door answers ``404``, which the inbound ladder maps to a fresh bridged turn — the
+    identical path a timeout/expiry removal already takes.
+
+    Audience gate identical to ``answer_interaction`` (after the existence/status guards):
+    a question's ``audience`` identity OR any unrestricted caller (the operator can always
+    withdraw a stuck question) may cancel; every other restricted caller is a loud ``403``.
+    """
+    # OFF gate: with no store configured no interaction can exist — a 404 byte-identical
+    # to the genuine miss below, so the door is no oracle (mirrors the answer door).
+    if not interactions_store_configured():
+        raise NotFoundError("Interaction not found")
+    settings = interactions_settings()
+    store = InteractionStore(settings.key_prefix)
+    _user_id, restricted = request_identity()
+
+    async with client_ctx(RedisClient, settings.redis) as r:
+        state = await store.get_state(r, interaction_id)
+        if state is None:
+            raise NotFoundError("Interaction not found")
+        if state.status == "answered":
+            raise ConflictError("Interaction already answered")
+        # A restricted caller may cancel ONLY a question addressed to its identity;
+        # an unrestricted caller may cancel anything (the answer door's exact gate).
+        if restricted is not None:
+            if state.request.audience is None:
+                raise ForbiddenError("restricted identities may cancel only interactions addressed to them")
+            if state.request.audience != restricted:
+                raise ForbiddenError("interaction is addressed to another identity")
+        # Status-gated teardown firing NO continuation, tagging the removed event
+        # ``cancelled``. A concurrent answer that claimed first surfaces as ``"answered"``
+        # here (a loud 409 conflict); a state that vanished between the read and the
+        # prune (a raced expiry/cancel) surfaces as ``"gone"`` (a 404, the same terminal
+        # answer the answer door gives for a missing interaction).
+        result = await store.prune_pending(r, interaction_id, state.group_id, reason="cancelled")
+        if result == "answered":
+            raise ConflictError("Interaction already answered")
+        if result == "gone":
+            raise NotFoundError("Interaction not found")
+
+    return {"interaction_id": interaction_id, "status": "cancelled"}
+
+
 def _add_data(request: InteractionRequest) -> dict:
     """The add-frame shape shared by the paged list door and the live stream tail — the
     client shape of one pending question."""
@@ -335,9 +406,18 @@ MAX_INTERACTIONS_PAGE_SIZE = 200
 #: index cannot be sliced at; it is a malformed window and is refused as one.
 MAX_INTERACTIONS_PAGE = 1_000_000
 
+#: The interaction lifecycle statuses the list door accepts as a ``?status=`` filter: the
+#: one LIVE status the pending inbox surfaces (``pending``) plus the two TERMINALS a record
+#: reaches (``answered``, and the ``cancelled`` this feature adds). An unknown value is a
+#: loud 400 naming this set. Note the inbox retains only PENDING records — an answered one
+#: is reconciled out of the pending index, a cancelled/expired one is pruned — so a terminal
+#: filter is well-formed but matches NOTHING on this door: it filters what the inbox holds,
+#: it never resurrects terminal history (which this store does not retain).
+LIST_STATUS_VALUES: tuple[str, ...] = ("pending", "answered", "cancelled")
+
 
 class InteractionWindowQuery(BaseModel):
-    """The ``?page=``/``?pageSize=`` window the pending-list door takes.
+    """The ``?page=``/``?pageSize=``/``?status=`` window the pending-list door takes.
 
     Spec metadata only — the door parses its query at the HTTP edge."""
 
@@ -347,6 +427,14 @@ class InteractionWindowQuery(BaseModel):
         ge=1,
         alias="pageSize",
         description=f"Items per page. A larger value is capped to {MAX_INTERACTIONS_PAGE_SIZE}, never refused.",
+    )
+    status: str | None = Field(
+        default=None,
+        description=(
+            "Optional lifecycle-status filter. One of "
+            f"{', '.join(LIST_STATUS_VALUES)}; an unknown value is a 400. The inbox holds only "
+            "pending records, so a terminal status matches nothing here."
+        ),
     )
 
 
@@ -374,7 +462,7 @@ def _next_page(page: int, limit: int, total: int) -> int | None:
     errors=[BadRequestError],
     request_model=InteractionWindowQuery,
 )
-async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
+async def list_interactions(page: int = 1, page_size: int = 50, status: str | None = None) -> dict:
     """The pending questions the inbox shows, one page at a time — the initial-load
     surface a client reads BEFORE applying the live stream
     (``GET /api/interactions/stream``).
@@ -388,10 +476,21 @@ async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
     goes (phantom-group prune, abandoned past-deadline prune, answered/missing skip). Returns
     ``{"items", "total", "page", "page_size", "next_page", "truncated"}`` — ``items``
     carry the same shape as the stream's add frames, and ``truncated`` is always
-    ``false`` (the pending index is the whole set, sliced in memory)."""
+    ``false`` (the pending index is the whole set, sliced in memory).
+
+    ``status`` optionally filters by lifecycle status (one of :data:`LIST_STATUS_VALUES`;
+    an unknown value is a loud 400 naming the set), applied BEFORE paging so ``total`` stays
+    honest. The inbox holds only PENDING records, so ``status="pending"`` returns the whole
+    set and any TERMINAL status (``answered``/``cancelled``) matches nothing on this door —
+    the terminal history is not retained here; use it as a forward-looking axis, not a
+    terminal-history query."""
     offset, limit = _page_bounds(page, page_size)
+    # Loud, before any read: an unknown status names the valid set (the /pending audit door
+    # is deliberately untouched — a different store with live-park semantics).
+    if status is not None and status not in LIST_STATUS_VALUES:
+        raise BadRequestError(f"unknown status {status!r}; valid statuses are {', '.join(LIST_STATUS_VALUES)}")
     # OFF gate: with no store configured nothing is pending — the honest empty page
-    # (the malformed-window 400 above still applies, so the door is no configured oracle).
+    # (the malformed-window/status 400s above still apply, so the door is no configured oracle).
     if not interactions_store_configured():
         return {"items": [], "total": 0, "page": page, "page_size": limit, "next_page": None, "truncated": False}
     settings = interactions_settings()
@@ -403,6 +502,11 @@ async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
         # A restricted caller sees only its own addressed questions; filter BEFORE
         # paging so the total counts what the caller may actually see.
         pending = [req for req in pending if req.audience == restricted]
+    # Status filter, BEFORE paging so ``total`` is honest. The pending inbox holds only
+    # PENDING records by construction, so a terminal-status filter (``answered``/``cancelled``)
+    # matches none here — the door filters what it holds, never resurrecting terminal history.
+    if status is not None and status != "pending":
+        pending = []
     total = len(pending)
     window = pending[offset : offset + limit]
     return {

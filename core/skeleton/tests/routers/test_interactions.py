@@ -1374,6 +1374,52 @@ async def test_list_unrestricted_shows_all(wired):
     assert sorted(item["interaction_id"] for item in page["items"]) == ["a1", "o1"]
 
 
+# -- list door: the ?status= filter -----------------------------------------
+
+
+async def test_list_status_pending_returns_matching_and_unfiltered_unchanged(wired):
+    await _seed_addressed(wired, "a1", "ga", None)
+    await _seed_addressed(wired, "a2", "gb", None)
+    with _identity(user_id="op1", owner=None):
+        unfiltered = await ops.list_interactions()
+        filtered = await ops.list_interactions(status="pending")
+    # The inbox holds only pending records, so status=pending == the unfiltered set.
+    assert sorted(i["interaction_id"] for i in filtered["items"]) == ["a1", "a2"]
+    assert filtered["total"] == 2
+    assert [i["interaction_id"] for i in filtered["items"]] == [i["interaction_id"] for i in unfiltered["items"]]
+
+
+async def test_list_status_terminal_matches_nothing_on_the_pending_door(wired):
+    # A terminal-status filter is well-formed but the pending inbox retains no terminal
+    # records, so it returns an honest empty page (total 0) — never a resurrection.
+    await _seed_addressed(wired, "a1", "ga", None)
+    with _identity(user_id="op1", owner=None):
+        for terminal in ("answered", "cancelled"):
+            page = await ops.list_interactions(status=terminal)
+            assert page["items"] == []
+            assert page["total"] == 0
+
+
+async def test_list_unknown_status_400(wired):
+    from tai42_skeleton.operations import BadRequestError
+
+    with pytest.raises(BadRequestError, match="unknown status"):
+        await ops.list_interactions(status="bogus")
+
+
+async def test_list_status_unknown_400_through_router(wired):
+    resp = await router.list_interactions(make_request("GET", query="status=bogus"))
+    assert resp.status_code == 400
+    assert "unknown status" in _json(resp)["error"]
+
+
+async def test_list_status_valid_through_router(wired):
+    await _seed_addressed(wired, "a1", "ga", None)
+    resp = await router.list_interactions(make_request("GET", query="status=pending"))
+    assert resp.status_code == 200
+    assert [i["interaction_id"] for i in _json(resp)["data"]["items"]] == ["a1"]
+
+
 async def test_restricted_stream_terminal_filtered_by_event_audience(wired):
     # A terminal frame is filtered DIRECTLY on the audience the store stamps into the
     # event payload: a restricted caller sees a terminal ONLY for its own addressed
@@ -1484,6 +1530,71 @@ async def test_restricted_answers_unaddressed_403(wired):
         resp = await router.answer(make_request("POST", path_params={"interaction_id": "un"}, body=b'{"answer":"x"}'))
     assert resp.status_code == 403
     assert _json(resp)["error"] == "restricted identities may answer only interactions addressed to them"
+
+
+# -- the cancel door ---------------------------------------------------------
+
+
+async def test_cancel_pending_200_and_tags_removed_event(wired):
+    await wired.store.add(wired.fake, _plain_request(wired.store, AnswerFormat.TEXT), idle_ttl=86400)
+    resp = await router.cancel(make_request("POST", path_params={"interaction_id": "p1"}))
+    assert resp.status_code == 200
+    assert _json(resp)["data"] == {"interaction_id": "p1", "status": "cancelled"}
+    # Gone from pending, and the removed event rides tagged ``cancelled``.
+    assert await wired.store.get_state(wired.fake, "p1") is None
+    events = await wired.fake.xrange(wired.store.events_key)
+    removed = [f for _id, f in events if f["type"] == "interaction.removed"]
+    assert removed
+    assert removed[-1]["reason"] == "cancelled"
+
+
+async def test_cancel_unknown_interaction_404(wired):
+    resp = await router.cancel(make_request("POST", path_params={"interaction_id": "ghost"}))
+    assert resp.status_code == 404
+
+
+async def test_cancel_answered_is_409(wired):
+    await wired.store.add(wired.fake, _plain_request(wired.store, AnswerFormat.TEXT), idle_ttl=86400)
+    first = await router.answer(make_request("POST", path_params={"interaction_id": "p1"}, body=b'{"answer":"x"}'))
+    assert first.status_code == 200
+    resp = await router.cancel(make_request("POST", path_params={"interaction_id": "p1"}))
+    assert resp.status_code == 409
+
+
+async def test_cancel_recancel_is_404(wired):
+    await wired.store.add(wired.fake, _plain_request(wired.store, AnswerFormat.TEXT), idle_ttl=86400)
+    assert (await router.cancel(make_request("POST", path_params={"interaction_id": "p1"}))).status_code == 200
+    assert (await router.cancel(make_request("POST", path_params={"interaction_id": "p1"}))).status_code == 404
+
+
+async def test_cancel_audience_holder_200(wired):
+    await _seed_addressed(wired, "ad", "gad", "keyA")
+    with _identity(user_id="keyA", owner="alice"):
+        resp = await router.cancel(make_request("POST", path_params={"interaction_id": "ad"}))
+    assert resp.status_code == 200
+
+
+async def test_cancel_other_restricted_403(wired):
+    await _seed_addressed(wired, "ad", "gad", "keyA")
+    with _identity(user_id="keyB", owner="bob"):
+        resp = await router.cancel(make_request("POST", path_params={"interaction_id": "ad"}))
+    assert resp.status_code == 403
+    assert _json(resp)["error"] == "interaction is addressed to another identity"
+
+
+async def test_cancel_unrestricted_addressed_200(wired):
+    await _seed_addressed(wired, "ad", "gad", "alice")
+    with _identity(user_id="op1", owner=None):
+        resp = await router.cancel(make_request("POST", path_params={"interaction_id": "ad"}))
+    assert resp.status_code == 200
+
+
+async def test_cancel_restricted_unaddressed_403(wired):
+    await _seed_addressed(wired, "un", "gun", None)
+    with _identity(user_id="keyA", owner="alice"):
+        resp = await router.cancel(make_request("POST", path_params={"interaction_id": "un"}))
+    assert resp.status_code == 403
+    assert _json(resp)["error"] == "restricted identities may cancel only interactions addressed to them"
 
 
 async def test_callback_answers_addressed_external_regardless_of_audience(wired):
