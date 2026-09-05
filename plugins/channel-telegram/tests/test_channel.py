@@ -738,6 +738,32 @@ async def test_notify_header_media_carries_body_as_caption_with_keyboard(http_re
     assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(("go", "Go", "go", None))
 
 
+def test_mint_callback_data_hash_fallback_on_index_collision():
+    # An author-set id numerically equal to another button's index forces the minted
+    # token onto the deterministic hash path, keeping every token in the keyboard unique.
+    from tai42_channel_telegram.channel import _mint_callback_data
+
+    used = {"1"}  # button 0 authored id "1" already claimed the index-1 token
+    token = _mint_callback_data(None, 1, used)
+    assert token.startswith("h")
+    assert len(token) == 17
+    assert token not in used
+
+
+async def test_notify_header_caption_cap_counts_utf16_units(http_recorder, fake_redis):
+    # Telegram caps captions at 1024 UTF-16 code units, not code points: emoji count
+    # double. A 600-emoji body (600 code points, 1200 UTF-16 units) must take the
+    # SPLIT path (media alone, then text+keyboard), never the caption path.
+    header = MediaItem(kind=MediaKind.VIDEO, url="https://cdn.test/h.mp4")
+    options: list[Option] = [ReplyOption(text="Go", id="go")]
+    body = "\U0001f389" * 600
+    await TelegramChannel().notify(ChannelNotification(message=body, options=options, header=header))
+
+    methods = [str(r.url).rsplit("/", 1)[-1] for r in http_recorder.requests]
+    assert methods == ["sendVideo", "sendMessage"]
+    assert "caption" not in json.loads(http_recorder.requests[0].content)
+
+
 async def test_notify_header_media_degrades_to_separate_message_when_body_too_long(http_recorder, fake_redis):
     # A body past Telegram's caption cap cannot ride as a caption: the header media is sent
     # alone, then the text-plus-keyboard message (which anchors the option record).

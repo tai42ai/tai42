@@ -107,10 +107,17 @@ _TIER1_FORMATS = frozenset({"confirm", "external"})
 # is sent verbatim only when it fits; a longer id gets a minted token instead.
 _CALLBACK_DATA_MAX_BYTES = 64
 
-# Telegram's caption cap on a media message (1024 characters). An interactive message with a
+# Telegram's caption cap on a media message: 1024 UTF-16 code units (the Bot API counts
+# UTF-16, so astral-plane characters like emoji count double). An interactive message with a
 # media HEADER rides the body AS the caption when it fits; a longer body degrades to a
 # separate media message followed by the text-plus-keyboard message.
-_CAPTION_MAX_CHARS = 1024
+_CAPTION_MAX_UTF16_UNITS = 1024
+
+
+def _utf16_units(text: str) -> int:
+    """The string's length in UTF-16 code units — the unit Telegram's caps count in."""
+    return len(text.encode("utf-16-le")) // 2
+
 
 # One display-media kind → its Bot API send method and the JSON key naming the source url.
 # ``link`` is absent (it renders as an appended text line, not a file send).
@@ -661,7 +668,7 @@ class TelegramChannel:
             return data
 
         method, source_key = _MEDIA_SEND[header.kind]
-        if len(body_text) <= _CAPTION_MAX_CHARS:
+        if _utf16_units(body_text) <= _CAPTION_MAX_UTF16_UNITS:
             payload = {"chat_id": target, source_key: header.url, "caption": body_text, "reply_markup": keyboard}
             if parse_mode is not None:
                 payload["parse_mode"] = parse_mode

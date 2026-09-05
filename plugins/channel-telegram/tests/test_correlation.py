@@ -154,6 +154,14 @@ async def test_get_options_tolerates_non_json_record(fake_redis):
     assert await get_options("chatA", "42") is None
 
 
+async def test_get_options_tolerates_a_legacy_bare_string_record(fake_redis):
+    # The pre-vocabulary channel stored options as a bare list[str] (callback_data = index).
+    # A tap resolving against such a record is a graceful miss — acked-ignored, never a
+    # crash — until the record's bounded TTL clears it.
+    fake_redis.data["channel:telegram:opts:chatA:42"] = '["red", "blue"]'
+    assert await get_options("chatA", "42") is None
+
+
 @pytest.mark.parametrize("stored", ['{"a": 1}', "[1, 2, 3]", '["ok", 7]', '[{"text": "no cb"}]'])
 async def test_get_options_ignores_records_that_are_not_the_stored_option_shape(fake_redis, stored: str):
     # Valid JSON but the wrong shape (an object, a list carrying a non-object, or an object
