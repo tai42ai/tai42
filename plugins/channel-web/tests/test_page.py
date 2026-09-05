@@ -132,6 +132,9 @@ def test_render_page_escapes_interpolated_values(public_build: Path):
         # the contract's https-only rule); ``data:`` serves the schema-form media field's
         # inline <img> preview of a visitor-picked image, whose source is a data: URL.
         "img-src 'self' data: https:",
+        # ``https:`` (and same-origin ``'self'``) serves an agent-sent card's native
+        # <video>/<audio> players; without it default-src 'none' would block the fetch.
+        "media-src 'self' https:",
         "frame-ancestors 'none'",
     ],
 )

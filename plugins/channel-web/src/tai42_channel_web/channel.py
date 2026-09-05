@@ -32,8 +32,16 @@ import math
 from datetime import UTC, datetime
 from typing import ClassVar
 
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
-from tai42_contract.interactions.models import MediaItem
+from tai42_contract.channels import (
+    ChannelDelivery,
+    ChannelDeliveryError,
+    ChannelNotification,
+    LinkOption,
+    Option,
+    OptionSection,
+    ReplyOption,
+)
+from tai42_contract.interactions.models import LocationElement, MediaItem
 
 from tai42_channel_web.store import (
     FormRecord,
@@ -69,11 +77,59 @@ _EXTERNAL_FORMAT = "external"
 
 
 def _media_frame_item(item: MediaItem) -> dict[str, str]:
-    """One media item as its transcript-frame shape — ``caption`` omitted when
-    absent, so there is no empty-value key."""
+    """One media item as its transcript-frame shape — ``caption`` and ``filename``
+    omitted when absent, so there is no empty-value key. ``filename`` rides a
+    ``document`` only (the contract refuses it on any other kind), so a reader keys
+    the download label off the document card alone."""
     entry = {"kind": item.kind.value, "url": item.url}
     if item.caption is not None:
         entry["caption"] = item.caption
+    if item.filename is not None:
+        entry["filename"] = item.filename
+    return entry
+
+
+def _option_frame_item(option: Option) -> dict[str, str]:
+    """One tappable option as its transcript-frame shape, discriminated on ``kind``.
+
+    A :class:`ReplyOption` becomes ``{"kind": "reply", "text", "description"?, "id"?}``
+    — a tap submits ``text`` as the visitor's next message and, when the author set an
+    ``id``, that id rides the submission as opaque enrichment (``params.reply_id``, the
+    same convention every channel keeps). A :class:`LinkOption` becomes
+    ``{"kind": "link", "label", "url"}`` — a tap OPENS ``url`` and submits nothing.
+    Optional keys are omitted when absent, so there is no empty-value shape."""
+    if isinstance(option, LinkOption):
+        return {"kind": "link", "label": option.label, "url": option.url}
+    entry = {"kind": "reply", "text": option.text}
+    if option.description is not None:
+        entry["description"] = option.description
+    if option.id is not None:
+        entry["id"] = option.id
+    return entry
+
+
+def _reply_frame_item(reply: ReplyOption) -> dict[str, str]:
+    """One sectioned-list row as its frame shape — a :class:`ReplyOption` is the only
+    row a section holds (a link is a button, never a list row), so this narrows
+    :func:`_option_frame_item` to the reply case."""
+    return _option_frame_item(reply)
+
+
+def _section_frame_item(section: OptionSection) -> dict[str, object]:
+    """One titled section as its frame shape: ``{"title", "rows": [reply, ...]}`` — the
+    grouped reply rows the page renders under a section header."""
+    return {"title": section.title, "rows": [_reply_frame_item(row) for row in section.rows]}
+
+
+def _location_frame_item(location: LocationElement) -> dict[str, object]:
+    """A shared geographic point as its frame shape: the coordinates plus any name and
+    address, each omitted when absent. The page renders it as a map-pin element with an
+    OpenStreetMap link built from the coordinates — no external tiles, CSP-safe."""
+    entry: dict[str, object] = {"latitude": location.latitude, "longitude": location.longitude}
+    if location.name is not None:
+        entry["name"] = location.name
+    if location.address is not None:
+        entry["address"] = location.address
     return entry
 
 
@@ -133,19 +189,28 @@ class WebChannel:
     """Satisfies the ``tai42_contract.channels.Channel`` protocol.
 
     Advertises ``supports_form_delivery`` — the chat page renders a schema-driven
-    form widget, so a ``form`` question is delivered here. ``notify`` also carries
-    media cards, tappable option lists and ask-less forms
-    (``supports_media_notifications`` / ``supports_interactive_notifications`` /
-    ``supports_form_notifications``); it advertises NO template capability
-    (``supports_template_notifications`` absent) — a template is a vendor construct."""
+    form widget, so a ``form`` question is delivered here. ``notify`` renders the WHOLE
+    interactive vocabulary the page owns pixel-for-pixel: media cards (image inline,
+    document as a download card, video/audio as native players, link as a safe anchor),
+    tappable reply chips and link-action buttons, sectioned reply lists, a media header
+    and a muted footer, a shared location as a map-pin element, and ask-less forms —
+    ``supports_media_notifications`` / ``supports_interactive_notifications`` /
+    ``supports_location_notifications`` / ``supports_form_notifications``. It advertises
+    NO template capability (``supports_template_notifications`` absent) — a template is a
+    vendor construct with no place on a page this plugin renders itself."""
 
     # The page renders a schema-driven form widget, so the ask_user helper may route
     # a ``form`` delivery here; absent this flag it never would.
     supports_form_delivery: ClassVar[bool] = True
-    # notify carries an image card and a tappable option list; the central notify_user
-    # capability guard reads these before dispatching either. Templates stay unsupported.
+    # notify carries a media card and a tappable option list (reply chips + link
+    # actions, flat or sectioned); the central notify_user / conversations-delivery
+    # capability guards read these before dispatching. Templates stay unsupported.
     supports_media_notifications: ClassVar[bool] = True
     supports_interactive_notifications: ClassVar[bool] = True
+    # notify carries a shared location: the page renders a map-pin element (readable
+    # coordinates/name/address + an OpenStreetMap link, no external tiles). Absent this
+    # flag the delivery guard would refuse a location part to this channel.
+    supports_location_notifications: ClassVar[bool] = True
     # notify also carries an ask-less form (a schema notification): the page renders
     # the same schema-driven widget as a fillable card, and the submission enters the
     # conversation as a guest message through this plugin's own form door.
@@ -232,22 +297,26 @@ class WebChannel:
         default.
 
         A plain text-only notification lands as a ``chat.message`` entry. A notification
-        carrying ``media`` and/or ``options`` lands as ONE ``chat.media`` card entry: the
-        message is its text, every media item rides the frame's media list in order (an
-        ``image`` as an inline picture, a ``link`` as a card link element the page renders
-        as a safe anchor), and the options ride its option list. A MEDIA-ONLY notification
-        (blank message) lands as the same card with an empty ``text`` — the page renders the
-        media card with no text bubble. A ``data:`` image is refused loudly — the page renders
-        an image only from an absolute ``https`` source. A template notification is refused
-        loudly — this channel sends no vendor templates.
+        carrying ANY card content — ``media``, ``options``, ``sections``, ``header``,
+        ``footer`` or ``location`` — lands as ONE ``chat.media`` card entry: the message is
+        its text; every media item rides the frame's media list in order (an ``image``
+        inline, a ``document`` as a download card, ``video``/``audio`` as native players, a
+        ``link`` as a safe anchor); flat ``options`` (reply chips + link-action buttons) OR a
+        sectioned reply list ride the card's choice surface; a ``header`` display item sits
+        above the body and a ``footer`` as a muted trailing line; and a ``location`` renders
+        as a map-pin element. A CONTENT-ONLY notification (blank message carried by media or a
+        location) lands as the same card with an empty ``text`` — no text bubble. A ``data:``
+        image is refused loudly — the page renders an image only from an absolute ``https``
+        source. A template notification is refused loudly — this channel sends no vendor
+        templates.
 
         A ``schema`` notification (an ask-less form) lands as ONE ``chat.form`` card:
         the message is the form's prompt, the schema is the fillable widget, any media
-        rides the same card, and the frame carries a server-minted submission token.
-        The token's record (the transcript pair, the schema, the message) is stored
-        for the transcript TTL, so the card is submittable exactly as long as it can
-        replay; the submission door reads it, renders the ``label: value`` text from
-        the STORED schema, and bridges the values as a guest message.
+        and any location ride the same card, and the frame carries a server-minted
+        submission token. The token's record (the transcript pair, the schema, the
+        message) is stored for the transcript TTL, so the card is submittable exactly as
+        long as it can replay; the submission door reads it, renders the ``label: value``
+        text from the STORED schema, and bridges the values as a guest message.
         """
         if notification.template is not None:
             raise NotImplementedError("web channel sends no vendor templates; template notifications are not supported")
@@ -257,33 +326,65 @@ class WebChannel:
             identity = _canonical_identity(notification.sender_identity)
             address = _require_recipient(notification.recipient, _NO_RECIPIENT)
 
+        frame_media = (
+            [_media_frame_item(item) for item in notification.media] if notification.media is not None else None
+        )
+        frame_location = (
+            _location_frame_item(notification.location) if notification.location is not None else None
+        )
+
         if notification.schema is not None:
             # An ask-less form: ONE chat.form card carrying the prompt, the schema and
-            # a server-minted submission token; any media rides the same card
-            # (options are impossible beside a schema by contract). The token record
-            # is written BEFORE the frame — the reserve-before-append rule — so the
-            # moment the card is replayable the submission door already resolves its
-            # token. A record whose frame then failed to land is unreadable (the
-            # token never left the server) and ages out on its own TTL.
+            # a server-minted submission token; media and/or a location may ride the
+            # same card (options/sections are impossible beside a schema by contract).
+            # The token record is written BEFORE the frame — the reserve-before-append
+            # rule — so the moment the card is replayable the submission door already
+            # resolves its token. A record whose frame then failed to land is unreadable
+            # (the token never left the server) and ages out on its own TTL.
             token = await store_form_record(
                 FormRecord(identity=identity, address=address, schema=notification.schema, message=notification.message)
             )
-            frame_media = (
-                [_media_frame_item(item) for item in notification.media] if notification.media is not None else None
-            )
             async with transcript_order(identity, address):
                 entry_id = await append_form(
-                    identity, address, notification.message, notification.schema, token, frame_media
+                    identity, address, notification.message, notification.schema, token, frame_media, frame_location
                 )
             return [entry_id]
 
-        if notification.media is None and notification.options is None:
+        # A plain text send carries no card content at all; anything else is a card.
+        if (
+            notification.media is None
+            and notification.options is None
+            and notification.sections is None
+            and notification.location is None
+        ):
             async with transcript_order(identity, address):
                 entry_id = await append_message(identity, address, "out", notification.message)
             return [entry_id]
 
-        media = notification.media or []
-        frame_media = [_media_frame_item(item) for item in media]
+        frame_options = (
+            [_option_frame_item(option) for option in notification.options]
+            if notification.options is not None
+            else None
+        )
+        frame_sections = (
+            [_section_frame_item(section) for section in notification.sections]
+            if notification.sections is not None
+            else None
+        )
+        # A header is display media (never a link); footer a short trailing line. Both
+        # ride an interactive card (the contract requires options/sections present), so
+        # they only ever accompany a choice surface.
+        frame_header = _media_frame_item(notification.header) if notification.header is not None else None
         async with transcript_order(identity, address):
-            entry_id = await append_media(identity, address, notification.message, frame_media, notification.options)
+            entry_id = await append_media(
+                identity,
+                address,
+                notification.message,
+                frame_media,
+                frame_options,
+                frame_sections,
+                frame_header,
+                notification.footer,
+                frame_location,
+            )
         return [entry_id]

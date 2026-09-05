@@ -185,16 +185,28 @@ async function readData<T>(response: Response, what: string): Promise<T> {
  * from it, so re-sending one whose response was lost returns the ORIGINAL
  * `message_id` rather than delivering the message a second time. Every attempt at
  * the same composed message must carry the same key.
+ *
+ * `replyId` is the authored id of the reply OPTION the visitor tapped, when this
+ * message is a chip tap carrying one; the door threads it onto the turn as
+ * `params.reply_id` so the flow reads which option was chosen. Omitted from the body
+ * when `null`, so a typed message's request is byte-identical to before.
  */
 export async function sendMessage(
   identity: string,
   text: string,
   clientMessageId: string,
+  replyId: string | null = null,
 ): Promise<string> {
+  const body: { identity: string; text: string; client_message_id: string; reply_id?: string } = {
+    identity,
+    text,
+    client_message_id: clientMessageId,
+  };
+  if (replyId !== null) body.reply_id = replyId;
   const response = await fetch(`${apiBase()}/messages`, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: JSON.stringify({ identity, text, client_message_id: clientMessageId }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) throw await failure(response, MESSAGE_DOOR);
   const data = await readData<{ message_id?: unknown }>(response, 'sending a message');

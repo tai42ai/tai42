@@ -1920,6 +1920,55 @@ async def test_messages_pass_none_when_no_params(web_env, stub_app, registered_s
     assert stub_app.conversations.accept_calls[0]["params"] is None
 
 
+async def test_messages_thread_a_tapped_reply_id_as_params_reply_id(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # A media-card reply chip carrying an authored id sends that id back on the message
+    # POST; the door threads it as ``params.reply_id`` so the flow reads WHICH option was
+    # chosen, not only its echoed text (the same convention every channel keeps).
+    await _handler(stub_app, _MESSAGES)(
+        build_request(json_body={"identity": IDENTITY, "text": "Item A", "reply_id": "opt-a"}, token=SESSION_TOKEN)
+    )
+    assert stub_app.conversations.accept_calls[0]["params"] == {"reply_id": "opt-a"}
+
+
+async def test_messages_merge_a_reply_id_with_the_session_link_params(
+    web_env, stub_app, fake_redis: FakeRedis
+):
+    # The reply id rides ALONGSIDE the captured link params, never replacing them.
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "spring"})
+    await _handler(stub_app, _MESSAGES)(
+        build_request(json_body={"identity": IDENTITY, "text": "Item A", "reply_id": "opt-a"}, token=SESSION_TOKEN)
+    )
+    assert stub_app.conversations.accept_calls[0]["params"] == {"ref": "spring", "reply_id": "opt-a"}
+
+
+async def test_messages_without_a_reply_id_carry_no_reply_id_param(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # A typed message threads no reply_id — the payload stays byte-identical to a plain send.
+    await _handler(stub_app, _MESSAGES)(
+        build_request(json_body={"identity": IDENTITY, "text": "typed"}, token=SESSION_TOKEN)
+    )
+    assert stub_app.conversations.accept_calls[0]["params"] is None
+
+
+@pytest.mark.parametrize(
+    "reply_id",
+    ["", "  ", "a\nb", "a b", "x" * 257],
+)
+async def test_messages_refuse_a_malformed_reply_id_with_422(
+    web_env, stub_app, registered_session: FakeRedis, reply_id: str
+):
+    # A reply id rides the wire and becomes an entry-param value, so a blank, multi-line,
+    # whitespace-bearing, or over-cap token is refused at the body — never bridged.
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(json_body={"identity": IDENTITY, "text": "x", "reply_id": reply_id}, token=SESSION_TOKEN)
+    )
+    assert resp.status_code == 422
+    assert stub_app.conversations.accept_calls == []
+
+
 # -- old-shape session records fail loud, the door re-mints ----------------------
 
 

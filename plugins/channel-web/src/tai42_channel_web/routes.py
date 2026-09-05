@@ -92,6 +92,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import OPTION_ID_MAX_CHARS
 from tai42_contract.conversations import BlankInboundTextError, validate_entry_params
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.utils.client_address import XFF_HEADER, client_bucket
@@ -360,11 +361,34 @@ class MessageBody(IdentityBody):
     # with the SAME key, and the door then derives the bridge's dedup id from it, so
     # the retry resolves to the first attempt's turn instead of delivering twice.
     client_message_id: str | None = None
+    # The author-set id of the reply OPTION the visitor tapped, when this message is a
+    # chip tap (a media card's reply option carrying an ``id``). It rides the turn as
+    # opaque enrichment under ``params.reply_id`` — the SAME convention every channel
+    # keeps for a tapped reply id — so the flow reads which option was chosen, not only
+    # its echoed text. Absent on a typed message. Bounded by the contract's option-id
+    # cap and shaped as a single-line token (it becomes an entry-param value).
+    reply_id: str | None = None
 
     @field_validator("client_message_id")
     @classmethod
     def _opaque_retry_key(cls, value: str | None) -> str | None:
         return _validated_retry_key(value)
+
+    @field_validator("reply_id")
+    @classmethod
+    def _reply_id_valid(cls, value: str | None) -> str | None:
+        # The same shape the contract's ReplyOption.id enforces on the authoring side:
+        # a non-blank single-line token within the option-id cap. It rides the wire and
+        # becomes an entry-param value, so a newline or control character is refused.
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("reply_id must be non-blank when present")
+        if len(value) > OPTION_ID_MAX_CHARS:
+            raise ValueError(f"reply_id must be at most {OPTION_ID_MAX_CHARS} characters")
+        if any(ch.isspace() or not ch.isprintable() for ch in value):
+            raise ValueError("reply_id must be a single-line token with no whitespace or control characters")
+        return value
 
 
 class FormSubmissionBody(BaseModel):
@@ -665,6 +689,22 @@ def _provider_message_id(identity: str, address: str, client_message_id: str | N
     return hashlib.sha256(f"{identity}:{address}:{client_message_id}".encode()).hexdigest()
 
 
+def _turn_params(registration: SessionRegistration, reply_id: str | None) -> dict[str, str] | None:
+    """The turn's opaque enrichment params: the session's captured link params, plus a
+    tapped reply option's ``id`` under ``reply_id`` when one rode this send. ``None`` when
+    neither is present, so a plain typed message's payload stays byte-identical to before.
+
+    The merged dict is re-bounded by the shared entry-param validator here (rather than only
+    inside ``accept``, which would surface an over-count/over-size merge as an opaque 500):
+    the caller maps a ``ValueError`` to a 422 the visitor's chip tap can be refused with."""
+    params = dict(registration.params)
+    if reply_id is not None:
+        params["reply_id"] = reply_id
+    if not params:
+        return None
+    return validate_entry_params(params)
+
+
 def _render_form_text(schema: dict[str, Any], values: dict[str, Any]) -> str:
     """The submitted values as the ``label: value`` text every consumer of the turn
     sees, one line per field.
@@ -885,6 +925,12 @@ async def web_messages(request: Request) -> Response:
     if not _serves(registration, body.identity):
         return _error(_SESSION_MISSING, 401, _SESSION_MISSING_CODE)
     address = registration.visitor_id
+    # The captured link params plus a tapped reply option's id (params.reply_id) ride the
+    # turn; an over-count/over-size merge is a clean 422 rather than an opaque accept 500.
+    try:
+        params = _turn_params(registration, body.reply_id)
+    except ValueError as exc:
+        return _error(str(exc), 422)
     # The conversation identity is the minted visitor id, which the platform mints on
     # unauthenticated doors and a visitor can rotate at will — so it cannot bound spend.
     # The turn cap keys instead on the accountable NETWORK bucket, the same value the
@@ -900,9 +946,7 @@ async def web_messages(request: Request) -> Response:
                 cap_key=cap_key,
                 text=body.text,
                 provider_message_id=_provider_message_id(body.identity, address, body.client_message_id),
-                # The captured link params ride the turn's tool payload under their own
-                # key; empty -> None -> payload byte-identical to today.
-                params=registration.params or None,
+                params=params,
             )
         except BlankInboundTextError:
             return _error("message text is blank", 400)

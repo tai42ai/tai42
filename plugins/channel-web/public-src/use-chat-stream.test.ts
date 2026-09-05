@@ -155,19 +155,56 @@ describe('applyFrame', () => {
       kind: 'media',
       id: 'md1',
       text: 'Here you go',
-      media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'Item A' }],
+      media: [
+        { kind: 'image', url: 'https://example.com/a.png', caption: 'Item A', filename: null },
+      ],
       options: null,
+      sections: null,
+      header: null,
+      footer: null,
+      location: null,
       ts: TS,
     });
   });
 
   it('folds a media card that is text and tappable options only', () => {
-    const model = fold(EMPTY_MODEL, mediaFrame({ options: ['Item A', 'Item B'] }));
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({
+        options: [
+          { kind: 'reply', text: 'Item A' },
+          { kind: 'reply', text: 'Item B' },
+        ],
+      }),
+    );
 
     expect(model.items[0]).toMatchObject({
       kind: 'media',
       media: null,
-      options: ['Item A', 'Item B'],
+      options: [
+        { kind: 'reply', text: 'Item A', description: null, id: null },
+        { kind: 'reply', text: 'Item B', description: null, id: null },
+      ],
+    });
+  });
+
+  it('folds reply and link options together, preserving id and description', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({
+        options: [
+          { kind: 'reply', text: 'Book', description: 'the fast lane', id: 'opt-1' },
+          { kind: 'link', label: 'Read more', url: 'https://example.com/more' },
+        ],
+      }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'media',
+      options: [
+        { kind: 'reply', text: 'Book', description: 'the fast lane', id: 'opt-1' },
+        { kind: 'link', label: 'Read more', url: 'https://example.com/more' },
+      ],
     });
   });
 
@@ -176,14 +213,109 @@ describe('applyFrame', () => {
       EMPTY_MODEL,
       mediaFrame({
         media: [{ kind: 'image', url: 'https://example.com/a.png' }],
-        options: ['See all'],
+        options: [{ kind: 'reply', text: 'See all' }],
       }),
     );
 
     expect(model.items[0]).toMatchObject({
       kind: 'media',
-      media: [{ kind: 'image', url: 'https://example.com/a.png', caption: null }],
-      options: ['See all'],
+      media: [{ kind: 'image', url: 'https://example.com/a.png', caption: null, filename: null }],
+      options: [{ kind: 'reply', text: 'See all', description: null, id: null }],
+    });
+  });
+
+  it('folds a sectioned reply list', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({
+        sections: [
+          { title: 'Today', rows: [{ kind: 'reply', text: '09:00', id: 't-9' }] },
+          { title: 'Tomorrow', rows: [{ kind: 'reply', text: '11:00' }] },
+        ],
+      }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'media',
+      options: null,
+      sections: [
+        { title: 'Today', rows: [{ kind: 'reply', text: '09:00', description: null, id: 't-9' }] },
+        {
+          title: 'Tomorrow',
+          rows: [{ kind: 'reply', text: '11:00', description: null, id: null }],
+        },
+      ],
+    });
+  });
+
+  it('folds a header, footer and location on an interactive card', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({
+        header: { kind: 'image', url: 'https://example.com/banner.png', caption: 'Banner' },
+        footer: 'Powered by TAI',
+        location: { latitude: 51.5, longitude: -0.12, name: 'London', address: 'Trafalgar Square' },
+        options: [{ kind: 'reply', text: 'Item A' }],
+      }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'media',
+      header: {
+        kind: 'image',
+        url: 'https://example.com/banner.png',
+        caption: 'Banner',
+        filename: null,
+      },
+      footer: 'Powered by TAI',
+      location: { latitude: 51.5, longitude: -0.12, name: 'London', address: 'Trafalgar Square' },
+    });
+  });
+
+  it('folds a document with its filename and native video/audio media', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({
+        media: [
+          {
+            kind: 'document',
+            url: 'https://example.com/r.pdf',
+            caption: 'Q3',
+            filename: 'report.pdf',
+          },
+          { kind: 'video', url: 'https://example.com/clip.mp4' },
+          { kind: 'audio', url: 'https://example.com/note.mp3' },
+        ],
+      }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'media',
+      media: [
+        {
+          kind: 'document',
+          url: 'https://example.com/r.pdf',
+          caption: 'Q3',
+          filename: 'report.pdf',
+        },
+        { kind: 'video', url: 'https://example.com/clip.mp4', caption: null, filename: null },
+        { kind: 'audio', url: 'https://example.com/note.mp3', caption: null, filename: null },
+      ],
+    });
+  });
+
+  it('folds a content-only location card (blank text, no media/options)', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({ text: '', location: { latitude: 1, longitude: 2 } }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'media',
+      text: '',
+      media: null,
+      options: null,
+      location: { latitude: 1, longitude: 2, name: null, address: null },
     });
   });
 
@@ -194,19 +326,22 @@ describe('applyFrame', () => {
     );
 
     expect(model.items[0]).toMatchObject({
-      media: [{ kind: 'link', url: 'http://example.com/a', caption: 'Open A' }],
+      media: [{ kind: 'link', url: 'http://example.com/a', caption: 'Open A', filename: null }],
     });
   });
 
   it('de-duplicates a redelivered media card on backlog replay', () => {
     const model = fold(
       EMPTY_MODEL,
-      mediaFrame({ options: ['Item A'] }),
-      mediaFrame({ options: ['Item A'] }),
+      mediaFrame({ options: [{ kind: 'reply', text: 'Item A' }] }),
+      mediaFrame({ options: [{ kind: 'reply', text: 'Item A' }] }),
     );
 
     expect(model.items).toHaveLength(1);
-    expect(model.items[0]).toMatchObject({ kind: 'media', options: ['Item A'] });
+    expect(model.items[0]).toMatchObject({
+      kind: 'media',
+      options: [{ kind: 'reply', text: 'Item A', description: null, id: null }],
+    });
   });
 
   it('records an answered frame against the interaction, not as a row of its own', () => {
@@ -334,8 +469,23 @@ describe('applyFrame', () => {
     ],
     ['a question whose display media is not an array', questionFrame('text', { media: 'a.png' })],
     [
+      // The new known set (document/video/audio) is admitted; a kind outside it
+      // still rejects rather than rendering as a blank attachment.
       'a media card with an unknown attachment kind',
-      mediaFrame({ media: [{ kind: 'video', url: 'https://example.com/a.mp4' }] }),
+      mediaFrame({ media: [{ kind: 'sticker', url: 'https://example.com/a.webp' }] }),
+    ],
+    [
+      // A video/audio/document still obeys the https file discipline — an http
+      // source the CSP would refuse taints the frame.
+      'a media video whose url is not https',
+      mediaFrame({ media: [{ kind: 'video', url: 'http://example.com/a.mp4' }] }),
+    ],
+    [
+      // filename rides a document only; on any other kind it is off-contract.
+      'a filename on a non-document media item',
+      mediaFrame({
+        media: [{ kind: 'image', url: 'https://example.com/a.png', filename: 'a.png' }],
+      }),
     ],
     [
       'a media image whose url carries a user@ authority',
@@ -365,19 +515,75 @@ describe('applyFrame', () => {
       'a media attachment whose caption is explicitly null',
       mediaFrame({ media: [{ kind: 'image', url: 'https://example.com/a.png', caption: null }] }),
     ],
-    ['a media card with a blank option chip', mediaFrame({ options: ['Item A', '  '] })],
+    ['a reply option with blank text', mediaFrame({ options: [{ kind: 'reply', text: '  ' }] })],
+    ['a bare-string option (the old flat shape)', mediaFrame({ options: ['Item A'] })],
     ['a media card with an empty options array', mediaFrame({ options: [] })],
-    ['a media card with a non-string option', mediaFrame({ options: [1] })],
+    ['an option with no kind', mediaFrame({ options: [{ text: 'Item A' }] })],
+    [
+      'a reply option whose text is not a string',
+      mediaFrame({ options: [{ kind: 'reply', text: 1 }] }),
+    ],
+    [
+      'a link option whose url is not http(s)',
+      mediaFrame({ options: [{ kind: 'link', label: 'x', url: 'ftp://example.com/a' }] }),
+    ],
+    [
+      'a link option with a blank label',
+      mediaFrame({ options: [{ kind: 'link', label: ' ', url: 'https://ex/a' }] }),
+    ],
     ['a media card whose options is a non-array object', mediaFrame({ options: { a: 1 } })],
     [
+      'options and sections together (two choice surfaces)',
+      mediaFrame({
+        options: [{ kind: 'reply', text: 'a' }],
+        sections: [{ title: 'S', rows: [{ kind: 'reply', text: 'b' }] }],
+      }),
+    ],
+    ['a section with empty rows', mediaFrame({ sections: [{ title: 'S', rows: [] }] })],
+    [
+      'a section with a blank title',
+      mediaFrame({ sections: [{ title: ' ', rows: [{ kind: 'reply', text: 'b' }] }] }),
+    ],
+    [
+      'a section row that is a link (rows are replies only)',
+      mediaFrame({
+        sections: [{ title: 'S', rows: [{ kind: 'link', label: 'x', url: 'https://ex/a' }] }],
+      }),
+    ],
+    [
+      'a header with no options or sections',
+      mediaFrame({ header: { kind: 'image', url: 'https://example.com/a.png' } }),
+    ],
+    [
+      'a link header (a header is display media, never a link)',
+      mediaFrame({
+        header: { kind: 'link', url: 'https://ex/a' },
+        options: [{ kind: 'reply', text: 'a' }],
+      }),
+    ],
+    ['a footer with no options or sections', mediaFrame({ footer: 'trailing' })],
+    [
+      'a location with an out-of-range latitude',
+      mediaFrame({ location: { latitude: 91, longitude: 0 } }),
+    ],
+    [
+      'a location with a non-number coordinate',
+      mediaFrame({ location: { latitude: '51', longitude: 0 } }),
+    ],
+    [
       'a media card missing its text',
-      frame('chat.media', { id: 'md1', direction: 'out', ts: TS, options: ['Item A'] }),
+      frame('chat.media', {
+        id: 'md1',
+        direction: 'out',
+        ts: TS,
+        options: [{ kind: 'reply', text: 'Item A' }],
+      }),
     ],
     [
       'a media card whose direction is not out',
-      mediaFrame({ direction: 'in', options: ['Item A'] }),
+      mediaFrame({ direction: 'in', options: [{ kind: 'reply', text: 'Item A' }] }),
     ],
-    ['a media card with neither attachments nor options', mediaFrame({})],
+    ['a media card with no content at all', mediaFrame({})],
     [
       'a media card whose media is not an array',
       mediaFrame({ media: { kind: 'image', url: 'https://example.com/a.png' } }),
@@ -421,6 +627,7 @@ describe('applyFrame: chat.form', () => {
         schema: { type: 'object', properties: { note: { type: 'string' } } },
         token: 'tok-1',
         media: null,
+        location: null,
         ts: TS,
       },
     ]);
@@ -434,7 +641,19 @@ describe('applyFrame: chat.form', () => {
 
     expect(model.items[0]).toMatchObject({
       kind: 'form',
-      media: [{ kind: 'image', url: 'https://example.com/a.png', caption: null }],
+      media: [{ kind: 'image', url: 'https://example.com/a.png', caption: null, filename: null }],
+    });
+  });
+
+  it('folds a location on a form card', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      formFrame({ location: { latitude: 51.5, longitude: -0.12, name: 'London' } }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'form',
+      location: { latitude: 51.5, longitude: -0.12, name: 'London', address: null },
     });
   });
 

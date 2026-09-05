@@ -19,7 +19,7 @@ import { ArrowDownIcon, Button, EmptyState, Spinner } from '@tai42/studio-sdk';
 
 import { Bubble, type SendStatus } from '@/bubble';
 import { FormCard, type FormCardItem } from '@/form-card';
-import { MediaCard, type MediaCardItem } from '@/media-card';
+import { MediaCard, type MediaCardItem, type SendReply } from '@/media-card';
 import { QuestionCard, type QuestionItem } from '@/question-card';
 
 /** How close to the bottom edge (px) still counts as "pinned to the tail". */
@@ -165,9 +165,9 @@ export interface TranscriptProps {
   readonly onAnswer: (interactionId: string, answer: unknown) => Promise<void>;
   readonly onAnswered: () => void;
   readonly onRetry: (retryId: string) => void;
-  /** Sends a media card chip's label as a regular visitor message — the same send
-   * door the composer uses. */
-  readonly onSend: (text: string) => void;
+  /** Sends a media card reply chip's text as a regular visitor message — the same
+   * send door the composer uses — carrying the tapped option's authored id when set. */
+  readonly onSend: SendReply;
   /** Submits one ask-less form card's values through its token door. */
   readonly onSubmitForm: (token: string, values: Record<string, unknown>) => Promise<void>;
   /** Bumped on every send from this page. The visitor's own message always
@@ -325,7 +325,7 @@ interface EntryRowProps {
   readonly onAnswer: (interactionId: string, answer: unknown) => Promise<void>;
   readonly onAnswered: () => void;
   readonly onRetry: (retryId: string) => void;
-  readonly onSend: (text: string) => void;
+  readonly onSend: SendReply;
   readonly onSubmitForm: (token: string, values: Record<string, unknown>) => Promise<void>;
 }
 

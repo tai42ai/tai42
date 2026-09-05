@@ -31,7 +31,7 @@ import {
 import type { SchemaFormErrors } from '@tai42/studio-sdk';
 
 import { isFormGone } from '@/api';
-import { MediaItems } from '@/media-card';
+import { LocationPin, MediaItems } from '@/media-card';
 import type { ChatItem } from '@/use-chat-stream';
 
 /** The transcript item this card renders. */
@@ -98,6 +98,7 @@ export function FormCard({ item, onSubmitForm, locked }: FormCardProps): ReactEl
           {locked ? <Badge variant="neutral">Session ended</Badge> : null}
         </div>
         {item.media !== null ? <MediaItems media={item.media} /> : null}
+        {item.location !== null ? <LocationPin location={item.location} /> : null}
         {gone ? (
           <p className="tcw-form-gone" role="status">
             This form is no longer available.
