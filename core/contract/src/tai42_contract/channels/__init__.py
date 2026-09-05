@@ -379,7 +379,7 @@ class ReplyOption(BaseModel):
 
     ``id`` is an OPTIONAL author-set stable identifier for the button/list row. When set, a channel
     sends it verbatim on the wire and the guest's tap echoes it back (a channel surfaces the echoed
-    id to the inbound turn as opaque enrichment — e.g. WhatsApp forwards it as ``params.reply_id``);
+    id to the inbound turn as opaque enrichment — e.g. Slack forwards it as ``params.reply_id``);
     when ``None`` the channel mints its own id as today. Bounded by ``OPTION_ID_MAX_CHARS`` and a
     single-line non-blank label — the strictest carrier's rule. Frozen.
     """
