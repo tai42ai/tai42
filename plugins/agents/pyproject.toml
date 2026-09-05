@@ -30,7 +30,7 @@ dependencies = [
     # a published agents wheel paired with the contract release carrying its
     # imports (the ambient trace-context carrier lands with contract 5.10.0).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.5,<8",
+    "tai42-contract>=6.5,<7",
     # Leaf helpers: settings machinery and the llm factories agents configure
     # model access through (never a direct model-provider SDK).
     "tai42-kit>=3.8,<4",
