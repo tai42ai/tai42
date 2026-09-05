@@ -54,7 +54,7 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     # ``to_jsonable_python`` for the job payload encoding; imported directly,
     # so declared directly rather than leaned on as a pydantic transitive.
-    "pydantic-core>=2",
+    "pydantic-core>=2.48.0",
 ]
 
 [project.urls]
