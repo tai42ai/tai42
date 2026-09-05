@@ -820,11 +820,28 @@ def test_ask_user_accepts_channel_and_recipient_keywords():
     for name in ("channel", "recipient"):
         assert params[name].kind is inspect.Parameter.KEYWORD_ONLY
         assert params[name].default is None
-    # ``recipient`` sits between ``channel`` and ``sensitive`` in the ordered
-    # call surface.
+    # The channel-delivery group is ordered ``channel`` -> ``recipient`` ->
+    # ``on_mismatch`` -> ``mismatch_notice`` -> ``sensitive`` in the call surface.
     ordered = list(params)
     assert ordered[ordered.index("channel") + 1] == "recipient"
-    assert ordered[ordered.index("recipient") + 1] == "sensitive"
+    assert ordered[ordered.index("recipient") + 1] == "on_mismatch"
+    assert ordered[ordered.index("on_mismatch") + 1] == "mismatch_notice"
+    assert ordered[ordered.index("mismatch_notice") + 1] == "sensitive"
+
+
+def test_ask_user_accepts_on_mismatch_and_mismatch_notice_keywords():
+    from tai42_contract.interactions import AnswerMismatchPolicy
+    from tai42_contract.interactions.asker import AskUser
+
+    params = inspect.signature(AskUser.__call__).parameters
+    # ``on_mismatch`` is the contract's own policy enum, defaulting to RETRY
+    # (today's behavior); ``mismatch_notice`` is optional custom retry text.
+    on_mismatch = params["on_mismatch"]
+    assert on_mismatch.kind is inspect.Parameter.KEYWORD_ONLY
+    assert on_mismatch.default is AnswerMismatchPolicy.RETRY
+    notice = params["mismatch_notice"]
+    assert notice.kind is inspect.Parameter.KEYWORD_ONLY
+    assert notice.default is None
 
 
 # -- Correlation: the per-address record of ONE parked ask awaiting a reply ------

@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import AnswerMismatchPolicy
 
 from tai42_skeleton.interactions import ask_user as _ask_user
 
@@ -37,6 +38,8 @@ async def ask_user(
     link: str | None = None,
     channel: str | None = None,
     recipient: str | None = None,
+    on_mismatch: Literal["retry", "bridge"] = "retry",
+    mismatch_notice: str | None = None,
     audience: str | None = None,
     media: list[dict[str, Any]] | None = None,
     mode: Literal["sync", "async"] = "sync",
@@ -87,6 +90,21 @@ async def ask_user(
             operator allowlist and refuses an unlisted address. Omit to use
             the channel's operator-configured default recipient. Requires
             ``channel`` — an address is meaningless without one.
+        on_mismatch: What a channel-delivered ask does with a guest reply the
+            answer door REJECTS on a LIVE ask (its format did not fit):
+            - "retry" (the default): keep the ask parked and tell the guest what
+              is expected so they answer again in place.
+            - "bridge": treat an unmatched reply as a DIGRESSION — keep the ask
+              parked with NO guest notice and hand the reply to the conversation
+              as a fresh routed turn, so the ask ends only by a real answer or its
+              timeout, never by unmatched input.
+            Takes effect only on a channel-delivered ask; an inbox-only ask ignores it.
+        mismatch_notice: An OPTIONAL custom guest-facing rejection notice used
+            ONLY under ``on_mismatch="retry"``: when set it REPLACES the built-in
+            retry notice. A literal ``{reason}`` token is filled with the door's
+            rejection reason by a plain substitution (a notice without it is sent
+            verbatim). IGNORED under ``on_mismatch="bridge"`` (a digression never
+            notifies). Omit to use the built-in notice.
         audience: The identity (user_id) this question is addressed to; a
             restricted identity sees/answers only questions addressed to it.
             Leave unset for an operator/broadcast question. Distinct from
@@ -140,6 +158,8 @@ async def ask_user(
         link=link,
         channel=channel,
         recipient=recipient,
+        on_mismatch=AnswerMismatchPolicy(on_mismatch),
+        mismatch_notice=mismatch_notice,
         audience=audience,
         # A ``list[dict]`` is a valid ``list[MediaItem | dict]`` argument; the
         # invariant-list check is a type-system limitation, not a runtime one.
