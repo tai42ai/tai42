@@ -799,11 +799,12 @@ class Channel(Protocol):
     minted. A channel never reaches the interactions store directly: the
     human's reply travels back through the delivery's public ``callback_url``.
 
-    A channel MAY advertise richer support with five OPTIONAL, class-level
+    A channel MAY advertise richer support with six OPTIONAL, class-level
     capability flags — ``supports_media_notifications``,
     ``supports_template_notifications``, ``supports_interactive_notifications``,
-    ``supports_form_notifications`` (all four for ``notify``) and
-    ``supports_form_delivery`` (for ``deliver``) — set as plain class
+    ``supports_location_notifications``, ``supports_form_notifications`` (all
+    five for ``notify``) and ``supports_form_delivery`` (for ``deliver``) — set
+    as plain class
     attributes. They are a documented convention, NOT Protocol members: a
     channel that supports the richer form sets the matching attribute to
     ``True``; a channel that omits it advertises no support (absent =
@@ -812,7 +813,8 @@ class Channel(Protocol):
     runtime ``isinstance``). The ask/notify helpers read them defensively with
     ``getattr(channel, "<flag>", False)`` and refuse the matching richer send to
     a channel that does not advertise the flag: ``notify_user`` refuses a media,
-    template, options or schema notification, and the ``ask_user`` helper
+    template, options, sections, location or schema notification, and the
+    ``ask_user`` helper
     refuses a ``form`` delivery, to a channel without the flag — so a channel
     that reads only the plain fields can never silently drop the extra content.
     A channel that does not advertise ``supports_form_delivery`` never receives
