@@ -575,6 +575,8 @@ async def send_conversation_message(request: Request) -> Response:
             wait_seconds,
             params=message.params,
             form=message.form,
+            attachments=message.attachments,
+            location=message.location,
         )
     except ConversationRouteResolutionError as exc:
         return _error(str(exc), 404)

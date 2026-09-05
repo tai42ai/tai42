@@ -25,6 +25,7 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
+    ReplyOption,
 )
 from tai42_contract.interactions.models import MediaItem, MediaKind
 from tai42_contract.manifest import ApiToolsConfig
@@ -242,7 +243,7 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
     helper = _RecordingHelper()
     monkeypatch.setattr(notifications_ops, "_notify_user", helper)
     media = [MediaItem(kind=MediaKind.IMAGE, url="https://example.com/a.png")]
-    template = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42"])
+    template = ChannelTemplate(name="status_update", language="en_US", body_parameters=["A-42"])
 
     await notifications_ops.notify_user("hi", channel="whatsapp", media=media)
     await notifications_ops.notify_user("done", channel="whatsapp", template=template)
@@ -349,7 +350,9 @@ async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> 
     helper = _RecordingHelper()
     monkeypatch.setattr(notifications_ops, "_notify_user", helper)
 
-    await notifications_ops.notify_user("pick one", channel="web", options=["Item A", "Item B"])
+    await notifications_ops.notify_user(
+        "pick one", channel="web", options=[ReplyOption(text="Item A"), ReplyOption(text="Item B")]
+    )
 
     assert helper.calls == [
         (
@@ -360,7 +363,7 @@ async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> 
                 "audience": None,
                 "media": None,
                 "template": None,
-                "options": ["Item A", "Item B"],
+                "options": [ReplyOption(text="Item A"), ReplyOption(text="Item B")],
                 "schema": None,
             },
         )

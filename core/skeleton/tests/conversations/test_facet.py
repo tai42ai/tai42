@@ -22,7 +22,17 @@ class _FakeApp:
         self.receipts: list[tuple] = []
 
     async def _conversation_accept(
-        self, channel, our_identity, client_address, cap_key, text, provider_message_id, params=None, form=None
+        self,
+        channel,
+        our_identity,
+        client_address,
+        cap_key,
+        text,
+        provider_message_id,
+        params=None,
+        form=None,
+        attachments=None,
+        location=None,
     ) -> str:
         self.accepted.append((channel, our_identity, client_address, cap_key, text, provider_message_id, params, form))
         return "mid-1"

@@ -11,7 +11,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tai42_contract.conversations import (
     AnswerPart,
     AnswerStatus,
@@ -19,6 +19,7 @@ from tai42_contract.conversations import (
     ConversationDoor,
     joined_answer_text,
 )
+from tai42_contract.interactions.models import LocationElement, MediaItem, check_media_list
 
 
 class DeliveryStatus(StrEnum):
@@ -97,6 +98,13 @@ class ConversationRecord(BaseModel):
     # promise. ``None`` for a text-only inbound and for every ``operator`` record (an
     # operator send answers, it does not submit).
     inbound_form: dict[str, Any] | None = None
+    # Structured media the guest sent WITH the inbound text (image/document/video/audio) and a
+    # geographic point the guest shared — the inbound counterparts of an answer's media/location,
+    # stored beside the text as machine-consumable content. Both surface to a tool target's payload
+    # under the stable ``attachments``/``location`` keys. ``None`` when the inbound carried none;
+    # an ``operator`` record carries neither (it answers, it does not submit).
+    inbound_attachments: list[MediaItem] | None = None
+    inbound_location: LocationElement | None = None
 
     # ``None`` exactly while the record carries no turn outcome (``accepted``, ``shed``,
     # channel-door ``silent``); set on every state carrying one.
@@ -121,6 +129,15 @@ class ConversationRecord(BaseModel):
 
     created_at: float
     updated_at: float
+
+    @field_validator("inbound_attachments")
+    @classmethod
+    def _check_inbound_attachments(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
+        # None means no inbound media; a present list carries the shared list-level media caps
+        # (non-empty, item count, summed URI) — each item's own shape is MediaItem's concern.
+        if value is not None:
+            check_media_list(value)
+        return value
 
     @model_validator(mode="after")
     def _outcome_matches_status(self) -> ConversationRecord:
@@ -173,6 +190,10 @@ class ConversationRecord(BaseModel):
                 raise ValueError("an operator record carries no inbound_text (must be '')")
             if self.inbound_form is not None:
                 raise ValueError("an operator record carries no inbound_form (it answers, it does not submit)")
+            if self.inbound_attachments is not None or self.inbound_location is not None:
+                raise ValueError(
+                    "an operator record carries no inbound attachments/location (it answers, it does not submit)"
+                )
             if self.answer_status != "answered":
                 raise ValueError(f"an operator record is always answered, got answer_status {self.answer_status!r}")
             if not (self.caller_principal or "").strip():
@@ -206,9 +227,10 @@ class ConversationRecord(BaseModel):
         """The record as the CALLER-scoped read door returns it: the message, its outcome
         and where delivery stands. An allow-list, so a newly added field stays withheld
         until deliberately published here. ``error`` and the delivery bookkeeping are
-        withheld — the turn ran as the ROUTE's key, not the caller's. ``inbound_text`` and
-        ``inbound_form`` are
-        published: they are the message (and structured submission) this caller sent.
+        withheld — the turn ran as the ROUTE's key, not the caller's. ``inbound_text``,
+        ``inbound_form``, ``inbound_attachments`` and ``inbound_location`` are
+        published: they are the message (and the structured submission / media / location) this
+        caller sent.
         """
         return self.model_dump(
             mode="json",
@@ -222,6 +244,8 @@ class ConversationRecord(BaseModel):
                 "origin",
                 "inbound_text",
                 "inbound_form",
+                "inbound_attachments",
+                "inbound_location",
                 "answer_status",
                 "answer",
                 "answer_parts",

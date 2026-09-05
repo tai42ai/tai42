@@ -37,6 +37,7 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
+    Option,
 )
 from tai42_contract.interactions.models import MediaItem, MediaKind
 from tai42_kit.clients import client_ctx
@@ -83,7 +84,7 @@ async def notify_user(
     audience: str | None = None,
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
-    options: list[str] | None = None,
+    options: list[Option] | None = None,
     schema: dict[str, Any] | None = None,
 ) -> list[str]:
     """Notify a human of ``message``, fire-and-forget.

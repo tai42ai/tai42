@@ -16,8 +16,8 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import BaseModel, Field, ValidationError
-from tai42_contract.channels import ChannelTemplate
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from tai42_contract.channels import ChannelTemplate, Option
 from tai42_contract.conversations import (
     CONVERSATION_MODES,
     ROUTE_NAME_RE,
@@ -61,6 +61,10 @@ if TYPE_CHECKING:
     from tai42_skeleton.conversations.persons import ConversationPersonStore
     from tai42_skeleton.conversations.records import ConversationRecordStore
     from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
+
+# Coerces raw option dicts into the typed ``Option`` discriminated union once, so the send seam
+# and the AnswerPart validation both see typed models rather than raw dicts.
+_OPTIONS_ADAPTER = TypeAdapter(list[Option])
 
 # Surfaced before a create does any bind work it would then have to discard.
 _NO_BACKEND = "conversation routes require the redis conversations backend"
@@ -1103,7 +1107,7 @@ async def send_conversation_thread_message(
     text: str,
     address: str | None = None,
     media: list[dict[str, Any]] | None = None,
-    options: list[str] | None = None,
+    options: list[dict[str, Any]] | None = None,
     # Appended after the earlier rich fields so their positional slots are unchanged —
     # the release API gate treats a moved positional parameter as breaking.
     template: dict[str, Any] | None = None,
@@ -1113,9 +1117,11 @@ async def send_conversation_thread_message(
     return ``{"message_id", "thread_id"}``. No turn runs: the message is stored already
     ``answered`` and delivered through the same machine a produced answer takes.
 
-    ``media`` (a list of ``{"kind", "url", "caption"?}`` display items), ``template`` (a
-    pre-approved ``{"name", "language", "parameters"?}`` out-of-window template),
-    ``options`` (a list of tappable suggested replies) and ``schema`` (an ask-less form's
+    ``media`` (a list of ``{"kind", "url", "caption"?, "filename"?}`` display items),
+    ``template`` (a pre-approved ``{"name", "language", "header_media"?, "body_parameters"?,
+    "buttons"?}`` out-of-window template), ``options`` (a list of tappable option objects —
+    each a ``{"kind": "reply", "text"}`` reply or a ``{"kind": "link", "label", "url"}`` link
+    action) and ``schema`` (an ask-less form's
     answer schema — the channel renders ``text`` as the form's prompt, and the guest's
     submission enters the conversation as an ordinary inbound message) are OPTIONAL
     richer-send forms
@@ -1159,6 +1165,7 @@ async def send_conversation_thread_message(
     # reused, never duplicated here.
     media_items: list[MediaItem] | None = None
     template_item: ChannelTemplate | None = None
+    option_items: list[Option] | None = None
     if media is not None or template is not None or options is not None or schema is not None:
         try:
             media_items = (
@@ -1167,7 +1174,10 @@ async def send_conversation_thread_message(
                 else None
             )
             template_item = ChannelTemplate.model_validate(template) if template is not None else None
-            AnswerPart(message=text, media=media_items, template=template_item, options=options, schema=schema)
+            # Coerce the raw option dicts into the typed discriminated union, then let AnswerPart
+            # apply the cross-field contract rules over the whole part.
+            option_items = _OPTIONS_ADAPTER.validate_python(options) if options is not None else None
+            AnswerPart(message=text, media=media_items, template=template_item, options=option_items, schema=schema)
         except (ValidationError, ValueError) as exc:
             raise BadRequestError(f"invalid media/template/options/schema: {exc}") from exc
     manager = _require_backend()
@@ -1197,7 +1207,7 @@ async def send_conversation_thread_message(
             operator_principal=operator_principal,
             media=media_items,
             template=template_item,
-            options=options,
+            options=option_items,
             schema=schema,
         )
     except OperatorAppendError as exc:

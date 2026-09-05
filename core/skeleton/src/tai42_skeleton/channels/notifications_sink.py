@@ -10,7 +10,7 @@ its own keys, so two deployments sharing one interactions Redis under distinct
 notifications across deployments. Each notification is one JSON record — ``id``,
 ``message``, ``recipient``, an optional ``audience`` identity, the optional richer-send
 forms ``media`` (a list of ``MediaItem`` dicts) / ``template`` (a ``ChannelTemplate``
-dict) / ``options`` (a list of option strings) / ``schema`` (an ask-less form's
+dict) / ``options`` (a list of ``Option`` dicts) / ``schema`` (an ask-less form's
 answer-schema dict, present only via the channel path's audience feed write — the sink
 door refuses a channel-less form), and a server-side ``created_at`` —
 pushed onto that per-deployment list; the read path returns the list newest-first — the
@@ -60,7 +60,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from redis.asyncio import Redis
-from tai42_contract.channels import ChannelTemplate
+from tai42_contract.channels import ChannelTemplate, Option
 from tai42_contract.interactions.models import MediaItem
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -132,7 +132,7 @@ class NotificationSink:
         *,
         media: list[dict] | None = None,
         template: dict | None = None,
-        options: list[str] | None = None,
+        options: list[dict] | None = None,
         schema: dict[str, Any] | None = None,
     ) -> dict:
         """Append one notification and return the stored record. The id and the
@@ -147,7 +147,7 @@ class NotificationSink:
 
         ``media`` / ``template`` / ``options`` / ``schema`` are the OPTIONAL richer-send forms
         the notification carried (already JSON-serialized by the caller — a list of
-        ``MediaItem`` dicts, a ``ChannelTemplate`` dict, a list of option strings, an ask-less
+        ``MediaItem`` dicts, a ``ChannelTemplate`` dict, a list of ``Option`` dicts, an ask-less
         form's answer-schema dict), stored
         alongside the message and returned by the read doors — rendering them is the host
         inbox's own surface. ``None`` for each keeps the plain record shape. A ``schema``
@@ -205,7 +205,7 @@ async def record_notification(
     *,
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
-    options: list[str] | None = None,
+    options: list[Option] | None = None,
     schema: dict[str, Any] | None = None,
 ) -> dict:
     """Write one notification to the internal sink and return the stored record.
@@ -240,7 +240,7 @@ async def record_notification(
             audience=audience,
             media=[item.model_dump(mode="json") for item in media] if media is not None else None,
             template=template.model_dump(mode="json") if template is not None else None,
-            options=options,
+            options=[option.model_dump(mode="json") for option in options] if options is not None else None,
             schema=schema,
         )
 

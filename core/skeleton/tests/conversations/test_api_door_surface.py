@@ -45,7 +45,16 @@ class _Engine:
         self.calls: list[tuple] = []
 
     async def __call__(
-        self, route_name, external_user_id, text, caller_principal, wait_seconds, params=None, form=None
+        self,
+        route_name,
+        external_user_id,
+        text,
+        caller_principal,
+        wait_seconds,
+        params=None,
+        form=None,
+        attachments=None,
+        location=None,
     ):
         self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds, params, form))
         if self._raises is not None:

@@ -25,6 +25,7 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
+    ReplyOption,
 )
 from tai42_contract.interactions import MEDIA_ROUTE_PREFIX
 from tai42_contract.interactions.models import MediaItem, MediaKind
@@ -174,7 +175,7 @@ async def test_notify_none_return_becomes_empty_id_list(register_channel):
 
 
 _IMAGE = MediaItem(kind=MediaKind.IMAGE, url="https://example.com/photo.png", caption="a photo")
-_TEMPLATE = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42"])
+_TEMPLATE = ChannelTemplate(name="status_update", language="en_US", body_parameters=["A-42"])
 
 
 async def test_notify_threads_media_to_a_capable_channel(register_channel):
@@ -214,18 +215,20 @@ async def test_template_to_channel_without_capability_is_not_implemented(registe
 async def test_notify_threads_options_to_a_capable_channel(register_channel):
     channel = register_channel("rich", RichChannel())
 
-    await notify_user("pick one", channel="rich", options=["Item A", "Item B"])
+    await notify_user("pick one", channel="rich", options=[ReplyOption(text="Item A"), ReplyOption(text="Item B")])
 
-    assert channel.notifications == [ChannelNotification(message="pick one", options=["Item A", "Item B"])]
+    assert channel.notifications == [
+        ChannelNotification(message="pick one", options=[ReplyOption(text="Item A"), ReplyOption(text="Item B")])
+    ]
 
 
 async def test_notify_threads_options_with_media_to_a_capable_channel(register_channel):
     channel = register_channel("rich", RichChannel())
 
-    await notify_user("a card with a list", channel="rich", media=[_IMAGE], options=["Item A"])
+    await notify_user("a card with a list", channel="rich", media=[_IMAGE], options=[ReplyOption(text="Item A")])
 
     assert channel.notifications == [
-        ChannelNotification(message="a card with a list", media=[_IMAGE], options=["Item A"])
+        ChannelNotification(message="a card with a list", media=[_IMAGE], options=[ReplyOption(text="Item A")])
     ]
 
 
@@ -255,7 +258,7 @@ async def test_blank_message_with_options_still_refused(register_channel):
     channel = register_channel("rich", RichChannel())
 
     with pytest.raises(ValueError, match="carries no options"):
-        await notify_user("", channel="rich", media=[_IMAGE], options=["Item A"])
+        await notify_user("", channel="rich", media=[_IMAGE], options=[ReplyOption(text="Item A")])
     assert channel.notifications == []
 
 
@@ -265,7 +268,7 @@ async def test_options_to_channel_without_capability_is_not_implemented(register
     channel = register_channel("plain", RecordingChannel())
 
     with pytest.raises(NotImplementedError, match="does not support interactive notifications"):
-        await notify_user("pick one", channel="plain", options=["Item A", "Item B"])
+        await notify_user("pick one", channel="plain", options=[ReplyOption(text="Item A"), ReplyOption(text="Item B")])
     assert channel.notifications == []
 
 
@@ -276,7 +279,7 @@ async def test_options_capability_guard_fires_before_the_feed_record(register_ch
     channel = register_channel("plain", RecordingChannel())
 
     with pytest.raises(NotImplementedError, match="does not support interactive notifications"):
-        await notify_user("pick one", channel="plain", options=["Item A"], audience="alice")
+        await notify_user("pick one", channel="plain", options=[ReplyOption(text="Item A")], audience="alice")
 
     assert channel.notifications == []
     assert await notifications_sink.read_notifications(audience="alice") == []
@@ -290,7 +293,9 @@ async def test_options_and_template_mutual_exclusion_leaves_no_phantom_feed_entr
     channel = register_channel("rich", RichChannel())
 
     with pytest.raises(ValidationError, match="mutually exclusive"):
-        await notify_user("x", channel="rich", options=["Item A"], template=_TEMPLATE, audience="alice")
+        await notify_user(
+            "x", channel="rich", options=[ReplyOption(text="Item A")], template=_TEMPLATE, audience="alice"
+        )
 
     assert channel.notifications == []
     assert await notifications_sink.read_notifications(audience="alice") == []
@@ -375,9 +380,12 @@ async def test_template_with_channel_none_stored_on_sink(sink_redis):
 
 
 async def test_options_with_channel_none_stored_on_sink(sink_redis):
-    await notify_user("pick one", options=["Item A", "Item B"])
+    await notify_user("pick one", options=[ReplyOption(text="Item A"), ReplyOption(text="Item B")])
     records = await notifications_sink.read_notifications()
-    assert records[0]["options"] == ["Item A", "Item B"]
+    assert records[0]["options"] == [
+        ReplyOption(text="Item A").model_dump(mode="json"),
+        ReplyOption(text="Item B").model_dump(mode="json"),
+    ]
 
 
 async def test_media_and_template_mutually_exclusive_on_sink(sink_redis):
@@ -473,7 +481,9 @@ async def test_schema_and_options_mutual_exclusion_leaves_no_phantom_feed_entry(
     channel = register_channel("rich", RichChannel())
 
     with pytest.raises(ValidationError, match="mutually exclusive"):
-        await notify_user("x", channel="rich", schema=_FORM_SCHEMA, options=["Item A"], audience="alice")
+        await notify_user(
+            "x", channel="rich", schema=_FORM_SCHEMA, options=[ReplyOption(text="Item A")], audience="alice"
+        )
 
     assert channel.notifications == []
     assert await notifications_sink.read_notifications(audience="alice") == []
@@ -813,13 +823,17 @@ async def test_channel_send_with_audience_records_rich_fields_on_feed(register_c
     # media/options land on the in-app record, not just the channel push.
     channel = register_channel("rich", RichChannel())
 
-    await notify_user("pick one", channel="rich", media=[_IMAGE], options=["Item A"], audience="alice")
+    await notify_user(
+        "pick one", channel="rich", media=[_IMAGE], options=[ReplyOption(text="Item A")], audience="alice"
+    )
 
-    assert channel.notifications == [ChannelNotification(message="pick one", media=[_IMAGE], options=["Item A"])]
+    assert channel.notifications == [
+        ChannelNotification(message="pick one", media=[_IMAGE], options=[ReplyOption(text="Item A")])
+    ]
     own = await notifications_sink.read_notifications(audience="alice")
     assert len(own) == 1
     assert own[0]["media"] == [_IMAGE.model_dump(mode="json")]
-    assert own[0]["options"] == ["Item A"]
+    assert own[0]["options"] == [ReplyOption(text="Item A").model_dump(mode="json")]
     assert own[0]["template"] is None
 
 
@@ -877,7 +891,7 @@ async def test_blank_message_without_media_rejected(register_channel, bad_messag
     # message has nothing to deliver and the door refuses it before any send.
     channel = register_channel("fake", RecordingChannel())
 
-    with pytest.raises(ValueError, match="message must be non-blank unless media carries the content"):
+    with pytest.raises(ValueError, match="message must be non-blank unless media or location"):
         await notify_user(bad_message, channel="fake")
     assert channel.notifications == []
 

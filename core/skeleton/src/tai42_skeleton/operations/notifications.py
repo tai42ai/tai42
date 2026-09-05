@@ -32,7 +32,7 @@ import warnings
 from typing import Any
 
 from pydantic import BaseModel, Field
-from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelTemplate
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelTemplate, Option
 from tai42_contract.interactions.models import MediaItem
 
 from tai42_skeleton.access_control.user import CrossIdentityAudienceError, request_identity
@@ -100,13 +100,13 @@ with warnings.catch_warnings():
                 "internal inbox record. Mutually exclusive with media and options."
             ),
         )
-        options: list[str] | None = Field(
+        options: list[Option] | None = Field(
             default=None,
             description=(
-                "Optional tappable options sent WITH the message; a tap enters the conversation as a visitor "
-                "message on channels that support it. On a named channel it requires a channel that advertises "
-                "interactive support (else a 501); with no channel it is stored on the internal inbox record. "
-                "Mutually exclusive with template, may combine with media."
+                "Optional tappable options sent WITH the message — each a reply option (a tap submits its text "
+                "as a visitor message) or a link option (a tap opens its url). On a named channel it requires a "
+                "channel that advertises interactive support (else a 501); with no channel it is stored on the "
+                "internal inbox record. Mutually exclusive with template and sections, may combine with media."
             ),
         )
         schema: dict[str, Any] | None = Field(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -151,7 +151,7 @@ async def notify_user(
     sender_identity: str | None = None,
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
-    options: list[str] | None = None,
+    options: list[Option] | None = None,
     schema: dict[str, Any] | None = None,
 ) -> str:
     """Send a human a one-way notification, fire-and-forget.

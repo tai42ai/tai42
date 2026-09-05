@@ -202,6 +202,7 @@ class RichFakeChannel(FakeChannel):
 
 
 async def test_operator_send_with_media_stores_a_rich_part_and_delivers_it(env, monkeypatch):
+    from tai42_contract.channels import ReplyOption
     from tai42_contract.interactions import MediaItem, MediaKind
 
     agent = RecordingAgent()
@@ -217,7 +218,7 @@ async def test_operator_send_with_media_stores_a_rich_part_and_delivers_it(env, 
         text="here you go",
         operator_principal="op-1",
         media=[item],
-        options=["Thanks"],
+        options=[ReplyOption(text="Thanks")],
     )
     await _settle()
 
@@ -229,11 +230,11 @@ async def test_operator_send_with_media_stores_a_rich_part_and_delivers_it(env, 
     assert record.answer_parts is not None
     assert record.answer_parts[0].message == "here you go"
     assert record.answer_parts[0].media == [item]
-    assert record.answer_parts[0].options == ["Thanks"]
+    assert record.answer_parts[0].options == [ReplyOption(text="Thanks")]
     # The delivered notification carries the operator's media/options (final chunk of the part).
     assert channel.sends[0].message == "here you go"
     assert channel.sends[0].media == [item]
-    assert channel.sends[0].options == ["Thanks"]
+    assert channel.sends[0].options == [ReplyOption(text="Thanks")]
     assert record.delivery_status is DeliveryStatus.DELIVERED
 
 
@@ -245,7 +246,7 @@ async def test_operator_send_with_template_stores_a_rich_part_and_delivers_it(en
     route = _channel_route()
     _wire(monkeypatch, FakeManager(route), agent, channel)
 
-    template = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42"])
+    template = ChannelTemplate(name="status_update", language="en_US", body_parameters=["A-42"])
     message_id = await operator_send(
         route=route,
         thread_id="bridge:line:+15550002222",
@@ -332,7 +333,7 @@ async def test_operator_send_template_to_incapable_channel_fails_the_record(env,
     route = _channel_route(target_kind="tool")
     _wire(monkeypatch, FakeManager(route), None, channel)
 
-    template = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42"])
+    template = ChannelTemplate(name="status_update", language="en_US", body_parameters=["A-42"])
     message_id = await operator_send(
         route=route,
         thread_id="bridge:line:+15550002222",

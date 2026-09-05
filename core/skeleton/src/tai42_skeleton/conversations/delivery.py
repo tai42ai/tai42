@@ -148,21 +148,25 @@ def _remaining_parts(parts: list[AnswerPart], sent: list[SentChunk]) -> list[tup
 
 def _part_notification(part: AnswerPart, chunk: str, record: ConversationRecord, *, final: bool) -> ChannelNotification:
     """The :class:`ChannelNotification` for one chunk of ``part``. The part's rich fields
-    (media, template, options, schema) ride the FINAL chunk of the part — its completed
-    message — so a
-    multi-chunk part's earlier chunks are plain text and the media/buttons/form land with the
-    last.
-    A MEDIA-ONLY part has a single final chunk of ``""``: the notification then carries a blank
-    message plus the media, which the contract admits exactly because media is present.
-    ``recipient``/``sender_identity`` are the per-delivery routing the record carries, never
-    per-part."""
+    (media, location, template, options, sections, header, footer, schema) ride the FINAL chunk of
+    the part — its completed message — so a multi-chunk part's earlier chunks are plain text and
+    the media/buttons/form land with the last.
+    A CONTENT-ONLY part (media- or location-only) has a single final chunk of ``""``: the
+    notification then carries a blank message plus that content, which the contract admits exactly
+    because the content is present. ``recipient``/``sender_identity`` are the per-delivery routing
+    the record carries, never per-part. The mapping is 1:1 — every AnswerPart content/interactive
+    field maps to its identically-named ChannelNotification field."""
     return ChannelNotification(
         message=chunk,
         recipient=record.client_address,
         sender_identity=record.our_identity,
         media=part.media if final else None,
+        location=part.location if final else None,
         template=part.template if final else None,
         options=part.options if final else None,
+        sections=part.sections if final else None,
+        header=part.header if final else None,
+        footer=part.footer if final else None,
         schema=part.schema if final else None,
     )
 
@@ -177,12 +181,20 @@ def _unsupported_rich_capability(channel: Channel, parts: list[AnswerPart]) -> s
     for part in parts:
         if part.media is not None and not getattr(channel, "supports_media_notifications", False):
             return "media"
+        if part.location is not None and not getattr(channel, "supports_location_notifications", False):
+            return "location"
         if part.template is not None and not getattr(channel, "supports_template_notifications", False):
             return "template"
         if part.options is not None and not getattr(channel, "supports_interactive_notifications", False):
             return "interactive options"
+        if part.sections is not None and not getattr(channel, "supports_interactive_notifications", False):
+            # A sectioned list IS an interactive choice surface, same capability as flat options.
+            return "interactive sections"
         if part.schema is not None and not getattr(channel, "supports_form_notifications", False):
             return "form"
+        # A header/footer is a pure enhancement of an already-gated interactive message (it rides
+        # options/sections), so a channel that renders the choice surface but not the header/footer
+        # simply omits them — no capability gate, mirroring a media caption a channel may drop.
     return None
 
 
