@@ -1324,7 +1324,8 @@ async def test_notify_over_cap_row_description_degrades_list_to_numbered_text(
     fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # A row description past the 72-char list-row cap cannot ride the list (and a described
-    # option can never be a button), so the whole message degrades to numbered text.
+    # option can never be a button), so the whole message degrades to numbered text — where
+    # the description rides the numbered line whole (a degrade never drops content).
     fake_httpx.responses.append(_accepted("wamid.NUM"))
 
     await WhatsAppChannel().notify(
@@ -1337,7 +1338,8 @@ async def test_notify_over_cap_row_description_degrades_list_to_numbered_text(
 
     payload = fake_httpx.calls[0]["json"]
     assert payload["type"] == "text"
-    assert payload["text"]["body"] == "Pick\n1. Yes\n2. No\nReply with the text of one option."
+    expected = f"Pick\n1. Yes — {'d' * 73}\n2. No\nReply with the text of one option."
+    assert payload["text"]["body"] == expected
 
 
 async def test_notify_over_cap_section_title_degrades_list_to_numbered_text(

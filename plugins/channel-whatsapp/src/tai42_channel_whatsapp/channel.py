@@ -488,13 +488,15 @@ def _numbered_sections_body(body: str, sections: list[OptionSection], footer: st
     section's title as a header line with its rows numbered continuously (1-based across all
     sections), the type-an-option footer, and any interactive footer appended as a trailing
     line — the plain-text send carries no wire caps on these fields, so the authored titles
-    ride whole."""
+    AND row descriptions ride whole (a description often being the very field that forced
+    the degrade)."""
     lines = [body]
     index = 1
     for section in sections:
         lines.append(section.title)
         for row in section.rows:
-            lines.append(f"{index}. {row.text}")
+            entry = f"{index}. {row.text} — {row.description}" if row.description else f"{index}. {row.text}"
+            lines.append(entry)
             index += 1
     lines.append(_NUMBERED_FALLBACK_FOOTER)
     if footer is not None:
@@ -685,7 +687,9 @@ async def _send_interactive_notification(
             ),
         ]
     # Numbered-text fallback: the person types an option (which bridges as a visitor message).
-    numbered = _numbered_body(body_with_links, titles)
+    # Descriptions ride the numbered lines whole — a degrade never silently drops content.
+    entries = [f"{reply.text} — {reply.description}" if reply.description else reply.text for reply in replies]
+    numbered = _numbered_body(body_with_links, entries)
     text_body = _append_lines(numbered, [footer] if footer else [])
     return [*prelude, await send_message(phone_number_id=phone_number_id, to=target, body=text_body)]
 
