@@ -316,12 +316,9 @@ def test_d1_interactions_read_tools_are_agent_callable():
     both are default-projected reads, so an agent dispatches them by name. A same-named
     ``tools/builtin`` shim is impossible — it would trip the duplicate-bind boot guard
     (checklist 3) — so the projected surface IS the agent tool. This pins registration +
-    invocation returning the operation's own result, and the ``status`` filter honored
-    through the tool (an unknown value is a loud ``ToolError``)."""
+    invocation returning the operation's own result."""
 
     async def run():
-        from fastmcp.exceptions import ToolError
-
         async with app.app_context(_manifest()):
             live = await app.tools.get_tools()
             assert "list_interactions" in live
@@ -330,7 +327,7 @@ def test_d1_interactions_read_tools_are_agent_callable():
             # Dispatched by name through the shared run_tool seam, returning the
             # operation's own result. The interactions store is unconfigured in this
             # harness, so each read answers its honest empty payload.
-            page = await app.tools.run_tool("list_interactions", {"status": "pending"})
+            page = await app.tools.run_tool("list_interactions", {})
             assert page == {
                 "items": [],
                 "total": 0,
@@ -341,11 +338,6 @@ def test_d1_interactions_read_tools_are_agent_callable():
             }
             parked = await app.tools.run_tool("list_pending_interactions", {})
             assert parked == {"items": [], "count": 0}
-
-            # The status filter is honored THROUGH the tool: an unknown value is a loud
-            # ToolError naming the valid set (mapped from the operation's BadRequestError).
-            with pytest.raises(ToolError, match="unknown status"):
-                await app.tools.run_tool("list_interactions", {"status": "bogus"})
 
     asyncio.run(run())
 

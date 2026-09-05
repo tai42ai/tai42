@@ -406,18 +406,9 @@ MAX_INTERACTIONS_PAGE_SIZE = 200
 #: index cannot be sliced at; it is a malformed window and is refused as one.
 MAX_INTERACTIONS_PAGE = 1_000_000
 
-#: The interaction lifecycle statuses the list door accepts as a ``?status=`` filter: the
-#: one LIVE status the pending inbox surfaces (``pending``) plus the two TERMINALS a record
-#: reaches (``answered``, and the ``cancelled`` this feature adds). An unknown value is a
-#: loud 400 naming this set. Note the inbox retains only PENDING records — an answered one
-#: is reconciled out of the pending index, a cancelled/expired one is pruned — so a terminal
-#: filter is well-formed but matches NOTHING on this door: it filters what the inbox holds,
-#: it never resurrects terminal history (which this store does not retain).
-LIST_STATUS_VALUES: tuple[str, ...] = ("pending", "answered", "cancelled")
-
 
 class InteractionWindowQuery(BaseModel):
-    """The ``?page=``/``?pageSize=``/``?status=`` window the pending-list door takes.
+    """The ``?page=``/``?pageSize=`` window the pending-list door takes.
 
     Spec metadata only — the door parses its query at the HTTP edge."""
 
@@ -427,14 +418,6 @@ class InteractionWindowQuery(BaseModel):
         ge=1,
         alias="pageSize",
         description=f"Items per page. A larger value is capped to {MAX_INTERACTIONS_PAGE_SIZE}, never refused.",
-    )
-    status: str | None = Field(
-        default=None,
-        description=(
-            "Optional lifecycle-status filter. One of "
-            f"{', '.join(LIST_STATUS_VALUES)}; an unknown value is a 400. The inbox holds only "
-            "pending records, so a terminal status matches nothing here."
-        ),
     )
 
 
@@ -462,7 +445,7 @@ def _next_page(page: int, limit: int, total: int) -> int | None:
     errors=[BadRequestError],
     request_model=InteractionWindowQuery,
 )
-async def list_interactions(page: int = 1, page_size: int = 50, status: str | None = None) -> dict:
+async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
     """The pending questions the inbox shows, one page at a time — the initial-load
     surface a client reads BEFORE applying the live stream
     (``GET /api/interactions/stream``).
@@ -476,21 +459,10 @@ async def list_interactions(page: int = 1, page_size: int = 50, status: str | No
     goes (phantom-group prune, abandoned past-deadline prune, answered/missing skip). Returns
     ``{"items", "total", "page", "page_size", "next_page", "truncated"}`` — ``items``
     carry the same shape as the stream's add frames, and ``truncated`` is always
-    ``false`` (the pending index is the whole set, sliced in memory).
-
-    ``status`` optionally filters by lifecycle status (one of :data:`LIST_STATUS_VALUES`;
-    an unknown value is a loud 400 naming the set), applied BEFORE paging so ``total`` stays
-    honest. The inbox holds only PENDING records, so ``status="pending"`` returns the whole
-    set and any TERMINAL status (``answered``/``cancelled``) matches nothing on this door —
-    the terminal history is not retained here; use it as a forward-looking axis, not a
-    terminal-history query."""
+    ``false`` (the pending index is the whole set, sliced in memory)."""
     offset, limit = _page_bounds(page, page_size)
-    # Loud, before any read: an unknown status names the valid set (the /pending audit door
-    # is deliberately untouched — a different store with live-park semantics).
-    if status is not None and status not in LIST_STATUS_VALUES:
-        raise BadRequestError(f"unknown status {status!r}; valid statuses are {', '.join(LIST_STATUS_VALUES)}")
     # OFF gate: with no store configured nothing is pending — the honest empty page
-    # (the malformed-window/status 400s above still apply, so the door is no configured oracle).
+    # (the malformed-window 400 above still applies, so the door is no configured oracle).
     if not interactions_store_configured():
         return {"items": [], "total": 0, "page": page, "page_size": limit, "next_page": None, "truncated": False}
     settings = interactions_settings()
@@ -502,11 +474,6 @@ async def list_interactions(page: int = 1, page_size: int = 50, status: str | No
         # A restricted caller sees only its own addressed questions; filter BEFORE
         # paging so the total counts what the caller may actually see.
         pending = [req for req in pending if req.audience == restricted]
-    # Status filter, BEFORE paging so ``total`` is honest. The pending inbox holds only
-    # PENDING records by construction, so a terminal-status filter (``answered``/``cancelled``)
-    # matches none here — the door filters what it holds, never resurrecting terminal history.
-    if status is not None and status != "pending":
-        pending = []
     total = len(pending)
     window = pending[offset : offset + limit]
     return {

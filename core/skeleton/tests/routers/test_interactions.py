@@ -1374,52 +1374,6 @@ async def test_list_unrestricted_shows_all(wired):
     assert sorted(item["interaction_id"] for item in page["items"]) == ["a1", "o1"]
 
 
-# -- list door: the ?status= filter -----------------------------------------
-
-
-async def test_list_status_pending_returns_matching_and_unfiltered_unchanged(wired):
-    await _seed_addressed(wired, "a1", "ga", None)
-    await _seed_addressed(wired, "a2", "gb", None)
-    with _identity(user_id="op1", owner=None):
-        unfiltered = await ops.list_interactions()
-        filtered = await ops.list_interactions(status="pending")
-    # The inbox holds only pending records, so status=pending == the unfiltered set.
-    assert sorted(i["interaction_id"] for i in filtered["items"]) == ["a1", "a2"]
-    assert filtered["total"] == 2
-    assert [i["interaction_id"] for i in filtered["items"]] == [i["interaction_id"] for i in unfiltered["items"]]
-
-
-async def test_list_status_terminal_matches_nothing_on_the_pending_door(wired):
-    # A terminal-status filter is well-formed but the pending inbox retains no terminal
-    # records, so it returns an honest empty page (total 0) — never a resurrection.
-    await _seed_addressed(wired, "a1", "ga", None)
-    with _identity(user_id="op1", owner=None):
-        for terminal in ("answered", "cancelled"):
-            page = await ops.list_interactions(status=terminal)
-            assert page["items"] == []
-            assert page["total"] == 0
-
-
-async def test_list_unknown_status_400(wired):
-    from tai42_skeleton.operations import BadRequestError
-
-    with pytest.raises(BadRequestError, match="unknown status"):
-        await ops.list_interactions(status="bogus")
-
-
-async def test_list_status_unknown_400_through_router(wired):
-    resp = await router.list_interactions(make_request("GET", query="status=bogus"))
-    assert resp.status_code == 400
-    assert "unknown status" in _json(resp)["error"]
-
-
-async def test_list_status_valid_through_router(wired):
-    await _seed_addressed(wired, "a1", "ga", None)
-    resp = await router.list_interactions(make_request("GET", query="status=pending"))
-    assert resp.status_code == 200
-    assert [i["interaction_id"] for i in _json(resp)["data"]["items"]] == ["a1"]
-
-
 async def test_restricted_stream_terminal_filtered_by_event_audience(wired):
     # A terminal frame is filtered DIRECTLY on the audience the store stamps into the
     # event payload: a restricted caller sees a terminal ONLY for its own addressed

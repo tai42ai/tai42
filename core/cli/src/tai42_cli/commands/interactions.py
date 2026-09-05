@@ -34,17 +34,10 @@ def list_interactions(
     ctx: typer.Context,
     page: Annotated[int | None, typer.Option("--page", help="Page number (1-based).")] = None,
     page_size: Annotated[int | None, typer.Option("--page-size", help="Items per page (capped at 200).")] = None,
-    status: Annotated[
-        str | None,
-        typer.Option(
-            "--status",
-            help="Filter by lifecycle status (pending|answered|cancelled). The inbox holds only pending records.",
-        ),
-    ] = None,
 ) -> None:
     """Print one page of pending interactions.
 
-    Example: ``tai interactions list --page 1 --page-size 50 --status pending``
+    Example: ``tai interactions list --page 1 --page-size 50``
     """
     ctx_obj = app_context(ctx)
     params: dict[str, str] = {}
@@ -52,8 +45,6 @@ def list_interactions(
         params["page"] = str(page)
     if page_size is not None:
         params["pageSize"] = str(page_size)
-    if status is not None:
-        params["status"] = status
     with ctx_obj.client() as client:
         data = client.get("/api/interactions", params=params or None)
     emit_result(ctx_obj, data)

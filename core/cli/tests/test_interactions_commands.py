@@ -44,25 +44,3 @@ def test_interactions_cancel_conflict_surfaces_error(monkeypatch: pytest.MonkeyP
     result = run_cli(monkeypatch, handler, ["interactions", "cancel", "i_123"])
     assert result.exit_code != 0
     assert "Interaction already answered" in visible(result.output)
-
-
-def test_interactions_list_status_passes_the_query_param(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "GET"
-        assert request.url.path == "/api/interactions"
-        assert request.url.params.get("status") == "pending"
-        return data_response(
-            {"items": [], "total": 0, "page": 1, "page_size": 50, "next_page": None, "truncated": False}
-        )
-
-    result = run_cli(monkeypatch, handler, ["interactions", "list", "--status", "pending"])
-    assert result.exit_code == 0, result.output
-
-
-def test_interactions_list_unknown_status_surfaces_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return error_response("unknown status 'bogus'; valid statuses are pending, answered, cancelled", 400)
-
-    result = run_cli(monkeypatch, handler, ["interactions", "list", "--status", "bogus"])
-    assert result.exit_code != 0
-    assert "valid statuses are pending, answered, cancelled" in visible(result.output)

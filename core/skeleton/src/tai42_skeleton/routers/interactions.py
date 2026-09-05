@@ -585,20 +585,15 @@ async def media(request: Request) -> Response:
 
 
 async def _extract_page_window(request: Request) -> dict:
-    """The ``?page=`` / ``?pageSize=`` / ``?status=`` window as the list door's flat
-    arguments (a GET reads its parameters from the query string, never a body). A
-    non-integer page/pageSize is a loud 400 here; the operation range-checks the pair,
-    caps the size, and validates ``status`` against the known set (a loud 400 there)."""
+    """The ``?page=`` / ``?pageSize=`` window as the list door's flat arguments (a GET
+    reads its parameters from the query string, never a body). A non-integer is a loud
+    400 here; the operation range-checks the pair and caps the size."""
     page = request.query_params.get("page", "1")
     page_size = request.query_params.get("pageSize", "50")
     try:
-        window: dict[str, Any] = {"page": int(page), "page_size": int(page_size)}
+        return {"page": int(page), "page_size": int(page_size)}
     except ValueError as exc:
         raise BadRequestError(f"page and pageSize must be integers: page={page!r} pageSize={page_size!r}") from exc
-    status = request.query_params.get("status")
-    if status is not None:
-        window["status"] = status
-    return window
 
 
 list_interactions = register_operation_route(
