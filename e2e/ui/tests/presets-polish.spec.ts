@@ -1,18 +1,18 @@
 /**
- * The presets "polish" surfaces over the REAL versioning store: the rename
+ * The custom nodes "polish" surfaces over the REAL versioning store: the rename
  * referee preflight, the version-history compare, per-version tag editing, the
  * dry-run validate verdict, and the absence of the conflicted section when no
- * preset is quarantined. Every effect is driven through the live Studio and the
+ * custom node is quarantined. Every effect is driven through the live Studio and the
  * real skeleton doors it calls.
  */
 import { expect, test, type Page } from '@playwright/test';
 import { apiHeaders, seedCredential, uniq } from './helpers';
 
-/** Create a preset over `e2e_echo` baking `payload`, landing on its detail view. */
+/** Create a custom node over `e2e_echo` baking `payload`, landing on its detail view. */
 async function createEchoPreset(page: Page, name: string, payload: string): Promise<void> {
   await page.goto('/presets');
-  await page.getByRole('button', { name: 'Create preset' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Create preset' });
+  await page.getByRole('button', { name: 'Create custom node' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Create custom node' });
   await dialog.getByRole('textbox', { name: 'Name' }).fill(name);
   // Description is REQUIRED and gates submit; the bound tool's LLM-facing docstring.
   await dialog.getByRole('textbox', { name: 'Description' }).fill(`echo preset ${name}`);
@@ -25,8 +25,8 @@ async function createEchoPreset(page: Page, name: string, payload: string): Prom
   await baseTool.pressSequentially('e2e_echo');
   await expect(baseTool).toHaveText(/^e2e_echo(?!_)/);
   await dialog.getByRole('textbox', { name: 'Fixed kwargs JSON' }).fill(JSON.stringify({ payload }));
-  await dialog.getByRole('button', { name: 'Create preset' }).click();
-  await expect(page.getByRole('link', { name: `Open preset ${name}` })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Create custom node' }).click();
+  await expect(page.getByRole('link', { name: `Open custom node ${name}` })).toBeVisible();
 }
 
 test('rename preflight lists referees and disables submit', async ({ page, request }) => {
@@ -51,11 +51,11 @@ test('rename preflight lists referees and disables submit', async ({ page, reque
   });
   expect(created.status(), await created.text()).toBe(200);
 
-  // Renaming the referenced preset is preflighted: the callout lists the referee
+  // Renaming the referenced custom node is preflighted: the callout lists the referee
   // and the submit button is disabled.
   await page.goto(`/presets?preset=${base}`);
-  await page.getByRole('button', { name: `Rename preset ${base}` }).click();
-  const renameDialog = page.getByRole('dialog', { name: `Rename preset — ${base}` });
+  await page.getByRole('button', { name: `Rename custom node ${base}` }).click();
+  const renameDialog = page.getByRole('dialog', { name: `Rename custom node — ${base}` });
   await expect(renameDialog).toBeVisible();
   const callout = page.getByRole('alert');
   await expect(callout).toContainText(`Referenced by: ${composer}`);
@@ -98,12 +98,12 @@ test('version history compare shows the changed path row and per-version tags', 
   await expect(page.getByTestId('version-row-2').getByText(tag)).toBeVisible();
 });
 
-test('the presets edit-details dialog writes the overlay display name + tags', async ({ page, request }) => {
+test('the custom nodes edit-details dialog writes the overlay display name + tags', async ({ page, request }) => {
   const name = uniq('preset');
   await seedCredential(page);
   await createEchoPreset(page, name, uniq('payload'));
 
-  // The presets screen edits the tool_meta overlay's display name + tags (no folder /
+  // The custom nodes screen edits the tool_meta overlay's display name + tags (no folder /
   // hide controls here — those are centralized on the tools screen).
   await page.goto(`/presets?preset=${name}`);
   await page.getByRole('button', { name: `Edit details for ${name}` }).click();
@@ -134,13 +134,13 @@ test('validate reports a clean bind, and no conflicted section when none is quar
 }) => {
   await seedCredential(page);
 
-  // The list-level conflicted section is absent while every preset is healthy.
+  // The list-level conflicted section is absent while every custom node is healthy.
   await page.goto('/presets');
   await expect(page.getByTestId('presets-conflicted-section')).toHaveCount(0);
 
   // The Validate button on a valid create draft returns the clean-bind verdict.
-  await page.getByRole('button', { name: 'Create preset' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Create preset' });
+  await page.getByRole('button', { name: 'Create custom node' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Create custom node' });
   await dialog.getByRole('textbox', { name: 'Name' }).fill(uniq('draft'));
   // Description is REQUIRED: the validate door mirrors the create rule and
   // rejects an empty one, so the draft must carry it to bind cleanly.

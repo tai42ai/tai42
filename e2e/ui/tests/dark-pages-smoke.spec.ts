@@ -42,7 +42,7 @@ const NAV_PAGES: ReadonlyArray<{ readonly navLabel: string; readonly heading: st
   // Capabilities.
   { navLabel: 'Tools', heading: 'Tools' },
   { navLabel: 'Agents', heading: 'Agents' },
-  { navLabel: 'Presets', heading: 'Presets' },
+  { navLabel: 'Custom nodes', heading: 'Custom nodes' },
   { navLabel: 'Extensions', heading: 'Tool extensions' },
   { navLabel: 'Templates', heading: 'Templates' },
   // Connections. The MCP config surface moved onto the Connectors page (its own
