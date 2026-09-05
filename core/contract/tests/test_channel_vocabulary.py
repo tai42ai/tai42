@@ -72,8 +72,8 @@ def test_new_file_kinds_reject_non_absolute(kind: MediaKind):
 
 
 def test_document_carries_filename():
-    item = MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.example/d.pdf", filename="invoice.pdf")
-    assert item.filename == "invoice.pdf"
+    item = MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.example/d.pdf", filename="report.pdf")
+    assert item.filename == "report.pdf"
 
 
 @pytest.mark.parametrize("kind", [MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.AUDIO, MediaKind.LINK])

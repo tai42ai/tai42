@@ -642,10 +642,10 @@ async def test_send_template_document_header_carries_filename(fake_redis: FakeRe
         PHONE_NUMBER_ID,
         ALLOWED_A,
         ChannelTemplate(
-            name="invoice",
+            name="report",
             language="en_US",
             header_media=MediaItem(
-                kind=MediaKind.DOCUMENT, url="https://cdn.example/invoice.pdf", filename="invoice.pdf"
+                kind=MediaKind.DOCUMENT, url="https://cdn.example/report.pdf", filename="report.pdf"
             ),
         ),
     )
@@ -653,7 +653,7 @@ async def test_send_template_document_header_carries_filename(fake_redis: FakeRe
         {
             "type": "header",
             "parameters": [
-                {"type": "document", "document": {"link": "https://cdn.example/invoice.pdf", "filename": "invoice.pdf"}}
+                {"type": "document", "document": {"link": "https://cdn.example/report.pdf", "filename": "report.pdf"}}
             ],
         }
     ]
@@ -1067,15 +1067,15 @@ async def test_notify_single_link_option_renders_as_cta_url(fake_redis: FakeRedi
 
     await WhatsAppChannel().notify(
         ChannelNotification(
-            message="Your invoice is ready.",
+            message="Your report is ready.",
             recipient=ALLOWED_A,
-            options=[LinkOption(label="View invoice", url="https://pay.example/42")],
+            options=[LinkOption(label="View report", url="https://pay.example/42")],
         )
     )
 
     interactive = fake_httpx.calls[0]["json"]["interactive"]
     assert interactive["type"] == "cta_url"
-    assert interactive["action"]["parameters"] == {"display_text": "View invoice", "url": "https://pay.example/42"}
+    assert interactive["action"]["parameters"] == {"display_text": "View report", "url": "https://pay.example/42"}
 
 
 async def test_notify_mixed_reply_and_link_options_buttons_with_link_body_line(
@@ -1453,7 +1453,7 @@ async def test_notify_over_cap_cta_url_label_degrades_to_body_line(fake_redis: F
 
     await WhatsAppChannel().notify(
         ChannelNotification(
-            message="Your invoice is ready.",
+            message="Your report is ready.",
             recipient=ALLOWED_A,
             options=[LinkOption(label=long_label, url="https://pay.example/42")],
         )
@@ -1461,7 +1461,7 @@ async def test_notify_over_cap_cta_url_label_degrades_to_body_line(fake_redis: F
 
     payload = fake_httpx.calls[0]["json"]
     assert payload["type"] == "text"
-    assert payload["text"]["body"] == f"Your invoice is ready.\n{long_label}: https://pay.example/42"
+    assert payload["text"]["body"] == f"Your report is ready.\n{long_label}: https://pay.example/42"
 
 
 # --- Minted-id collision-proofing against authored ids (FINDING B) --------------------------

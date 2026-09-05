@@ -19,6 +19,7 @@ _BANNED_CLIENT_TERMS = (
     "bookin" + "guru",
     "bookin" + "-guru",
     "bookin" + "_guru",
+    "invo" + "ice",
 )
 
 _BANNED_RE = re.compile(
@@ -81,6 +82,7 @@ def test_scan_is_not_vacuous():
 # this guard file stays self-exempt and greps clean.
 _CONCI = "conci" + "erge"
 _GURU = "bookin" + "guru"
+_INVO = "invo" + "ice"
 
 _MATCHING_CONTROLS = (
     _CONCI,  # exact, lowercase
@@ -91,6 +93,8 @@ _MATCHING_CONTROLS = (
     "bookin" + "_guru",  # underscored
     "a " + _CONCI + " here",  # bounded by spaces
     _CONCI + ",",  # trailing punctuation is a word boundary
+    _INVO,  # business-domain term, lowercase
+    _INVO.capitalize(),  # title case
 )
 
 _NON_MATCHING_CONTROLS = (
