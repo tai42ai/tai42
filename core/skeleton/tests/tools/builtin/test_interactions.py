@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 import pytest
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
-from tai42_contract.interactions import InteractionResponse
+from tai42_contract.interactions import AnswerMismatchPolicy, InteractionResponse
 
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_identity_claims,
@@ -91,6 +91,8 @@ async def test_ask_user_forwards_arguments_and_returns_answer(monkeypatch: pytes
                 "link": None,
                 "channel": None,
                 "recipient": None,
+                "on_mismatch": AnswerMismatchPolicy.RETRY,
+                "mismatch_notice": None,
                 "audience": None,
                 "media": None,
                 "mode": "sync",
@@ -119,6 +121,8 @@ async def test_ask_user_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> N
                 "link": None,
                 "channel": None,
                 "recipient": None,
+                "on_mismatch": AnswerMismatchPolicy.RETRY,
+                "mismatch_notice": None,
                 "audience": None,
                 "media": None,
                 "mode": "sync",
@@ -147,6 +151,47 @@ async def test_ask_user_forwards_recipient(monkeypatch: pytest.MonkeyPatch) -> N
     assert result == "ok"
     assert helper.calls[0][1]["channel"] == "telegram"
     assert helper.calls[0][1]["recipient"] == "@ops"
+
+
+async def test_ask_user_forwards_on_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The tool's ``on_mismatch`` string is coerced to the contract policy enum and
+    # forwarded to the helper, so a tool author can set the bridge digression policy.
+    helper = _RecordingHelper(answer="ok")
+    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+
+    result = await builtin_interactions.ask_user("Ping?", channel="telegram", on_mismatch="bridge")
+
+    assert result == "ok"
+    assert helper.calls[0][1]["on_mismatch"] is AnswerMismatchPolicy.BRIDGE
+
+
+async def test_ask_user_forwards_mismatch_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The custom retry notice is forwarded verbatim; on_mismatch defaults to retry.
+    helper = _RecordingHelper(answer="ok")
+    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+
+    result = await builtin_interactions.ask_user(
+        "Ping?", channel="telegram", mismatch_notice="Please answer yes or no ({reason})."
+    )
+
+    assert result == "ok"
+    assert helper.calls[0][1]["mismatch_notice"] == "Please answer yes or no ({reason})."
+    assert helper.calls[0][1]["on_mismatch"] is AnswerMismatchPolicy.RETRY
+
+
+def test_ask_user_tool_schema_advertises_mismatch_fields() -> None:
+    # The typed signature fastmcp derives advertises both fields to the LLM: a bounded
+    # retry|bridge choice defaulting to retry, and an optional custom notice string.
+    # Neither is required, so every existing ask keeps working unchanged.
+    from fastmcp.utilities.types import get_cached_typeadapter
+
+    schema = get_cached_typeadapter(builtin_interactions.ask_user).json_schema()
+    props = schema["properties"]
+    assert props["on_mismatch"]["enum"] == ["retry", "bridge"]
+    assert props["on_mismatch"]["default"] == "retry"
+    assert "mismatch_notice" in props
+    assert "on_mismatch" not in schema.get("required", [])
+    assert "mismatch_notice" not in schema.get("required", [])
 
 
 async def test_ask_user_forwards_media(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -34,6 +34,7 @@ from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions import (
     PARK_COMPLETION_THREAD_KEY,
     AnswerFormat,
+    AnswerMismatchPolicy,
     InteractionRequest,
     MediaItem,
     SuspendedInteraction,
@@ -348,6 +349,8 @@ async def ask_user(
     verifier: dict[str, Any] | None = None,
     channel: str | None = None,
     recipient: str | None = None,
+    on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
+    mismatch_notice: str | None = None,
     sensitive: bool = False,
     audience: str | None = None,
     media: list[MediaItem | dict[str, Any]] | None = None,
@@ -424,6 +427,28 @@ async def ask_user(
     must be a non-blank string): the plugin owns the allowlist. ``recipient``
     is forbidden when ``channel`` is ``None`` (an address is meaningless
     without a channel to send on).
+
+    ``on_mismatch`` is the per-ask digression policy the shared inbound-answer
+    ladder reads when the answer door REJECTS a guest reply on a LIVE
+    channel-delivered ask (a 400 — the reply did not fit the format).
+    ``AnswerMismatchPolicy.RETRY`` (the default, today's behavior) keeps the ask
+    parked and tells the guest what is expected so they answer again in place;
+    ``AnswerMismatchPolicy.BRIDGE`` treats an unmatched reply as a DIGRESSION —
+    keep the ask parked with NO guest notice and hand the reply to the
+    conversation as a fresh routed turn, so the ask ends only by a real answer or
+    its timeout. It rides both the durable ``InteractionRequest`` (attribution) and
+    the ``ChannelDelivery`` the channel copies onto the ``Correlation`` it parks
+    (the ladder's authoritative read). It takes effect only on a channel-delivered
+    ask; an inbox-only ask records it but never reaches the ladder.
+
+    ``mismatch_notice`` is an OPTIONAL custom guest-facing rejection notice used
+    ONLY under the ``RETRY`` policy: when set it REPLACES the platform's built-in
+    retry notice (a literal ``{reason}`` token is filled with the door's reason by
+    a plain substitution; a notice without it is sent verbatim). It is IGNORED
+    under ``BRIDGE`` (a digression never notifies) and by a channel that owns its
+    correction surface. It rides the same two frames as ``on_mismatch``. ``None``
+    (the default) uses the built-in notice; a set value is a non-blank string
+    within the guest-reply cap (the models enforce it).
 
     ``audience`` is the identity (a user_id) the question is addressed to:
     a restricted identity sees and answers ONLY questions addressed to it, while an
@@ -716,6 +741,11 @@ async def ask_user(
             question=question,
             answer_format=fmt,
             format_payload=format_payload,
+            # The per-ask digression policy + custom retry notice ride the durable
+            # record for attribution; the ladder reads them off the Correlation the
+            # channel parks (copied from the ChannelDelivery below).
+            on_mismatch=on_mismatch,
+            mismatch_notice=mismatch_notice,
             reply_to=reply_to,
             created_at=created_at,
             timeout_at=timeout_at,
@@ -806,6 +836,12 @@ async def ask_user(
             # a channel that renders media shows it alongside the question and one that
             # renders only text simply ignores it. None when the ask carried no media.
             media=stored_media,
+            # The ladder's authoritative path: the channel copies these onto the
+            # ``Correlation`` it parks, and the shared inbound-answer ladder reads
+            # them at the 400 decision (bridge the digression / send the custom
+            # retry notice).
+            on_mismatch=on_mismatch,
+            mismatch_notice=mismatch_notice,
             callback_url=callback_url,
             timeout_at=timeout_at,
         )

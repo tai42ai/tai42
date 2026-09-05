@@ -177,8 +177,11 @@ class AppInteractions(Protocol):
         ``await tai42_app.interactions.ask_user(question, ..., mode="async",
         expiry_at=...)``. The return shape is the ``AskUser`` contract's:
         ``mode="sync"`` returns the typed answer, ``mode="async"`` returns a
-        ``SuspendedInteraction``. A facade EXPOSURE of the skeleton helper through the
-        already-typed Protocol — no new ask semantics."""
+        ``SuspendedInteraction``. Its full call signature is the ``AskUser``
+        Protocol's, including the per-ask ``on_mismatch`` digression policy and
+        ``mismatch_notice`` retry text a channel-delivered ask carries. A facade
+        EXPOSURE of the skeleton helper through the already-typed Protocol — no new
+        ask semantics."""
         ...
 
 

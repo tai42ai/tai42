@@ -280,6 +280,61 @@ def test_app_interactions_exposes_ask_user_typed_by_the_contract_protocol():
     assert get_type_hints(prop.fget)["return"] is AskUser
 
 
+def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
+    # A double implementing the AppInteractions facet exposes an AskUser callable that
+    # ACCEPTS the per-ask ``on_mismatch``/``mismatch_notice`` kwargs — the settability
+    # a caller reaches through the typed protocol. Both protocols are runtime-checkable,
+    # and calling the double captures the values, proving the kwargs are part of the
+    # contract surface (not merely present on some impl).
+    import asyncio
+    import inspect
+
+    from tai42_contract.app import AppInteractions
+    from tai42_contract.interactions import AnswerMismatchPolicy, AskUser
+
+    # The kwargs a facet double threads must be part of the CONTRACT's own AskUser
+    # surface — not merely accepted by some impl double — so a caller reaches them
+    # through the typed protocol.
+    proto_params = inspect.signature(AskUser.__call__).parameters
+    assert proto_params["on_mismatch"].default is AnswerMismatchPolicy.RETRY
+    assert proto_params["mismatch_notice"].default is None
+
+    captured: dict[str, object] = {}
+
+    class _AskUserDouble:
+        async def __call__(
+            self,
+            question: str,
+            *,
+            on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
+            mismatch_notice: str | None = None,
+            **kwargs: object,
+        ) -> object:
+            captured["question"] = question
+            captured["on_mismatch"] = on_mismatch
+            captured["mismatch_notice"] = mismatch_notice
+            return "ok"
+
+    class _InteractionsDouble:
+        def __init__(self) -> None:
+            self._ask = _AskUserDouble()
+
+        @property
+        def ask_user(self) -> AskUser:
+            return self._ask
+
+    facet = _InteractionsDouble()
+    assert isinstance(facet, AppInteractions)
+    assert isinstance(facet.ask_user, AskUser)
+
+    answer = asyncio.run(
+        facet.ask_user("confirm?", on_mismatch=AnswerMismatchPolicy.BRIDGE, mismatch_notice="try again: {reason}")
+    )
+    assert answer == "ok"
+    assert captured["on_mismatch"] is AnswerMismatchPolicy.BRIDGE
+    assert captured["mismatch_notice"] == "try again: {reason}"
+
+
 # -- Manifest wiring: kind, binding, sandbox_module ----------------------------
 
 
