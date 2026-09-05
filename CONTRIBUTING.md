@@ -26,7 +26,12 @@ uv run --package tai42-<name> pytest --cov --cov-report=term-missing
 ```
 
 Run each package's checks from its own directory so its coverage floor,
-`filterwarnings`, markers, and ruff/pyright config bind.
+`filterwarnings`, markers, and ruff/pyright config bind. Running `pyright` from
+the repository root is unsupported: there is no root config, so pyright falls
+back to its defaults (standard mode, `reportMissingImports=error`) and reports
+hundreds of false positives. Always run it per package so that member's
+`[tool.pyright]` binds; `scripts/pyright-all.sh` sweeps every member the way CI
+does.
 
 ## Dependency resolution
 

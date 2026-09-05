@@ -98,12 +98,10 @@ def test_attribute_run_returns_the_wrapping_cm_without_entering_it():
 
 
 def test_attribute_run_stamps_even_before_a_trace_is_open():
-    # GUARD REWORK: attribute_run no longer short-circuits to a nullcontext when
-    # current_trace_id() is None. langfuse's propagate_attributes is OTel-context-
-    # scoped, so a deposit made BEFORE the run's first span is lifted onto that span's
-    # trace root when it opens INSIDE the scope. The old guard dropped exactly that
-    # common case (a door deposits, then opens the first span), so it is gone: the
-    # stamp is ALWAYS attempted, and its fail-safety is trace_attributes' own.
+    # attribute_run always attempts the stamp, even with no trace open. langfuse's
+    # propagate_attributes is OTel-context-scoped, so a deposit made BEFORE the run's
+    # first span is lifted onto that span's trace root when it opens INSIDE the scope
+    # (a door deposits, then opens the first span). Fail-safety is trace_attributes' own.
     from tai42_contract.monitoring import RunAttribution, attribute_run
     from tai42_contract.monitoring.writer import RUN_ATTRIBUTION_TRACE_NAME, MonitoringWriter
 
