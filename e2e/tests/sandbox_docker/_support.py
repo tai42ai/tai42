@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TypedDict
 
 import pytest
-from tai42_contract.sandbox import SandboxError, SandboxSessionSpec
+from tai42_contract.sandbox import SandboxError, SandboxExecTimeoutError, SandboxSessionSpec
 from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession, permissive_policy
 
 from tai42_e2e.waiting import WaitTimeout, wait_for_async
@@ -178,21 +178,28 @@ async def http_over_tcp(session: ManagedSandboxSession, host: str, port: int, pa
 
 
 async def resolves_dns(session: ManagedSandboxSession, name: str) -> bool:
-    """Whether the session can resolve ``name`` — DNS egress works.
+    """Whether the session can resolve ``name`` — i.e. DNS egress is OPEN.
 
-    "Egress open" is a STEADY-STATE property; a single UDP resolution can be lost
-    to transient runner noise without falsifying it. Wait on the condition over a
-    bounded window (soft bound: the deadline is checked BETWEEN attempts, so one
-    hung lookup can run to its own 25s exec timeout): a firewall that blocks DNS
-    fails every attempt deterministically, so the negative stays trustworthy
-    while one dropped packet stops failing the suite."""
+    Egress-open is a STEADY-STATE policy property, not a promise about the
+    runner's network: on a shared CI host a single UDP lookup can be lost or run
+    slow without the policy being closed, and external DNS latency there is not
+    this probe's subject. So the resolution is a bounded retry — a few short
+    attempts on a small backoff, each capped at a short per-attempt timeout so a
+    hung lookup counts as one retryable miss (caught and treated as "not yet")
+    instead of consuming the whole window or escaping as a hard error. A firewall
+    that truly blocks DNS fails every attempt deterministically, so this only
+    rides out transient loss; it returns True the instant a lookup succeeds and
+    never turns a real block into a pass."""
 
     async def resolved() -> bool:
-        result = await session.exec(["nslookup", name], stdin=b"", timeout_seconds=25)
+        try:
+            result = await session.exec(["nslookup", name], stdin=b"", timeout_seconds=5)
+        except SandboxExecTimeoutError:
+            return False
         return result.exit_code == 0
 
     try:
-        await wait_for_async(resolved, deadline=15.0, interval=2.0, message=f"{name} never resolved")
+        await wait_for_async(resolved, deadline=12.0, interval=1.0, message=f"{name} never resolved")
     except WaitTimeout:
         return False
     return True
