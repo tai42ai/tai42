@@ -3,7 +3,8 @@
 ``list`` reads one page of the pending questions from ``GET /api/interactions``;
 ``pending`` reads the operator-only audit of PARKED (async) asks awaiting an answer
 from ``GET /api/interactions/pending``; ``stream`` tails the inbox live (a tail-only
-add/answered/removed feed, no backlog); ``answer`` posts a human answer.
+add/answered/removed feed, no backlog); ``answer`` posts a human answer; ``cancel``
+withdraws a pending ask without answering it.
 """
 
 from __future__ import annotations
@@ -97,4 +98,23 @@ def answer_interaction(
     value = parse_json_value(answer, param_hint="--answer")
     with ctx_obj.client() as client:
         data = client.post(f"/api/interactions/{interaction_id}/answer", json={"answer": value})
+    emit_result(ctx_obj, data)
+
+
+@app.command("cancel")
+@covers(("POST", "/api/interactions/{interaction_id}/cancel"))
+def cancel_interaction(
+    ctx: typer.Context,
+    interaction_id: Annotated[str, typer.Argument(help="Interaction id.")],
+) -> None:
+    """Cancel a pending interaction — withdraw the ask without answering it.
+
+    The parked flow is never resumed and the interaction's thread is left intact; a
+    question that is already answered is a conflict and a gone/expired one is not found.
+
+    Example: ``tai interactions cancel i_123``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.post(f"/api/interactions/{interaction_id}/cancel")
     emit_result(ctx_obj, data)

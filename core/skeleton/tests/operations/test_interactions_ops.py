@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from tai42_contract.interactions import AnswerFormat, InteractionRequest
+from tai42_contract.interactions import AnswerFormat, InteractionRequest, InteractionResponse
 
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions.settings import InteractionsSettings
@@ -139,6 +139,92 @@ def test_metadata_declares_destructive_and_the_full_error_set():
         NotFoundError,
         PayloadTooLargeError,
     }
+
+
+# -- cancel_interaction -------------------------------------------------------
+
+
+def _async_park(store, *, iid="ap", gid="apg", expiry_minutes=60) -> InteractionRequest:
+    now = datetime.now(UTC)
+    expiry = now + timedelta(minutes=expiry_minutes)
+    return InteractionRequest(
+        interaction_id=iid,
+        group_id=gid,
+        question="?",
+        answer_format=AnswerFormat.TEXT,
+        reply_to=store.reply_key(iid),
+        created_at=now,
+        timeout_at=expiry,
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        expiry_at=expiry,
+    )
+
+
+async def test_cancel_pending_succeeds_then_gone(wired):
+    await wired.store.add(wired.fake, _req(wired.store, AnswerFormat.TEXT), idle_ttl=86400)
+    assert await ops.cancel_interaction("p1") == {"interaction_id": "p1", "status": "cancelled"}
+    # The state is gone (withdrawn); it no longer appears pending.
+    assert await wired.store.get_state(wired.fake, "p1") is None
+    assert [req.interaction_id for req in await wired.store.pending(wired.fake)] == []
+    # Idempotent at the store seam: a re-cancel finds it gone → a clean 404, never a
+    # double-teardown.
+    with pytest.raises(NotFoundError, match="Interaction not found"):
+        await ops.cancel_interaction("p1")
+
+
+async def test_cancel_answered_raises_conflict(wired):
+    await wired.store.add(wired.fake, _req(wired.store, AnswerFormat.TEXT), idle_ttl=86400)
+    assert await ops.answer_interaction("p1", "done") == {"interaction_id": "p1", "status": "answered"}
+    with pytest.raises(ConflictError, match="already answered"):
+        await ops.cancel_interaction("p1")
+
+
+async def test_cancel_unknown_raises_not_found(wired):
+    with pytest.raises(NotFoundError, match="Interaction not found"):
+        await ops.cancel_interaction("ghost")
+
+
+async def test_cancel_is_answer_format_agnostic_external(wired):
+    # Unlike the answer door (which rejects EXTERNAL), cancel WITHDRAWS a pending ask of
+    # any format — an external ask is a pending ask an operator may withdraw.
+    await wired.store.add(wired.fake, _req(wired.store, AnswerFormat.EXTERNAL, payload={"url": "x"}), idle_ttl=86400)
+    assert await ops.cancel_interaction("p1") == {"interaction_id": "p1", "status": "cancelled"}
+
+
+async def test_cancel_async_park_fires_no_continuation(wired):
+    # Cancel tears the park down via ``prune_pending``, which NEVER enqueues a
+    # continuation: the parked flow can never resume. Proof: a late answer claims
+    # nothing and the expiry reaper has nothing to fire.
+    await wired.store.add(wired.fake, _async_park(wired.store), idle_ttl=86400, continuation_fingerprint="fp")
+    assert await ops.cancel_interaction("ap") == {"interaction_id": "ap", "status": "cancelled"}
+    claimed = await wired.store.record_answer(
+        wired.fake,
+        InteractionResponse(interaction_id="ap", answer="late", answered_by="op", answered_at=datetime.now(UTC)),
+        group_id="apg",
+        reply_ttl=60,
+        continuation_due_ttl=3600,
+        continuation_first_attempt_at_ms=0,
+    )
+    assert claimed is False
+    assert await wired.store.due_expiries(wired.fake, datetime.now(UTC) + timedelta(days=1)) == []
+
+
+def test_cancel_metadata_declares_destructive_and_error_set():
+    meta = operation_metadata_of(ops.cancel_interaction)
+    assert meta.destructive is True
+    assert meta.meta_executor is False
+    assert meta.reload_gated is False
+    # A subset of the answer door's set: no body is parsed, so no BadRequest/413.
+    assert set(meta.error_classes) == {ConflictError, ForbiddenError, NotFoundError}
+
+
+async def test_cancel_off_when_store_unconfigured_raises_not_found(monkeypatch):
+    monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    with pytest.raises(NotFoundError, match="Interaction not found"):
+        await ops.cancel_interaction("ghost")
 
 
 # -- the store-unconfigured OFF gate ------------------------------------

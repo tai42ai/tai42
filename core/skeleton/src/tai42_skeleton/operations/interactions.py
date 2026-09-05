@@ -278,6 +278,77 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
     return {"interaction_id": interaction_id, "status": "answered"}
 
 
+@operation(
+    name="cancel_interaction",
+    summary="Cancel a pending interaction",
+    tags=["interactions"],
+    destructive=True,
+    errors=[ConflictError, ForbiddenError, NotFoundError],
+)
+async def cancel_interaction(interaction_id: str) -> dict:
+    """Cancel a pending interaction — WITHDRAW one specific ask without answering it and
+    without deleting its conversation thread.
+
+    The mirror of ``answer_interaction`` for the terminal-without-an-answer case: it
+    tears the pending question down via the store's status-gated ``prune_pending`` (the
+    same primitive the timeout path and the thread-delete cascade use), so NO continuation
+    fires — a parked async flow is never resumed — and the removed event rides tagged
+    ``reason="cancelled"`` so a live operator surface tells a deliberate withdrawal apart
+    from a timeout/expiry removal.
+
+    Status-gated exactly like the answer door: only a PENDING (or parked) question cancels.
+    A question already ``answered`` (its state retained) is a loud ``409`` conflict; a
+    question whose state is GONE — expired, already cancelled, or never existed (all
+    leave no distinguishable tombstone, the same limit the answer door has) — is a ``404``.
+    Idempotent at the store seam: ``prune_pending`` re-run on a withdrawn question is a
+    clean no-op, so a re-cancel simply reports the question gone (``404``) rather than
+    double-tearing anything down. Unlike the answer door it is answer-format-AGNOSTIC: an
+    EXTERNAL ask is a pending ask an operator may withdraw, so it is cancellable too.
+
+    Channel-blind by construction: a channel-side pending correlation is NOT proactively
+    torn down. A later guest reply forwarded to the callback door finds the state gone and
+    the door answers ``404``, which the inbound ladder maps to a fresh bridged turn — the
+    identical path a timeout/expiry removal already takes.
+
+    Audience gate identical to ``answer_interaction`` (after the existence/status guards):
+    a question's ``audience`` identity OR any unrestricted caller (the operator can always
+    withdraw a stuck question) may cancel; every other restricted caller is a loud ``403``.
+    """
+    # OFF gate: with no store configured no interaction can exist — a 404 byte-identical
+    # to the genuine miss below, so the door is no oracle (mirrors the answer door).
+    if not interactions_store_configured():
+        raise NotFoundError("Interaction not found")
+    settings = interactions_settings()
+    store = InteractionStore(settings.key_prefix)
+    _user_id, restricted = request_identity()
+
+    async with client_ctx(RedisClient, settings.redis) as r:
+        state = await store.get_state(r, interaction_id)
+        if state is None:
+            raise NotFoundError("Interaction not found")
+        if state.status == "answered":
+            raise ConflictError("Interaction already answered")
+        # A restricted caller may cancel ONLY a question addressed to its identity;
+        # an unrestricted caller may cancel anything (the answer door's exact gate).
+        if restricted is not None:
+            if state.request.audience is None:
+                raise ForbiddenError("restricted identities may cancel only interactions addressed to them")
+            if state.request.audience != restricted:
+                raise ForbiddenError("interaction is addressed to another identity")
+        # Status-gated teardown firing NO continuation, tagging the removed event
+        # ``cancelled``. A concurrent answer that claimed first surfaces as ``"answered"``
+        # here (a loud 409 conflict); a state that vanished between the read and the
+        # prune (a raced expiry/cancel) surfaces as ``"gone"`` (a 404, the same terminal
+        # answer the answer door gives for a missing interaction).
+        result = await store.prune_pending(r, interaction_id, state.group_id, reason="cancelled")
+        if result == "answered":
+            raise ConflictError("Interaction already answered")
+        if result == "gone":
+            raise NotFoundError("Interaction not found")
+
+    return {"interaction_id": interaction_id, "status": "cancelled"}
+
+
 def _add_data(request: InteractionRequest) -> dict:
     """The add-frame shape shared by the paged list door and the live stream tail — the
     client shape of one pending question."""

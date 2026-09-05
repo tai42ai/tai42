@@ -18,6 +18,12 @@ Doors:
   ``answer_format`` before the blocked caller is woken; an invalid answer is
   rejected loudly and the caller stays blocked. An EXTERNAL question is answered
   through its callback URL, never here.
+* ``POST /api/interactions/{interaction_id}/cancel`` — the authenticated cancel
+  door: WITHDRAW one pending ask without answering it and without deleting its
+  thread. Status-gated (a pending/parked question cancels; an answered one is a
+  409, a gone/expired one a 404), fires NO continuation (a parked flow never
+  resumes), and emits the removed event tagged ``reason="cancelled"``. Same
+  audience gate as the answer door.
 * ``POST /api/interactions/callback/{ticket}`` — the UNAUTHENTICATED data door
   for external-format answers (the server-to-server / confirm-form claim path).
   Sensitive data rides the JSON body here.
@@ -108,6 +114,7 @@ from tai42_skeleton.operations.interactions import (
     _validate_answer,
 )
 from tai42_skeleton.operations.interactions import answer_interaction as _answer_interaction_op
+from tai42_skeleton.operations.interactions import cancel_interaction as _cancel_interaction_op
 from tai42_skeleton.operations.interactions import list_interactions as _list_interactions_op
 from tai42_skeleton.operations.interactions import list_pending_interactions as _list_pending_interactions_op
 
@@ -461,7 +468,16 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
                         # unaddressed question, which a restricted caller never sees).
                         if restricted and fields.get("audience") != restricted_id:
                             continue
-                        yield _frame(event_type, {"interaction_id": interaction_id, "group_id": group_id})
+                        terminal_frame: dict[str, str] = {"interaction_id": interaction_id, "group_id": group_id}
+                        # A ``reason`` tag rides a removed frame when the store set one
+                        # (``"cancelled"`` for an operator per-interaction cancel), so a
+                        # live surface tells a deliberate withdrawal apart from a
+                        # timeout/expiry removal; absent (untagged) for every other
+                        # removal — the additive-wire idiom.
+                        reason = fields.get("reason")
+                        if reason is not None:
+                            terminal_frame["reason"] = reason
+                        yield _frame(event_type, terminal_frame)
                         yielded = True
             # The keepalive is deadline-driven: it fires whenever the monotonic
             # deadline passes and no frame reached THIS caller this window — whether
@@ -646,6 +662,23 @@ answer = register_operation_route(
     path="/api/interactions/{interaction_id}/answer",
     method="POST",
     context_extractor=_extract_answer,
+    action="write",
+)
+
+
+# -- cancel door — an operation adapter --------------------------------------
+
+# POST (never DELETE) mirrors the sibling ``/answer`` door: cancel is a named
+# state-transition SUB-ACTION on the interaction, not a full-resource delete. The
+# router uses no DELETE verb, and DELETE would wrongly connote removing the
+# interaction's conversation thread — the one thing this feature explicitly does NOT
+# do. The door takes no body (the interaction id is the whole request), so it needs
+# no ``context_extractor``: the adapter binds ``interaction_id`` from the path alone.
+cancel = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_cancel_interaction_op),
+    path="/api/interactions/{interaction_id}/cancel",
+    method="POST",
     action="write",
 )
 
