@@ -438,7 +438,8 @@ async def _handle_text(
 ) -> None:
     """A typed reply: resolve it against a pending question via the shared ladder, else
     route to the bridge. ``params`` are the message-level referral/reply-context entries,
-    carried onto the bridged turn (the correlated-answer path takes none)."""
+    carried onto the bridged turn — including the expired-ask fallback bridge (the
+    correlated forward itself takes none)."""
     if await already_seen(wamid):
         return
     text_field = message.get("text")
@@ -451,7 +452,7 @@ async def _handle_text(
         await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=params or None)
         return
     # A typed reply answers with its body minus outer whitespace.
-    await _resolve_answer(phone_number_id, wa_id, wamid, text.strip(), pending)
+    await _resolve_answer(phone_number_id, wa_id, wamid, text.strip(), pending, params=params or None)
 
 
 def _extract_interactive_reply(interactive: Any) -> tuple[str | None, str, str | None]:
@@ -551,7 +552,7 @@ async def _handle_interactive(
     # A real answer — resolve it via the shared ladder (which peeks + forwards + keeps
     # or releases). One-pending is enforced on reserve, and the wamid dedupe above
     # guards a redelivery, so the peek-then-resolve needs no destructive claim.
-    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending)
+    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending, params=_merged_params(params, reply_params))
 
 
 async def _handle_button(
@@ -581,7 +582,9 @@ async def _handle_button(
         return
     # A quick-reply while a question is pending answers with its visible text minus outer
     # whitespace, mirroring a typed reply.
-    await _resolve_answer(phone_number_id, wa_id, wamid, text.strip(), pending)
+    await _resolve_answer(
+        phone_number_id, wa_id, wamid, text.strip(), pending, params=_merged_params(params, button_params)
+    )
 
 
 def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None:
@@ -686,7 +689,7 @@ async def _handle_form_reply(
     # it via the shared ladder. The wamid dedupe upstream guards a redelivery, so no
     # destructive claim is needed before the ladder's own peek.
     answer = _coerce_form_answer(response, pending.schema)
-    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending)
+    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending, params=params or None)
 
 
 async def _handle_notify_form_reply(
@@ -764,7 +767,12 @@ def _render_form_text(answer: dict[str, Any], schema: dict[str, Any] | None) -> 
 
 
 async def _resolve_answer(
-    phone_number_id: str, wa_id: str, wamid: str, answer: str | dict[str, Any], pending: PendingQuestion
+    phone_number_id: str,
+    wa_id: str,
+    wamid: str,
+    answer: str | dict[str, Any],
+    pending: PendingQuestion,
+    params: dict[str, str] | None = None,
 ) -> None:
     """Resolve a correlated reply against its pending ask via the ONE shared ladder.
 
@@ -808,7 +816,9 @@ async def _resolve_answer(
         ),
     )
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
-        await _bridge_inbound(phone_number_id, wa_id, bridge_text, wamid)
+        # The fallback IS the bridge path, so it carries the same params the caller's
+        # own bridge branch would have carried (the correlated forward takes none).
+        await _bridge_inbound(phone_number_id, wa_id, bridge_text, wamid, params=params)
         return
     if result.outcome is InboundAnswerOutcome.RETRY_KEPT and is_form:
         await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, result.retry_reason)

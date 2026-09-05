@@ -301,6 +301,30 @@ async def test_pending_question_resolves_before_bridge(handler, stub_app, channe
     assert _SEEN_KEY in fake_redis.store
 
 
+async def test_expired_ask_fallback_bridge_carries_message_params(handler, stub_app, channels, fake_redis: FakeRedis):
+    # A reply that IS an answer at decode-peek, whose ask expires before the ladder's
+    # own peek (NO_CORRELATION): the fallback bridge is the bridge path, so it carries
+    # the same message-level params (reply-to context here) the caller's own bridge
+    # branch would have carried.
+    await _seed_pending()
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+
+    message = {
+        "id": "wamid.EXP1",
+        "from": WA_ID,
+        "type": "text",
+        "text": {"body": "yes please"},
+        "context": {"id": "wamid.QUOTED"},
+    }
+    result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    assert len(stub_app.conversations.accept_calls) == 1
+    call = stub_app.conversations.accept_calls[0]
+    assert call["text"] == "yes please"
+    assert call["params"] == {"context_message_id": "wamid.QUOTED"}
+
+
 async def test_answer_is_body_verbatim_minus_outer_whitespace(handler, channels, fake_redis: FakeRedis):
     await _seed_pending()
     channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
