@@ -120,7 +120,7 @@ advertises `supports_media_notifications`:
 |---|---|
 | `image` / `video` / `audio` | A repeated Twilio `MediaUrl` attachment (a public `https` url Twilio fetches; the carrier applies its own per-type fallback). An inline `data:` image is refused with `ChannelInputError` — Twilio fetches a url, not inline bytes. The item's caption is alt-text a `MediaUrl` cannot carry, so it is dropped rather than leaked into the body. |
 | `document` | A `filename: url` body line (its suggested download name — which a `MediaUrl` cannot carry — followed by the link; `caption` then bare `url` are the fallbacks). MMS document rendering is carrier-unreliable, so a named tappable link is the honest degradation. |
-| `link` | A `caption: url` body line (SMS has no rich link cards; the human taps through). |
+| `link` | A `caption: url` body line, or the bare `url` when no caption rides (SMS has no rich link cards; the human taps through). |
 
 A **content-only** notify (blank message) sends its media alone: an image/video/audio-only
 send goes out as a **body-less MMS** (the `Body` field is omitted, only the `MediaUrl`
