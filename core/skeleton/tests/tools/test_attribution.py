@@ -91,10 +91,9 @@ def test_no_ambient_attribution_no_wrap(spy) -> None:
 
 
 def test_deposit_before_a_trace_still_stamps(spy) -> None:
-    # GUARD REWORK: with an ambient attribution deposited, the stamp is entered even
-    # when the writer reports no active trace yet — the deposit is context-scoped and
-    # lands on the trace opened inside the scope, so it is NOT skipped. (Previously a
-    # trace-less writer produced a bare ``["drive"]`` — the deposit was dropped.)
+    # With an ambient attribution deposited, the stamp is entered even when the writer
+    # reports no active trace yet — the deposit is context-scoped and lands on the trace
+    # opened inside the scope, so it is NOT skipped.
     writer = spy(trace_id=None)
     with run_attribution(RunAttribution(tags=["t"])), stamp_run_attribution():
         writer.events.append("drive")
