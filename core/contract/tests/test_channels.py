@@ -563,9 +563,9 @@ def test_notification_options_rejects_a_blank_option(blank: str):
 def test_notification_options_capped():
     from pydantic import ValidationError
 
-    from tai42_contract.channels import NOTIFICATION_OPTIONS_MAX, ChannelNotification, ReplyOption
+    from tai42_contract.channels import NOTIFICATION_OPTIONS_MAX, ChannelNotification, Option, ReplyOption
 
-    ok = [ReplyOption(text=f"Item {n}") for n in range(NOTIFICATION_OPTIONS_MAX)]
+    ok: list[Option] = [ReplyOption(text=f"Item {n}") for n in range(NOTIFICATION_OPTIONS_MAX)]
     assert ChannelNotification(message="hi", options=ok).options == ok
     with pytest.raises(ValidationError, match=f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries"):
         ChannelNotification(message="hi", options=[*ok, ReplyOption(text="one too many")])

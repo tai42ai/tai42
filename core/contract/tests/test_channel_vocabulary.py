@@ -7,6 +7,7 @@ inbound/answer enrichment params seams.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -26,6 +27,7 @@ from tai42_contract.channels import (
     OptionSection,
     QuickReplyButtonParam,
     ReplyOption,
+    TemplateButtonParam,
     UrlButtonParam,
 )
 from tai42_contract.conversations import AnswerPart, ConversationMessage
@@ -341,7 +343,9 @@ def test_template_body_parameters_bounds():
 
 
 def test_template_buttons_capped():
-    buttons = [QuickReplyButtonParam(payload=f"p{i}") for i in range(TEMPLATE_BUTTONS_MAX + 1)]
+    buttons: list[TemplateButtonParam] = [
+        QuickReplyButtonParam(payload=f"p{i}") for i in range(TEMPLATE_BUTTONS_MAX + 1)
+    ]
     with pytest.raises(ValidationError, match=f"at most {TEMPLATE_BUTTONS_MAX}"):
         ChannelTemplate(name="t", language="en", buttons=buttons)
 
@@ -394,6 +398,7 @@ def test_answer_part_header_requires_choice():
 
 def test_answer_part_link_option():
     part = AnswerPart(message="m", options=[LinkOption(label="Go", url="https://x.example")])
+    assert part.options is not None
     assert isinstance(part.options[0], LinkOption)
 
 
@@ -503,7 +508,7 @@ def test_channel_delivery_carries_on_mismatch():
     from tai42_contract.interactions.models import AnswerMismatchPolicy
 
     now = datetime.now(UTC)
-    base = {
+    base: dict[str, Any] = {
         "interaction_id": "i",
         "question": "pick",
         "answer_format": "text",
@@ -522,7 +527,7 @@ def test_mismatch_notice_defaults_bounds_and_rides_the_shapes():
 
     now = datetime.now(UTC)
 
-    def _ask(**over):
+    def _ask(**over: Any):
         return InteractionRequest(
             interaction_id="i",
             group_id="g",
