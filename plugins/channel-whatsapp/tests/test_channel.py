@@ -14,17 +14,28 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
+    LinkOption,
+    Option,
+    OptionSection,
+    QuickReplyButtonParam,
+    ReplyOption,
+    UrlButtonParam,
 )
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 
 from tai42_channel_whatsapp.channel import WhatsAppChannel
 from tai42_channel_whatsapp.client import (
     mark_read_typing,
+    send_audio,
+    send_document,
     send_image,
     send_interactive_buttons,
+    send_interactive_cta_url,
     send_interactive_list,
+    send_location,
     send_message,
     send_template,
+    send_video,
 )
 from tai42_channel_whatsapp.correlation import PendingQuestionExistsError
 from tai42_channel_whatsapp.flows import build_flow
@@ -576,7 +587,7 @@ async def test_send_template_builder_with_and_without_parameters(fake_redis: Fak
     await send_template(
         PHONE_NUMBER_ID,
         ALLOWED_A,
-        ChannelTemplate(name="status_update", language="en_US", parameters=["Jane", "A-42"]),
+        ChannelTemplate(name="status_update", language="en_US", body_parameters=["Jane", "A-42"]),
     )
     assert fake_httpx.calls[0]["json"] == {
         "messaging_product": "whatsapp",
@@ -593,7 +604,74 @@ async def test_send_template_builder_with_and_without_parameters(fake_redis: Fak
 
     fake_httpx.responses.append(_accepted())
     await send_template(PHONE_NUMBER_ID, ALLOWED_A, ChannelTemplate(name="hello", language="en_US"))
-    assert "components" not in fake_httpx.calls[1]["json"]["template"]  # no params → no components
+    assert "components" not in fake_httpx.calls[1]["json"]["template"]  # no runtime args → no components
+
+
+async def test_send_template_builder_maps_header_media_and_buttons(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # The template's NAMED components map onto the Cloud API template-message components array:
+    # a header component for header_media, a body component for body_parameters, and one button
+    # component per buttons entry (quick-reply payload / url text suffix, positional by index).
+    fake_httpx.responses.append(_accepted())
+    await send_template(
+        PHONE_NUMBER_ID,
+        ALLOWED_A,
+        ChannelTemplate(
+            name="order_update",
+            language="en_US",
+            header_media=MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/banner.jpg"),
+            body_parameters=["Jane", "A-42"],
+            buttons=[QuickReplyButtonParam(payload="STOP"), UrlButtonParam(url_parameter="order/42")],
+        ),
+    )
+    assert fake_httpx.calls[0]["json"]["template"]["components"] == [
+        {"type": "header", "parameters": [{"type": "image", "image": {"link": "https://cdn.example/banner.jpg"}}]},
+        {"type": "body", "parameters": [{"type": "text", "text": "Jane"}, {"type": "text", "text": "A-42"}]},
+        {
+            "type": "button",
+            "sub_type": "quick_reply",
+            "index": "0",
+            "parameters": [{"type": "payload", "payload": "STOP"}],
+        },
+        {"type": "button", "sub_type": "url", "index": "1", "parameters": [{"type": "text", "text": "order/42"}]},
+    ]
+
+
+async def test_send_template_document_header_carries_filename(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted())
+    await send_template(
+        PHONE_NUMBER_ID,
+        ALLOWED_A,
+        ChannelTemplate(
+            name="invoice",
+            language="en_US",
+            header_media=MediaItem(
+                kind=MediaKind.DOCUMENT, url="https://cdn.example/invoice.pdf", filename="invoice.pdf"
+            ),
+        ),
+    )
+    assert fake_httpx.calls[0]["json"]["template"]["components"] == [
+        {
+            "type": "header",
+            "parameters": [
+                {"type": "document", "document": {"link": "https://cdn.example/invoice.pdf", "filename": "invoice.pdf"}}
+            ],
+        }
+    ]
+
+
+async def test_send_template_audio_header_refused(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A template header cannot carry audio (no Cloud API representation) — a permanent refusal.
+    with pytest.raises(ChannelInputError, match="template header cannot carry audio"):
+        await send_template(
+            PHONE_NUMBER_ID,
+            ALLOWED_A,
+            ChannelTemplate(
+                name="jingle",
+                language="en_US",
+                header_media=MediaItem(kind=MediaKind.AUDIO, url="https://cdn.example/a.mp3"),
+            ),
+        )
+    assert not fake_httpx.calls
 
 
 async def test_send_interactive_buttons_builder_shape(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
@@ -609,12 +687,104 @@ async def test_send_interactive_buttons_builder_shape(fake_redis: FakeRedis, fak
 
 async def test_send_interactive_list_builder_shape(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(_accepted())
-    await send_interactive_list(PHONE_NUMBER_ID, ALLOWED_A, "Pick", "Choose an option", [("id0", "A"), ("id1", "B")])
+    await send_interactive_list(
+        PHONE_NUMBER_ID,
+        ALLOWED_A,
+        "Pick",
+        "Choose an option",
+        [{"rows": [{"id": "id0", "title": "A"}, {"id": "id1", "title": "B"}]}],
+    )
     interactive = fake_httpx.calls[0]["json"]["interactive"]
     assert interactive["type"] == "list"
     assert interactive["action"] == {
         "button": "Choose an option",
         "sections": [{"rows": [{"id": "id0", "title": "A"}, {"id": "id1", "title": "B"}]}],
+    }
+
+
+async def test_send_interactive_list_multi_section_with_descriptions_and_header_footer(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    fake_httpx.responses.append(_accepted())
+    await send_interactive_list(
+        PHONE_NUMBER_ID,
+        ALLOWED_A,
+        "Pick a dish",
+        "Menu",
+        [
+            {"title": "Starters", "rows": [{"id": "s0", "title": "Soup", "description": "Tomato basil"}]},
+            {"title": "Mains", "rows": [{"id": "m0", "title": "Steak"}]},
+        ],
+        header={"type": "image", "image": {"link": "https://cdn.example/menu.jpg"}},
+        footer="Prices include tax",
+    )
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "list"
+    assert interactive["header"] == {"type": "image", "image": {"link": "https://cdn.example/menu.jpg"}}
+    assert interactive["footer"] == {"text": "Prices include tax"}
+    assert interactive["action"]["sections"] == [
+        {"title": "Starters", "rows": [{"id": "s0", "title": "Soup", "description": "Tomato basil"}]},
+        {"title": "Mains", "rows": [{"id": "m0", "title": "Steak"}]},
+    ]
+
+
+async def test_send_interactive_cta_url_builder_shape(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted())
+    await send_interactive_cta_url(PHONE_NUMBER_ID, ALLOWED_A, "Pay now", "Open portal", "https://pay.example/42")
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "cta_url"
+    assert interactive["body"] == {"text": "Pay now"}
+    assert interactive["action"] == {
+        "name": "cta_url",
+        "parameters": {"display_text": "Open portal", "url": "https://pay.example/42"},
+    }
+
+
+async def test_send_interactive_buttons_header_footer_added_only_when_set(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted())
+    await send_interactive_buttons(
+        PHONE_NUMBER_ID,
+        ALLOWED_A,
+        "Pick",
+        [("id0", "A")],
+        header={"type": "image", "image": {"link": "https://cdn.example/h.jpg"}},
+        footer="footer line",
+    )
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["header"] == {"type": "image", "image": {"link": "https://cdn.example/h.jpg"}}
+    assert interactive["footer"] == {"text": "footer line"}
+
+
+async def test_send_document_video_audio_location_builders(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted())
+    await send_document(PHONE_NUMBER_ID, ALLOWED_A, "https://cdn.example/r.pdf", "Q3 report", "report.pdf")
+    assert fake_httpx.calls[0]["json"] == {
+        "messaging_product": "whatsapp",
+        "to": ALLOWED_A,
+        "type": "document",
+        "document": {"link": "https://cdn.example/r.pdf", "caption": "Q3 report", "filename": "report.pdf"},
+    }
+
+    fake_httpx.responses.append(_accepted())
+    await send_video(PHONE_NUMBER_ID, ALLOWED_A, "https://cdn.example/clip.mp4", None)
+    assert fake_httpx.calls[1]["json"]["video"] == {"link": "https://cdn.example/clip.mp4"}  # no caption key
+
+    fake_httpx.responses.append(_accepted())
+    await send_audio(PHONE_NUMBER_ID, ALLOWED_A, "https://cdn.example/a.mp3")
+    assert fake_httpx.calls[2]["json"] == {
+        "messaging_product": "whatsapp",
+        "to": ALLOWED_A,
+        "type": "audio",
+        "audio": {"link": "https://cdn.example/a.mp3"},  # no caption/filename on audio
+    }
+
+    fake_httpx.responses.append(_accepted())
+    await send_location(PHONE_NUMBER_ID, ALLOWED_A, 51.5, -0.12, "Office", "1 High St")
+    assert fake_httpx.calls[3]["json"] == {
+        "messaging_product": "whatsapp",
+        "to": ALLOWED_A,
+        "type": "location",
+        "location": {"latitude": 51.5, "longitude": -0.12, "name": "Office", "address": "1 High St"},
     }
 
 
@@ -852,7 +1022,11 @@ async def test_notify_options_render_as_reply_buttons(fake_redis: FakeRedis, fak
     fake_httpx.responses.append(_accepted("wamid.OPT"))
 
     ids = await WhatsAppChannel().notify(
-        ChannelNotification(message="How did we do?", recipient=ALLOWED_A, options=["Great", "Poor"])
+        ChannelNotification(
+            message="How did we do?",
+            recipient=ALLOWED_A,
+            options=[ReplyOption(text="Great"), ReplyOption(text="Poor")],
+        )
     )
 
     assert ids == ["wamid.OPT"]
@@ -868,9 +1042,235 @@ async def test_notify_options_render_as_reply_buttons(fake_redis: FakeRedis, fak
     assert not fake_redis.store  # fire-and-forget: no correlation reserved
 
 
+async def test_notify_reply_options_send_authored_ids_on_the_wire(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # An AUTHORED reply-option id rides the wire verbatim (echoed back on tap as reply_id);
+    # an option without one falls back to the minted 0-based index.
+    fake_httpx.responses.append(_accepted("wamid.OPT"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="How did we do?",
+            recipient=ALLOWED_A,
+            options=[ReplyOption(text="Great", id="rating-great"), ReplyOption(text="Poor")],
+        )
+    )
+
+    assert fake_httpx.calls[0]["json"]["interactive"]["action"]["buttons"] == [
+        {"type": "reply", "reply": {"id": "rating-great", "title": "Great"}},
+        {"type": "reply", "reply": {"id": "1", "title": "Poor"}},
+    ]
+
+
+async def test_notify_single_link_option_renders_as_cta_url(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A lone LinkOption → the single-URL cta_url interactive.
+    fake_httpx.responses.append(_accepted("wamid.CTA"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Your invoice is ready.",
+            recipient=ALLOWED_A,
+            options=[LinkOption(label="View invoice", url="https://pay.example/42")],
+        )
+    )
+
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "cta_url"
+    assert interactive["action"]["parameters"] == {"display_text": "View invoice", "url": "https://pay.example/42"}
+
+
+async def test_notify_mixed_reply_and_link_options_buttons_with_link_body_line(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Reply + link options: replies render as reply buttons, the link is appended to the body
+    # as a `label: url` line (a WhatsApp reply widget carries no URL button).
+    fake_httpx.responses.append(_accepted("wamid.MIX"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Rate us",
+            recipient=ALLOWED_A,
+            options=[ReplyOption(text="Good"), LinkOption(label="Learn more", url="https://x.example/why")],
+        )
+    )
+
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "button"
+    assert interactive["body"]["text"] == "Rate us\nLearn more: https://x.example/why"
+    assert interactive["action"]["buttons"] == [{"type": "reply", "reply": {"id": "0", "title": "Good"}}]
+
+
+async def test_notify_multiple_link_options_render_as_text_lines(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Two+ link options: no native multi-URL interactive — a plain text body of the link lines.
+    fake_httpx.responses.append(_accepted("wamid.LINKS"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Choose",
+            recipient=ALLOWED_A,
+            options=[
+                LinkOption(label="Docs", url="https://x.example/docs"),
+                LinkOption(label="Blog", url="https://x.example/blog"),
+            ],
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"] == "Choose\nDocs: https://x.example/docs\nBlog: https://x.example/blog"
+
+
+async def test_notify_sections_render_as_multi_section_list_with_descriptions(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    fake_httpx.responses.append(_accepted("wamid.SEC"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick a dish",
+            recipient=ALLOWED_A,
+            sections=[
+                OptionSection(
+                    title="Starters",
+                    rows=[ReplyOption(text="Soup", description="Tomato basil", id="soup")],
+                ),
+                OptionSection(title="Mains", rows=[ReplyOption(text="Steak")]),
+            ],
+        )
+    )
+
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "list"
+    assert interactive["action"]["button"] == "Choose an option"
+    assert interactive["action"]["sections"] == [
+        {"title": "Starters", "rows": [{"id": "soup", "title": "Soup", "description": "Tomato basil"}]},
+        {"title": "Mains", "rows": [{"id": "1", "title": "Steak"}]},  # minted global index for the un-id'd row
+    ]
+
+
+async def test_notify_reply_option_description_forces_list_over_buttons(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A described reply option cannot show its description on a button, so a small option set
+    # that would otherwise be buttons renders as a list instead.
+    fake_httpx.responses.append(_accepted("wamid.DESC"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick",
+            recipient=ALLOWED_A,
+            options=[ReplyOption(text="Yes", description="go ahead"), ReplyOption(text="No")],
+        )
+    )
+
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "list"
+    assert interactive["action"]["sections"] == [
+        {"rows": [{"id": "0", "title": "Yes", "description": "go ahead"}, {"id": "1", "title": "No"}]}
+    ]
+
+
+async def test_notify_interactive_header_and_footer_ride_the_message(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted("wamid.HF"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="How did we do?",
+            recipient=ALLOWED_A,
+            options=[ReplyOption(text="Great"), ReplyOption(text="Poor")],
+            header=MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/banner.jpg"),
+            footer="Thanks for your feedback",
+        )
+    )
+
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["header"] == {"type": "image", "image": {"link": "https://cdn.example/banner.jpg"}}
+    assert interactive["footer"] == {"text": "Thanks for your feedback"}
+
+
+async def test_notify_audio_header_sent_ahead_of_interactive(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # An audio header has no interactive-header slot on WhatsApp: it is sent as its own audio
+    # message BEFORE the interactive, which then carries no header key.
+    fake_httpx.responses.append(_accepted("wamid.AUDIO"))
+    fake_httpx.responses.append(_accepted("wamid.INT"))
+
+    ids = await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Listen then choose",
+            recipient=ALLOWED_A,
+            options=[ReplyOption(text="OK")],
+            header=MediaItem(kind=MediaKind.AUDIO, url="https://cdn.example/a.mp3"),
+        )
+    )
+
+    assert ids == ["wamid.AUDIO", "wamid.INT"]
+    assert fake_httpx.calls[0]["json"]["type"] == "audio"
+    assert "header" not in fake_httpx.calls[1]["json"]["interactive"]
+
+
+async def test_notify_location_sends_location_message(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted("wamid.BODY"))
+    fake_httpx.responses.append(_accepted("wamid.LOC"))
+
+    ids = await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Here is the venue",
+            recipient=ALLOWED_A,
+            location=LocationElement(latitude=51.5, longitude=-0.12, name="Office", address="1 High St"),
+        )
+    )
+
+    assert ids == ["wamid.BODY", "wamid.LOC"]
+    assert fake_httpx.calls[0]["json"]["text"]["body"] == "Here is the venue"
+    assert fake_httpx.calls[1]["json"] == {
+        "messaging_product": "whatsapp",
+        "to": ALLOWED_A,
+        "type": "location",
+        "location": {"latitude": 51.5, "longitude": -0.12, "name": "Office", "address": "1 High St"},
+    }
+
+
+async def test_notify_location_only_blank_message_sends_just_location(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted("wamid.LOC"))
+
+    ids = await WhatsAppChannel().notify(
+        ChannelNotification(message="", recipient=ALLOWED_A, location=LocationElement(latitude=1.0, longitude=2.0))
+    )
+
+    assert ids == ["wamid.LOC"]
+    assert len(fake_httpx.calls) == 1
+    assert fake_httpx.calls[0]["json"]["location"] == {"latitude": 1.0, "longitude": 2.0}
+
+
+async def test_notify_document_video_audio_media_each_send_native(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted("wamid.BODY"))
+    fake_httpx.responses.append(_accepted("wamid.DOC"))
+    fake_httpx.responses.append(_accepted("wamid.VID"))
+    fake_httpx.responses.append(_accepted("wamid.AUD"))
+
+    ids = await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Files attached.",
+            recipient=ALLOWED_A,
+            media=[
+                MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.example/r.pdf", caption="Report", filename="r.pdf"),
+                MediaItem(kind=MediaKind.VIDEO, url="https://cdn.example/clip.mp4", caption="Demo"),
+                MediaItem(kind=MediaKind.AUDIO, url="https://cdn.example/a.mp3"),
+            ],
+        )
+    )
+
+    assert ids == ["wamid.BODY", "wamid.DOC", "wamid.VID", "wamid.AUD"]
+    assert fake_httpx.calls[1]["json"] == {
+        "messaging_product": "whatsapp",
+        "to": ALLOWED_A,
+        "type": "document",
+        "document": {"link": "https://cdn.example/r.pdf", "caption": "Report", "filename": "r.pdf"},
+    }
+    assert fake_httpx.calls[2]["json"]["video"] == {"link": "https://cdn.example/clip.mp4", "caption": "Demo"}
+    assert fake_httpx.calls[3]["json"]["audio"] == {"link": "https://cdn.example/a.mp3"}
+
+
 async def test_notify_many_options_render_as_interactive_list(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(_accepted("wamid.LIST"))
-    options = [f"choice-{i}" for i in range(5)]  # >3 → past the button cap, within the list cap
+    options: list[Option] = [ReplyOption(text=f"choice-{i}") for i in range(5)]  # >3 → past the button, within list
 
     await WhatsAppChannel().notify(ChannelNotification(message="Pick one", recipient=ALLOWED_A, options=options))
 
@@ -884,7 +1284,7 @@ async def test_notify_long_options_fall_to_numbered_text(fake_redis: FakeRedis, 
     # An option longer than the list row-title cap forces the numbered-text fallback for
     # the whole notification — the human types an option (which enters the conversation).
     fake_httpx.responses.append(_accepted("wamid.NUM"))
-    options = ["short", "x" * 25]
+    options: list[Option] = [ReplyOption(text="short"), ReplyOption(text="x" * 25)]
 
     await WhatsAppChannel().notify(ChannelNotification(message="Pick", recipient=ALLOWED_A, options=options))
 
@@ -903,7 +1303,7 @@ async def test_notify_options_and_media_send_choice_then_images(fake_redis: Fake
         ChannelNotification(
             message="Rate it",
             recipient=ALLOWED_A,
-            options=["Good", "Bad"],
+            options=[ReplyOption(text="Good"), ReplyOption(text="Bad")],
             media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.jpg")],
         )
     )
@@ -920,7 +1320,7 @@ async def test_notify_template_maps_body_parameters(fake_redis: FakeRedis, fake_
         ChannelNotification(
             message="Item done.",
             recipient=ALLOWED_A,
-            template=ChannelTemplate(name="status_update", language="en_US", parameters=["Jane", "A-42"]),
+            template=ChannelTemplate(name="status_update", language="en_US", body_parameters=["Jane", "A-42"]),
         )
     )
 
@@ -990,6 +1390,8 @@ async def test_channel_advertises_media_and_template_capabilities():
     # Tappable notification options render as native reply buttons/list, so the
     # central notify_user guard dispatches an options notification here instead of 501.
     assert WhatsAppChannel.supports_interactive_notifications is True
+    # This channel shares a geographic location natively (send_location).
+    assert WhatsAppChannel.supports_location_notifications is True
 
 
 # --- Send-failure classification (the caller's retry decision) ----------------

@@ -66,10 +66,18 @@ tai conversations create chat-line \
   option's text is too long for a button or row, the ask falls back to the
   numbered-text prompt so the person always sees every option in full. Either way
   the answer is the option text.
-- **Media on a notification** — `notify_user` can attach media: an image sends as
-  a WhatsApp image message from a public `https` URL with an optional caption (a
-  `data:` URI is refused loudly); a link item is appended to the body. `media`
-  and `template` are mutually exclusive on one send.
+- **Rich notifications** — `notify_user` renders the full outbound vocabulary:
+  **media** (image / document / video / audio each as its own native message; a
+  link appended to the body), tappable **options** (`ReplyOption` → reply
+  buttons or a list, sending an authored `id` on the wire when set; a lone
+  `LinkOption` → a `cta_url` URL button), multi-section **lists** with per-row
+  descriptions (`sections`), a media **header** + text **footer** on an
+  interactive message, a shared **location**, an **ask-less form** (`schema`, an
+  in-chat Flow), and out-of-window **templates** (`header_media` +
+  `body_parameters` + quick-reply/url `buttons`). A choice surface, `schema`,
+  and `template` are mutually exclusive on one send; media and location may
+  combine with a choice surface. A channel that cannot render a given field never
+  receives it (the send gates on the matching `supports_*` capability flag).
 
 ## Inbound entry parameters
 
@@ -87,6 +95,19 @@ keys it understands:
 - `referral_source_url` / `referral_source_id` / `referral_source_type` /
   `referral_ctwa_clid` / `referral_headline` / `referral_body` — a click-to-WhatsApp
   or QR entry (`referral`) forwards its fields.
+- `media_kind` / `media_id` / `media_mime_type` / `media_sha256` /
+  `media_filename` / `media_voice` / `sticker_animated` — an inbound **media**
+  message (image/document/audio/video/sticker) bridges with its caption as the
+  turn text and its identity in these params.
+- `reaction_emoji` / `reaction_message_id` — an inbound emoji **reaction**.
+- `contacts_count` / `contacts` — shared **contact** card(s).
+
+Guest **media**, **location**, **contacts**, and **reactions** now bridge as
+turns. An inbound **location** additionally lands as a typed `LocationElement` on
+the turn (not a param). Inbound media carries **no typed `attachments`** entry:
+the Graph media id is not a durable media source and no served-media ingestion
+seam is reachable from a channel, so a consumer re-fetches bytes via `media_id`
+with operator credentials (a flagged platform gap — see the plugin README).
 
 Params ride only on the bridge path — a tap or quick-reply that **answers** a
 pending question surfaces none (the answer path carries no params). Meta inbound
@@ -105,8 +126,10 @@ tai conversations failed
 ```
 
 A **pre-approved template** is the one message delivered outside the window. Send
-one with `notify_user`'s `template` input (a `name`, a `language`, and positional
-body-text `parameters`). Because a template is billed and delivered cold, the
+one with `notify_user`'s `template` input: a `name`, a `language`, an optional
+`header_media` (image/video/document), positional `body_parameters` (body-text
+fills), and per-button `buttons` (a quick-reply `payload` or a url suffix). Because
+a template is billed and delivered cold, the
 channel fences who may receive one: the recipient must be on
 `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS`, or be a **known contact** — a number the
 inbound webhook received a message from within

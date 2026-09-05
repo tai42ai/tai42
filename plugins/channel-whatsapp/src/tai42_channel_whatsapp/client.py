@@ -6,10 +6,13 @@ loop here; the raised ``ChannelDeliveryError`` carries ``retryable`` (and Meta's
 ``Retry-After`` when it sent one) so the central caller decides. Any failure
 raises ``ChannelDeliveryError``.
 
-One builder per message shape (text, interactive buttons, interactive list,
-image, template, flow) assembles the payload and hands it to the single ``_post``
-send seam (auth, transport, error mapping, wamid extraction); each returns the
-send's ``wamid`` (``messages[0].id``). The Flow lifecycle builders
+One builder per message shape (text; interactive buttons / list / cta_url; image,
+document, video, audio, location; template; flow) assembles the payload and hands
+it to the single ``_post`` send seam (auth, transport, error mapping, wamid
+extraction); each returns the send's ``wamid`` (``messages[0].id``). The
+interactive builders take an optional pre-built media ``header`` and text
+``footer``; the template builder maps the template's named components
+(``header_media`` / ``body_parameters`` / ``buttons``). The Flow lifecycle builders
 (``create_flow``, ``publish_flow``, ``delete_flow``) share the same auth +
 transport + error policy through ``_send`` but target the graph object
 endpoints, not ``/messages``.
@@ -22,7 +25,14 @@ from typing import Any
 
 import httpx
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDeliveryError, ChannelTemplate
+from tai42_contract.channels import (
+    ChannelDeliveryError,
+    ChannelInputError,
+    ChannelTemplate,
+    QuickReplyButtonParam,
+    TemplateButtonParam,
+)
+from tai42_contract.interactions.models import MediaItem, MediaKind
 from tai42_kit.clients.impl.http import HttpxClient
 
 from tai42_channel_whatsapp.settings import require_delivery_secret, whatsapp_settings
@@ -108,47 +118,120 @@ async def send_message(phone_number_id: str, to: str, body: str) -> str:
     return await _post(phone_number_id, payload)
 
 
-async def send_interactive_buttons(phone_number_id: str, to: str, body: str, buttons: list[tuple[str, str]]) -> str:
+def _header_object(header: MediaItem) -> dict[str, Any]:
+    """The ``interactive.header`` object for a media header, per the Cloud API.
+
+    A header carries a single ``image``/``video``/``document`` object (a ``document`` may
+    add a ``filename``). WhatsApp interactive headers support text/image/video/document
+    ONLY — an ``audio`` header has no representation here, so the caller sends the audio as
+    its own message ahead of the interactive instead of reaching this builder (a ``link``
+    is never a header by contract)."""
+    if header.kind is MediaKind.IMAGE:
+        return {"type": "image", "image": {"link": header.url}}
+    if header.kind is MediaKind.VIDEO:
+        return {"type": "video", "video": {"link": header.url}}
+    if header.kind is MediaKind.DOCUMENT:
+        document: dict[str, str] = {"link": header.url}
+        if header.filename:
+            document["filename"] = header.filename
+        return {"type": "document", "document": document}
+    raise ChannelInputError(f"WhatsApp interactive header cannot carry {header.kind.value} media")
+
+
+def _with_header_footer(
+    interactive: dict[str, Any], header: dict[str, Any] | None, footer: str | None
+) -> dict[str, Any]:
+    """``interactive`` with an optional media ``header`` and text ``footer`` added — the two
+    pure enhancements every interactive shape (buttons/list/cta_url) shares. Keys are added
+    only when set, so a send without them is byte-identical to the plain interactive."""
+    if header is not None:
+        interactive["header"] = header
+    if footer:
+        interactive["footer"] = {"text": footer}
+    return interactive
+
+
+async def send_interactive_buttons(
+    phone_number_id: str,
+    to: str,
+    body: str,
+    buttons: list[tuple[str, str]],
+    *,
+    header: dict[str, Any] | None = None,
+    footer: str | None = None,
+) -> str:
     """Send an interactive reply-buttons message; return its ``wamid``.
 
     ``buttons`` is a list of ``(id, title)`` pairs — each becomes a tappable reply
-    button whose id the inbound webhook echoes back.
+    button whose id the inbound webhook echoes back. ``header`` is an optional pre-built
+    media-header object (:func:`_header_object`) and ``footer`` an optional trailing line.
     """
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "interactive",
-        "interactive": {
+    interactive = _with_header_footer(
+        {
             "type": "button",
             "body": {"text": body},
             "action": {"buttons": [{"type": "reply", "reply": {"id": bid, "title": title}} for bid, title in buttons]},
         },
-    }
+        header,
+        footer,
+    )
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "interactive", "interactive": interactive}
     return await _post(phone_number_id, payload)
 
 
 async def send_interactive_list(
-    phone_number_id: str, to: str, body: str, button_text: str, rows: list[tuple[str, str]]
+    phone_number_id: str,
+    to: str,
+    body: str,
+    button_text: str,
+    sections: list[dict[str, Any]],
+    *,
+    header: dict[str, Any] | None = None,
+    footer: str | None = None,
 ) -> str:
-    """Send an interactive list message (single section); return its ``wamid``.
+    """Send an interactive list message; return its ``wamid``.
 
-    ``button_text`` labels the list-opening button; ``rows`` is a list of
-    ``(id, title)`` pairs — each a selectable row whose id the inbound webhook
-    echoes back.
+    ``button_text`` labels the list-opening button; ``sections`` is the Cloud-API
+    ``action.sections`` array — one or more ``{title?, rows: [{id, title, description?}]}``
+    groups, each row a selectable entry whose id the inbound webhook echoes back and whose
+    optional ``description`` renders as the row's secondary line. ``header``/``footer`` are
+    the optional media-header object and trailing line.
     """
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "interactive",
-        "interactive": {
-            "type": "list",
+    interactive = _with_header_footer(
+        {"type": "list", "body": {"text": body}, "action": {"button": button_text, "sections": sections}},
+        header,
+        footer,
+    )
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "interactive", "interactive": interactive}
+    return await _post(phone_number_id, payload)
+
+
+async def send_interactive_cta_url(
+    phone_number_id: str,
+    to: str,
+    body: str,
+    display_text: str,
+    url: str,
+    *,
+    header: dict[str, Any] | None = None,
+    footer: str | None = None,
+) -> str:
+    """Send an interactive call-to-action URL message (one URL button); return its ``wamid``.
+
+    The Cloud API's ``cta_url`` interactive carries exactly ONE URL button
+    (``action.parameters = {display_text, url}``) — the single-link-option mapping; a tap
+    OPENS the url and submits nothing. ``header``/``footer`` are the optional enhancements.
+    """
+    interactive = _with_header_footer(
+        {
+            "type": "cta_url",
             "body": {"text": body},
-            "action": {
-                "button": button_text,
-                "sections": [{"rows": [{"id": rid, "title": title} for rid, title in rows]}],
-            },
+            "action": {"name": "cta_url", "parameters": {"display_text": display_text, "url": url}},
         },
-    }
+        header,
+        footer,
+    )
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "interactive", "interactive": interactive}
     return await _post(phone_number_id, payload)
 
 
@@ -165,18 +248,115 @@ async def send_image(phone_number_id: str, to: str, link: str, caption: str | No
     return await _post(phone_number_id, payload)
 
 
+async def send_document(phone_number_id: str, to: str, link: str, caption: str | None, filename: str | None) -> str:
+    """Send a link-sourced document message; return its ``wamid``.
+
+    ``filename`` is the display name WhatsApp shows for the download (per the Cloud API's
+    ``document`` object); ``caption`` an optional label. Both keys are added only when set.
+    """
+    document: dict[str, str] = {"link": link}
+    if caption:
+        document["caption"] = caption
+    if filename:
+        document["filename"] = filename
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "document", "document": document}
+    return await _post(phone_number_id, payload)
+
+
+async def send_video(phone_number_id: str, to: str, link: str, caption: str | None) -> str:
+    """Send a link-sourced video message; return its ``wamid``. ``caption`` optional."""
+    video: dict[str, str] = {"link": link}
+    if caption:
+        video["caption"] = caption
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "video", "video": video}
+    return await _post(phone_number_id, payload)
+
+
+async def send_audio(phone_number_id: str, to: str, link: str) -> str:
+    """Send a link-sourced audio message; return its ``wamid``.
+
+    The Cloud API's ``audio`` object carries no caption or filename — a caption on an
+    audio item is dropped at the channel (a pure enhancement the medium cannot render).
+    """
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "audio", "audio": {"link": link}}
+    return await _post(phone_number_id, payload)
+
+
+async def send_location(
+    phone_number_id: str, to: str, latitude: float, longitude: float, name: str | None, address: str | None
+) -> str:
+    """Send a location message; return its ``wamid``.
+
+    Maps a :class:`LocationElement` onto the Cloud API's ``location`` object
+    (``latitude``/``longitude`` required; ``name``/``address`` added only when set).
+    """
+    location: dict[str, Any] = {"latitude": latitude, "longitude": longitude}
+    if name:
+        location["name"] = name
+    if address:
+        location["address"] = address
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "location", "location": location}
+    return await _post(phone_number_id, payload)
+
+
+def _template_header_component(header: MediaItem) -> dict[str, Any]:
+    """The template ``header`` component for a media header argument, per the template-message
+    API: a single ``image``/``video``/``document`` parameter (a ``document`` may add a
+    ``filename``). An ``audio`` header has no template representation and is refused loudly."""
+    if header.kind is MediaKind.IMAGE:
+        parameter: dict[str, Any] = {"type": "image", "image": {"link": header.url}}
+    elif header.kind is MediaKind.VIDEO:
+        parameter = {"type": "video", "video": {"link": header.url}}
+    elif header.kind is MediaKind.DOCUMENT:
+        document: dict[str, str] = {"link": header.url}
+        if header.filename:
+            document["filename"] = header.filename
+        parameter = {"type": "document", "document": document}
+    else:
+        raise ChannelInputError(f"WhatsApp template header cannot carry {header.kind.value} media")
+    return {"type": "header", "parameters": [parameter]}
+
+
+def _template_button_component(index: int, button: TemplateButtonParam) -> dict[str, Any]:
+    """One template ``button`` component for the i-th button's runtime argument, per the
+    template-message API: a ``quick_reply`` carries a ``payload`` parameter, a ``url`` carries
+    a ``text`` parameter (the dynamic suffix substituted into the button's pre-approved URL)."""
+    if isinstance(button, QuickReplyButtonParam):
+        return {
+            "type": "button",
+            "sub_type": "quick_reply",
+            "index": str(index),
+            "parameters": [{"type": "payload", "payload": button.payload}],
+        }
+    return {
+        "type": "button",
+        "sub_type": "url",
+        "index": str(index),
+        "parameters": [{"type": "text", "text": button.url_parameter}],
+    }
+
+
 async def send_template(phone_number_id: str, to: str, template: ChannelTemplate) -> str:
     """Send a pre-approved template message; return its ``wamid``.
 
-    Maps the template's positional ``parameters`` onto Meta's single ``body``
-    component as ordered ``text`` parameters; a template with no parameters sends
-    with no components.
+    Maps the template's NAMED components onto the Cloud API template-message ``components``
+    array: a ``header`` component for ``header_media`` (image/video/document), a ``body``
+    component whose ordered ``text`` parameters fill the body placeholders from
+    ``body_parameters``, and one ``button`` component per ``buttons`` entry (a quick-reply
+    ``payload`` or a url ``text`` suffix, positional by index). A template with no runtime
+    arguments sends with no ``components`` key.
     """
+    components: list[dict[str, Any]] = []
+    if template.header_media is not None:
+        components.append(_template_header_component(template.header_media))
+    if template.body_parameters:
+        components.append(
+            {"type": "body", "parameters": [{"type": "text", "text": value} for value in template.body_parameters]}
+        )
+    components.extend(_template_button_component(index, button) for index, button in enumerate(template.buttons))
     template_obj: dict[str, object] = {"name": template.name, "language": {"code": template.language}}
-    if template.parameters:
-        template_obj["components"] = [
-            {"type": "body", "parameters": [{"type": "text", "text": value} for value in template.parameters]}
-        ]
+    if components:
+        template_obj["components"] = components
     payload = {"messaging_product": "whatsapp", "to": to, "type": "template", "template": template_obj}
     return await _post(phone_number_id, payload)
 
