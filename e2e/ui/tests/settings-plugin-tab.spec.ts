@@ -16,12 +16,14 @@ test('the reference plugin contributes a Settings tab (after core tabs) and a na
   await page.waitForFunction(() => '__pluginReact' in window);
 
   // The reference plugin declares no core section, so its nav entry renders under the
-  // plugin's own self-named section within the Primary nav (there is no generic "Plugins"
-  // landmark). `exact` so the link name never substrings the section's provenance badge.
+  // single generic "Plugins" section (its list named by the "Plugins" header) within the
+  // Primary nav — there is no separate "Plugins" navigation landmark. `exact` so the link
+  // name never substrings the per-entry provenance badge ("Plugin: reference_plugin …").
+  const pluginsList = page
+    .getByRole('navigation', { name: 'Primary' })
+    .getByRole('list', { name: 'Plugins' });
   await expect(
-    page
-      .getByRole('navigation', { name: 'Primary' })
-      .getByRole('link', { name: 'Reference', exact: true }),
+    pluginsList.getByRole('link', { name: 'Reference', exact: true }),
   ).toBeVisible();
 
   // The plugin settings tab appears in the Settings workbench, sorted after the
