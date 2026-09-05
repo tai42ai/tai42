@@ -175,7 +175,14 @@ class _StubConversations:
         self.status_calls.clear()
 
     async def accept(
-        self, channel: str, our_identity: str, client_address: str, cap_key: str, text: str, provider_message_id: str
+        self,
+        channel: str,
+        our_identity: str,
+        client_address: str,
+        cap_key: str,
+        text: str,
+        provider_message_id: str,
+        params: dict[str, str] | None = None,
     ) -> str:
         self.accept_calls.append(
             SimpleNamespace(
@@ -185,6 +192,7 @@ class _StubConversations:
                 cap_key=cap_key,
                 text=text,
                 provider_message_id=provider_message_id,
+                params=params,
             )
         )
         if self.accept_error is not None:
