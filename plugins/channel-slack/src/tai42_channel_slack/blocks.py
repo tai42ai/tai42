@@ -236,7 +236,10 @@ def build_option_blocks(options: list[str] | None) -> list[dict[str, Any]]:
 
 def options_text_lines(options: list[str]) -> str:
     """The ask-path options as bulleted suggestion lines — the text fallback a caller
-    appends when the options do not fit native buttons (so they are shown, never dropped)."""
+    appends when the options do not fit native buttons (so they are shown, never dropped).
+    Deliberately UNescaped: the sole consumer wraps these lines in a ``plain_text``
+    section, which Slack never mrkdwn-parses — escaping here would render literal
+    entities to the guest."""
     return "\n".join(f"• {option}" for option in options)
 
 
