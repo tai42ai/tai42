@@ -361,6 +361,25 @@ jobs:
         # needs the full-workspace sync. Skips a plugin with no docs/ tree yet.
         run: uv run --no-sync python scripts/check_plugin_docs.py
 
+  # Guards against a workspace floor only a pre-release can satisfy — the class
+  # that let backend-arq's `pydantic-core>=2.48.0` (wired solely by the pydantic
+  # 2.14.0b1 beta) lock green here while tai-distribution's stable-only image
+  # install hit ResolutionImpossible. A fresh, non-mutating resolve; no installs,
+  # so it runs unconditionally like `fleet` rather than behind a path filter.
+  stable-resolution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Stable-only resolution guard
+        # --no-project: the guard is stdlib-only and drives `uv` itself, so no
+        # workspace sync is needed to run it.
+        run: uv run --no-project --python 3.13 python scripts/stable_resolution.py
+
   # Each backend leg is split 3 ways by pytest-split using the committed
   # per-test durations in e2e/.test_durations; unknown/new tests get the
   # average duration. Refresh that file from CI junit data when the shards drift
@@ -740,7 +759,7 @@ jobs:
   # Single required check. Fails if any needed job failed or was cancelled;
   # skipped members do not fail it.
   ci-ok:
-    needs: [changes, check, plugin-frontend, fleet, e2e, ui-e2e]
+    needs: [changes, check, plugin-frontend, fleet, stable-resolution, e2e, ui-e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
