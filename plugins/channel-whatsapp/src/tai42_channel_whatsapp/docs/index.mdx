@@ -71,6 +71,28 @@ tai conversations create chat-line \
   `data:` URI is refused loudly); a link item is appended to the body. `media`
   and `template` are mutually exclusive on one send.
 
+## Inbound entry parameters
+
+When an inbound message enters the conversation **bridge** as a fresh turn (no
+pending question to answer), the channel forwards opaque **entry parameters**
+alongside the turn text, delivered verbatim to a `tool` target's payload under
+`params`. The platform attaches no meaning and no trust; a consumer opts into the
+keys it understands:
+
+- `reply_id` (+ `reply_description` for a list row) — an interactive tap that is
+  not an answer carries its question-bound wire id.
+- `button_payload` — a **template quick-reply** tap (`button` message) carries the
+  developer payload behind the visible button text.
+- `context_message_id` — a message that quotes another carries the quoted `wamid`.
+- `referral_source_url` / `referral_source_id` / `referral_source_type` /
+  `referral_ctwa_clid` / `referral_headline` / `referral_body` — a click-to-WhatsApp
+  or QR entry (`referral`) forwards its fields.
+
+Params ride only on the bridge path — a tap or quick-reply that **answers** a
+pending question surfaces none (the answer path carries no params). Meta inbound
+error notices (`errors[]`, e.g. an unsupported guest message type) are logged at
+warning, never bridged.
+
 ## The 24-hour window and templates
 
 WhatsApp delivers freeform messages only inside a **24-hour service window**

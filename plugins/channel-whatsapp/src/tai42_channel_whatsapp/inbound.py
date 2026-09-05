@@ -41,7 +41,12 @@ from tai42_contract.channels import (
     InboundAnswerOutcome,
     InboundBridge,
 )
-from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
+from tai42_contract.conversations import (
+    ENTRY_PARAM_VALUE_MAX_CHARS,
+    BlankInboundTextError,
+    DeliveryReceipt,
+    validate_entry_params,
+)
 from tai42_kit.settings import require_secret
 
 from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX
@@ -101,6 +106,43 @@ _FLOW_BODY_MAX_CHARS = 1024
 # The lead + bounded door line alone always fit the cap, so the overflow fallback
 # (drop the whole question) is guaranteed deliverable — verified, not assumed.
 assert len(_FORM_REJECTION_LEAD) + 1 + _DOOR_REJECTION_MAX_CHARS <= _FLOW_BODY_MAX_CHARS
+
+# Inbound entry-params vocabulary — the channel's PUBLIC contract for the opaque
+# ``payload["params"]`` a channel-agnostic tool consumer reads. Every key below is
+# forwarded VERBATIM as a string and carries NO platform interpretation; a consumer
+# opts into whichever keys it understands. Params ride ONLY on the conversation-bridge
+# path (a fresh turn via ``conversations.accept``); the correlated-answer path forwards
+# ``{"answer": …}`` to the callback door, a seam that carries no params, so a tap/button
+# that ANSWERS a pending question does not surface these (its id is already consumed to
+# select the option). Keys, and where each is set:
+#
+#   reply_id            — an interactive tap's ``button_reply.id`` / ``list_reply.id``
+#                         (the question-bound wire id), bridged when the tap is NOT an
+#                         answer (no/other pending ask).
+#   reply_description   — a ``list_reply.description`` when the picked row carried one.
+#   button_payload      — a template quick-reply tap's ``button.payload`` (the developer-
+#                         defined payload behind the visible ``button.text``).
+#   context_message_id  — a reply-to's ``context.id`` (the quoted/replied-to ``wamid``),
+#                         on any message that quotes an earlier one.
+#   referral_source_url — a click-to-WhatsApp / QR ``referral.source_url``.
+#   referral_source_id  — the ad/post ``referral.source_id``.
+#   referral_source_type— the ``referral.source_type`` (e.g. ``ad``/``post``).
+#   referral_ctwa_clid  — the click-to-WhatsApp click id ``referral.ctwa_clid``.
+#   referral_headline   — the referral's ``headline`` when present.
+#   referral_body       — the referral's ``body`` when present.
+#
+# All values are transport-bounded by the contract (:func:`validate_entry_params`); an
+# individual value over ``ENTRY_PARAM_VALUE_MAX_CHARS`` is dropped at extraction and, in
+# the rare event the aggregate still overflows a bound, the whole params set is dropped
+# and the turn bridges without it — a guest message is never lost to a params bound.
+_REFERRAL_PARAM_KEYS: dict[str, str] = {
+    "source_url": "referral_source_url",
+    "source_id": "referral_source_id",
+    "source_type": "referral_source_type",
+    "ctwa_clid": "referral_ctwa_clid",
+    "headline": "referral_headline",
+    "body": "referral_body",
+}
 
 
 class SignatureRejectedError(Exception):
@@ -327,18 +369,77 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
         except ChannelDeliveryError as exc:
             logger.warning("whatsapp typing signal for %s failed: %s", wamid, exc)
 
+    # Referral (ctwa/QR entry) and reply-to context are message-level and ride on
+    # WHATEVER turn this message bridges, regardless of its type. Extract once, thread down.
+    context_params = _message_context_params(message)
+
     message_type = message.get("type")
     if message_type == "text":
-        await _handle_text(message, phone_number_id, wa_id, wamid)
+        await _handle_text(message, phone_number_id, wa_id, wamid, context_params)
     elif message_type == "interactive":
-        await _handle_interactive(message, phone_number_id, wa_id, wamid)
+        await _handle_interactive(message, phone_number_id, wa_id, wamid, context_params)
+    elif message_type == "button":
+        # A template quick-reply tap (marketing/utility template button) — a distinct wire
+        # shape from an interactive reply: fields live under ``button`` (visible ``text`` +
+        # developer ``payload``), not ``interactive``.
+        await _handle_button(message, phone_number_id, wa_id, wamid, context_params)
+    elif message.get("errors"):
+        # A Meta inbound error notice (e.g. an unsupported message type the guest sent):
+        # never a guest turn — surface it loudly for the operator, do not bridge.
+        logger.warning("whatsapp inbound error notice for %s: %r", wamid, message.get("errors"))
     else:
-        logger.debug("non-text whatsapp message %s ignored", wamid)
+        # Media/location/contacts/reactions and any other type are not bridged yet; name the
+        # type so an operator sees WHAT was dropped, not just that something was.
+        logger.info("unhandled whatsapp message type %r for %s; not bridged", message_type, wamid)
 
 
-async def _handle_text(message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str) -> None:
+def _message_context_params(message: dict[str, Any]) -> dict[str, str]:
+    """The opaque entry-params a bridged turn carries from a message's ``referral``
+    (click-to-WhatsApp / QR entry) and reply-to ``context`` — forwarded verbatim as
+    strings, no interpretation. A missing/non-string/empty field is skipped, and a value
+    over the contract's per-value cap is dropped (the transport bound is enforced
+    end-to-end by :func:`~tai42_contract.conversations.validate_entry_params`); the key
+    vocabulary is the module's ``_REFERRAL_PARAM_KEYS`` plus ``context_message_id``."""
+    params: dict[str, str] = {}
+    referral = message.get("referral")
+    if isinstance(referral, dict):
+        for field, key in _REFERRAL_PARAM_KEYS.items():
+            _put_param(params, key, referral.get(field))
+    context = message.get("context")
+    if isinstance(context, dict):
+        _put_param(params, "context_message_id", context.get("id"))
+    return params
+
+
+def _put_param(params: dict[str, str], key: str, value: Any) -> None:
+    """Add ``key`` iff ``value`` is a non-empty string within the contract's per-value cap.
+    An over-cap opaque value is dropped (never truncated — truncation would silently corrupt
+    an opaque token); a debug line records the drop without ever logging the value."""
+    if not isinstance(value, str) or not value:
+        return
+    if len(value) > ENTRY_PARAM_VALUE_MAX_CHARS:
+        logger.debug("dropping whatsapp inbound param %r: value over the %d-char cap", key, ENTRY_PARAM_VALUE_MAX_CHARS)
+        return
+    params[key] = value
+
+
+def _merged_params(base: dict[str, str], extra: dict[str, str]) -> dict[str, str] | None:
+    """``base`` merged with ``extra`` (both already per-value bounded), or ``None`` when the
+    result is empty. ``base`` is never mutated. ``extra`` wins on a key collision, though the
+    channel's key spaces do not overlap by construction."""
+    if not base and not extra:
+        return None
+    merged = {**base, **extra}
+    return merged or None
+
+
+async def _handle_text(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+) -> None:
     """A typed reply: resolve it against a pending question via the shared ladder, else
-    route to the bridge."""
+    route to the bridge. ``params`` are the message-level referral/reply-context entries,
+    carried onto the bridged turn — including the expired-ask fallback bridge (the
+    correlated forward itself takes none)."""
     if await already_seen(wamid):
         return
     text_field = message.get("text")
@@ -348,27 +449,34 @@ async def _handle_text(message: dict[str, Any], phone_number_id: str, wa_id: str
     pending = await peek_pending(phone_number_id, wa_id)
     if pending is None:
         # No pending question (unrelated text or expired) — route to the bridge.
-        await _bridge_inbound(phone_number_id, wa_id, text, wamid)
+        await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=params or None)
         return
     # A typed reply answers with its body minus outer whitespace.
-    await _resolve_answer(phone_number_id, wa_id, wamid, text.strip(), pending)
+    await _resolve_answer(phone_number_id, wa_id, wamid, text.strip(), pending, params=params or None)
 
 
-def _extract_interactive_reply(interactive: Any) -> tuple[str | None, str]:
-    """The tapped ``(id, title)`` from an interactive reply, or ``(None, "")``.
+def _extract_interactive_reply(interactive: Any) -> tuple[str | None, str, str | None]:
+    """The tapped ``(id, title, description)`` from an interactive reply, or
+    ``(None, "", None)``.
 
-    ``id`` is None when the button/list reply is missing or malformed; ``title``
-    is the human-readable label bridged when the tap is not an answer.
+    ``id`` is None when the button/list reply is missing or malformed; ``title`` is the
+    human-readable label bridged when the tap is not an answer; ``description`` is a
+    ``list_reply``'s optional secondary line (``None`` for a button reply, which has none).
     """
     if not isinstance(interactive, dict):
-        return None, ""
+        return None, "", None
     reply_type = interactive.get("type")
     reply = interactive.get(reply_type) if isinstance(reply_type, str) else None
     if reply_type not in ("button_reply", "list_reply") or not isinstance(reply, dict):
-        return None, ""
+        return None, "", None
     reply_id = reply.get("id")
     title = reply.get("title")
-    return (reply_id if isinstance(reply_id, str) else None), (title if isinstance(title, str) else "")
+    description = reply.get("description")
+    return (
+        (reply_id if isinstance(reply_id, str) else None),
+        (title if isinstance(title, str) else ""),
+        (description if isinstance(description, str) else None),
+    )
 
 
 def _map_tap_to_answer(reply_id: str | None, pending: PendingQuestion) -> str | None:
@@ -397,46 +505,86 @@ def _map_tap_to_answer(reply_id: str | None, pending: PendingQuestion) -> str | 
     return pending.options[index]
 
 
-async def _handle_interactive(message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str) -> None:
+async def _handle_interactive(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+) -> None:
     """A button tap or list pick: map it to a pending ask's option, else bridge
     the tap's title.
 
     A tap whose id matches the pending ask answers it (``options[index]``). A tap
     with no pending question, or one whose id is stale/malformed/out-of-range, is
     NOT an answer: the pending question is left untouched and the tap's title goes
-    to the bridge like any unrelated message — never a 5xx that would have Meta
-    redeliver the poison tap forever.
+    to the bridge like any unrelated message — carrying the tapped ``reply_id`` (and a
+    ``list_reply``'s ``reply_description``) in ``params`` so a consumer sees WHICH option
+    was tapped, not just its label — never a 5xx that would have Meta redeliver the poison
+    tap forever.
 
     The pending question is read NON-destructively first (``peek_pending``) and only
     popped once the tap is confirmed a real answer, so a stale/malformed tap never
     claims a live ask that a concurrent genuine reply from the same pair could still
-    answer.
+    answer. On the answer path the tap's id is consumed to select the option and the
+    correlated-answer seam carries no params, so nothing is forwarded there.
     """
     if await already_seen(wamid):
         return
     interactive = message.get("interactive")
     if isinstance(interactive, dict) and interactive.get("type") == "nfm_reply":
         # A completed WhatsApp Flow form arrives as an nfm_reply, not a button/list tap.
-        await _handle_form_reply(interactive, phone_number_id, wa_id, wamid)
+        await _handle_form_reply(interactive, phone_number_id, wa_id, wamid, params)
         return
-    reply_id, title = _extract_interactive_reply(interactive)
+    reply_id, title, description = _extract_interactive_reply(interactive)
+    reply_params: dict[str, str] = {}
+    _put_param(reply_params, "reply_id", reply_id)
+    _put_param(reply_params, "reply_description", description)
 
     # Peek the pending ask (non-destructive) and check the tap against it. A non-answer
     # must not touch the pending — bridge the tap's title and leave the ask untouched.
     pending = await peek_pending(phone_number_id, wa_id)
     if pending is None:
-        await _bridge_inbound(phone_number_id, wa_id, title, wamid)
+        await _bridge_inbound(phone_number_id, wa_id, title, wamid, params=_merged_params(params, reply_params))
         return
     answer = _map_tap_to_answer(reply_id, pending)
     if answer is None:
         # A stale/malformed/out-of-range tap, or a text ask with no options — not an
         # answer to this pending ask; bridge the tap's title and leave the ask intact.
-        await _bridge_inbound(phone_number_id, wa_id, title, wamid)
+        await _bridge_inbound(phone_number_id, wa_id, title, wamid, params=_merged_params(params, reply_params))
         return
     # A real answer — resolve it via the shared ladder (which peeks + forwards + keeps
     # or releases). One-pending is enforced on reserve, and the wamid dedupe above
     # guards a redelivery, so the peek-then-resolve needs no destructive claim.
-    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending)
+    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending, params=_merged_params(params, reply_params))
+
+
+async def _handle_button(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+) -> None:
+    """A template quick-reply tap (a ``button`` message): resolve its visible ``text``
+    against a pending question via the shared ladder, else route to the bridge — the same
+    routing and known-contact semantics a text message takes.
+
+    ``button.text`` is the human-visible label (the turn text every consumer sees);
+    ``button.payload`` is the developer-defined payload behind it, carried in ``params`` as
+    ``button_payload`` on the bridged turn. On the correlated-answer path the visible text
+    answers the ask (as a typed reply would) and the params seam carries nothing.
+    """
+    if await already_seen(wamid):
+        return
+    button = message.get("button")
+    text_value = button.get("text") if isinstance(button, dict) else None
+    text = text_value if isinstance(text_value, str) else ""
+    payload = button.get("payload") if isinstance(button, dict) else None
+    button_params: dict[str, str] = {}
+    _put_param(button_params, "button_payload", payload)
+
+    pending = await peek_pending(phone_number_id, wa_id)
+    if pending is None:
+        await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=_merged_params(params, button_params))
+        return
+    # A quick-reply while a question is pending answers with its visible text minus outer
+    # whitespace, mirroring a typed reply.
+    await _resolve_answer(
+        phone_number_id, wa_id, wamid, text.strip(), pending, params=_merged_params(params, button_params)
+    )
 
 
 def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None:
@@ -502,7 +650,9 @@ def _coerce_form_answer(response: dict[str, Any], schema: dict[str, Any] | None)
     return {key: _coerce_value(value, props.get(key)) for key, value in response.items() if key != "flow_token"}
 
 
-async def _handle_form_reply(interactive: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str) -> None:
+async def _handle_form_reply(
+    interactive: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+) -> None:
     """A completed Flow form (``nfm_reply``): forward the coerced answer dict to the
     pending form question, else bridge.
 
@@ -510,8 +660,10 @@ async def _handle_form_reply(interactive: dict[str, Any], phone_number_id: str, 
     ``interaction_id``; a malformed ``response_json``, a missing/mismatched token,
     or no pending ask bridges the message (its shape carries no human-readable
     title, so a blank bridge — the same shape an uncorrelated interactive takes).
-    The pending ask is peeked before the destructive pop so a non-answer never
-    claims a live ask a concurrent genuine reply could still answer.
+    ``params`` are the message-level referral/reply-context entries, carried onto a
+    bridged turn (the correlated-answer path takes none). The pending ask is peeked
+    before the destructive pop so a non-answer never claims a live ask a concurrent
+    genuine reply could still answer.
 
     A token in the ``tai42-nf:`` namespace is an ASK-LESS form (a ``notify``
     Flow) and branches out BEFORE any pending peek: it has no reservation and
@@ -520,28 +672,28 @@ async def _handle_form_reply(interactive: dict[str, Any], phone_number_id: str, 
     response = _extract_form_response(interactive)
     if response is None:
         logger.warning("whatsapp nfm_reply %s carried no JSON-object response_json; bridging", wamid)
-        await _bridge_inbound(phone_number_id, wa_id, "", wamid)
+        await _bridge_inbound(phone_number_id, wa_id, "", wamid, params=params or None)
         return
 
     flow_token = response.get("flow_token")
     if isinstance(flow_token, str) and flow_token.startswith(_NOTIFY_FORM_TOKEN_PREFIX):
-        await _handle_notify_form_reply(response, flow_token, phone_number_id, wa_id, wamid)
+        await _handle_notify_form_reply(response, flow_token, phone_number_id, wa_id, wamid, params)
         return
 
     pending = await peek_pending(phone_number_id, wa_id)
     if pending is None or not isinstance(flow_token, str) or flow_token != pending.interaction_id:
-        await _bridge_inbound(phone_number_id, wa_id, "", wamid)
+        await _bridge_inbound(phone_number_id, wa_id, "", wamid, params=params or None)
         return
 
     # A matched completed form: coerce the response to the schema's types and resolve
     # it via the shared ladder. The wamid dedupe upstream guards a redelivery, so no
     # destructive claim is needed before the ladder's own peek.
     answer = _coerce_form_answer(response, pending.schema)
-    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending)
+    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending, params=params or None)
 
 
 async def _handle_notify_form_reply(
-    response: dict[str, Any], flow_token: str, phone_number_id: str, wa_id: str, wamid: str
+    response: dict[str, Any], flow_token: str, phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
 ) -> None:
     """A completed ASK-LESS form (a ``notify`` Flow, token in the ``tai42-nf:``
     namespace): enter it into the conversation as a structured guest message.
@@ -553,7 +705,8 @@ async def _handle_notify_form_reply(
     DEGRADES, never drops, and never 5xx's into a permanent Meta redelivery loop.
     The rendered ``label: value`` text (compact JSON for an empty form — never
     blank) is the turn every consumer sees; the structured copy rides beside it
-    through the bridge's ``form`` seam.
+    through the bridge's ``form`` seam, and ``params`` carry any message-level
+    referral/reply-context entries.
     """
     schema_hash = flow_token[len(_NOTIFY_FORM_TOKEN_PREFIX) :].partition(":")[0]
     waba_id = whatsapp_settings().waba_id
@@ -565,7 +718,9 @@ async def _handle_notify_form_reply(
             schema_hash,
         )
     form = _coerce_form_answer(response, schema)
-    await _bridge_inbound(phone_number_id, wa_id, _render_form_text(form, schema), wamid, form=form)
+    await _bridge_inbound(
+        phone_number_id, wa_id, _render_form_text(form, schema), wamid, form=form, params=params or None
+    )
 
 
 def _render_answer_for_bridge(answer: str | dict[str, Any], pending: PendingQuestion) -> str:
@@ -612,7 +767,12 @@ def _render_form_text(answer: dict[str, Any], schema: dict[str, Any] | None) -> 
 
 
 async def _resolve_answer(
-    phone_number_id: str, wa_id: str, wamid: str, answer: str | dict[str, Any], pending: PendingQuestion
+    phone_number_id: str,
+    wa_id: str,
+    wamid: str,
+    answer: str | dict[str, Any],
+    pending: PendingQuestion,
+    params: dict[str, str] | None = None,
 ) -> None:
     """Resolve a correlated reply against its pending ask via the ONE shared ladder.
 
@@ -656,7 +816,9 @@ async def _resolve_answer(
         ),
     )
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
-        await _bridge_inbound(phone_number_id, wa_id, bridge_text, wamid)
+        # The fallback IS the bridge path, so it carries the same params the caller's
+        # own bridge branch would have carried (the correlated forward takes none).
+        await _bridge_inbound(phone_number_id, wa_id, bridge_text, wamid, params=params)
         return
     if result.outcome is InboundAnswerOutcome.RETRY_KEPT and is_form:
         await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, result.retry_reason)
@@ -762,17 +924,36 @@ def _rejection_body(question: str, error_line: str) -> str:
 
 
 async def _bridge_inbound(
-    phone_number_id: str, wa_id: str, text: str, wamid: str, form: dict[str, Any] | None = None
+    phone_number_id: str,
+    wa_id: str,
+    text: str,
+    wamid: str,
+    form: dict[str, Any] | None = None,
+    params: dict[str, str] | None = None,
 ) -> None:
     """Route an uncorrelated inbound message into the conversation bridge.
 
     ``our_identity`` = phone_number_id, ``client_address`` = wa_id (verbatim);
     ``form`` is an ask-less form submission's structured copy, riding beside its
-    rendered ``text``. A message with no route bound, or with blank text (a
+    rendered ``text``; ``params`` are the channel's opaque entry-params (reply ids,
+    referral, reply-to context — see the module's vocabulary block) forwarded verbatim to
+    the tool target's payload. A message with no route bound, or with blank text (a
     media-only message or an empty interactive title), is logged and skipped; a
     retryable overflow or infrastructure failure propagates as a 5xx so Meta
     redelivers.
+
+    ``params`` are validated against the contract's transport bounds HERE before accept: a
+    bound violation (which would otherwise 5xx and have Meta redeliver the same poison
+    message forever) drops the whole params set and bridges the turn without it — the
+    guest's message is never lost to a params bound. The refusal names the bound/key, never
+    an opaque value.
     """
+    if params:
+        try:
+            validate_entry_params(params)
+        except ValueError as exc:
+            logger.warning("whatsapp inbound %s params rejected (%s); bridging without params", wamid, exc)
+            params = None
     try:
         await tai42_app.conversations.accept(
             channel="whatsapp",
@@ -783,6 +964,7 @@ async def _bridge_inbound(
             cap_key=wa_id,
             text=text,
             provider_message_id=wamid,
+            params=params,
             form=form,
         )
     except BlankInboundTextError as exc:

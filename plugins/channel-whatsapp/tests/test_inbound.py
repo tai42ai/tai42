@@ -301,6 +301,30 @@ async def test_pending_question_resolves_before_bridge(handler, stub_app, channe
     assert _SEEN_KEY in fake_redis.store
 
 
+async def test_expired_ask_fallback_bridge_carries_message_params(handler, stub_app, channels, fake_redis: FakeRedis):
+    # A reply that IS an answer at decode-peek, whose ask expires before the ladder's
+    # own peek (NO_CORRELATION): the fallback bridge is the bridge path, so it carries
+    # the same message-level params (reply-to context here) the caller's own bridge
+    # branch would have carried.
+    await _seed_pending()
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+
+    message = {
+        "id": "wamid.EXP1",
+        "from": WA_ID,
+        "type": "text",
+        "text": {"body": "yes please"},
+        "context": {"id": "wamid.QUOTED"},
+    }
+    result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    assert len(stub_app.conversations.accept_calls) == 1
+    call = stub_app.conversations.accept_calls[0]
+    assert call["text"] == "yes please"
+    assert call["params"] == {"context_message_id": "wamid.QUOTED"}
+
+
 async def test_answer_is_body_verbatim_minus_outer_whitespace(handler, channels, fake_redis: FakeRedis):
     await _seed_pending()
     channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
@@ -1372,7 +1396,7 @@ async def test_stale_tap_restores_pending_and_bridges_title(
 ):
     # A stale button from an EARLIER ask (interaction part "int-1") taps while a
     # NEWER ask ("int-2") is pending: not an answer — the pending ask survives and
-    # the tap's title bridges like any unrelated message.
+    # the tap's title bridges like any unrelated message, carrying the tapped reply_id.
     await _seed_pending_select(options=["a", "b"], interaction_id="int-2")
 
     result = await handler(signed_request(interactive_payload(reply_id="int-1:0", title="stale choice")))
@@ -1388,7 +1412,8 @@ async def test_stale_tap_restores_pending_and_bridges_title(
             "cap_key": WA_ID,
             "text": "stale choice",
             "provider_message_id": _WAMID,
-            "params": None,
+            # The bridged (non-answer) tap now carries WHICH button was tapped.
+            "params": {"reply_id": "int-1:0"},
             "form": None,
         }
     ]
@@ -1802,3 +1827,235 @@ async def test_non_prefixed_form_reply_takes_the_ask_path_unchanged(
     assert result.status_code == 200
     assert channels.inbound_calls[0].answer == {"note": "x", "qty": 7}
     assert stub_app.conversations.accept_calls == []
+
+
+# --- Inbound entry-params vocabulary (bridge-path only) ------------------------
+#
+# The channel-side lane of the channels-vocabulary wave. Every param below rides ONLY
+# on the conversation-bridge path (a fresh turn via ``conversations.accept``); the
+# correlated-answer path forwards ``{"answer": …}`` to the callback door — a seam that
+# carries no params — so a tap/button that ANSWERS a pending question surfaces none.
+
+
+def _params_envelope(message: dict, *, phone_number_id: str = PHONE_NUMBER_ID) -> dict:
+    """A signed-inbound envelope carrying one arbitrary message object — for the message
+    shapes (``button`` type, ``referral``, ``context``, ``errors``) the shared
+    ``message_payload``/``interactive_payload`` helpers do not build."""
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"display_phone_number": "15551112222", "phone_number_id": phone_number_id},
+                            "messages": [message],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+async def test_button_reply_tap_bridges_reply_id_in_params(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Claim 1 (born-red): a button_reply tap with NO pending question bridges the tap's
+    # title AND carries the tapped wire id under params.reply_id. On the OLD code the
+    # bridge accept passed no params, so params was None.
+    result = await handler(signed_request(interactive_payload(reply_id="int-9:2", title="Talk to sales")))
+
+    assert result.status_code == 200
+    (call,) = stub_app.conversations.accept_calls
+    assert call["text"] == "Talk to sales"
+    assert call["params"] == {"reply_id": "int-9:2"}
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_list_reply_tap_bridges_reply_id_and_description(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Claim 1 (born-red): a list pick with a description carries both reply_id and
+    # reply_description. OLD code: params None (and reply_description never extracted).
+    result = await handler(
+        signed_request(
+            interactive_payload(
+                reply_type="list_reply", reply_id="int-3:0", title="Standard", description="3-5 business days"
+            )
+        )
+    )
+
+    assert result.status_code == 200
+    (call,) = stub_app.conversations.accept_calls
+    assert call["text"] == "Standard"
+    assert call["params"] == {"reply_id": "int-3:0", "reply_description": "3-5 business days"}
+
+
+async def test_button_message_type_bridges_text_and_payload(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Claim 2 (born-red): a template quick-reply tap arrives as a ``button`` message
+    # (fields button.text + button.payload). OLD code dropped it in the else-branch, so
+    # accept was NEVER called; NEW code bridges the text with params.button_payload.
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "button",
+        "button": {"text": "Confirm appointment", "payload": "CONFIRM_APPT_42"},
+    }
+    result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    (call,) = stub_app.conversations.accept_calls
+    assert call["text"] == "Confirm appointment"
+    assert call["params"] == {"button_payload": "CONFIRM_APPT_42"}
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_button_message_type_answers_pending_like_text(
+    handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A ``button`` quick-reply while a question is pending answers with its visible text,
+    # mirroring a typed reply — the ask path, no bridge, no params seam.
+    await _seed_pending_select(options=["Confirm", "Cancel"])
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "button",
+        "button": {"text": "Confirm", "payload": "CONFIRM_APPT_42"},
+    }
+    result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    assert channels.inbound_calls[0].answer == "Confirm"  # answered as a typed reply would
+    assert stub_app.conversations.accept_calls == []  # the ask path, not the bridge
+
+
+async def test_referral_fields_carried_as_params(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Claim 3 (born-red): a click-to-WhatsApp / QR referral forwards its fields as opaque,
+    # prefixed params on the bridged turn. OLD code: params None.
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "text",
+        "text": {"body": "hi from the ad"},
+        "referral": {
+            "source_url": "https://fb.me/ad/123",
+            "source_id": "ad-123",
+            "source_type": "ad",
+            "ctwa_clid": "clid-abc",
+            "headline": "50% off today",
+            "body": "Tap to chat",
+        },
+    }
+    result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    (call,) = stub_app.conversations.accept_calls
+    assert call["text"] == "hi from the ad"
+    assert call["params"] == {
+        "referral_source_url": "https://fb.me/ad/123",
+        "referral_source_id": "ad-123",
+        "referral_source_type": "ad",
+        "referral_ctwa_clid": "clid-abc",
+        "referral_headline": "50% off today",
+        "referral_body": "Tap to chat",
+    }
+
+
+async def test_reply_context_carried_as_params(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Claim 4 (born-red): a message quoting an earlier one carries context.id as
+    # params.context_message_id. OLD code: params None.
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "text",
+        "text": {"body": "re: that"},
+        "context": {"from": "15551112222", "id": "wamid.QUOTED"},
+    }
+    result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    (call,) = stub_app.conversations.accept_calls
+    assert call["text"] == "re: that"
+    assert call["params"] == {"context_message_id": "wamid.QUOTED"}
+
+
+async def test_referral_and_context_merge_with_reply_id_on_a_tap(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The message-level referral/context params merge with an interactive tap's reply_id
+    # on one bridged turn (the union of both key spaces).
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "interactive",
+        "interactive": {"type": "button_reply", "button_reply": {"id": "int-1:0", "title": "Yes"}},
+        "context": {"id": "wamid.QUOTED"},
+    }
+    result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    (call,) = stub_app.conversations.accept_calls
+    assert call["params"] == {"reply_id": "int-1:0", "context_message_id": "wamid.QUOTED"}
+
+
+async def test_inbound_error_notice_logged_warning_not_bridged(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # Claim 5 (born-red): a Meta inbound error notice (an unsupported message type the
+    # guest sent) is logged at WARNING with the detail and NOT bridged. OLD code dropped
+    # it in the else-branch at DEBUG with no type/detail, so no WARNING was emitted.
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "unsupported",
+        "errors": [{"code": 131051, "title": "Unsupported message type"}],
+    }
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.accept_calls == []  # never bridged
+    assert any("error notice" in record.message and "131051" in record.getMessage() for record in caplog.records)
+
+
+async def test_unhandled_media_type_logged_at_info_naming_the_type(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # Media/location/contacts/reactions stay inbound-dropped (a later lane bridges them),
+    # but the drop log now names the type at INFO so an operator sees WHAT was dropped.
+    with caplog.at_level("INFO"):
+        result = await handler(signed_request(message_payload(msg_type="image")))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.accept_calls == []
+    assert any(
+        record.levelname == "INFO" and "image" in record.getMessage() and "unhandled" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_oversized_param_value_is_dropped_not_5xx(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # A referral field over the contract's per-value cap is dropped at extraction (never
+    # truncated, never a 5xx), while the well-formed sibling fields still ride.
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "text",
+        "text": {"body": "hi"},
+        "referral": {"source_id": "ad-1", "headline": "x" * 600},
+    }
+    result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    (call,) = stub_app.conversations.accept_calls
+    assert call["params"] == {"referral_source_id": "ad-1"}  # the 600-char headline dropped

@@ -40,6 +40,7 @@ from ._bridge_support import (
     request_mentions,
     script_reply,
     tool_text,
+    wait_probe_record,
     wait_whatsapp_send,
     whatsapp_get_verify,
 )
@@ -341,6 +342,49 @@ async def test_button_reply_without_pending_bridges_the_title(
     assert send["phone_number_id"] == identity
     # The bridged turn saw the reply TITLE, not the wire id.
     assert any(request_mentions(bridge.llm_stub, index, title) for index in range(len(bridge.llm_stub.requests)))
+
+
+async def test_button_tap_carries_reply_id_onto_the_tool_payload_params(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    """Composed-path proof for the inbound-fidelity lane: a button tap with no pending
+    question bridges as a fresh turn whose ROUTED TOOL PAYLOAD carries the tapped wire id
+    under ``.params.reply_id`` — the exact seam a channel-agnostic tool consumer reads.
+
+    Driven end to end over the live stack: signed whatsapp webhook → inbound decode →
+    ``conversations.accept(params=…)`` → route → tool dispatch → the tool records what it
+    received. Born red before the channel carried the tap's id into ``params`` (the payload
+    had no ``params`` key, so ``.params.reply_id`` resolved to the ``"none"`` fallback)."""
+    exec_key = uniq("l7-rid-exec")
+    await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
+    identity = _fresh_phone_id()
+    probe = uniq("l7-rid")
+    # The tool records the id it actually received under .params; the fallback makes the
+    # unfixed behavior (no params) an observably-different value, not a KeyError.
+    await bridge.create_tool_channel_route(
+        route_name=uniq("l7-rid-route").replace("_", "-"),
+        tool="e2e_record",
+        execution_key=exec_key,
+        channel="whatsapp",
+        our_identity=identity,
+        payload_expr=f'{{key: "{probe}", value: (.params.reply_id // "none")}}',
+        reply_expr="null",
+    )
+
+    reply_id = "int-shipping:2"
+    reply = bridge.whatsapp_interactive_reply(
+        phone_number_id=identity,
+        wa_id=_fresh_wa_id(),
+        reply_kind="button_reply",
+        reply_id=reply_id,
+        title=uniq("l7-rid-title"),
+    )
+    resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
+    assert resp.status_code == 200, resp.text
+
+    recorded = await wait_probe_record(bridge, probe)
+    # The tool saw the tapped wire id under .params.reply_id — not the "none" fallback.
+    assert [entry["value"] for entry in recorded] == [reply_id]
 
 
 async def test_stale_button_tap_restores_pending_ask(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
