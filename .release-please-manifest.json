@@ -4,7 +4,7 @@
   "core/cli": "5.0.0",
   "core/skeleton": "10.0.2",
   "plugins/accounts-oidc": "1.0.9",
-  "plugins/accounts-postgres": "2.2.2",
+  "plugins/accounts-postgres": "2.2.3",
   "plugins/agents": "5.4.1",
   "plugins/backend-arq": "2.0.7",
   "plugins/backend-celery": "2.2.3",
