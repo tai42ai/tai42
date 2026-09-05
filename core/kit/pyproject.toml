@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-kit"
-version = "3.8.2"
+version = "3.8.3"
 description = "Generic leaf helpers, settings primitives, pooled clients, and LLM/AI factories for the TAI ecosystem."
 readme = "README.md"
 requires-python = ">=3.13"
