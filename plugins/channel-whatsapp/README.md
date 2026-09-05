@@ -171,6 +171,41 @@ A `confirm` or `external` question arrives as a tappable link and is answered in
 the browser via the callback door — no WhatsApp reply is expected or matched, and
 it never consumes the pair.
 
+## Inbound entry parameters
+
+When an inbound message enters the conversation **bridge** as a fresh turn (a
+message with no pending question to answer), the channel forwards a set of opaque
+**entry parameters** alongside the turn text. They ride verbatim to a `tool`
+target's payload under its own `params` key (`payload["params"]`) — the platform
+attaches **no meaning and no trust**; a channel-agnostic consumer opts into
+whichever keys it understands. This is the channel's public inbound contract:
+
+| `params` key | Set when | Value |
+|---|---|---|
+| `reply_id` | An interactive reply button / list row is tapped but is **not** an answer to a pending ask (no ask, or a stale/other id) | The question-bound wire id the outbound carried (`button_reply.id` / `list_reply.id`) |
+| `reply_description` | The tapped item is a **list row** that carried a secondary description line | `list_reply.description` |
+| `button_payload` | A **template quick-reply** button is tapped (a `button`-type message) | The developer-defined `button.payload` behind the visible `button.text` |
+| `context_message_id` | The message **quotes / replies to** an earlier one | `context.id` (the quoted `wamid`) |
+| `referral_source_url` | The message enters via **click-to-WhatsApp / QR** (`referral`) | `referral.source_url` |
+| `referral_source_id` | " | `referral.source_id` |
+| `referral_source_type` | " | `referral.source_type` (e.g. `ad`, `post`) |
+| `referral_ctwa_clid` | " | `referral.ctwa_clid` (the click-to-WhatsApp click id) |
+| `referral_headline` | " (when present) | `referral.headline` |
+| `referral_body` | " (when present) | `referral.body` |
+
+Params ride **only on the bridge path**. A tap or quick-reply that **answers** a
+pending question does not surface them: the answer path forwards `{"answer": …}`
+to the callback door — a seam that carries no params — and a tap's id is already
+consumed there to select the option. Values are transport-bounded (per the
+platform's entry-param limits — count, key charset, value length, total size); an
+individual value over the per-value cap is dropped (never truncated), and in the
+rare case the aggregate still overflows a bound the whole set is dropped and the
+turn bridges without it — a guest message is never lost to a params bound.
+
+Meta inbound **error notices** (e.g. an unsupported message type the guest sent,
+carried as an `errors[]` array) are logged at **warning** with the detail and are
+never bridged as guest turns.
+
 ## Delivery statuses
 
 WhatsApp reports delivery asynchronously: a send returns `2xx` with a `wamid`, and
@@ -215,7 +250,7 @@ status is acknowledged, never retried.
 | One pending question per `(phone_number_id, wa_id)` pair | A second concurrent `ask_user` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired |
 | Freeform sends need the 24h window | A freeform send (question, reply, media) outside the human's 24-hour session window is rejected by Meta (error 131047), synchronously as a delivery error or asynchronously as a `failed` status. A template is the only send Meta accepts outside the window |
 | Single send attempt per part | A transient Cloud API outage fails the send instead of retrying (no idempotency key → a blind retry risks double-messaging). A multi-part media send that fails on the Nth part raises naming the wamids already delivered |
-| Guest-sent media stays inbound-dropped | Inbound non-text, non-interactive messages (image, audio, location, …) are acknowledged and debug-logged, not bridged. Outbound supports text, interactive buttons/list, interactive Flow (form), image, and template |
+| Guest-sent media stays inbound-dropped | Inbound **media/location/contacts/reactions** are acknowledged and logged at info naming the type, not bridged (a later lane carries them). Inbound **text**, **interactive** taps, **template quick-replies** (`button` type), and completed **Flow forms** ARE bridged, with referral / reply-to context / tap ids carried as entry `params`. Outbound supports text, interactive buttons/list, interactive Flow (form), image, and template |
 | Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel |
 | Template scope is body-text | A `ChannelTemplate` carries positional body-text parameters only — header media, button, and typed (currency, date-time) parameters are out of scope |
 | No timestamp in Meta's signature scheme | Replay of a captured request validates forever for that body; `wamid` dedupe (48h default window) + HTTPS are the guards (a Meta protocol property) |
