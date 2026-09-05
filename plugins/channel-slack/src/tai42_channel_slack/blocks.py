@@ -40,7 +40,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from tai42_contract.channels import ChannelInputError, LinkOption, Option, OptionSection, ReplyOption
+from tai42_contract.channels import (
+    OPTION_ID_MAX_CHARS,
+    ChannelInputError,
+    LinkOption,
+    Option,
+    OptionSection,
+    ReplyOption,
+)
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 
 # The ask-path select/suggested-reply tap: ``value`` is the option text verbatim, the
@@ -56,9 +63,10 @@ LINK_ACTION_PREFIX = "tai42_link:"
 # Slack Block Kit caps for an actions block of buttons.
 _MAX_OPTION_BUTTONS = 25  # elements per actions block
 _MAX_BUTTON_TEXT_LEN = 75  # a button's plain_text label
-# A button's ``value`` cap (Slack allows 2000). Every option comfortably fits — an option
-# text is <=1000 and an author id <=256, so the reply envelope stays well under this — but
-# the guard keeps a pathological option from minting a value Slack rejects at send.
+# A button's ``value`` cap (Slack allows 2000). A typical reply envelope (option text plus
+# an optional author id) fits comfortably, but a long option text or id can exceed it — so
+# the guard drops such an option to the text fallback rather than minting a value Slack
+# rejects at send.
 _MAX_BUTTON_VALUE_LEN = 2000
 # ``alt_text`` is accessibility text (not the media content), so it is bounded, never
 # a content field — a caption longer than this is clipped for the alt attribute only.
@@ -97,7 +105,12 @@ def decode_reply_value(value: str) -> tuple[str, str | None]:
     """The ``(text, option_id)`` a reply button tap carried, from its JSON-envelope
     ``value``. Defensive: a value that is not our envelope (no JSON object with a string
     ``text``) is treated as plain submit text with no id, so a malformed tap still bridges
-    the visible string rather than failing."""
+    the visible string rather than failing.
+
+    The id is clamped to :data:`~tai42_contract.channels.OPTION_ID_MAX_CHARS` — the same
+    bound the contract enforces when an id is minted — so a forged-signed oversized id is
+    dropped here (the reply text still bridges) and can never reach ``validate_entry_params``
+    to raise and 5xx-loop the webhook."""
     try:
         parsed = json.loads(value)
     except ValueError:
@@ -108,7 +121,9 @@ def decode_reply_value(value: str) -> tuple[str, str | None]:
     if not isinstance(text, str) or not text:
         return value, None
     option_id = parsed.get("id")
-    return text, option_id if isinstance(option_id, str) and option_id else None
+    if not isinstance(option_id, str) or not option_id or len(option_id) > OPTION_ID_MAX_CHARS:
+        return text, None
+    return text, option_id
 
 
 def _plain(text: str) -> dict[str, str]:
@@ -119,9 +134,25 @@ def _mrkdwn_section(text: str) -> dict[str, Any]:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
+def _escape_mrkdwn(text: str) -> str:
+    """Escape the three mrkdwn control characters in author/user text placed in an mrkdwn
+    context, so a literal ``&``/``<``/``>`` renders as itself instead of being parsed as
+    markup (or opening a stray ``<…>`` link). The ``&`` pass MUST come first — otherwise the
+    ``&amp;`` the ``<``/``>`` passes introduce would be double-escaped."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _escape_mrkdwn_url(url: str) -> str:
+    """A url placed inside an mrkdwn ``<url|…>`` link needs only its ``&`` escaped (an
+    unescaped ``&`` — e.g. the OpenStreetMap ``&mlon`` — is read as an HTML entity); the
+    ``<``/``>`` delimiters are ours and the url must keep its own path/query characters."""
+    return url.replace("&", "&amp;")
+
+
 def _link_mrkdwn(item: MediaItem) -> str:
     """A ``link`` media item as an mrkdwn hyperlink (``<url|caption>``)."""
-    return f"<{item.url}|{item.caption}>" if item.caption else f"<{item.url}>"
+    url = _escape_mrkdwn_url(item.url)
+    return f"<{url}|{_escape_mrkdwn(item.caption)}>" if item.caption else f"<{url}>"
 
 
 def _file_media_mrkdwn(item: MediaItem) -> str:
@@ -133,9 +164,9 @@ def _file_media_mrkdwn(item: MediaItem) -> str:
     filename so the download is identifiable — the file is reachable, never dropped.
     """
     label = item.caption or item.filename or item.kind.value
-    line = f"<{item.url}|{label}>"
+    line = f"<{_escape_mrkdwn_url(item.url)}|{_escape_mrkdwn(label)}>"
     if item.kind is MediaKind.DOCUMENT and item.filename and item.filename != label:
-        line = f"{line} ({item.filename})"
+        line = f"{line} ({_escape_mrkdwn(item.filename)})"
     return line
 
 
@@ -218,7 +249,8 @@ def _option_label(option: Option) -> str:
 
 def _option_fits(option: Option) -> bool:
     # A button label must fit Slack's cap; a reply option additionally mints a JSON value
-    # envelope that must fit the value cap (text<=1000 + id<=256 always does, but guard it).
+    # envelope that must fit the value cap. A long option text or author id can push the
+    # envelope past the cap, so this guards its length rather than assuming it fits.
     if len(_option_label(option)) > _MAX_BUTTON_TEXT_LEN:
         return False
     if isinstance(option, ReplyOption):
@@ -250,7 +282,7 @@ def _descriptions_context(options: list[Option] | list[ReplyOption]) -> list[dic
     # Slack buttons carry no description, so a reply option's description is folded into a
     # muted context block above the buttons (never dropped). Only reply options carry one.
     elements = [
-        {"type": "mrkdwn", "text": f"*{o.text}* — {o.description}"}
+        {"type": "mrkdwn", "text": f"*{_escape_mrkdwn(o.text)}* — {_escape_mrkdwn(o.description)}"}
         for o in options
         if isinstance(o, ReplyOption) and o.description
     ]
@@ -261,11 +293,11 @@ def _typed_option_lines(options: list[Option] | list[ReplyOption]) -> str:
     lines: list[str] = []
     for option in options:
         if isinstance(option, LinkOption):
-            lines.append(f"• <{option.url}|{option.label}>")
+            lines.append(f"• <{_escape_mrkdwn_url(option.url)}|{_escape_mrkdwn(option.label)}>")
         else:
-            line = f"• {option.text}"
+            line = f"• {_escape_mrkdwn(option.text)}"
             if option.description:
-                line = f"{line} — {option.description}"
+                line = f"{line} — {_escape_mrkdwn(option.description)}"
             lines.append(line)
     return "\n".join(lines)
 
@@ -277,7 +309,10 @@ def _option_group_blocks(options: list[Option] | list[ReplyOption], start_index:
     if not options:
         return []
     if not _typed_options_fit(options):
-        return [text_section(_typed_option_lines(options))]
+        # The fallback lines are mrkdwn (a link option renders as an ``<url|label>`` link),
+        # so they ride an mrkdwn section — a plain_text section would show the markup
+        # literally.
+        return [_mrkdwn_section(_typed_option_lines(options))]
     buttons = [_button_for_option(start_index + offset, option) for offset, option in enumerate(options)]
     return [*_descriptions_context(options), {"type": "actions", "elements": buttons}]
 
@@ -300,7 +335,7 @@ def build_section_blocks(sections: list[OptionSection] | None) -> list[dict[str,
     blocks: list[dict[str, Any]] = []
     index = 0
     for section in sections:
-        blocks.append(_mrkdwn_section(f"*{section.title}*"))
+        blocks.append(_mrkdwn_section(f"*{_escape_mrkdwn(section.title)}*"))
         blocks.extend(_option_group_blocks(section.rows, index))
         index += len(section.rows)
     return blocks
@@ -315,7 +350,7 @@ def sections_text_lines(sections: list[OptionSection]) -> str:
     """The sectioned options as titled bulleted lines for the message text fallback."""
     blocks: list[str] = []
     for section in sections:
-        blocks.append(f"{section.title}:\n{_typed_option_lines(section.rows)}")
+        blocks.append(f"{_escape_mrkdwn(section.title)}:\n{_typed_option_lines(section.rows)}")
     return "\n".join(blocks)
 
 
@@ -334,13 +369,21 @@ def build_header_blocks(header: MediaItem | None) -> list[dict[str, Any]]:
 def build_footer_block(footer: str) -> dict[str, Any]:
     """A footer as a muted ``context`` block — the short trailing line under an interactive
     message."""
-    return {"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]}
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": _escape_mrkdwn(footer)}]}
+
+
+def _fmt_coord(value: float) -> str:
+    # Fixed-precision so a near-zero coordinate renders as a plain decimal (e.g. ``0.0000001``)
+    # rather than scientific notation (``1e-07``), which OpenStreetMap would not parse;
+    # trailing zeros (and a bare trailing dot) are trimmed so a short coordinate stays clean.
+    return f"{value:.7f}".rstrip("0").rstrip(".")
 
 
 def _osm_url(latitude: float, longitude: float) -> str:
     # An OpenStreetMap pin+map link at the shared coordinates (Slack cannot render a native
     # map, so the coordinates degrade to a clickable map link the human opens).
-    return f"https://www.openstreetmap.org/?mlat={latitude}&mlon={longitude}#map=16/{latitude}/{longitude}"
+    lat, lon = _fmt_coord(latitude), _fmt_coord(longitude)
+    return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
 
 
 def build_location_block(location: LocationElement) -> dict[str, Any]:
@@ -348,16 +391,19 @@ def build_location_block(location: LocationElement) -> dict[str, Any]:
     address, then an OpenStreetMap link to the coordinates."""
     lines: list[str] = []
     if location.name:
-        lines.append(f"*{location.name}*")
+        lines.append(f"*{_escape_mrkdwn(location.name)}*")
     if location.address:
-        lines.append(location.address)
-    lines.append(f"<{_osm_url(location.latitude, location.longitude)}|View on OpenStreetMap>")
+        lines.append(_escape_mrkdwn(location.address))
+    osm = _escape_mrkdwn_url(_osm_url(location.latitude, location.longitude))
+    lines.append(f"<{osm}|View on OpenStreetMap>")
     return _mrkdwn_section("\n".join(lines))
 
 
 def location_text_line(location: LocationElement) -> str:
     """A one-line location summary for the message text fallback."""
-    parts = [part for part in (location.name, location.address) if part]
+    parts = [_escape_mrkdwn(part) for part in (location.name, location.address) if part]
+    # The OSM url is a bare (auto-linked) url here, not inside an ``<url|…>`` link, so it
+    # keeps its literal ``&`` — escaping it would break the query Slack hands the browser.
     parts.append(_osm_url(location.latitude, location.longitude))
     return " — ".join(parts)
 
