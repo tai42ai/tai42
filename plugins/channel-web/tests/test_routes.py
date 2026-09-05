@@ -1920,9 +1920,7 @@ async def test_messages_pass_none_when_no_params(web_env, stub_app, registered_s
     assert stub_app.conversations.accept_calls[0]["params"] is None
 
 
-async def test_messages_thread_a_tapped_reply_id_as_params_reply_id(
-    web_env, stub_app, registered_session: FakeRedis
-):
+async def test_messages_thread_a_tapped_reply_id_as_params_reply_id(web_env, stub_app, registered_session: FakeRedis):
     # A media-card reply chip carrying an authored id sends that id back on the message
     # POST; the door threads it as ``params.reply_id`` so the flow reads WHICH option was
     # chosen, not only its echoed text (the same convention every channel keeps).
@@ -1932,9 +1930,7 @@ async def test_messages_thread_a_tapped_reply_id_as_params_reply_id(
     assert stub_app.conversations.accept_calls[0]["params"] == {"reply_id": "opt-a"}
 
 
-async def test_messages_merge_a_reply_id_with_the_session_link_params(
-    web_env, stub_app, fake_redis: FakeRedis
-):
+async def test_messages_merge_a_reply_id_with_the_session_link_params(web_env, stub_app, fake_redis: FakeRedis):
     # The reply id rides ALONGSIDE the captured link params, never replacing them.
     register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "spring"})
     await _handler(stub_app, _MESSAGES)(
@@ -1943,9 +1939,7 @@ async def test_messages_merge_a_reply_id_with_the_session_link_params(
     assert stub_app.conversations.accept_calls[0]["params"] == {"ref": "spring", "reply_id": "opt-a"}
 
 
-async def test_messages_without_a_reply_id_carry_no_reply_id_param(
-    web_env, stub_app, registered_session: FakeRedis
-):
+async def test_messages_without_a_reply_id_carry_no_reply_id_param(web_env, stub_app, registered_session: FakeRedis):
     # A typed message threads no reply_id — the payload stays byte-identical to a plain send.
     await _handler(stub_app, _MESSAGES)(
         build_request(json_body={"identity": IDENTITY, "text": "typed"}, token=SESSION_TOKEN)

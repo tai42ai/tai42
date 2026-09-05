@@ -329,9 +329,7 @@ class WebChannel:
         frame_media = (
             [_media_frame_item(item) for item in notification.media] if notification.media is not None else None
         )
-        frame_location = (
-            _location_frame_item(notification.location) if notification.location is not None else None
-        )
+        frame_location = _location_frame_item(notification.location) if notification.location is not None else None
 
         if notification.schema is not None:
             # An ask-less form: ONE chat.form card carrying the prompt, the schema and
