@@ -223,7 +223,7 @@ def test_pathological_jq_expression_surfaces_timeout_through_chain(bind_fake_app
 
     bind_fake_app(FakeTools(run_tool=run_tool))
 
-    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expression: _BlockingProgram())
+    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expression, prelude="": _BlockingProgram())
     monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.05")
     reset_all_settings()
     try:

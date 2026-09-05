@@ -262,7 +262,7 @@ async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> Non
             time.sleep(1)
             return None
 
-    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr: _SlowProgram())
+    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="": _SlowProgram())
     monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
     reset_all_settings()
     try:
