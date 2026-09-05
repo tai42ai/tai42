@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-channel-telegram"
-version = "3.0.0"
+version = "3.0.1"
 description = "Telegram channel plugin for the TAI ecosystem — delivers ask_user questions to a Telegram chat and bridges the typed reply back to the interactions callback door."
 readme = "README.md"
 requires-python = ">=3.13"
