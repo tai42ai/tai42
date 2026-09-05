@@ -1342,6 +1342,24 @@ async def test_notify_over_cap_row_description_degrades_list_to_numbered_text(
     assert payload["text"]["body"] == expected
 
 
+async def test_notify_sectioned_degrade_carries_row_descriptions(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A sectioned list degraded by an over-cap row description carries that description
+    # whole on the numbered line — a degrade never silently drops authored content.
+    fake_httpx.responses.append(_accepted("wamid.NUM"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick a dish",
+            recipient=ALLOWED_A,
+            sections=[OptionSection(title="Soups", rows=[ReplyOption(text="Soup", description="d" * 73)])],
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"] == (f"Pick a dish\nSoups\n1. Soup — {'d' * 73}\nReply with the text of one option.")
+
+
 async def test_notify_over_cap_section_title_degrades_list_to_numbered_text(
     fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
