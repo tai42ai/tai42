@@ -27,7 +27,7 @@ dependencies = [
     # ABCs and the module-level identity-provider registry.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.5,<7",
+    "tai42-contract>=7.0,<8",
     # The Redis client, its hash typing seams (hgetall/hset_mapping/scan_iter),
     # and the api-key hash. The `redis` extra is REQUIRED, not optional: the
     # provider's storage IS Redis, so tai42_kit.clients.impl.redis (which imports the

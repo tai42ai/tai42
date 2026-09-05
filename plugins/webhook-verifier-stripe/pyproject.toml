@@ -29,7 +29,7 @@ dependencies = [
     # work is pure standard library (hmac / hashlib); no other tai-* dependency.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.5,<7",
+    "tai42-contract>=7.0,<8",
 ]
 
 [project.urls]

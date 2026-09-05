@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract these tools and tool extensions register through
     # — the tai42_app handle, ExtensionKind, and the tool/extension facets.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.5,<7",
+    "tai42-contract>=7.0,<8",
     # Leaf helpers: settings machinery, the curl client, the jq compiler, and the
     # llm/embedding factories the extra-gated modules wire to.
     "tai42-kit>=3.8,<4",
