@@ -67,7 +67,10 @@ _DEFAULT_OUT = (
 # Domain-agnostic card content (platform rule: no business-domain words, no client/product
 # names anywhere). A neutral caption and two generic option chips.
 _CAPTION = "Status update"
-_OPTIONS = ["View details", "Dismiss"]
+_OPTIONS = [
+    {"kind": "reply", "text": "View details"},
+    {"kind": "reply", "text": "Dismiss"},
+]
 
 
 class _ImageHandler(http.server.BaseHTTPRequestHandler):
