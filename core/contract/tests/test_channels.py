@@ -472,15 +472,19 @@ def test_notification_media_total_uri_budget_at_cap_accepted():
 def test_template_roundtrips_on_a_notification():
     from tai42_contract.channels import ChannelNotification, ChannelTemplate
 
-    template = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42", "done"])
+    template = ChannelTemplate(name="status_update", language="en_US", body_parameters=["A-42", "done"])
     notification = ChannelNotification(message="Your item is done", template=template)
     assert notification.template is not None
     assert notification.template == template
     assert notification.template.name == "status_update"
     assert notification.template.language == "en_US"
-    assert notification.template.parameters == ["A-42", "done"]
-    # parameters is optional — a template with no body placeholders is valid.
-    assert ChannelTemplate(name="ping", language="en").parameters == []
+    assert notification.template.body_parameters == ["A-42", "done"]
+    # body_parameters is optional — a template with no body placeholders is valid, and header
+    # media / button parameters default to empty.
+    empty = ChannelTemplate(name="ping", language="en")
+    assert empty.body_parameters == []
+    assert empty.buttons == []
+    assert empty.header_media is None
 
 
 def test_template_is_frozen():
@@ -527,10 +531,12 @@ def test_notification_media_and_template_are_mutually_exclusive():
 
 
 def test_notification_accepts_options():
-    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.channels import ChannelNotification, LinkOption, ReplyOption
 
-    notification = ChannelNotification(message="pick one", options=["Item A", "Item B"])
-    assert notification.options == ["Item A", "Item B"]
+    notification = ChannelNotification(
+        message="pick one", options=[ReplyOption(text="Item A"), LinkOption(label="Docs", url="https://x.example/d")]
+    )
+    assert notification.options == [ReplyOption(text="Item A"), LinkOption(label="Docs", url="https://x.example/d")]
     # Absent by default; freeform text needs no options.
     assert ChannelNotification(message="hi").options is None
 
@@ -548,53 +554,55 @@ def test_notification_options_rejects_present_but_empty_list():
 def test_notification_options_rejects_a_blank_option(blank: str):
     from pydantic import ValidationError
 
-    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.channels import ChannelNotification, ReplyOption
 
-    with pytest.raises(ValidationError, match="each option must be a non-blank string"):
-        ChannelNotification(message="hi", options=["Item A", blank])
+    with pytest.raises(ValidationError, match="reply option text must be non-blank"):
+        ChannelNotification(message="hi", options=[ReplyOption(text="Item A"), ReplyOption(text=blank)])
 
 
 def test_notification_options_capped():
     from pydantic import ValidationError
 
-    from tai42_contract.channels import NOTIFICATION_OPTIONS_MAX, ChannelNotification
+    from tai42_contract.channels import NOTIFICATION_OPTIONS_MAX, ChannelNotification, ReplyOption
 
-    ok = [f"Item {n}" for n in range(NOTIFICATION_OPTIONS_MAX)]
+    ok = [ReplyOption(text=f"Item {n}") for n in range(NOTIFICATION_OPTIONS_MAX)]
     assert ChannelNotification(message="hi", options=ok).options == ok
     with pytest.raises(ValidationError, match=f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries"):
-        ChannelNotification(message="hi", options=[*ok, "one too many"])
+        ChannelNotification(message="hi", options=[*ok, ReplyOption(text="one too many")])
 
 
 def test_notification_option_length_capped():
     from pydantic import ValidationError
 
-    from tai42_contract.channels import NOTIFICATION_OPTION_MAX_CHARS, ChannelNotification
+    from tai42_contract.channels import NOTIFICATION_OPTION_MAX_CHARS, ChannelNotification, ReplyOption
 
     at_cap = "x" * NOTIFICATION_OPTION_MAX_CHARS
-    assert ChannelNotification(message="hi", options=[at_cap]).options == [at_cap]
+    assert ChannelNotification(message="hi", options=[ReplyOption(text=at_cap)]).options == [ReplyOption(text=at_cap)]
     with pytest.raises(ValidationError, match="at most"):
-        ChannelNotification(message="hi", options=["x" * (NOTIFICATION_OPTION_MAX_CHARS + 1)])
+        ChannelNotification(message="hi", options=[ReplyOption(text="x" * (NOTIFICATION_OPTION_MAX_CHARS + 1))])
 
 
 def test_notification_options_and_template_are_mutually_exclusive():
     from pydantic import ValidationError
 
-    from tai42_contract.channels import ChannelNotification, ChannelTemplate
+    from tai42_contract.channels import ChannelNotification, ChannelTemplate, ReplyOption
 
     with pytest.raises(ValidationError, match="mutually exclusive"):
         ChannelNotification(
             message="both set",
-            options=["Item A"],
+            options=[ReplyOption(text="Item A")],
             template=ChannelTemplate(name="status_update", language="en_US"),
         )
 
 
 def test_notification_options_may_combine_with_media():
-    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.channels import ChannelNotification, ReplyOption
 
-    notification = ChannelNotification(message="a card with a list", media=[_image_item()], options=["Item A"])
+    notification = ChannelNotification(
+        message="a card with a list", media=[_image_item()], options=[ReplyOption(text="Item A")]
+    )
     assert notification.media == [_image_item()]
-    assert notification.options == ["Item A"]
+    assert notification.options == [ReplyOption(text="Item A")]
 
 
 # -- schema (ask-less form) ------------------------------------------------------------
@@ -654,10 +662,10 @@ def test_notification_schema_and_options_are_mutually_exclusive():
     # One message carries ONE interactive surface: a form's fields or a tap list, never both.
     from pydantic import ValidationError
 
-    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.channels import ChannelNotification, ReplyOption
 
     with pytest.raises(ValidationError, match="mutually exclusive"):
-        ChannelNotification(message="both set", schema=_form_schema(), options=["Item A"])
+        ChannelNotification(message="both set", schema=_form_schema(), options=[ReplyOption(text="Item A")])
 
 
 def test_notification_schema_may_combine_with_media():
@@ -695,10 +703,10 @@ def test_notification_media_only_carries_no_options():
     # Options require a non-blank message — a tappable choice needs a prompt.
     from pydantic import ValidationError
 
-    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.channels import ChannelNotification, ReplyOption
 
-    with pytest.raises(ValidationError, match=r"media-only .* carries no options"):
-        ChannelNotification(message="", media=[_image_item()], options=["Item A"])
+    with pytest.raises(ValidationError, match=r"content-only .* carries no options"):
+        ChannelNotification(message="", media=[_image_item()], options=[ReplyOption(text="Item A")])
 
 
 def test_notification_blank_message_with_only_template_is_refused():
@@ -797,6 +805,8 @@ def test_channel_delivery_shape():
         "schema",
         "options",
         "media",
+        "on_mismatch",
+        "mismatch_notice",
         "callback_url",
         "timeout_at",
     }

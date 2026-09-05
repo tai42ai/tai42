@@ -20,16 +20,21 @@ import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from tai42_contract.entry_params import validate_entry_params
 from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions.models import (
     MEDIA_CAPTION_MAX_CHARS,
     AnswerFormat,
+    AnswerMismatchPolicy,
+    LocationElement,
     MediaItem,
+    MediaKind,
     check_media_list,
+    validate_action_url,
 )
 
 
@@ -117,6 +122,12 @@ with warnings.catch_warnings():
         schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
         options: list[str] | None = None  # required for select; optional suggested replies for text
         media: list[MediaItem] | None = None  # display media rendered WITH the question; None -> none
+        # The ask's digression policy for a rejected reply; the channel carries it onto the
+        # ``Correlation`` it parks so the shared answer ladder reads it at the 400 decision.
+        on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY
+        # The ask's custom retry-notice text (``retry`` policy only), carried onto the parked
+        # ``Correlation`` for the ladder; ``None`` uses the built-in notice.
+        mismatch_notice: str | None = None
         callback_url: str  # public /api/interactions/callback/{ticket} — the answer sink
         timeout_at: datetime  # tz-aware; the plugin may surface a deadline to the human
 
@@ -185,30 +196,127 @@ with warnings.catch_warnings():
             return self
 
 
+# Caps on a template's component parameters. ``TEMPLATE_BUTTONS_MAX`` bounds the buttons
+# component; ``TEMPLATE_PARAM_MAX_CHARS`` bounds one substituted value (a body text param, a
+# button payload, a URL suffix) — a generous single-value bound, never a message body.
+TEMPLATE_BUTTONS_MAX = 10
+TEMPLATE_PARAM_MAX_CHARS = 4096
+
+
+class QuickReplyButtonParam(BaseModel):
+    """The runtime argument for one QUICK-REPLY button of a template's buttons component:
+    ``payload`` is the string the medium returns when the human taps the button. Frozen."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["quick_reply"] = "quick_reply"
+    payload: str
+
+    @field_validator("payload")
+    @classmethod
+    def _payload_valid(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("quick-reply button payload must be non-blank")
+        if len(value) > TEMPLATE_PARAM_MAX_CHARS:
+            raise ValueError(
+                f"quick-reply button payload must be at most {TEMPLATE_PARAM_MAX_CHARS} characters, got {len(value)}"
+            )
+        return value
+
+
+class UrlButtonParam(BaseModel):
+    """The runtime argument for one URL button of a template's buttons component:
+    ``url_parameter`` is the dynamic suffix substituted into the button's pre-approved URL.
+    Frozen."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["url"] = "url"
+    url_parameter: str
+
+    @field_validator("url_parameter")
+    @classmethod
+    def _url_parameter_valid(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("url button parameter must be non-blank")
+        if len(value) > TEMPLATE_PARAM_MAX_CHARS:
+            raise ValueError(
+                f"url button parameter must be at most {TEMPLATE_PARAM_MAX_CHARS} characters, got {len(value)}"
+            )
+        return value
+
+
+# One button's runtime argument on a template's buttons component: a quick-reply payload or a URL
+# suffix, discriminated on ``kind``. Positional — the i-th entry parameterises the i-th button.
+TemplateButtonParam = Annotated[QuickReplyButtonParam | UrlButtonParam, Field(discriminator="kind")]
+
+
+def _no_button_params() -> list[TemplateButtonParam]:
+    # A concretely-typed default factory for the buttons component (an empty list default over the
+    # discriminated ``TemplateButtonParam`` alias), so the field's element type stays fully known.
+    return []
+
+
 class ChannelTemplate(BaseModel):
     """A pre-approved, named template a channel sends outside its freeform window.
 
-    Some media only accept arbitrary text inside a bounded conversation window
-    (e.g. WhatsApp's 24-hour customer-service window); outside it, the sole
-    accepted send is an operator-authored template referenced by ``name`` in an
-    approved ``language`` — both required and non-blank. ``parameters`` is the
-    POSITIONAL list of body-text values substituted into the template's body
-    placeholders in order; it is empty when the template has no placeholders.
-    Body text only — templates with header media, button parameters, or typed
-    parameters (currency, date-time) are out of scope for this contract.
+    Some media only accept arbitrary text inside a bounded conversation window (e.g. WhatsApp's
+    24-hour customer-service window); outside it, the sole accepted send is an operator-authored
+    template referenced by ``name`` in an approved ``language`` — both required and non-blank.
+
+    The template's runtime arguments are its NAMED components (never one flat positional list):
+
+    * ``header_media`` — the media argument for a media HEADER component (a display item:
+      image/document/video/audio, never a ``link``); ``None`` when the template has no media
+      header (or a static/text header needing no argument).
+    * ``body_parameters`` — the POSITIONAL body-text values substituted into the body's
+      placeholders in order; empty when the body has no placeholders. Typed values (currency,
+      date-time) ride as their pre-formatted STRING here — the contract does not model the type.
+    * ``buttons`` — the POSITIONAL per-button arguments of the buttons component
+      (:data:`TemplateButtonParam`: a :class:`QuickReplyButtonParam` payload or a
+      :class:`UrlButtonParam` url suffix); the i-th entry parameterises the i-th button, at most
+      ``TEMPLATE_BUTTONS_MAX``. Empty when no button needs a runtime argument.
     """
 
     model_config = ConfigDict(frozen=True)
 
     name: str
     language: str
-    parameters: list[str] = Field(default_factory=list)
+    header_media: MediaItem | None = None
+    body_parameters: list[str] = Field(default_factory=list)
+    buttons: list[TemplateButtonParam] = Field(default_factory=_no_button_params)
 
     @field_validator("name", "language")
     @classmethod
     def _non_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("must be non-blank")
+        return value
+
+    @field_validator("header_media")
+    @classmethod
+    def _header_media_valid(cls, value: MediaItem | None) -> MediaItem | None:
+        if value is not None and value.kind is MediaKind.LINK:
+            raise ValueError("template header_media must be a display item (image/document/video/audio), not a link")
+        return value
+
+    @field_validator("body_parameters")
+    @classmethod
+    def _body_parameters_valid(cls, value: list[str]) -> list[str]:
+        for param in value:
+            if not param.strip():
+                raise ValueError("each body parameter must be non-blank")
+            if len(param) > TEMPLATE_PARAM_MAX_CHARS:
+                raise ValueError(
+                    f"each body parameter must be at most {TEMPLATE_PARAM_MAX_CHARS} characters, got {len(param)}"
+                )
+        return value
+
+    @field_validator("buttons")
+    @classmethod
+    def _buttons_capped(cls, value: list[TemplateButtonParam]) -> list[TemplateButtonParam]:
+        if len(value) > TEMPLATE_BUTTONS_MAX:
+            raise ValueError(f"buttons carries at most {TEMPLATE_BUTTONS_MAX} entries, got {len(value)}")
         return value
 
 
@@ -229,6 +337,264 @@ NOTIFICATION_OPTION_MAX_CHARS = MEDIA_CAPTION_MAX_CHARS
 # replayed feed record and ``audience`` also becomes a per-identity Redis key, so an
 # unbounded value would bloat a stored frame or mint an oversized key.
 NOTIFICATION_ADDRESS_MAX_CHARS = 512
+
+# Upper bound on a sectioned option list's section count. A sectioned list groups its rows
+# under titled sections; the summed row count across every section still obeys
+# ``NOTIFICATION_OPTIONS_MAX`` (one message cannot fan out an unbounded tap set).
+NOTIFICATION_SECTIONS_MAX = 10
+
+# Per-footer character bound — the short trailing line under an interactive message; same cap
+# as an option label, the other short rider on an interactive frame.
+NOTIFICATION_FOOTER_MAX_CHARS = MEDIA_CAPTION_MAX_CHARS
+
+# Bound on an AUTHORED reply-option id — the stable id a sender may set on a quick-reply button
+# or a list row so the tap echoes it back verbatim. Set to the STRICTEST carrier's cap (WhatsApp
+# limits an interactive button/row id to 256 characters); a channel that mints its own id when
+# the author sets none is unaffected.
+OPTION_ID_MAX_CHARS = 256
+
+
+class ReplyOption(BaseModel):
+    """A tappable suggested reply. Tapping SUBMITS ``text`` as the guest's next inbound message —
+    the quick-reply / list-row case, where the option's own text becomes the turn. ``description``
+    is an OPTIONAL secondary line a sectioned-list row renders under its ``text``; a channel that
+    renders flat buttons (no descriptions) ignores it.
+
+    ``id`` is an OPTIONAL author-set stable identifier for the button/list row. When set, a channel
+    sends it verbatim on the wire and the guest's tap echoes it back (a channel surfaces the echoed
+    id to the inbound turn as opaque enrichment — e.g. WhatsApp forwards it as ``params.reply_id``);
+    when ``None`` the channel mints its own id as today. Bounded by ``OPTION_ID_MAX_CHARS`` and a
+    single-line non-blank label — the strictest carrier's rule. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["reply"] = "reply"
+    text: str
+    description: str | None = None
+    id: str | None = None
+
+    @field_validator("text")
+    @classmethod
+    def _text_valid(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("reply option text must be non-blank")
+        if len(value) > NOTIFICATION_OPTION_MAX_CHARS:
+            raise ValueError(
+                f"reply option text must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(value)}"
+            )
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _description_valid(cls, value: str | None) -> str | None:
+        if value is not None:
+            if not value.strip():
+                raise ValueError("reply option description must be non-blank when present")
+            if len(value) > NOTIFICATION_OPTION_MAX_CHARS:
+                raise ValueError(
+                    f"reply option description must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, "
+                    f"got {len(value)}"
+                )
+        return value
+
+    @field_validator("id")
+    @classmethod
+    def _id_valid(cls, value: str | None) -> str | None:
+        # An author-set id is a single-line non-blank token within the strictest carrier's cap;
+        # raw whitespace and control/format characters are rejected (an id rides the wire and is
+        # echoed back, so it must not carry a newline or a bidi spoof).
+        if value is not None:
+            if not value.strip():
+                raise ValueError("reply option id must be non-blank when present")
+            if len(value) > OPTION_ID_MAX_CHARS:
+                raise ValueError(f"reply option id must be at most {OPTION_ID_MAX_CHARS} characters, got {len(value)}")
+            if any(ch.isspace() or not ch.isprintable() for ch in value):
+                raise ValueError("reply option id must be a single-line token with no whitespace or control characters")
+        return value
+
+
+class LinkOption(BaseModel):
+    """A tappable link action. Tapping OPENS ``url`` (an absolute ``http(s)`` URL) in the human's
+    browser — NO message is submitted, distinct from a :class:`ReplyOption`. ``label`` is the
+    button text. The URL-button / call-to-action case. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["link"] = "link"
+    label: str
+    url: str
+
+    @field_validator("label")
+    @classmethod
+    def _label_valid(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("link option label must be non-blank")
+        if len(value) > NOTIFICATION_OPTION_MAX_CHARS:
+            raise ValueError(
+                f"link option label must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(value)}"
+            )
+        return value
+
+    @field_validator("url")
+    @classmethod
+    def _url_valid(cls, value: str) -> str:
+        return validate_action_url(value)
+
+
+# One tappable option on an interactive message: EITHER a reply (tap submits its text) or a link
+# action (tap opens its url). A discriminated union on ``kind`` — the input carries the tag, so a
+# bare string is not an option (the clean break from the old text-only ``list[str]``: an option
+# is authored as ``{"kind": "reply", "text": …}`` or ``{"kind": "link", "label": …, "url": …}``).
+Option = Annotated[ReplyOption | LinkOption, Field(discriminator="kind")]
+
+
+class OptionSection(BaseModel):
+    """One titled section of a sectioned option list. ``title`` is the section header; ``rows`` are
+    its entries — a sectioned list holds :class:`ReplyOption` rows ONLY (a tapped row submits its
+    text; a link action is a button, never a list row). A present ``rows`` is non-empty. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    title: str
+    rows: list[ReplyOption]
+
+    @field_validator("title")
+    @classmethod
+    def _title_valid(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("section title must be non-blank")
+        if len(value) > NOTIFICATION_OPTION_MAX_CHARS:
+            raise ValueError(
+                f"section title must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(value)}"
+            )
+        return value
+
+    @field_validator("rows")
+    @classmethod
+    def _rows_non_empty(cls, value: list[ReplyOption]) -> list[ReplyOption]:
+        if not value:
+            raise ValueError("section rows must be a non-empty list")
+        return value
+
+
+def check_options(value: list[Option] | None) -> list[Option] | None:
+    """List-level caps on a flat interactive option list: None means none; a present list is
+    non-empty and holds at most ``NOTIFICATION_OPTIONS_MAX`` entries. Each option's own shape
+    (reply text / link label+url bounds) is the :class:`ReplyOption`/:class:`LinkOption` concern.
+    Raises ``ValueError``."""
+    if value is None:
+        return None
+    if not value:
+        raise ValueError("options must be a non-empty list when present")
+    if len(value) > NOTIFICATION_OPTIONS_MAX:
+        raise ValueError(f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries, got {len(value)}")
+    return value
+
+
+def check_sections(value: list[OptionSection] | None) -> list[OptionSection] | None:
+    """List-level caps on a sectioned option list: None means none; a present list is non-empty,
+    holds at most ``NOTIFICATION_SECTIONS_MAX`` sections, and its rows summed across every section
+    stay within ``NOTIFICATION_OPTIONS_MAX`` (one message never fans out an unbounded tap set).
+    Raises ``ValueError``."""
+    if value is None:
+        return None
+    if not value:
+        raise ValueError("sections must be a non-empty list when present")
+    if len(value) > NOTIFICATION_SECTIONS_MAX:
+        raise ValueError(f"sections carries at most {NOTIFICATION_SECTIONS_MAX} sections, got {len(value)}")
+    total_rows = sum(len(section.rows) for section in value)
+    if total_rows > NOTIFICATION_OPTIONS_MAX:
+        raise ValueError(
+            f"sections carry at most {NOTIFICATION_OPTIONS_MAX} rows in total across all sections, got {total_rows}"
+        )
+    return value
+
+
+def check_footer(value: str | None) -> str | None:
+    """A footer is the short trailing line under an interactive message: None means none; a
+    present value is non-blank and within ``NOTIFICATION_FOOTER_MAX_CHARS``. Raises ``ValueError``."""
+    if value is None:
+        return None
+    if not value.strip():
+        raise ValueError("footer must be non-blank when present")
+    if len(value) > NOTIFICATION_FOOTER_MAX_CHARS:
+        raise ValueError(f"footer must be at most {NOTIFICATION_FOOTER_MAX_CHARS} characters, got {len(value)}")
+    return value
+
+
+def check_header(value: MediaItem | None) -> MediaItem | None:
+    """A header is a SINGLE display-media item shown above an interactive message: None means
+    none; a present item is display media (image/document/video/audio), never a ``link`` (an
+    anchor is content, not a header). The item's own url/kind shape is :class:`MediaItem`'s
+    concern. Raises ``ValueError``."""
+    if value is not None and value.kind is MediaKind.LINK:
+        raise ValueError("header media must be a display item (image/document/video/audio), not a link")
+    return value
+
+
+def check_interactive_composition(
+    *,
+    message: str,
+    media: list[MediaItem] | None,
+    location: LocationElement | None,
+    template: ChannelTemplate | None,
+    options: list[Option] | None,
+    sections: list[OptionSection] | None,
+    schema: dict[str, Any] | None,
+    header: MediaItem | None,
+    footer: str | None,
+    noun: str,
+) -> None:
+    """The shared cross-field rules every option-carrying message carrier
+    (:class:`ChannelNotification`, :class:`~tai42_contract.conversations.AnswerPart`) enforces, so
+    the two can never drift. ``noun`` names the carrier for the raised messages
+    (``"notification"`` / ``"part"``). Rules:
+
+    * message is non-blank BY DEFAULT, EXCEPT blank for a CONTENT-ONLY send — a blank message
+      carried by non-empty ``media`` OR a ``location`` (a caption-less image / a bare pin).
+    * an interactive surface (``options``, ``sections``, ``schema``) REQUIRES a non-blank message
+      — a choice or a form needs a prompt — so a content-only send carries none of them.
+    * ``options`` XOR ``sections`` — one choice surface (flat buttons OR a sectioned list).
+    * ``schema`` is exclusive with both ``options`` and ``sections`` — one interactive surface
+      (a form's fields OR a choice list), never both.
+    * ``header`` and ``footer`` compose an interactive message, so each REQUIRES ``options`` or
+      ``sections`` present.
+    * ``template`` is the standalone out-of-window send: exclusive with every other content and
+      interactive field (``media``, ``location``, ``options``, ``sections``, ``schema``; and
+      transitively ``header``/``footer``, which require ``options``/``sections``).
+    """
+    if not message.strip():
+        if not media and location is None:
+            raise ValueError(f"message must be non-blank unless media or location carries the {noun} content")
+        if options is not None or sections is not None:
+            raise ValueError(f"a content-only (blank-message) {noun} carries no options; a choice needs a prompt")
+        if schema is not None:
+            raise ValueError(f"a content-only (blank-message) {noun} carries no schema; a form needs a prompt")
+    if options is not None and sections is not None:
+        raise ValueError(f"options and sections are mutually exclusive on one {noun}")
+    if schema is not None and options is not None:
+        raise ValueError(f"schema and options are mutually exclusive on one {noun}")
+    if schema is not None and sections is not None:
+        raise ValueError(f"schema and sections are mutually exclusive on one {noun}")
+    if header is not None and options is None and sections is None:
+        raise ValueError(f"a header requires options or sections on the {noun}")
+    if footer is not None and options is None and sections is None:
+        raise ValueError(f"a footer requires options or sections on the {noun}")
+    if template is not None:
+        for field, present in (
+            ("media", media is not None),
+            ("location", location is not None),
+            ("options", options is not None),
+            ("sections", sections is not None),
+            ("schema", schema is not None),
+            ("header", header is not None),
+            ("footer", footer is not None),
+        ):
+            if present:
+                raise ValueError(f"{field} and template are mutually exclusive on one {noun}")
 
 
 with warnings.catch_warnings():
@@ -255,32 +621,37 @@ with warnings.catch_warnings():
         never caller-supplied, and an address only — never a secret.
 
         ``message`` is the human-readable text, non-blank BY DEFAULT — EXCEPT it may be the empty
-        string ``""`` for a MEDIA-ONLY send: a caption-less image or other bubble that is just
-        ``media``, with no text carrier. The admissible states are "``message`` non-blank" OR
-        "blank ``message`` WITH non-empty ``media``"; a blank ``message`` and no media has nothing
-        to deliver and is refused. (``message`` stays REQUIRED — a media-only sender passes ``""``
-        explicitly — because every caller constructs it in code with the text in hand.) ``options``
-        REQUIRE a non-blank ``message`` — a tappable choice needs a prompt — so a media-only send
-        carries none; a ``template`` likewise rides a non-blank ``message`` (it is not ``media``, so
-        a blank message with only a template is refused).
+        string ``""`` for a CONTENT-ONLY send: a caption-less bubble that is just ``media`` or a
+        ``location``, with no text carrier. The admissible states are "``message`` non-blank" OR
+        "blank ``message`` WITH non-empty ``media`` OR a ``location``"; a blank ``message`` with no
+        such content has nothing to deliver and is refused. (``message`` stays REQUIRED — a
+        content-only sender passes ``""`` explicitly — because every caller constructs it in code
+        with the text in hand.) An interactive surface (``options``, ``sections`` or ``schema``)
+        REQUIRES a non-blank ``message`` — a choice or a form needs a prompt — so a content-only
+        send carries none; a ``template`` likewise rides a non-blank ``message``.
 
-        ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms reusing the
-        same ``message`` as the human-readable equivalent. ``media`` is display media the
-        channel sends alongside the message (reusing :class:`MediaItem`); a present
-        list is non-empty. ``template`` sends a pre-approved :class:`ChannelTemplate`
-        for out-of-window delivery. ``options`` is a list of tappable options; a tap enters
-        the conversation as a visitor message on channels that support it — a present list is
-        non-empty, each option non-blank and at most ``NOTIFICATION_OPTION_MAX_CHARS`` characters,
-        at most ``NOTIFICATION_OPTIONS_MAX`` entries.
-        ``media`` and ``template`` are MUTUALLY EXCLUSIVE — a template is the out-of-window
-        send and a companion standalone media item would be rejected by the medium there, so
-        setting both is refused rather than partially delivered; ``options`` is likewise
-        incompatible with ``template`` but MAY combine with ``media`` (a card with a list).
-        A channel that does not advertise the matching capability flag
-        (``supports_media_notifications`` / ``supports_template_notifications`` /
-        ``supports_interactive_notifications`` / ``supports_form_notifications``, the
-        OPTIONAL class-attribute convention documented on :class:`Channel`) never receives
-        the matching field.
+        The OPTIONAL richer-send forms reuse the same ``message`` as the human-readable
+        equivalent. ``media`` is display media the channel sends alongside the message (reusing
+        :class:`MediaItem`, image/document/video/audio/link); a present list is non-empty.
+        ``location`` is a shared geographic point (:class:`LocationElement`). ``template`` sends a
+        pre-approved :class:`ChannelTemplate` for out-of-window delivery. ``options`` is a flat
+        list of tappable :data:`Option` entries — a :class:`ReplyOption` (a tap submits its text
+        as a visitor message) or a :class:`LinkOption` (a tap opens its url) — at most
+        ``NOTIFICATION_OPTIONS_MAX``. ``sections`` is the sectioned alternative: titled
+        :class:`OptionSection` groups of reply rows (rows summed across sections stay within
+        ``NOTIFICATION_OPTIONS_MAX``). ``header`` is a single display-media header and ``footer`` a
+        short trailing line, each composing an interactive message (they REQUIRE ``options`` or
+        ``sections``).
+
+        The composition rules (:func:`check_interactive_composition`): ``options`` XOR
+        ``sections`` (one choice surface); ``schema`` excludes both (one interactive surface); a
+        ``template`` is the standalone out-of-window send, MUTUALLY EXCLUSIVE with every other
+        content and interactive field; ``options``/``sections`` and ``schema`` MAY each combine
+        with ``media`` and ``location``. A channel that does not advertise the matching capability
+        flag (``supports_media_notifications`` / ``supports_location_notifications`` /
+        ``supports_template_notifications`` / ``supports_interactive_notifications`` /
+        ``supports_form_notifications``, the OPTIONAL class-attribute convention documented on
+        :class:`Channel`) never receives the matching field.
 
         ``schema`` is the form answer schema for an ASK-LESS FORM: the channel renders
         ``message`` as the form's prompt and ``schema`` as the fillable form, and the
@@ -302,12 +673,16 @@ with warnings.catch_warnings():
 
         model_config = ConfigDict(frozen=True)
 
-        message: str  # human-readable text; blank ("") ONLY for a media-only send (media carries it)
+        message: str  # human-readable text; blank ("") ONLY for a content-only send (media/location carries it)
         recipient: str | None = None  # caller-requested address; None -> plugin default
         sender_identity: str | None = None  # internal sending identity; None -> plugin default
         media: list[MediaItem] | None = None  # display media sent WITH the message; None -> none
+        location: LocationElement | None = None  # a shared geographic point; None -> none
         template: ChannelTemplate | None = None  # out-of-window template send; None -> freeform
-        options: list[str] | None = None  # tappable options; a tap enters the conversation; None -> none
+        options: list[Option] | None = None  # flat tappable options (reply/link); None -> none
+        sections: list[OptionSection] | None = None  # a sectioned option list; None -> none
+        header: MediaItem | None = None  # single media header above an interactive message; None -> none
+        footer: str | None = None  # short trailing line under an interactive message; None -> none
         # The form answer schema for an ask-less form; the submission enters the conversation as
         # a guest message. Intentionally named ``schema`` (matches the payload it carries);
         # shadows the deprecated ``BaseModel.schema()`` alias, which this model never uses.
@@ -348,23 +723,25 @@ with warnings.catch_warnings():
 
         @field_validator("options")
         @classmethod
-        def _options_valid(cls, value: list[str] | None) -> list[str] | None:
-            # None means no options; a present list is non-empty, each option non-blank,
-            # and capped so one notification cannot fan out an unbounded tap list.
-            if value is None:
-                return value
-            if not value:
-                raise ValueError("options must be a non-empty list when present")
-            if len(value) > NOTIFICATION_OPTIONS_MAX:
-                raise ValueError(f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries, got {len(value)}")
-            for option in value:
-                if not option.strip():
-                    raise ValueError("each option must be a non-blank string")
-                if len(option) > NOTIFICATION_OPTION_MAX_CHARS:
-                    raise ValueError(
-                        f"each option must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(option)}"
-                    )
-            return value
+        def _options_valid(cls, value: list[Option] | None) -> list[Option] | None:
+            # None means no options; a present flat list is non-empty and capped. Each option's own
+            # shape (reply text / link label+url) is the ReplyOption/LinkOption concern.
+            return check_options(value)
+
+        @field_validator("sections")
+        @classmethod
+        def _sections_valid(cls, value: list[OptionSection] | None) -> list[OptionSection] | None:
+            return check_sections(value)
+
+        @field_validator("footer")
+        @classmethod
+        def _footer_valid(cls, value: str | None) -> str | None:
+            return check_footer(value)
+
+        @field_validator("header")
+        @classmethod
+        def _header_valid(cls, value: MediaItem | None) -> MediaItem | None:
+            return check_header(value)
 
         @field_validator("schema")
         @classmethod
@@ -377,47 +754,21 @@ with warnings.catch_warnings():
             return value
 
         @model_validator(mode="after")
-        def _message_or_media(self) -> ChannelNotification:
-            # A message is either non-blank text OR a media-only send: a blank message carried by
-            # non-empty media (a caption-less image). A blank message with no media has nothing to
-            # deliver and is refused. Options REQUIRE a non-blank message — a tappable choice needs
-            # a prompt — and a schema does too — a form needs a prompt — so a media-only send
-            # carries neither. A template is not media, so a blank message with only a template is
-            # refused here too (its ``not self.media`` branch).
-            if not self.message.strip():
-                if not self.media:
-                    raise ValueError("message must be non-blank unless media carries the content")
-                if self.options is not None:
-                    raise ValueError(
-                        "media-only (blank-message) notification carries no options; a choice needs a prompt"
-                    )
-                if self.schema is not None:
-                    raise ValueError("media-only (blank-message) notification carries no schema; a form needs a prompt")
-            return self
-
-        @model_validator(mode="after")
-        def _media_template_exclusive(self) -> ChannelNotification:
-            if self.media is not None and self.template is not None:
-                raise ValueError("media and template are mutually exclusive on one notification")
-            return self
-
-        @model_validator(mode="after")
-        def _options_template_exclusive(self) -> ChannelNotification:
-            if self.options is not None and self.template is not None:
-                raise ValueError("options and template are mutually exclusive on one notification")
-            return self
-
-        @model_validator(mode="after")
-        def _schema_template_exclusive(self) -> ChannelNotification:
-            if self.schema is not None and self.template is not None:
-                raise ValueError("schema and template are mutually exclusive on one notification")
-            return self
-
-        @model_validator(mode="after")
-        def _schema_options_exclusive(self) -> ChannelNotification:
-            # One message carries ONE interactive surface: a form's fields or a tap list, never both.
-            if self.schema is not None and self.options is not None:
-                raise ValueError("schema and options are mutually exclusive on one notification")
+        def _check_composition(self) -> ChannelNotification:
+            # The shared cross-field interactive-composition rules, so this carrier and AnswerPart
+            # can never drift (see :func:`check_interactive_composition`).
+            check_interactive_composition(
+                message=self.message,
+                media=self.media,
+                location=self.location,
+                template=self.template,
+                options=self.options,
+                sections=self.sections,
+                schema=self.schema,
+                header=self.header,
+                footer=self.footer,
+                noun="notification",
+            )
             return self
 
 
@@ -601,6 +952,14 @@ class Correlation(BaseModel):
     callback_url: str  # the delivery's public /api/interactions/callback/{ticket} answer sink
     interaction_id: str  # the parked ask this record awaits a reply for
     ttl_deadline: datetime  # tz-aware; past it the pending ask is stale and the key reclaimable
+    # The parked ask's digression policy the shared answer ladder reads at a 400 rejection:
+    # ``retry`` (keep + notify, today's behavior) or ``bridge`` (keep + bridge the reply as a
+    # fresh turn, no notice). A channel copies it from the ``ChannelDelivery`` it delivered;
+    # a channel that does not set it keeps the safe default.
+    on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY
+    # The ask's custom retry-notice text the ladder sends instead of the built-in one (``retry``
+    # policy only); ``None`` uses the built-in notice. Carried from the ``ChannelDelivery``.
+    mismatch_notice: str | None = None
 
     @field_validator("ttl_deadline")
     @classmethod
@@ -684,6 +1043,9 @@ class InboundAnswerOutcome(StrEnum):
     FORWARDED = "forwarded"  # the door accepted the answer; the correlation was released
     RETRY_KEPT = "retry_kept"  # the door rejected a re-answerable ask; correlation KEPT, guest told what's expected
     BRIDGED = "bridged"  # the ask is gone or the mismatch is hard; correlation released and the reply bridged
+    # A ``bridge``-policy ask rejected a reply: the correlation is KEPT (the ask stays parked) and
+    # the reply is bridged as a fresh turn with NO guest notice — the reply was a digression.
+    BRIDGED_KEPT = "bridged_kept"
 
 
 class InboundBridge(BaseModel):
@@ -708,6 +1070,16 @@ class InboundBridge(BaseModel):
     It applies ONLY to the retryable path: on a hard mismatch (a closed ask) the
     channel's re-ask surface is moot, so the ladder always sends the final "question is
     closed" notice regardless of this flag.
+
+    ``params`` is the OPTIONAL opaque channel enrichment this inbound reply carries — the
+    ANSWER-path counterpart of a conversation entry's ``params``: a tapped reply id, a template
+    button payload, a referral, the reply-to context the guest quoted. The ladder threads it BOTH
+    ways with the same seam symmetry — forwarded to the ask's callback door alongside the answer
+    (landing on :class:`~tai42_contract.interactions.models.InteractionResponse.params`, read by
+    the asking flow beside ``answer``) AND, when the reply is instead BRIDGED as a fresh turn,
+    passed to ``accept`` as its ``params`` — so enrichment is never dropped on either arm. The
+    SAME transport vocabulary (:func:`~tai42_contract.entry_params.validate_entry_params`) bounds
+    it; the platform attaches no meaning and NO TRUST. ``None`` means no enrichment.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -719,6 +1091,14 @@ class InboundBridge(BaseModel):
     provider_message_id: str
     bridge_text: str
     owns_retry_notice: bool = False
+    params: dict[str, str] | None = None
+
+    @field_validator("params")
+    @classmethod
+    def _check_params(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        if value is None:
+            return None
+        return validate_entry_params(value)
 
 
 class InboundAnswerResult(BaseModel):
@@ -743,6 +1123,11 @@ class InboundAnswerResult(BaseModel):
 
 
 __all__ = [
+    "NOTIFICATION_FOOTER_MAX_CHARS",
+    "NOTIFICATION_SECTIONS_MAX",
+    "OPTION_ID_MAX_CHARS",
+    "TEMPLATE_BUTTONS_MAX",
+    "TEMPLATE_PARAM_MAX_CHARS",
     "AnswerForwardError",
     "Channel",
     "ChannelDelivery",
@@ -755,5 +1140,17 @@ __all__ = [
     "InboundAnswerOutcome",
     "InboundAnswerResult",
     "InboundBridge",
+    "LinkOption",
+    "Option",
+    "OptionSection",
+    "QuickReplyButtonParam",
+    "ReplyOption",
+    "TemplateButtonParam",
+    "UrlButtonParam",
+    "check_footer",
+    "check_header",
+    "check_interactive_composition",
+    "check_options",
+    "check_sections",
     "notify_in_order",
 ]

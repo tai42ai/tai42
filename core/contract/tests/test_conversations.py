@@ -331,18 +331,19 @@ def test_answer_part_is_a_text_only_part():
 
 
 def test_answer_part_carries_media_and_options():
+    from tai42_contract.channels import ReplyOption
     from tai42_contract.conversations import AnswerPart
     from tai42_contract.interactions.models import MediaItem, MediaKind
 
     part = AnswerPart(
         message="here is the chart",
         media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")],
-        options=["Yes", "No"],
+        options=[ReplyOption(text="Yes"), ReplyOption(text="No")],
     )
     assert not part.is_plain_text()
     assert part.media is not None
     assert part.media[0].url == "https://cdn.example/c.png"
-    assert part.options == ["Yes", "No"]
+    assert part.options == [ReplyOption(text="Yes"), ReplyOption(text="No")]
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
@@ -388,12 +389,15 @@ def test_answer_part_media_only_message_may_be_blank(blank: str):
 
 
 def test_answer_part_media_only_carries_no_options():
+    from tai42_contract.channels import ReplyOption
     from tai42_contract.conversations import AnswerPart
     from tai42_contract.interactions.models import MediaItem, MediaKind
 
-    with pytest.raises(ValidationError, match=r"media-only .* carries no options"):
+    with pytest.raises(ValidationError, match=r"content-only .* carries no options"):
         AnswerPart(
-            message="", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")], options=["Yes"]
+            message="",
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")],
+            options=[ReplyOption(text="Yes")],
         )
 
 
@@ -443,10 +447,11 @@ def test_answer_part_schema_and_template_are_exclusive():
 
 def test_answer_part_schema_and_options_are_exclusive():
     # One message carries ONE interactive surface: a form's fields or a tap list, never both.
+    from tai42_contract.channels import ReplyOption
     from tai42_contract.conversations import AnswerPart
 
     with pytest.raises(ValidationError, match="schema and options are mutually exclusive"):
-        AnswerPart(message="hi", schema=_part_form_schema(), options=["Yes"])
+        AnswerPart(message="hi", schema=_part_form_schema(), options=[ReplyOption(text="Yes")])
 
 
 def test_answer_part_schema_may_combine_with_media():
@@ -833,6 +838,8 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
         "provider_message_id",
         "params",
         "form",
+        "attachments",
+        "location",
     ]
     assert inspect.iscoroutinefunction(AppConversations.record_delivery_status)
     assert list(inspect.signature(AppConversations.record_delivery_status).parameters) == [

@@ -42,6 +42,7 @@ from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_contract.conversations import DeliveryReceipt
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.interactions.asker import AskUser
+from tai42_contract.interactions.models import LocationElement, MediaItem
 from tai42_contract.monitoring import Monitoring
 from tai42_contract.presets import PresetInputSchemaSupport, PresetSeed, PresetStore, PresetWriteValidator
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
@@ -298,9 +299,18 @@ class AppChannels(Protocol):
         door's specific message.
 
         A channel computes its own opaque ``correlation_key`` for the guest's address,
-        provides the ``answer`` value to forward to the door as ``{"answer": answer}``,
-        its :class:`~tai42_contract.channels.CorrelationStore`, and an
-        :class:`InboundBridge` of the fields a bridged turn needs. The ladder:
+        provides the ``answer`` value to forward to the door, its
+        :class:`~tai42_contract.channels.CorrelationStore`, and an :class:`InboundBridge` of the
+        fields a bridged turn needs.
+
+        SEAM SYMMETRY (``bridge.params`` ↔ answer params): the ``InboundBridge`` may carry opaque
+        channel enrichment in ``params`` — the answer-path counterpart of a conversation entry's
+        ``params``. The ladder threads it BOTH ways so enrichment is never dropped on either arm:
+        the answer is forwarded to the ask's callback door as ``{"answer": answer, "params":
+        params}`` (params present only when set), landing on
+        :attr:`~tai42_contract.interactions.models.InteractionResponse.params` for the asking flow
+        to read beside ``answer``; and on the BRIDGE arm the same ``params`` are passed to
+        ``accept`` as its entry ``params``. The ladder:
 
         * No pending ask on the key -> :attr:`InboundAnswerOutcome.NO_CORRELATION`
           with NO side effect: the CALLER bridges the reply as a normal turn (the
@@ -361,6 +371,8 @@ class AppConversations(Protocol):
         provider_message_id: str,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
+        attachments: list[MediaItem] | None = None,
+        location: LocationElement | None = None,
     ) -> str:
         """Accept one inbound channel message, persist it, and return its
         ``message_id`` (a uuid4).
@@ -381,6 +393,11 @@ class AppConversations(Protocol):
         entry, delivered verbatim to a tool target's payload under ``params``;
         ``None``/empty leaves the payload unchanged. The door validates them with
         :func:`~tai42_contract.conversations.validate_entry_params` before accept.
+        ``params`` is ALSO the opaque-enrichment seam for the channel-specific inbound
+        context that has no shared shape — a tapped reply/list id, a template button
+        payload, a referral, the reply-to context of the message the guest quoted, a
+        contact card or a reaction — which a channel adapter encodes as string entries a
+        route reads deliberately; the platform adds no typed field for those.
 
         ``form`` is an optional structured guest submission (an ask-less form's answers)
         riding WITH the required rendered ``text`` — the text stays the whole turn every
@@ -389,6 +406,16 @@ class AppConversations(Protocol):
         platform bounds it as pure transport
         (:func:`~tai42_contract.conversations.validate_inbound_form`) and attaches no
         meaning and NO TRUST to the contents: guest-shaped data, never schema-conformant.
+
+        ``attachments`` is the STRUCTURED media the guest sent WITH the message — the
+        inbound counterpart of an outbound answer's ``media`` — as :class:`MediaItem`
+        (image/document/video/audio; a channel resolves a sticker to image/video, a voice
+        note to audio). ``location`` is a :class:`LocationElement` the guest shared. Both
+        are machine-consumable content with a shared cross-channel shape, so they are typed
+        fields (not ``params``): they land in a tool target's payload under the stable
+        ``attachments`` / ``location`` keys, present only when the inbound carried them, so
+        a form-/media-unaware target still sees the whole turn as ``text``. ``None`` leaves
+        the payload unchanged.
         """
         ...
 
