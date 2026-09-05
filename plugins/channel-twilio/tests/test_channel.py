@@ -65,11 +65,20 @@ async def test_select_rendering_numbers_options(fake_redis: FakeRedis, fake_http
     assert body == "Which env?\n1. staging\n2. production\nReply with the text of one option."
 
 
-def test_channel_advertises_media_but_not_interactive_notifications():
-    # MMS media is real; SMS has no tappable buttons, so interactive is NOT advertised
-    # (the guard then refuses a notify with options — no fake affordance).
+def test_channel_advertises_media_only_and_no_other_capability():
+    # MMS media is real, so media is advertised. SMS has no tappable buttons, native map
+    # pin, template component model, or fillable form — so EVERY other capability flag is
+    # absent. The platform guard reads these flags and refuses the matching shape (options,
+    # sections, location, template, form) before it reaches this channel: honest reachability.
     assert TwilioChannel.supports_media_notifications is True
-    assert getattr(TwilioChannel, "supports_interactive_notifications", False) is False
+    for absent_flag in (
+        "supports_interactive_notifications",
+        "supports_location_notifications",
+        "supports_template_notifications",
+        "supports_form_notifications",
+        "supports_form_delivery",
+    ):
+        assert getattr(TwilioChannel, absent_flag, False) is False, absent_flag
 
 
 async def test_deliver_attaches_image_media_and_appends_links(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
@@ -86,6 +95,92 @@ async def test_deliver_attaches_image_media_and_appends_links(fake_redis: FakeRe
     assert data["MediaUrl"] == ["https://cdn.test/a.png", "https://cdn.test/b.png"]
     # The link rides as an appended Body line.
     assert data["Body"] == "See attached.\nthe spec: https://docs.test/spec"
+
+
+async def test_deliver_attaches_image_video_audio_as_media_urls_in_order(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # image/video/audio are renderable MMS bubbles: each rides as a MediaUrl, in order, and
+    # their captions (alt-text a MediaUrl cannot carry) do NOT leak into the Body.
+    fake_httpx.responses.append(_accepted())
+    media = [
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption="a diagram"),
+        MediaItem(kind=MediaKind.VIDEO, url="https://cdn.test/clip.mp4", caption="a demo clip"),
+        MediaItem(kind=MediaKind.AUDIO, url="https://cdn.test/note.mp3", caption=None),
+    ]
+    await TwilioChannel().deliver(make_delivery(question="See attached.", media=media))
+
+    data = fake_httpx.calls[0]["data"]
+    assert data["MediaUrl"] == ["https://cdn.test/a.png", "https://cdn.test/clip.mp4", "https://cdn.test/note.mp3"]
+    assert data["Body"] == "See attached."  # no caption lines for bubble media
+
+
+async def test_deliver_renders_document_as_filename_body_line(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A document's suggested filename cannot ride a MediaUrl, so it degrades to a labelled
+    # "filename: url" Body line (a named tappable link) — filename preferred over caption.
+    fake_httpx.responses.append(_accepted())
+    media = [MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/q3.pdf", filename="q3-report.pdf", caption="Q3")]
+    await TwilioChannel().deliver(make_delivery(question="Here it is.", media=media))
+
+    data = fake_httpx.calls[0]["data"]
+    assert "MediaUrl" not in data  # a document is not an MMS attachment here
+    assert data["Body"] == "Here it is.\nq3-report.pdf: https://cdn.test/q3.pdf"
+
+
+async def test_deliver_document_without_filename_falls_back_to_caption_then_url(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    fake_httpx.responses.append(_accepted())
+    media = [
+        MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/a.pdf", caption="the spec"),
+        MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/b.pdf"),
+    ]
+    await TwilioChannel().deliver(make_delivery(question="Docs.", media=media))
+
+    data = fake_httpx.calls[0]["data"]
+    assert data["Body"] == "Docs.\nthe spec: https://cdn.test/a.pdf\nhttps://cdn.test/b.pdf"
+
+
+async def test_deliver_mixed_media_splits_bubbles_from_text_lines(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A mixed list: image+audio ride as MediaUrl (in order), while document+link ride as
+    # Body lines (in order) — the two degradation lanes are independent and both faithful.
+    fake_httpx.responses.append(_accepted())
+    media = [
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption=None),
+        MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/d.pdf", filename="deck.pdf"),
+        MediaItem(kind=MediaKind.LINK, url="https://docs.test/spec", caption="the spec"),
+        MediaItem(kind=MediaKind.AUDIO, url="https://cdn.test/n.mp3", caption=None),
+    ]
+    await TwilioChannel().deliver(make_delivery(question="Bundle.", media=media))
+
+    data = fake_httpx.calls[0]["data"]
+    assert data["MediaUrl"] == ["https://cdn.test/a.png", "https://cdn.test/n.mp3"]
+    assert data["Body"] == "Bundle.\ndeck.pdf: https://cdn.test/d.pdf\nthe spec: https://docs.test/spec"
+
+
+async def test_notify_attaches_video_audio_and_renders_document_line(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(response(201, json={"sid": "SM_rich"}))
+    media = [
+        MediaItem(kind=MediaKind.VIDEO, url="https://cdn.test/clip.mp4", caption=None),
+        MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/r.pdf", filename="report.pdf"),
+    ]
+    ids = await TwilioChannel().notify(ChannelNotification(message="Update.", media=media))
+
+    assert ids == ["SM_rich"]
+    data = fake_httpx.calls[0]["data"]
+    assert data["MediaUrl"] == ["https://cdn.test/clip.mp4"]
+    assert data["Body"] == "Update.\nreport.pdf: https://cdn.test/r.pdf"
+
+
+async def test_notify_document_only_renders_the_line_as_the_body(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A blank-message notification whose only content is a document renders the document line
+    # AS the Body (no leading blank line), with no MediaUrl at all.
+    fake_httpx.responses.append(response(201, json={"sid": "SM_doconly"}))
+    media = [MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/r.pdf", filename="report.pdf")]
+    ids = await TwilioChannel().notify(ChannelNotification(message="", media=media))
+
+    assert ids == ["SM_doconly"]
+    data = fake_httpx.calls[0]["data"]
+    assert data["Body"] == "report.pdf: https://cdn.test/r.pdf"
+    assert "MediaUrl" not in data
 
 
 async def test_deliver_rejects_data_uri_image_before_reserve_or_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
