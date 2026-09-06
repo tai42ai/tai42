@@ -16,9 +16,11 @@ on:
 permissions:
   contents: read
 
+# Superseded PR runs are cancelled; a run on main never is, so every main commit
+# reaches its own conclusion and the release lane can gate on it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # Per-member path filter. A change under a member runs that member's check
@@ -90,12 +92,7 @@ jobs:
           # exhaustive, so neither can lean on the path filter to decide what changed:
           # treat the whole workspace as changed and force every gate on.
           FORCE_FULL: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
-          # A release-please train PR changes only versions/changelogs/manifests of
-          # content the feature PRs just ran the FULL suite on verbatim. The train
-          # keeps the fast gates (check matrix, fleet, frontend dist-freshness) and
-          # skips the e2e/ui-e2e suites — ci-ok tolerates skipped, so automerge is
-          # unaffected. The weekly schedule stays exhaustive either way.
-          RELEASE_TRAIN: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-please--') }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
           # Manual dispatch or the weekly schedule: force the full workspace + every
@@ -103,6 +100,12 @@ jobs:
           if [ "$FORCE_FULL" = "true" ]; then
             CORE=true
           fi
+          # The release-please train PR is the tree that gets tagged and published on
+          # merge, so it runs the full workspace matrix rather than the lock-incidental
+          # subset its version-only diff would otherwise select.
+          case "${HEAD_REF:-}" in
+            release-please--*) CORE=true ;;
+          esac
           # member table: name|dir|package|import_path|sync_extra|legs|pytest_mode
           # import_path empty -> core/e2e (no packaged-descriptor gate);
           # legs empty -> the member has no e2e trigger;
@@ -198,14 +201,6 @@ jobs:
           run_browsers=false
           if [ "$FORCE_FULL" = "true" ] || [ "$BROWSERS" = "true" ]; then
             run_browsers=true
-          fi
-          # Train short-circuit (see RELEASE_TRAIN above): version-only churn does
-          # not re-earn the e2e wall-clock the same tree already spent.
-          if [ "${RELEASE_TRAIN:-false}" = "true" ]; then
-            run_e2e=false
-            run_monitoring=false
-            run_browsers=false
-            backends='[]'
           fi
           echo "core=$CORE" >> "$GITHUB_OUTPUT"
           echo "check_matrix=$(jq -c '{include: .}' <<<"$entries")" >> "$GITHUB_OUTPUT"
