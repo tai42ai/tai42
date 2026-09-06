@@ -133,15 +133,19 @@ def wipe_trigger_state(trigger_stack: TaiStack) -> Callable[[], None]:
     also holds the seeded admin credential the import call authenticates with)."""
     host, port = trigger_stack.infra.settings.redis_host_port
     db = trigger_stack.resources.redis_idx
+    # The hooks keyspace is namespaced per stack (``HOOKS_PREFIX``), so the wipe
+    # scans under this stack's own prefix, never the bare ``hooks`` default.
+    hooks_prefix = f"{trigger_stack.resources.bus_namespace}:hooks"
 
     def _wipe() -> None:
         client = redis.Redis(host=host, port=port, db=db, decode_responses=True)
         try:
             keys: list[str] = []
-            for pattern in ("hooks:trigger:*", "hooks:topic:*"):
+            for pattern in (f"{hooks_prefix}:trigger:*", f"{hooks_prefix}:topic:*"):
                 keys.extend(client.scan_iter(match=pattern, count=100))
-            if client.exists("hooks:name_trigger_map"):
-                keys.append("hooks:name_trigger_map")
+            name_trigger_map_key = f"{hooks_prefix}:name_trigger_map"
+            if client.exists(name_trigger_map_key):
+                keys.append(name_trigger_map_key)
             if keys:
                 client.delete(*keys)
         finally:

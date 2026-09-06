@@ -11,6 +11,8 @@ allocation happens on the boot path, not inside test coroutines."""
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 from typing import cast
 
@@ -66,13 +68,20 @@ class RedisAdmin:
         self._probe.delete(probe_key)
 
     def allocate_db(self) -> int:
-        """Reserve and FLUSHDB a logical DB index for a stack."""
+        """Reserve and FLUSHDB a logical DB index for a stack.
+
+        Before the flush, refuse an index a leaked worker still consumes: the
+        flush would wipe the orphan's keys but not stop its process, so it would
+        keep dequeuing this stack's jobs / firing its parks off the shared index.
+        A live foreign consumer is a loud refusal naming its pid, never a silent
+        reuse (:meth:`_assert_no_live_orphan`)."""
         span = self._stack_db_range
         with self._lock:
             for _ in range(len(span)):
                 idx = span[self._cursor % len(span)]
                 self._cursor += 1
                 if idx not in self._in_use:
+                    self._assert_no_live_orphan(idx)
                     client = redis.Redis(host=self._host, port=self._port, db=idx)
                     try:
                         client.flushdb()
@@ -84,6 +93,42 @@ class RedisAdmin:
                     return idx
             raise RuntimeError(
                 f"Redis logical-DB pool ({span.start}-{span.stop - 1}) exhausted; too many concurrent stacks"
+            )
+
+    def _assert_no_live_orphan(self, idx: int) -> None:
+        """Refuse a logical DB that a live foreign worker still heartbeats on.
+
+        Every SUT worker (HTTP ``serve`` and the ``backend`` consumer alike)
+        refreshes a TTL-bound ``<ns>:bus:presence:<name>`` key while it runs. A
+        cleanly torn-down stack leaves only expiring keys whose process is gone; a
+        LEAKED worker keeps re-writing its key on this index. No stack of this run
+        holds the index yet (allocation is exclusive and pre-spawn), so a presence
+        key whose pid is still alive belongs to an orphan from an earlier run. The
+        harness raises naming the pid rather than leasing the index under it — the
+        exact cross-stack theft (a foreign backend answering this stack's tool
+        jobs, a foreign reaper firing its parks) the isolation contract forbids."""
+        client = redis.Redis(host=self._host, port=self._port, db=idx, decode_responses=True)
+        try:
+            offenders: list[str] = []
+            for key in client.scan_iter(match="*:bus:presence:*"):
+                value = client.get(key)
+                if not isinstance(value, str):
+                    continue
+                try:
+                    meta = json.loads(value)
+                    pid = int(meta["pid"])
+                except (ValueError, TypeError, KeyError):
+                    continue
+                if _pid_alive(pid):
+                    offenders.append(f"pid {pid} (kind={meta.get('kind', '?')}, key={key!r})")
+        finally:
+            client.close()
+        if offenders:
+            raise RuntimeError(
+                f"redis logical DB {idx} on {self._host}:{self._port} still carries live worker(s) "
+                f"from a leaked stack: {'; '.join(offenders)}. Kill the orphan process(es) by pid "
+                "before re-running — the harness refuses to lease a DB under a live foreign consumer "
+                "(it would dequeue this stack's jobs and fire its parks)."
             )
 
     def release_db(self, idx: int) -> None:
@@ -108,3 +153,20 @@ class RedisAdmin:
 
     def close(self) -> None:
         self._probe.close()
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether a local process id is still running. ``signal 0`` probes existence
+    without delivering a signal; a permission error means the pid exists under
+    another user (still alive), only ``ProcessLookupError`` means it is gone. SUT
+    processes run on the harness host, so the pid a presence value carries is
+    local."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True

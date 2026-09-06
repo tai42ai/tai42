@@ -6,6 +6,7 @@ reservation set so the same port is never handed out twice within a run."""
 from __future__ import annotations
 
 import socket
+import subprocess
 import threading
 
 _reserved: set[int] = set()
@@ -40,7 +41,12 @@ def reserve_specific_port(port: int) -> None:
         if port in _reserved:
             raise RuntimeError(f"port {port} is already reserved in this run")
         if not is_free(port):
-            raise RuntimeError(f"port {port} is already in use; free it or point TAI_E2E_UI_PORT at another port")
+            pids = _pids_listening(port)
+            who = f" (held by pid(s) {', '.join(map(str, pids))})" if pids else ""
+            raise RuntimeError(
+                f"port {port} is already in use{who} — likely a leaked stack from an earlier run. "
+                "Kill it by pid, or point TAI_E2E_UI_PORT at another port."
+            )
         _reserved.add(port)
 
 
@@ -56,3 +62,28 @@ def is_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
         return sock.connect_ex(("127.0.0.1", port)) != 0
+
+
+def _pids_listening(port: int) -> list[int]:
+    """Best-effort pids listening on ``port``, so a loud refusal can name the
+    orphan holding it. Tries ``lsof`` then ``ss``; an absent tool or a parse miss
+    yields an empty list (the refusal still fires, just without pids) rather than
+    masking the collision."""
+    pids = {int(tok) for tok in _tool_stdout(["lsof", f"-tiTCP:{port}", "-sTCP:LISTEN"]).split() if tok.isdigit()}
+    if pids:
+        return sorted(pids)
+    for chunk in _tool_stdout(["ss", "-ltnpH", f"sport = :{port}"]).split("pid="):
+        head = chunk.split(",", 1)[0].strip()
+        if head.isdigit():
+            pids.add(int(head))
+    return sorted(pids)
+
+
+def _tool_stdout(argv: list[str]) -> str:
+    """Stdout of a diagnostic tool, or "" when the tool is absent or cannot run —
+    the caller's refusal still fires without pids; no error is masked into a
+    false "free" verdict."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, check=False).stdout
+    except OSError:
+        return ""

@@ -192,7 +192,14 @@ class ArqVariant(BackendVariant):
     crashed_run_terminal = "failed"
 
     def feature_env(self, res: StackResources) -> dict[str, str]:
-        return {"ARQ_REDIS_URL": res.redis_url}
+        # The logical DB isolates co-tenant stacks, but a DB index re-leased while a
+        # leaked worker still consumes it would let that orphan dequeue this stack's
+        # ``tool_execution`` jobs off the shared default queue key. Namespacing the
+        # queue by the same per-stack token as the bus keeps each worker on its own.
+        return {
+            "ARQ_REDIS_URL": res.redis_url,
+            "ARQ_QUEUE_NAME": f"{res.bus_namespace}:arq:queue",
+        }
 
     def extra_backend_processes(self) -> list[list[str]]:
         # arq's recurring scheduler is the self-rescheduling ``task_scheduler``
@@ -214,7 +221,12 @@ class RqVariant(BackendVariant):
     crashed_run_terminal = "succeeded"
 
     def feature_env(self, res: StackResources) -> dict[str, str]:
-        return {"RQ_REDIS_URL": res.redis_url}
+        # Same reasoning as arq: namespace the RQ queue by the per-stack token so a
+        # leaked worker on a re-leased DB index cannot consume this stack's jobs.
+        return {
+            "RQ_REDIS_URL": res.redis_url,
+            "RQ_QUEUE_NAME": f"{res.bus_namespace}:default",
+        }
 
     def extra_backend_processes(self) -> list[list[str]]:
         # ``schedule_task`` recurring jobs only reach the queue when the ``rqscheduler``
@@ -239,10 +251,17 @@ class CeleryVariant(BackendVariant):
 
     def feature_env(self, res: StackResources) -> dict[str, str]:
         broker_url = self._require_broker(res)
+        # The task queue rides a per-stack RabbitMQ vhost (``allocate_broker``), so
+        # tool_execution is already isolated and reaped with the lease — no queue
+        # rename is needed. Result records key on unique task ids. The one shared
+        # Redis structure is RedBeat's schedule store on the logical DB, so its key
+        # prefix is namespaced by the per-stack token to stop a leaked beat on a
+        # re-leased DB from firing this stack's schedules.
         return {
             "CELERY_BROKER_URL": broker_url,
             "CELERY_RESULT_BACKEND": res.redis_url,
             "CELERY_REDBEAT_REDIS_URL": res.redis_url,
+            "CELERY_REDBEAT_KEY_PREFIX": f"{res.bus_namespace}:redbeat:",
         }
 
     def infra_check(self, settings: HarnessSettings) -> None:

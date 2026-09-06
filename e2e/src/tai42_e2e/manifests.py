@@ -184,15 +184,38 @@ _TOOLBOX_EXTRA_TOOL_ENTRIES: list[dict] = [
 
 def _redis_feature_env(res: StackResources) -> dict[str, str]:
     """Point every per-feature Redis URL at the stack's logical DB, and the
-    probe-record client at DB 0."""
+    probe-record client at DB 0.
+
+    The logical DB isolates co-tenant stacks, but NOT a stack whose DB index is
+    re-leased while a leaked process still holds keys under it (the bus namespace
+    exists for the same reason). So every feature keyspace that a foreign process
+    could reach on a shared DB — one carrying an active cross-stack mutator (the
+    interactions expiry reaper) or one addressed by a collision-prone LOGICAL name
+    (a hook name, a connector slug, a rate-limit identity/route, a per-tool run
+    index) rather than a globally-unique token — is namespaced by the same
+    per-stack id the bus uses, so two stacks can never share a key.
+
+    Access-control is deliberately absent: its identity records are addressed by
+    ``sha256(raw-token)`` with a random token minted per stack, so no foreign
+    process can read or claim a live stack's credential even on a re-leased DB,
+    and no background reaper sweeps the ``ac:*`` range. Namespacing it would also
+    demand a change to the identity-redis provider's hardcoded reverse-key prefix
+    (a public settings-Protocol surface) for no theft that unique addressing does
+    not already prevent."""
     return {
         "ACCESS_CONTROL_REDIS_URL": res.redis_url,
         "INTERACTIONS_REDIS_URL": res.redis_url,
+        "INTERACTIONS_KEY_PREFIX": f"{res.bus_namespace}:interactions:",
         "TAI_TOOL_RUNS_REDIS_URL": res.redis_url,
+        "TAI_TOOL_RUNS_KEY_PREFIX": f"{res.bus_namespace}:tool_runs:",
         "TAI_RATE_LIMIT_REDIS_URL": res.redis_url,
+        "TAI_RATE_LIMIT_KEY_PREFIX": f"{res.bus_namespace}:ratelimit:",
         "HOOKS_REDIS_URL": res.redis_url,
+        "HOOKS_PREFIX": f"{res.bus_namespace}:hooks",
         "SUB_MCP_REDIS_URL": res.redis_url,
+        "SUB_MCP_PREFIX": f"{res.bus_namespace}:sub_mcp",
         "CONNECTOR_STORE_REDIS_URL": res.redis_url,
+        "CONNECTOR_STORE_KEY_PREFIX": f"{res.bus_namespace}:connectors:",
         "E2E_PROBE_REDIS_URL": res.probe_redis_url,
     }
 
@@ -1011,6 +1034,7 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     env["ACCESS_CONTROL_ENABLE"] = "true"
     env.update(variants.identity.auth_provider_env())
     env["CONVERSATIONS_REDIS_URL"] = res.redis_url
+    env["CONVERSATIONS_PREFIX"] = f"{res.bus_namespace}:conversations"
     env.update(_memory_agent_state_env())
     env.update(_llm_env(res))
     env.update(_bridge_channel_env(res))
@@ -1667,6 +1691,7 @@ def build_agent_route_park_stack(res: StackResources, variants: Variants) -> Sta
     env["ACCESS_CONTROL_ENABLE"] = "true"
     env.update(variants.identity.auth_provider_env())
     env["CONVERSATIONS_REDIS_URL"] = res.redis_url
+    env["CONVERSATIONS_PREFIX"] = f"{res.bus_namespace}:conversations"
     env.update(_redis_agent_state_env(res))
     env.update(_llm_env(res))
     env.update(_web_channel_env(res))

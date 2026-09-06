@@ -130,7 +130,7 @@ def _resolve_ticket(stack: TaiStack, interaction_id: str) -> str:
     host, port = stack.infra.settings.redis_host_port
     client = redis_lib.Redis(host=host, port=port, db=stack.resources.redis_idx, decode_responses=True)
     try:
-        for key in client.scan_iter(match="interactions:ticket:*"):
+        for key in client.scan_iter(match=f"{stack.resources.bus_namespace}:interactions:ticket:*"):
             if client.get(key) == interaction_id:
                 return key.rsplit(":", 1)[-1]
     finally:

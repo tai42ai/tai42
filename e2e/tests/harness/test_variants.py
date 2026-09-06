@@ -32,6 +32,7 @@ _RES = StackResources(
     pg_db="tai42_e2e_probe",
     storage_root="/tmp/e2e-storage",
     broker_url="amqp://guest:guest@127.0.0.1:5672/tai42_e2e_probe",
+    bus_namespace="tai42_e2e_probe",
 )
 
 
@@ -106,9 +107,14 @@ def test_bus_presence_ttl_env_is_backend_independent() -> None:
 
 
 def test_arq_backend_feature_env_and_process_model() -> None:
-    # The arq backend points its plugin env at the stack's Redis.
+    # The arq backend points its plugin env at the stack's Redis and namespaces
+    # its queue by the per-stack bus token so a leaked worker on a re-leased DB
+    # cannot consume this stack's jobs.
     arq = BACKENDS["arq"]
-    assert arq.feature_env(_RES) == {"ARQ_REDIS_URL": _RES.redis_url}
+    assert arq.feature_env(_RES) == {
+        "ARQ_REDIS_URL": _RES.redis_url,
+        "ARQ_QUEUE_NAME": f"{_RES.bus_namespace}:arq:queue",
+    }
     assert STORAGES["local"].feature_env(_RES) == {"STORAGE_LOCAL_ROOT_PATH": _RES.storage_root}
     # arq's recurring scheduler is a self-rescheduling queue job in the worker, so
     # a schedule fires without any extra backend process.
@@ -117,9 +123,13 @@ def test_arq_backend_feature_env_and_process_model() -> None:
 
 
 def test_rq_backend_feature_env_and_process_model() -> None:
-    # The rq backend rides the stack's Redis.
+    # The rq backend rides the stack's Redis and namespaces its queue by the
+    # per-stack bus token, same as arq.
     rq = BACKENDS["rq"]
-    assert rq.feature_env(_RES) == {"RQ_REDIS_URL": _RES.redis_url}
+    assert rq.feature_env(_RES) == {
+        "RQ_REDIS_URL": _RES.redis_url,
+        "RQ_QUEUE_NAME": f"{_RES.bus_namespace}:default",
+    }
     # rq-scheduler's recurring zset is only drained by a separate ``rqscheduler``
     # daemon — ``tai backend beat`` — so a schedule needs its own process.
     assert rq.extra_backend_processes() == [["beat", "-i", "1"]]
@@ -128,10 +138,13 @@ def test_rq_backend_feature_env_and_process_model() -> None:
 
 def test_celery_feature_env_and_process_model() -> None:
     celery = BACKENDS["celery"]
+    # The task queue rides a per-stack RabbitMQ vhost, so celery namespaces the
+    # RedBeat schedule store (its only shared Redis structure) rather than the queue.
     assert celery.feature_env(_RES) == {
         "CELERY_BROKER_URL": _RES.broker_url,
         "CELERY_RESULT_BACKEND": _RES.redis_url,
         "CELERY_REDBEAT_REDIS_URL": _RES.redis_url,
+        "CELERY_REDBEAT_KEY_PREFIX": f"{_RES.bus_namespace}:redbeat:",
     }
     # RedBeat only fires while a beat process runs; ``tai backend beat`` starts it.
     assert celery.extra_backend_processes() == [["beat", "--max-interval", "2"]]
