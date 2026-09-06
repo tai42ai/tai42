@@ -177,7 +177,7 @@ async def backend_cancel_task(task_id: str) -> str:
     """Cancel a running or queued task."""
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(connection=r)
+        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
 
         def _cancel() -> str:
             # A scheduled (recurring) entry cancels through the scheduler.
@@ -326,7 +326,7 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
     """
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(connection=r)
+        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
 
         def _read() -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
@@ -352,7 +352,7 @@ async def backend_get_schedule(name: str) -> dict[str, Any]:
     """Get schedule details."""
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(connection=r)
+        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
 
         def _read() -> dict[str, Any]:
             if name not in scheduler:
@@ -413,7 +413,7 @@ async def backend_run_schedule_now(name: str) -> dict[str, Any]:
     """
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(connection=r)
+        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
 
         def _run() -> dict[str, Any]:
             if name not in scheduler:
@@ -452,7 +452,7 @@ async def backend_update_schedule(
     """
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(connection=r)
+        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
 
         def _update() -> dict[str, Any]:
             if name not in scheduler:
@@ -540,7 +540,7 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
     """
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(connection=r)
+        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
 
         def _read_jobs() -> list[dict[str, Any]]:
             # Each Job field triggers a blocking Redis fetch; materialize them all
@@ -623,7 +623,7 @@ async def backend_import_schedules(
     skipped_existing = 0
     errors: list[dict[str, Any]] = []
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(connection=r)
+        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
         for index, entry in enumerate(schedules):
             entry_name = entry.get("name") if isinstance(entry, dict) else None
             try:

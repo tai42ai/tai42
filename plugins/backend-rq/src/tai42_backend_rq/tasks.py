@@ -99,7 +99,7 @@ async def enqueue_task(*args: Any, **kwargs: Any) -> Job:
     chains a ``callback_job`` dependent on the primary job. Returns the primary job.
     """
     async with client_ctx(SyncRedisClient, url=rq_settings().redis_url) as r:
-        queue = Queue(connection=r)
+        queue = Queue(rq_settings().queue_name, connection=r)
 
         task_kwargs = {k: kwargs.pop(k) for k in RQ_TASK_OPTS if k in kwargs}
         enqueue_opts = {k: v for k, v in task_kwargs.items() if v is not None}

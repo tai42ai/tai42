@@ -140,7 +140,7 @@ async def test_schedule_task_branch_applies_schedule(monkeypatch):
 
     monkeypatch.setattr(extensions, "apply_normalized_schedule", fake_apply)
     monkeypatch.setattr(extensions, "client_ctx", make_client_ctx(object()))
-    monkeypatch.setattr(extensions, "Scheduler", lambda connection=None: object())
+    monkeypatch.setattr(extensions, "Scheduler", lambda queue_name=None, connection=None: object())
 
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     assert branch.__name__ == "sample_tool_schedule_task"
@@ -158,6 +158,32 @@ async def test_schedule_task_branch_applies_schedule(monkeypatch):
     assert kwargs["x"] == 7
 
 
+async def test_schedule_task_binds_the_settings_queue_name(monkeypatch):
+    """The scheduler enqueues due jobs onto the ``queue_name`` setting's queue, so
+    a schedule fires onto the SAME per-stack queue the worker consumes — without
+    it, a namespaced worker would never see its own scheduled jobs."""
+    from tai42_backend_rq.settings import RqSettings
+
+    captured: dict[str, Any] = {}
+
+    def fake_scheduler(queue_name: Any = None, connection: Any = None) -> Any:
+        captured["queue_name"] = queue_name
+        return object()
+
+    async def fake_apply(scheduler: Any, norm: Any, func: Any, args: Any, kwargs: Any, name: Any) -> None:
+        pass
+
+    monkeypatch.setattr(extensions, "rq_settings", lambda: RqSettings(queue_name="tai42_e2e_abc123:default"))
+    monkeypatch.setattr(extensions, "apply_normalized_schedule", fake_apply)
+    monkeypatch.setattr(extensions, "client_ctx", make_client_ctx(object()))
+    monkeypatch.setattr(extensions, "Scheduler", fake_scheduler)
+
+    branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
+    await branch(x=7, backend_schedule_name="nightly", backend_schedule=3600)
+
+    assert captured["queue_name"] == "tai42_e2e_abc123:default"
+
+
 async def test_schedule_task_requires_name_and_schedule():
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     with pytest.raises(ValueError, match="backend_schedule_name is required"):
@@ -168,7 +194,7 @@ async def test_schedule_task_requires_name_and_schedule():
 
 async def test_schedule_task_rejects_bad_schedule(monkeypatch):
     monkeypatch.setattr(extensions, "client_ctx", make_client_ctx(object()))
-    monkeypatch.setattr(extensions, "Scheduler", lambda connection=None: object())
+    monkeypatch.setattr(extensions, "Scheduler", lambda queue_name=None, connection=None: object())
 
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     with pytest.raises(ValueError, match="Unsupported schedule format"):

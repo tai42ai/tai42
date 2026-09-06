@@ -409,7 +409,7 @@ def _build_worker(
         prepare_forking_worker()
 
     redis_conn = Redis.from_url(url)
-    queue = Queue(connection=redis_conn)
+    queue = Queue(rq_settings().queue_name, connection=redis_conn)
     worker = worker_class([queue], name=name, connection=redis_conn, default_result_ttl=results_ttl)
     return worker, redis_conn
 

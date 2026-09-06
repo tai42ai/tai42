@@ -115,3 +115,14 @@ def test_specific_redis_url_beats_default(monkeypatch):
 @pytest.mark.usefixtures("isolated_env")
 def test_nothing_set_keeps_class_default():
     assert RqSettings().redis_url == "redis://localhost:6379/0"
+
+
+def test_queue_name_default_is_rq_default():
+    # RQ's own default queue, so an unconfigured deployment is unchanged.
+    assert RqSettings().queue_name == "default"
+
+
+@pytest.mark.usefixtures("isolated_env")
+def test_queue_name_is_read_from_env(monkeypatch):
+    monkeypatch.setenv("RQ_QUEUE_NAME", "tai42_e2e_abc123:default")
+    assert RqSettings().queue_name == "tai42_e2e_abc123:default"

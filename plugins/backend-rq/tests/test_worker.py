@@ -277,7 +277,8 @@ def test_prepare_forking_worker_darwin_disables_proxy_detection(app, monkeypatch
 
 
 class FakeQueue:
-    def __init__(self, connection: Any = None) -> None:
+    def __init__(self, name: Any = None, connection: Any = None) -> None:
+        self.name = name
         self.connection = connection
 
 
@@ -322,6 +323,9 @@ def test_start_rq_worker_prefork(worker_env):
     assert worker_env["gevent"] == 0
     assert worker_env["hooks"] == 1
     assert worker_env["name"] == "w1"
+    # The worker consumes the queue named by the ``queue_name`` setting (default
+    # ``default``), the same queue the enqueue side and scheduler bind.
+    assert worker_env["queues"][0].name == "default"
     # --results-ttl reaches rq as the worker's default result TTL.
     assert worker_env["default_result_ttl"] == 500
     assert worker_env["work"] == {"burst": False, "logging_level": "INFO", "with_scheduler": True}

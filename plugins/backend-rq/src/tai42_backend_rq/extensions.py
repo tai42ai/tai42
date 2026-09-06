@@ -125,7 +125,7 @@ def schedule_task(func: Any, name: str, description: str) -> Any:
         norm = normalize_schedule(schedule_in)
 
         async with client_ctx(SyncRedisClient, url=rq_settings().redis_url) as r:
-            scheduler = Scheduler(connection=r)
+            scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
             await apply_normalized_schedule(scheduler, norm, tool_execution, list(args), kwargs, schedule_name)
 
     branch = create_function(

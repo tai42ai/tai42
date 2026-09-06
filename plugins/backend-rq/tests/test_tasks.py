@@ -262,7 +262,8 @@ class FakeEnqueuedJob:
 
 
 class FakeQueue:
-    def __init__(self, connection: Any = None) -> None:
+    def __init__(self, name: Any = None, connection: Any = None) -> None:
+        self.name = name
         self.calls: list[tuple[str, Any]] = []
 
     def enqueue(self, func: Any, *args: Any, **kwargs: Any) -> FakeEnqueuedJob:
@@ -281,9 +282,24 @@ class FakeQueue:
 @pytest.fixture
 def queue(monkeypatch) -> FakeQueue:
     fake_queue = FakeQueue()
-    monkeypatch.setattr(tasks, "Queue", lambda connection=None: fake_queue)
+
+    def make_queue(name: Any = None, connection: Any = None) -> FakeQueue:
+        fake_queue.name = name
+        return fake_queue
+
+    monkeypatch.setattr(tasks, "Queue", make_queue)
     monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
     return fake_queue
+
+
+async def test_enqueue_task_binds_the_settings_queue_name(queue, monkeypatch):
+    """The enqueue queue name is the ``queue_name`` setting, so the enqueue side
+    and the worker's consume side name the SAME per-stack queue."""
+    from tai42_backend_rq.settings import RqSettings
+
+    monkeypatch.setattr(tasks, "rq_settings", lambda: RqSettings(queue_name="tai42_e2e_abc123:default"))
+    await tasks.enqueue_task(a=1)
+    assert queue.name == "tai42_e2e_abc123:default"
 
 
 async def test_enqueue_task_plain(queue):

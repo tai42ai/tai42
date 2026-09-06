@@ -28,6 +28,11 @@ class RqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings
     redis_url: str = "redis://localhost:6379/0"
     # Key prefix RQ uses for all of its Redis structures.
     rq_prefix: str = "rq:"
+    # The RQ queue name every enqueue, worker, and scheduler binds. RQ's own
+    # default is ``default``; co-tenant deployments on one logical DB diverge here
+    # so each worker consumes only its own jobs (the queue key is
+    # ``<rq_prefix>queue:<queue_name>``).
+    queue_name: str = "default"
 
     @property
     def rq_scheduler_zset(self) -> str:

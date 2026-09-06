@@ -61,7 +61,7 @@ def _make_scheduler(fetch_behavior, contains: bool = True):
     class FakeScheduler:
         job_class = FakeJobClass
 
-        def __init__(self, connection=None):
+        def __init__(self, queue_name=None, connection=None):
             self.connection = connection
 
         def __contains__(self, item):
@@ -297,7 +297,7 @@ async def test_cancel_task_scheduled_branch(monkeypatch):
     canceled: list[str] = []
 
     class FakeScheduler:
-        def __init__(self, connection=None):
+        def __init__(self, queue_name=None, connection=None):
             pass
 
         def __contains__(self, item):
@@ -363,7 +363,7 @@ async def test_list_schedules_reports_next_run(monkeypatch):
         id = "sched-1"
 
     class FakeScheduler:
-        def __init__(self, connection=None):
+        def __init__(self, queue_name=None, connection=None):
             pass
 
         def get_jobs(self, with_times=False):
@@ -447,7 +447,7 @@ def _run_now_scheduler(store: dict[str, FakeJob], enqueued: list[FakeJob]):
     class FakeScheduler:
         job_class = FakeJobClass
 
-        def __init__(self, connection=None):
+        def __init__(self, queue_name=None, connection=None):
             pass
 
         def __contains__(self, item):
@@ -531,7 +531,7 @@ def _make_stateful_scheduler(store: dict[str, _StatefulScheduledJob], zset: dict
     class FakeScheduler:
         job_class = FakeJobClass
 
-        def __init__(self, connection=None):
+        def __init__(self, queue_name=None, connection=None):
             self.connection = connection
 
         def __contains__(self, name):
@@ -945,7 +945,7 @@ async def test_import_apply_failure_preserves_existing_schedule(monkeypatch):
     class FailingScheduler:
         """Applies fail, but existence/cancel behave normally, so we can prove the old survives."""
 
-        def __init__(self, connection=None):
+        def __init__(self, queue_name=None, connection=None):
             self.connection = connection
 
         def __contains__(self, name):
