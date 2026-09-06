@@ -24,7 +24,6 @@ from typing import Any, Self
 
 import click
 from arq import Worker, func
-from arq.constants import default_queue_name
 from tai42_contract.backend.runtime import CONSUMING_RUNTIME, BackendRuntime, ExecutionMode
 
 from tai42_backend_arq.pool import RedisPoolManager
@@ -82,7 +81,10 @@ class ArqWorkerRuntime(BackendRuntime):
             job_serializer=job_serializer,
             job_deserializer=job_deserializer,
             functions=[func(task_scheduler), func(callback_job), func(tool_execution)],
-            queue_name=options["queue_name"],
+            # An unset ``--queue-name`` falls to the setting (``ARQ_QUEUE_NAME``), so the
+            # consume target tracks the enqueue pool's default without a CLI flag; an
+            # explicit flag still wins for a direct-CLI operator.
+            queue_name=options["queue_name"] or settings.queue_name,
             redis_settings=settings.make_redis_settings(options["redis_url"]),
             burst=options["burst"],
             keep_result=options["keep_result"],
@@ -169,7 +171,7 @@ async def _run_standalone(options: Mapping[str, Any]) -> None:
 @click.option("--redis-url", default=None, help="Redis URL (defaults to ARQ_REDIS_URL)")
 @click.option("--burst", is_flag=True, help="Run in burst mode")
 @click.option("--keep-result", type=int, default=3600, help="Keep result seconds")
-@click.option("--queue-name", default=default_queue_name, help="Queue name")
+@click.option("--queue-name", default=None, help="Queue name (defaults to ARQ_QUEUE_NAME)")
 @click.option("--max-jobs", type=int, default=10, help="Max concurrent jobs")
 @click.option("--job-timeout", type=int, default=300, help="Job timeout seconds")
 @click.option("--poll-delay", type=float, default=0.5, help="Poll delay seconds")

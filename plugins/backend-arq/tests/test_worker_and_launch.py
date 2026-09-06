@@ -465,3 +465,24 @@ def test_the_drain_budget_tracks_the_live_job_completion_wait(monkeypatch: pytes
     finally:
         monkeypatch.delenv("ARQ_JOB_COMPLETION_WAIT", raising=False)
         reset_all_settings()
+
+
+async def test_build_takes_the_queue_name_from_settings(worker_env, monkeypatch) -> None:
+    """An unset ``--queue-name`` binds the worker's consume target to the
+    ``ARQ_QUEUE_NAME`` setting, so it tracks the enqueue pool's default queue
+    without a CLI flag — the seam per-stack isolation rides on."""
+    from tai42_backend_arq.settings import ArqSettings
+
+    monkeypatch.setattr(worker, "arq_settings", lambda: ArqSettings(queue_name="tai42_e2e_abc123:arq:queue"))
+    await _built()
+
+    assert worker_env.latest().kwargs["queue_name"] == "tai42_e2e_abc123:arq:queue"
+
+
+async def test_explicit_queue_name_flag_beats_the_setting(worker_env, monkeypatch) -> None:
+    from tai42_backend_arq.settings import ArqSettings
+
+    monkeypatch.setattr(worker, "arq_settings", lambda: ArqSettings(queue_name="from-setting"))
+    await _built("--queue-name", "from-flag")
+
+    assert worker_env.latest().kwargs["queue_name"] == "from-flag"

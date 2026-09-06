@@ -30,6 +30,7 @@ class RedisPoolManager:
                 if cls._pool is None:
                     cls._pool = await create_pool(
                         arq_settings().redis_settings,
+                        default_queue_name=arq_settings().queue_name,
                         job_serializer=job_serializer,
                         job_deserializer=job_deserializer,
                     )

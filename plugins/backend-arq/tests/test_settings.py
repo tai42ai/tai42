@@ -56,3 +56,16 @@ def test_specific_redis_max_connections_beats_default(monkeypatch: pytest.Monkey
     monkeypatch.setenv("TAI_DEFAULT_REDIS_MAX_CONNECTIONS", "42")
 
     assert ArqSettings().redis_max_connections == 7
+
+
+def test_queue_name_defaults_to_the_arq_default() -> None:
+    # arq's own default queue key, so an unconfigured deployment is unchanged.
+    from arq.constants import default_queue_name
+
+    assert ArqSettings().queue_name == default_queue_name
+
+
+def test_queue_name_is_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARQ_QUEUE_NAME", "tai42_e2e_abc123:arq:queue")
+
+    assert ArqSettings().queue_name == "tai42_e2e_abc123:arq:queue"

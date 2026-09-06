@@ -314,3 +314,26 @@ async def test_pool_created_once_and_closed(monkeypatch) -> None:
 
     # Closing again is a no-op.
     await RedisPoolManager.close()
+
+
+async def test_pool_binds_the_settings_queue_name(monkeypatch) -> None:
+    """The enqueue pool's default queue is the ``queue_name`` setting, so the
+    enqueue side and the worker's consume side name the SAME per-stack queue."""
+    captured: dict[str, Any] = {}
+
+    async def fake_create_pool(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return AsyncMock()
+
+    monkeypatch.setattr("tai42_backend_arq.pool.create_pool", fake_create_pool)
+    monkeypatch.setattr(
+        "tai42_backend_arq.pool.arq_settings", lambda: ArqSettings(queue_name="tai42_e2e_abc123:arq:queue")
+    )
+    monkeypatch.setattr(RedisPoolManager, "_pool", None)
+
+    try:
+        await RedisPoolManager.get()
+    finally:
+        monkeypatch.setattr(RedisPoolManager, "_pool", None)
+
+    assert captured["default_queue_name"] == "tai42_e2e_abc123:arq:queue"

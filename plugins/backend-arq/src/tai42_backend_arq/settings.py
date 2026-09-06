@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar
 
 import orjson
+from arq.constants import default_queue_name
 from pydantic_core import to_jsonable_python
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.secrets import SecretValue
@@ -129,6 +130,11 @@ class ArqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSetting
 
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int | None = None
+    # The arq queue key both sides bind: the enqueue pool's default target and the
+    # worker's consume target. It is a full Redis key (arq's own default is the
+    # literal ``arq:queue``), so co-tenant deployments on one logical DB diverge
+    # here to keep each worker consuming only its own jobs.
+    queue_name: str = default_queue_name
     # How long a callback job waits for its predecessor to complete.
     callback_timeout: int = 5
 
