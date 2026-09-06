@@ -1,13 +1,13 @@
-# Release PRs merge themselves the moment branch protection's required checks
-# pass — the release train has no human step. The PAT (not GITHUB_TOKEN) must
-# both enable auto-merge and author the merge commit: refs written by
+# Release trains open as drafts; a person un-drafts one to release it, which
+# fires ready_for_review and arms auto-merge here. The PAT (not GITHUB_TOKEN)
+# must both enable auto-merge and author the merge commit: refs written by
 # GITHUB_TOKEN fire no workflows, so a GITHUB_TOKEN merge would strand the
 # train before its tag ever published.
 name: release-automerge
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [ready_for_review]
 
 permissions: {}
 
@@ -15,6 +15,7 @@ jobs:
   automerge:
     runs-on: ubuntu-latest
     if: >-
+      github.event_name == 'pull_request' &&
       startsWith(github.head_ref, 'release-please--') &&
       github.event.pull_request.head.repo.full_name == github.repository
     steps:

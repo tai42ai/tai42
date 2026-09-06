@@ -95,9 +95,10 @@ jobs:
           git commit -m "$title" -m "$body"
           git push --force origin "$branch"
           # Open the PR only if one is not already open for this branch (a prior
-          # run in the same wave may have opened it), then enable auto-merge so it
-          # lands the moment branch protection's required checks pass — the same
-          # no-human-step merge the release train uses (see release-automerge.yml).
+          # run in the same wave may have opened it), then enable auto-merge so the
+          # range-only re-pin lands the moment required checks pass. This is a
+          # deps-fix PR, not a version release train, so it carries no draft gate;
+          # merging it later cuts patch releases through the drafted release train.
           if ! gh pr view "$branch" --json state --jq '.state' 2>/dev/null | grep -qx OPEN; then
             gh pr create --base main --head "$branch" --title "$title" --body "$body"
           fi
