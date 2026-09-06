@@ -230,6 +230,39 @@ class PresetManager:
             output_schema=output_schema,
             input_schema=input_schema,
         )
+        self._commit_registration(
+            name,
+            tool_obj,
+            extensions,
+            base_tool=base_tool,
+            fixed_kwargs=fixed_kwargs,
+            description=description,
+            output_schema=output_schema,
+            input_schema=input_schema,
+            version=version,
+        )
+
+    def _commit_registration(
+        self,
+        name: str,
+        tool_obj: Any,
+        extensions: Sequence[Sequence[ExtensionElement]],
+        *,
+        base_tool: str,
+        fixed_kwargs: dict[str, Any],
+        description: str,
+        output_schema: dict[str, Any] | None,
+        input_schema: dict[str, Any] | None,
+        version: int,
+    ) -> None:
+        """Seed the combos and force-register the prebuilt ``tool_obj``, then capture
+        the spec + version — the SYNCHRONOUS tail of a register/reload.
+
+        Holds no ``await``: the whole registry mutation lands in one loop turn, so a
+        run resolving ``name`` on this loop never observes it half-bound between the
+        teardown and the re-register (:meth:`reload` tears the old registration down
+        immediately before calling this). All-or-nothing: a mid-register failure tears
+        down the partial registration and re-raises loudly."""
         try:
             # Clear any stale registry entry for ``name`` first — the seed below is
             # a no-op when the name is already a requested tool, so honour that
@@ -267,37 +300,53 @@ class PresetManager:
         """Re-register ``name`` from its store ACTIVE version body after a
         ``save_version`` / ``rollback`` has committed.
 
-        Tears the base AND every branch tool down BEFORE re-registering (so a
-        reload never re-binds over a live branch), then registers from the whole
-        active body (``base_tool``, ``description``, ``fixed_kwargs``,
-        ``extensions``). Never drops the live primitive: the
-        currently-live spec is captured before teardown and, if the re-register
-        from the new body raises, RESTORED so base + branches survive, then the
-        register error is re-raised loudly. The already-committed store bump is
-        deliberately NOT unwound — the next reload re-attempts it, and the
-        divergence stays loud, never silent.
+        The new body is READ and its tool BUILT while the live registration is still
+        bound; only then is the old base + every branch torn down and the fresh tool
+        force-registered — a teardown+register that holds NO ``await`` (see
+        :meth:`_commit_registration`). This is the atomicity a concurrent run needs:
+        a run resolving ``name`` on this loop (e.g. a backend worker job dispatched
+        the instant a version/rollback fan-out lands) sees the OLD tool or the NEW
+        tool, never a gap — a rebind never surfaces a spurious ``UnknownToolError``
+        for a tool bound both before and after it.
 
-        Holds the per-name lock across the WHOLE teardown + re-register window (the
-        ``get_active_body`` await is the race) and re-registers through the
-        internal :meth:`_register`, never the public :meth:`register`, so the held
-        per-name lock is never re-acquired (the lock is not reentrant)."""
+        Never drops the live primitive: the currently-live spec is captured before
+        teardown and, if the re-register raises, RESTORED so base + branches survive,
+        then the error is re-raised loudly. A bind/read failure leaves the live tool
+        untouched (it runs before the teardown). The already-committed store bump is
+        deliberately NOT unwound — the next reload re-attempts it, and the divergence
+        stays loud, never silent.
+
+        Holds the per-name lock across the whole read+build+swap so two reloads of one
+        name serialize; re-registers through the sync commit / internal
+        :meth:`_register`, never the public :meth:`register`, so the held per-name lock
+        is never re-acquired (the lock is not reentrant)."""
         async with self._locks[name]:
             captured = self._specs.get(name)
             captured_version = self._versions.get(name)
-            self._remove_registration(name)
             # One version-aware read: the freshly-active version and its body are
             # captured TOGETHER so the version retained beside the re-bound body is the
-            # one it was actually built from (never a skewed second read).
+            # one it was actually built from (never a skewed second read). Both the read
+            # and the bind run BEFORE the teardown, so the swap below yields no loop turn.
             version, body = await self._app.presets.get_active_versioned_body(name)
+            tool_obj = await self._app.presets.bind(
+                body.base_tool,
+                body.fixed_kwargs,
+                name=name,
+                description=body.description,
+                output_schema=body.output_schema,
+                input_schema=body.input_schema,
+            )
+            self._remove_registration(name)
             try:
-                await self._register(
+                self._commit_registration(
                     name,
-                    body.base_tool,
-                    body.fixed_kwargs,
+                    tool_obj,
                     body.extensions,
-                    body.description,
-                    body.output_schema,
-                    body.input_schema,
+                    base_tool=body.base_tool,
+                    fixed_kwargs=body.fixed_kwargs,
+                    description=body.description,
+                    output_schema=body.output_schema,
+                    input_schema=body.input_schema,
                     version=version,
                 )
             except Exception:

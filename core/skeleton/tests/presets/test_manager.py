@@ -287,6 +287,66 @@ def test_reload_and_rollback_serve_right_kwargs(pg: FakeVersioningPg):
     asyncio.run(run())
 
 
+def test_reload_never_exposes_a_gap_to_a_concurrent_run(pg: FakeVersioningPg, monkeypatch):
+    """A run resolving a preset the instant a version/rollback reload lands must see
+    the OLD or the NEW tool, never a transient ``UnknownToolError``.
+
+    The consumer this guards is a backend worker job dispatched on the same serving
+    loop as the fan-out reload (``run_tool`` -> ``_resolve_run_target`` -> ``get_tool``):
+    a preset ``reload_tool`` is applied inline on that loop and holds no reload gate, so
+    a run that observed the rebind mid-teardown got a hard miss the caller does not
+    retry. The rebind reads the new body and BINDS the new tool while the old one is
+    still live, then swaps with no ``await`` — so every loop turn resolves ``name``.
+
+    A reload that tears the old registration down before its body-read/bind awaits
+    lets a run scheduled during those awaits resolve the name to nothing; this test
+    schedules exactly that resolver."""
+
+    async def run():
+        async with app.app_context(_manifest()):
+            store = app.presets.store
+            mgr = app.preset_manager
+            await _create_versioned("wv", "weather", {"units": "v1"}, [])
+            await store.save_version("wv", fixed_kwargs={"units": "v2"})
+
+            # Make the reload YIELD the loop during its body read, so a concurrent
+            # resolver is scheduled mid-reload: with teardown before this read, the
+            # yields would expose an unregistered window.
+            real_read = app.presets.get_active_versioned_body
+            entered = asyncio.Event()
+
+            async def yielding_read(name: str):
+                entered.set()
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                return await real_read(name)
+
+            monkeypatch.setattr(app.presets, "get_active_versioned_body", yielding_read)
+
+            misses: list[str] = []
+            stop = asyncio.Event()
+
+            async def resolver() -> None:
+                await entered.wait()
+                while not stop.is_set():
+                    try:
+                        await app.tools.get_tool("wv")
+                    except UnknownToolError:
+                        misses.append("wv")
+                    await asyncio.sleep(0)
+
+            res_task = asyncio.create_task(resolver())
+            await mgr.reload("wv")
+            stop.set()
+            await res_task
+
+            assert misses == [], "a concurrent run resolved the preset to a gap during a reload"
+            # The swap still lands the new active body.
+            assert await app.tools.run_tool("wv", {"city": "x"}) == {"city": "x", "units": "v2"}
+
+    asyncio.run(run())
+
+
 def test_active_version_retained_across_create_save_rollback_reload(pg: FakeVersioningPg):
     async def run():
         async with app.app_context(_manifest()):
