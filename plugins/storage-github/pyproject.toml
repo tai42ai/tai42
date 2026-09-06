@@ -27,9 +27,9 @@ dependencies = [
     # ObjectStat, assert_not_root, and the tai42_app handle.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=7.0,<8",
+    "tai42-contract>=7.1,<8",
     # Pooled clients + settings primitives (PooledClient, TaiBaseSettings, cache).
-    "tai42-kit>=3.8,<4",
+    "tai42-kit>=3.9,<4",
     "httpx>=0.28",
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",

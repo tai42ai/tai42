@@ -27,10 +27,10 @@ dependencies = [
     # and the tai42_app handle the plugin registers through.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=7.0,<8",
+    "tai42-contract>=7.1,<8",
     # HttpxClient (pooled outbound HTTP), RedisClient (correlation store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py.
-    "tai42-kit[redis]>=3.8,<4",
+    "tai42-kit[redis]>=3.9,<4",
     # Imported directly (transport error types + Basic-auth request building).
     "httpx>=0.28",
     # Imported directly by inbound.py (Request/Response handler types).

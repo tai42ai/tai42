@@ -27,10 +27,10 @@ dependencies = [
     # and the tai42_app handle the plugin registers through.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=7.0,<8",
+    "tai42-contract>=7.1,<8",
     # HttpxClient + RedisClient pooling, TaiBaseSettings + the settings cache
     # registry. The [redis] extra carries the correlation store's driver.
-    "tai42-kit[redis]>=3.8,<4",
+    "tai42-kit[redis]>=3.9,<4",
     # The whole Slack surface is two HTTPS POSTs — no slack_sdk, no Bolt.
     "httpx>=0.28",
     # Request/Response types of the inbound route handler (the contract's

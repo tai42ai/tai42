@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-kit"
-version = "3.8.3"
+version = "3.9.0"
 description = "Generic leaf helpers, settings primitives, pooled clients, and LLM/AI factories for the TAI ecosystem."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -27,7 +27,7 @@ dependencies = [
     # Tracks the contract 5.x major (unified park protocol); this floor is what
     # a published kit must carry so downstream resolvers see a contract-5 kit.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=7.0,<8",
+    "tai42-contract>=7.1,<8",
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.0",
