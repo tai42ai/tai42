@@ -36,3 +36,6 @@ site/
 
 # pytest --basetemp scratch of the e2e suites (CI and host runs)
 .stacks-tmp*/
+
+# Local untracked banned-terms list for the naming guards (never committed).
+banned-terms.txt
