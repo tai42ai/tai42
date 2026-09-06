@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-backend-rq"
-version = "2.0.6"
+version = "2.1.0"
 description = "RQ execution backend for the TAI ecosystem — background tool runs and schedules over Redis."
 readme = "README.md"
 requires-python = ">=3.13"
