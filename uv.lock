@@ -6450,7 +6450,7 @@ dev = [
 
 [[package]]
 name = "tai42-toolbox"
-version = "2.0.3"
+version = "2.0.4"
 source = { editable = "plugins/toolbox" }
 dependencies = [
     { name = "makefun" },
@@ -6524,7 +6524,7 @@ docs = [
 
 [[package]]
 name = "tai42-tools-github"
-version = "1.0.8"
+version = "1.0.9"
 source = { editable = "plugins/tools-github" }
 dependencies = [
     { name = "pydantic" },
@@ -6592,7 +6592,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-tools-twilio"
-version = "1.0.8"
+version = "1.0.9"
 source = { editable = "plugins/tools-twilio" }
 dependencies = [
     { name = "pydantic" },
