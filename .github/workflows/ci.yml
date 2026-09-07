@@ -72,6 +72,7 @@ jobs:
       run_monitoring: ${{ steps.assemble.outputs.run_monitoring }}
       run_ui: ${{ steps.assemble.outputs.run_ui }}
       run_browsers: ${{ steps.assemble.outputs.run_browsers }}
+      browser_engines: ${{ steps.assemble.outputs.browser_engines }}
       browser_lane: ${{ steps.assemble.outputs.browser_lane }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,6 +135,15 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
+          # chromium is the always-present baseline engine of the ui-e2e matrix; the
+          # firefox + webkit widening is appended only when run_browsers is on.
+          engine_list() {
+            if [ "$1" = "true" ]; then
+              printf '["chromium","firefox","webkit"]'
+            else
+              printf '["chromium"]'
+            fi
+          }
           # The dispatched browser lane runs the ui-e2e job and nothing else: both
           # matrices are empty and every other gate is off, whatever the filter saw.
           if [ "$UI_LANE" = "true" ]; then
@@ -146,6 +156,7 @@ jobs:
               echo 'run_monitoring=false'
               echo 'run_ui=true'
               echo "run_browsers=$WIDEN"
+              echo "browser_engines=$(engine_list "$WIDEN")"
               echo 'browser_lane=true'
             } >> "$GITHUB_OUTPUT"
             exit 0
@@ -266,6 +277,7 @@ jobs:
           # Outside the browser lane the ui suite follows the python e2e gate.
           echo "run_ui=$run_e2e" >> "$GITHUB_OUTPUT"
           echo "run_browsers=$run_browsers" >> "$GITHUB_OUTPUT"
+          echo "browser_engines=$(engine_list "$run_browsers")" >> "$GITHUB_OUTPUT"
           echo "browser_lane=false" >> "$GITHUB_OUTPUT"
 
   check:
@@ -731,6 +743,13 @@ jobs:
     needs: [reuse, changes, e2e]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && !cancelled() && needs.changes.outputs.run_ui == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
     runs-on: ubuntu-latest
+    # One runner per engine. Each engine boots its own services stack, so the
+    # per-DB login bootstrap and per-stack pending-question state never bleed
+    # between engines. fail-fast off: one engine's failure never cancels the rest.
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: ${{ fromJSON(needs.changes.outputs.browser_engines) }}
     # The failed-MCP reprobe runs unmasked throughout the suite (the mcp / secret-ref specs seed
     # many never-recovering stub servers it keeps probing off the reload gate), lengthening the
     # browser run beyond the old masked 50m budget.
@@ -819,88 +838,30 @@ jobs:
       - name: Install the ui/ workspace
         working-directory: e2e/ui
         run: pnpm install --frozen-lockfile
-      - name: Install chromium
+      - name: Install the browser engine
+        # Only this leg's engine, with its system libraries (--with-deps; the CI
+        # runner is root). The cross-viewport / a11y sweeps are chromium-only via
+        # `testIgnore` in playwright.config.ts, so firefox + webkit run the rest.
         working-directory: e2e/ui
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps ${{ matrix.engine }}
       - name: Run the browser suite
+        # Per-engine output and report dirs so this leg's diagnostics artifact
+        # never collides with another engine's.
         working-directory: e2e/ui
-        run: pnpm exec playwright test --project=chromium
+        env:
+          PLAYWRIGHT_HTML_REPORT: playwright-report/${{ matrix.engine }}
+        run: pnpm exec playwright test --project=${{ matrix.engine }} --output=test-results/${{ matrix.engine }}
       - name: Upload browser diagnostics
+        # Playwright keeps traces + screenshots only on failure; this leg's report,
+        # trace and its kept stack server logs (KEEP_STACKS) travel together, named
+        # per engine so matrix legs never share an artifact name.
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ui-e2e-diagnostics
+          name: ui-e2e-diagnostics-${{ matrix.engine }}
           path: |
-            e2e/ui/test-results/**
-            e2e/ui/playwright-report/**
-            e2e/**/tai-e2e-studio-*/
-          if-no-files-found: ignore
-      - name: Install firefox + webkit (browser widening)
-        # firefox + webkit widen the matrix when the ui suite changed or the run is
-        # manual with `browsers=all` (the `run_browsers` gate). --with-deps
-        # apt-installs their system libraries (the CI runner is root). The
-        # cross-viewport / a11y sweeps are chromium-only via `testIgnore` in
-        # playwright.config.ts, so these two browsers run the remaining specs.
-        if: ${{ needs.changes.outputs.run_browsers == 'true' }}
-        working-directory: e2e/ui
-        run: pnpm exec playwright install --with-deps firefox webkit
-      - name: Run the browser suite on firefox
-        # firefox and webkit each run as their OWN playwright invocation so each
-        # boots its OWN webServer stack. The stack's login bootstrap is once-per-DB
-        # (login.spec creates the first owner in a fresh Postgres clone) and its
-        # pending-question state is per-stack, so a single invocation running both
-        # engines against the one shared stack bleeds the first engine's owner +
-        # questions into the second. Playwright boots and tears the webServer down
-        # per invocation — the runner's SIGTERM handler drops the stack DB and frees
-        # the pinned port (KEEP_STACKS only skips the log-dir rmtree, never the
-        # process/port teardown) — so the second boot is genuinely fresh. Each engine
-        # writes to its own output/report dir; a shared dir would be wiped by the
-        # next invocation's output-clean.
-        id: firefox
-        if: ${{ needs.changes.outputs.run_browsers == 'true' }}
-        working-directory: e2e/ui
-        env:
-          PLAYWRIGHT_HTML_REPORT: playwright-report/firefox
-        run: pnpm exec playwright test --project=firefox --output=test-results/firefox
-      - name: Run the browser suite on webkit
-        # Runs on its own fresh stack whether firefox passed or failed, and stays
-        # skipped whenever firefox was — the widening is off, or chromium failed
-        # upstream.
-        id: webkit
-        if: ${{ !cancelled() && steps.firefox.conclusion != 'skipped' }}
-        working-directory: e2e/ui
-        env:
-          PLAYWRIGHT_HTML_REPORT: playwright-report/webkit
-        run: pnpm exec playwright test --project=webkit --output=test-results/webkit
-      - name: Upload firefox diagnostics
-        # Retain firefox's result tree + html report whether it passed or failed.
-        if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ui-e2e-browser-diagnostics-firefox
-          path: |
-            e2e/ui/test-results/firefox/**
-            e2e/ui/playwright-report/firefox/**
-          if-no-files-found: ignore
-      - name: Upload webkit diagnostics
-        # Retain webkit's result tree + html report whether it passed or failed.
-        if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ui-e2e-browser-diagnostics-webkit
-          path: |
-            e2e/ui/test-results/webkit/**
-            e2e/ui/playwright-report/webkit/**
-          if-no-files-found: ignore
-      - name: Upload the widening stack server logs
-        # Both engines' kept stack dirs (KEEP_STACKS) carry the skeleton/backend
-        # process logs; their tmp-dir names are engine-agnostic, so capture them
-        # once as a combined artifact rather than duplicating into each engine's.
-        if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ui-e2e-browser-stacks
-          path: |
+            e2e/ui/test-results/${{ matrix.engine }}/**
+            e2e/ui/playwright-report/${{ matrix.engine }}/**
             e2e/**/tai-e2e-studio-*/
           if-no-files-found: ignore
 
