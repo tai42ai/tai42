@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig, devices } from '@playwright/test';
 
 import {
@@ -114,6 +115,8 @@ export default defineConfig({
     stdout: 'pipe',
     stderr: 'pipe',
     env: {
+      // The per-run handoff the specs read next to this file (helpers.ts).
+      TAI_E2E_STACK_HANDOFF: fileURLToPath(new URL('./.stack-handoff.json', import.meta.url)),
       TAI_E2E_UI_PORT: String(UI_PORT),
       TAI_E2E_UI_LLM_PORT: String(LLM_PORT),
       TAI_E2E_UI_IDP_PORT: String(IDP_PORT),
