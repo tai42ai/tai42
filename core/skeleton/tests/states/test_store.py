@@ -1,8 +1,8 @@
 """The store's pure helpers — the trace-stamping rule (D-3), the composing-shape refusal
-(D-4), the regime/traced-path derivation from mount rows, and the op-ledger retention
-validation. The SQL behaviors (subject-keyed read/apply/fold/alias/search/migrate and the
-``state_writes`` ledger) are exercised against a real Postgres in
-``test_store_integration.py``."""
+(D-4), the regime/traced-path derivation from mount rows, and the retention-window
+validation. The SQL behaviors (subject-keyed read/apply/fold/alias/search and the
+``state_writes`` ledger) run against an in-memory fake Postgres in ``test_store_sql.py``
+and against a real Postgres in ``test_store_integration.py``."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from tai42_skeleton.states.store import (
     _traced_paths,
     make_cursor,
     stamp_trace,
+    store_settings_default_retention,
     store_settings_retention,
 )
 
@@ -66,6 +67,15 @@ def test_composing_shape_allows_keyed_and_append() -> None:
     _refuse_composing_shape([{"op": "set", "path": ["b", "x"], "value": 1}], regime_paths)
 
 
+def test_composing_shape_ignores_non_mutating_and_pathless_ops() -> None:
+    regime_paths = _abs_regime_paths(_mounts())
+    # an op with no list path is skipped (nothing to refuse) …
+    _refuse_composing_shape([{"op": "set", "path": None, "value": 1}], regime_paths)
+    # … and an op whose kind is neither a keyed op nor a whole-path set/remove is skipped,
+    # even squarely over the composing path (only whole-path set/remove is the D-4 hazard)
+    _refuse_composing_shape([{"op": "increment", "path": ["a", "items"], "value": 1}], regime_paths)
+
+
 def test_stamp_trace_object_set_and_keyed_items() -> None:
     traced = (("a",),)
     ops = [
@@ -108,6 +118,15 @@ def test_store_settings_retention_validates(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(store_mod, "states_settings", lambda: SimpleNamespace(op_retention_days=0))
     with pytest.raises(StatesError, match="OP_RETENTION_DAYS"):
         store_settings_retention()
+
+
+def test_store_settings_default_retention_reads_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(store_mod, "states_settings", lambda: SimpleNamespace(default_retention_days=None))
+    assert store_settings_default_retention() is None
+    monkeypatch.setattr(store_mod, "states_settings", lambda: SimpleNamespace(default_retention_days=45))
+    assert store_settings_default_retention() == 45
 
 
 def test_split_cursor_round_trips_a_packed_identity() -> None:

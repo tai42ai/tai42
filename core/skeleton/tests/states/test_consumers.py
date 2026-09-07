@@ -170,3 +170,123 @@ def _run(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+# --------------------------------------------------------------------------- #
+# The registered listers (process registries in, rows out)                      #
+# --------------------------------------------------------------------------- #
+def _fake_app(monkeypatch: pytest.MonkeyPatch, *, kinds: set[str] | None, **facets):
+    """Wire ``instance.app`` with a states facet whose ``get_declaration`` reports
+    ``kinds`` (``None`` ⇒ the state is undeclared), plus any extra facet stubs."""
+
+    async def _get_declaration(_state):
+        return None if kinds is None else SimpleNamespace(subject_kinds=kinds)
+
+    app = SimpleNamespace(states=SimpleNamespace(get_declaration=_get_declaration), **facets)
+    monkeypatch.setattr(consumers_mod.instance, "app", app)
+    return app
+
+
+def test_declared_subject_kinds_none_for_undeclared_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds=None)
+    assert _run(consumers_mod._declared_subject_kinds("alerts")) is None
+
+
+def test_declared_subject_kinds_for_a_declared_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds={"thread"})
+    assert _run(consumers_mod._declared_subject_kinds("alerts")) == {"thread"}
+
+
+def test_hooks_lister_matches_declared_kinds(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds={"person"})
+
+    async def _list_hooks():
+        return {
+            "on-person": _hook("on-person", subject_kind="person"),
+            "on-thread": _hook("on-thread", subject_kind="thread"),
+        }
+
+    monkeypatch.setattr("tai42_skeleton.hooks.cache.get_hooks_manager", lambda: SimpleNamespace(list_hooks=_list_hooks))
+    rows = _run(consumers_mod.hooks_lister("alerts"))
+    assert [r.name for r in rows] == ["on-person"]
+
+
+def test_hooks_lister_empty_for_undeclared_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds=None)
+    assert _run(consumers_mod.hooks_lister("alerts")) == []
+
+
+def test_schedules_lister_reads_the_export_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds={"person"})
+    subject = StateSubject(target_kind="agent", target_name="a", kind="person", key="p-1")
+
+    async def _export():
+        return [_schedule_record("nightly", subject)]
+
+    monkeypatch.setattr("tai42_skeleton.operations.schedules.export_schedules_raw", _export)
+    rows = _run(consumers_mod.schedules_lister("alerts"))
+    assert [r.name for r in rows] == ["nightly"]
+
+
+def test_schedules_lister_empty_for_undeclared_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds=None)
+    assert _run(consumers_mod.schedules_lister("alerts")) == []
+
+
+def test_schedules_lister_raises_on_a_non_list_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds={"person"})
+
+    async def _export():
+        return {"not": "a list"}
+
+    monkeypatch.setattr("tai42_skeleton.operations.schedules.export_schedules_raw", _export)
+    with pytest.raises(TypeError, match="expected a list of ScheduleRecord"):
+        _run(consumers_mod.schedules_lister("alerts"))
+
+
+def test_agents_lister_matches_state_tool_binders(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(
+        monkeypatch,
+        kinds={"thread"},
+        agents=SimpleNamespace(all_agents=lambda: {"writer": SimpleNamespace(tool_names=["state_read"])}),
+    )
+    rows = _run(consumers_mod.agents_lister("alerts"))
+    assert [r.name for r in rows] == ["writer"]
+
+
+def test_agents_lister_empty_for_undeclared_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds=None)
+    assert _run(consumers_mod.agents_lister("alerts")) == []
+
+
+def test_presets_lister_reads_active_bodies_when_store_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _bodies():
+        return {"assistant": _preset("run_agent", ["state_merge"])}
+
+    _fake_app(monkeypatch, kinds={"thread"}, presets=SimpleNamespace(list_active_bodies=_bodies))
+    monkeypatch.setattr("tai42_kit.db.component_store_configured", lambda component: True)
+    rows = _run(consumers_mod.presets_lister("alerts"))
+    assert [r.name for r in rows] == ["assistant"]
+
+
+def test_presets_lister_skips_read_when_store_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds={"thread"})
+    monkeypatch.setattr("tai42_kit.db.component_store_configured", lambda component: False)
+    assert _run(consumers_mod.presets_lister("alerts")) == []
+
+
+def test_presets_lister_empty_for_undeclared_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_app(monkeypatch, kinds=None)
+    assert _run(consumers_mod.presets_lister("alerts")) == []
+
+
+def test_register_platform_consumer_listers_arms_all_four(monkeypatch: pytest.MonkeyPatch) -> None:
+    registered: dict[str, object] = {}
+    app = SimpleNamespace(
+        states=SimpleNamespace(register_consumer_lister=lambda kind, lister: registered.__setitem__(kind, lister))
+    )
+    monkeypatch.setattr(consumers_mod.instance, "app", app)
+    consumers_mod.register_platform_consumer_listers()
+    assert set(registered) == {"hook", "schedule", "agent", "preset"}
+    assert registered["hook"] is consumers_mod.hooks_lister
+    assert registered["preset"] is consumers_mod.presets_lister

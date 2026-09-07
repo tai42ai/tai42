@@ -202,7 +202,7 @@ class FakeStatesStore:
         self.records[(state, subject.target_kind, subject.target_name, subject.kind, subject.key)] = doc
         return (True, doc, 1.0, [])
 
-    async def import_records(self, state, rows, *, origin, validate_doc):
+    async def restore_records(self, state, rows, *, origin, validate_doc):
         decl = self.declarations.get(state)
         if decl is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
@@ -211,6 +211,52 @@ class FakeStatesStore:
             validate_doc(decl["effective_schema"], row["data"])
             key = (state, row["target_kind"], row["target_name"], row["subject_kind"], row["subject_key"])
             self.records[key] = row["data"]
+
+    async def restore_aliases(self, state, rows):
+        self.restored_aliases = list(rows)
+
+    async def replace(self, state, subject, data, *, origin, validate_doc):
+        decl = self.declarations.get(state)
+        if decl is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        validate_doc(decl["effective_schema"], data)
+        self.applied_origins.append(origin)
+        self.records[(state, subject.target_kind, subject.target_name, subject.kind, subject.key)] = data
+        return data, 1.0
+
+    async def erase_subject(self, state, subject, *, origin):
+        self.applied_origins.append(origin)
+        self.records.pop((state, subject.target_kind, subject.target_name, subject.kind, subject.key), None)
+
+    async def fold_subject(self, state, subject, into, mode, *, origin, validate_doc):
+        self.applied_origins.append(origin)
+        return {
+            "mode": mode,
+            "from": {"kind": subject.kind, "key": subject.key},
+            "into": {"kind": into.kind, "key": into.key},
+            "already": False,
+            "flattened": 0,
+        }
+
+    async def list_subjects(self, state, *, kind, limit, cursor):
+        rows = [
+            {"target_kind": tk, "target_name": tn, "subject_kind": sk, "subject_key": key, "updated_at": 1.0}
+            for (s, tk, tn, sk, key) in self.records
+            if s == state and (kind is None or sk == kind)
+        ]
+        return rows[:limit]
+
+    async def search_records(self, state, containment, *, limit, cursor):
+        rows = [
+            {"target_kind": tk, "target_name": tn, "subject_kind": sk, "subject_key": key, "updated_at": 1.0}
+            for (s, tk, tn, sk, key), data in self.records.items()
+            if s == state and all(data.get(k) == v for k, v in containment.items())
+        ]
+        return rows[:limit]
+
+    async def prune_expired(self, default):
+        self.prune_default = default
+        return {"alerts": 2} if self.records else {}
 
 
 _STATE = StateDeclaration(
@@ -710,7 +756,7 @@ async def test_list_modules_catalog_adds_mounted_on_and_shipped_default(svc: Sta
 
 
 # --------------------------------------------------------------------------- #
-# import_records validates every subject before any write (PLAN_5 item 3)      #
+# restore_records validates every subject before any write                     #
 # --------------------------------------------------------------------------- #
 _PERSON_STATE = StateDeclaration(
     name="alerts",
@@ -743,7 +789,7 @@ def _person_row(key: str, n: int) -> dict[str, Any]:
     return {"target_kind": "agent", "target_name": "a", "subject_kind": "person", "subject_key": key, "data": {"n": n}}
 
 
-async def test_import_records_refuses_a_bad_person_row_and_writes_nothing(
+async def test_restore_records_refuses_a_bad_person_row_and_writes_nothing(
     svc: StatesService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await svc.put_declaration(_PERSON_STATE)
@@ -751,23 +797,21 @@ async def test_import_records_refuses_a_bad_person_row_and_writes_nothing(
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
     rows = [_person_row("known", 1), _person_row("ghost", 2)]
     # the offending row's index AND its subject ride the refusal, and nothing is written
-    with pytest.raises(SubjectRefusedError, match="import row 1"):
-        await svc.import_records("alerts", rows, origin=WriteOrigin(consumer="flow_states_transfer"))
+    with pytest.raises(SubjectRefusedError, match="restore row 1"):
+        await svc.restore_records("alerts", rows, origin=WriteOrigin(consumer="backup-restore"))
     assert store.records == {}
 
 
-async def test_import_records_lands_a_clean_batch(svc: StatesService, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_restore_records_lands_a_clean_batch(svc: StatesService, monkeypatch: pytest.MonkeyPatch) -> None:
     await svc.put_declaration(_PERSON_STATE)
     _patch_person_store(monkeypatch)
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
     ctx = StateContext(
-        door="transfer",
+        door="operator",
         candidates=SubjectCandidates(target_kind="agent", target_name="a"),
         actor="operator-1",
     )
     with state_context(ctx):
-        await svc.import_records(
-            "alerts", [_person_row("known", 7)], origin=WriteOrigin(consumer="flow_states_transfer")
-        )
+        await svc.restore_records("alerts", [_person_row("known", 7)], origin=WriteOrigin(consumer="backup-restore"))
     assert store.records[("alerts", "agent", "a", "person", "known")] == {"n": 7}
-    assert store.applied_origins[-1].door == "transfer"
+    assert store.applied_origins[-1].door == "operator"

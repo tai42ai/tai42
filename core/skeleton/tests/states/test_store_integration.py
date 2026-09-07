@@ -1,6 +1,6 @@
 """A REAL Postgres exercise of the subject-keyed store: subject-column read/apply, the
 ``_trace`` stamp under a traced mount, the ``state_writes`` ledger row with the completed
-origin + touched paths, subject fold/alias resolution, content search, and migrate.
+origin + touched paths, subject fold/alias resolution, and content search.
 
 This needs real Postgres semantics (jsonb ``@>``, ``clock_timestamp()``, row locks) — there
 is no fake here. It is OPT-IN: set ``TAI42_SKELETON_REAL_PG=1`` and point
@@ -351,23 +351,3 @@ async def test_list_and_search_page_over_full_subject_identity(
         searched.extend((r["target_name"], r["subject_key"]) for r in rows)
         cursor = _next(rows)
     assert searched == [("a", "same"), ("b", "same")]
-
-
-async def test_migrate_drops_field(real_store: tuple[PostgresStatesStore, str]) -> None:
-    store, state = real_store
-    old = {"type": "object", "properties": {"n": {"type": "integer"}, "g": {"type": "string"}}}
-    new = {"type": "object", "properties": {"n": {"type": "integer"}}}
-    await store.upsert_declaration(state, "", old, ["thread"], "thread", None, effective_schema=old)
-    subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="t1")
-    await store.replace(state, subject, {"n": 1, "g": "x"}, origin=_ORIGIN, validate_doc=_validate_document)
-
-    async def convert(records):
-        return {k: {"n": v["n"]} for k, v in records.items()}
-
-    await store.migrate(state, new, new, decide=lambda _old: convert, origin=_ORIGIN)
-    read, _seq = await store.read_record(state, subject)
-    assert read == {"n": 1}
-    # migrate records ONE write row per converted subject, whole-document paths ([[]])
-    writes = await store.writes(state, subject, limit=10, cursor=None)
-    assert writes[0]["paths"] == [[]]
-    assert writes[0]["consumer"] == "consumer-x"
