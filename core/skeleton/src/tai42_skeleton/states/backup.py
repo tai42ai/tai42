@@ -130,15 +130,20 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
             report["errors"].append(f"declaration {entry.get('name')!r}: {exc}")
             continue
         report["declarations"]["updated" if existed else "created"] += 1
+    # A restored mount is a snapshot, not a re-mount: it re-runs the validators (schema
+    # integrity) but NOT the reconcilers (there is no live remount to reconcile against,
+    # and mounts restore before records) — reached through the concrete skeleton facet.
+    from tai42_skeleton.app import instance
+
     for entry in payload.get("mounts") or []:
         try:
             mounts = await tai42_app.states.list_mounts(entry["state"], module=entry["module"])
             if mounts:
-                await tai42_app.states.update_mount_declarations(
-                    entry["state"], entry["module"], entry.get("declarations") or {}
+                await instance.app.states.update_mount_declarations(
+                    entry["state"], entry["module"], entry.get("declarations") or {}, skip_reconcilers=True
                 )
             else:
-                await tai42_app.states.mount(
+                await instance.app.states.mount(
                     entry["state"],
                     entry["module"],
                     MountBody(
@@ -146,6 +151,7 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
                         parameters=entry.get("parameters") or {},
                         declarations=entry.get("declarations") or {},
                     ),
+                    skip_reconcilers=True,
                 )
         except _ENTITY_ERRORS as exc:
             report["mounts"]["failed"] += 1

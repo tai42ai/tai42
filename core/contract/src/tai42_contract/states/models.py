@@ -23,8 +23,9 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -257,13 +258,18 @@ class StateModuleDocument(BaseModel):
 
 class MountBody(BaseModel):
     """A mount request: the ``path`` in the state's document where the module's
-    fragment lands, plus the mount's parameter values and static ``declarations``."""
+    fragment lands, the mount's parameter values, its static ``declarations``, and
+    ``options`` — a free-form, per-operation directive bag a registered mount reconciler
+    reads (how to reconcile OPEN records against the new declarations). ``options`` is
+    passed to the reconcilers for THIS mount only, never stored or served back; every
+    other key is refused."""
 
     model_config = ConfigDict(extra="forbid")
 
     path: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     declarations: dict[str, Any] = Field(default_factory=dict)
+    options: dict[str, Any] = Field(default_factory=dict)
 
 
 class RecordView(BaseModel):
@@ -355,6 +361,54 @@ class ConsumerRow(BaseModel):
 #: to refuse the door — consulted before every mount / declarations write. A pass
 #: returns ``None``.
 MountValidator = Callable[["StateModuleDocument", dict[str, Any], dict[str, Any]], Awaitable[None]]
+
+
+@runtime_checkable
+class MountReconcileRecords(Protocol):
+    """The narrow record door a mount reconciler reads and writes the (re)mounted state's
+    records through — a subset of the states facet bound to the one state: read a subject,
+    page its subjects, ``merge`` a shallow resolution, or ``apply`` a full op batch (the
+    same keyed ops as a module fill, so a record under a ``composing`` write regime can be
+    closed too). Every write runs on the mount transaction and is completed and audited at
+    the platform chokepoint exactly like a facet write."""
+
+    async def read(self, subject: StateSubject) -> RecordView | None: ...
+
+    async def list_subjects(
+        self, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+    ) -> dict[str, Any]: ...
+
+    async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> RecordView: ...
+
+    async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class MountReconcileContext:
+    """What a mount reconciler receives before a mount write commits: the ``state`` name,
+    the ``module`` document, the ``operation`` replacing declarations, the
+    ``previous_declarations`` (``None`` on a first mount), the ``new_declarations``, the
+    mount ``options``, and the ``records`` door bound to the state. A reconciler RAISES a
+    :class:`~tai42_contract.states.errors.ModuleValidationError` to refuse the mount
+    (naming the offending records) or writes resolutions through ``records`` and returns,
+    letting the mount commit with those writes."""
+
+    state: str
+    module: StateModuleDocument
+    operation: Literal["mount", "update_declarations"]
+    previous_declarations: dict[str, Any] | None
+    new_declarations: dict[str, Any]
+    options: dict[str, Any] = field(default_factory=dict[str, Any])
+    records: MountReconcileRecords
+
+
+#: A pre-write mount reconciler a consumer registers on the states facet: given a
+#: :class:`MountReconcileContext`, it reconciles the state's OPEN records against the new
+#: declarations — RAISING (a ``ModuleValidationError`` naming the records) to refuse the
+#: mount, or writing resolutions through the context's record door and returning to let
+#: the mount commit. Run inside every mount / declarations write, after the validators and
+#: before the write.
+MountReconciler = Callable[["MountReconcileContext"], Awaitable[None]]
 
 #: A consumer lister a plugin registers per consumer ``kind``: given a state name,
 #: returns the :class:`ConsumerRow` rows for that kind. The facet's ``consumers``

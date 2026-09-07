@@ -32,9 +32,12 @@ what is never optional.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from tai42_contract.states.errors import (
@@ -175,7 +178,55 @@ def stamp_trace(
 
 class PostgresStatesStore:
     """One class over the record substrate's tables. Each method opens its own pooled
-    connection; multi-statement operations run in one explicit transaction."""
+    connection; multi-statement operations run in one explicit transaction. A caller that
+    must span several writes atomically opens :meth:`begin` and threads the yielded
+    connection into the write methods' ``conn`` parameter — they join that transaction
+    instead of opening their own."""
+
+    @asynccontextmanager
+    async def begin(self) -> AsyncIterator[AsyncConnection[Any]]:
+        """A pooled connection with an open transaction — the atomic boundary a caller
+        threads into the write methods' ``conn`` so several writes commit or roll back as
+        one."""
+        async with (
+            client_ctx(PostgresClient, _settings()) as pool,
+            pool.connection() as conn,
+            conn.transaction(),
+        ):
+            yield conn
+
+    @asynccontextmanager
+    async def _write_cursor(self, conn: AsyncConnection[Any] | None) -> AsyncIterator[Any]:
+        """Yield the cursor a write runs on: with an external ``conn`` join the caller's
+        transaction (no new one); otherwise open a pooled connection and a fresh
+        transaction."""
+        if conn is not None:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                yield cur
+            return
+        async with (
+            client_ctx(PostgresClient, _settings()) as pool,
+            pool.connection() as own,
+            own.transaction(),
+            own.cursor(row_factory=dict_row) as cur,
+        ):
+            yield cur
+
+    @asynccontextmanager
+    async def _read_cursor(self, conn: AsyncConnection[Any] | None) -> AsyncIterator[Any]:
+        """Yield the cursor a read runs on: with an external ``conn`` join the caller's
+        transaction (so it sees that transaction's own uncommitted writes); otherwise open
+        a pooled connection (no transaction, matching a plain read)."""
+        if conn is not None:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                yield cur
+            return
+        async with (
+            client_ctx(PostgresClient, _settings()) as pool,
+            pool.connection() as own,
+            own.cursor(row_factory=dict_row) as cur,
+        ):
+            yield cur
 
     # -- declarations ------------------------------------------------------------
 
@@ -496,17 +547,14 @@ class PostgresStatesStore:
         declarations: dict[str, Any],
         *,
         effective_schema: dict[str, Any],
+        conn: AsyncConnection[Any] | None = None,
     ) -> None:
         """Write a mount row and the state's recomposed effective schema in ONE txn, under
         the declaration lock (serializing against every schema change, so the effective
         schema a concurrent write validates against is never half-composed). Refuses loudly
-        when the state is not declared."""
-        async with (
-            client_ctx(PostgresClient, _settings()) as pool,
-            pool.connection() as conn,
-            conn.transaction(),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
+        when the state is not declared. With ``conn`` the write joins the caller's
+        transaction (a reconciler's writes commit or roll back with the mount)."""
+        async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT name FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
             if await cur.fetchone() is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
@@ -523,16 +571,18 @@ class PostgresStatesStore:
             )
 
     async def update_mount_declarations(
-        self, state: str, module: str, declarations: dict[str, Any], *, effective_schema: dict[str, Any]
+        self,
+        state: str,
+        module: str,
+        declarations: dict[str, Any],
+        *,
+        effective_schema: dict[str, Any],
+        conn: AsyncConnection[Any] | None = None,
     ) -> bool:
         """Rewrite a mount's declarations (values only) and the state's effective schema in
-        ONE txn under the declaration lock. ``False`` when no such mount exists."""
-        async with (
-            client_ctx(PostgresClient, _settings()) as pool,
-            pool.connection() as conn,
-            conn.transaction(),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
+        ONE txn under the declaration lock. ``False`` when no such mount exists. With
+        ``conn`` the write joins the caller's transaction."""
+        async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT name FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
             if await cur.fetchone() is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
@@ -631,15 +681,14 @@ class PostgresStatesStore:
             row = await cur.fetchone()
             return (None, None) if row is None else (row["data"], row["seq"])
 
-    async def read_record_view(self, state: str, subject: StateSubject) -> dict[str, Any] | None:
+    async def read_record_view(
+        self, state: str, subject: StateSubject, *, conn: AsyncConnection[Any] | None = None
+    ) -> dict[str, Any] | None:
         """The read door's view: ``{data, seq, canonical_subject, folded_from}`` —
         ``folded_from`` is every alias pointing at the canonical — or ``None`` when no
-        record exists."""
-        async with (
-            client_ctx(PostgresClient, _settings()) as pool,
-            pool.connection() as conn,
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
+        record exists. With ``conn`` the read joins the caller's transaction (a mount
+        reconciler reading its own in-flight merges)."""
+        async with self._read_cursor(conn) as cur:
             kind, key = await self._resolve_subject(cur, state, subject)
             await cur.execute(
                 "SELECT data, extract(epoch FROM updated_at)::float8 AS seq FROM state_records "
@@ -787,6 +836,7 @@ class PostgresStatesStore:
         origin: CompletedOrigin,
         validate_doc: Any,
         retention_days: int,
+        conn: AsyncConnection[Any] | None = None,
     ) -> tuple[bool, dict[str, Any] | None, float | None, list[dict[str, Any]]]:
         """Apply a batch of path-addressed ops to one record, in ONE txn. Returns
         ``(applied, merged_document, seq, guarded_skipped)`` — ``(False, None, None, [])``
@@ -799,14 +849,11 @@ class PostgresStatesStore:
         set (replay ⇒ return without touching the record); the ATOMIC UPSERT-LOCK on the
         record row; the COMPARE-AND-SET GUARD filter; the ``_trace`` stamp under a traced
         mount (D-3); the SHARED pure ops apply; the whole-document validation; the UPDATE;
-        the ``state_writes`` row; opportunistic ledger prune.
+        the ``state_writes`` row; opportunistic ledger prune. With ``conn`` the write joins
+        the caller's transaction (a reconciler's record write commits or rolls back with
+        the mount).
         """
-        async with (
-            client_ctx(PostgresClient, _settings()) as pool,
-            pool.connection() as conn,
-            conn.transaction(),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
+        async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT effective_schema FROM state_declarations WHERE name = %s FOR SHARE", (state,))
             decl = await cur.fetchone()
             if decl is None:
@@ -1061,18 +1108,15 @@ class PostgresStatesStore:
             return report
 
     async def list_subjects(
-        self, state: str, *, kind: str | None, limit: int, cursor: str | None
+        self, state: str, *, kind: str | None, limit: int, cursor: str | None, conn: AsyncConnection[Any] | None = None
     ) -> list[dict[str, Any]]:
         """One keyset page of a state's subjects, ordered by the FULL subject identity
         ``(target_kind, target_name, subject_kind, subject_key)`` (optionally one
         ``kind``), each row ``{target_kind, target_name, kind, key, updated_at}``, starting
-        strictly after ``cursor`` (the packed identity of the last row seen)."""
+        strictly after ``cursor`` (the packed identity of the last row seen). With ``conn``
+        the read joins the caller's transaction."""
         after = ("", "", "", "") if cursor is None else _split_cursor(cursor)
-        async with (
-            client_ctx(PostgresClient, _settings()) as pool,
-            pool.connection() as conn,
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
+        async with self._read_cursor(conn) as cur:
             if kind is None:
                 await cur.execute(
                     "SELECT target_kind, target_name, subject_kind, subject_key, "

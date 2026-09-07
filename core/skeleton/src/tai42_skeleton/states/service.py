@@ -23,7 +23,7 @@ import json
 import logging
 from collections import OrderedDict
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import unquote
 
 if TYPE_CHECKING:
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 import jsonschema
 import referencing.exceptions
 from jsonschema import Draft202012Validator
+from psycopg import AsyncConnection
 from tai42_contract.states.errors import (
     DeclarationInUseError,
     InvalidPathError,
@@ -55,6 +56,8 @@ from tai42_contract.states.models import (
     ConsumerLister,
     ConsumerRow,
     MountBody,
+    MountReconcileContext,
+    MountReconciler,
     MountValidator,
     RecordView,
     StateContext,
@@ -104,6 +107,26 @@ class StatesMountValidatorRegistry:
 
     def reset(self) -> None:
         self._validators.clear()
+
+
+class StatesMountReconcilerRegistry:
+    """The process-wide mount-reconciler registry — the body behind
+    ``app.states.register_mount_reconciler``. A consumer registers a pre-write reconciler
+    when its module loads; the mount doors run every registered reconciler after the
+    validators and before the write. Reset each ``start()`` so a reload re-registers
+    cleanly."""
+
+    def __init__(self) -> None:
+        self._reconcilers: list[MountReconciler] = []
+
+    def register(self, reconciler: MountReconciler) -> None:
+        self._reconcilers.append(reconciler)
+
+    def all(self) -> list[MountReconciler]:
+        return list(self._reconcilers)
+
+    def reset(self) -> None:
+        self._reconcilers.clear()
 
 
 class StatesConsumerListerRegistry:
@@ -273,6 +296,46 @@ def _row_to_declaration(row: dict[str, Any]) -> StateDeclaration:
     )
 
 
+class _MountReconcileRecords:
+    """The narrow record door a mount reconciler reads and writes through — the
+    :class:`~tai42_contract.states.MountReconcileRecords` handle bound to one state and the
+    mount's transaction ``conn``. Every call runs on that transaction: ``merge`` and the
+    keyed ``apply`` write on it (so a reconciler's resolution commits with the mount or
+    rolls back with a refusal),
+    and ``read``/``list_subjects`` read on it too, so a reconciler sees its own in-flight
+    merges. Writes are completed and audited through the service chokepoint exactly like any
+    facet write."""
+
+    def __init__(self, service: StatesService, state: str, conn: AsyncConnection[Any]) -> None:
+        self._service = service
+        self._state = state
+        self._conn = conn
+
+    async def read(self, subject: StateSubject) -> RecordView | None:
+        return await self._service.read(self._state, subject, conn=self._conn)
+
+    async def list_subjects(
+        self, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+    ) -> dict[str, Any]:
+        return await self._service.list_subjects(self._state, kind=kind, limit=limit, cursor=cursor, conn=self._conn)
+
+    async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> RecordView:
+        """Shallow top-level merge ``patch`` into ``subject`` on the mount transaction."""
+        if not isinstance(patch, dict):
+            raise ValueValidationError("a merge patch must be a JSON object")
+        ops = [{"op": "set", "path": [k], "value": v} for k, v in patch.items()]
+        result = await self._service.apply(self._state, subject, ops, op_id=None, origin=origin, conn=self._conn)
+        data = result.data if result.data is not None else {}
+        seq = result.seq if result.seq is not None else 0.0
+        return RecordView(state=self._state, subject=subject, data=data, seq=seq, canonical_subject=subject)
+
+    async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult:
+        """Apply an op batch (the same keyed ops as a module fill) to ``subject`` on the
+        mount transaction — so a record under a ``composing`` write regime can be closed
+        with a keyed op that ``merge``'s whole-path set would refuse."""
+        return await self._service.apply(self._state, subject, ops, op_id=None, origin=origin, conn=self._conn)
+
+
 class StatesService:
     """The one validate + apply layer. Holds a store and the consumer-owned registries;
     every method refuses loudly while the feature is off."""
@@ -284,6 +347,7 @@ class StatesService:
         store: PostgresStatesStore | None = None,
         *,
         mount_validators: StatesMountValidatorRegistry | None = None,
+        mount_reconcilers: StatesMountReconcilerRegistry | None = None,
         consumer_listers: StatesConsumerListerRegistry | None = None,
         seeds: StateModuleSeedRegistry | None = None,
     ) -> None:
@@ -291,6 +355,7 @@ class StatesService:
 
         self._store = store or PostgresStatesStore()
         self._mount_validators = mount_validators or StatesMountValidatorRegistry()
+        self._mount_reconcilers = mount_reconcilers or StatesMountReconcilerRegistry()
         self._consumer_listers = consumer_listers or StatesConsumerListerRegistry()
         self._seeds = seeds or StateModuleSeedRegistry()
         self._module_cache: OrderedDict[tuple[str, Any], StateModule] = OrderedDict()
@@ -486,13 +551,17 @@ class StatesService:
 
     # -- records -----------------------------------------------------------------
 
-    async def read(self, state: str, subject: StateSubject) -> RecordView | None:
+    async def read(
+        self, state: str, subject: StateSubject, *, conn: AsyncConnection[Any] | None = None
+    ) -> RecordView | None:
         """The record for ``subject`` (resolving a fold), or ``None`` when none exists. An
-        unknown person or a target mismatch is a refusal, never an empty document."""
+        unknown person or a target mismatch is a refusal, never an empty document. With
+        ``conn`` the read joins the caller's transaction (a mount reconciler reading its own
+        in-flight merges)."""
         self._ensure_available()
         decl = await self._require_declaration_decl(state)
         await self.validate_subject(decl, subject)
-        view = await self._store.read_record_view(state, subject)
+        view = await self._store.read_record_view(state, subject, conn=conn)
         if view is None:
             return None
         return RecordView(
@@ -545,11 +614,13 @@ class StatesService:
         *,
         op_id: str | None,
         origin: WriteOrigin,
+        conn: AsyncConnection[Any] | None = None,
     ) -> ApplyResult:
         """Apply an op batch to ``subject``'s document under the effective schema. Refuses a
         composing-path shape violation before the ledger insert, stamps ``_trace`` under a
         traced mount, and records one write row. A replayed ``op_id`` returns
-        ``applied=False``; guarded ops land in ``skipped``."""
+        ``applied=False``; guarded ops land in ``skipped``. With ``conn`` the write joins
+        the caller's transaction (a mount reconciler's resolution)."""
         self._ensure_available()
         if not isinstance(ops, list):
             raise InvalidPathError("ops must be a list of operations")
@@ -568,6 +639,7 @@ class StatesService:
             origin=completed,
             validate_doc=_validate_document,
             retention_days=store_settings_retention(),
+            conn=conn,
         )
         return ApplyResult(
             applied=applied,
@@ -601,15 +673,22 @@ class StatesService:
         )
 
     async def list_subjects(
-        self, state: str, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+        self,
+        state: str,
+        *,
+        kind: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        conn: AsyncConnection[Any] | None = None,
     ) -> dict[str, Any]:
         """One keyset page of a state's subjects, ordered by the full subject identity
-        ``(target_kind, target_name, kind, key)``."""
+        ``(target_kind, target_name, kind, key)``. With ``conn`` the read joins the caller's
+        transaction (a mount reconciler paging its own in-flight merges)."""
         self._ensure_available()
         page = _page_limit(limit)
         if await self._store.get_declaration(state) is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
-        rows = await self._store.list_subjects(state, kind=kind, limit=page, cursor=cursor)
+        rows = await self._store.list_subjects(state, kind=kind, limit=page, cursor=cursor, conn=conn)
         next_cursor = (
             make_cursor(
                 rows[-1]["target_kind"], rows[-1]["target_name"], rows[-1]["subject_kind"], rows[-1]["subject_key"]
@@ -840,15 +919,21 @@ class StatesService:
             for r in rows
         ]
 
-    async def mount(self, state: str, module_name: str, body: MountBody) -> None:
+    async def mount(self, state: str, module_name: str, body: MountBody, *, skip_reconcilers: bool = False) -> None:
         """Mount a module on a state: validate path/parameters/declarations (+ check), run
-        every registered mount validator over the composed effective schema, then store the
-        resolved parameters and the recomposed effective schema in one transaction (D-5 —
-        nothing derived is materialized)."""
+        every registered mount validator over the composed effective schema, run every
+        registered reconciler, then store the resolved parameters and the recomposed
+        effective schema in one transaction (D-5 — nothing derived is materialized). The
+        reconcilers and the mount write share ONE transaction, so a reconciler's record
+        writes commit with the mount or roll back together with a refusal. ``body.options``
+        is a per-operation directive passed to the reconcilers, never stored.
+        ``skip_reconcilers`` (backup restore only) runs the validators but not the
+        reconcilers — a restored mount is a snapshot, not a re-mount."""
         self._ensure_available()
         path = list(body.path)
         parameters = dict(body.parameters or {})
         declarations = dict(body.declarations or {})
+        options = dict(body.options or {})
         decl = await self._require_declaration(state)
         module = await self._get_module_or_raise(module_name)
         self._validate_mount_path(path)
@@ -865,13 +950,42 @@ class StatesService:
         _validate_schema(effective)
         module_doc = StateModuleDocument.model_validate(module.to_document())
         await self._run_mount_validators(module_doc, declarations, effective)
-        await self._store.upsert_mount(state, module_name, path, resolved, declarations, effective_schema=effective)
+        reconcilers = [] if skip_reconcilers else self._mount_reconcilers.all()
+        if reconcilers:
+            async with self._store.begin() as conn:
+                await self._run_mount_reconcilers(
+                    reconcilers,
+                    state,
+                    module_doc,
+                    "mount",
+                    previous_declarations=None,
+                    new_declarations=declarations,
+                    options=options,
+                    conn=conn,
+                )
+                await self._store.upsert_mount(
+                    state, module_name, path, resolved, declarations, effective_schema=effective, conn=conn
+                )
+        else:
+            await self._store.upsert_mount(state, module_name, path, resolved, declarations, effective_schema=effective)
 
-    async def update_mount_declarations(self, state: str, module_name: str, declarations: dict[str, Any]) -> None:
-        """Rewrite a mount's declarations only, re-running every registered mount validator
-        and recomposing the effective schema before the write."""
+    async def update_mount_declarations(
+        self,
+        state: str,
+        module_name: str,
+        declarations: dict[str, Any],
+        *,
+        options: dict[str, Any] | None = None,
+        skip_reconcilers: bool = False,
+    ) -> None:
+        """Rewrite a mount's declarations, re-running every registered mount validator and
+        reconciler and recomposing the effective schema before the write. The reconcilers
+        and the write share ONE transaction. ``options`` is a per-operation directive
+        passed to the reconcilers, never stored. ``skip_reconcilers`` (backup restore only)
+        runs the validators but not the reconcilers."""
         self._ensure_available()
         declarations = dict(declarations or {})
+        options = dict(options or {})
         row = await self._store.get_mount(state, module_name)
         if row is None:
             raise StateNotFoundError(f"module {module_name!r} is not mounted on state {state!r}")
@@ -880,7 +994,24 @@ class StatesService:
         effective = await self._compose_effective(state, (await self._require_declaration(state))["schema"])
         module_doc = StateModuleDocument.model_validate(module.to_document())
         await self._run_mount_validators(module_doc, declarations, effective)
-        await self._store.update_mount_declarations(state, module_name, declarations, effective_schema=effective)
+        reconcilers = [] if skip_reconcilers else self._mount_reconcilers.all()
+        if reconcilers:
+            async with self._store.begin() as conn:
+                await self._run_mount_reconcilers(
+                    reconcilers,
+                    state,
+                    module_doc,
+                    "update_declarations",
+                    previous_declarations=dict(row["declarations"] or {}),
+                    new_declarations=declarations,
+                    options=options,
+                    conn=conn,
+                )
+                await self._store.update_mount_declarations(
+                    state, module_name, declarations, effective_schema=effective, conn=conn
+                )
+        else:
+            await self._store.update_mount_declarations(state, module_name, declarations, effective_schema=effective)
 
     async def unmount(self, state: str, module_name: str) -> None:
         """Remove a mount and recompose the state's effective schema (D-5 — nothing else)."""
@@ -961,6 +1092,49 @@ class StatesService:
         raises loudly (a :class:`ModuleValidationError`) to refuse the door."""
         for validator in self._mount_validators.all():
             await validator(module_doc, declarations, effective)
+
+    # -- mount reconcilers -------------------------------------------------------
+
+    def register_mount_reconciler(self, reconciler: MountReconciler) -> None:
+        self._mount_reconcilers.register(reconciler)
+
+    async def _run_mount_reconcilers(
+        self,
+        reconcilers: list[MountReconciler],
+        state: str,
+        module_doc: StateModuleDocument,
+        operation: Literal["mount", "update_declarations"],
+        *,
+        previous_declarations: dict[str, Any] | None,
+        new_declarations: dict[str, Any],
+        options: dict[str, Any],
+        conn: AsyncConnection[Any],
+    ) -> None:
+        """Run each mount reconciler AFTER the validators and BEFORE the write, each with a
+        :class:`MountReconcileContext` whose record door writes on the caller's transaction
+        ``conn`` — so a reconciler's writes commit with the mount or roll back together with
+        a refusal. A reconciler raises (a :class:`ModuleValidationError`, named with the
+        module and state) to refuse the mount, or writes resolutions through the record door
+        and returns so the mount commits with them. Any other exception propagates with the
+        module and state named — never swallowed."""
+        context = MountReconcileContext(
+            state=state,
+            module=module_doc,
+            operation=operation,
+            previous_declarations=previous_declarations,
+            new_declarations=new_declarations,
+            options=options,
+            records=_MountReconcileRecords(self, state, conn),
+        )
+        for reconciler in reconcilers:
+            try:
+                await reconciler(context)
+            except ModuleValidationError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"mount reconciler for module {module_doc.name!r} on state {state!r} failed: {exc}"
+                ) from exc
 
     # -- seeds -------------------------------------------------------------------
 
@@ -1085,6 +1259,7 @@ class StatesService:
 
 __all__ = [
     "StatesConsumerListerRegistry",
+    "StatesMountReconcilerRegistry",
     "StatesMountValidatorRegistry",
     "StatesService",
     "current_state_context",

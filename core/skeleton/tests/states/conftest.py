@@ -516,7 +516,10 @@ def _list_mounts_of_module(cur, pg, norm, params):
     cur._all = sorted(rows, key=lambda r: r["state"])
 
 
-@_on(r"SELECT state, module, path, parameters, declarations, updated_at FROM state_mounts ORDER BY state, module$")
+@_on(
+    r"SELECT state, module, path, parameters, declarations, updated_at FROM state_mounts "
+    r"ORDER BY state, module$"
+)
 def _list_all_mounts(cur, pg, norm, params):
     cur._all = sorted(pg.mounts.values(), key=lambda r: (r["state"], r["module"]))
 

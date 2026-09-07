@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.states.seeds import StateModuleSeedRegistry
     from tai42_skeleton.states.service import (
         StatesConsumerListerRegistry,
+        StatesMountReconcilerRegistry,
         StatesMountValidatorRegistry,
         StatesService,
     )
@@ -351,6 +352,10 @@ class TaiMCPLifecycleMixin(ABC):
     @property
     def _states_mount_validators(self) -> "StatesMountValidatorRegistry":
         return self._serving_core._states_mount_validators
+
+    @property
+    def _states_mount_reconcilers(self) -> "StatesMountReconcilerRegistry":
+        return self._serving_core._states_mount_reconcilers
 
     @property
     def _states_consumer_listers(self) -> "StatesConsumerListerRegistry":
@@ -905,11 +910,13 @@ class TaiMCPLifecycleMixin(ABC):
         self._rename_referee_registry.reset()
         self._seed_registry.reset()
 
-        # Reset the state store's consumer-owned registries (mount validators, consumer
-        # listers, module seeds) alongside the registries above: a reload re-imports the
-        # plugin modules (which re-run their register_mount_validator/register_consumer_lister/
-        # register_module_seed calls), so a stale validator, lister or seed never lingers.
+        # Reset the state store's consumer-owned registries (mount validators, mount
+        # reconcilers, consumer listers, module seeds) alongside the registries above: a
+        # reload re-imports the plugin modules (which re-run their register_mount_validator/
+        # register_mount_reconciler/register_consumer_lister/register_module_seed calls), so a
+        # stale validator, reconciler, lister or seed never lingers.
         self._states_mount_validators.reset()
+        self._states_mount_reconcilers.reset()
         self._states_consumer_listers.reset()
         self._states_module_seeds.reset()
 

@@ -320,3 +320,180 @@ async def test_list_and_search_page_over_full_subject_identity(
         searched.extend((r["target_name"], r["subject_key"]) for r in rows)
         cursor = _next(rows)
     assert searched == [("a", "same"), ("b", "same")]
+
+
+async def test_threaded_conn_makes_the_record_write_and_the_mount_atomic(
+    real_store: tuple[PostgresStatesStore, str],
+) -> None:
+    # F1: a write threaded onto ``begin()``'s connection joins that transaction. Here a
+    # record write and a mount write run on the shared connection and the transaction rolls
+    # back — BOTH must vanish. Were ``apply_ops`` to open its own connection (the bug), the
+    # record write would commit independently and survive the rollback.
+    store, state = real_store
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
+    await store.upsert_module(
+        state + "_m", {"kind": "state-module", "name": state + "_m", "schema": {"type": "object"}}, None
+    )
+    subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="t1")
+    await store.apply_ops(
+        state,
+        subject,
+        [{"op": "set", "path": ["n"], "value": 1}],
+        op_id=None,
+        origin=_ORIGIN,
+        validate_doc=_validate_document,
+        retention_days=30,
+    )
+
+    class _Rollback(Exception):
+        pass
+
+    async def _write_then_rollback() -> None:
+        async with store.begin() as conn:
+            await store.apply_ops(
+                state,
+                subject,
+                [{"op": "set", "path": ["n"], "value": 9}],
+                op_id=None,
+                origin=_ORIGIN,
+                validate_doc=_validate_document,
+                retention_days=30,
+                conn=conn,
+            )
+            await store.upsert_mount(state, state + "_m", ["x"], {}, {}, effective_schema=schema, conn=conn)
+            raise _Rollback
+
+    with pytest.raises(_Rollback):
+        await _write_then_rollback()
+
+    read, _seq = await store.read_record(state, subject)
+    assert read == {"n": 1}  # the threaded record write rolled back with the transaction
+    assert await store.get_mount(state, state + "_m") is None
+
+    # positive control: the same writes on the shared connection COMMIT together.
+    async with store.begin() as conn:
+        await store.apply_ops(
+            state,
+            subject,
+            [{"op": "set", "path": ["n"], "value": 9}],
+            op_id=None,
+            origin=_ORIGIN,
+            validate_doc=_validate_document,
+            retention_days=30,
+            conn=conn,
+        )
+        await store.upsert_mount(state, state + "_m", ["x"], {}, {}, effective_schema=schema, conn=conn)
+    read, _seq = await store.read_record(state, subject)
+    assert read == {"n": 9}
+    assert await store.get_mount(state, state + "_m") is not None
+
+
+async def test_a_read_on_the_threaded_conn_sees_an_in_flight_write(
+    real_store: tuple[PostgresStatesStore, str],
+) -> None:
+    # Read-your-writes: a read threaded onto ``begin()``'s connection sees that
+    # transaction's own uncommitted write; a read on a fresh connection does NOT — proving
+    # a mount reconciler reading through the handle sees its own in-flight merges.
+    store, state = real_store
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
+    subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="t1")
+    await store.apply_ops(
+        state,
+        subject,
+        [{"op": "set", "path": ["n"], "value": 1}],
+        op_id=None,
+        origin=_ORIGIN,
+        validate_doc=_validate_document,
+        retention_days=30,
+    )
+
+    async with store.begin() as conn:
+        await store.apply_ops(
+            state,
+            subject,
+            [{"op": "set", "path": ["n"], "value": 9}],
+            op_id=None,
+            origin=_ORIGIN,
+            validate_doc=_validate_document,
+            retention_days=30,
+            conn=conn,
+        )
+        on_txn = await store.read_record_view(state, subject, conn=conn)
+        off_txn = await store.read_record_view(state, subject)
+        rows_on = await store.list_subjects(state, kind=None, limit=10, cursor=None, conn=conn)
+        assert on_txn is not None
+        assert on_txn["data"] == {"n": 9}  # the transaction's own uncommitted write
+        assert off_txn is not None
+        assert off_txn["data"] == {"n": 1}  # a fresh connection cannot see it yet
+        assert len(rows_on) == 1
+
+
+async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
+    real_store: tuple[PostgresStatesStore, str],
+) -> None:
+    # A record under a ``composing`` write regime is closed with a KEYED op on the mount
+    # transaction — exactly what a reconciler's ``apply`` does — while a whole-path ``set``
+    # (what ``merge`` emits) is refused. Proves the composing close works on real Postgres.
+    from tai42_contract.states.errors import RegimeViolationError
+
+    store, state = real_store
+    module = state + "_m"
+    frag = {
+        "type": "object",
+        "properties": {
+            "entries": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"id": {"type": "integer"}, "closed": {"type": "boolean"}}},
+            }
+        },
+    }
+    await store.upsert_declaration(state, "", frag, ["thread"], "thread", None, effective_schema=frag)
+    await store.upsert_module(
+        module,
+        {
+            "kind": "state-module",
+            "name": module,
+            "schema": frag,
+            "regimes": [{"path": ["entries"], "regime": "composing"}],
+        },
+        None,
+    )
+    await store.upsert_mount(state, module, [], {}, {}, effective_schema=frag)
+    subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="led1")
+    await store.apply_ops(
+        state,
+        subject,
+        [{"op": "set_by_key", "path": ["entries"], "key_field": "id", "value": {"id": 1}}],
+        op_id=None,
+        origin=_ORIGIN,
+        validate_doc=_validate_document,
+        retention_days=30,
+    )
+
+    async with store.begin() as conn:
+        with pytest.raises(RegimeViolationError):
+            await store.apply_ops(
+                state,
+                subject,
+                [{"op": "set", "path": ["entries"], "value": [{"id": 1, "closed": True}]}],
+                op_id=None,
+                origin=_ORIGIN,
+                validate_doc=_validate_document,
+                retention_days=30,
+                conn=conn,
+            )
+    async with store.begin() as conn:
+        await store.apply_ops(
+            state,
+            subject,
+            [{"op": "set_by_key", "path": ["entries"], "key_field": "id", "value": {"id": 1, "closed": True}}],
+            op_id=None,
+            origin=_ORIGIN,
+            validate_doc=_validate_document,
+            retention_days=30,
+            conn=conn,
+        )
+    read, _seq = await store.read_record(state, subject)
+    assert read == {"entries": [{"id": 1, "closed": True}]}

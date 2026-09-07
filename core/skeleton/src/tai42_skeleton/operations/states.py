@@ -222,11 +222,13 @@ async def mount_state_module(name: str, module: str, body: dict[str, Any]) -> di
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected, ConflictError],
 )
-async def update_state_mount(name: str, module: str, declarations: dict[str, Any]) -> dict[str, Any]:
-    """Replace a mount's static declaration values, re-running the mount validators and
-    recomposing the effective schema."""
+async def update_state_mount(
+    name: str, module: str, declarations: dict[str, Any], options: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Replace a mount's static declaration values and reconcile ``options``, re-running the
+    mount validators and reconcilers and recomposing the effective schema."""
     with _states_door():
-        await _states().update_mount_declarations(name, module, declarations)
+        await _states().update_mount_declarations(name, module, declarations, options=options)
     return {"updated": True, "state": name, "module": module}
 
 

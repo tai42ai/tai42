@@ -163,6 +163,7 @@ EXPECTED_FACADE = {
     "consumers",
     "register_module_seed",
     "register_mount_validator",
+    "register_mount_reconciler",
 }
 
 
@@ -270,11 +271,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 112 (sub-protocol, member) pairs over 108 distinct names — ``store`` is exposed
+    # 113 (sub-protocol, member) pairs over 109 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 108, f"union={len(union)}"
-    assert total == 112 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 109, f"union={len(union)}"
+    assert total == 113 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_four_namespaces():

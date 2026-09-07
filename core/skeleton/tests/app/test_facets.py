@@ -622,11 +622,16 @@ async def test_states_facet_forwarding():
     assert await f.apply("s", "subj", [], op_id="o", origin="orig") == "apply-result"  # type: ignore[arg-type]
     svc.apply.assert_awaited_once_with("s", "subj", [], op_id="o", origin="orig")
     assert await f.mount("s", "m", "body") == "mount-result"  # type: ignore[arg-type]
-    svc.mount.assert_awaited_once_with("s", "m", "body")
+    svc.mount.assert_awaited_once_with("s", "m", "body", skip_reconcilers=False)
+
+    assert await f.update_mount_declarations("s", "m", {"n": 1}, options={"x": 2}) == "update_mount_declarations-result"  # type: ignore[arg-type]
+    svc.update_mount_declarations.assert_awaited_once_with("s", "m", {"n": 1}, options={"x": 2}, skip_reconcilers=False)
 
     # the register/context seams are sync forwards
     f.register_mount_validator("v")  # type: ignore[arg-type]
     svc.register_mount_validator.assert_called_once_with("v")
+    f.register_mount_reconciler("r")  # type: ignore[arg-type]
+    svc.register_mount_reconciler.assert_called_once_with("r")
     f.register_consumer_lister("consumer", "lister")  # type: ignore[arg-type]
     svc.register_consumer_lister.assert_called_once_with("consumer", "lister")
     f.register_module_seed("doc")  # type: ignore[arg-type]

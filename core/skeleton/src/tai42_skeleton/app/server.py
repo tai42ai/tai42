@@ -68,6 +68,7 @@ from tai42_skeleton.states.backup import register_states_backup_section
 from tai42_skeleton.states.seeds import StateModuleSeedRegistry
 from tai42_skeleton.states.service import (
     StatesConsumerListerRegistry,
+    StatesMountReconcilerRegistry,
     StatesMountValidatorRegistry,
     StatesService,
 )
@@ -295,10 +296,12 @@ class ServingCore:
         # re-registers cleanly. The service holds refs to the SAME registry objects, so a
         # reset+re-register is visible to it without rebuilding the service.
         self._states_mount_validators = StatesMountValidatorRegistry()
+        self._states_mount_reconcilers = StatesMountReconcilerRegistry()
         self._states_consumer_listers = StatesConsumerListerRegistry()
         self._states_module_seeds = StateModuleSeedRegistry()
         self._states_service = StatesService(
             mount_validators=self._states_mount_validators,
+            mount_reconcilers=self._states_mount_reconcilers,
             consumer_listers=self._states_consumer_listers,
             seeds=self._states_module_seeds,
         )

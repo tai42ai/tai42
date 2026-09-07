@@ -111,6 +111,7 @@ class _FakeStatesFacet:
         self.put_declarations: list[str] = []
         self.mounted: list[tuple[str, str]] = []
         self.updated_mounts: list[tuple[str, str]] = []
+        self.skip_reconcilers_seen: list[bool] = []
         self.restored_aliases: list[tuple[str, int]] = []
         self.restored_records: list[tuple[str, int]] = []
 
@@ -133,13 +134,15 @@ class _FakeStatesFacet:
     async def list_mounts(self, state, *, module):
         return [{"state": state, "module": module}] if (state, module) in self.existing_mounts else []
 
-    async def update_mount_declarations(self, state, module, declarations):
+    async def update_mount_declarations(self, state, module, declarations, *, options=None, skip_reconcilers=False):
         self.updated_mounts.append((state, module))
+        self.skip_reconcilers_seen.append(skip_reconcilers)
 
-    async def mount(self, state, module, body):
+    async def mount(self, state, module, body, *, skip_reconcilers=False):
         if module in self.fail:
             raise StatesError(f"mount {module} refused")
         self.mounted.append((state, module))
+        self.skip_reconcilers_seen.append(skip_reconcilers)
 
     async def restore_aliases(self, state, rows, *, origin):
         if state in self.fail:
@@ -200,6 +203,8 @@ async def test_import_creates_all_entities(monkeypatch: pytest.MonkeyPatch) -> N
     assert report["records"] == {"restored": 1, "failed": 0}
     assert report["errors"] == []
     assert facet.mounted == [("alerts", "m")]
+    # A restored mount is a snapshot, not a re-mount — it must NOT fire the reconcilers.
+    assert facet.skip_reconcilers_seen == [True]
     assert facet.restored_records == [("alerts", 1)]
 
 
@@ -211,6 +216,7 @@ async def test_import_updates_present_entities(monkeypatch: pytest.MonkeyPatch) 
     assert report["declarations"] == {"created": 0, "updated": 1, "failed": 0}
     assert report["mounts"] == {"created": 0, "updated": 1, "failed": 0}
     assert facet.updated_mounts == [("alerts", "m")]
+    assert facet.skip_reconcilers_seen == [True]
     assert facet.mounted == []
 
 

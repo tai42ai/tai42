@@ -52,6 +52,7 @@ if TYPE_CHECKING:
         ConsumerLister,
         ConsumerRow,
         MountBody,
+        MountReconciler,
         MountValidator,
         RecordView,
         StateContext,
@@ -821,11 +822,21 @@ class StatesFacet(_Facet):
     async def list_mounts(self, state: str | None = None, *, module: str | None = None) -> list[dict[str, Any]]:
         return await self._app._states_service.list_mounts(state, module=module)
 
-    async def mount(self, state: str, module: str, body: MountBody) -> None:
-        return await self._app._states_service.mount(state, module, body)
+    async def mount(self, state: str, module: str, body: MountBody, *, skip_reconcilers: bool = False) -> None:
+        return await self._app._states_service.mount(state, module, body, skip_reconcilers=skip_reconcilers)
 
-    async def update_mount_declarations(self, state: str, module: str, declarations: dict[str, Any]) -> None:
-        return await self._app._states_service.update_mount_declarations(state, module, declarations)
+    async def update_mount_declarations(
+        self,
+        state: str,
+        module: str,
+        declarations: dict[str, Any],
+        *,
+        options: dict[str, Any] | None = None,
+        skip_reconcilers: bool = False,
+    ) -> None:
+        return await self._app._states_service.update_mount_declarations(
+            state, module, declarations, options=options, skip_reconcilers=skip_reconcilers
+        )
 
     async def unmount(self, state: str, module: str) -> None:
         return await self._app._states_service.unmount(state, module)
@@ -911,3 +922,6 @@ class StatesFacet(_Facet):
     # -- mount validation --
     def register_mount_validator(self, validator: MountValidator) -> None:
         return self._app._states_service.register_mount_validator(validator)
+
+    def register_mount_reconciler(self, reconciler: MountReconciler) -> None:
+        return self._app._states_service.register_mount_reconciler(reconciler)

@@ -191,7 +191,7 @@ class _FakeStates:
     async def mount(self, state, module, body):
         raise ModuleValidationError(_VALIDATOR_REFUSAL)
 
-    async def update_mount_declarations(self, state, module, declarations):
+    async def update_mount_declarations(self, state, module, declarations, *, options=None):
         raise ModuleValidationError(_VALIDATOR_REFUSAL)
 
     async def put_module(self, doc, *, replace):
@@ -356,6 +356,64 @@ def test_get_mount_absent_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(NotFoundError) as excinfo:
         asyncio.run(ops.get_state_mount("alerts", "nope"))
     assert excinfo.value.status == 404
+class _RecordingMountStates:
+    """Records the mount options the door threads through."""
+
+    def __init__(self) -> None:
+        self.mount_options: dict | None = None
+        self.update_options: dict | None = None
+
+    async def mount(self, state, module, body):
+        self.mount_options = dict(body.options)
+
+    async def update_mount_declarations(self, state, module, declarations, *, options=None):
+        self.update_options = options
+
+
+def test_mount_operation_threads_options_into_the_mount_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    facet = _RecordingMountStates()
+    monkeypatch.setattr(ops, "_states", lambda: facet)
+    asyncio.run(ops.mount_state_module("alerts", "m", {"path": ["sub"], "options": {"on_orphan": "close"}}))
+    assert facet.mount_options == {"on_orphan": "close"}
+
+
+def test_update_mount_operation_threads_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    facet = _RecordingMountStates()
+    monkeypatch.setattr(ops, "_states", lambda: facet)
+    asyncio.run(ops.update_state_mount("alerts", "m", {"n": 2}, {"on_orphan": "refuse"}))
+    assert facet.update_options == {"on_orphan": "refuse"}
+
+
+def _request_with_body(method: str, path: str, body: dict[str, Any], **path_params: str) -> Request:
+    raw = json.dumps(body).encode()
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "headers": [(b"content-type", b"application/json")],
+        "query_string": b"",
+        "path_params": path_params,
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    return Request(scope, receive)
+
+
+def test_extract_mount_declarations_carries_options_only_when_present() -> None:
+    with_opts = asyncio.run(
+        router._extract_mount_declarations(
+            _request_with_body("PATCH", "/api/states/alerts/mounts/m", {"declarations": {"n": 1}, "options": {"x": 2}})
+        )
+    )
+    assert with_opts == {"declarations": {"n": 1}, "options": {"x": 2}}
+    without = asyncio.run(
+        router._extract_mount_declarations(
+            _request_with_body("PATCH", "/api/states/alerts/mounts/m", {"declarations": {"n": 1}})
+        )
+    )
+    assert without == {"declarations": {"n": 1}}
 
 
 def test_unmapped_store_error_reraises_not_500(monkeypatch: pytest.MonkeyPatch) -> None:

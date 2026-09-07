@@ -150,6 +150,30 @@ def test_update_mount_patches_the_declarations(monkeypatch: pytest.MonkeyPatch) 
     assert result.exit_code == 0, result.output
 
 
+def test_update_mount_sends_options_when_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == "/api/states/status/mounts/counters"
+        assert json.loads(request.content) == {"declarations": {"cap": 10}, "options": {"on_orphan": "close"}}
+        return data_response({"module": "counters"})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "states",
+            "update-mount",
+            "status",
+            "counters",
+            "--declarations",
+            '{"cap": 10}',
+            "--options",
+            '{"on_orphan": "close"}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
 def test_unmount_deletes_the_mount(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"

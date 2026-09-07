@@ -14,6 +14,7 @@ from __future__ import annotations
 from tai42_skeleton.states.db import STATES_COMPONENT, states_store_configured
 from tai42_skeleton.states.service import (
     StatesConsumerListerRegistry,
+    StatesMountReconcilerRegistry,
     StatesMountValidatorRegistry,
     StatesService,
     current_state_context,
@@ -25,6 +26,7 @@ __all__ = [
     "STATES_COMPONENT",
     "PostgresStatesStore",
     "StatesConsumerListerRegistry",
+    "StatesMountReconcilerRegistry",
     "StatesMountValidatorRegistry",
     "StatesService",
     "current_state_context",

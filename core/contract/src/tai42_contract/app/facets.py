@@ -58,6 +58,7 @@ from tai42_contract.states.models import (
     ConsumerLister,
     ConsumerRow,
     MountBody,
+    MountReconciler,
     MountValidator,
     RecordView,
     StateContext,
@@ -990,9 +991,13 @@ class AppStates(Protocol):
         :class:`~tai42_contract.states.MountConflictError`."""
         ...
 
-    async def update_mount_declarations(self, state: str, module: str, declarations: dict[str, Any]) -> None:
+    async def update_mount_declarations(
+        self, state: str, module: str, declarations: dict[str, Any], *, options: dict[str, Any] | None = None
+    ) -> None:
         """Replace a mount's declaration values, re-running every registered mount
-        validator and recomposing the effective schema before the write."""
+        validator and reconciler and recomposing the effective schema before the write.
+        ``options`` is a per-operation directive bag passed to the reconcilers for THIS
+        operation only, never stored or served back (``None`` is an empty bag)."""
         ...
 
     async def unmount(self, state: str, module: str) -> None:
@@ -1120,4 +1125,17 @@ class AppStates(Protocol):
         ``update_mount_declarations`` and ``put_module(replace=True)`` write, so a
         consumer's checks fire at the platform's declarations doors, the States page
         included."""
+        ...
+
+    def register_mount_reconciler(self, reconciler: MountReconciler) -> None:
+        """Register a pre-write mount reconciler.
+
+        A plugin calls this through the ``tai42_app`` handle when its module loads. The
+        reconciler receives a :class:`~tai42_contract.states.MountReconcileContext` — the
+        module, the operation, the previous and new declarations, the mount options, and a
+        record door bound to the state — inside every ``mount`` and
+        ``update_mount_declarations`` write, after the validators and before the write. It
+        RAISES to refuse the mount (naming the records the new declarations orphan) or
+        writes resolutions through the context's record door and returns, letting the mount
+        commit with those writes."""
         ...

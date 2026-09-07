@@ -159,10 +159,16 @@ def update_state_mount(
     name: Annotated[str, typer.Argument(help="The state name.")],
     module: Annotated[str, typer.Argument(help="The module name.")],
     declarations: Annotated[str, typer.Option("--declarations", help="The mount declaration values JSON object.")],
+    options: Annotated[
+        str | None,
+        typer.Option("--options", help="The reconcile options JSON object passed to mount reconcilers."),
+    ] = None,
 ) -> None:
-    """Replace a mount's static declaration values."""
+    """Replace a mount's static declaration values, with optional reconcile options."""
     ctx_obj = app_context(ctx)
-    body = {"declarations": parse_json_object(declarations, param_hint="--declarations")}
+    body: dict[str, Any] = {"declarations": parse_json_object(declarations, param_hint="--declarations")}
+    if options is not None:
+        body["options"] = parse_json_object(options, param_hint="--options")
     with ctx_obj.client() as client:
         emit_result(ctx_obj, client.patch(f"/api/states/{name}/mounts/{module}", json=body))
 

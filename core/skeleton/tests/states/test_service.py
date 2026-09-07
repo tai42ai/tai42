@@ -5,7 +5,8 @@ Postgres (the store SQL is exercised in ``test_store_integration.py``)."""
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+import copy
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
 
@@ -52,6 +53,18 @@ class FakeStatesStore:
         self.upsert_mount_calls = 0
         self.update_decl_calls = 0
         self.upsert_module_calls = 0
+
+    @asynccontextmanager
+    async def begin(self):
+        """A transaction boundary: snapshot the tables on enter, restore them on any
+        exception (a real rollback), so a reconcile + mount write commit or roll back as
+        one — the atomicity the real store gives through a shared connection."""
+        snapshot = (copy.deepcopy(self.records), copy.deepcopy(self.mounts), copy.deepcopy(self.declarations))
+        try:
+            yield object()
+        except BaseException:
+            self.records, self.mounts, self.declarations = snapshot
+            raise
 
     # declarations
     async def get_declaration(self, name):
@@ -139,7 +152,7 @@ class FakeStatesStore:
     async def list_all_mounts(self):
         return list(self.mounts.values())
 
-    async def upsert_mount(self, state, module, path, parameters, declarations, *, effective_schema):
+    async def upsert_mount(self, state, module, path, parameters, declarations, *, effective_schema, conn=None):
         self.upsert_mount_calls += 1
         self.mounts[(state, module)] = {
             "state": state,
@@ -151,7 +164,7 @@ class FakeStatesStore:
         }
         self.declarations[state]["effective_schema"] = effective_schema
 
-    async def update_mount_declarations(self, state, module, declarations, *, effective_schema):
+    async def update_mount_declarations(self, state, module, declarations, *, effective_schema, conn=None):
         self.update_decl_calls += 1
         self.mounts[(state, module)]["declarations"] = declarations
         self.declarations[state]["effective_schema"] = effective_schema
@@ -168,13 +181,13 @@ class FakeStatesStore:
         return True
 
     # records
-    async def read_record_view(self, state, subject):
+    async def read_record_view(self, state, subject, *, conn=None):
         row = self.records.get((state, subject.target_kind, subject.target_name, subject.kind, subject.key))
         if row is None:
             return None
         return {"data": row, "seq": 1.0, "canonical_subject": subject, "folded_from": []}
 
-    async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, retention_days):
+    async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, retention_days, conn=None):
         self.applied_origins.append(origin)
         # Mirror the store's D-3 chokepoint so the service-level provenance test is end to
         # end: compose the state's traced paths from its mounts + modules and stamp
@@ -238,7 +251,7 @@ class FakeStatesStore:
             "flattened": 0,
         }
 
-    async def list_subjects(self, state, *, kind, limit, cursor):
+    async def list_subjects(self, state, *, kind, limit, cursor, conn=None):
         rows = [
             {"target_kind": tk, "target_name": tn, "subject_kind": sk, "subject_key": key, "updated_at": 1.0}
             for (s, tk, tn, sk, key) in self.records

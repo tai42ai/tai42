@@ -19,6 +19,9 @@ from tai42_contract.states import (
     ConsumerRow,
     DeclarationInUseError,
     ModuleValidationError,
+    MountBody,
+    MountReconcileContext,
+    MountReconcileRecords,
     RecordView,
     StateContext,
     StateDeclaration,
@@ -313,9 +316,61 @@ def test_errors_stamp_their_transport_neutral_kind(exc: Exception, kind: ErrorKi
 
 
 # --------------------------------------------------------------------------- #
+# Mount body options + reconcile context
+# --------------------------------------------------------------------------- #
+def test_mount_body_options_default_empty_and_round_trip():
+    assert MountBody().options == {}
+    body = MountBody(path=["a"], options={"on_orphan": "close", "resolution": {"closed": True}})
+    assert body.options == {"on_orphan": "close", "resolution": {"closed": True}}
+
+
+def test_mount_body_still_refuses_an_unknown_key():
+    with pytest.raises(ValidationError):
+        MountBody(bogus=1)  # type: ignore[call-arg]
+
+
+def test_mount_reconcile_context_is_frozen_and_defaults_options():
+    class _Records:
+        async def read(self, subject: StateSubject) -> RecordView | None:  # pragma: no cover - shape only
+            return None
+
+        async def list_subjects(
+            self, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+        ) -> dict[str, object]:  # pragma: no cover
+            return {"subjects": [], "next_cursor": None}
+
+        async def merge(
+            self, subject: StateSubject, patch: dict[str, object], *, origin: WriteOrigin
+        ) -> RecordView:  # pragma: no cover
+            raise AssertionError
+
+        async def apply(
+            self, subject: StateSubject, ops: list[dict[str, object]], *, origin: WriteOrigin
+        ) -> ApplyResult:  # pragma: no cover
+            raise AssertionError
+
+    records = _Records()
+    assert isinstance(records, MountReconcileRecords)
+    doc = StateModuleDocument(name="notes", schema={"type": "object"})
+    ctx = MountReconcileContext(
+        state="profile",
+        module=doc,
+        operation="mount",
+        previous_declarations=None,
+        new_declarations={"cap": 5},
+        records=records,
+    )
+    assert ctx.options == {}
+    assert ctx.previous_declarations is None
+    assert ctx.operation == "mount"
+    with pytest.raises(AttributeError):
+        ctx.operation = "update_declarations"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
 # The facet surface
 # --------------------------------------------------------------------------- #
-def test_appstates_enumerates_its_twenty_eight_members():
+def test_appstates_enumerates_its_twenty_nine_members():
     members = protocol_members(AppStates)
     assert members == {
         "list_declarations",
@@ -346,4 +401,5 @@ def test_appstates_enumerates_its_twenty_eight_members():
         "consumers",
         "register_module_seed",
         "register_mount_validator",
+        "register_mount_reconciler",
     }

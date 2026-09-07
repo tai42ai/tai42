@@ -162,7 +162,10 @@ async def _extract_mount(request: Request) -> dict[str, Any]:
 
 async def _extract_mount_declarations(request: Request) -> dict[str, Any]:
     body = await _json_object(request)
-    return {"declarations": _require_object(body, "declarations")}
+    ctx: dict[str, Any] = {"declarations": _require_object(body, "declarations")}
+    if "options" in body:
+        ctx["options"] = _require_object(body, "options")
+    return ctx
 
 
 async def _extract_subjects_query(request: Request) -> dict[str, Any]:
