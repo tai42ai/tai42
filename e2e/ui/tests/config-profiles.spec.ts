@@ -25,7 +25,14 @@
  * (`data-testid=apply-report`) with its Hot-swapped section, not a fleet alert.
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { apiHeaders, postConfig, seedCredential, uniq, waitForReloadSettle } from './helpers';
+import {
+  apiHeaders,
+  awaitMutation,
+  postConfig,
+  seedCredential,
+  uniq,
+  waitForReloadSettle,
+} from './helpers';
 
 /** The client-side mask ProfilesTab renders for a masked value (6 bullets). */
 const MASK = '••••••';
@@ -58,7 +65,8 @@ async function openProfilesTab(page: Page): Promise<void> {
 async function applyInDialog(page: Page, dialogName: string): Promise<void> {
   const dialog = page.getByRole('dialog', { name: dialogName });
   await expect(async () => {
-    const posted = page.waitForResponse(
+    const posted = awaitMutation(
+      page,
       (r) => r.url().includes('/apply') && r.request().method() === 'POST',
     );
     await dialog.getByRole('button', { name: 'Apply profile', exact: true }).click();

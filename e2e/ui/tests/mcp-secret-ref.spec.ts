@@ -26,7 +26,14 @@
  *    (asserted through the API) and the masked chip.
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { apiHeaders, postConfig, seedCredential, uniq, waitForReloadSettle } from './helpers';
+import {
+  apiHeaders,
+  awaitMutation,
+  postConfig,
+  seedCredential,
+  uniq,
+  waitForReloadSettle,
+} from './helpers';
 
 /** The env-map key on the seeded MCP entry whose value is the secret reference. */
 const ENV_ENTRY = 'REFVAL';
@@ -117,7 +124,8 @@ async function pasteNewSecret(page: Page, request: APIRequestContext, leaf: stri
   // retriable response (never a sleep). The paste form stays open on a retriable `503`, so the
   // button is present to re-click; a `200` commits the leaf and ends the retry.
   await expect(async () => {
-    const posted = page.waitForResponse(
+    const posted = awaitMutation(
+      page,
       (r) => r.url().endsWith('/api/mcp-config/secret-env') && r.request().method() === 'POST',
     );
     await field.getByRole('button', { name: 'Use secret' }).click();
@@ -147,7 +155,8 @@ async function pasteNewSecret(page: Page, request: APIRequestContext, leaf: stri
 /** Click Save config, retrying the documented reload 503 on its own cadence. */
 async function saveMcpConfig(page: Page): Promise<void> {
   await expect(async () => {
-    const posted = page.waitForResponse(
+    const posted = awaitMutation(
+      page,
       (r) => r.url().endsWith('/api/mcp-config') && r.request().method() === 'POST',
     );
     await page.getByRole('button', { name: 'Save config' }).click();
@@ -238,7 +247,8 @@ test('pasting a new secret generates a key; the save-time sweep drops it but nev
   // "Use secret" fires the combined store-then-mark op (`POST /api/mcp-config/secret-env`),
   // which writes the generated env key then fans a reload out. Await that op's own 200 so the
   // key-count assertion below reads the store AFTER the write landed, not mid-op.
-  const secretEnvOk = page.waitForResponse(
+  const secretEnvOk = awaitMutation(
+    page,
     (r) => r.url().endsWith('/api/mcp-config/secret-env') && r.request().method() === 'POST',
   );
   await field.getByRole('button', { name: 'Use secret' }).click();

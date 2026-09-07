@@ -11,7 +11,7 @@
  * the restore below drives.
  */
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import { apiHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, awaitMutation, seedCredential, uniq } from './helpers';
 
 /** The stored env map GET /api/config/env exposes under `data.env`. */
 async function storedEnv(request: APIRequestContext): Promise<Record<string, string>> {
@@ -35,7 +35,8 @@ async function openEnvironmentTab(page: import('@playwright/test').Page): Promis
  * a raw sleep) until the reload settles and the POST returns 200. */
 async function saveEnv(page: import('@playwright/test').Page): Promise<void> {
   await expect(async () => {
-    const posted = page.waitForResponse(
+    const posted = awaitMutation(
+      page,
       (r) => r.url().includes('/api/config/env') && r.request().method() === 'POST',
     );
     await page.getByRole('button', { name: 'Save' }).click();

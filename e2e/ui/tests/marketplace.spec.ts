@@ -13,7 +13,7 @@
  * proof still polls to convergence rather than reading once.
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { apiHeaders, MP_URL, mpAdminHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, awaitMutation, MP_URL, mpAdminHeaders, seedCredential, uniq } from './helpers';
 
 test.skip(
   process.env.TAI_E2E_MARKETPLACE !== '1',
@@ -47,26 +47,38 @@ async function apiToolNames(request: APIRequestContext): Promise<string[]> {
   return body.data;
 }
 
+/** The three plugin-mutation doors, matched on the pathname so `install/preview` —
+ *  which the detail page fires alongside them — is never mistaken for the mutation. */
+const MUTATION_PATH = /\/api\/marketplace\/(install|uninstall|update)$/;
+
 /** Confirm a mounted ConfirmDialog by its title, then wait for it to close. */
 async function confirmDialog(page: Page, title: string, confirmLabel: string): Promise<void> {
   const dialog = page.getByRole('dialog', { name: title });
   await expect(dialog).toBeVisible();
+  // The dialog stays mounted until the mutation resolves, so its unmount is driven by
+  // the mutation RESPONSE — observe that response rather than polling for the unmount
+  // against a fixed budget the server-side work can outrun. Armed before the click so
+  // a fast mutation cannot land first.
+  const mutated = awaitMutation(
+    page,
+    (r) => MUTATION_PATH.test(new URL(r.url()).pathname) && r.request().method() === 'POST',
+  );
   await dialog.getByRole('button', { name: confirmLabel, exact: true }).click();
-  // The dialog stays mounted until the install/update/uninstall mutation
-  // resolves: a real pip install/uninstall plus this worker's reload and the
-  // awaited sibling-worker reload — inherently 5-10s+ server-side, beyond the
-  // global 10s expect budget.
-  await expect(dialog).toBeHidden({ timeout: 30_000 });
+  const response = await mutated;
+  expect(response.ok(), await response.text()).toBeTruthy();
+  await expect(dialog).toBeHidden();
 }
 
 test('browse, install beta via UI, then the API-pinned alpha advisory + update arc', async ({
   page,
 }) => {
-  // This arc drives several REAL pip mutations end to end — an install, an uninstall, and an
+  // This arc drives FIVE REAL pip mutations end to end — two installs, two uninstalls and an
   // update — each a pip subprocess plus this worker's reload AND the awaited sibling reload
-  // (MULTIWORKER(2), 5-10s+ server-side apiece). Their sum exceeds the default 60s test budget
-  // under CI load; budget for the whole real-registry arc rather than a single mutation.
-  test.setTimeout(180_000);
+  // (MULTIWORKER(2)), measured at 12s to 30s server-side apiece on a loaded CI runner. Their
+  // sum alone approaches 150s, before the browse/facet steps and the two advisory
+  // reload-to-convergence loops; budget for the whole real-registry arc rather than a single
+  // mutation.
+  test.setTimeout(300_000);
   await seedCredential(page);
 
   // 1. Browse renders the three seeded listings.
