@@ -148,6 +148,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 xfail_strict = true
+markers = [
+    "integration: exercises a real external service (e.g. a live Postgres); skips VISIBLY with a clear reason when the service is not configured, never a silent skip",
+]
 # Turn warnings into errors so a real defect that only surfaces as a warning
 # (e.g. a missing await -> "coroutine was never awaited") fails the suite loudly
 # instead of passing green.
