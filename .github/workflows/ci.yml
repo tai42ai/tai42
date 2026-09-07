@@ -132,7 +132,7 @@ jobs:
           # the services-backed e2e job. Any other value -> full pytest with cov.
           read -r -d '' TABLE <<'EOF' || true
           contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov
-          kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres|arq,celery,rq|cov
+          kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres|arq,celery,rq|cov
           cli|core/cli|tai42-cli||--extra dev|arq,celery,rq|cov
           skeleton|core/skeleton|tai42-skeleton||--extra dev|arq,celery,rq|cov
           accounts-oidc|plugins/accounts-oidc|tai42-accounts-oidc|tai42_accounts_oidc|--extra dev|arq|cov
@@ -241,7 +241,9 @@ jobs:
       # they hold the skeleton's 96% coverage floor. Without a live database they skip
       # and the floor is missed. A cheap alpine service — idle for every other member —
       # lets the skeleton row's real-Postgres pass reach them. Empty on every CI runner
-      # image restart, so each job gets a fresh, uncontended database.
+      # image restart, so each job gets a fresh, uncontended database. The connector
+      # token store keeps a Redis cache beside its Postgres rows, so its integration
+      # tests need the Redis service too.
       postgres:
         image: postgres:16-alpine
         env:
@@ -251,6 +253,12 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
           --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -276,9 +284,9 @@ jobs:
         # The e2e member's suite is infra-bound; here it is collect-only (imports +
         # plugin registration, no live Redis/Postgres). Its live pytest is the
         # services-backed e2e job. Every other member runs the full suite with cov.
-        # The skeleton member is handled by the two-pass step below (it needs the
-        # real-Postgres integration suite for its floor).
-        if: ${{ matrix.dir != 'core/skeleton' }}
+        # The skeleton, kit, and accounts-postgres members are handled by the two-pass
+        # steps below (each needs its real-Postgres integration suite for its floor).
+        if: ${{ matrix.dir != 'core/skeleton' && matrix.dir != 'core/kit' && matrix.dir != 'plugins/accounts-postgres' }}
         working-directory: ${{ matrix.dir }}
         run: >-
           uv run --no-sync pytest ${{ matrix.pytest_mode == 'collect' && '--collect-only -q' || '--cov --cov-report=term-missing' }}
@@ -301,6 +309,45 @@ jobs:
           uv run --no-sync pytest -m "not integration" --cov --cov-report= --cov-fail-under=0
           TAI42_SKELETON_REAL_PG=1 \
           TAI_DATABASE_DEFAULT_PG_HOST=localhost \
+          TAI_DATABASE_DEFAULT_PG_PASSWORD=postgres \
+          CONNECTOR_STORE_REDIS_URL=redis://localhost:6379 \
+            uv run --no-sync pytest -m integration --cov --cov-append --cov-report=term-missing
+      - name: Pytest (kit — offline suite + real-Postgres integration suite)
+        # The Postgres client pool, the LangGraph postgres checkpoint saver, and the
+        # LangGraph postgres store are exercised against a real Postgres by the opt-in
+        # ``integration`` suite (their SQL and driver behavior cannot be faked); that
+        # coverage carries part of the kit floor. The rest of the suite runs OFFLINE and
+        # must NOT see a configured database. So the two halves run as two passes with
+        # coverage accumulated (--cov-append); the final report applies the package's
+        # fail_under against the COMBINED data. The service starts each job empty, and the
+        # integration fixtures apply their schema and use per-run unique keys.
+        if: ${{ matrix.dir == 'core/kit' }}
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync pytest -m "not integration" --cov --cov-report= --cov-fail-under=0
+          TAI42_KIT_REAL_PG=1 \
+          TAI_DATABASE_DEFAULT_PG_HOST=localhost \
+          TAI_DATABASE_DEFAULT_PG_PASSWORD=postgres \
+            uv run --no-sync pytest -m integration --cov --cov-append --cov-report=term-missing
+      - name: Pytest (accounts-postgres — offline suite + real-Postgres integration suite)
+        # The stores' named-constraint split, advisory-locked bootstrap/last-admin guard,
+        # session sweeping, invite consumption, and backup round-trip are exercised against
+        # a real Postgres by the opt-in ``integration`` suite (their SQL cannot be faked
+        # without re-implementing Postgres). The rest of the suite runs OFFLINE against the
+        # scripted-cursor fakes, which alone carry the package's coverage floor. The two
+        # halves run as two passes with coverage accumulated (--cov-append); the final
+        # report applies the package's fail_under against the COMBINED data. The service
+        # starts each job empty; the integration fixtures apply the plugin's own shipped
+        # migration chain through the kit runner and TRUNCATE the account tables per test.
+        if: ${{ matrix.dir == 'plugins/accounts-postgres' }}
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync pytest -m "not integration" --cov --cov-report= --cov-fail-under=0
+          TAI42_ACCOUNTS_REAL_PG=1 \
+          TAI_DATABASE_DEFAULT_PG_HOST=localhost \
+          TAI_DATABASE_DEFAULT_PG_DB=postgres \
           TAI_DATABASE_DEFAULT_PG_PASSWORD=postgres \
             uv run --no-sync pytest -m integration --cov --cov-append --cov-report=term-missing
       - name: Packaged descriptor
