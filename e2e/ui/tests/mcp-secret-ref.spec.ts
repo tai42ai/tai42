@@ -132,6 +132,10 @@ async function pasteNewSecret(page: Page, request: APIRequestContext, leaf: stri
     const response = await posted;
     expect(response.status(), await response.text()).toBe(200);
   }).toPass({ timeout: 45_000 });
+  // The op's 200 is the SERVER's half. The editor shuts its Save door for the whole op —
+  // draft, provenance record and all — so the door reopening is the observable that the
+  // paste has fully landed in the UI and its generated key is sweep-eligible.
+  await expect(page.getByRole('button', { name: 'Save config' })).toBeEnabled({ timeout: 60_000 });
   // Drain the op's reload so GET /api/config/env answers 200 (not a mid-reload 503) below.
   await waitForReloadSettle(request);
   // The op generated exactly one new env key (a transiently reduced mid-swap band cannot
@@ -254,6 +258,9 @@ test('pasting a new secret generates a key; the save-time sweep drops it but nev
   await field.getByRole('button', { name: 'Use secret' }).click();
   const secretEnvRes = await secretEnvOk;
   expect(secretEnvRes.status(), await secretEnvRes.text()).toBe(200);
+  // The editor shuts its Save door for the whole op; the door reopening is the observable
+  // that the paste landed in the UI too, not just on the server.
+  await expect(page.getByRole('button', { name: 'Save config' })).toBeEnabled({ timeout: 60_000 });
   // Drain the op's reload so GET /api/config/env answers 200 (not a mid-reload 503) below.
   await waitForReloadSettle(request);
 
