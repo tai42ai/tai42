@@ -291,9 +291,9 @@ jobs:
         # tests that fake no such seam, which hangs them. So the two halves run as two
         # passes with coverage accumulated (--cov-append); the final report applies the
         # package's fail_under against the COMBINED data. The service starts each job
-        # empty, so ``CREATE TABLE IF NOT EXISTS`` in the integration fixtures lands the
-        # current schema and per-run unique ``state``/token keys keep the shared tables
-        # collision-free.
+        # empty; the integration fixtures apply the shipped schema chain through the
+        # migration runner, and per-run unique ``state``/token keys keep the shared
+        # tables collision-free.
         if: ${{ matrix.dir == 'core/skeleton' }}
         working-directory: ${{ matrix.dir }}
         run: |
