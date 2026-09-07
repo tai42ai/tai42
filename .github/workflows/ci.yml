@@ -235,6 +235,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.check_matrix) }}
+    services:
+      # The skeleton member carries OPT-IN real-Postgres tests (TAI42_SKELETON_REAL_PG)
+      # for the states/versioning/tool_meta/backup stores whose SQL cannot be faked;
+      # they hold the skeleton's 96% coverage floor. Without a live database they skip
+      # and the floor is missed. A cheap alpine service — idle for every other member —
+      # lets the skeleton row's real-Postgres pass reach them. Empty on every CI runner
+      # image restart, so each job gets a fresh, uncontended database.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -259,9 +276,33 @@ jobs:
         # The e2e member's suite is infra-bound; here it is collect-only (imports +
         # plugin registration, no live Redis/Postgres). Its live pytest is the
         # services-backed e2e job. Every other member runs the full suite with cov.
+        # The skeleton member is handled by the two-pass step below (it needs the
+        # real-Postgres integration suite for its floor).
+        if: ${{ matrix.dir != 'core/skeleton' }}
         working-directory: ${{ matrix.dir }}
         run: >-
           uv run --no-sync pytest ${{ matrix.pytest_mode == 'collect' && '--collect-only -q' || '--cov --cov-report=term-missing' }}
+      - name: Pytest (skeleton — offline suite + real-Postgres integration suite)
+        # The states/versioning/tool_meta/backup stores are exercised against a real
+        # Postgres by the opt-in ``integration`` suite (their SQL — jsonb @>, row locks,
+        # audit triggers — cannot be faked); that coverage is what carries the 96% floor.
+        # The rest of the suite runs OFFLINE and must NOT see a configured database: a
+        # configured default database turns on DB-backed run-recording inside plain unit
+        # tests that fake no such seam, which hangs them. So the two halves run as two
+        # passes with coverage accumulated (--cov-append); the final report applies the
+        # package's fail_under against the COMBINED data. The service starts each job
+        # empty, so ``CREATE TABLE IF NOT EXISTS`` in the integration fixtures lands the
+        # current schema and per-run unique ``state``/token keys keep the shared tables
+        # collision-free.
+        if: ${{ matrix.dir == 'core/skeleton' }}
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync pytest -m "not integration" --cov --cov-report= --cov-fail-under=0
+          TAI42_SKELETON_REAL_PG=1 \
+          TAI_DATABASE_DEFAULT_PG_HOST=localhost \
+          TAI_DATABASE_DEFAULT_PG_PASSWORD=postgres \
+            uv run --no-sync pytest -m integration --cov --cov-append --cov-report=term-missing
       - name: Packaged descriptor
         # Plugins only: the wheel is what users install, so build it from root and
         # assert the descriptor travels inside it at the import path the loader
