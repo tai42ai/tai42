@@ -23,7 +23,9 @@ breaking change through a mislabelled minor.
 Breaking changes are ``griffe``'s own classification (public objects removed,
 required parameters added, parameter kinds/types narrowed, and so on) plus the
 removal of a whole shipped top-level module. A module that is new at the tag is
-additive and skipped. A doc-only change to a known decorator/constructor call —
+additive and skipped. A module attribute bound to a ``logging.getLogger(...)`` call is
+the module's own log channel, never API surface: its removal or rebinding is not a
+breaking change. A doc-only change to a known decorator/constructor call —
 a pydantic ``Field(...)`` or a ``typer`` ``Typer``/``Option``/``Argument`` —
 editing only that callee's documentation keywords (``help``/``description``/
 ``title``/``examples`` and kin) is documentation metadata, not API surface, so it
@@ -422,6 +424,14 @@ def _is_additive_collection_growth(old_expr: str, new_expr: str) -> bool:
     return False
 
 
+_LOGGER_BINDING = re.compile(r"^(logging\.)?getLogger\(")
+
+
+def _is_logger_binding(value: str | None) -> bool:
+    """True when an attribute's bound expression is a ``logging.getLogger(...)`` call."""
+    return value is not None and _LOGGER_BINDING.match(value.strip()) is not None
+
+
 def _breakages(module: str, ref: str, search: str) -> list[str]:
     # griffe is the heavy release-only dependency (api-gate group); import it
     # lazily so the pure decision helpers can be imported and unit-tested in an
@@ -432,6 +442,8 @@ def _breakages(module: str, ref: str, search: str) -> list[str]:
     new = griffe.load(module, search_paths=[search])
     explained: list[str] = []
     for b in griffe.find_breaking_changes(old, new):
+        if isinstance(b.obj, griffe.Attribute) and _is_logger_binding(str(b.obj.value)):
+            continue
         if b.kind is griffe.BreakageKind.ATTRIBUTE_CHANGED_VALUE and (
             _is_additive_collection_growth(str(b.old_value), str(b.new_value))
             or _is_doc_only_call_change(str(b.old_value), str(b.new_value))

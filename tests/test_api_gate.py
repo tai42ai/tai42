@@ -520,6 +520,34 @@ def test_end_to_end_breaking_removal(
         )
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("logging.getLogger(__name__)", True),
+        ("getLogger('x')", True),
+        ("  logging.getLogger(__name__)  ", True),
+        ("Logger('x')", False),
+        ("logging.getLogger", False),
+        ("1", False),
+        (None, False),
+    ],
+)
+def test_is_logger_binding(value: str | None, expected: bool):
+    assert api_gate._is_logger_binding(value) is expected
+
+
+def test_end_to_end_module_logger_removal_passes_at_minor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    pytest.importorskip("griffe")
+    _build_release_repo(
+        tmp_path,
+        mode="label-honesty",
+        old_version="1.0.0",
+        old_body="import logging\n\nlogger = logging.getLogger(__name__)\n\n" + _KEEP,
+        new_body=_KEEP,  # the module log channel goes; the API stays
+    )
+    _run_main(monkeypatch, tmp_path, package="widget", member_dir="core/widget", version="1.1.0")
+
+
 def test_end_to_end_additive_change_passes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     pytest.importorskip("griffe")
     _build_release_repo(
