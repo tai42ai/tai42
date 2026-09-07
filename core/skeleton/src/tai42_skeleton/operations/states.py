@@ -22,11 +22,14 @@ from typing import Any
 
 from pydantic import ValidationError
 from tai42_contract.states import (
+    ApplyResult,
     MountBody,
+    RecordView,
     StateDeclaration,
     StateModuleDocument,
     StateSubject,
     WriteOrigin,
+    WritesPage,
 )
 from tai42_contract.states.errors import (
     DeclarationInUseError,
@@ -54,6 +57,24 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     ValidationRejected,
     operation,
+)
+from tai42_skeleton.operations.response_models_group_states import (
+    EraseAck,
+    FoldReport,
+    MountAck,
+    MountUpdateAck,
+    PruneResult,
+    ServedStateView,
+    StateConsumerList,
+    StateDeclarationList,
+    StateDeleteResult,
+    StateModuleCatalog,
+    StateMountList,
+    StateRecordOrNull,
+    StateSearchPage,
+    StateStats,
+    StateSubjectsPage,
+    UnmountAck,
 )
 
 # The machine-readable code the states OFF refusal carries; the message is the store's own.
@@ -114,7 +135,12 @@ def _subject(target_kind: str, target_name: str, kind: str, key: str) -> StateSu
 # --------------------------------------------------------------------------- #
 # Declarations                                                                 #
 # --------------------------------------------------------------------------- #
-@operation(summary="List declared states", tags=["states"], errors=[NotSupportedError])
+@operation(
+    summary="List declared states",
+    tags=["states"],
+    errors=[NotSupportedError],
+    response_model=StateDeclarationList,
+)
 async def list_states() -> list[dict[str, Any]]:
     """Every declared state, base + composed effective schema included, each with its
     ``updated_at`` timestamp (the Updated column)."""
@@ -124,7 +150,12 @@ async def list_states() -> list[dict[str, Any]]:
         return [decl.model_dump(mode="json") for decl in await _states().list_declarations()]
 
 
-@operation(summary="Get a state", tags=["states"], errors=[NotSupportedError, NotFoundError])
+@operation(
+    summary="Get a state",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError],
+    response_model=ServedStateView,
+)
 async def get_state(name: str) -> dict[str, Any]:
     """One state's served declaration: base ``schema``, ``effective_schema``,
     ``subject_kinds``, ``default_subject_kind``, its ``mounts``, computed ``regimes`` and
@@ -138,6 +169,7 @@ async def get_state(name: str) -> dict[str, Any]:
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, ValidationRejected, ConflictError, NotFoundError],
+    response_model=StateDeclaration,
 )
 async def put_state(name: str, declaration: dict[str, Any]) -> dict[str, Any]:
     """Upsert a state declaration; the ``name`` is taken from the path. With records present
@@ -162,6 +194,7 @@ async def put_state(name: str, declaration: dict[str, Any]) -> dict[str, Any]:
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ConflictError],
+    response_model=StateDeleteResult,
 )
 async def delete_state(name: str) -> dict[str, Any]:
     """Delete a state with its records, mounts and aliases; refused while a consumer binds it."""
@@ -170,7 +203,12 @@ async def delete_state(name: str) -> dict[str, Any]:
     return {"deleted": True, "name": name}
 
 
-@operation(summary="A state's record statistics", tags=["states"], errors=[NotSupportedError, NotFoundError])
+@operation(
+    summary="A state's record statistics",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError],
+    response_model=StateStats,
+)
 async def state_stats(name: str) -> dict[str, Any]:
     """Record counts for a state — the total and the per-subject-kind breakdown."""
     with _states_door():
@@ -180,7 +218,12 @@ async def state_stats(name: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Mounts                                                                       #
 # --------------------------------------------------------------------------- #
-@operation(summary="List a state's mounts", tags=["states"], errors=[NotSupportedError, NotFoundError])
+@operation(
+    summary="List a state's mounts",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError],
+    response_model=StateMountList,
+)
 async def list_state_mounts(name: str) -> list[dict[str, Any]]:
     """Every module mounted on the state — its path, resolved parameters and declarations."""
     with _states_door():
@@ -203,6 +246,7 @@ async def get_state_mount(name: str, module: str) -> dict[str, Any]:
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected, ConflictError],
+    response_model=MountAck,
 )
 async def mount_state_module(name: str, module: str, body: dict[str, Any]) -> dict[str, Any]:
     """Mount ``module`` on the state at the body's ``path`` with its parameters and static
@@ -221,6 +265,7 @@ async def mount_state_module(name: str, module: str, body: dict[str, Any]) -> di
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected, ConflictError],
+    response_model=MountUpdateAck,
 )
 async def update_state_mount(
     name: str, module: str, declarations: dict[str, Any], options: dict[str, Any] | None = None
@@ -237,6 +282,7 @@ async def update_state_mount(
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError],
+    response_model=UnmountAck,
 )
 async def unmount_state_module(name: str, module: str) -> dict[str, Any]:
     """Remove a module's mount and recompose the effective schema — nothing else."""
@@ -248,7 +294,12 @@ async def unmount_state_module(name: str, module: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Subjects + records                                                           #
 # --------------------------------------------------------------------------- #
-@operation(summary="List a state's subjects", tags=["states"], errors=[NotSupportedError, NotFoundError])
+@operation(
+    summary="List a state's subjects",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError],
+    response_model=StateSubjectsPage,
+)
 async def list_state_subjects(
     name: str, kind: str | None = None, limit: int | None = None, cursor: str | None = None
 ) -> dict[str, Any]:
@@ -257,7 +308,12 @@ async def list_state_subjects(
         return await _states().list_subjects(name, kind=kind, limit=limit, cursor=cursor)
 
 
-@operation(summary="Search a state's records", tags=["states"], errors=[NotSupportedError, NotFoundError])
+@operation(
+    summary="Search a state's records",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError],
+    response_model=StateSearchPage,
+)
 async def search_state_records(
     name: str, filters: dict[str, Any], limit: int | None = None, cursor: str | None = None
 ) -> dict[str, Any]:
@@ -270,6 +326,7 @@ async def search_state_records(
     summary="Read a subject's record",
     tags=["states"],
     errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    response_model=StateRecordOrNull,
 )
 async def read_state_record(
     name: str, target_kind: str, target_name: str, kind: str, key: str
@@ -289,6 +346,7 @@ async def read_state_record(
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    response_model=RecordView,
 )
 async def replace_state_record(
     name: str, target_kind: str, target_name: str, kind: str, key: str, data: dict[str, Any]
@@ -305,6 +363,7 @@ async def replace_state_record(
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    response_model=RecordView,
 )
 async def merge_state_record(
     name: str, target_kind: str, target_name: str, kind: str, key: str, patch: dict[str, Any]
@@ -321,6 +380,7 @@ async def merge_state_record(
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    response_model=ApplyResult,
 )
 async def apply_state_record(
     name: str,
@@ -344,6 +404,7 @@ async def apply_state_record(
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    response_model=EraseAck,
 )
 async def erase_state_record(name: str, target_kind: str, target_name: str, kind: str, key: str) -> dict[str, Any]:
     """Erase a subject's record; a fresh read then returns ``null``."""
@@ -358,6 +419,7 @@ async def erase_state_record(name: str, target_kind: str, target_name: str, kind
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected, ConflictError],
+    response_model=FoldReport,
 )
 async def fold_state_record(
     name: str,
@@ -383,6 +445,7 @@ async def fold_state_record(
     summary="A subject's write audit trail",
     tags=["states"],
     errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    response_model=WritesPage,
 )
 async def list_state_writes(
     name: str,
@@ -402,7 +465,12 @@ async def list_state_writes(
     return page.model_dump(mode="json")
 
 
-@operation(summary="A state's consumers", tags=["states"], errors=[NotSupportedError, NotFoundError])
+@operation(
+    summary="A state's consumers",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError],
+    response_model=StateConsumerList,
+)
 async def state_consumers(name: str) -> list[dict[str, Any]]:
     """Everything that binds the state — flows, hooks, schedules, agents — as the Consumers
     tab reads it; a consumer family the deployment cannot list is a labelled, muted row."""
@@ -413,7 +481,12 @@ async def state_consumers(name: str) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Modules (the sibling collection) + retention                                #
 # --------------------------------------------------------------------------- #
-@operation(summary="List state modules", tags=["states"], errors=[NotSupportedError])
+@operation(
+    summary="List state modules",
+    tags=["states"],
+    errors=[NotSupportedError],
+    response_model=StateModuleCatalog,
+)
 async def list_state_modules() -> list[dict[str, Any]]:
     """Every platform state-module document (the reusable schema fragments), each with the
     catalog columns ``mounted_on`` (the number of states it is mounted on) and
@@ -422,7 +495,12 @@ async def list_state_modules() -> list[dict[str, Any]]:
         return await _states().list_modules_catalog()
 
 
-@operation(summary="Get a state module", tags=["states"], errors=[NotSupportedError, NotFoundError])
+@operation(
+    summary="Get a state module",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError],
+    response_model=StateModuleDocument,
+)
 async def get_state_module(name: str) -> dict[str, Any]:
     """One state-module document by name."""
     with _states_door():
@@ -437,6 +515,7 @@ async def get_state_module(name: str) -> dict[str, Any]:
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, ValidationRejected, ConflictError],
+    response_model=StateModuleDocument,
 )
 async def put_state_module(name: str, document: dict[str, Any], replace: bool = False) -> dict[str, Any]:
     """Upload a state-module document; the ``name`` is taken from the path. An existing name
@@ -456,6 +535,7 @@ async def put_state_module(name: str, document: dict[str, Any], replace: bool = 
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ConflictError],
+    response_model=StateDeleteResult,
 )
 async def delete_state_module(name: str) -> dict[str, Any]:
     """Delete a state-module document; refused while it is still mounted."""
@@ -472,6 +552,7 @@ async def delete_state_module(name: str) -> dict[str, Any]:
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError],
+    response_model=PruneResult,
 )
 async def prune_state_retention() -> dict[str, Any]:
     """Delete every record past its state's ``retention_days`` horizon; returns the per-state
