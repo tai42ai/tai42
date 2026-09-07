@@ -277,6 +277,30 @@ def test_create_store_exists_maps_409(pg, monkeypatch) -> None:
     asyncio.run(run())
 
 
+def test_create_of_a_store_present_name_keeps_its_overlay_and_409s(pg) -> None:
+    """The create door on a name that is already a live preset in the STORE but not in
+    THIS worker's registry — a sibling worker's create or a boot seed applier, neither of
+    which fans out here. The locked claim conflicts on the stored row BEFORE the
+    clean-slate overlay cascade, so the existing preset keeps its display metadata."""
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            await _create("p", fixed_kwargs={"units": "v"})
+            await instance.app.tool_meta.store.merge_meta("p", patch={"display_name": "Kept"})
+            # Model the sibling's create: the store row stays, this worker's registration
+            # (what the door's local pre-checks read) does not.
+            await instance.app.preset_manager.remove("p")
+
+            with pytest.raises(ConflictError, match="already exists"):
+                await _create("p", fixed_kwargs={"units": "v"})
+
+            meta = await instance.app.tool_meta.store.get_meta("p")
+            assert meta is not None
+            assert meta.display_name == "Kept"
+
+    asyncio.run(run())
+
+
 def test_create_register_exists_race_rolls_back_and_409(pg, monkeypatch) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):

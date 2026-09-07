@@ -53,10 +53,12 @@ from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.connectors.store.catalog_store as catalog_store
 import tai42_skeleton.db.boot_gate as boot_gate
+import tai42_skeleton.db.locks as db_locks
 import tai42_skeleton.states.db as states_db
 import tai42_skeleton.tool_meta.store as tool_meta_store
 import tai42_skeleton.versioning.store as versioning_store
 
+from ._fakes.advisory_locks import FakeAdvisoryLocks
 from ._fakes.interactions_redis import FakeRedis
 from .tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
 from .versioning.conftest import FakeVersioningPg
@@ -155,6 +157,25 @@ def _offline_versioned_store(monkeypatch: pytest.MonkeyPatch) -> None:
         yield fake
 
     monkeypatch.setattr(versioning_store, "client_ctx", fake_client_ctx)
+
+
+@pytest.fixture(autouse=True)
+def _offline_advisory_locks(monkeypatch: pytest.MonkeyPatch) -> FakeAdvisoryLocks:
+    """A preset create claims its name under the fleet-wide advisory lock, which opens a
+    Postgres of its OWN (a dedicated one-shot pool, not the store's), so an offline test
+    that drives a create with the database configured would reach a real Postgres it never
+    provided. Point the lock's ``client_ctx`` seam at in-process locks with the same
+    per-key exclusion; a suite that asserts contention re-patches this seam with its own
+    fresh fake, and the real-Postgres suites restore the genuine one.
+
+    The lock resolves its DSN before it dials, so a host is needed even for the fake — set
+    a non-dialable one only when the environment names none, leaving a real-Postgres run's
+    own host alone."""
+    if not os.environ.get("TAI_DATABASE_DEFAULT_PG_HOST"):
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "offline.invalid")
+    locks = FakeAdvisoryLocks()
+    monkeypatch.setattr(db_locks, "client_ctx", locks.client_ctx)
+    return locks
 
 
 @pytest.fixture(autouse=True)

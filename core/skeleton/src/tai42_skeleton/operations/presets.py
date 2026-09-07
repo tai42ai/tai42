@@ -67,10 +67,10 @@ logger = logging.getLogger(__name__)
 _NOT_CONFIGURED_CODE = "versioning-not-configured"
 _NOT_CONFIGURED_NOUN = "versioned-document store"
 
-# The advisory-lock namespace the declared-preset-seed applier locks seed names in
-# ("pset" as ASCII bytes, a positive int32). A namespace of its own keeps these locks
-# from excluding another feature that happens to lock the same name.
-_SEED_LOCK_NAMESPACE = 0x70736574
+# The advisory-lock namespace every preset create claims its NAME in ("pset" as ASCII
+# bytes, a positive int32). A namespace of its own keeps these locks from excluding
+# another feature that happens to lock the same name.
+_PRESET_LOCK_NAMESPACE = 0x70736574
 
 
 # -- request models (the emitted spec's requestBody schemas) -----------------
@@ -819,6 +819,87 @@ async def list_presets() -> list[dict[str, Any]]:
 # -- create ------------------------------------------------------------------
 
 
+async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None) -> tuple[Any, dict[str, int] | None]:
+    """Claim *name* for a new preset under the fleet-wide per-name advisory lock: the
+    store-side existence check, the overlay clean slate, the store write and the local
+    register (rolled fully back on a register failure) are ONE step no other process can
+    interleave with. Returns the store record plus the fan-out census pinned before the
+    first write, which the caller publishes with the lock already released.
+
+    The create path acquires that lock here and nowhere else, and nothing under it creates
+    a preset, so a create takes it exactly once: the lock runs on a connection of its own,
+    so a nested acquire would wait on a lock its own caller holds.
+    """
+    async with advisory_name_lock(_PRESET_LOCK_NAMESPACE, name):
+        # The name's existence is re-read from the STORE here: the pre-checks above read
+        # THIS worker's registry, which a sibling process's create never reaches. An
+        # existing preset conflicts before the clean-slate cascade below, so a create of
+        # a name already taken never touches that preset's tool_meta overlay.
+        try:
+            await instance.app.presets.store.get_preset(name)
+        except PresetNotFoundError:
+            pass
+        else:
+            raise ConflictError(f"preset {name!r} already exists")
+
+        # Pin the fleet BEFORE the first write below: the cascade, the store write and
+        # the register are all this door's local apply, and the fan-out censuses only
+        # when it publishes, on the far side of every one of them.
+        census = await _census_at_start(_RELOAD_OP)
+
+        # Clean slate: a dangling overlay row for this name (left by a DIFFERENT tool
+        # that once held it, kept across a plugin uninstall) must never be inherited by
+        # the fresh preset, so drop it before the claim. A no-op when no row exists; and
+        # if the create below rolls back, the deleted ghost belonged to a vanished tool
+        # and needs no restoring.
+        await instance.app.tool_meta.store.delete_meta(name)
+
+        # The pre-checks already ran, so the store write is safe. Persist THEN register;
+        # if register fails, roll the store row fully back through the generic HARD
+        # delete so no stored-but-unregistered preset survives.
+        spec = PresetSpec(
+            name=name, description=body.description, base_tool=body.base_tool, fixed_kwargs=body.fixed_kwargs
+        )
+        try:
+            record = await instance.app.presets.store.create_preset(
+                spec,
+                extensions=body.extensions,
+                output_schema=body.output_schema,
+                input_schema=body.input_schema,
+                tags=tags,
+            )
+        except PresetNameConflictError as exc:
+            raise ConflictError(f"preset name {name!r} collides with an existing tool") from exc
+        except PresetExistsError as exc:
+            raise ConflictError(f"preset {name!r} already exists") from exc
+        try:
+            await instance.app.preset_manager.register(
+                name,
+                body.base_tool,
+                body.fixed_kwargs,
+                body.extensions,
+                body.description,
+                body.output_schema,
+                body.input_schema,
+                version=record.active_version,
+            )
+        except Exception as register_exc:
+            try:
+                await instance.app.versioning.store.delete("preset", name)
+            except Exception as delete_exc:
+                logger.exception("failed to roll back store row for preset %r after a register failure", name)
+                raise delete_exc from register_exc
+            # A typed clobber error (the name was taken by a foreign tool in the window
+            # between the pre-checks and the register) maps to 409; any other register
+            # failure re-raises loudly.
+            if isinstance(register_exc, PresetExistsError):
+                raise ConflictError(f"preset {name!r} already exists") from register_exc
+            if isinstance(register_exc, PresetNameConflictError):
+                raise ConflictError(f"preset name {name!r} collides with an existing tool") from register_exc
+            raise register_exc
+    return record, census
+
+
 async def _create_preset_core(
     name: str,
     base_tool: str,
@@ -833,9 +914,13 @@ async def _create_preset_core(
 ) -> tuple[Any, FleetResult]:
     """The reusable create path shared by the create door and the seed applier: ordered
     name pre-checks → base rule → agent-authoring → combo/schema/bind + input-schema +
-    write-validator validation → (optional) registration-tier fence → store write THEN
-    register (rolling the row fully back on a register failure) → one ``list_changed`` →
-    the bus rebind fan-out. Returns the store record + the per-worker fleet report.
+    write-validator validation → (optional) registration-tier fence → the locked name
+    claim (:func:`_claim_preset_name`: store write THEN register) → one ``list_changed``
+    → the bus rebind fan-out. Returns the store record + the per-worker fleet report.
+
+    EVERY door that creates a preset flows through here — the HTTP create operation, the
+    in-process facet ``instance.app.presets.create`` and the declared-seed applier — so
+    the fleet-wide per-name serialization the claim holds covers all three.
 
     ``enforce_tier`` runs the caller-authorization fence (create's door behavior); the
     seed applier passes ``False`` — a platform seed has no caller to fence and runs the
@@ -931,58 +1016,12 @@ async def _create_preset_core(
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
 
-    # Clean slate: a dangling overlay row for this name (left by a DIFFERENT tool that
-    # once held it, kept across a plugin uninstall) must never be inherited by the
-    # fresh preset, so drop it before the claim. A no-op when no row exists; and if the
-    # create below rolls back, the deleted ghost belonged to a vanished tool and needs
-    # no restoring. Guarded on the overlay store: with tool_meta OFF the cascade is a
-    # no-op rather than a 500 opening an absent Postgres.
-    # Pin the fleet BEFORE the first write below: the cascade, the store write and
-    # the register are all this door's local apply, and the fan-out censuses only
-    # when it publishes, on the far side of every one of them.
-    census = await _census_at_start(_RELOAD_OP)
-
-    if component_store_configured(SKELETON_COMPONENT):
-        await instance.app.tool_meta.store.delete_meta(name)
-
-    # The pre-checks already ran, so the store write is safe. Persist THEN register;
-    # if register fails, roll the store row fully back through the generic HARD
-    # delete so no stored-but-unregistered preset survives.
-    spec = PresetSpec(name=name, description=description, base_tool=base_tool, fixed_kwargs=fixed_kwargs)
-    try:
-        record = await instance.app.presets.store.create_preset(
-            spec, extensions=extensions, output_schema=output_schema, input_schema=input_schema, tags=tags
-        )
-    except PresetNameConflictError as exc:
-        raise ConflictError(f"preset name {name!r} collides with an existing tool") from exc
-    except PresetExistsError as exc:
-        raise ConflictError(f"preset {name!r} already exists") from exc
-    try:
-        await mgr.register(
-            name,
-            base_tool,
-            fixed_kwargs,
-            extensions,
-            description,
-            output_schema,
-            input_schema,
-            version=record.active_version,
-        )
-    except Exception as register_exc:
-        try:
-            await instance.app.versioning.store.delete("preset", name)
-        except Exception as delete_exc:
-            logger.exception("failed to roll back store row for preset %r after a register failure", name)
-            raise delete_exc from register_exc
-        # A typed clobber error (the name was taken by a foreign tool or a sibling
-        # preset in the window between the pre-checks and the register) maps to 409;
-        # any other register failure re-raises loudly.
-        if isinstance(register_exc, PresetExistsError):
-            raise ConflictError(f"preset {name!r} already exists") from register_exc
-        if isinstance(register_exc, PresetNameConflictError):
-            raise ConflictError(f"preset name {name!r} collides with an existing tool") from register_exc
-        raise register_exc
+    record, census = await _claim_preset_name(name, body, tags)
     await instance.app.emit_list_changed("tool")
+    # The fan-out waits on every sibling worker's confirmation (a fleet-sized round trip)
+    # and publishes state already committed above, so it runs with the name lock
+    # RELEASED — holding it here would queue every worker's create behind one confirmation
+    # wait after the write it protects has landed.
     report = await _fanout_reload(name, census)
     return record, report
 
@@ -1920,40 +1959,21 @@ async def _seed_create(seed: PresetSeed) -> None:
 
 async def _apply_one_seed(seed: PresetSeed) -> None:
     """Create the seed when absent; a preset already present is left untouched. Idempotent
-    across boot/reload/epoch-swap and safe under concurrent fleet boot."""
-    # Every process of the deployment (each ``tai serve`` worker and the backend worker)
-    # runs this applier against ONE database, so the presence check, the create and the
-    # tool_meta overlay are ONE atomic step under the fleet-wide per-seed advisory lock.
-    # Unserialized, an applier whose check missed runs the create core's clean-slate
-    # overlay cascade AFTER the winner's overlay merge — wiping the seed's placement
-    # metadata — and then observes the preset present and applies no overlay of its own.
-    async with advisory_name_lock(_SEED_LOCK_NAMESPACE, seed.name):
-        await _apply_one_seed_locked(seed)
+    across boot/reload/epoch-swap and safe under concurrent fleet boot.
 
-    # Local-load guard. A sibling's boot create lands store-side only — it does not fan out
-    # to this worker at boot — so a seed present in the store may be absent from THIS worker's
-    # registry. Bind the ACTIVE stored version here so every declared seed is callable on
-    # first boot, before any reload. A create already registered locally, so the guard no-ops;
-    # a quarantined seed stays conflicted — never force-loaded onto a base it cannot bind.
-    # Outside the lock: it mutates this process's registry only, and holding a database lock
-    # across it would serialize every worker's local bind behind one another for nothing.
-    mgr = instance.app.preset_manager
-    if not mgr.is_registered(seed.name) and not mgr.is_quarantined(seed.name):
-        await mgr.reload(seed.name)
-
-
-async def _apply_one_seed_locked(seed: PresetSeed) -> None:
-    """The store-side half of one seed's application, run under the seed's advisory lock:
-    create the seed when absent (overlay included), leave a present preset untouched."""
+    The presence check is the cheap fast path — every process of the deployment (each
+    ``tai serve`` worker and the backend worker) runs this applier against ONE database, so
+    a check that missed is decided by the create's own fleet-wide per-name lock
+    (:func:`_claim_preset_name`), which conflicts on the sibling's committed row without
+    touching its overlay."""
     store = instance.app.presets.store
     try:
         await store.get_preset(seed.name)
     except PresetNotFoundError:
-        # The lock excludes every other APPLIER, so a conflict here is a name claimed by a
-        # writer that does not hold it: an operator's create through the HTTP door, or a
-        # foreign (non-preset) tool of the same name. Re-read the STORE to tell them apart —
-        # a preset row now present is benign and idempotent, anything else is a genuine
-        # foreign-name collision and re-raises loudly.
+        # A conflict is either the sibling applier / an operator's create through the HTTP
+        # door claiming the name first, or a foreign (non-preset) tool of the same name.
+        # Re-read the STORE to tell them apart — a preset row now present is benign and
+        # idempotent, anything else is a genuine foreign-name collision and re-raises loudly.
         try:
             await _seed_create(seed)
         except ConflictError:
@@ -1965,6 +1985,15 @@ async def _apply_one_seed_locked(seed: PresetSeed) -> None:
             if not present:
                 raise
             logger.info("preset seeds: %r created concurrently by a sibling — treating as present", seed.name)
+
+    # Local-load guard. A sibling's boot create lands store-side only — it does not fan out
+    # to this worker at boot — so a seed present in the store may be absent from THIS worker's
+    # registry. Bind the ACTIVE stored version here so every declared seed is callable on
+    # first boot, before any reload. A create already registered locally, so the guard no-ops;
+    # a quarantined seed stays conflicted — never force-loaded onto a base it cannot bind.
+    mgr = instance.app.preset_manager
+    if not mgr.is_registered(seed.name) and not mgr.is_quarantined(seed.name):
+        await mgr.reload(seed.name)
 
 
 async def apply_preset_seeds() -> None:

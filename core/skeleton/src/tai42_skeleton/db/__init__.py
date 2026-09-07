@@ -3,9 +3,8 @@
 The kit owns the runner (:mod:`tai42_kit.db`) and the central database registry;
 this package owns the skeleton's integration: chain discovery for the skeleton and
 installed plugins (:mod:`.discovery`), the boot-time schema gate every schema-owning
-feature and plugin shares (:mod:`.boot_gate`), and the fleet-wide advisory lock a
-boot step takes to make its read-then-write atomic across processes
-(:mod:`.locks`).
+feature and plugin shares (:mod:`.boot_gate`), and and the fleet-wide advisory lock a
+read-then-write takes to stay atomic across processes (:mod:`.locks`).
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from tai42_skeleton.db.discovery import (
     skeleton_entry,
     skeleton_migrations_dir,
 )
-from tai42_skeleton.db.locks import advisory_name_lock, name_lock_key
+from tai42_skeleton.db.locks import advisory_name_lock
 from tai42_skeleton.db.not_configured import not_configured_message
 
 __all__ = [
@@ -34,7 +33,6 @@ __all__ = [
     "assert_chain_applied",
     "assert_skeleton_schema_applied",
     "installed_plugin_entries",
-    "name_lock_key",
     "not_configured_message",
     "plugin_migration_entry",
     "skeleton_entry",

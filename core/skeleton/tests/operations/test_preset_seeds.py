@@ -8,10 +8,10 @@ ops against the stateful in-memory fakes (the ``pg`` versioning fake + the autou
 tool_meta fake), so a seeded preset is created, registered LIVE, and its display metadata
 lands end-to-end, not mocked.
 
-The per-seed advisory lock the applier takes is faked in-process too
-(:class:`_FakeAdvisoryLocks`), so the concurrency oracle drives two appliers through a
-CHOSEN interleaving — the one that loses the overlay when the appliers are not
-serialized — with no database.
+The per-name advisory lock the create path takes is faked in-process too
+(:class:`~.._fakes.advisory_locks.FakeAdvisoryLocks`), so the concurrency oracle drives
+two appliers through a CHOSEN interleaving — the one that loses the overlay when the
+creates are not serialized — with no database.
 
 The registry unit oracle pins the duplicate-name guard in isolation.
 """
@@ -38,6 +38,7 @@ from tai42_skeleton.presets.seeds import PresetSeedRegistry
 from tai42_skeleton.presets.store import PresetStoreView
 from tai42_skeleton.tool_meta.store import PostgresToolMetaStore
 
+from .._fakes.advisory_locks import FakeAdvisoryLocks
 from ..versioning.conftest import FakeVersioningPg
 
 _SEED_LOGGER = "tai42_skeleton.operations.presets"
@@ -76,74 +77,13 @@ def pg(monkeypatch) -> FakeVersioningPg:
     return fake
 
 
-class _FakeAdvisoryLocks:
-    """An in-process stand-in for PostgreSQL transaction-scoped advisory locks.
-
-    One :class:`asyncio.Lock` per key, acquired by the ``pg_advisory_xact_lock``
-    statement and released when the holder's connection context exits — the scope the
-    real transaction-scoped lock has. ``contended`` is set the moment an acquire has to
-    WAIT, which is how a test observes that a second applier is serialized behind the
-    first rather than running through the same window.
-    """
-
-    def __init__(self) -> None:
-        self._locks: dict[tuple[int, int], asyncio.Lock] = {}
-        self.contended = asyncio.Event()
-
-    @asynccontextmanager
-    async def client_ctx(self, client_cls, settings=None, **kwargs):
-        if client_cls is not PostgresClient:
-            raise AssertionError(f"unexpected client_cls in fake: {client_cls!r}")
-        yield _FakeLockPool(self)
-
-    async def acquire(self, key: tuple[int, int]) -> asyncio.Lock:
-        lock = self._locks.setdefault(key, asyncio.Lock())
-        if lock.locked():
-            self.contended.set()
-        await lock.acquire()
-        return lock
-
-
-class _FakeLockPool:
-    def __init__(self, locks: _FakeAdvisoryLocks) -> None:
-        self._locks = locks
-
-    @asynccontextmanager
-    async def connection(self):
-        conn = _FakeLockConn(self._locks)
-        try:
-            yield conn
-        finally:
-            conn.release_all()
-
-
-class _FakeLockConn:
-    def __init__(self, locks: _FakeAdvisoryLocks) -> None:
-        self._locks = locks
-        self._held: list[asyncio.Lock] = []
-
-    @asynccontextmanager
-    async def transaction(self):
-        yield None
-
-    async def execute(self, sql: str, params: tuple = ()) -> None:
-        if "pg_advisory_xact_lock" not in sql:
-            raise AssertionError(f"unexpected SQL on the advisory-lock connection: {sql!r}")
-        self._held.append(await self._locks.acquire(tuple(params)))
-
-    def release_all(self) -> None:
-        while self._held:
-            self._held.pop().release()
-
-
 @pytest.fixture(autouse=True)
-def seed_locks(monkeypatch) -> _FakeAdvisoryLocks:
-    """Point the applier's advisory-lock seam at the in-process fake — this suite is
-    offline, and the lock is otherwise the one thing in the seed path that opens a
-    Postgres of its own. The lock resolves its DSN before it dials, so the host env is
-    set too; the fake never connects to it."""
+def seed_locks(monkeypatch) -> FakeAdvisoryLocks:
+    """This suite's OWN in-process stand-in for the create path's advisory lock, so the
+    concurrency oracle can read ``contended``. The lock resolves its DSN before it dials,
+    so the host env is set too; the fake never connects to it."""
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "offline.invalid")
-    locks = _FakeAdvisoryLocks()
+    locks = FakeAdvisoryLocks()
     monkeypatch.setattr(locks_module, "client_ctx", locks.client_ctx)
     return locks
 
@@ -382,14 +322,14 @@ def test_present_but_unregistered_seed_loaded_by_guard(pg) -> None:
 def test_concurrent_appliers_keep_version_and_overlay(pg, seed_locks, monkeypatch) -> None:
     """Two workers boot against ONE database and apply the same seed.
 
-    The interleaving driven here is the one that LOSES the overlay when the appliers are
+    The interleaving driven here is the one that LOSES the overlay when the creates are
     not serialized: a worker whose presence check missed runs the create core's
     clean-slate overlay cascade AFTER the winner's overlay merge, then hits the create
     conflict, observes the preset present, and applies no overlay of its own — the seed's
-    palette metadata is gone for good. Under the per-seed advisory lock that window does
-    not exist: the holder creates and overlays as one step, and the second applier waits
-    and then observes a complete seed. Both the single version and the full overlay must
-    be there at the end.
+    palette metadata is gone for good. Under the create core's per-name advisory lock that
+    window does not exist: the holder's claim runs check → cascade → write as one step, and
+    the second create waits and then conflicts on the committed row BEFORE the cascade.
+    Both the single version and the full overlay must be there at the end.
     """
 
     async def run() -> None:
@@ -411,7 +351,7 @@ def test_concurrent_appliers_keep_version_and_overlay(pg, seed_locks, monkeypatc
                 # The second applier holds its create window open at the clean-slate
                 # cascade — the very statement that wipes the overlay — until the first
                 # applier has FINISHED (the unserialized world) or is proven to be WAITING
-                # for the seed lock (the serialized world). Only that task parks; the first
+                # for the name lock (the serialized world). Only that task parks; the first
                 # applier's own cascade runs straight through.
                 task = asyncio.current_task()
                 if task is not None and task.get_name() == "applier-second":
@@ -438,8 +378,8 @@ def test_concurrent_appliers_keep_version_and_overlay(pg, seed_locks, monkeypatc
             assert meta.display_name == "Echo Bot"
             assert meta.tags == ["featured"]
             assert meta.folder_id is not None
-            # The second applier reached that outcome by WAITING for the seed lock, not by
-            # running through the first's window.
+            # The first applier reached that outcome by WAITING for the name lock, not by
+            # running through the second's window.
             assert seed_locks.contended.is_set()
             # One folder per segment — the two appliers converged on one tree.
             folders = await instance.app.tool_meta.store.list_folders()

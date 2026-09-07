@@ -1,4 +1,4 @@
-"""Two concurrent seed appliers against a REAL Postgres.
+"""Concurrent preset creates against a REAL Postgres.
 
 Every process of a deployment (each ``tai serve`` worker and the backend worker) runs
 the declared-preset-seed applier at boot against ONE database. Unserialized, an applier
@@ -12,7 +12,11 @@ boot's applier.
 
 The interleaving is chosen, not hoped for: the second applier holds its create window
 open at the clean-slate cascade until the first applier has finished or has entered the
-seed-lock acquire, so the test is deterministic in both worlds and hangs in neither.
+name-lock acquire, so the test is deterministic in both worlds and hangs in neither.
+
+The create door reaches that same lock, so a create of a name a sibling already claimed
+conflicts on the stored row before the cascade — the second test drives it over the real
+stores.
 
 OPT-IN: set ``TAI42_SKELETON_REAL_PG=1`` and point ``TAI_DATABASE_DEFAULT_PG_*`` at a
 live Postgres. Without the opt-in it SKIPS VISIBLY with a clear reason.
@@ -33,11 +37,13 @@ from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
+import tai42_skeleton.db.locks as db_locks
 import tai42_skeleton.tool_meta.store as tool_meta_store
 import tai42_skeleton.versioning.store as versioning_store
 from tai42_skeleton.app import instance
 from tai42_skeleton.db import SKELETON_COMPONENT, skeleton_entry
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.operations import ConflictError
 from tai42_skeleton.operations import presets as preset_ops
 from tai42_skeleton.tool_meta.store import PostgresToolMetaStore
 
@@ -67,10 +73,10 @@ async def _exec(sql: LiteralString, params: tuple = ()) -> None:
 async def real_seed(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[PresetSeed]:
     """A uniquely named seed over a real Postgres, cleaned up afterwards.
 
-    The suite-wide autouse fixtures point the versioned-document and tool_meta stores at
-    in-memory fakes so the offline suite never opens Postgres; this test needs the real
-    ones (only real row locks and a real advisory lock can exhibit the race), so restore
-    the genuine seams.
+    The suite-wide autouse fixtures point the versioned-document store, the tool_meta
+    store and the advisory lock at in-memory fakes so the offline suite never opens
+    Postgres; these tests need the real ones (only real row locks and a real advisory lock
+    can exhibit the race), so restore the genuine seams.
     """
     if os.environ.get(_OPT_IN_ENV) not in ("1", "true", "True"):
         pytest.skip(
@@ -79,6 +85,7 @@ async def real_seed(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[PresetSeed
         )
     monkeypatch.setattr(versioning_store, "client_ctx", client_ctx)
     monkeypatch.setattr(tool_meta_store, "client_ctx", client_ctx)
+    monkeypatch.setattr(db_locks, "client_ctx", client_ctx)
     # Rebuild the cached settings so ``TAI_DATABASE_DEFAULT_PG_*`` from the environment is read.
     reset_all_settings()
     await apply_migrations([skeleton_entry()])
@@ -114,7 +121,7 @@ class _RaceGates(NamedTuple):
 def race_gates(monkeypatch: pytest.MonkeyPatch) -> Iterator[_RaceGates]:
     """Park the ``applier-second`` task at the create core's clean-slate cascade — the
     very statement that wipes the overlay — until the ``applier-first`` task has entered
-    the seed-lock acquire (the serialized world) or the test releases it because the first
+    the name-lock acquire (the serialized world) or the test releases it because the first
     applier finished (the unserialized world). ``parked`` is what the test waits on before
     it starts the first applier, which fixes the order: second checks, first creates."""
     parked = asyncio.Event()
@@ -183,3 +190,30 @@ async def test_concurrent_appliers_keep_version_and_overlay_on_real_postgres(
         assert after.display_name == "Operator Label"
         assert after.tags == ["featured"]
         assert len(await store.list_versions(real_seed.name)) == 1
+
+
+async def test_create_door_on_a_present_name_keeps_its_overlay_on_real_postgres(real_seed: PresetSeed) -> None:
+    """The create door on a name a sibling worker already created: the claim conflicts on
+    the stored row before the clean-slate cascade, so the preset keeps its overlay."""
+    async with instance.app.app_context(_manifest()):
+        await preset_ops._apply_one_seed(real_seed)
+        # Model the sibling's create: the store row and its overlay stay, this worker's
+        # registration (what the door's local pre-checks read) does not.
+        await instance.app.preset_manager.remove(real_seed.name)
+
+        with pytest.raises(ConflictError, match="already exists"):
+            await preset_ops.create_preset(
+                name=real_seed.name,
+                base_tool="echo",
+                description="an operator create of a name a sibling already claimed",
+                fixed_kwargs={"text": "hello"},
+                extensions=[],
+                output_schema=None,
+            )
+
+        meta = await instance.app.tool_meta.store.get_meta(real_seed.name)
+        assert meta is not None
+        assert meta.display_name == "Echo Bot"
+        assert meta.tags == ["featured"]
+        assert meta.folder_id is not None
+        assert len(await instance.app.presets.store.list_versions(real_seed.name)) == 1
