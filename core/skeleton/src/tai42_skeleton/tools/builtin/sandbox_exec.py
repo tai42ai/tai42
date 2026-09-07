@@ -6,11 +6,12 @@ on every door with no provider), runs ``argv`` in it via ``SandboxSession.exec``
 returns the :class:`~tai42_contract.sandbox.ExecResult`. A DELIVERY names concrete tools
 as PRESETS over it; the base itself carries no domain knowledge.
 
-At load it DECLARES both preset mechanisms through the ``tai42_app`` handle (the same
-registration pattern as a per-base-tool write validator): input-schema support (so a
+At load it DECLARES its input-schema support through the ``tai42_app`` handle (so a
 preset's ``input_schema`` becomes the exposed tool's input contract, delivered under the
-``input`` arg) and the ``fenced`` registration tier (authoring a ``sandbox_exec`` preset
-requires the admin fence).
+``input`` arg) and its ``fenced`` registration tier. The ``fenced`` tier is admin-only for
+BOTH authoring a ``sandbox_exec`` preset AND running the tool: the generic run-time fence
+at the tool-run chokepoint refuses a non-admin on every door, so the base carries no fence
+of its own, and a preset authored over it inherits the fence at run time.
 
 The base tool reads NO policy knobs and builds NO policy of its own: it acquires the
 session through the SAME kit session-create policy chokepoint, so the platform policy
@@ -28,9 +29,6 @@ from typing import Any, Literal
 from tai42_contract.app import tai42_app
 from tai42_contract.presets import PresetInputSchemaSupport
 from tai42_contract.sandbox import ExecResult, SandboxSessionSpec
-
-from tai42_skeleton.operations._authority import require_admin, resolve_caller
-from tai42_skeleton.tools.reveal_gate import inprocess_reveal_gate
 
 # The base-tool argument a preset's validated structured input is delivered under.
 _PAYLOAD_ARG = "input"
@@ -71,16 +69,6 @@ async def sandbox_exec(
     Returns:
         The command's :class:`ExecResult` (exit code, stdout, stderr).
     """
-    # Invocation fence: a bare direct edge call by a
-    # tool-capable NON-admin would bypass the authoring fence with arbitrary argv/image,
-    # so the base tool admin-fences its own DIRECT invocation. A preset-forwarded call
-    # arms the in-process reveal gate (a ``TransformedTool`` dispatch) and its authoring
-    # was already admin-fenced, so an armed gate is allowed. ``resolve_caller`` returns an
-    # admin when access-control is disabled, so the fence bites only where the platform
-    # fences at all.
-    if inprocess_reveal_gate.get() is None:
-        require_admin(await resolve_caller())
-
     sandbox = tai42_app.sandboxes.require_sandbox()
     spec = SandboxSessionSpec(
         image=image,
@@ -104,8 +92,9 @@ async def sandbox_exec(
         await session.destroy()
 
 
-# Declare the preset mechanisms at load, through the handle (the write-validator pattern):
+# Declare the tool mechanisms at load, through the handle (the write-validator pattern):
 # a preset's ``input_schema`` becomes the exposed tool's input contract (routed into the
-# ``input`` arg), and authoring a ``sandbox_exec`` preset requires the admin fence.
+# ``input`` arg), and the ``fenced`` tier admin-fences both authoring a preset over the
+# tool and running it (enforced generically at the tool-run chokepoint).
 tai42_app.presets.register_input_schema_support("sandbox_exec", PresetInputSchemaSupport(payload_arg=_PAYLOAD_ARG))
-tai42_app.presets.register_registration_tier("sandbox_exec", "fenced")
+tai42_app.tools.register_tier("sandbox_exec", "fenced")

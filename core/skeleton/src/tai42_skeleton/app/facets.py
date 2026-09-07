@@ -150,6 +150,12 @@ class ToolsFacet(_Facet):
         precedent :meth:`PresetsFacet.write_validator` sets."""
         return self._app._rename_referee_registry.all()
 
+    def register_tier(self, base_tool: str, tier: RouteAction) -> None:
+        return self._app._registration_tier_registry.register(base_tool, tier)
+
+    def tier(self, base_tool: str) -> RouteAction | None:
+        return self._app._registration_tier_registry.get(base_tool)
+
 
 class AgentsFacet(_Facet):
     """``app.agents`` — agent registration + lookup (``AppAgents``)."""
@@ -626,6 +632,9 @@ class PresetsFacet(_Facet):
         return self._app._input_schema_support_registry.get(base_tool)
 
     def register_registration_tier(self, base_tool: str, tier: RouteAction) -> None:
+        """The authoring-side name for the tier registry :meth:`ToolsFacet.register_tier`
+        writes — the SAME registry object, so a tier declared through either name gates
+        both authoring a preset over the base tool and running it."""
         return self._app._registration_tier_registry.register(base_tool, tier)
 
     def registration_tier(self, base_tool: str) -> RouteAction | None:
@@ -634,20 +643,11 @@ class PresetsFacet(_Facet):
     def register_seed(self, seed: PresetSeed) -> None:
         return self._app._seed_registry.register(seed)
 
-    def register_retired_seed(self, name: str) -> None:
-        return self._app._seed_registry.register_retired(name)
-
     def seeds(self) -> list[PresetSeed]:
         """Every declared preset seed. Skeleton-only — the startup/reload seed applier
         consults it, so it is not on the ``AppPresets`` protocol (the register-only
         seam), the same precedent :meth:`write_validator` sets."""
         return self._app._seed_registry.all()
-
-    def retired_seeds(self) -> list[str]:
-        """Every declared retired seed name. Skeleton-only — the startup/reload seed
-        applier consults it, so it is not on the ``AppPresets`` protocol (the
-        register-only seam), the same precedent :meth:`seeds` sets."""
-        return self._app._seed_registry.retired()
 
     def write_validator(self, base_tool: str) -> PresetWriteValidator | None:
         """The registered write validator for ``base_tool``, or ``None`` when none
@@ -796,28 +796,6 @@ class StatesFacet(_Facet):
     async def stats(self, name: str) -> dict[str, Any]:
         return await self._app._states_service.stats(name)
 
-    async def migrate(
-        self,
-        name: str,
-        new_schema: dict[str, Any],
-        *,
-        origin: WriteOrigin,
-        transform_expr: str | None = None,
-        confirm_drop: bool = False,
-        resolutions: list[dict[str, Any]] | None = None,
-    ) -> None:
-        return await self._app._states_service.migrate(
-            name,
-            new_schema,
-            origin=origin,
-            transform_expr=transform_expr,
-            confirm_drop=confirm_drop,
-            resolutions=resolutions,
-        )
-
-    async def preview_migrate(self, name: str, new_schema: dict[str, Any]) -> dict[str, Any]:
-        return await self._app._states_service.preview_migrate(name, new_schema)
-
     # -- modules --
     async def list_modules(self) -> list[StateModuleDocument]:
         return await self._app._states_service.list_modules()
@@ -852,15 +830,17 @@ class StatesFacet(_Facet):
     async def unmount(self, state: str, module: str) -> None:
         return await self._app._states_service.unmount(state, module)
 
-    # -- bulk import --
-    async def import_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
-        return await self._app._states_service.import_aliases(state, rows, origin=origin)
+    # -- backup restore --
+    async def restore_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
+        """The backup section's alias-restore path; off the ``AppStates`` protocol — the
+        ``restore_records`` precedent."""
+        return await self._app._states_service.restore_aliases(state, rows, origin=origin)
 
-    async def import_applied_ops(self, rows: Sequence[dict[str, Any]]) -> None:
-        return await self._app._states_service.import_applied_ops(rows)
-
-    async def import_records(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
-        return await self._app._states_service.import_records(state, rows, origin=origin)
+    async def restore_records(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
+        """The backup section's record-restore path; off the ``AppStates`` protocol (a
+        consumer writes records through :meth:`replace` / :meth:`merge` / :meth:`apply`) —
+        the ``served_declaration`` precedent."""
+        return await self._app._states_service.restore_records(state, rows, origin=origin)
 
     # -- records --
     async def read(self, state: str, subject: StateSubject) -> RecordView | None:
@@ -927,9 +907,6 @@ class StatesFacet(_Facet):
     # -- seeds --
     def register_module_seed(self, doc: StateModuleDocument) -> None:
         return self._app._states_service.register_module_seed(doc)
-
-    def register_retired_module_name(self, name: str) -> None:
-        return self._app._states_service.register_retired_module_name(name)
 
     # -- mount validation --
     def register_mount_validator(self, validator: MountValidator) -> None:

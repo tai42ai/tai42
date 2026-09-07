@@ -23,27 +23,19 @@ budget). Connection from :class:`TelegramCorrelationSettings`
 The reservation is ``SET NX``: one pending ask per ``{chat_id}:{message_id}`` anchor,
 so a delivery never silently overwrites a live reservation on the same anchor. The NX
 makes the one-pending guarantee explicit at the port.
-
-The chat-scoped keyspace is a clean break from the earlier bare-``{message_id}`` keys:
-those records are short-TTL ephemeral correlations, so no migration is offered — any
-in-flight bare-key reservation simply expires (its reply bridges as a fresh turn), and
-new sends write only the scoped shape.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import Correlation
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_channel_telegram.settings import TelegramCorrelationSettings, telegram_correlation_settings
-
-logger = logging.getLogger(__name__)
 
 
 class StoredOption(BaseModel):
@@ -122,54 +114,18 @@ async def set_options(chat_id: str, message_id: str, options: list[StoredOption]
 
 async def get_options(chat_id: str, message_id: str) -> list[StoredOption] | None:
     """The tappable option records stored for ``{chat_id}:{message_id}``, or ``None``
-    (unknown / expired / a message that carried no callback options / a malformed record).
+    (no record — unknown, expired, or a message that carried no callback options).
 
     A non-destructive peek: a resolved tap leaves the record to expire (its anchor is
     single-use and the correlation record is the source of truth the ladder releases),
-    so a redelivered callback still resolves the same option rather than erroring. A record
-    that is not valid JSON, not a list, or whose entries are not the :class:`StoredOption`
-    shape is treated as no options (a graceful miss so the tap bridges), never a raise.
+    so a redelivered callback still resolves the same option rather than erroring.
     """
     async with _redis_ctx() as r:
         # decode_responses=True on this connection, so a hit is always ``str``.
         raw = cast("str | None", await r.get(_options_key(chat_id, message_id)))
     if raw is None:
         return None
-    try:
-        decoded = json.loads(raw)
-    except ValueError:
-        logger.warning(
-            "telegram: options record for message %r in chat %r is not valid JSON; treating as no options",
-            message_id,
-            chat_id,
-        )
-        return None
-    if not isinstance(decoded, list):
-        logger.warning(
-            "telegram: options record for message %r in chat %r is not a list; ignoring",
-            message_id,
-            chat_id,
-        )
-        return None
-    options: list[StoredOption] = []
-    for item in decoded:
-        if not isinstance(item, dict):
-            logger.warning(
-                "telegram: options record for message %r in chat %r carries a non-object entry; ignoring",
-                message_id,
-                chat_id,
-            )
-            return None
-        try:
-            options.append(StoredOption.model_validate(item))
-        except ValidationError:
-            logger.warning(
-                "telegram: options record for message %r in chat %r is not the StoredOption shape; ignoring",
-                message_id,
-                chat_id,
-            )
-            return None
-    return options
+    return [StoredOption.model_validate(item) for item in json.loads(raw)]
 
 
 def _redis_settings() -> TelegramCorrelationSettings:
@@ -215,18 +171,7 @@ class TelegramCorrelationStore:
             raw = cast("str | None", await r.get(_key(key)))
         if raw is None:
             return None
-        try:
-            return Correlation.model_validate_json(raw)
-        except ValueError:
-            # A record written by the pre-migration code (a bare callback URL string, not
-            # a JSON Correlation) does not parse. Tolerate it as a graceful miss so the
-            # reply bridges, never a 500; never log the value (it is a callback URL).
-            logger.warning(
-                "telegram: correlation for key %r is not the current Correlation shape "
-                "(pre-migration bare-URL record?); treating as no correlation",
-                key,
-            )
-            return None
+        return Correlation.model_validate_json(raw)
 
     async def release_correlation(self, key: str) -> None:
         """Drop any reservation under ``key``, idempotently (a no-op when free)."""

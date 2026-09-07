@@ -402,6 +402,12 @@ class SubMcpAppRouter:
         from tai42_skeleton.authz.middleware import AuthzMiddleware
 
         mcp.add_middleware(AuthzMiddleware(self._app))
+        # Run-time tier fence for this sub-MCP edge, enforced for the same reason and in the
+        # same position as the main server: a sub-MCP ``tools/call`` reaches ``Tool.run``
+        # directly, never the ``ToolBinding.run_tool`` seam that fences the in-process doors.
+        from tai42_skeleton.tools.tier import ToolTierFenceMiddleware
+
+        mcp.add_middleware(ToolTierFenceMiddleware(self._app))
         # Synchronous turn budget for this sub-MCP edge, armed for the same reason and in
         # the same innermost position as the main server (a sub-MCP ``tools/call`` reaches
         # ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam).

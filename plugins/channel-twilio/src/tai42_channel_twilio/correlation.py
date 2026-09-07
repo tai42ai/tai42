@@ -13,16 +13,14 @@ cannot capture a later reply.
 
 The shared inbound-answer ladder reads the record with a NON-destructive peek
 (:meth:`get_correlation` -> ``GET``, no ``DEL``) and drops it only on a terminal
-outcome (:meth:`release_correlation` -> ``DEL``, idempotent) — replacing the old
-pop(``GETDEL``)-then-restore(``SET NX``) dance: a kept (retry-in-place) rejection now
-simply leaves the record untouched instead of popping and re-reserving it. Upstream
-``MessageSid`` dedupe (``already_seen``/``mark_seen``) is the replay guard that keeps
-a redelivered webhook from re-forwarding a peeked-but-not-released reply.
+outcome (:meth:`release_correlation` -> ``DEL``, idempotent): a kept (retry-in-place)
+rejection leaves the record untouched. Upstream ``MessageSid`` dedupe
+(``already_seen``/``mark_seen``) is the replay guard that keeps a redelivered webhook
+from re-forwarding a peeked-but-not-released reply.
 """
 
 from __future__ import annotations
 
-import logging
 import math
 from datetime import UTC, datetime
 from typing import cast
@@ -32,8 +30,6 @@ from tai42_contract.channels import ChannelDeliveryError, Correlation
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_channel_twilio.settings import TwilioRedisSettings, twilio_redis_settings, twilio_settings
-
-logger = logging.getLogger(__name__)
 
 
 class PendingQuestionExistsError(ChannelDeliveryError):
@@ -91,18 +87,7 @@ class TwilioCorrelationStore:
             raw = cast("str | bytes | None", await redis.get(_pending_key(key)))
         if raw is None:
             return None
-        try:
-            return Correlation.model_validate_json(raw)
-        except ValueError:
-            # A record written by the pre-migration code (legacy JSON with no
-            # interaction_id) does not validate as a Correlation. Tolerate it as a
-            # graceful miss so the reply bridges, never a 500; never log the value.
-            logger.warning(
-                "twilio: pending record for key %r is not the current Correlation shape "
-                "(pre-migration record?); treating as no correlation",
-                key,
-            )
-            return None
+        return Correlation.model_validate_json(raw)
 
     async def release_correlation(self, key: str) -> None:
         """Drop any reservation under ``key``, idempotently (a no-op when free)."""

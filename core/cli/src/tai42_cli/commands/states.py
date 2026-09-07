@@ -109,48 +109,6 @@ def state_stats(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Th
         emit_result(ctx_obj, client.get(f"/api/states/{name}/stats"))
 
 
-@app.command("migrate")
-@covers(("POST", "/api/states/{name}/migrate"))
-def migrate_state(
-    ctx: typer.Context,
-    name: Annotated[str, typer.Argument(help="The state name.")],
-    new_schema: Annotated[str, typer.Option("--new-schema", help="The new base schema JSON object.")],
-    transform_expr: Annotated[
-        str | None, typer.Option("--transform", help="A jq transform for narrowing records.")
-    ] = None,
-    confirm_drop: Annotated[
-        bool, typer.Option("--confirm-drop", help="Confirm dropping fields a narrowing removes.")
-    ] = False,
-    resolutions: Annotated[
-        str | None, typer.Option("--resolutions", help="A JSON array of per-record resolutions.")
-    ] = None,
-) -> None:
-    """Migrate every record to a new schema (a narrowing needs --transform or --confirm-drop)."""
-    ctx_obj = app_context(ctx)
-    body: dict[str, Any] = {"new_schema": parse_json_object(new_schema, param_hint="--new-schema")}
-    if transform_expr is not None:
-        body["transform_expr"] = transform_expr
-    body["confirm_drop"] = confirm_drop
-    if resolutions is not None:
-        body["resolutions"] = parse_json_value(resolutions, param_hint="--resolutions")
-    with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.post(f"/api/states/{name}/migrate", json=body))
-
-
-@app.command("migrate-preview")
-@covers(("POST", "/api/states/{name}/migrate/preview"))
-def preview_migrate_state(
-    ctx: typer.Context,
-    name: Annotated[str, typer.Argument(help="The state name.")],
-    new_schema: Annotated[str, typer.Option("--new-schema", help="The candidate base schema JSON object.")],
-) -> None:
-    """Dry-run a migration: whether it narrows and which records it would drop or resolve."""
-    ctx_obj = app_context(ctx)
-    body = {"new_schema": parse_json_object(new_schema, param_hint="--new-schema")}
-    with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.post(f"/api/states/{name}/migrate/preview", json=body))
-
-
 # -- mounts -------------------------------------------------------------------
 
 

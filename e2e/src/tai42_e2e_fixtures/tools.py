@@ -45,6 +45,14 @@ def e2e_echo(payload: str) -> str:
     return payload
 
 
+@tai42_app.tools.tool(tags={"e2e"}, tier="fenced")
+def e2e_fenced_probe(payload: str = "ok") -> str:
+    """A ``fenced`` probe for the run-time tier fence: only an admin may run it, on every
+    door. Non-domain, no side effect — the harness asserts WHO may run it, not what it
+    does. With access control off every caller is an admin, so it runs freely there."""
+    return payload
+
+
 @tai42_app.tools.tool(tags={"e2e"})
 def e2e_secret_value(credential: str) -> dict:
     """Return ``credential`` wrapped in a ``SecretValue`` envelope — the probe for

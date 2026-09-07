@@ -1,13 +1,12 @@
 """Oracles for the declared-preset-seed applier.
 
 A plugin declares a default preset as a :class:`PresetSeed` at import time; the
-startup/reload handler :func:`apply_preset_seeds` creates it when absent (tagging the
-active version ``shipped-default`` and seeding its tool_meta), upgrades it when a
-shipped default drifts, never touches an operator-edited preset, is idempotent across
-re-runs, and raises loudly on a real failure. These drive the applier over the REAL
-preset + tool_meta ops against the stateful in-memory fakes (the ``pg`` versioning
-fake + the autouse tool_meta fake), so a seeded preset is created, registered LIVE,
-and its version tag + display metadata land end-to-end, not mocked.
+startup/reload handler :func:`apply_preset_seeds` creates it when absent (seeding its
+tool_meta), leaves a preset already present untouched, is idempotent across re-runs, and
+raises loudly on a real failure. These drive the applier over the REAL preset + tool_meta
+ops against the stateful in-memory fakes (the ``pg`` versioning fake + the autouse
+tool_meta fake), so a seeded preset is created, registered LIVE, and its display metadata
+lands end-to-end, not mocked.
 
 The registry unit oracle pins the duplicate-name guard in isolation.
 """
@@ -90,15 +89,6 @@ def _reset_preset_registry():
         mgr.drop_quarantine(name)
 
 
-# -- helpers -----------------------------------------------------------------
-
-
-async def _active_version(name: str):
-    """The current version row for ``name`` (the ``is_current`` projection)."""
-    versions = await instance.app.presets.store.list_versions(name)
-    return next(version for version in versions if version.is_current)
-
-
 # -- registry: duplicate-name guard ------------------------------------------
 
 
@@ -120,29 +110,10 @@ def test_seed_registry_all_preserves_order_and_reset_clears() -> None:
     assert registry.all() == []
 
 
-def test_seed_registry_retired_names_ordered_guarded_and_reset() -> None:
-    registry = PresetSeedRegistry()
-    registry.register_retired("old_a")
-    registry.register_retired("old_b")
-    assert registry.retired() == ["old_a", "old_b"]
-    # Duplicate retired declaration is a loud programming error, like a duplicate seed.
-    with pytest.raises(ValueError, match="already registered"):
-        registry.register_retired("old_a")
-    # One name declared BOTH seeded and retired raises loudly in either load order —
-    # the applier could not honor both create and delete for the same name.
-    with pytest.raises(ValueError, match="cannot be both"):
-        registry.register(PresetSeed(name="old_a", description="d", base_tool="echo"))
-    registry.register(PresetSeed(name="live", description="d", base_tool="echo"))
-    with pytest.raises(ValueError, match="cannot be both"):
-        registry.register_retired("live")
-    registry.reset()
-    assert registry.retired() == []
+# -- fresh boot: create + LIVE + tool_meta -----------------------------------
 
 
-# -- fresh boot: create + LIVE + tag + tool_meta -----------------------------
-
-
-def test_fresh_boot_creates_seed_live_tagged_and_applies_tool_meta(pg) -> None:
+def test_fresh_boot_creates_seed_live_and_applies_tool_meta(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
             seed = PresetSeed(
@@ -162,9 +133,6 @@ def test_fresh_boot_creates_seed_live_tagged_and_applies_tool_meta(pg) -> None:
             # ...is registered LIVE (resolvable in the tool registry the SAME epoch)...
             assert "echo_default" in await instance.app.tools.get_tools()
             assert instance.app.preset_manager.is_registered("echo_default")
-            # ...its active version wears the shipped-default tag...
-            active = await _active_version("echo_default")
-            assert preset_ops._SHIPPED_DEFAULT_TAG in active.tags
             # ...and its display metadata is applied, folder_path resolved to a real id.
             meta = await instance.app.tool_meta.store.get_meta("echo_default")
             assert meta is not None
@@ -182,7 +150,7 @@ def test_fresh_boot_creates_seed_live_tagged_and_applies_tool_meta(pg) -> None:
     asyncio.run(run())
 
 
-# -- idempotence: re-run is a no-op ------------------------------------------
+# -- idempotence: re-run leaves a present preset untouched --------------------
 
 
 def test_rerun_is_a_noop(pg) -> None:
@@ -200,290 +168,10 @@ def test_rerun_is_a_noop(pg) -> None:
             await preset_ops.apply_preset_seeds()
             await preset_ops.apply_preset_seeds()
 
-            # No new version was saved across re-runs — the content already matches the
-            # shipped default, so the applier is a pure no-op.
+            # No new version was saved across re-runs — the preset is present, so the applier
+            # is a pure no-op.
             versions = await instance.app.presets.store.list_versions("echo_default")
             assert len(versions) == 1
-
-    asyncio.run(run())
-
-
-# -- self-heal: a preset present WITHOUT its seeded tool_meta gets placement restored --
-
-
-def test_present_seed_reapplies_stripped_tool_meta(pg) -> None:
-    """``_seed_create`` commits the preset row + tag FIRST, then applies tool_meta — a
-    non-atomic window. A worker that crashes in between (or loses the folder race) leaves the
-    preset present WITHOUT its seeded folder/tags, and no versioned branch repairs it. The
-    applier's present branch must re-apply the seed's tool_meta so a later boot/config-reload
-    restores placement — idempotent and non-overwriting."""
-
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            seed = PresetSeed(
-                name="echo_default",
-                description="the shipped echo preset",
-                base_tool="echo",
-                fixed_kwargs={"text": "hello"},
-                tool_meta=PresetSeedToolMeta(display_name="Echo Bot", tags=["featured"], folder_path="acme/echoes"),
-            )
-            instance.app.presets.register_seed(seed)
-            await preset_ops.apply_preset_seeds()
-
-            # Simulate the crashed-worker outcome: the preset row + shipped-default tag landed,
-            # but its tool_meta overlay never did. Drop the overlay row so the preset is present
-            # WITHOUT placement, exactly as a worker that died in the create->meta window leaves it.
-            await instance.app.tool_meta.store.delete_meta("echo_default")
-            assert await instance.app.tool_meta.store.get_meta("echo_default") is None
-
-            # A later boot/config-reload re-runs the applier. The preset is now PRESENT, so this
-            # drives the present branch — which re-applies the seed's tool_meta.
-            await preset_ops.apply_preset_seeds()
-
-            # Placement is restored: display_name, tags, and the folder_path resolved to a real id.
-            meta = await instance.app.tool_meta.store.get_meta("echo_default")
-            assert meta is not None
-            assert meta.display_name == "Echo Bot"
-            assert meta.tags == ["featured"]
-            assert meta.folder_id is not None
-            folders = {f.id: f for f in await instance.app.tool_meta.store.list_folders()}
-            leaf = folders[meta.folder_id]
-            assert leaf.name == "echoes"
-            assert leaf.parent_id is not None
-            assert folders[leaf.parent_id].name == "acme"
-            # Self-heal is placement-only — no version was re-shipped.
-            assert len(await instance.app.presets.store.list_versions("echo_default")) == 1
-
-    asyncio.run(run())
-
-
-# -- present branch never overwrites operator-CHANGED tool_meta (fill-only) ----
-
-
-def test_present_seed_preserves_operator_edited_tool_meta(pg) -> None:
-    """The present-branch ``_apply_seed_tool_meta`` re-apply runs for EVERY present seed on
-    every boot, including operator-edited ones. Its guards are fill-only: display_name, tags,
-    and folder_id are each written ONLY where the preset's overlay leaves that field absent.
-    The contract this pins: operator-CHANGED display metadata survives a re-run UNTOUCHED —
-    the seed never clobbers a value the operator set. (Fill-only cannot tell a crash-stranded
-    NULL from a deliberately operator-CLEARED field, so a field the operator CLEARS is re-filled
-    by the seed on the next boot; that is out of scope here, which pins the CHANGED case.)"""
-
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            seed = PresetSeed(
-                name="echo_default",
-                description="the shipped echo preset",
-                base_tool="echo",
-                fixed_kwargs={"text": "hello"},
-                tool_meta=PresetSeedToolMeta(display_name="Echo Bot", tags=["featured"], folder_path="acme/echoes"),
-            )
-            instance.app.presets.register_seed(seed)
-            await preset_ops.apply_preset_seeds()
-
-            # The operator edits every display field: a custom display_name, a custom tag set,
-            # and a move into a real folder they created (a different id than the seed's leaf).
-            store = instance.app.tool_meta.store
-            operator_folder = await store.create_folder("operator-space")
-            await store.merge_meta(
-                "echo_default",
-                patch={
-                    "display_name": "Operator Renamed",
-                    "tags": ["operator-pick"],
-                    "folder_id": operator_folder.id,
-                },
-            )
-
-            # A later boot/config-reload re-runs the applier over the PRESENT preset — driving
-            # the present-branch tool_meta re-apply against the operator's overlay.
-            await preset_ops.apply_preset_seeds()
-
-            # All three operator values survive untouched — the fill-only guards saw each field
-            # already set and wrote nothing over it.
-            meta = await store.get_meta("echo_default")
-            assert meta is not None
-            assert meta.display_name == "Operator Renamed"
-            assert meta.tags == ["operator-pick"]
-            assert meta.folder_id == operator_folder.id
-
-    asyncio.run(run())
-
-
-# -- drift: content change upgrades to a new shipped-default version ----------
-
-
-def test_content_change_upgrades_new_shipped_default_version(pg) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            v1 = PresetSeed(
-                name="weather_default",
-                description="v1 description",
-                base_tool="weather",
-                fixed_kwargs={"units": "metric"},
-            )
-            instance.app.presets.register_seed(v1)
-            await preset_ops.apply_preset_seeds()
-
-            # A new build ships drifted content (different description AND fixed_kwargs)
-            # under the same seed name — re-declare it on a clean registry.
-            instance.app._seed_registry.reset()
-            v2 = PresetSeed(
-                name="weather_default",
-                description="v2 description",
-                base_tool="weather",
-                fixed_kwargs={"units": "imperial"},
-            )
-            instance.app.presets.register_seed(v2)
-            await preset_ops.apply_preset_seeds()
-
-            # The drift saved a NEW version, active, tagged shipped-default, carrying v2's
-            # content.
-            versions = await instance.app.presets.store.list_versions("weather_default")
-            assert len(versions) == 2
-            active = await _active_version("weather_default")
-            assert active.version == 2
-            assert preset_ops._SHIPPED_DEFAULT_TAG in active.tags
-            body = await instance.app.presets.store.get_active_body("weather_default")
-            assert body.description == "v2 description"
-            assert body.fixed_kwargs == {"units": "imperial"}
-
-    asyncio.run(run())
-
-
-# -- same-base upgrade tags atomically: no untagged window to strand ----------
-
-
-def test_same_base_upgrade_tags_new_version_atomically(pg, monkeypatch) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            v1 = PresetSeed(
-                name="weather_default",
-                description="v1 description",
-                base_tool="weather",
-                fixed_kwargs={"units": "metric"},
-            )
-            instance.app.presets.register_seed(v1)
-            await preset_ops.apply_preset_seeds()
-
-            # A new build ships drifted content under the SAME base tool (the non-repoint
-            # upgrade branch).
-            instance.app._seed_registry.reset()
-            v2 = PresetSeed(
-                name="weather_default",
-                description="v2 description",
-                base_tool="weather",
-                fixed_kwargs={"units": "imperial"},
-            )
-            instance.app.presets.register_seed(v2)
-
-            # The same-base upgrade tags the new version in the SAME save commit — it must
-            # NEVER reach the standalone tag door. A separate post-save tag step is exactly
-            # the untagged window an interrupted upgrade could strand (the next boot would
-            # read it as operator-edited and freeze the preset), and it no longer exists.
-            async def forbidden_set_tags(name, version, tags):
-                raise AssertionError("same-base upgrade must tag atomically, not via set_version_tags")
-
-            monkeypatch.setattr(instance.app.presets, "set_version_tags", forbidden_set_tags)
-
-            await preset_ops.apply_preset_seeds()
-
-            # The new active version carries v2's content and already wears the tag — the tag
-            # rode the save commit, so no untagged active version can be left behind.
-            versions = await instance.app.presets.store.list_versions("weather_default")
-            assert len(versions) == 2
-            active = await _active_version("weather_default")
-            assert active.version == 2
-            assert preset_ops._SHIPPED_DEFAULT_TAG in active.tags
-            body = await instance.app.presets.store.get_active_body("weather_default")
-            assert body.description == "v2 description"
-            assert body.fixed_kwargs == {"units": "imperial"}
-
-    asyncio.run(run())
-
-
-# -- operator-edited (untagged) active version is never touched --------------
-
-
-def test_operator_edited_untouched_with_visible_skip(pg, caplog) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            seed = PresetSeed(
-                name="weather_default",
-                description="shipped description",
-                base_tool="weather",
-                fixed_kwargs={"units": "metric"},
-            )
-            instance.app.presets.register_seed(seed)
-            await preset_ops.apply_preset_seeds()
-
-            # An operator saves a new version — the save door tags nothing, so the active
-            # version is UNtagged (operator-edited).
-            await preset_ops.save_version(
-                name="weather_default",
-                fixed_kwargs={"units": "operator"},
-                extensions=None,
-                output_schema=None,
-                output_schema_provided=False,
-                description="operator description",
-            )
-            active_before = await _active_version("weather_default")
-            assert preset_ops._SHIPPED_DEFAULT_TAG not in active_before.tags
-
-            with caplog.at_level(logging.INFO, logger=_SEED_LOGGER):
-                await preset_ops.apply_preset_seeds()
-
-            # The applier left the operator's version untouched — no new version, the
-            # active body still the operator's — and surfaced a VISIBLE skip line naming
-            # the preset and why.
-            versions = await instance.app.presets.store.list_versions("weather_default")
-            assert len(versions) == 2
-            body = await instance.app.presets.store.get_active_body("weather_default")
-            assert body.description == "operator description"
-            assert body.fixed_kwargs == {"units": "operator"}
-            assert any(
-                "weather_default" in rec.getMessage() and "operator-edited" in rec.getMessage()
-                for rec in caplog.records
-            )
-
-    asyncio.run(run())
-
-
-# -- create tags version 1 atomically: no untagged window to strand ----------
-
-
-def test_seed_create_tags_version_one_atomically(pg, monkeypatch) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            seed = PresetSeed(
-                name="echo_default",
-                description="the shipped echo preset",
-                base_tool="echo",
-                fixed_kwargs={"text": "hello"},
-                tool_meta=PresetSeedToolMeta(display_name="Echo Bot"),
-            )
-            instance.app.presets.register_seed(seed)
-
-            # The create tags version 1 in the SAME store commit — it must NEVER reach the
-            # standalone tag door. A separate post-create tag step is exactly the untagged
-            # window an interrupted create could strand, and it no longer exists.
-            async def forbidden_set_tags(name, version, tags):
-                raise AssertionError("seed create must tag version 1 atomically, not via set_version_tags")
-
-            monkeypatch.setattr(instance.app.presets, "set_version_tags", forbidden_set_tags)
-
-            await preset_ops.apply_preset_seeds()
-
-            # Version 1 is the only version and already wears the shipped-default tag — the tag
-            # rode the create commit, so no untagged version can be left behind.
-            versions = await instance.app.presets.store.list_versions("echo_default")
-            assert len(versions) == 1
-            active = await _active_version("echo_default")
-            assert active.version == 1
-            assert preset_ops._SHIPPED_DEFAULT_TAG in active.tags
-            # tool_meta still applied on the atomic create path.
-            meta = await instance.app.tool_meta.store.get_meta("echo_default")
-            assert meta is not None
-            assert meta.display_name == "Echo Bot"
 
     asyncio.run(run())
 
@@ -510,188 +198,6 @@ def test_blank_display_name_seed_refused_loudly(pg) -> None:
             # No blank label was persisted for the preset.
             meta = await instance.app.tool_meta.store.get_meta("echo_default")
             assert meta is None or meta.display_name is None
-
-    asyncio.run(run())
-
-
-# -- base_tool re-point ships as an upgrade (the live binding changes) --------
-
-
-def test_base_tool_change_upgrades_and_repoints_live_binding(pg) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            v1 = PresetSeed(name="repoint_default", description="same", base_tool="echo")
-            instance.app.presets.register_seed(v1)
-            await preset_ops.apply_preset_seeds()
-
-            # A new build re-points ONLY the base_tool (description/kwargs/schemas unchanged) —
-            # base_tool is content, so this must register as drift and ship.
-            instance.app._seed_registry.reset()
-            v2 = PresetSeed(name="repoint_default", description="same", base_tool="weather")
-            instance.app.presets.register_seed(v2)
-            await preset_ops.apply_preset_seeds()
-
-            # A new tagged version carrying the NEW base_tool is active, and the live tool
-            # re-bound onto it (history preserved, not a recreate).
-            versions = await instance.app.presets.store.list_versions("repoint_default")
-            assert len(versions) == 2
-            active = await _active_version("repoint_default")
-            assert active.version == 2
-            assert preset_ops._SHIPPED_DEFAULT_TAG in active.tags
-            body = await instance.app.presets.store.get_active_body("repoint_default")
-            assert body.base_tool == "weather"
-            assert "repoint_default" in await instance.app.tools.get_tools()
-
-            # Idempotent: the seed now matches, so a further re-run saves nothing.
-            await preset_ops.apply_preset_seeds()
-            assert len(await instance.app.presets.store.list_versions("repoint_default")) == 2
-
-    asyncio.run(run())
-
-
-# -- re-point onto a rejecting base is validated + refused, persists nothing ---
-
-
-def test_repoint_onto_rejecting_base_raises_and_persists_nothing(pg) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            v1 = PresetSeed(name="repoint_default", description="same", base_tool="echo")
-            instance.app.presets.register_seed(v1)
-            await preset_ops.apply_preset_seeds()
-
-            # The target base tool refuses any body it is asked to persist — the SAME write
-            # validator the create/save doors honor.
-            async def validator(body):
-                return ["weather refuses this preset"]
-
-            instance.app.presets.register_write_validator("weather", validator)
-
-            # A new build re-points onto that rejecting base.
-            instance.app._seed_registry.reset()
-            v2 = PresetSeed(name="repoint_default", description="same", base_tool="weather")
-            instance.app.presets.register_seed(v2)
-
-            # The re-point runs the shared authoring validators BEFORE its direct store write,
-            # so the rejecting base raises loudly — never persisted and served unvalidated.
-            with pytest.raises(preset_ops.BadRequestError, match="weather refuses this preset"):
-                await preset_ops.apply_preset_seeds()
-
-            # Nothing persisted or rebound: no new version, the active body still v1 on echo.
-            versions = await instance.app.presets.store.list_versions("repoint_default")
-            assert len(versions) == 1
-            body = await instance.app.presets.store.get_active_body("repoint_default")
-            assert body.base_tool == "echo"
-
-    asyncio.run(run())
-
-
-# -- re-point onto an existing preset name is rejected (no preset-on-preset) ---
-
-
-def test_repoint_onto_a_preset_base_raises_and_persists_nothing(pg) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            # A shipped preset that will be (illegally) named as another seed's base tool —
-            # a preset can never be another preset's base (create forbids it; chaining makes
-            # rehydration order-dependent).
-            base_preset = PresetSeed(name="echo_default", description="d", base_tool="echo")
-            instance.app.presets.register_seed(base_preset)
-            v1 = PresetSeed(name="repoint_default", description="same", base_tool="echo")
-            instance.app.presets.register_seed(v1)
-            await preset_ops.apply_preset_seeds()
-
-            # A new build re-points onto the OTHER preset's name — the dry-run bind binds via
-            # ``get_tool`` and a preset IS a registered tool, so only the create-mirrored
-            # preset-base guard on the re-point path catches it.
-            instance.app._seed_registry.reset()
-            instance.app.presets.register_seed(PresetSeed(name="echo_default", description="d", base_tool="echo"))
-            v2 = PresetSeed(name="repoint_default", description="same", base_tool="echo_default")
-            instance.app.presets.register_seed(v2)
-
-            with pytest.raises(BadRequestError, match="is itself a preset"):
-                await preset_ops.apply_preset_seeds()
-
-            # Nothing persisted or rebound: no new version, the active body still v1 on echo.
-            versions = await instance.app.presets.store.list_versions("repoint_default")
-            assert len(versions) == 1
-            body = await instance.app.presets.store.get_active_body("repoint_default")
-            assert body.base_tool == "echo"
-
-    asyncio.run(run())
-
-
-# -- re-point ROLLBACK: a reload failure restores the store pointer + old bind -
-
-
-def test_repoint_reload_failure_rolls_back_store_and_binding(pg, monkeypatch) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            v1 = PresetSeed(name="repoint_default", description="same", base_tool="echo")
-            instance.app.presets.register_seed(v1)
-            await preset_ops.apply_preset_seeds()
-            assert "repoint_default" in await instance.app.tools.get_tools()
-
-            instance.app._seed_registry.reset()
-            v2 = PresetSeed(name="repoint_default", description="same", base_tool="weather")
-            instance.app.presets.register_seed(v2)
-
-            # The re-point store write lands, then the reload/bind onto the new base fails.
-            async def flaky_reload(name):
-                raise RuntimeError("reload onto the new base crashed")
-
-            monkeypatch.setattr(instance.app.preset_manager, "reload", flaky_reload)
-
-            with pytest.raises(RuntimeError, match="reload onto the new base crashed"):
-                await preset_ops.apply_preset_seeds()
-
-            # The store pointer rolled back to the prior version (v1, echo) — no new active
-            # version is served, so store + live never diverge.
-            active = await _active_version("repoint_default")
-            assert active.version == 1
-            body = await instance.app.presets.store.get_active_body("repoint_default")
-            assert body.base_tool == "echo"
-            # The reload raised before touching the binding, so the live tool stayed bound to
-            # the OLD base — it still resolves in the registry, unchanged.
-            assert "repoint_default" in await instance.app.tools.get_tools()
-
-    asyncio.run(run())
-
-
-# -- concurrent-boot dedup: a sibling upgrade already applied → no-op ----------
-
-
-def test_upgrade_dedups_when_sibling_already_applied(pg) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            v1 = PresetSeed(
-                name="weather_default",
-                description="v1 description",
-                base_tool="weather",
-                fixed_kwargs={"units": "metric"},
-            )
-            instance.app.presets.register_seed(v1)
-            await preset_ops.apply_preset_seeds()
-            # The active body this worker read BEFORE a sibling raced it (the stale drift view).
-            stale_active = await instance.app.presets.store.get_active_body("weather_default")
-
-            # A sibling worker applies the same drift first — v2 becomes the active shipped
-            # default (two versions).
-            instance.app._seed_registry.reset()
-            v2 = PresetSeed(
-                name="weather_default",
-                description="v2 description",
-                base_tool="weather",
-                fixed_kwargs={"units": "imperial"},
-            )
-            instance.app.presets.register_seed(v2)
-            await preset_ops.apply_preset_seeds()
-            assert len(await instance.app.presets.store.list_versions("weather_default")) == 2
-
-            # This worker entered _seed_upgrade with the STALE pre-sibling active body. The
-            # dedup re-read sees the sibling's v2 already active and no-ops — no third version,
-            # so a concurrent fleet boot yields ONE upgraded version, not a duplicate per worker.
-            await preset_ops._seed_upgrade(v2, stale_active)
-            assert len(await instance.app.presets.store.list_versions("weather_default")) == 2
 
     asyncio.run(run())
 
@@ -736,15 +242,13 @@ def test_sibling_create_dedup_loads_seed_into_local_registry(pg, monkeypatch) ->
 
             await preset_ops._apply_one_seed(seed)
 
-            # The unified local-load guard bound the store-active version into THIS worker's
+            # The local-load guard bound the store-active version into THIS worker's
             # registry — the seed is callable on first boot, before any reload.
             assert instance.app.preset_manager.is_registered("echo_default")
             assert "echo_default" in await instance.app.tools.get_tools()
-            # No re-ship: the store still holds the sibling's single tagged version.
+            # No re-ship: the store still holds the sibling's single version.
             versions = await instance.app.presets.store.list_versions("echo_default")
             assert len(versions) == 1
-            active = await _active_version("echo_default")
-            assert preset_ops._SHIPPED_DEFAULT_TAG in active.tags
 
     asyncio.run(run())
 
@@ -766,22 +270,20 @@ def test_present_but_unregistered_seed_loaded_by_guard(pg) -> None:
             # The success window: a sibling created the seed AFTER this worker's rehydrate,
             # so the opening presence check SUCCEEDS (row present) yet the tool is not live
             # here. Model it by creating the seed then tearing down only this worker's local
-            # registration — the store row + its shipped-default tag stay.
+            # registration — the store row stays.
             await preset_ops.apply_preset_seeds()
             await instance.app.preset_manager.remove("echo_default")
             assert not instance.app.preset_manager.is_registered("echo_default")
             assert "echo_default" not in await instance.app.tools.get_tools()
 
-            # get_preset succeeds → the up-to-date no-op branch ships nothing, and the
-            # unified guard binds the active stored version so the seed is callable.
+            # get_preset succeeds → the present preset ships nothing, and the guard binds the
+            # active stored version so the seed is callable.
             await preset_ops._apply_one_seed(seed)
             assert instance.app.preset_manager.is_registered("echo_default")
             assert "echo_default" in await instance.app.tools.get_tools()
-            # No re-ship: still the single tagged version.
+            # No re-ship: still the single version.
             versions = await instance.app.presets.store.list_versions("echo_default")
             assert len(versions) == 1
-            active = await _active_version("echo_default")
-            assert preset_ops._SHIPPED_DEFAULT_TAG in active.tags
 
     asyncio.run(run())
 
@@ -900,207 +402,5 @@ def test_invalid_seed_raises_loudly(pg) -> None:
             # Nothing was persisted for the rejected seed.
             with pytest.raises(PresetNotFoundError):
                 await instance.app.presets.store.get_preset("broken_default")
-
-    asyncio.run(run())
-
-
-# -- retirement: a withdrawn seed's untouched record is deleted ---------------
-
-
-def _next_release(*, retired: list[str], seeds: tuple[PresetSeed, ...] = ()) -> None:
-    """Swap the declaration set to the NEXT release's: the registry is reset (exactly
-    what ``start()`` does before plugins re-declare) and the new declarations land."""
-    instance.app._seed_registry.reset()
-    for seed in seeds:
-        instance.app.presets.register_seed(seed)
-    for name in retired:
-        instance.app.presets.register_retired_seed(name)
-
-
-def test_retired_untouched_seed_deleted_with_overlay_cascade(pg) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            seed = PresetSeed(
-                name="echo_default",
-                description="the shipped echo preset",
-                base_tool="echo",
-                fixed_kwargs={"text": "hello"},
-                tool_meta=PresetSeedToolMeta(display_name="Echo Bot", tags=["seeded"], folder_path="acme/echoes"),
-            )
-            instance.app.presets.register_seed(seed)
-            await preset_ops.apply_preset_seeds()
-            assert instance.app.preset_manager.is_registered("echo_default")
-
-            _next_release(retired=["echo_default"])
-            await preset_ops.apply_preset_seeds()
-
-            # The record is gone (soft-deleted through the ordinary delete door)...
-            with pytest.raises(PresetNotFoundError):
-                await instance.app.presets.store.get_preset("echo_default")
-            # ...the live tool is torn down...
-            assert not instance.app.preset_manager.is_registered("echo_default")
-            assert "echo_default" not in await instance.app.tools.get_tools()
-            # ...and the tool_meta overlay row cascaded with it, as every preset delete does.
-            assert await instance.app.tool_meta.store.get_meta("echo_default") is None
-
-    asyncio.run(run())
-
-
-def test_retirement_is_idempotent_and_absent_name_is_noop(pg) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            seed = PresetSeed(name="echo_default", description="d", base_tool="echo", fixed_kwargs={"text": "x"})
-            instance.app.presets.register_seed(seed)
-            await preset_ops.apply_preset_seeds()
-
-            # ``never_shipped`` was never a record on this deploy — retiring it is a no-op.
-            _next_release(retired=["echo_default", "never_shipped"])
-            await preset_ops.apply_preset_seeds()
-            await preset_ops.apply_preset_seeds()  # second apply: nothing left to do, no raise
-
-            with pytest.raises(PresetNotFoundError):
-                await instance.app.presets.store.get_preset("echo_default")
-            with pytest.raises(PresetNotFoundError):
-                await instance.app.presets.store.get_preset("never_shipped")
-
-    asyncio.run(run())
-
-
-def test_concurrent_sibling_retirement_absorbed_not_raised(pg, monkeypatch, caplog) -> None:
-    """Two replicas boot on the deploy that introduces a retirement and the SIBLING wins
-    the delete between this worker's ownership check and its own delete door. The loser's
-    delete finds no active record — absorbed as benign (the sibling already retired it,
-    the outcome this worker wanted), with a visible line, NEVER a boot-lifecycle crash
-    (mirrors the create path's concurrent-create absorption)."""
-
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            seed = PresetSeed(name="echo_default", description="d", base_tool="echo", fixed_kwargs={"text": "x"})
-            instance.app.presets.register_seed(seed)
-            await preset_ops.apply_preset_seeds()
-
-            _next_release(retired=["echo_default"])
-
-            real_list_versions = PresetStoreView.list_versions
-            raced = False
-
-            async def racing_list_versions(self, name):
-                versions = await real_list_versions(self, name)
-                nonlocal raced
-                if name == "echo_default" and not raced:
-                    raced = True
-                    # The sibling's whole retirement lands between this worker's
-                    # ownership check and its delete.
-                    await preset_ops.delete_preset("echo_default")
-                return versions
-
-            monkeypatch.setattr(PresetStoreView, "list_versions", racing_list_versions)
-
-            with caplog.at_level(logging.INFO, logger=_SEED_LOGGER):
-                await preset_ops.apply_preset_seeds()  # no raise
-
-            # The record is gone (the sibling's delete) and the loser surfaced the
-            # concurrent absorption visibly instead of crashing its boot.
-            with pytest.raises(PresetNotFoundError):
-                await instance.app.presets.store.get_preset("echo_default")
-            assert any("echo_default" in rec.getMessage() and "sibling" in rec.getMessage() for rec in caplog.records)
-
-    asyncio.run(run())
-
-
-def test_retired_operator_edited_kept_with_visible_skip(pg, caplog) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            seed = PresetSeed(
-                name="weather_default", description="d", base_tool="weather", fixed_kwargs={"units": "si"}
-            )
-            instance.app.presets.register_seed(seed)
-            await preset_ops.apply_preset_seeds()
-
-            # An operator saves a new version — the save door tags nothing, so the
-            # active version is UNtagged and the operator now owns the preset.
-            await preset_ops.save_version(
-                name="weather_default",
-                fixed_kwargs={"units": "operator"},
-                extensions=None,
-                output_schema=None,
-                output_schema_provided=False,
-                description="operator description",
-            )
-
-            _next_release(retired=["weather_default"])
-            with caplog.at_level(logging.INFO, logger=_SEED_LOGGER):
-                await preset_ops.apply_preset_seeds()
-
-            # The operator's preset survives retirement, live and store-side, with a
-            # VISIBLE skip line naming the preset and why.
-            record = await instance.app.presets.store.get_preset("weather_default")
-            assert record.name == "weather_default"
-            assert instance.app.preset_manager.is_registered("weather_default")
-            body = await instance.app.presets.store.get_active_body("weather_default")
-            assert body.fixed_kwargs == {"units": "operator"}
-            assert any(
-                "weather_default" in rec.getMessage() and "operator-edited" in rec.getMessage()
-                for rec in caplog.records
-            )
-
-    asyncio.run(run())
-
-
-def test_retired_untagged_operator_created_preset_kept(pg) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            # An operator-CREATED preset that merely shares the retired name: no version
-            # ever wore the shipped-default tag, so the seed never owned it.
-            await preset_ops.create_preset("echo_default", "echo", "operator's own", {"text": "mine"}, [], None)
-
-            _next_release(retired=["echo_default"])
-            await preset_ops.apply_preset_seeds()
-
-            record = await instance.app.presets.store.get_preset("echo_default")
-            assert record.name == "echo_default"
-            assert instance.app.preset_manager.is_registered("echo_default")
-
-    asyncio.run(run())
-
-
-def test_still_declared_seed_unaffected_by_sibling_retirement(pg) -> None:
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            keep = PresetSeed(name="echo_default", description="d", base_tool="echo", fixed_kwargs={"text": "x"})
-            drop = PresetSeed(name="weather_default", description="d", base_tool="weather", fixed_kwargs={"units": "x"})
-            instance.app.presets.register_seed(keep)
-            instance.app.presets.register_seed(drop)
-            await preset_ops.apply_preset_seeds()
-
-            _next_release(seeds=(keep,), retired=["weather_default"])
-            await preset_ops.apply_preset_seeds()
-
-            # The still-declared seed rides on untouched (same single version, still live).
-            versions = await instance.app.presets.store.list_versions("echo_default")
-            assert len(versions) == 1
-            assert instance.app.preset_manager.is_registered("echo_default")
-            # The withdrawn sibling is gone.
-            with pytest.raises(PresetNotFoundError):
-                await instance.app.presets.store.get_preset("weather_default")
-
-    asyncio.run(run())
-
-
-def test_store_off_retirement_visible_skip_no_raise(monkeypatch, caplog) -> None:
-    # No versioned-document store configured (the OFF posture) — a retirement must skip
-    # visibly and never raise, exactly like a seed.
-    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
-
-    async def run() -> None:
-        async with instance.app.app_context(_manifest()):
-            instance.app.presets.register_retired_seed("old_default")
-
-            with caplog.at_level(logging.INFO, logger=_SEED_LOGGER):
-                await preset_ops.apply_preset_seeds()  # no raise
-
-            assert any(
-                "old_default" in rec.getMessage() and "not configured" in rec.getMessage() for rec in caplog.records
-            )
 
     asyncio.run(run())

@@ -143,21 +143,6 @@ async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: 
     folded = await api.get(record)
     assert folded["canonical_subject"]["key"] == "t2"
 
-    # -- an additive migration re-validates every record -----------------------
-    migrated = await api.post(
-        f"/api/states/{state}/migrate",
-        json={
-            "new_schema": {
-                "type": "object",
-                "properties": {
-                    "note": {"type": "string"},
-                    "tier": {"type": "string"},
-                },
-            }
-        },
-    )
-    assert migrated["migrated"] is True
-
 
 async def _assert_states_off(off_stack: TaiStack, method: str, path: str, *, json=None) -> None:
     api: ApiClient = off_stack.api()

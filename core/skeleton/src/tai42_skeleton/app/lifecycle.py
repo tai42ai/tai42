@@ -63,10 +63,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.backup import BackupRegistry
     from tai42_skeleton.channels.registry import ChannelRegistry
     from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
-    from tai42_skeleton.presets.base_tool_config import (
-        PresetInputSchemaSupportRegistry,
-        PresetRegistrationTierRegistry,
-    )
+    from tai42_skeleton.presets.base_tool_config import PresetInputSchemaSupportRegistry
     from tai42_skeleton.presets.manager import PresetManager
     from tai42_skeleton.presets.seeds import PresetSeedRegistry
     from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
@@ -78,7 +75,7 @@ if TYPE_CHECKING:
         StatesService,
     )
     from tai42_skeleton.template import ResourceManager
-    from tai42_skeleton.tools import ToolRefsRegistry, ToolRetryRegistry
+    from tai42_skeleton.tools import ToolRefsRegistry, ToolRetryRegistry, ToolTierRegistry
     from tai42_skeleton.tools.binding import ToolBinding
     from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
     from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
@@ -324,7 +321,7 @@ class TaiMCPLifecycleMixin(ABC):
         return self._serving_core._input_schema_support_registry
 
     @property
-    def _registration_tier_registry(self) -> "PresetRegistrationTierRegistry":
+    def _registration_tier_registry(self) -> "ToolTierRegistry":
         return self._serving_core._registration_tier_registry
 
     @property
@@ -885,7 +882,8 @@ class TaiMCPLifecycleMixin(ABC):
         self._target_validator_registry.reset()
 
         # Reset the per-base-tool preset input-schema support + registration-tier
-        # declarations alongside the write validator, for the same reload reason.
+        # declarations alongside the write validator, for the same reload reason. The
+        # tier registry backs both the authoring gate and the run-time fence.
         self._input_schema_support_registry.reset()
         self._registration_tier_registry.reset()
 

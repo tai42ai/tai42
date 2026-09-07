@@ -58,10 +58,7 @@ from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.middleware.rate_limit import RateLimitMiddleware
-from tai42_skeleton.presets.base_tool_config import (
-    PresetInputSchemaSupportRegistry,
-    PresetRegistrationTierRegistry,
-)
+from tai42_skeleton.presets.base_tool_config import PresetInputSchemaSupportRegistry
 from tai42_skeleton.presets.manager import PresetManager
 from tai42_skeleton.presets.seeds import PresetSeedRegistry
 from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
@@ -76,7 +73,7 @@ from tai42_skeleton.states.service import (
 )
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
-from tai42_skeleton.tools import ToolRefsRegistry, ToolRegistry, ToolRetryRegistry
+from tai42_skeleton.tools import ToolRefsRegistry, ToolRegistry, ToolRetryRegistry, ToolTierRegistry
 from tai42_skeleton.tools.binding import ToolBinding
 from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
 from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
@@ -210,6 +207,13 @@ class ServingCore:
         from tai42_skeleton.authz.middleware import AuthzMiddleware
 
         self._fast_mcp.add_middleware(AuthzMiddleware(app))
+        # Run-time tier fence for this MCP edge: an MCP ``tools/call`` reaches ``Tool.run``
+        # directly, never the ``ToolBinding.run_tool`` seam that fences the in-process
+        # doors, so this edge enforces the same admin fence for a ``fenced``/``secret``
+        # tool. Added before the turn budget so a fenced denial never opens a window.
+        from tai42_skeleton.tools.tier import ToolTierFenceMiddleware
+
+        self._fast_mcp.add_middleware(ToolTierFenceMiddleware(app))
         # Synchronous turn budget for this MCP edge: an MCP ``tools/call`` dispatches to
         # ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam, so it arms the
         # budget itself. Added INNERMOST (after authz/reload) so a denied or rejected call
@@ -257,9 +261,11 @@ class ServingCore:
 
         # Per-base-tool preset input-schema support + registration-tier registries,
         # reset each start() alongside the write-validator registry so a reload
-        # re-imports the tool modules and re-registers cleanly.
+        # re-imports the tool modules and re-registers cleanly. The tier registry is
+        # shared by the preset-authoring gate (``app.presets.registration_tier``) and the
+        # run-time fence (``app.tools.tier``) — one object, both facets.
         self._input_schema_support_registry = PresetInputSchemaSupportRegistry()
-        self._registration_tier_registry = PresetRegistrationTierRegistry()
+        self._registration_tier_registry = ToolTierRegistry()
 
         # Per-tool declared tool-references registry, reset each start() so a reload
         # re-imports the tool modules and re-registers cleanly. Mirrors the

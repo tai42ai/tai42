@@ -5,8 +5,9 @@ each mapped to its structured extension combos, backing the app facade's
 ``register_tool_info`` / ``unregister_tool_info`` surface), the
 ``ToolRefsRegistry`` (a base tool's declared composed-tool-names extractor), the
 ``ToolRetryRegistry`` (a base tool's declared retry policy, consumed at the
-dispatch seam), and the tool-dispatch adapters that turn a vendor tool into a
-callable.
+dispatch seam), the ``ToolTierRegistry`` (a base tool's declared registration
+tier, shared by the preset-authoring gate and the run-time fence), and the
+tool-dispatch adapters that turn a vendor tool into a callable.
 """
 
 from tai42_skeleton.tools.adapters import (
@@ -16,12 +17,14 @@ from tai42_skeleton.tools.adapters import (
 )
 from tai42_skeleton.tools.registry import ToolRegistry
 from tai42_skeleton.tools.retry import ToolRetryRegistry
+from tai42_skeleton.tools.tier import ToolTierRegistry
 from tai42_skeleton.tools.tool_refs import ToolRefsRegistry
 
 __all__ = [
     "ToolRefsRegistry",
     "ToolRegistry",
     "ToolRetryRegistry",
+    "ToolTierRegistry",
     "lc_tool_to_func",
     "mcp_tool_call_wrapper",
     "mcp_tool_to_func",

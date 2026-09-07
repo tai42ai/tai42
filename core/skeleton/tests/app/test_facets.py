@@ -99,6 +99,23 @@ def test_tools_facet_base_of_is_branch_mcp_bound_names_forwarding():
     app._tool_binding.mcp_bound_names.assert_called_once_with("svc")
 
 
+def test_tools_and_presets_facets_share_one_tier_registry():
+    # The tools-facet ``register_tier`` / ``tier`` and the presets-facet
+    # ``register_registration_tier`` / ``registration_tier`` forward to the SAME
+    # ``_registration_tier_registry`` object — one registry, two facet names, no copy.
+    app = _app()
+    tools = ToolsFacet(app)
+    presets = PresetsFacet(app)
+
+    tools.register_tier("base", "fenced")
+    app._registration_tier_registry.register.assert_called_once_with("base", "fenced")
+    assert tools.tier("base") is app._registration_tier_registry.get.return_value
+
+    presets.register_registration_tier("other", "secret")
+    app._registration_tier_registry.register.assert_called_with("other", "secret")
+    assert presets.registration_tier("other") is app._registration_tier_registry.get.return_value
+
+
 async def test_tools_facet_async_forwarding():
     app = _app()
     f = ToolsFacet(app)
@@ -592,11 +609,8 @@ async def test_states_facet_forwarding():
         "writes",
         "prune_expired",
         "consumers",
-        "import_aliases",
-        "import_applied_ops",
-        "import_records",
-        "migrate",
-        "preview_migrate",
+        "restore_aliases",
+        "restore_records",
     ):
         setattr(svc, name, AsyncMock(return_value=f"{name}-result"))
     app._states_service = svc
@@ -617,7 +631,5 @@ async def test_states_facet_forwarding():
     svc.register_consumer_lister.assert_called_once_with("consumer", "lister")
     f.register_module_seed("doc")  # type: ignore[arg-type]
     svc.register_module_seed.assert_called_once_with("doc")
-    f.register_retired_module_name("old")
-    svc.register_retired_module_name.assert_called_once_with("old")
     svc.context.return_value = "ctx"
     assert f.context() == "ctx"

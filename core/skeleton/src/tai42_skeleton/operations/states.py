@@ -31,12 +31,10 @@ from tai42_contract.states import (
 from tai42_contract.states.errors import (
     DeclarationInUseError,
     InvalidPathError,
-    MigrationConversionError,
     ModuleExistsError,
     ModuleInUseError,
     ModuleValidationError,
     MountConflictError,
-    NarrowingRequiresConfirmationError,
     NonAdditiveRedeclareError,
     RegimeViolationError,
     SchemaValidationError,
@@ -54,7 +52,6 @@ from tai42_skeleton.operations import (
     ConflictError,
     NotFoundError,
     NotSupportedError,
-    PreconditionFailedError,
     ValidationRejected,
     operation,
 )
@@ -75,10 +72,8 @@ _ERROR_MAP: dict[type[StatesError], type] = {
     ModuleExistsError: ConflictError,
     ModuleInUseError: ConflictError,
     MountConflictError: ConflictError,
-    NarrowingRequiresConfirmationError: PreconditionFailedError,
     SubjectRefusedError: ValidationRejected,
     SchemaValidationError: ValidationRejected,
-    MigrationConversionError: ValidationRejected,
     InvalidPathError: ValidationRejected,
     ValueValidationError: ValidationRejected,
     RegimeViolationError: ValidationRejected,
@@ -146,7 +141,7 @@ async def get_state(name: str) -> dict[str, Any]:
 )
 async def put_state(name: str, declaration: dict[str, Any]) -> dict[str, Any]:
     """Upsert a state declaration; the ``name`` is taken from the path. With records present
-    only additive schema changes are accepted — a narrowing goes through ``migrate``."""
+    only additive schema changes are accepted — a narrowing is refused while records exist."""
     body = {**declaration, "name": name}
     try:
         decl = StateDeclaration.model_validate(body)
@@ -180,46 +175,6 @@ async def state_stats(name: str) -> dict[str, Any]:
     """Record counts for a state — the total and the per-subject-kind breakdown."""
     with _states_door():
         return await _states().stats(name)
-
-
-@operation(
-    summary="Migrate a state's schema",
-    tags=["states"],
-    destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejected, PreconditionFailedError],
-)
-async def migrate_state(
-    name: str,
-    new_schema: dict[str, Any],
-    transform_expr: str | None = None,
-    confirm_drop: bool = False,
-    resolutions: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Migrate every record to ``new_schema`` in one transaction. A narrowing needs exactly
-    one of a ``transform_expr`` or ``confirm_drop`` (with optional ``resolutions``); without
-    it the door answers 412."""
-    with _states_door():
-        await _states().migrate(
-            name,
-            new_schema,
-            origin=WriteOrigin(),
-            transform_expr=transform_expr,
-            confirm_drop=confirm_drop,
-            resolutions=resolutions,
-        )
-    return {"migrated": True, "name": name}
-
-
-@operation(
-    summary="Preview a state migration",
-    tags=["states"],
-    errors=[NotSupportedError, NotFoundError, ValidationRejected],
-)
-async def preview_migrate_state(name: str, new_schema: dict[str, Any]) -> dict[str, Any]:
-    """Dry-run a migration to ``new_schema``: whether it narrows, and example records the
-    change would drop or need resolving — no record is written."""
-    with _states_door():
-        return await _states().preview_migrate(name, new_schema)
 
 
 # --------------------------------------------------------------------------- #

@@ -22,6 +22,7 @@ from tai42_contract.agent.base import PresetSpec
 from tai42_contract.presets import PresetBody
 from tai42_contract.presets.errors import PresetNameConflictError, PresetNotFoundError
 from tai42_contract.sandbox import SandboxUnavailableError
+from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
@@ -897,7 +898,17 @@ def test_plain_preset_over_sandbox_exec_authors(pg: FakeVersioningPg):
     asyncio.run(run())
 
 
-def test_input_schema_preset_over_sandbox_exec_authors_validates_and_routes(pg: FakeVersioningPg):
+def test_input_schema_preset_over_sandbox_exec_authors_validates_and_routes(
+    pg: FakeVersioningPg, monkeypatch: pytest.MonkeyPatch
+):
+    # ``sandbox_exec`` is a ``fenced`` tool, so the run-seam tier fence admits only an
+    # admin. This test exercises the preset ROUTING mechanics, not the fence: run with
+    # access control OFF (every sandbox deployment's posture), so the caller resolves as an
+    # admin and the fence is a no-op — the schema-validation and payload-routing behaviour
+    # is what is asserted. The fence itself is covered in tests/tools/test_run_tier_fence.py.
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
+    reset_all_settings()
+
     async def run():
         async with app.app_context(_sandbox_manifest()):
             mgr = app.preset_manager

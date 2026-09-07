@@ -1,12 +1,12 @@
 """Declared preset seeds over the REAL versioned store on a running stack: a boot makes
-a seed a LIVE callable preset in the SAME epoch, a re-boot is idempotent, a content
-change upgrades the tagged version, an operator-edited (untagged-active) seed survives a
-re-boot untouched, and a store-OFF profile skips visibly while booting healthy.
+a seed a LIVE callable preset in the SAME epoch, a re-boot is idempotent, a preset already
+present is left untouched even when the declared body changes, and a store-OFF profile
+skips visibly while booting healthy.
 
 The seed-lifecycle legs each boot their OWN store-backed / store-off stack through
 ``fresh_stack`` so a leg owns its seed's global version history. Reloads are driven
 through the env-write door (``POST /api/config/env``); an empty body re-applies the
-current seed, a variant flip ships the drifted body."""
+current seed, a variant flip re-declares a changed body."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from tai42_e2e.manifests import build_seams_seed_off_stack, build_seams_seed_sta
 from tai42_e2e.stack import TaiStack
 
 _SEED = "e2e_seed_probe"
-_SHIPPED_DEFAULT_TAG = "shipped-default"
 
 
 async def _active_body(stack: TaiStack) -> dict:
@@ -51,43 +50,35 @@ async def test_seed_is_live_callable_in_first_boot_epoch(
     body = await _active_body(stack)
     assert body["base_tool"] == "e2e_echo"
     assert body["active_version"] == 1
-    # Version 1 wears the shipped-default tag from the atomic create.
     versions = await _versions(stack)
     assert len(versions) == 1
-    assert _SHIPPED_DEFAULT_TAG in versions[0]["tags"]
 
-    # A re-boot re-runs the applier over the unchanged seed — a pure no-op, no new version.
+    # A re-boot re-runs the applier over the present seed — a pure no-op, no new version.
     await _reload_env(stack, {})
     assert len(await _versions(stack)) == 1
 
 
-async def test_content_change_upgrades_tagged_version(fresh_stack: Callable[..., TaiStack]) -> None:
+async def test_content_change_leaves_present_preset_untouched(fresh_stack: Callable[..., TaiStack]) -> None:
     stack = fresh_stack(build_seams_seed_stack)
     assert (await _active_body(stack))["fixed_kwargs"]["payload"] == "seeded-base"
 
-    # Flip the seed variant and reload: the re-imported module re-declares a DRIFTED body,
-    # so the applier upgrades the tagged version in place.
+    # Flip the seed variant and reload: the re-imported module re-declares a CHANGED body.
+    # The applier only creates an absent seed, so the already-present preset is left untouched.
     await _reload_env(stack, {"E2E_SEED_VARIANT": "upgraded"})
 
     versions = await _versions(stack)
-    assert len(versions) == 2
-    active = next(v for v in versions if v["is_current"])
-    assert active["version"] == 2
-    assert _SHIPPED_DEFAULT_TAG in active["tags"]
-    assert (await _active_body(stack))["fixed_kwargs"]["payload"] == "seeded-upgraded"
+    assert len(versions) == 1
+    assert (await _active_body(stack))["fixed_kwargs"]["payload"] == "seeded-base"
 
 
 async def test_operator_edit_survives_reboot(fresh_stack: Callable[..., TaiStack]) -> None:
     stack = fresh_stack(build_seams_seed_stack)
-    # An operator saves a new version — the save door tags nothing, so the active version
-    # is UNTAGGED (operator-edited).
+    # An operator saves a new version.
     await stack.api().post(f"/api/presets/{_SEED}/versions", json={"fixed_kwargs": {"payload": "operator"}})
-    versions = await _versions(stack)
-    active = next(v for v in versions if v["is_current"])
-    assert _SHIPPED_DEFAULT_TAG not in active["tags"]
+    assert len(await _versions(stack)) == 2
 
-    # A re-boot leaves the operator's untagged version untouched — no new version, the
-    # active body still the operator's.
+    # A re-boot leaves the present preset untouched — no new version, the active body still
+    # the operator's.
     await _reload_env(stack, {})
     versions_after = await _versions(stack)
     assert len(versions_after) == 2

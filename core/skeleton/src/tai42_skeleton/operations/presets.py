@@ -21,7 +21,6 @@ route adapter wraps them in ``{"data": ...}`` at the HTTP edge.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Sequence
 from typing import Annotated, Any
@@ -548,49 +547,6 @@ async def _enforce_registration_tier(base_tool: str) -> None:
         require_admin(await resolve_caller())
 
 
-async def _validate_authoring(name: str, body: PresetBody) -> None:
-    """Run the create/save authoring validators over a FULL body about to persist,
-    raising the same loud :class:`BadRequestError` those doors raise: non-empty
-    description, agent-authoring, combo registry, output-schema, dry-run bind,
-    input-schema support, and the base tool's write validator. The seed re-point path
-    (which writes straight to the versioned store, bypassing the create/save cores)
-    calls this BEFORE its write so a re-point onto a base that rejects the carried
-    body is refused loudly, never persisted and served unvalidated."""
-    if not body.description.strip():
-        raise BadRequestError("a preset description must not be empty")
-    # A preset's base must be a registered NON-preset tool (a preset cannot be another
-    # preset's base — chaining makes rehydration order-dependent). The dry-run bind
-    # binds via ``get_tool`` and a preset IS a registered tool, so it would pass a
-    # preset base; mirror create's guard here so the re-point path rejects it too.
-    if body.base_tool in instance.app.preset_manager.registered_names():
-        raise BadRequestError(f"base tool {body.base_tool!r} is itself a preset")
-    authoring_error = await _agent_authoring_error(body.base_tool, body.fixed_kwargs)
-    if authoring_error is not None:
-        raise BadRequestError(authoring_error)
-    combo_error = _combo_registry_error(body.extensions)
-    if combo_error is not None:
-        raise BadRequestError(combo_error)
-    schema_error = await _output_schema_error(body.base_tool, body.output_schema, body.extensions)
-    if schema_error is not None:
-        raise BadRequestError(schema_error)
-    bind_error = await _dry_run_bind_error(
-        body.base_tool,
-        body.fixed_kwargs,
-        name=name,
-        description=body.description,
-        output_schema=body.output_schema,
-        input_schema=body.input_schema,
-    )
-    if bind_error is not None:
-        raise BadRequestError(bind_error)
-    input_schema_error = _input_schema_authoring_error(body)
-    if input_schema_error is not None:
-        raise BadRequestError(input_schema_error)
-    write_validator_error = await _write_validator_error(body)
-    if write_validator_error is not None:
-        raise BadRequestError(write_validator_error)
-
-
 def _input_schema_authoring_error(body: PresetBody) -> str | None:
     """A 400 message when ``body`` sets an ``input_schema`` over a base tool with no
     registered input-schema support, else ``None``. Loud, never a silently-ignored
@@ -879,8 +835,7 @@ async def _create_preset_core(
     ``enforce_tier`` runs the caller-authorization fence (create's door behavior); the
     seed applier passes ``False`` — a platform seed has no caller to fence and runs the
     identical content path otherwise (no logic duplicated between the two). ``tags`` labels
-    version 1 in the SAME store commit (``None`` is the door's untagged create); the seed
-    applier passes the shipped-default tag so the create-then-tag has no untagged window."""
+    version 1 in the SAME store commit (``None`` is the door's untagged create)."""
     # A preset name is a live tool name + a ``{name}`` route segment, so it must be
     # tool-name-safe (a slash-bearing name would never match the routes; an
     # over-long one collides after client-tool truncation).
@@ -1168,19 +1123,16 @@ async def _save_version_core(
     tags: list[str] | None = None,
     enforce_tier: bool = True,
 ) -> tuple[Any, FleetResult]:
-    """The reusable save-a-new-version path shared by the save door and the seed applier:
-    read the active body, resolve the carry-forward sentinels, run create's validation
-    over the effective new body, (optionally) fence on the base tool's authoring tier,
-    save THEN reload (re-pointing the active version back on a residual register failure),
-    guard the ``list_changed`` emit on a real wire/extension change, and fan the rebind
-    out. Returns the new version row + the per-worker fleet report.
+    """The save door's reusable save-a-new-version path: read the active body, resolve the
+    carry-forward sentinels, run create's validation over the effective new body,
+    (optionally) fence on the base tool's authoring tier, save THEN reload (re-pointing the
+    active version back on a residual register failure), guard the ``list_changed`` emit on a
+    real wire/extension change, and fan the rebind out. Returns the new version row + the
+    per-worker fleet report.
 
-    ``input_schema`` carries forward by default (the save door's behavior); the seed
-    applier passes an explicit schema so an upgraded shipped default sets it. ``tags`` labels
-    the new version in the SAME save commit (``None`` is the door's untagged save); the seed
-    applier passes the shipped-default tag so the save-then-tag has no untagged window.
-    ``enforce_tier`` runs the caller-authorization fence; the seed applier passes ``False`` —
-    no caller."""
+    ``input_schema`` carries forward by default (the save door's behavior). ``tags`` labels
+    the new version in the SAME save commit (``None`` is the door's untagged save).
+    ``enforce_tier`` runs the caller-authorization fence."""
     store = instance.app.presets.store
     if instance.app.preset_manager.is_quarantined(name):
         raise ConflictError(f"preset {name!r} is conflicted and is delete-only")
@@ -1915,41 +1867,6 @@ async def set_preset_version_tags(name: str, version: str, tags: list[str]) -> d
 
 # -- declared preset seeds ---------------------------------------------------
 
-# The version tag a shipped default carries. A seed OWNS a version only while it wears
-# this tag; the moment an operator saves an untagged version the preset is user-edited
-# and the applier never touches it again.
-_SHIPPED_DEFAULT_TAG = "shipped-default"
-
-
-def _operator_edited(active_tags: Sequence[str]) -> bool:
-    """The applier's single untouched-vs-edited policy, over the ACTIVE version's tags.
-    Every version the applier writes carries ``shipped-default`` in the SAME commit (no
-    untagged window can exist) and the operator save door tags nothing, so an untagged
-    active version is unambiguously operator-authored — the applier never touches the
-    preset again (no upgrade, no retirement delete)."""
-    return _SHIPPED_DEFAULT_TAG not in active_tags
-
-
-def _canonical(value: Any) -> str:
-    """A stable JSON rendering for the normalized seed-vs-body content compare — key order
-    and container identity never register as a difference."""
-    return json.dumps(value, sort_keys=True, default=str)
-
-
-def _seed_matches(seed: PresetSeed, body: PresetBody) -> bool:
-    """Whether the live active body already equals the seed's declared content — the
-    normalized compare of base_tool + description + fixed_kwargs + input/output schemas.
-    ``base_tool`` is core content: a shipped default that re-points its binding across
-    releases must register as drift so the new binding ships. Extensions are not part of a
-    seed, so they are not compared."""
-    return (
-        seed.base_tool == body.base_tool
-        and seed.description == body.description
-        and _canonical(seed.fixed_kwargs) == _canonical(body.fixed_kwargs)
-        and _canonical(seed.input_schema) == _canonical(body.input_schema)
-        and _canonical(seed.output_schema) == _canonical(body.output_schema)
-    )
-
 
 async def _apply_seed_tool_meta(seed: PresetSeed) -> None:
     """Apply the seed's tool_meta display fields ONLY where the preset's tool_meta leaves
@@ -1981,10 +1898,8 @@ async def _apply_seed_tool_meta(seed: PresetSeed) -> None:
 
 
 async def _seed_create(seed: PresetSeed) -> None:
-    """Create an absent seed through the shared create core (no caller fence), tagging
-    version 1 ``shipped-default`` in the SAME commit, then apply its tool_meta where
-    absent. The atomic tag leaves no untagged window, so an interrupted create can never
-    strand an untagged version the applier must later repair."""
+    """Create an absent seed through the shared create core (no caller fence), then apply
+    its tool_meta where absent."""
     await _create_preset_core(
         seed.name,
         seed.base_tool,
@@ -1993,90 +1908,14 @@ async def _seed_create(seed: PresetSeed) -> None:
         [],
         seed.output_schema,
         seed.input_schema,
-        tags=[_SHIPPED_DEFAULT_TAG],
         enforce_tier=False,
     )
     await _apply_seed_tool_meta(seed)
 
 
-async def _seed_upgrade(seed: PresetSeed, active_body: PresetBody) -> None:
-    """Re-ship a shipped default whose content drifted from its live active version, tagging
-    the result ``shipped-default``. tool_meta is left untouched — an upgrade re-ships content,
-    not display.
-
-    Content drift that leaves ``base_tool`` unchanged saves a new version through the shared
-    save core (no caller fence). A drift that RE-POINTS ``base_tool`` cannot go through the
-    save core — it carries ``base_tool`` forward from the active version, so a version save
-    can never change the binding — so the full new body is written straight to the versioned
-    store (the tag applied in the SAME commit), then the live tool is reloaded onto the new
-    base and the rebind fans out. History and the tool_meta overlay are preserved (no
-    recreate); a reload that cannot bind the new base rolls the store pointer back and raises
-    loudly.
-
-    Concurrent-boot dedup (symmetric with the create branch): a sibling worker running the
-    same on_startup hook may have re-shipped this drift between the applier's drift check and
-    here. Re-read the active body first and no-op if it now matches the seed, so a concurrent
-    fleet boot yields ONE upgraded version, not a duplicate per worker — for both branches."""
-    if _seed_matches(seed, await instance.app.presets.store.get_active_body(seed.name)):
-        return
-    if seed.base_tool == active_body.base_tool:
-        # Tag the new version in the SAME save commit — no untagged window an
-        # interrupt could strand as an "operator-edited" active version the applier
-        # then freezes against future upgrades.
-        await _save_version_core(
-            seed.name,
-            fixed_kwargs=seed.fixed_kwargs,
-            extensions=[],
-            output_schema=seed.output_schema,
-            output_schema_provided=True,
-            description=seed.description,
-            input_schema=seed.input_schema,
-            tags=[_SHIPPED_DEFAULT_TAG],
-            enforce_tier=False,
-        )
-        return
-
-    new_body = PresetBody(
-        base_tool=seed.base_tool,
-        description=seed.description,
-        fixed_kwargs=seed.fixed_kwargs,
-        extensions=[],
-        output_schema=seed.output_schema,
-        input_schema=seed.input_schema,
-    )
-    # The direct store write bypasses the create/save cores, so run their authoring
-    # validators FIRST: a re-point onto a base that rejects the carried body (an unbindable
-    # base, an unsupported input_schema, a rejecting write validator, an empty description)
-    # raises loudly and persists nothing — never served unvalidated.
-    await _validate_authoring(seed.name, new_body)
-    generic = instance.app.versioning.store
-    prior_active = (await generic.get("preset", seed.name)).active_version
-    census = await _census_at_start(_RELOAD_OP)
-    await generic.save_version("preset", seed.name, new_body.model_dump(), tags=[_SHIPPED_DEFAULT_TAG])
-    try:
-        await instance.app.preset_manager.reload(seed.name)
-    except Exception:
-        await generic.rollback("preset", seed.name, prior_active)
-        raise
-    await instance.app.emit_list_changed("tool")
-    await _fanout_reload(seed.name, census)
-
-
 async def _apply_one_seed(seed: PresetSeed) -> None:
-    """The per-seed policy, idempotent across boot/reload/epoch-swap:
-
-    * absent → create + tag + tool_meta;
-    * present, active version tagged ``shipped-default``, content matches → no-op;
-    * present, active tagged ``shipped-default``, content matches → no-op;
-    * present, active tagged ``shipped-default``, content drifted → re-ship a new tagged
-      version (a base_tool re-point re-binds the live tool, other drift saves a version);
-    * present, active version UNTAGGED → operator-edited, never touched, a VISIBLE skip line
-      names the seed and why. The create tags version 1 atomically (no untagged window can
-      exist), so an untagged active version is unambiguously operator-authored;
-    * any real failure raises loudly at the lifecycle hook.
-
-    Every non-raising branch ends through the local-load guard below, so this worker leaves
-    first boot with the seed's ACTIVE stored version bound in its own registry."""
+    """Create the seed when absent; a preset already present is left untouched. Idempotent
+    across boot/reload/epoch-swap and safe under concurrent fleet boot."""
     store = instance.app.presets.store
     try:
         await store.get_preset(seed.name)
@@ -2097,112 +1936,31 @@ async def _apply_one_seed(seed: PresetSeed) -> None:
             if not present:
                 raise
             logger.info("preset seeds: %r created concurrently by a sibling — treating as present", seed.name)
-            # Self-heal placement: the sibling committed the preset ROW then may have crashed
-            # (or still be) before its non-atomic tool_meta step — re-apply here so this worker
-            # restores the seed's folder/tags rather than leaving the concurrently-created
-            # preset stranded without placement.
-            await _apply_seed_tool_meta(seed)
-    else:
-        versions = await store.list_versions(seed.name)
-        active = next(version for version in versions if version.is_current)
-        active_body = PresetBody.model_validate(active.body)
-        if _operator_edited(active.tags):
-            # Operator-authored (see ``_operator_edited``) — never re-shipped, a VISIBLE
-            # skip names the seed and why.
-            logger.info(
-                "preset seeds: leaving %r untouched — its active version %d is operator-edited (not %s-tagged)",
-                seed.name,
-                active.version,
-                _SHIPPED_DEFAULT_TAG,
-            )
-        elif not _seed_matches(seed, active_body):
-            await _seed_upgrade(seed, active_body)
-        # Self-heal placement on the present branch. ``_seed_create`` commits the preset row +
-        # tag FIRST and applies tool_meta AFTER (a non-atomic window): a worker that crashed in
-        # between — or a race that stranded folder creation — leaves a preset present WITHOUT
-        # its seeded folder/``palette-node`` placement, and no versioned branch above repairs
-        # it. Re-apply the seed's tool_meta here so any boot/config-reload restores placement.
-        # The guards are fill-only (write display_name/tags/folder_id ONLY where absent): an
-        # operator-CHANGED value survives untouched. Fill-only cannot distinguish a
-        # crash-stranded NULL from a field the operator deliberately CLEARED, so a cleared
-        # tags/folder is re-filled by the seed on the next boot.
-        await _apply_seed_tool_meta(seed)
 
-    # Local-load guard on every non-raising branch. A sibling's boot create/upgrade lands
-    # store-side only — it does not fan out to this worker at boot — so a seed present in
-    # the store may be absent from THIS worker's registry (the sibling-dedup and up-to-date
-    # / operator-edited branches both leave it so). Bind the ACTIVE stored version here so
-    # every declared seed is callable on first boot, before any reload — never a per-worker
-    # subset. A create/upgrade already registered locally, so the guard no-ops; reload only
-    # loads the ACTIVE version (never writes one), so an operator edit is preserved and a
-    # reboot stays a no-op; it tears down first, so a name it reaches binds exactly once. A
-    # quarantined seed stays conflicted — never force-loaded onto a base it cannot bind.
+    # Local-load guard. A sibling's boot create lands store-side only — it does not fan out
+    # to this worker at boot — so a seed present in the store may be absent from THIS worker's
+    # registry. Bind the ACTIVE stored version here so every declared seed is callable on
+    # first boot, before any reload. A create already registered locally, so the guard no-ops;
+    # a quarantined seed stays conflicted — never force-loaded onto a base it cannot bind.
     mgr = instance.app.preset_manager
     if not mgr.is_registered(seed.name) and not mgr.is_quarantined(seed.name):
         await mgr.reload(seed.name)
 
 
-async def _retire_one_seed(name: str) -> None:
-    """Retire a WITHDRAWN shipped default — delete the deployed record while the seed
-    still owns it, so a plugin that stops shipping a seed does not leave the stale
-    record visible forever. Ownership is the applier's single untouched-vs-edited
-    policy (:func:`_operator_edited`): only a record whose active version still wears
-    the ``shipped-default`` tag is deleted, and it goes through the ordinary delete
-    door — the registration teardown, tool_meta-overlay cascade, and fleet fan-out are
-    exactly a manual delete's (a quarantined record takes that door's hard-delete
-    branch). An operator-edited record — or an operator-created preset that merely
-    shares the retired name — is left in place with a VISIBLE skip line; an absent
-    name is a no-op, so a re-run is idempotent.
-
-    Concurrent-boot dedup (symmetric with the create path's conflict absorption): a
-    sibling worker running the same startup hook may win the delete between this
-    worker's ownership check and its own delete door, leaving the door a 404 — the
-    record is already gone, which is the outcome this worker wanted, so it is absorbed
-    as benign rather than crashing the boot lifecycle."""
-    try:
-        versions = await instance.app.presets.store.list_versions(name)
-    except PresetNotFoundError:
-        return
-    active = next(version for version in versions if version.is_current)
-    if _operator_edited(active.tags):
-        logger.info(
-            "preset seeds: leaving retired %r in place — its active version %d is operator-edited (not %s-tagged)",
-            name,
-            active.version,
-            _SHIPPED_DEFAULT_TAG,
-        )
-        return
-    try:
-        await delete_preset(name)
-    except NotFoundError:
-        logger.info("preset seeds: retired %r deleted concurrently by a sibling — treating as retired", name)
-        return
-    logger.info("preset seeds: retired %r — its shipped-default record was deleted", name)
-
-
 async def apply_preset_seeds() -> None:
-    """Startup/reload/epoch-swap handler: apply every declared preset seed, then every
-    declared seed retirement.
+    """Startup/reload/epoch-swap handler: create every declared preset seed that is absent.
 
-    Registered AFTER the preset-rehydrate handler so a just-created seed is LIVE in the
-    same epoch (resolvable in the tool registry) — it creates through the operations-layer
-    internal path, which registers the tool — and a retired record is rehydrated/registered
-    before its delete tears it down. Feature-OFF is legal: with the versioned store
-    unconfigured every seed and retirement logs a VISIBLE skip and nothing is touched.
-    Any real failure raises loudly. Idempotent across re-runs."""
+    Registered AFTER the preset-rehydrate handler so a just-created seed is LIVE in the same
+    epoch (resolvable in the tool registry) — it creates through the operations-layer internal
+    path, which registers the tool. Feature-OFF is legal: with the versioned store unconfigured
+    every seed logs a VISIBLE skip and nothing is touched. Any real failure raises loudly.
+    Idempotent across re-runs."""
     seeds = instance.app.presets.seeds()
-    retired = instance.app.presets.retired_seeds()
-    if not seeds and not retired:
+    if not seeds:
         return
     if not component_store_configured(SKELETON_COMPONENT):
         for seed in seeds:
             logger.info("preset seeds: skipping seed %r — the versioned-document store is not configured", seed.name)
-        for name in retired:
-            logger.info(
-                "preset seeds: skipping retirement of %r — the versioned-document store is not configured", name
-            )
         return
     for seed in seeds:
         await _apply_one_seed(seed)
-    for name in retired:
-        await _retire_one_seed(name)

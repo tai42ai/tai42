@@ -10,8 +10,9 @@ is the audit of a running system, re-derived as writes land, never restored.
 store holds; it carries no credentials.
 
 EXPORT reads the store directly; IMPORT writes through the facet doors
-(``put_module`` / ``put_declaration`` / ``mount`` / ``import_aliases`` / ``import_records``)
-so every validation applies unchanged and each imported write is stamped with the
+(``put_module`` / ``put_declaration`` / ``mount``) plus this section's own
+``restore_aliases`` / ``restore_records`` paths so every validation applies unchanged and
+each imported write is stamped with the
 completed origin. A refused entity is REPORTED and skipped — one bad row never aborts the
 rest. Order is load-bearing: modules → declarations → mounts → aliases → records (a mount
 needs its module and declaration; a record needs its declared state).
@@ -156,7 +157,11 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
         aliases_by_state.setdefault(entry["state"], []).append({k: v for k, v in entry.items() if k != "state"})
     for state, rows in aliases_by_state.items():
         try:
-            await tai42_app.states.import_aliases(state, rows, origin=_RESTORE_ORIGIN)
+            # ``restore_aliases`` is the states section's own restore path (off the
+            # ``AppStates`` protocol), reached through the concrete skeleton facet.
+            from tai42_skeleton.app import instance
+
+            await instance.app.states.restore_aliases(state, rows, origin=_RESTORE_ORIGIN)
         except _ENTITY_ERRORS as exc:
             report["aliases"]["failed"] += len(rows)
             report["errors"].append(f"aliases for state {state!r}: {exc}")
@@ -167,7 +172,11 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
         records_by_state.setdefault(entry["state"], []).append({k: v for k, v in entry.items() if k != "state"})
     for state, rows in records_by_state.items():
         try:
-            await tai42_app.states.import_records(state, rows, origin=_RESTORE_ORIGIN)
+            # ``restore_records`` is the states section's own restore path (off the
+            # ``AppStates`` protocol), reached through the concrete skeleton facet.
+            from tai42_skeleton.app import instance
+
+            await instance.app.states.restore_records(state, rows, origin=_RESTORE_ORIGIN)
         except _ENTITY_ERRORS as exc:
             report["records"]["failed"] += len(rows)
             report["errors"].append(f"records for state {state!r}: {exc}")

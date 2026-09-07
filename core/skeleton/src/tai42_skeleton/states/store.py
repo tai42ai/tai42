@@ -498,9 +498,9 @@ class PostgresStatesStore:
         effective_schema: dict[str, Any],
     ) -> None:
         """Write a mount row and the state's recomposed effective schema in ONE txn, under
-        the declaration lock (serializing against every migrate, so the effective schema a
-        concurrent write validates against is never half-composed). Refuses loudly when
-        the state is not declared."""
+        the declaration lock (serializing against every schema change, so the effective
+        schema a concurrent write validates against is never half-composed). Refuses loudly
+        when the state is not declared."""
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
@@ -674,24 +674,6 @@ class PostgresStatesStore:
                 "folded_from": folded,
             }
 
-    async def all_records(self, state: str) -> dict[tuple[str, str, str, str], dict[str, Any]]:
-        """Every ``{(target_kind, target_name, subject_kind, subject_key): data}`` of a
-        state — the migrate-PREVIEW read. A lock-free snapshot (a preview is advisory)."""
-        async with (
-            client_ctx(PostgresClient, _settings()) as pool,
-            pool.connection() as conn,
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
-            await cur.execute(
-                "SELECT target_kind, target_name, subject_kind, subject_key, data FROM state_records "
-                "WHERE state = %s ORDER BY target_kind, target_name, subject_kind, subject_key",
-                (state,),
-            )
-            return {
-                (r["target_kind"], r["target_name"], r["subject_kind"], r["subject_key"]): r["data"]
-                for r in await cur.fetchall()
-            }
-
     async def export_records(self, state: str) -> list[dict[str, Any]]:
         """Every record of a state as export rows ``{target_kind, target_name,
         subject_kind, subject_key, data}`` — the backup exporter's read."""
@@ -810,8 +792,8 @@ class PostgresStatesStore:
         ``(applied, merged_document, seq, guarded_skipped)`` — ``(False, None, None, [])``
         on an op-id replay.
 
-        Order (pinned): declaration row ``FOR SHARE`` (the migrate serialization pin AND
-        the effective-schema read); compose the state's regime + traced paths from its
+        Order (pinned): declaration row ``FOR SHARE`` (the schema-change serialization pin
+        AND the effective-schema read); compose the state's regime + traced paths from its
         mounts under the lock; refuse a ``composing`` shape violation BEFORE the op-ledger
         insert (D-4); the op-ledger ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is
         set (replay ⇒ return without touching the record); the ATOMIC UPSERT-LOCK on the
@@ -1159,68 +1141,16 @@ class PostgresStatesStore:
                 )
             return list(await cur.fetchall())
 
-    async def migrate(
-        self,
-        state: str,
-        new_schema: dict[str, Any],
-        new_effective_schema: dict[str, Any],
-        *,
-        decide: Any,
-        origin: CompletedOrigin,
-    ) -> None:
-        """Replace a declaration's base + effective schema, converting every record
-        atomically in ONE txn under the declaration ``FOR UPDATE`` lock. The narrowing
-        decision + converter are built from the old BASE schema RE-READ under the lock; a
-        failing rule or an invalid converted record aborts the WHOLE change. Records one
-        ``state_writes`` row per converted subject (paths ``[[]]`` — the whole document)
-        under ``origin``, in the same transaction."""
-        async with (
-            client_ctx(PostgresClient, _settings()) as pool,
-            pool.connection() as conn,
-            conn.transaction(),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
-            await cur.execute("SELECT schema FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
-            row = await cur.fetchone()
-            if row is None:
-                raise StateNotFoundError(f"no state declared as {state!r}")
-            convert = decide(row["schema"])  # built UNDER the lock; raises to refuse
+    # -- backup restore ----------------------------------------------------------
 
-            await cur.execute(
-                "SELECT target_kind, target_name, subject_kind, subject_key, data FROM state_records "
-                "WHERE state = %s ORDER BY target_kind, target_name, subject_kind, subject_key FOR UPDATE",
-                (state,),
-            )
-            records = {
-                (r["target_kind"], r["target_name"], r["subject_kind"], r["subject_key"]): r["data"]
-                for r in await cur.fetchall()
-            }
-            converted = await convert(records)
-            for (tk, tn, sk, key), data in converted.items():
-                await cur.execute(
-                    "UPDATE state_records SET data = %s, updated_at = clock_timestamp() "
-                    "WHERE state = %s AND target_kind = %s AND target_name = %s AND subject_kind = %s "
-                    "AND subject_key = %s RETURNING extract(epoch FROM updated_at)::float8 AS seq",
-                    (Jsonb(data), state, tk, tn, sk, key),
-                )
-                seq_row = await cur.fetchone()
-                if seq_row is not None:
-                    await self._insert_write(cur, state, tk, tn, sk, key, seq_row["seq"], origin, [[]], None)
-            await cur.execute(
-                "UPDATE state_declarations SET schema = %s, effective_schema = %s, updated_at = clock_timestamp() "
-                "WHERE name = %s",
-                (Jsonb(new_schema), Jsonb(new_effective_schema), state),
-            )
-
-    # -- bulk import (backup restore + the transfer tool) ------------------------
-
-    async def import_records(
+    async def restore_records(
         self, state: str, rows: list[dict[str, Any]], *, origin: CompletedOrigin, validate_doc: Any
     ) -> None:
-        """Import record rows for ``state`` under the completed origin, validating each
-        document against the effective schema, in ONE txn. Each row carries its four
-        subject columns plus ``data``. A record already present with equal data is a
-        no-op; a differing one is overwritten. Records one write per imported row."""
+        """Restore record rows for ``state`` under the completed origin, validating each
+        document against the effective schema, in ONE txn — the backup section's own
+        record-restore path. Each row carries its four subject columns plus ``data``. A
+        record already present with equal data is a no-op; a differing one is overwritten.
+        Records one write per restored row."""
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
@@ -1248,8 +1178,8 @@ class PostgresStatesStore:
                 seq = None if seq_row is None else seq_row["seq"]
                 await self._insert_write(cur, state, tk, tn, kind, key, seq, origin, [[]], None)
 
-    async def import_aliases(self, state: str, rows: list[dict[str, Any]]) -> None:
-        """Import subject-alias rows for ``state`` verbatim, in ONE txn (identity, not a
+    async def restore_aliases(self, state: str, rows: list[dict[str, Any]]) -> None:
+        """Restore subject-alias rows for ``state`` verbatim, in ONE txn (identity, not a
         write — no ledger row). Each row carries the target, the alias ``(kind, key)``,
         the canonical ``(kind, key)`` and the ``mode``."""
         async with (
@@ -1275,21 +1205,6 @@ class PostgresStatesStore:
                         row["canonical_key"],
                         row["mode"],
                     ),
-                )
-
-    async def import_applied_ops(self, rows: list[dict[str, Any]]) -> None:
-        """Import applied-op ledger rows verbatim (the idempotency keys carry no subject),
-        in ONE txn — a re-imported id is a no-op."""
-        async with (
-            client_ctx(PostgresClient, _settings()) as pool,
-            pool.connection() as conn,
-            conn.transaction(),
-            conn.cursor() as cur,
-        ):
-            for row in rows:
-                await cur.execute(
-                    "INSERT INTO state_applied_ops (op_id) VALUES (%s) ON CONFLICT DO NOTHING",
-                    (row["op_id"],),
                 )
 
     # -- retention ---------------------------------------------------------------

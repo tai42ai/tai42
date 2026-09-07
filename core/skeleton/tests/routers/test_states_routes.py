@@ -19,7 +19,10 @@ from typing import Any
 import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_contract.states.errors import NarrowingRequiresConfirmationError, StatesError
+from tai42_contract.states.errors import (
+    ModuleValidationError,
+    StatesError,
+)
 from tai42_contract.states.models import (
     CompletedOrigin,
     ConsumerLink,
@@ -31,7 +34,7 @@ from tai42_contract.states.models import (
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.route_registry import load_api_routes
-from tai42_skeleton.operations import NotSupportedError, PreconditionFailedError, ValidationRejected
+from tai42_skeleton.operations import NotSupportedError, ValidationRejected
 from tai42_skeleton.operations import states as ops
 from tai42_skeleton.routers import states as router
 
@@ -65,8 +68,6 @@ _EXPECTED: set[tuple[str, str]] = {
     ("PUT", "/api/states/{name}"),
     ("DELETE", "/api/states/{name}"),
     ("GET", "/api/states/{name}/stats"),
-    ("POST", "/api/states/{name}/migrate"),
-    ("POST", "/api/states/{name}/migrate/preview"),
     ("GET", "/api/states/{name}/mounts"),
     ("PUT", "/api/states/{name}/mounts/{module}"),
     ("PATCH", "/api/states/{name}/mounts/{module}"),
@@ -146,18 +147,19 @@ def test_route_answers_501_body_with_the_stable_code_when_unbound() -> None:
 # The error -> status chokepoint (_states_door + _ERROR_MAP) and the flat      #
 # operation surface, exercised through a fake facet so no database is needed.  #
 # --------------------------------------------------------------------------- #
+# The message a consumer-registered mount validator raises with; the door must relay it verbatim.
+_VALIDATOR_REFUSAL = (
+    "module 'agenda' compiled view 'standing' reads a bare `.data`, but its input is the flow "
+    "root; read the mounted subtree as `$mount.data`"
+)
+
+
 class _FakeStates:
     """A stand-in for ``instance.app.states`` covering only the methods a test drives; each
     installs the outcome (a raise or a value) the door is asserted to map."""
 
     def __init__(self) -> None:
-        self.migrate_calls: list[dict[str, Any]] = []
         self.writes_calls: list[dict[str, Any]] = []
-
-    async def migrate(self, name, new_schema, *, origin, transform_expr, confirm_drop, resolutions):
-        self.migrate_calls.append({"confirm_drop": confirm_drop})
-        if not confirm_drop:
-            raise NarrowingRequiresConfirmationError("a narrowing change requires EXACTLY ONE of ...")
 
     async def writes(self, state, subject, *, limit, cursor):
         self.writes_calls.append({"limit": limit, "cursor": cursor})
@@ -185,6 +187,15 @@ class _FakeStates:
             {"kind": "state-module", "name": "loose", "schema": {}, "mounted_on": 0, "shipped_default": False},
         ]
 
+    async def mount(self, state, module, body):
+        raise ModuleValidationError(_VALIDATOR_REFUSAL)
+
+    async def update_mount_declarations(self, state, module, declarations):
+        raise ModuleValidationError(_VALIDATOR_REFUSAL)
+
+    async def put_module(self, doc, *, replace):
+        raise ModuleValidationError(_VALIDATOR_REFUSAL)
+
     async def list_declarations(self):
         raise _UnmappedStatesError("a brand-new store error class the map does not know")
 
@@ -206,20 +217,6 @@ def _install_fake_states(monkeypatch: pytest.MonkeyPatch) -> _FakeStates:
     fake = _FakeStates()
     monkeypatch.setattr(ops, "_states", lambda: fake)
     return fake
-
-
-def test_migrate_maps_narrowing_to_412_then_confirm_drop_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = _install_fake_states(monkeypatch)
-    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
-    with pytest.raises(PreconditionFailedError) as excinfo:
-        asyncio.run(ops.migrate_state("alerts", schema))
-    assert excinfo.value.status == 412
-    # The store's own message reaches the client verbatim through the map.
-    assert "EXACTLY ONE" in str(excinfo.value)
-    # The retry that confirms the drop passes through to a success body.
-    out = asyncio.run(ops.migrate_state("alerts", schema, confirm_drop=True))
-    assert out == {"migrated": True, "name": "alerts"}
-    assert [c["confirm_drop"] for c in fake.migrate_calls] == [False, True]
 
 
 def test_malformed_record_path_segment_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -303,6 +300,26 @@ def test_module_listing_serves_the_catalog_columns(monkeypatch: pytest.MonkeyPat
     assert by_name["tagmod"]["shipped_default"] is True
     assert by_name["loose"]["mounted_on"] == 0
     assert by_name["loose"]["shipped_default"] is False
+
+
+@pytest.mark.parametrize(
+    "door",
+    [
+        lambda: ops.mount_state_module("alerts", "agenda", {"path": ["sub"]}),
+        lambda: ops.update_state_mount("alerts", "agenda", {"intents": []}),
+        lambda: ops.put_state_module("agenda", {"kind": "state-module", "schema": {}}, replace=True),
+    ],
+    ids=["mount", "update_mount_declarations", "put_module"],
+)
+def test_mount_validator_refusal_is_422_on_every_door(monkeypatch: pytest.MonkeyPatch, door) -> None:
+    # Every door that runs the registered mount validators (mount / update_mount_declarations /
+    # put_module) funnels through ``_states_door``; a consumer validator's contract
+    # ``ModuleValidationError`` maps to a 422 with the validator's message verbatim, never a 500.
+    _install_fake_states(monkeypatch)
+    with pytest.raises(ValidationRejected) as excinfo:
+        asyncio.run(door())
+    assert excinfo.value.status == 422
+    assert str(excinfo.value) == _VALIDATOR_REFUSAL
 
 
 def test_unmapped_store_error_reraises_not_500(monkeypatch: pytest.MonkeyPatch) -> None:

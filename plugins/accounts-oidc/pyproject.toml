@@ -25,7 +25,6 @@ classifiers = [
 dependencies = [
     # The pure interface contract the provider registers through — the accounts
     # ABC, the login-method models, and the dual-registry registration function.
-    # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=7.1,<8",
     # The Redis client (session/state/SSO-code storage), the api-key hash used to

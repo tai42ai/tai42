@@ -95,14 +95,6 @@ async def test_store_correlation_expired_budget_raises_and_writes_nothing(fake_r
     assert fake_redis.store == {}
 
 
-async def test_thread_get_tolerates_legacy_bare_url_record(fake_redis):
-    # A record written by the PRE-migration code is a bare callback URL string, not the
-    # current JSON. get_correlation must read it as a graceful miss (-> the reply
-    # bridges), never raise a JSONDecodeError.
-    fake_redis.store["channel:slack:corr:11.22"] = "http://gateway/api/interactions/callback/legacy"
-    assert await slack_thread_correlation_store.get_correlation("11.22") is None
-
-
 # -- the form store (form:<interaction_id>) as the contract port -----------------
 
 

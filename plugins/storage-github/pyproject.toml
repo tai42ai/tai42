@@ -25,7 +25,6 @@ classifiers = [
 dependencies = [
     # The pure interface contract the backend registers through — Storage,
     # ObjectStat, assert_not_root, and the tai42_app handle.
-    # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=7.1,<8",
     # Pooled clients + settings primitives (PooledClient, TaiBaseSettings, cache).

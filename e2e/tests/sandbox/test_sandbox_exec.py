@@ -1,6 +1,7 @@
 """The ``sandbox_exec`` base tool end to end: it runs IN the sandbox, it is loud on a
 provider-less door, its per-tool ``input_schema`` preset delivery validates the caller,
-and its authoring/invocation fence is a no-op only where the platform does not fence.
+and its ``fenced`` tier — enforced generically at the tool-run chokepoint — is a no-op
+only where the platform does not fence.
 
 ``sandbox_exec`` acquires a session through the same kit chokepoint every consumer does,
 runs ``argv`` in it, and returns the :class:`ExecResult`. A DELIVERY names concrete tools
@@ -128,9 +129,9 @@ async def test_input_schema_over_an_unsupported_base_is_a_loud_authoring_error(
 async def test_invocation_fence_is_a_no_op_with_access_control_off(
     sandbox_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
-    # With access control OFF, ``resolve_caller`` returns an admin, so the base tool's own
-    # direct-invocation admin fence is a no-op: a bare ``sandbox_exec`` edge call SUCCEEDS,
-    # proving the fence bites only where the platform fences at all.
+    # With access control OFF, ``resolve_caller`` returns an admin, so the run-time tier
+    # fence (generic, at the tool-run chokepoint) is a no-op: a bare ``sandbox_exec`` edge
+    # call SUCCEEDS, proving the fence bites only where the platform fences at all.
     token = uniq("fence")
     async with sandbox_stack.mcp() as mcp:
         result = await mcp.call_tool("sandbox_exec", {"argv": ["python", "-c", f"print({token!r})"], "image": _IMAGE})

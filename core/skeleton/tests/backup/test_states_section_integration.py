@@ -139,7 +139,7 @@ async def _seed(token: str) -> None:
     )
     await tai42_app.states.mount(state, module, MountBody(path=["a"], parameters={}, declarations={}))
     await tai42_app.states.replace(state, _SUBJECT, {"n": 1}, origin=_ORIGIN)
-    await tai42_app.states.import_aliases(
+    await instance.app.states.restore_aliases(
         state,
         [
             {

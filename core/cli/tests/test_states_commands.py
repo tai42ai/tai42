@@ -96,69 +96,6 @@ def test_stats_reads_the_counts(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "total" in result.output
 
 
-def test_migrate_posts_the_new_schema_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/api/states/status/migrate"
-        assert json.loads(request.content) == {"new_schema": {"type": "object"}, "confirm_drop": False}
-        return data_response({"migrated": 3})
-
-    result = run_cli(monkeypatch, handler, ["states", "migrate", "status", "--new-schema", '{"type": "object"}'])
-    assert result.exit_code == 0, result.output
-
-
-def test_migrate_carries_transform_confirm_and_resolutions(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert json.loads(request.content) == {
-            "new_schema": {"type": "object"},
-            "transform_expr": ".count",
-            "confirm_drop": True,
-            "resolutions": [{"subject": "a", "value": {}}],
-        }
-        return data_response({"migrated": 2})
-
-    result = run_cli(
-        monkeypatch,
-        handler,
-        [
-            "states",
-            "migrate",
-            "status",
-            "--new-schema",
-            '{"type": "object"}',
-            "--transform",
-            ".count",
-            "--confirm-drop",
-            "--resolutions",
-            '[{"subject": "a", "value": {}}]',
-        ],
-    )
-    assert result.exit_code == 0, result.output
-
-
-def test_migrate_rejects_invalid_new_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("no request should be made for a malformed schema")
-
-    result = run_cli(monkeypatch, handler, ["states", "migrate", "status", "--new-schema", "[]"])
-    assert result.exit_code != 0
-    assert "must be a JSON object" in visible(result.output)
-
-
-def test_migrate_preview_dry_runs(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/api/states/status/migrate/preview"
-        assert json.loads(request.content) == {"new_schema": {"type": "object"}}
-        return data_response({"narrows": True, "would_drop": 1})
-
-    result = run_cli(
-        monkeypatch, handler, ["states", "migrate-preview", "status", "--new-schema", '{"type": "object"}']
-    )
-    assert result.exit_code == 0, result.output
-    assert "would_drop" in result.output
-
-
 # -- mounts -------------------------------------------------------------------
 
 
@@ -561,12 +498,3 @@ def test_get_surfaces_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     result = run_cli(monkeypatch, handler, ["states", "get", "status"])
     assert result.exit_code != 0
     assert "not found" in visible(result.output)
-
-
-def test_migrate_surfaces_a_validation_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return error_response("migration narrows the schema; pass --transform or --confirm-drop", 422)
-
-    result = run_cli(monkeypatch, handler, ["states", "migrate", "status", "--new-schema", "{}"])
-    assert result.exit_code != 0
-    assert "narrows the schema" in visible(result.output)

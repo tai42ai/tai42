@@ -53,14 +53,6 @@ async def test_get_unknown_returns_none(fake_redis):
     assert await store.get_correlation("99") is None
 
 
-async def test_get_tolerates_legacy_bare_url_record(fake_redis):
-    # A record written by the PRE-migration code is a bare callback URL string, not a JSON
-    # Correlation. get_correlation must read it as a graceful miss (-> the reply bridges),
-    # never raise a JSON/validation error.
-    fake_redis.data["channel:telegram:corr:42"] = "https://example.test/api/interactions/callback/legacy"
-    assert await store.get_correlation("42") is None
-
-
 async def test_release_removes_key_and_is_idempotent(fake_redis):
     await store.set_correlation("42", _entry(), ttl_seconds=600)
     await store.release_correlation("42")
@@ -145,30 +137,6 @@ async def test_set_options_non_positive_ttl_raises(fake_redis, ttl: int):
     with pytest.raises(ValueError, match="TTL must be positive"):
         await set_options("chatA", "42", _opts("red", "blue"), ttl_seconds=ttl)
     assert fake_redis.data == {}
-
-
-async def test_get_options_tolerates_non_json_record(fake_redis):
-    # A record that is not valid JSON is treated as "no options" (a graceful miss so the
-    # tap bridges), never a raise.
-    fake_redis.data["channel:telegram:opts:chatA:42"] = "not json{"
-    assert await get_options("chatA", "42") is None
-
-
-async def test_get_options_tolerates_a_legacy_bare_string_record(fake_redis):
-    # The pre-vocabulary channel stored options as a bare list[str] (callback_data = index).
-    # A tap resolving against such a record is a graceful miss — acked-ignored, never a
-    # crash — until the record's bounded TTL clears it.
-    fake_redis.data["channel:telegram:opts:chatA:42"] = '["red", "blue"]'
-    assert await get_options("chatA", "42") is None
-
-
-@pytest.mark.parametrize("stored", ['{"a": 1}', "[1, 2, 3]", '["ok", 7]', '[{"text": "no cb"}]'])
-async def test_get_options_ignores_records_that_are_not_the_stored_option_shape(fake_redis, stored: str):
-    # Valid JSON but the wrong shape (an object, a list carrying a non-object, or an object
-    # missing the required StoredOption fields) is not a usable option list: ignored as "no
-    # options", never handed to the token mapping.
-    fake_redis.data["channel:telegram:opts:chatA:42"] = stored
-    assert await get_options("chatA", "42") is None
 
 
 async def test_default_namespace_redis_url_configures_the_store(fake_redis, monkeypatch: pytest.MonkeyPatch):

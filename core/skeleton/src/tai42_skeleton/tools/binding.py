@@ -58,10 +58,12 @@ from tai42_skeleton.tools.attribution import (
 from tai42_skeleton.tools.context_bridge import bridge_context
 from tai42_skeleton.tools.retry import dispatch_with_retry
 from tai42_skeleton.tools.reveal_gate import InprocessRevealGate, inprocess_reveal_gate, note_secret_reveal
+from tai42_skeleton.tools.tier import enforce_run_tier
 from tai42_skeleton.tools.turn_budget import turn_budget
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
+    from tai42_contract.app import RouteAction
 
     from tai42_skeleton.app.server import TaiMCP
     from tai42_skeleton.authz.identity import CallerIdentity
@@ -69,6 +71,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.manifest import Manifest
     from tai42_skeleton.tools.registry import ToolRegistry
     from tai42_skeleton.tools.retry import ToolRetryRegistry
+    from tai42_skeleton.tools.tier import ToolTierRegistry
     from tai42_skeleton.tools.tool_refs import ToolRefsRegistry
 
 logger = logging.getLogger(__name__)
@@ -501,6 +504,10 @@ class ToolBinding:
     def _tool_retry_registry(self) -> "ToolRetryRegistry":
         return self._app._tool_retry_registry
 
+    @property
+    def _registration_tier_registry(self) -> "ToolTierRegistry":
+        return self._app._registration_tier_registry
+
     def _require_manifest(self) -> "Manifest":
         manifest = self._manifest
         if manifest is None:
@@ -613,6 +620,13 @@ class ToolBinding:
         connection and its ContextVar keeps a nested re-dispatch from opening a fresh
         window; a detached run (a background submit, a hook/trigger fire, a backend-worker
         execution) runs unbounded."""
+        # Run-time tier fence: a ``fenced``/``secret`` tool — or a preset/branch over one —
+        # runs only for an administrator. Enforced here at the shared in-process seam every
+        # door flows through, before argument work or the invoked-tool deposit, so a refused
+        # run has no visible effect; a detached fire resolves its bound execution identity,
+        # so its refusal is a recorded failed run. The MCP edge never reaches this seam and
+        # fences at its own middleware. A non-fenced tool resolves no caller (a dict read).
+        await enforce_run_tier(self._app, key)
         # An agent run tool's re-dispatch (e.g. a chain TRANSFORMER re-invoking it by
         # name) materializes the _UNSET sentinel for optionals the caller never
         # supplied; strip it here so the set-fields-only contract holds and the tool's
@@ -911,6 +925,12 @@ class ToolBinding:
         resolved_sig = inspect.signature(resolved)
 
         async def runnable(*args, **kwargs):
+            # Run-time tier fence: this agent tool-dispatch door reaches the tool BODY
+            # directly (never the ``run_tool`` seam), so it enforces the same admin fence for
+            # a ``fenced``/``secret`` tool here — through the SAME ``enforce_run_tier`` the
+            # seam uses, resolving a preset/branch to its base tool identically, so the two
+            # doors cannot drift. A non-fenced tool resolves no caller (a dict read).
+            await enforce_run_tier(self._app, tool_obj.name)
             target, target_sig = resolved, resolved_sig
             execution_identity = self._bound_execution_identity()
             if execution_identity is not None:
@@ -1007,6 +1027,7 @@ class ToolBinding:
         force=False,
         tool_refs: "ToolRefsExtractor | None" = None,
         retry: ToolRetryPolicy | None = None,
+        tier: "RouteAction | None" = None,
         **kwargs,
     ) -> Any:
         func_to_register = None
@@ -1036,6 +1057,11 @@ class ToolBinding:
             # never silently at dispatch.
             if retry is not None:
                 self._tool_retry_registry.register(name, ToolRetryPolicy.model_validate(retry))
+            # Likewise for the declared registration tier — the declarative form of
+            # ``app.tools.register_tier``, keyed by the bound name so both the authoring
+            # gate and the run-time fence read it.
+            if tier is not None:
+                self._registration_tier_registry.register(name, tier)
             return self.bind_tool_func(*decorator_args, **kwargs)(func)
 
         if func_to_register is not None:

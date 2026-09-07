@@ -61,13 +61,7 @@ from tai42_skeleton.operations.states import (
     merge_state_record as _merge_state_record_op,
 )
 from tai42_skeleton.operations.states import (
-    migrate_state as _migrate_state_op,
-)
-from tai42_skeleton.operations.states import (
     mount_state_module as _mount_state_module_op,
-)
-from tai42_skeleton.operations.states import (
-    preview_migrate_state as _preview_migrate_state_op,
 )
 from tai42_skeleton.operations.states import (
     prune_state_retention as _prune_state_retention_op,
@@ -157,26 +151,6 @@ def _query_bool(request: Request, field: str) -> bool:
 
 async def _extract_declaration(request: Request) -> dict[str, Any]:
     return {"declaration": await _json_object(request)}
-
-
-async def _extract_migrate(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
-    resolutions = body.get("resolutions")
-    if resolutions is not None and not isinstance(resolutions, list):
-        raise BadRequestError("'resolutions' must be a JSON array")
-    transform_expr = body.get("transform_expr")
-    if transform_expr is not None and not isinstance(transform_expr, str):
-        raise BadRequestError("'transform_expr' must be a string")
-    return {
-        "new_schema": _require_object(body, "new_schema"),
-        "transform_expr": transform_expr,
-        "confirm_drop": bool(body.get("confirm_drop", False)),
-        "resolutions": resolutions,
-    }
-
-
-async def _extract_preview_migrate(request: Request) -> dict[str, Any]:
-    return {"new_schema": _require_object(await _json_object(request), "new_schema")}
 
 
 async def _extract_mount(request: Request) -> dict[str, Any]:
@@ -296,22 +270,6 @@ delete_state = register_operation_route(
 )
 state_stats = register_operation_route(
     tai42_app, operation_metadata_of(_state_stats_op), path="/api/states/{name}/stats", method="GET", action="read"
-)
-migrate_state = register_operation_route(
-    tai42_app,
-    operation_metadata_of(_migrate_state_op),
-    path="/api/states/{name}/migrate",
-    method="POST",
-    context_extractor=_extract_migrate,
-    action="write",
-)
-preview_migrate_state = register_operation_route(
-    tai42_app,
-    operation_metadata_of(_preview_migrate_state_op),
-    path="/api/states/{name}/migrate/preview",
-    method="POST",
-    context_extractor=_extract_preview_migrate,
-    action="write",
 )
 list_state_mounts = register_operation_route(
     tai42_app,

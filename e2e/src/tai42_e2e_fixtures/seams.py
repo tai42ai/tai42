@@ -26,16 +26,16 @@ from tai42_contract.tools import current_tool_invocation
 
 # The seed's declared name; a boot binds it as a live callable preset over ``e2e_echo``.
 _SEED_NAME = "e2e_seed_probe"
-# The env toggle a stack flips (through the env-write door) to ship an UPGRADED body:
-# a reload re-imports this module, re-declares the drifted seed, and the applier
-# upgrades the tagged version in place.
+# The env toggle a stack flips (through the env-write door) to re-declare a CHANGED body:
+# a reload re-imports this module and re-declares the seed with different content, which
+# the create-when-absent applier leaves untouched on the already-present preset.
 _SEED_VARIANT_ENV = "E2E_SEED_VARIANT"
 _SEED_UPGRADED = "upgraded"
 
 
 def _seed() -> PresetSeed:
     """The declared seed for the CURRENT env variant: a distinct description +
-    baked ``payload`` for the upgraded body so its content genuinely drifts."""
+    baked ``payload`` so a reload declares different content than the present preset."""
     upgraded = os.environ.get(_SEED_VARIANT_ENV) == _SEED_UPGRADED
     payload = "seeded-upgraded" if upgraded else "seeded-base"
     description = "the shipped seed probe (upgraded)" if upgraded else "the shipped seed probe"

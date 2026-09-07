@@ -34,12 +34,10 @@ from jsonschema import Draft202012Validator
 from tai42_contract.states.errors import (
     DeclarationInUseError,
     InvalidPathError,
-    MigrationConversionError,
     ModuleExistsError,
     ModuleInUseError,
     ModuleValidationError,
     MountConflictError,
-    NarrowingRequiresConfirmationError,
     NonAdditiveRedeclareError,
     SchemaValidationError,
     StateNotFoundError,
@@ -71,8 +69,7 @@ from tai42_kit.utils.data.jq_util import run_jq_first
 from tai42_skeleton.states.context import current_state_context, state_context
 from tai42_skeleton.states.db import states_store_configured
 from tai42_skeleton.states.modules import StateModule, compose_effective_schema, regime_for, validate_module
-from tai42_skeleton.states.paths import APPEND, validate_op, validate_path
-from tai42_skeleton.states.paths import apply_ops as apply_path_ops
+from tai42_skeleton.states.paths import validate_op
 from tai42_skeleton.states.store import (
     PostgresStatesStore,
     make_cursor,
@@ -82,7 +79,6 @@ from tai42_skeleton.states.store import (
 
 logger = logging.getLogger(__name__)
 
-_PREVIEW_EXAMPLE_CAP = 10
 _DEFAULT_PAGE = 200
 _MAX_PAGE = 500
 
@@ -228,8 +224,7 @@ def _validate_document(schema: dict[str, Any], doc: dict[str, Any]) -> None:
 def _is_narrowing(old_schema: dict[str, Any], new_schema: dict[str, Any]) -> bool:
     """Whether ``new_schema`` removes or changes any top-level property of ``old_schema`` —
     OR changes any ROOT keyword outside ``properties``. Deliberately conservative: any
-    property-subtree edit or root-keyword edit registers as narrowing and takes the guarded
-    migrate door."""
+    property-subtree edit or root-keyword edit registers as narrowing."""
     old_props = old_schema.get("properties", {}) if isinstance(old_schema, dict) else {}
     new_props = new_schema.get("properties", {})
     for fname, fschema in old_props.items():
@@ -414,7 +409,7 @@ class StatesService:
         """Create or plain re-declare a state.
 
         With records present, a re-declare accepts only ADDITIVE schema changes; a removal
-        or change of an existing property is refused pointing at the guarded migrate door
+        or change of an existing property is refused while records exist
         (:class:`NonAdditiveRedeclareError`), and removing a subject kind still present in
         records raises :class:`DeclarationInUseError`. ``retention_days`` is metadata, not
         schema, so changing it alone is never gated."""
@@ -434,8 +429,8 @@ class StatesService:
             total = sum(per_kind.values())
             if total > 0 and _is_narrowing(existing["schema"], decl.schema_):
                 raise NonAdditiveRedeclareError(
-                    f"state {decl.name!r} has records: removing or changing a field goes through the guarded "
-                    f"migrate door, not a plain re-declare"
+                    f"state {decl.name!r} has records: removing or changing a field is refused while records "
+                    f"exist — erase them first"
                 )
             removed = set(existing["subject_kinds"]) - set(decl.subject_kinds)
             in_use = sorted(k for k in removed if per_kind.get(k, 0) > 0)
@@ -486,94 +481,6 @@ class StatesService:
             "per_field": {f: per_field.get(f, 0) for f in props},
             "per_kind": per_kind,
             "consumers": len([c for c in consumers if c.unavailable is None]),
-        }
-
-    async def migrate(
-        self,
-        name: str,
-        new_schema: dict[str, Any],
-        *,
-        origin: WriteOrigin,
-        transform_expr: str | None = None,
-        confirm_drop: bool = False,
-        resolutions: list[dict[str, Any]] | None = None,
-    ) -> None:
-        """The guarded schema-change door: additive changes pass through; a narrowing needs
-        exactly one of ``transform_expr`` / ``confirm_drop`` / ``resolutions``. The
-        conversion + schema replace happen in ONE transaction; a failing rule or a
-        still-invalid record aborts the WHOLE change. Records one ``state_writes`` row per
-        converted subject under the completed ``origin``, in the same transaction."""
-        self._ensure_available()
-        completed = self._complete_origin(origin)
-        _validate_schema(new_schema)
-        checked = None if resolutions is None else _validate_resolutions(resolutions)
-        new_effective_schema = await self._compose_effective(name, new_schema)
-
-        def decide(old_schema: dict[str, Any]):
-            doors = sum([transform_expr is not None, bool(confirm_drop), checked is not None])
-            if not _is_narrowing(old_schema, new_schema):
-                if doors:
-                    raise NarrowingRequiresConfirmationError(
-                        "the change is additive — no conversion runs, so transform_expr/confirm_drop/resolutions "
-                        "must not be supplied"
-                    )
-                return _no_conversion
-            if doors != 1:
-                raise NarrowingRequiresConfirmationError(
-                    "a narrowing change requires EXACTLY ONE of transform_expr, confirm_drop, or resolutions"
-                )
-            if transform_expr is not None:
-                return _transform_converter(transform_expr, new_effective_schema)
-            if checked is not None:
-                return _resolutions_converter(checked, new_effective_schema)
-            return _drop_converter(old_schema, new_schema, new_effective_schema)
-
-        await self._store.migrate(name, new_schema, new_effective_schema, decide=decide, origin=completed)
-
-    async def preview_migrate(self, name: str, new_schema: dict[str, Any]) -> dict[str, Any]:
-        """A read-only dry run of ``new_schema`` against the state's CURRENT records: how
-        many fit, how many don't, which json paths fail, and up to ten misfit examples."""
-        self._ensure_available()
-        _validate_schema(new_schema)
-        decl = await self._store.get_declaration(name)
-        if decl is None:
-            raise StateNotFoundError(f"no state declared as {name!r}")
-        new_effective_schema = await self._compose_effective(name, new_schema)
-        records = await self._store.all_records(name)
-        validator = Draft202012Validator(new_effective_schema)
-        fits = 0
-        misfits = 0
-        misfit_fields: dict[str, int] = {}
-        examples: list[dict[str, Any]] = []
-        for subject in sorted(records, key=lambda s: (s[2], s[3], s[0], s[1])):
-            try:
-                errors = sorted(validator.iter_errors(records[subject]), key=lambda e: e.json_path)
-            except referencing.exceptions.Unresolvable as exc:
-                raise SchemaValidationError(f"the candidate schema carries an unresolvable $ref: {exc}") from exc
-            if not errors:
-                fits += 1
-                continue
-            misfits += 1
-            for path in sorted({err.json_path for err in errors}):
-                misfit_fields[path] = misfit_fields.get(path, 0) + 1
-            if len(examples) < _PREVIEW_EXAMPLE_CAP:
-                examples.append(
-                    {
-                        "subject": {
-                            "target_kind": subject[0],
-                            "target_name": subject[1],
-                            "kind": subject[2],
-                            "key": subject[3],
-                        },
-                        "errors": [{"path": e.json_path, "message": e.message} for e in errors],
-                    }
-                )
-        return {
-            "records": len(records),
-            "fits": fits,
-            "misfits": misfits,
-            "misfit_fields": misfit_fields,
-            "examples": examples,
         }
 
     # -- records -----------------------------------------------------------------
@@ -784,17 +691,18 @@ class StatesService:
             )
         return counts
 
-    # -- bulk import -------------------------------------------------------------
+    # -- backup restore ----------------------------------------------------------
 
-    async def import_records(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
-        """Import record rows for ``state`` under the completed origin, validating each
-        document against the effective schema.
+    async def restore_records(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
+        """Restore record rows for ``state`` under the completed origin, validating each
+        document against the effective schema. The backup section's own record-restore
+        path (off the ``AppStates`` protocol).
 
         EVERY row's subject is validated (declared kind, non-empty key, and — for kind
         ``person`` — a known person of the row's target) through :meth:`validate_subject`
         BEFORE any write; a refusal names the offending row index and its subject and
-        nothing is written, so a backup restore or a state transfer never lands records
-        under an undeclared kind or an unknown person (§4.10 transfer step 2)."""
+        nothing is written, so a restore never lands records under an undeclared kind or an
+        unknown person."""
         self._ensure_available()
         from pydantic import ValidationError
 
@@ -810,26 +718,22 @@ class StatesService:
                 )
             except ValidationError as exc:
                 raise SubjectRefusedError(
-                    f"import row {index}: malformed subject "
+                    f"restore row {index}: malformed subject "
                     f"{row.get('target_kind')!r}/{row.get('target_name')!r}/"
                     f"{row.get('subject_kind')!r}/{row.get('subject_key')!r}: {exc}"
                 ) from exc
             try:
                 await self.validate_subject(decl, subject)
             except SubjectRefusedError as exc:
-                raise SubjectRefusedError(f"import row {index}: {exc}") from exc
+                raise SubjectRefusedError(f"restore row {index}: {exc}") from exc
         completed = self._complete_origin(origin)
-        await self._store.import_records(state, row_list, origin=completed, validate_doc=_validate_document)
+        await self._store.restore_records(state, row_list, origin=completed, validate_doc=_validate_document)
 
-    async def import_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
-        """Import subject-alias rows for ``state`` verbatim (identity, not a write)."""
+    async def restore_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
+        """Restore subject-alias rows for ``state`` verbatim (identity, not a write) — the
+        backup section's restore path, off the ``AppStates`` protocol."""
         self._ensure_available()
-        await self._store.import_aliases(state, list(rows))
-
-    async def import_applied_ops(self, rows: Sequence[dict[str, Any]]) -> None:
-        """Import applied-op ledger rows verbatim (the idempotency keys carry no subject)."""
-        self._ensure_available()
-        await self._store.import_applied_ops(list(rows))
+        await self._store.restore_aliases(state, list(rows))
 
     # -- modules -----------------------------------------------------------------
 
@@ -1062,17 +966,14 @@ class StatesService:
     def register_module_seed(self, doc: StateModuleDocument) -> None:
         self._seeds.register(doc)
 
-    def register_retired_module_name(self, name: str) -> None:
-        self._seeds.register_retired(name)
-
     async def apply_module_seeds(self) -> None:
-        """Reconcile the shipped module seeds against the store (a no-op while the feature
-        is off)."""
+        """Create each shipped module seed that is absent from the store (a no-op while the
+        feature is off)."""
         if not states_store_configured():
             return
         from tai42_skeleton.states.seeds import apply_module_seeds
 
-        await apply_module_seeds(self._store, seeds=self._seeds.seeds(), retired=self._seeds.retired())
+        await apply_module_seeds(self._store, seeds=self._seeds.seeds())
 
     # -- module/mount helpers ----------------------------------------------------
 
@@ -1179,129 +1080,6 @@ class StatesService:
             if result is not True:
                 message = result if isinstance(result, str) else "the declarations violate the module's check rule"
                 raise ModuleValidationError(f"mount declarations rejected by module {module.name!r}: {message}")
-
-
-# --------------------------------------------------------------------------- #
-# Migrate converters                                                            #
-# --------------------------------------------------------------------------- #
-async def _no_conversion(records: dict[Any, Any]) -> dict[Any, Any]:
-    """Additive migrate: no record is rewritten."""
-    return {}
-
-
-def _transform_converter(transform_expr: str, new_effective_schema: dict[str, Any]):
-    """Build the async converter that runs ``transform_expr`` over every record, validating
-    each result WHOLE against the new EFFECTIVE schema; any failure aborts the migrate."""
-
-    async def convert(records: dict[Any, Any]) -> dict[Any, Any]:
-        converted: dict[Any, Any] = {}
-        for subject, data in records.items():
-            try:
-                result = await run_jq_first(transform_expr, data)
-            except Exception as exc:
-                raise MigrationConversionError(f"transform_expr failed on subject {subject!r}: {exc}") from exc
-            if not isinstance(result, dict):
-                raise MigrationConversionError(f"transform_expr produced a non-object for subject {subject!r}")
-            try:
-                _validate_document(new_effective_schema, result)
-            except ValueValidationError as exc:
-                raise MigrationConversionError(
-                    f"converted record for subject {subject!r} is invalid under the new schema: {exc}"
-                ) from exc
-            converted[subject] = result
-        return converted
-
-    return convert
-
-
-def _validate_resolutions(resolutions: Any) -> list[dict[str, Any]]:
-    """Shape-check a migrate ``resolutions`` list at the door, loudly. Each is
-    ``{"path": [seg…], "action": "drop"}`` or ``{"path": [seg…], "action": "default",
-    "value": …}``; ``"-"`` is refused (a resolution addresses existing data)."""
-    if not isinstance(resolutions, list):
-        raise InvalidPathError("resolutions must be a list")
-    out: list[dict[str, Any]] = []
-    for i, r in enumerate(resolutions):
-        where = f"resolutions[{i}]"
-        if not isinstance(r, dict):
-            raise InvalidPathError(f"{where}: a resolution must be a JSON object, got {r!r}")
-        action = r.get("action")
-        if action not in ("drop", "default"):
-            raise InvalidPathError(f"{where}: unknown action {action!r} (supported: ['default', 'drop'])")
-        validate_path(r.get("path"), where=where)
-        if any(seg == APPEND for seg in r["path"]):
-            raise InvalidPathError(
-                f"{where}: '-' (append) has no meaning in a resolution path — it addresses existing data"
-            )
-        if action == "default" and "value" not in r:
-            raise InvalidPathError(f"{where}: a default resolution requires a 'value'")
-        if action == "drop" and "value" in r:
-            raise InvalidPathError(f"{where}: a drop resolution takes no 'value'")
-        extra = set(r) - {"path", "action", "value"}
-        if extra:
-            raise InvalidPathError(f"{where}: resolution carries unknown keys {sorted(extra)}")
-        out.append(r)
-    return out
-
-
-def _resolutions_converter(resolutions: list[dict[str, Any]], new_effective_schema: dict[str, Any]):
-    """Build the async converter for the declarative resolutions door: a record already
-    valid under the new schema is untouched; an invalid one gets every resolution applied
-    and is re-validated (still invalid ⇒ abort)."""
-    ops = [
-        {"op": "remove", "path": r["path"]}
-        if r["action"] == "drop"
-        else {"op": "set", "path": r["path"], "value": r["value"]}
-        for r in resolutions
-    ]
-
-    async def convert(records: dict[Any, Any]) -> dict[Any, Any]:
-        converted: dict[Any, Any] = {}
-        for subject, data in records.items():
-            try:
-                _validate_document(new_effective_schema, data)
-                continue
-            except ValueValidationError:
-                pass
-            try:
-                fixed = apply_path_ops(data, ops)
-            except InvalidPathError as exc:
-                raise MigrationConversionError(f"resolutions failed on subject {subject!r}: {exc}") from exc
-            try:
-                _validate_document(new_effective_schema, fixed)
-            except ValueValidationError as exc:
-                raise MigrationConversionError(
-                    f"subject {subject!r} is still invalid after the resolutions ({exc}); use transform_expr "
-                    "to reshape it instead"
-                ) from exc
-            converted[subject] = fixed
-        return converted
-
-    return convert
-
-
-def _drop_converter(old_schema: dict[str, Any], new_schema: dict[str, Any], new_effective_schema: dict[str, Any]):
-    """Build the async converter that drops removed/changed top-level fields from every
-    record — validating the RESULT whole against the new EFFECTIVE schema."""
-    old_props = old_schema.get("properties", {}) if isinstance(old_schema, dict) else {}
-    new_props = new_schema.get("properties", {})
-    kept = {name for name, fschema in old_props.items() if _canonical(new_props.get(name)) == _canonical(fschema)}
-
-    async def convert(records: dict[Any, Any]) -> dict[Any, Any]:
-        converted: dict[Any, Any] = {}
-        for subject, data in records.items():
-            dropped = {k: v for k, v in data.items() if k in kept}
-            try:
-                _validate_document(new_effective_schema, dropped)
-            except ValueValidationError as exc:
-                raise MigrationConversionError(
-                    f"dropping the changed fields leaves subject {subject!r} invalid under the new schema "
-                    f"({exc}); use transform_expr to reshape the records instead"
-                ) from exc
-            converted[subject] = dropped
-        return converted
-
-    return convert
 
 
 __all__ = [
