@@ -73,6 +73,7 @@ STUDIO_ROUTE_ANCHORS: dict[str, tuple[str, str, dict | None]] = {
     "tai42_skeleton.routers.runs": ("GET", "/api/runs", None),
     "tai42_skeleton.routers.sandbox": ("GET", "/api/sandbox", None),
     "tai42_skeleton.routers.schedules": ("GET", "/api/schedules", None),
+    "tai42_skeleton.routers.states": ("GET", "/api/states", None),
     "tai42_skeleton.routers.storage": ("GET", "/api/storage", None),
     "tai42_skeleton.routers.sub_mcp": ("GET", "/api/sub-mcp", None),
     "tai42_skeleton.routers.system_kinds": ("GET", "/api/system/kinds", None),
