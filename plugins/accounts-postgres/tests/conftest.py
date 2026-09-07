@@ -11,8 +11,9 @@ register cleanly under test.
 from __future__ import annotations
 
 import json
+import os
 import types
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,12 @@ from typing import Any
 import psycopg
 import pytest
 from starlette.requests import Request
+from tai42_kit.clients import PostgresConnectionSettings, client_ctx
+from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.settings import reset_all_settings
+
+from tai42_accounts_postgres.db import COMPONENT, accounts_migration_entry
 
 # -- bind a no-op app handle before any route module imports --------------------
 
@@ -595,3 +602,52 @@ def wire(monkeypatch, users_store, sessions_store, invites_store, admin):
         admin=admin,
         settings=settings,
     )
+
+
+# -- the opt-in live-Postgres fixture for the integration suites ----------------
+
+_ACCOUNTS_REAL_PG_ENV = "TAI42_ACCOUNTS_REAL_PG"
+
+# Captured at conftest import, BEFORE the autouse ``_configure_default_database`` fixture
+# overrides PG_DB/PG_PASSWORD with its offline placeholders per test: the live-Postgres
+# coordinates the operator/CI passes in. The fixture re-applies them so the store reaches
+# the configured database instead of the offline unit placeholder.
+_LIVE_PG_ENV = {
+    key: os.environ[key]
+    for key in ("TAI_DATABASE_DEFAULT_PG_DB", "TAI_DATABASE_DEFAULT_PG_PASSWORD")
+    if key in os.environ
+}
+
+
+async def _truncate_accounts_tables() -> None:
+    async with (
+        client_ctx(PostgresClient, component_store_settings(COMPONENT)) as pool,
+        pool.connection() as conn,
+    ):
+        await conn.execute("TRUNCATE accounts_invites, accounts_sessions, accounts_users RESTART IDENTITY")
+
+
+@pytest.fixture
+async def accounts_db(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[PostgresConnectionSettings]:
+    """The account stores' database, migrated and empty, for a real-Postgres integration
+    test — the store settings resolved from the live connection env.
+
+    OPT-IN: set ``TAI42_ACCOUNTS_REAL_PG=1`` and point ``TAI_DATABASE_DEFAULT_PG_*`` at a
+    live Postgres. Without the opt-in the requesting test SKIPS VISIBLY with a clear reason
+    (never a silent skip). The plugin's own shipped migration chain is applied through the
+    kit runner; the account tables are truncated on entry and exit so each test owns an
+    empty roster (the advisory-locked bootstrap counts on it).
+    """
+    if os.environ.get(_ACCOUNTS_REAL_PG_ENV) not in ("1", "true", "True"):
+        pytest.skip(
+            f"real-Postgres accounts store test is opt-in: set {_ACCOUNTS_REAL_PG_ENV}=1 and point the "
+            "TAI_DATABASE_DEFAULT_PG_* env at a live Postgres to run it (proves the named unique "
+            "constraints and advisory-lock serialization the fakes only script — no fake)"
+        )
+    for key, value in _LIVE_PG_ENV.items():
+        monkeypatch.setenv(key, value)
+    reset_all_settings()
+    await apply_migrations([accounts_migration_entry()])
+    await _truncate_accounts_tables()
+    yield component_store_settings(COMPONENT)
+    await _truncate_accounts_tables()
