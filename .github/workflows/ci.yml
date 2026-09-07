@@ -5,6 +5,17 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      lane:
+        description: "full = every gate; ui-e2e = the browser job alone"
+        type: choice
+        default: full
+        options: [full, ui-e2e]
+      browsers:
+        description: "Engines the browser job runs: all = chromium + the firefox/webkit widening"
+        type: choice
+        default: all
+        options: [all, chromium]
   schedule:
     # Weekly full-matrix run (Mondays 04:23 UTC). Like workflow_dispatch it forces
     # core=true so every member + backend leg runs and the monitoring/browser gates
@@ -42,9 +53,11 @@ jobs:
   # Per-member path filter. A change under a member runs that member's check
   # leg; a change to shared roots (core/*, e2e, the lock, root pyproject, the
   # root fleet tests, or .github) runs the full workspace including e2e. A manual
-  # `workflow_dispatch` treats everything as changed: it forces core=true and
-  # every downstream gate on. The dynamic `check_matrix` / `e2e_backends` outputs,
-  # plus the `run_monitoring` / `run_browsers` gates, are computed from these
+  # `workflow_dispatch` on the default `full` lane treats everything as changed:
+  # it forces core=true and every downstream gate on. `lane=ui-e2e` inverts that —
+  # every gate off and both matrices empty, so the browser job is the only one
+  # that runs. The dynamic `check_matrix` / `e2e_backends` outputs, plus the
+  # `run_monitoring` / `run_ui` / `run_browsers` gates, are computed from these
   # booleans so an unchanged member never runs a silent green no-op.
   changes:
     needs: reuse
@@ -57,7 +70,9 @@ jobs:
       run_e2e: ${{ steps.assemble.outputs.run_e2e }}
       e2e_backends: ${{ steps.assemble.outputs.e2e_backends }}
       run_monitoring: ${{ steps.assemble.outputs.run_monitoring }}
+      run_ui: ${{ steps.assemble.outputs.run_ui }}
       run_browsers: ${{ steps.assemble.outputs.run_browsers }}
+      browser_lane: ${{ steps.assemble.outputs.browser_lane }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -108,11 +123,33 @@ jobs:
           BROWSERS: ${{ steps.filter.outputs.browsers }}
           # A manual dispatch has no diff base and the weekly schedule is meant to be
           # exhaustive, so neither can lean on the path filter to decide what changed:
-          # treat the whole workspace as changed and force every gate on.
-          FORCE_FULL: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+          # treat the whole workspace as changed and force every gate on. The
+          # `ui-e2e` lane is the exception: it asks for the browser job alone, so it
+          # takes the short circuit below instead of the filter.
+          FORCE_FULL: ${{ (github.event_name == 'workflow_dispatch' && inputs.lane != 'ui-e2e') || github.event_name == 'schedule' }}
+          UI_LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'ui-e2e' }}
+          # `browsers=chromium` drops the firefox + webkit widening; every
+          # non-dispatch event keeps it.
+          WIDEN: ${{ github.event_name != 'workflow_dispatch' || inputs.browsers != 'chromium' }}
           HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
+          # The dispatched browser lane runs the ui-e2e job and nothing else: both
+          # matrices are empty and every other gate is off, whatever the filter saw.
+          if [ "$UI_LANE" = "true" ]; then
+            {
+              echo 'core=false'
+              echo 'check_matrix={"include":[]}'
+              echo 'frontend_matrix={"include":[]}'
+              echo 'run_e2e=false'
+              echo 'e2e_backends=[]'
+              echo 'run_monitoring=false'
+              echo 'run_ui=true'
+              echo "run_browsers=$WIDEN"
+              echo 'browser_lane=true'
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Manual dispatch or the weekly schedule: force the full workspace + every
           # downstream gate.
           if [ "$FORCE_FULL" = "true" ]; then
@@ -211,13 +248,13 @@ jobs:
           # The monitoring profile runs when its own paths (monitoring-langfuse,
           # core, or e2e) changed; the firefox+webkit browser widening runs when
           # the ui suite (e2e/ui) changed. A manual dispatch or the weekly schedule
-          # forces both on.
+          # forces both on, except that `browsers=chromium` drops the widening.
           run_monitoring=false
           if [ "$FORCE_FULL" = "true" ] || [ "$MONITORING" = "true" ]; then
             run_monitoring=true
           fi
           run_browsers=false
-          if [ "$FORCE_FULL" = "true" ] || [ "$BROWSERS" = "true" ]; then
+          if [ "$WIDEN" = "true" ] && { [ "$FORCE_FULL" = "true" ] || [ "$BROWSERS" = "true" ]; }; then
             run_browsers=true
           fi
           echo "core=$CORE" >> "$GITHUB_OUTPUT"
@@ -226,7 +263,10 @@ jobs:
           echo "run_e2e=$run_e2e" >> "$GITHUB_OUTPUT"
           echo "e2e_backends=$backends" >> "$GITHUB_OUTPUT"
           echo "run_monitoring=$run_monitoring" >> "$GITHUB_OUTPUT"
+          # Outside the browser lane the ui suite follows the python e2e gate.
+          echo "run_ui=$run_e2e" >> "$GITHUB_OUTPUT"
           echo "run_browsers=$run_browsers" >> "$GITHUB_OUTPUT"
+          echo "browser_lane=false" >> "$GITHUB_OUTPUT"
 
   check:
     needs: [reuse, changes]
@@ -433,8 +473,8 @@ jobs:
           )
 
   fleet:
-    needs: reuse
-    if: ${{ needs.reuse.outputs.should_skip != 'true' }}
+    needs: [reuse, changes]
+    if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.browser_lane != 'true' }}
     runs-on: ubuntu-latest
     env:
       # The banned-terms list is data, never source: the naming guard reads it here.
@@ -473,8 +513,8 @@ jobs:
   # install hit ResolutionImpossible. A fresh, non-mutating resolve; no installs,
   # so it runs unconditionally like `fleet` rather than behind a path filter.
   stable-resolution:
-    needs: reuse
-    if: ${{ needs.reuse.outputs.should_skip != 'true' }}
+    needs: [reuse, changes]
+    if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.browser_lane != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -689,7 +729,7 @@ jobs:
 
   ui-e2e:
     needs: [reuse, changes, e2e]
-    if: ${{ needs.reuse.outputs.should_skip != 'true' && !cancelled() && needs.changes.outputs.run_e2e == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
+    if: ${{ needs.reuse.outputs.should_skip != 'true' && !cancelled() && needs.changes.outputs.run_ui == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
     runs-on: ubuntu-latest
     # The failed-MCP reprobe runs unmasked throughout the suite (the mcp / secret-ref specs seed
     # many never-recovering stub servers it keeps probing off the reload gate), lengthening the
@@ -797,10 +837,10 @@ jobs:
           if-no-files-found: ignore
       - name: Install firefox + webkit (browser widening)
         # firefox + webkit widen the matrix when the ui suite changed or the run is
-        # manual (the `run_browsers` gate). --with-deps apt-installs their system
-        # libraries (the CI runner is root). The cross-viewport / a11y sweeps are
-        # chromium-only via `testIgnore` in playwright.config.ts, so these two
-        # browsers run the remaining specs.
+        # manual with `browsers=all` (the `run_browsers` gate). --with-deps
+        # apt-installs their system libraries (the CI runner is root). The
+        # cross-viewport / a11y sweeps are chromium-only via `testIgnore` in
+        # playwright.config.ts, so these two browsers run the remaining specs.
         if: ${{ needs.changes.outputs.run_browsers == 'true' }}
         working-directory: e2e/ui
         run: pnpm exec playwright install --with-deps firefox webkit
@@ -823,9 +863,9 @@ jobs:
           PLAYWRIGHT_HTML_REPORT: playwright-report/firefox
         run: pnpm exec playwright test --project=firefox --output=test-results/firefox
       - name: Run the browser suite on webkit
-        # Runs on its own fresh stack whether firefox passed or failed (the prior
-        # single-invocation form ran both engines regardless), but stays skipped
-        # when firefox itself was skipped (chromium failed upstream).
+        # Runs on its own fresh stack whether firefox passed or failed, and stays
+        # skipped whenever firefox was — the widening is off, or chromium failed
+        # upstream.
         id: webkit
         if: ${{ !cancelled() && steps.firefox.conclusion != 'skipped' }}
         working-directory: e2e/ui
