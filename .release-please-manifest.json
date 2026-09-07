@@ -2,7 +2,7 @@
   "core/contract": "8.0.0",
   "core/kit": "3.10.0",
   "core/cli": "5.1.0",
-  "core/skeleton": "11.0.1",
+  "core/skeleton": "11.0.2",
   "plugins/accounts-oidc": "1.1.0",
   "plugins/accounts-postgres": "2.3.0",
   "plugins/agents": "5.5.0",
