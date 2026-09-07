@@ -89,7 +89,7 @@ async def test_valid_reply_invokes_shared_ladder_and_acks_forwarded(http_recorde
     assert call.bridge.cap_key == "777"
     assert call.bridge.provider_message_id == "5"  # the update id
     assert call.bridge.bridge_text == "the blue one"
-    # The plugin no longer forwards itself; the ladder owns that.
+    # The plugin does not forward itself; the ladder owns that.
     assert _forward_requests(http_recorder) == []
 
 
@@ -419,6 +419,18 @@ async def test_ladder_bridged_outcome_acks_accepted(http_recorder, fake_redis, c
     assert _body(response) == {"data": {"status": "accepted"}}
     assert len(channels.inbound_calls) == 1
     assert channels.inbound_calls[0].bridge.provider_message_id == "5"  # the update id — dedupes a redelivery
+
+
+async def test_ladder_bridged_kept_outcome_acks_accepted(http_recorder, fake_redis, channels):
+    # The ladder's BRIDGED_KEPT outcome (a bridge-policy ask rejected the reply: the
+    # correlation is KEPT and the reply was bridged as a digression turn) acks "accepted",
+    # the same wire a released BRIDGE returns. Without the ack-map entry this reachable
+    # outcome raised KeyError -> 500 -> provider redelivery loop.
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED_KEPT
+    response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert len(channels.inbound_calls) == 1
 
 
 async def test_ladder_forward_error_propagates_so_telegram_redelivers(http_recorder, fake_redis, channels):

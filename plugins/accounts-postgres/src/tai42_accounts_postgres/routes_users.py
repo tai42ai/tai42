@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.access_control import get_current_user_id
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import DeleteResult
 
 # Arms the accounts backup-section on_startup hook. Homed HERE (a manifest-loaded
 # router module the host imports only post-bind) and NOT in the package __init__ —
@@ -54,6 +55,18 @@ class InviteResponse(BaseModel):
     user_id: str
     invite_token: str
     login_path: str
+
+
+class PasswordChangedResponse(BaseModel):
+    """Ack of a self-service password change — always ``changed: true`` on success."""
+
+    changed: bool
+
+
+class UserUpdatedResponse(BaseModel):
+    """Ack of a user role/disabled update — echoes the updated user's id."""
+
+    user_id: str
 
 
 class CreateUserBody(BaseModel):
@@ -193,7 +206,7 @@ async def create_user(request: Request) -> Response:
     summary="Change your own password",
     tags=["users"],
     request_model=ChangePasswordBody,
-    response_model=None,
+    response_model=PasswordChangedResponse,
     action="write",
 )
 async def change_own_password(request: Request) -> Response:
@@ -234,7 +247,7 @@ async def change_own_password(request: Request) -> Response:
     summary="Update a user's role or disabled state",
     tags=["users"],
     request_model=UpdateUserBody,
-    response_model=None,
+    response_model=UserUpdatedResponse,
     action="write",
 )
 async def update_user(request: Request) -> Response:
@@ -316,7 +329,7 @@ async def update_user(request: Request) -> Response:
     methods=["DELETE"],
     summary="Delete a user",
     tags=["users"],
-    response_model=None,
+    response_model=DeleteResult,
     action="write",
 )
 async def delete_user(request: Request) -> Response:

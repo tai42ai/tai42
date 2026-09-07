@@ -77,7 +77,10 @@ class _StubHttp:
         request_model: Any = None,
         query_model: Any = None,
         authed: bool | None = None,
+        destructive: bool = False,
         action: str | None = None,
+        declared: Any = None,
+        no_body_reason: str | None = None,
     ) -> Callable[[Any], Any]:
         # ``action`` is recorded as metadata only — the stub enforces nothing (the
         # fail-closed authed-without-action refusal is the core registry's, exercised

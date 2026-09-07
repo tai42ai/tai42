@@ -320,6 +320,7 @@ def _as_list(value: Any) -> list[Any]:
     summary="WhatsApp webhook (verification + messages + delivery statuses)",
     tags=["channels"],
     response_model=None,
+    no_body_reason="Meta/WhatsApp webhook: GET hub-challenge echo, POST vendor ack",
 )
 async def whatsapp_inbound(request: Request) -> Response:
     """Meta's single webhook endpoint: GET verification, POST message/status events.
@@ -1029,8 +1030,7 @@ async def _resolve_answer(
 def _door_error_line(retry_reason: str | None) -> str:
     """The guest-facing error line for the re-sent Flow: the door's OWN reason (already
     length-bounded by the ladder, re-capped here defensively at ``_DOOR_REJECTION_MAX_CHARS``
-    which names the failing field), or the fixed opaque line when the door gave none —
-    restoring the pre-migration ``_door_rejection_line`` fidelity."""
+    which names the failing field), or the fixed opaque line when the door gave none."""
     return retry_reason[:_DOOR_REJECTION_MAX_CHARS] if retry_reason else _CALLBACK_REJECTION_OPAQUE
 
 
@@ -1044,8 +1044,8 @@ async def _recover_form_rejection(
     channel owns the retry notice — sent NO guest message, so the fresh Flow is the
     guest's single correction message (no double-messaging). ``retry_reason`` is the
     door's own (already-truncated) message, which names the failing field and rides the
-    re-sent Flow's body — restoring the pre-migration behavior; a missing reason falls
-    back to a fixed opaque line. Ordering is load-bearing for Meta's redelivery:
+    re-sent Flow's body; a missing reason falls back to a fixed opaque line. Ordering is
+    load-bearing for Meta's redelivery:
 
     * Under the cap — re-send a fresh Flow (same ``flow_token`` = ``interaction_id``,
       same cached flow id), then count the rejection on the STILL-HELD record and mark

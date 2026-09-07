@@ -23,7 +23,9 @@ import hashlib
 import hmac
 import json
 import logging
+from typing import Literal
 
+from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
@@ -69,15 +71,23 @@ _SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 _MAX_BODY_BYTES = 1 * 1024 * 1024
 
 # The shared ladder's outcome -> this webhook's ``{"data": {"status": ...}}`` ack. The
-# statuses match the wire the hand-rolled ladder answered: a resolved answer forwards,
-# a kept re-answerable ask reads "rejected", a bridged (gone/hard-mismatch) reply reads
-# "accepted" — the same string a fresh-turn bridge returns. NO_CORRELATION is absent:
-# the caller bridges that miss and returns the bridge's own ack.
+# statuses are this webhook's stable ack vocabulary: a resolved answer forwards,
+# a kept re-answerable ask reads "rejected", and a bridged reply reads "accepted" — the
+# same string a fresh-turn bridge returns, covering both a released bridge (gone ask /
+# hard mismatch) and a bridge-policy digression that KEPT the ask (BRIDGED_KEPT).
+# NO_CORRELATION is absent: the caller bridges that miss and returns the bridge's own ack.
 _ACK_STATUS = {
     InboundAnswerOutcome.FORWARDED: "forwarded",
     InboundAnswerOutcome.RETRY_KEPT: "rejected",
     InboundAnswerOutcome.BRIDGED: "accepted",
+    InboundAnswerOutcome.BRIDGED_KEPT: "accepted",
 }
+
+
+class StatusAck(BaseModel):
+    """The webhook's ack status naming which branch handled the update."""
+
+    status: Literal["accepted", "forwarded", "ignored", "rejected"]
 
 
 class _PayloadTooLarge(Exception):
@@ -362,7 +372,7 @@ async def _bridge(
     methods=["POST"],
     summary="Telegram channel inbound webhook",
     tags=["channels"],
-    response_model=None,
+    response_model=StatusAck,
 )
 async def inbound(request: Request) -> Response:
     """Receive a Telegram webhook update, resolve a pending ask or bridge the message.
