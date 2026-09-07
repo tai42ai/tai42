@@ -197,6 +197,47 @@ def test_comments_and_formatting_preserved(tmp_path: Path):
     assert "# version-less first-party ref must be left untouched" in demo_text
 
 
+def test_core_major_bump_produces_repin_and_converges(tmp_path: Path):
+    """The two-train contract: the core release train bumps a depended-upon member
+    and leaves its dependents' ranges stale; the post-merge re-pin (release-repin's
+    range_sync apply) rewrites every dependent and is itself a fixed point, so the
+    follow-up train's re-pin PR carries a self-consistent tree."""
+    _build_tree(tmp_path)
+    range_sync.apply(tmp_path)  # fleet in sync at contract 0.3.0
+
+    # The core train ships only the member bump; dependents are untouched on it.
+    contract = tmp_path / "core/contract/pyproject.toml"
+    contract.write_text(contract.read_text().replace('version = "0.3.0"', 'version = "1.0.0"'))
+
+    repin = range_sync.apply(tmp_path)  # what release-repin runs on the tag
+    assert repin.dirty
+    repinned = {member for member, _ in repin.spec_changes}
+    assert repinned == {"core/kit", "plugins/demo"}  # every dependent, none missed
+    assert "tai42-contract>=1.0,<2" in (tmp_path / "core/kit/pyproject.toml").read_text()
+
+    # The re-pin PR's own tree is self-consistent — re-applying changes nothing.
+    assert not range_sync.apply(tmp_path).dirty
+
+
+def test_follow_up_patch_bumps_are_repin_noop(tmp_path: Path):
+    """The follow-up train bumps the re-pinned dependents by a patch; a patch never
+    moves a derived range (the floor is major.minor), so range_sync finds no drift
+    on that train's tags and no third train opens — the loop terminates."""
+    _build_tree(tmp_path)
+    range_sync.apply(tmp_path)
+
+    for rel, old in (
+        ("core/contract/pyproject.toml", 'version = "0.3.0"'),
+        ("core/kit/pyproject.toml", 'version = "0.3.0"'),
+        ("plugins/demo/pyproject.toml", 'version = "0.2.1"'),
+    ):
+        p = tmp_path / rel
+        bumped = old.rsplit(".", 1)[0] + f'.{int(old.rsplit(".", 1)[1].rstrip(chr(34))) + 1}"'
+        p.write_text(p.read_text().replace(old, bumped))
+
+    assert not range_sync.check(tmp_path).dirty
+
+
 # ---------------------------------------------------------------------- check
 
 

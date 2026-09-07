@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import tomllib
 from pathlib import Path
 
@@ -15,8 +16,22 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 from tai42_kit.plugins import load_plugin_spec, read_dir_docs, validate_docs
 
+import range_sync  # importable via the scripts/ path tests/conftest.py injects
+
 ROOT = Path(__file__).resolve().parent.parent
 REPO_TREE_URL = "https://github.com/tai42ai/tai42/tree/main"
+
+# A release-please train bumps a depended-upon member ahead of its dependents'
+# not-yet-re-pinned ranges; the post-merge `fix(deps)` re-pin (release-repin.yml)
+# lands one commit later. On a development PR the on-disk ranges are asserted
+# as-is, so a hand-authored range that refuses a sibling is caught. On the release
+# train branch and on the main push that opens the pending-re-pin window, the
+# ranges the re-pin WILL produce are asserted instead — an unpinned range converges
+# on the sibling and admits it, while a deliberately pinned cap the re-pin preserves
+# is still held to admitting the released sibling, so a real break is never masked.
+_PENDING_REPIN_WINDOW = not (
+    os.environ.get("GITHUB_HEAD_REF", "") and not os.environ["GITHUB_HEAD_REF"].startswith("release-please--")
+)
 
 WORKSPACE_GLOBS = ["core/*", "plugins/*", "e2e"]
 
@@ -137,17 +152,82 @@ def test_membership_equality():
 
 # --------------------------------------------------------------- 2. cap admission
 
+# name -> version over every workspace member, normalized as range_sync keys it —
+# the input its derivation and pin analysis read.
+_FIRST_PARTY = range_sync.first_party_versions(range_sync.discover_members(ROOT))
+
+
+def _effective_spec(
+    dep_name: str, on_disk_spec: str, sibling_version: str, preserved: set[str], *, pending_repin: bool
+) -> str:
+    """The tai42-* range a member is held to for admission. On a development PR
+    (``pending_repin`` False) it is the on-disk range, so a hand-authored range
+    that refuses a sibling is caught. During the pending-re-pin window it is the
+    range release-repin will produce: an unpinned dep converges on
+    ``derive_range(sibling_version)`` (which admits that version), while a dep the
+    re-pin preserves (a deliberate pinned cap) keeps its on-disk range, so a pin
+    that refuses the released sibling still fails."""
+    if not pending_repin or range_sync._normalize_name(dep_name) in preserved:
+        return on_disk_spec
+    return range_sync.derive_range(sibling_version)
+
+
+def _preserved_first_party(pyproject: dict) -> set[str]:
+    """Normalized names of this member's first-party deps whose cap range_sync
+    preserves across a major (a deliberate ``[tool.range-sync]`` pin)."""
+    analysis = range_sync.analyze_pyproject(pyproject, _FIRST_PARTY)
+    return {range_sync._normalize_name(p.dep_name) for p in analysis.preserved}
+
+
+def _assert_cap_admission(
+    member_label: str, pyproject: dict, sibling_versions: dict[str, str], *, pending_repin: bool
+) -> None:
+    preserved = _preserved_first_party(pyproject)
+    for dep_name, spec in _iter_tai42_specifiers(pyproject):
+        if dep_name not in sibling_versions:
+            continue  # not a workspace sibling
+        sibling_version = sibling_versions[dep_name]
+        effective = _effective_spec(dep_name, str(spec), sibling_version, preserved, pending_repin=pending_repin)
+        assert SpecifierSet(effective).contains(sibling_version, prereleases=False), (
+            f"{member_label}: {dep_name} {effective} does not admit sibling version {sibling_version}"
+        )
+
 
 @pytest.mark.parametrize("member_dir", PACKAGED_DIRS, ids=PACKAGED_PATHS)
 def test_cap_admission(member_dir: Path):
-    pyproject = _load_toml(member_dir / "pyproject.toml")
-    for dep_name, spec in _iter_tai42_specifiers(pyproject):
-        if dep_name not in SIBLING_VERSIONS:
-            continue  # not a workspace sibling
-        sibling_version = SIBLING_VERSIONS[dep_name]
-        assert SpecifierSet(str(spec)).contains(sibling_version, prereleases=False), (
-            f"{member_dir.name}: {dep_name}{spec} does not admit sibling version {sibling_version}"
-        )
+    _assert_cap_admission(
+        member_dir.name,
+        _load_toml(member_dir / "pyproject.toml"),
+        SIBLING_VERSIONS,
+        pending_repin=_PENDING_REPIN_WINDOW,
+    )
+
+
+def test_cap_admission_window_admits_pending_repin_while_disk_refuses():
+    """During the window a sibling major bump leaves a member's range stale; disk
+    mode (a development PR) refuses it, window mode (main push / release train)
+    admits the range the pending re-pin will produce."""
+    dep, stale, bumped = "tai42-contract", ">=8.0,<9", "9.0.0"
+    assert not SpecifierSet(_effective_spec(dep, stale, bumped, set(), pending_repin=False)).contains(bumped)
+    assert SpecifierSet(_effective_spec(dep, stale, bumped, set(), pending_repin=True)).contains(bumped)
+
+
+def test_cap_admission_window_still_refuses_a_preserved_pin_rejecting_sibling():
+    """A deliberate pinned cap the re-pin preserves is held to admitting the
+    released sibling even in window mode — a real break is never masked."""
+    dep, pinned_cap, bumped = "tai42-contract", ">=7,<8", "9.0.0"
+    preserved = {range_sync._normalize_name(dep)}
+    assert not SpecifierSet(_effective_spec(dep, pinned_cap, bumped, preserved, pending_repin=True)).contains(bumped)
+
+
+def test_cap_admission_helper_contrasts_modes_on_a_stale_member():
+    """The assembled check: a member pinning a bumped sibling's stale range fails
+    on a PR (disk) and passes in the window (the re-pin's range admits)."""
+    pyproject = {"project": {"name": "tai42-demo", "version": "1.0.0", "dependencies": ["tai42-contract>=8.0,<9"]}}
+    siblings = {"tai42-contract": "9.0.0"}
+    with pytest.raises(AssertionError):
+        _assert_cap_admission("demo", pyproject, siblings, pending_repin=False)
+    _assert_cap_admission("demo", pyproject, siblings, pending_repin=True)
 
 
 # ------------------------------------------------------ 3. descriptor lockstep

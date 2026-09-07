@@ -1,20 +1,21 @@
 # After any first-party member cuts a release (its component tag is pushed on
 # merge of the release PR), re-derive the fleet's first-party tai42-* dependency
 # ranges + tai-plugin.yml contract pins from the released member versions on
-# main, so the `fleet` range-sync gate is never left red waiting for a
-# maintainer to run scripts/range_sync.py by hand.
-#
-# This is the safety net BEHIND release-please.yml's in-PR re-pin (its
-# `sync-lock` job runs range_sync on the release PR branch). In the normal flow
-# that in-PR step already carried the re-pin, so range_sync finds nothing here
-# and this is a clean no-op. It earns its keep when a member version reaches
-# main OUTSIDE a release PR (e.g. a hand-pinned release-as wave) — a path the
-# in-PR step never sees — where the fleet would otherwise sit stale on main.
+# main and land them as a `fix(deps)` commit whose paths touch each re-pinned
+# dependent. This is the mechanism that republishes dependents after a core bump:
+# release-please attributes that `fix(deps)` to each touched dependent, so the
+# next train bumps their versions and their wheels ship the current pins. The
+# release PR itself deliberately leaves ranges stale — a re-pin squashed into the
+# release merge is unattributed, so the dependent never re-releases and its wheel
+# keeps the old pin (the failure this workflow exists to prevent).
 #
 # A range-only re-pin touches no resolved version, so uv.lock is unaffected (a
 # first-party dep is a specifier-less editable workspace entry in the lock) and
 # no `uv lock` runs here — the change is pyproject specifiers + descriptor pins
-# only. range_sync is an idempotent fixed point, so re-runs converge.
+# only. range_sync is an idempotent fixed point: the follow-up train's own patch
+# bumps leave every derived range unchanged (the floor is major.minor, patch is
+# ignored), so this workflow finds nothing on that train's tags and no third
+# train opens.
 name: release-repin
 
 on:
@@ -63,8 +64,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Normal flow: the release PR already carried the re-pin, so main is in
-          # sync and there is nothing to do.
+          # A tag whose release changed no dependent range (a patch bump, or a
+          # member nothing depends on) leaves the fleet already in sync — the
+          # idempotent fixed point that stops the follow-up train from recurring.
           if git diff --quiet -- core plugins e2e; then
             echo "Fleet already in sync with the released versions; nothing to re-pin."
             exit 0

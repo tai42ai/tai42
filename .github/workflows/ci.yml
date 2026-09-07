@@ -504,9 +504,20 @@ jobs:
       - name: Ruff format
         run: uv run --no-sync ruff format --check scripts tests
       - name: Range sync check
-        # Catch cross-package first-party range / contract-pin drift on the PR.
-        # Release then only re-derives; it never silently rewrites a drift the PR
-        # slipped past.
+        # Catch first-party range / contract-pin drift a person hand-authored on a
+        # development PR — including a too-wide cap that still admits the sibling.
+        # A release train deliberately runs its dependents' ranges behind the bumped
+        # member until the post-merge `fix(deps)` re-pin (release-repin.yml)
+        # republishes them, so this exact-match gate — which cannot pass while that
+        # re-pin is pending — runs only on development PRs, not the release-please or
+        # fleet-repin branches nor the main push. Installability across the window is
+        # held by test_cap_admission, which checks cap admission against the re-pinned
+        # ranges while a re-pin is pending (main push / release train) and the on-disk
+        # ranges on a development PR.
+        if: >-
+          github.event_name == 'pull_request' &&
+          !startsWith(github.head_ref, 'release-please--') &&
+          github.head_ref != 'fleet-repin'
         run: uv run --no-sync python scripts/range_sync.py --check
       - name: Fleet consistency
         run: uv run pytest tests/
