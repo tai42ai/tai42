@@ -233,6 +233,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "tool",
             "execution_key",
             "tool_kwargs",
+            "subject",
             "execution_key_fingerprint",
         ),
     ),
@@ -368,6 +369,45 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "endedAt",
         ),
     ),
+    ("GET", "/api/state-modules"): RouteShape(
+        items_key=None,
+        columns=(
+            "kind",
+            "name",
+            "description",
+            "parameters",
+            "schema_",
+            "regimes",
+            "declarations",
+            "trace",
+            "mounted_on",
+            "shipped_default",
+        ),
+    ),
+    ("GET", "/api/states"): RouteShape(
+        items_key=None,
+        columns=(
+            "name",
+            "description",
+            "schema_",
+            "subject_kinds",
+            "default_subject_kind",
+            "retention_days",
+            "effective_schema",
+            "regimes",
+            "updated_at",
+        ),
+    ),
+    ("GET", "/api/states/{name}/consumers"): RouteShape(
+        items_key=None, columns=("kind", "name", "detail", "link", "unavailable")
+    ),
+    ("GET", "/api/states/{name}/mounts"): RouteShape(
+        items_key=None, columns=("module", "path", "parameters", "declarations", "state")
+    ),
+    ("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/writes"): RouteShape(
+        items_key="items", columns=("seq", "at", "origin", "paths")
+    ),
+    ("GET", "/api/states/{name}/subjects"): RouteShape(items_key="subjects", columns=("subject", "updated_at")),
     ("GET", "/api/storage/resources"): RouteShape(items_key="resources", columns=("value",)),
     ("GET", "/api/system/kinds"): RouteShape(items_key=None, columns=("kind", "state", "plugin", "detail")),
     ("GET", "/api/templates"): RouteShape(items_key=None, columns=("value",)),
@@ -376,6 +416,9 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ),
     ("GET", "/api/tools"): RouteShape(items_key=None, columns=("value",)),
     ("GET", "/api/tools/tags"): RouteShape(items_key=None, columns=("name", "tags", "hidden", "badges")),
+    ("PATCH", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"): RouteShape(
+        items_key="folded_from", columns=("target_kind", "target_name", "kind", "key")
+    ),
     ("POST", "/api/auth/api-keys/{user_id}/scopes"): RouteShape(
         items_key=None, columns=("user_id", "updated", "scopes")
     ),
@@ -449,6 +492,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("POST", "/api/presets/{name}/versions"): RouteShape(
         items_key=None, columns=("version", "body", "tags", "created_at", "is_current", "fanout")
     ),
+    ("POST", "/api/states/{name}/records/search"): RouteShape(items_key="matches", columns=("subject", "updated_at")),
     ("POST", "/api/sub-mcp"): RouteShape(items_key=None, columns=("slug", "tools", "transport")),
     ("POST", "/api/tools/reload"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
@@ -472,5 +516,22 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ),
     ("PUT", "/api/presets/{name}/versions/{version}/tags"): RouteShape(
         items_key=None, columns=("name", "version", "tags")
+    ),
+    ("PUT", "/api/states/{name}"): RouteShape(
+        items_key=None,
+        columns=(
+            "name",
+            "description",
+            "schema_",
+            "subject_kinds",
+            "default_subject_kind",
+            "retention_days",
+            "effective_schema",
+            "regimes",
+            "updated_at",
+        ),
+    ),
+    ("PUT", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"): RouteShape(
+        items_key="folded_from", columns=("target_kind", "target_name", "kind", "key")
     ),
 }
