@@ -296,13 +296,6 @@ class StackConfig:
     # telegram ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL`` (the setWebhook URL) at B.
     # Only meaningful on a REPLICAS stack (two app ports).
     replica_b_origin_env_keys: list[str] = field(default_factory=list)
-    # Env keys that must carry THIS stack's own single app origin (``http://host:port``),
-    # only known after boot — the single-port (MULTIWORKER) analogue of
-    # ``replica_b_origin_env_keys``. The studio profile pins ``INTERACTIONS_PUBLIC_BASE_URL``
-    # here so an ask_user callback ticket it mints is reachable back on its own origin (the
-    # web channel's answer door FORWARDS the answer to that callback URL — a loopback
-    # origin resolves, an off-host placeholder does not). Filled from the first app port.
-    app_origin_env_keys: list[str] = field(default_factory=list)
     # The REAL-inbound public-URL fill (empty on every mock leg). A real inbound
     # leg lists here the public-base-URL env keys (e.g. ``INTERACTIONS_PUBLIC_BASE_URL``,
     # ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``, ``TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL``)
@@ -323,6 +316,13 @@ class StackConfig:
     # every key must also appear in ``origin_allowlist_env_keys``. ``public_base_url`` must be
     # set whenever this is non-empty; the leg refuses to start otherwise.
     public_allowlist_env_keys: list[str] = field(default_factory=list)
+    # Env keys that must carry THIS stack's own single app origin (``http://host:port``),
+    # only known after boot — the single-port (MULTIWORKER) analogue of
+    # ``replica_b_origin_env_keys``. The studio profile pins ``INTERACTIONS_PUBLIC_BASE_URL``
+    # here so an ask_user callback ticket it mints is reachable back on its own origin (the
+    # web channel's answer door FORWARDS the answer to that callback URL — a loopback
+    # origin resolves, an off-host placeholder does not). Filled from the first app port.
+    app_origin_env_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
