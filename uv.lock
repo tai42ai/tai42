@@ -6183,7 +6183,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "11.0.1"
+version = "11.0.2"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
