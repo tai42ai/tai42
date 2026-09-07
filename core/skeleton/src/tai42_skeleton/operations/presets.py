@@ -44,7 +44,7 @@ from tai42_kit.utils.data.json_schema_util import (
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome
-from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
+from tai42_skeleton.db import SKELETON_COMPONENT, advisory_name_lock, not_configured_message
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_name
 from tai42_skeleton.operations import (
@@ -66,6 +66,11 @@ logger = logging.getLogger(__name__)
 # transient 503 — the store is absent, not momentarily down.
 _NOT_CONFIGURED_CODE = "versioning-not-configured"
 _NOT_CONFIGURED_NOUN = "versioned-document store"
+
+# The advisory-lock namespace the declared-preset-seed applier locks seed names in
+# ("pset" as ASCII bytes, a positive int32). A namespace of its own keeps these locks
+# from excluding another feature that happens to lock the same name.
+_SEED_LOCK_NAMESPACE = 0x70736574
 
 
 # -- request models (the emitted spec's requestBody schemas) -----------------
@@ -1916,15 +1921,39 @@ async def _seed_create(seed: PresetSeed) -> None:
 async def _apply_one_seed(seed: PresetSeed) -> None:
     """Create the seed when absent; a preset already present is left untouched. Idempotent
     across boot/reload/epoch-swap and safe under concurrent fleet boot."""
+    # Every process of the deployment (each ``tai serve`` worker and the backend worker)
+    # runs this applier against ONE database, so the presence check, the create and the
+    # tool_meta overlay are ONE atomic step under the fleet-wide per-seed advisory lock.
+    # Unserialized, an applier whose check missed runs the create core's clean-slate
+    # overlay cascade AFTER the winner's overlay merge — wiping the seed's placement
+    # metadata — and then observes the preset present and applies no overlay of its own.
+    async with advisory_name_lock(_SEED_LOCK_NAMESPACE, seed.name):
+        await _apply_one_seed_locked(seed)
+
+    # Local-load guard. A sibling's boot create lands store-side only — it does not fan out
+    # to this worker at boot — so a seed present in the store may be absent from THIS worker's
+    # registry. Bind the ACTIVE stored version here so every declared seed is callable on
+    # first boot, before any reload. A create already registered locally, so the guard no-ops;
+    # a quarantined seed stays conflicted — never force-loaded onto a base it cannot bind.
+    # Outside the lock: it mutates this process's registry only, and holding a database lock
+    # across it would serialize every worker's local bind behind one another for nothing.
+    mgr = instance.app.preset_manager
+    if not mgr.is_registered(seed.name) and not mgr.is_quarantined(seed.name):
+        await mgr.reload(seed.name)
+
+
+async def _apply_one_seed_locked(seed: PresetSeed) -> None:
+    """The store-side half of one seed's application, run under the seed's advisory lock:
+    create the seed when absent (overlay included), leave a present preset untouched."""
     store = instance.app.presets.store
     try:
         await store.get_preset(seed.name)
     except PresetNotFoundError:
-        # A sibling worker booting in parallel may create the same seed between this check
-        # and the create. On a conflict, re-read the STORE (not the local registry, which
-        # lags the sibling's fan-out): a preset row now present is that sibling's create —
-        # benign, idempotent. A name colliding with something that is NOT a preset row is a
-        # genuine foreign-name collision and re-raises loudly.
+        # The lock excludes every other APPLIER, so a conflict here is a name claimed by a
+        # writer that does not hold it: an operator's create through the HTTP door, or a
+        # foreign (non-preset) tool of the same name. Re-read the STORE to tell them apart —
+        # a preset row now present is benign and idempotent, anything else is a genuine
+        # foreign-name collision and re-raises loudly.
         try:
             await _seed_create(seed)
         except ConflictError:
@@ -1936,15 +1965,6 @@ async def _apply_one_seed(seed: PresetSeed) -> None:
             if not present:
                 raise
             logger.info("preset seeds: %r created concurrently by a sibling — treating as present", seed.name)
-
-    # Local-load guard. A sibling's boot create lands store-side only — it does not fan out
-    # to this worker at boot — so a seed present in the store may be absent from THIS worker's
-    # registry. Bind the ACTIVE stored version here so every declared seed is callable on
-    # first boot, before any reload. A create already registered locally, so the guard no-ops;
-    # a quarantined seed stays conflicted — never force-loaded onto a base it cannot bind.
-    mgr = instance.app.preset_manager
-    if not mgr.is_registered(seed.name) and not mgr.is_quarantined(seed.name):
-        await mgr.reload(seed.name)
 
 
 async def apply_preset_seeds() -> None:

@@ -8,6 +8,11 @@ ops against the stateful in-memory fakes (the ``pg`` versioning fake + the autou
 tool_meta fake), so a seeded preset is created, registered LIVE, and its display metadata
 lands end-to-end, not mocked.
 
+The per-seed advisory lock the applier takes is faked in-process too
+(:class:`_FakeAdvisoryLocks`), so the concurrency oracle drives two appliers through a
+CHOSEN interleaving — the one that loses the overlay when the appliers are not
+serialized — with no database.
+
 The registry unit oracle pins the duplicate-name guard in isolation.
 """
 
@@ -23,6 +28,7 @@ from tai42_contract.presets.errors import PresetNotFoundError
 from tai42_contract.tool_meta import FolderNameConflictError
 from tai42_kit.clients.impl.postgres import PostgresClient
 
+import tai42_skeleton.db.locks as locks_module
 import tai42_skeleton.versioning.store as store_module
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
@@ -68,6 +74,88 @@ def pg(monkeypatch) -> FakeVersioningPg:
     monkeypatch.setattr(store_module, "client_ctx", fake_client_ctx)
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     return fake
+
+
+class _FakeAdvisoryLocks:
+    """An in-process stand-in for PostgreSQL transaction-scoped advisory locks.
+
+    One :class:`asyncio.Lock` per key, acquired by the ``pg_advisory_xact_lock``
+    statement and released when the holder's connection context exits — the scope the
+    real transaction-scoped lock has. ``contended`` is set the moment an acquire has to
+    WAIT, which is how a test observes that a second applier is serialized behind the
+    first rather than running through the same window.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self.contended = asyncio.Event()
+
+    @asynccontextmanager
+    async def client_ctx(self, client_cls, settings=None, **kwargs):
+        if client_cls is not PostgresClient:
+            raise AssertionError(f"unexpected client_cls in fake: {client_cls!r}")
+        yield _FakeLockPool(self)
+
+    async def acquire(self, key: tuple[int, int]) -> asyncio.Lock:
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        if lock.locked():
+            self.contended.set()
+        await lock.acquire()
+        return lock
+
+
+class _FakeLockPool:
+    def __init__(self, locks: _FakeAdvisoryLocks) -> None:
+        self._locks = locks
+
+    @asynccontextmanager
+    async def connection(self):
+        conn = _FakeLockConn(self._locks)
+        try:
+            yield conn
+        finally:
+            conn.release_all()
+
+
+class _FakeLockConn:
+    def __init__(self, locks: _FakeAdvisoryLocks) -> None:
+        self._locks = locks
+        self._held: list[asyncio.Lock] = []
+
+    @asynccontextmanager
+    async def transaction(self):
+        yield None
+
+    async def execute(self, sql: str, params: tuple = ()) -> None:
+        if "pg_advisory_xact_lock" not in sql:
+            raise AssertionError(f"unexpected SQL on the advisory-lock connection: {sql!r}")
+        self._held.append(await self._locks.acquire(tuple(params)))
+
+    def release_all(self) -> None:
+        while self._held:
+            self._held.pop().release()
+
+
+@pytest.fixture(autouse=True)
+def seed_locks(monkeypatch) -> _FakeAdvisoryLocks:
+    """Point the applier's advisory-lock seam at the in-process fake — this suite is
+    offline, and the lock is otherwise the one thing in the seed path that opens a
+    Postgres of its own. The lock resolves its DSN before it dials, so the host env is
+    set too; the fake never connects to it."""
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "offline.invalid")
+    locks = _FakeAdvisoryLocks()
+    monkeypatch.setattr(locks_module, "client_ctx", locks.client_ctx)
+    return locks
+
+
+async def _first_of(*events: asyncio.Event) -> None:
+    """Return as soon as ANY of *events* is set."""
+    waiters = [asyncio.ensure_future(event.wait()) for event in events]
+    try:
+        await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for waiter in waiters:
+            waiter.cancel()
 
 
 @pytest.fixture(autouse=True)
@@ -284,6 +372,113 @@ def test_present_but_unregistered_seed_loaded_by_guard(pg) -> None:
             # No re-ship: still the single version.
             versions = await instance.app.presets.store.list_versions("echo_default")
             assert len(versions) == 1
+
+    asyncio.run(run())
+
+
+# -- concurrent appliers: the version AND the overlay land exactly once -------
+
+
+def test_concurrent_appliers_keep_version_and_overlay(pg, seed_locks, monkeypatch) -> None:
+    """Two workers boot against ONE database and apply the same seed.
+
+    The interleaving driven here is the one that LOSES the overlay when the appliers are
+    not serialized: a worker whose presence check missed runs the create core's
+    clean-slate overlay cascade AFTER the winner's overlay merge, then hits the create
+    conflict, observes the preset present, and applies no overlay of its own — the seed's
+    palette metadata is gone for good. Under the per-seed advisory lock that window does
+    not exist: the holder creates and overlays as one step, and the second applier waits
+    and then observes a complete seed. Both the single version and the full overlay must
+    be there at the end.
+    """
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="echo_default",
+                description="the shipped echo preset",
+                base_tool="echo",
+                fixed_kwargs={"text": "hello"},
+                tool_meta=PresetSeedToolMeta(display_name="Echo Bot", tags=["featured"], folder_path="acme/echoes"),
+            )
+            instance.app.presets.register_seed(seed)
+
+            parked = asyncio.Event()
+            first_done = asyncio.Event()
+            real_delete_meta = PostgresToolMetaStore.delete_meta
+
+            async def parking_delete_meta(self, tool_name: str) -> None:
+                # The second applier holds its create window open at the clean-slate
+                # cascade — the very statement that wipes the overlay — until the first
+                # applier has FINISHED (the unserialized world) or is proven to be WAITING
+                # for the seed lock (the serialized world). Only that task parks; the first
+                # applier's own cascade runs straight through.
+                task = asyncio.current_task()
+                if task is not None and task.get_name() == "applier-second":
+                    parked.set()
+                    await _first_of(first_done, seed_locks.contended)
+                await real_delete_meta(self, tool_name)
+
+            monkeypatch.setattr(PostgresToolMetaStore, "delete_meta", parking_delete_meta)
+
+            second = asyncio.create_task(preset_ops._apply_one_seed(seed), name="applier-second")
+            await parked.wait()
+            first = asyncio.create_task(preset_ops._apply_one_seed(seed), name="applier-first")
+            await first
+            first_done.set()
+            await second
+
+            # Exactly one preset, one version — no second create, no re-ship.
+            records = await instance.app.presets.store.list_presets()
+            assert [record.name for record in records] == ["echo_default"]
+            assert len(await instance.app.presets.store.list_versions("echo_default")) == 1
+            # ...and the overlay survived the race intact (the defect: it is gone).
+            meta = await instance.app.tool_meta.store.get_meta("echo_default")
+            assert meta is not None
+            assert meta.display_name == "Echo Bot"
+            assert meta.tags == ["featured"]
+            assert meta.folder_id is not None
+            # The second applier reached that outcome by WAITING for the seed lock, not by
+            # running through the first's window.
+            assert seed_locks.contended.is_set()
+            # One folder per segment — the two appliers converged on one tree.
+            folders = await instance.app.tool_meta.store.list_folders()
+            assert sorted(folder.name for folder in folders) == ["acme", "echoes"]
+            # Both workers end with the seed live in their own registry.
+            assert instance.app.preset_manager.is_registered("echo_default")
+            assert "echo_default" in await instance.app.tools.get_tools()
+
+    asyncio.run(run())
+
+
+# -- an operator's overlay edit survives every later boot --------------------
+
+
+def test_operator_overlay_edit_survives_reapply(pg) -> None:
+    """A seed fills its display metadata only where the overlay leaves it absent, so an
+    operator's later rename is still there after the next boot's applier runs — and the
+    preset is still on its first version."""
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="echo_default",
+                description="the shipped echo preset",
+                base_tool="echo",
+                tool_meta=PresetSeedToolMeta(display_name="Echo Bot", tags=["featured"]),
+            )
+            instance.app.presets.register_seed(seed)
+            await preset_ops.apply_preset_seeds()
+
+            await instance.app.tool_meta.store.merge_meta("echo_default", patch={"display_name": "Operator Label"})
+
+            await preset_ops.apply_preset_seeds()
+
+            meta = await instance.app.tool_meta.store.get_meta("echo_default")
+            assert meta is not None
+            assert meta.display_name == "Operator Label"
+            assert meta.tags == ["featured"]
+            assert len(await instance.app.presets.store.list_versions("echo_default")) == 1
 
     asyncio.run(run())
 
