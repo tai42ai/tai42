@@ -1,15 +1,11 @@
 name: release-please
 
-# Release trains: tags mint on the train's own green. The release job runs on the
-# push of the `release-please` merge commit to main, without waiting for main's `ci`
-# to rerun; normal commits still open/update the release PR via the post-`ci`
-# `workflow_run`. release-please is idempotent on tags, so a later `workflow_run` for
-# the same merge commit finds the tag present and no-ops.
+# release-please runs on every push to main and on manual dispatch, opening or
+# updating the release-train PR; that PR's own CI is the merge gate. Merging the
+# train pushes its merge commit, which re-triggers this workflow to mint the
+# tags; release-please is idempotent, so an already-present tag is a no-op.
+# Publish lanes fire on the tag push, not on this workflow.
 on:
-  workflow_run:
-    workflows: [ci]
-    types: [completed]
-    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
@@ -25,15 +21,8 @@ concurrency:
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    if: >-
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.head_repository.full_name == github.repository) ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' &&
-       (startsWith(github.event.head_commit.message, 'chore: release') ||
-        startsWith(github.event.head_commit.message, 'chore(main): release')))
+    # Release automation runs on the org repo only, never in a fork.
+    if: github.repository == 'tai42ai/tai42'
     permissions:
       contents: write # push the release PR branch; create the tags + GitHub Releases
       pull-requests: write # open and update the release PR
