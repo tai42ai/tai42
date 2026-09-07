@@ -90,7 +90,7 @@ def list_routes(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/auth/routes")
-    emit_records(ctx_obj, data, ["path", "methods", "mapped"])
+    emit_records(ctx_obj, data, route=("GET", "/api/auth/routes"))
 
 
 @app.command("public-list")

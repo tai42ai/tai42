@@ -42,7 +42,7 @@ def list_roles(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/auth/roles")
-    emit_records(ctx_obj, data, ["name", "base_tier", "allow_all", "grants", "description"])
+    emit_records(ctx_obj, data, route=("GET", "/api/auth/roles"))
 
 
 @app.command("show")

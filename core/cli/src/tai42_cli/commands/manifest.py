@@ -77,7 +77,7 @@ def list_plugins(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/plugins")
-    emit_records(ctx_obj, data, ["name"])
+    emit_records(ctx_obj, data, route=("GET", "/api/plugins"))
 
 
 @app.command("replace")

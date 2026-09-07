@@ -33,4 +33,4 @@ def kinds(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/system/kinds")
-    emit_records(ctx_obj, data, ["kind", "state", "plugin", "detail"])
+    emit_records(ctx_obj, data, route=("GET", "/api/system/kinds"))

@@ -85,7 +85,7 @@ def list_runs(
         params["pageSize"] = str(page_size)
     with ctx_obj.client() as client:
         data = client.get("/api/observability/runs", params=params or None)
-    emit_records(ctx_obj, data, ["traceId", "createdAt", "status", "cost", "latencyMs"], items_key="items")
+    emit_records(ctx_obj, data, route=("GET", "/api/observability/runs"))
 
 
 @app.command("get")

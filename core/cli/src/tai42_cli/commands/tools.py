@@ -46,7 +46,7 @@ def list_tools(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/tools")
-    emit_records(ctx_obj, data, ["name"])
+    emit_records(ctx_obj, data, route=("GET", "/api/tools"))
 
 
 @app.command("tags")
@@ -59,7 +59,7 @@ def tool_tags(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/tools/tags")
-    emit_records(ctx_obj, data, ["name", "tags"])
+    emit_records(ctx_obj, data, route=("GET", "/api/tools/tags"))
 
 
 @app.command("schema")
@@ -303,4 +303,4 @@ def list_runs(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Tool
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/tool-runs", params={"tool_name": name})
-    emit_records(ctx_obj, data, ["run_id", "tool_name", "status", "started_at", "finished_at"])
+    emit_records(ctx_obj, data, route=("GET", "/api/tool-runs"))

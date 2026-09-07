@@ -27,8 +27,6 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_LIST_COLUMNS = ["name", "tool_name", "spec_runnable", "description"]
-
 _INPUT_FILE_HELP = (
     "Read the agent input JSON object from a file, or from stdin when the path is '-', instead of putting a secret "
     "on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --input."
@@ -45,7 +43,7 @@ def list_agents(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/agents")
-    emit_records(ctx_obj, data, _LIST_COLUMNS, items_key="items")
+    emit_records(ctx_obj, data, route=("GET", "/api/agents"))
 
 
 @app.command("spec-runnable")
@@ -58,7 +56,7 @@ def list_spec_runnable(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/agents/spec-runnable")
-    emit_records(ctx_obj, data, _LIST_COLUMNS, items_key="items")
+    emit_records(ctx_obj, data, route=("GET", "/api/agents/spec-runnable"))
 
 
 @app.command("run")

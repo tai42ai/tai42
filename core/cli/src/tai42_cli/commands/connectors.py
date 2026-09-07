@@ -44,6 +44,8 @@ def providers(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/connectors/providers")
+    # /api/connectors/providers returns two lists (providers + categories); this
+    # renders the providers list, so its columns are not model-derivable.
     emit_records(ctx_obj, data, ["id", "display_name", "kind", "category"], items_key="providers")
 
 
@@ -57,7 +59,7 @@ def connections(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/connectors/connections")
-    emit_records(ctx_obj, data, ["connection_id", "provider_id", "alias", "auth_health_state"], items_key="items")
+    emit_records(ctx_obj, data, route=("GET", "/api/connectors/connections"))
 
 
 @app.command("get")
@@ -156,4 +158,20 @@ def patch_sub_services(
     body = {"enabled_sub_services": list(sub_service), "return_url": return_url}
     with ctx_obj.client() as client:
         data = client.patch(f"/api/connectors/connections/{seg(connection_id)}/sub-services", json=body)
+    emit_result(ctx_obj, data)
+
+
+@app.command("reencrypt-tokens")
+@covers(("POST", "/api/connectors/tokens/reencrypt"))
+def reencrypt_tokens(ctx: typer.Context) -> None:
+    """Re-encrypt every stored token blob under the current CONNECTORS_KEK.
+
+    Run after rotating CONNECTORS_KEK (old key moved to CONNECTORS_KEK_PREVIOUS) to
+    converge every blob onto the new key so the previous key can be retired.
+
+    Example: ``tai connectors reencrypt-tokens``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.post("/api/connectors/tokens/reencrypt")
     emit_result(ctx_obj, data)

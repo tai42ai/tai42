@@ -35,12 +35,7 @@ def list_routes(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/conversations")
-    emit_records(
-        ctx_obj,
-        data,
-        ["route_name", "door", "target_kind", "target_name", "execution_key", "channel", "our_identity"],
-        items_key="items",
-    )
+    emit_records(ctx_obj, data, route=("GET", "/api/conversations"))
 
 
 @app.command("get")
@@ -384,12 +379,7 @@ def list_threads(
         params["address"] = address
     with ctx_obj.client() as client:
         data = client.get(f"/api/conversations/{seg(route_name)}/threads", params=params)
-    emit_records(
-        ctx_obj,
-        data,
-        ["thread_id", "client_address", "last_activity_at", "message_count", "last_delivery_status"],
-        items_key="items",
-    )
+    emit_records(ctx_obj, data, route=("GET", "/api/conversations/{route_name}/threads"))
 
 
 @app.command("search")
@@ -414,12 +404,7 @@ def search_messages(
             f"/api/conversations/{seg(route_name)}/messages/search",
             params={"q": q, "page": page, "pageSize": page_size},
         )
-    emit_records(
-        ctx_obj,
-        data,
-        ["created_at", "message_id", "route_name", "thread_id", "inbound_text", "answer", "delivery_status"],
-        items_key="items",
-    )
+    emit_records(ctx_obj, data, route=("GET", "/api/conversations/{route_name}/messages/search"))
 
 
 @app.command("transcript")
@@ -456,12 +441,7 @@ def get_transcript(
         params["q"] = q
     with ctx_obj.client() as client:
         data = client.get(f"/api/conversations/{seg(route_name)}/transcript", params=params)
-    emit_records(
-        ctx_obj,
-        data,
-        ["created_at", "message_id", "inbound_text", "answer", "answer_status", "delivery_status"],
-        items_key="items",
-    )
+    emit_records(ctx_obj, data, route=("GET", "/api/conversations/{route_name}/transcript"))
 
 
 @app.command("failed")
@@ -474,12 +454,7 @@ def list_failed(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/conversations/messages/failed")
-    emit_records(
-        ctx_obj,
-        data,
-        ["message_id", "route_name", "door", "client_address", "answer_status", "attempts"],
-        items_key="items",
-    )
+    emit_records(ctx_obj, data, route=("GET", "/api/conversations/messages/failed"))
 
 
 @app.command("config-list")
@@ -492,12 +467,7 @@ def list_configs(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/conversation-configs")
-    emit_records(
-        ctx_obj,
-        data,
-        ["target_kind", "target_name", "multichannel", "greeting_template"],
-        items_key="items",
-    )
+    emit_records(ctx_obj, data, route=("GET", "/api/conversation-configs"))
 
 
 @app.command("config-get")

@@ -48,7 +48,7 @@ def list_hooks(
     params = {"topic": topic} if topic else None
     with ctx_obj.client() as client:
         data = client.get("/api/hooks", params=params)
-    emit_records(ctx_obj, data, ["name", "topic", "tool", "execution_key"], items_key="items")
+    emit_records(ctx_obj, data, route=("GET", "/api/hooks"))
 
 
 @app.command("verifiers")
@@ -118,12 +118,7 @@ def list_trigger_links(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/hooks/trigger-links")
-    emit_records(
-        ctx_obj,
-        data,
-        ["name", "topic", "execution_key", "trigger_auth", "expires_at", "token_hash_prefix"],
-        items_key="items",
-    )
+    emit_records(ctx_obj, data, route=("GET", "/api/hooks/trigger-links"))
 
 
 @app.command("create-trigger-link")
