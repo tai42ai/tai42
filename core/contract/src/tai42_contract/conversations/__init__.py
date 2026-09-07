@@ -13,7 +13,7 @@ import json
 import re
 import string
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal, cast
@@ -49,7 +49,19 @@ ConversationDoor = Literal["api", "channel"]
 
 #: What an inbound turn is routed to: ``agent`` runs a registered agent (threaded
 #: conversation memory), ``tool`` dispatches a registered tool statelessly per message.
-ConversationTargetKind = Literal["agent", "tool"]
+#: Defined in the leaf :mod:`tai42_contract.conversation_target` so the states models
+#: reach it without importing this package (which depends on channels + interactions);
+#: re-exported here so ``from tai42_contract.conversations import ConversationTargetKind``
+#: is unchanged.
+from tai42_contract.conversation_target import ConversationTargetKind  # noqa: E402
+
+#: A per-target-kind bind validator a plugin registers on the conversations facet:
+#: given a route's target NAME, returns the BLOCKING message lines that forbid binding
+#: it to a route (empty = allow). Route creation consults every registered validator
+#: for the target's kind before the route exists, so a flow that reads an unbound state
+#: is refused at bind, not discovered at run time. Blocking only — a warning is not a
+#: bind-path concept.
+TargetBindValidator = Callable[[str], Awaitable[Sequence[str]]]
 
 #: A thread's conversation control mode: ``agent`` runs the target turn (an agent run or a
 #: tool dispatch); ``manual`` suppresses the target turn so an operator answers by hand,
@@ -923,6 +935,7 @@ __all__ = [
     "PairCodeInvalidError",
     "Person",
     "PersonAddress",
+    "TargetBindValidator",
     "TargetConversationConfig",
     "joined_answer_text",
     "validate_bounded_object",

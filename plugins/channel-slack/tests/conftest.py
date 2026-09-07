@@ -372,6 +372,8 @@ def make_delivery(
     schema: dict[str, Any] | None = None,
     interaction_id: str = "int-1",
     media: list[MediaItem] | None = None,
+    data: Any = None,
+    pages: Any = None,
 ) -> ChannelDelivery:
     """A valid ``ChannelDelivery`` with a comfortably-future default budget."""
     return ChannelDelivery(
@@ -381,6 +383,8 @@ def make_delivery(
         answer_format=answer_format,
         options=options,
         schema=schema,
+        data=data,
+        pages=pages,
         media=media,
         callback_url=callback_url,
         timeout_at=timeout_at or (datetime.now(UTC) + timedelta(minutes=10)),

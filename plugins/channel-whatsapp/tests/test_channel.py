@@ -38,7 +38,7 @@ from tai42_channel_whatsapp.client import (
     send_video,
 )
 from tai42_channel_whatsapp.correlation import PendingQuestionExistsError
-from tai42_channel_whatsapp.flows import build_flow
+from tai42_channel_whatsapp.flows import build_flow, build_flow_data, build_form_flow
 
 from .conftest import ALLOWED_A, ALLOWED_B, PHONE_NUMBER_ID, FakeHttpx, FakeRedis, make_delivery, response
 
@@ -1724,7 +1724,7 @@ def _flow_cache_key(schema_hash: str) -> str:
 
 
 async def test_form_cache_miss_creates_publishes_then_sends(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    flow_json, schema_hash = build_flow(_FORM_SCHEMA)
+    flow_json, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_httpx.responses.append(_flow_created("flow-1"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.FORM"))
@@ -1763,7 +1763,12 @@ async def test_form_cache_miss_creates_publishes_then_sends(waba_env, fake_redis
                     "flow_id": "flow-1",
                     "flow_cta": "Fill form",
                     "flow_action": "navigate",
-                    "flow_action_payload": {"screen": "FORM"},
+                    # A per-send form navigates to the entry screen and injects the
+                    # prefill/option data (here the empty defaults — no per-send data).
+                    "flow_action_payload": {
+                        "screen": "SCREEN_0",
+                        "data": build_flow_data(_FORM_SCHEMA, {}, {}),
+                    },
                 },
             },
         },
@@ -1776,8 +1781,69 @@ async def test_form_cache_miss_creates_publishes_then_sends(waba_env, fake_redis
     assert stored["interaction_id"] == "int-1"
 
 
+async def test_form_with_pages_and_data_publishes_once_and_carries_data_per_send(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions.models import FormData, FormOption, FormPage
+
+    schema = {
+        "type": "object",
+        "properties": {"tier": {"type": "string", "enum": ["g", "s"]}, "note": {"type": "string"}},
+    }
+    data = FormData(values={"note": "hi"}, options={"tier": [FormOption(value="g", label="Gold")]})
+    pages = [FormPage(title="Plan", fields=["tier"]), FormPage(title="Say", fields=["note"])]
+    # The publish key carries the option-bearing set — here ``{"tier"}`` from the ask's data.
+    _, ask_hash = build_form_flow(
+        schema, [{"title": "Plan", "fields": ["tier"]}, {"title": "Say", "fields": ["note"]}], {"tier"}
+    )
+
+    # First send: cache miss → create + publish + send. Second send: cache hit → send only.
+    fake_httpx.responses.append(_flow_created("flow-multi"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.ONE"))
+    fake_httpx.responses.append(_accepted("wamid.TWO"))
+
+    delivery = _form_delivery(schema=schema, data=data, pages=pages)
+    await WhatsAppChannel().deliver(delivery)
+    # A second delivery (a different pair) reuses the cached published Flow.
+    await WhatsAppChannel().deliver(
+        _form_delivery(schema=schema, data=data, pages=pages, interaction_id="int-2", recipient=ALLOWED_B)
+    )
+
+    # One create+publish for the (schema, pages) pair, then a send per delivery — never a
+    # new Flow per send.
+    urls = [call["url"] for call in fake_httpx.calls]
+    assert urls == [
+        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
+        "https://graph.facebook.com/v23.0/flow-multi/publish",
+        _MESSAGES_URL,
+        _MESSAGES_URL,
+    ]
+    assert fake_redis.store[_flow_cache_key(ask_hash)] == "flow-multi"
+    # The send carries the per-send values/options through the Flow action payload's data.
+    action_payload = fake_httpx.calls[2]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]
+    assert action_payload["screen"] == "SCREEN_0"
+    assert action_payload["data"]["note__init"] == "hi"
+    assert action_payload["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]
+
+
+async def test_form_per_send_option_on_non_string_field_raises_before_any_send(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions.models import FormData, FormOption
+
+    # A plain string takes per-send options (parity with web/Slack); a non-string never
+    # can — only a string maps to a dropdown — so it is refused before any network work.
+    schema = {"type": "object", "properties": {"agree": {"type": "boolean"}}}
+    data = FormData(values={}, options={"agree": [FormOption(value="x")]})
+    with pytest.raises(ChannelInputError, match="agree"):
+        await WhatsAppChannel().deliver(_form_delivery(schema=schema, data=data))
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
 async def test_form_cache_hit_sends_only(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
     fake_httpx.responses.append(_accepted("wamid.FORM"))
 
@@ -1790,7 +1856,7 @@ async def test_form_cache_hit_sends_only(waba_env, fake_redis: FakeRedis, fake_h
 
 
 async def test_form_reserves_before_any_send(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
     fake_httpx.responses.append(_accepted("wamid.FORM"))
 
@@ -1801,7 +1867,7 @@ async def test_form_reserves_before_any_send(waba_env, fake_redis: FakeRedis, fa
 
 
 async def test_form_send_failure_releases_reservation(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
     fake_httpx.responses.append(response(400, json={"error": {"code": 131009, "message": "Invalid recipient"}}))
 
@@ -1829,7 +1895,7 @@ async def test_form_publish_failure_deletes_orphan_draft_and_raises(
 ):
     # Create succeeds, publish fails — the stranded draft is deleted by its id and
     # the original publish error surfaces; nothing is cached, the pair is freed.
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_httpx.responses.append(_flow_created("flow-1"))
     fake_httpx.responses.append(response(500, text="publish down"))
     fake_httpx.responses.append(_published())  # delete succeeds (its 2xx body is unused)
@@ -1848,7 +1914,7 @@ async def test_form_orphan_delete_failure_is_logged_and_original_error_raised(
 ):
     # Publish fails AND the cleanup delete fails: the delete failure is logged
     # without masking, and the ORIGINAL publish error is the one that surfaces.
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_httpx.responses.append(_flow_created("flow-1"))
     fake_httpx.responses.append(response(500, text="publish down"))
     fake_httpx.responses.append(response(500, text="delete down"))
@@ -2022,8 +2088,13 @@ async def test_notify_form_token_disjoint_from_ask_flow_tokens(waba_env, fake_re
     # Both directions of the namespace fence: an ask's flow token is its interaction id
     # verbatim (no prefix), a notification's is always prefixed — and two notifications
     # for the SAME schema still mint distinct tokens (the random suffix).
-    _, schema_hash = build_flow(_FORM_SCHEMA)
-    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    # The ask flow (per-send, keyed on the schema+pages pair) and the notify flow
+    # (schema only) are distinct published flows; seed both caches so all three sends
+    # are cache hits.
+    _, notify_hash = build_flow(_FORM_SCHEMA)
+    _, ask_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(notify_hash)] = "flow-nf"
+    fake_redis.store[_flow_cache_key(ask_hash)] = "flow-ask"
     fake_httpx.responses.append(_accepted("wamid.ASK"))
     fake_httpx.responses.append(_accepted("wamid.NF1"))
     fake_httpx.responses.append(_accepted("wamid.NF2"))

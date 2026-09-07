@@ -20,12 +20,12 @@ import tai42_contract
 
 from ._helpers import protocol_members  # stdlib-only helper, no application package
 
-# The frozen facade surface: the 78 (sub-protocol, member) pairs over 75
-# distinct flat names, grouped into the 22 sub-protocols. This is the
-# contract's own source of truth — no external lookup needed. Three leaf names
-# are shared: ``store`` (versioning + presets) and ``register``/``get``
-# (webhook_verifiers + channels), so the distinct-name union (75) is three
-# fewer than the pair count (78).
+# The frozen facade surface: the 117 (sub-protocol, member) pairs over 113
+# distinct flat names, grouped into the 23 sub-protocols. This is the
+# contract's own source of truth — no external lookup needed. Two leaf names
+# are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
+# (webhook_verifiers + channels), so the distinct-name union (113) is four
+# fewer than the pair count (117).
 EXPECTED_FACADE = {
     # tools (13)
     "tool",
@@ -72,9 +72,10 @@ EXPECTED_FACADE = {
     "names",
     "handle_inbound_answer",
     "record_flow_send_receipt",
-    # conversations (2)
+    # conversations (3)
     "accept",
     "record_delivery_status",
+    "register_target_validator",
     # monitoring (2)
     "register_monitoring",
     "active",
@@ -132,6 +133,41 @@ EXPECTED_FACADE = {
     "registration_tier",
     # tool_meta (2) — `store` shared with versioning and presets above
     "patch",
+    # states (34)
+    "list_declarations",
+    "get_declaration",
+    "put_declaration",
+    "delete_declaration",
+    "stats",
+    "migrate",
+    "preview_migrate",
+    "list_modules",
+    "get_module",
+    "put_module",
+    "delete_module",
+    "list_mounts",
+    "mount",
+    "update_mount_declarations",
+    "unmount",
+    "import_aliases",
+    "import_applied_ops",
+    "import_records",
+    "read",
+    "replace",
+    "merge",
+    "apply",
+    "erase",
+    "fold",
+    "list_subjects",
+    "search",
+    "writes",
+    "prune_expired",
+    "context",
+    "register_consumer_lister",
+    "consumers",
+    "register_module_seed",
+    "register_retired_module_name",
+    "register_mount_validator",
 }
 
 
@@ -195,6 +231,7 @@ def test_facade_partition_against_frozen_surface():
         AppMonitoring,
         AppPresets,
         AppSandboxes,
+        AppStates,
         AppStorage,
         AppSubApp,
         AppToolMeta,
@@ -227,6 +264,7 @@ def test_facade_partition_against_frozen_surface():
         AppVersioning,
         AppPresets,
         AppToolMeta,
+        AppStates,
     ]
     union: set[str] = set()
     total = 0
@@ -237,14 +275,14 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 82 (sub-protocol, member) pairs over 78 distinct names — ``store`` is exposed
+    # 117 (sub-protocol, member) pairs over 113 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 78, f"union={len(union)}"
-    assert total == 82 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 113, f"union={len(union)}"
+    assert total == 117 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
-def test_taiapp_exposes_twenty_three_namespaces():
+def test_taiapp_exposes_twenty_four_namespaces():
     from tai42_contract.app import TaiApp
 
     assert protocol_members(TaiApp) == {
@@ -271,6 +309,7 @@ def test_taiapp_exposes_twenty_three_namespaces():
         "versioning",
         "presets",
         "tool_meta",
+        "states",
     }
 
 

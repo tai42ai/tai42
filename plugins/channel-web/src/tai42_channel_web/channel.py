@@ -41,7 +41,7 @@ from tai42_contract.channels import (
     OptionSection,
     ReplyOption,
 )
-from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_contract.interactions.models import FormData, FormOption, FormPage, LocationElement, MediaItem
 
 from tai42_channel_web.store import (
     FormRecord,
@@ -119,6 +119,35 @@ def _section_frame_item(section: OptionSection) -> dict[str, object]:
     """One titled section as its frame shape: ``{"title", "rows": [reply, ...]}`` — the
     grouped reply rows the page renders under a section header."""
     return {"title": section.title, "rows": [_reply_frame_item(row) for row in section.rows]}
+
+
+def _form_option_frame_item(option: FormOption) -> dict[str, str]:
+    """One per-send form option as its transcript-frame shape: ``{"value", "label"?}``.
+    ``label`` is omitted when absent (the widget shows the value in its place), so there
+    is no empty-value key."""
+    entry = {"value": option.value}
+    if option.label is not None:
+        entry["label"] = option.label
+    return entry
+
+
+def _form_data_frame(data: FormData) -> dict[str, object]:
+    """A form question's per-send enrichment as its transcript-frame shape:
+    ``{"values", "options"}`` — the prefilled values verbatim and each property's per-send
+    option list as ``{"value", "label"?}`` items. The widget prefills the controls from
+    ``values`` and renders ``options`` as the field's choices (labels shown, values posted)."""
+    return {
+        "values": data.values,
+        "options": {
+            name: [_form_option_frame_item(option) for option in choices] for name, choices in data.options.items()
+        },
+    }
+
+
+def _form_pages_frame(pages: list[FormPage]) -> list[dict[str, object]]:
+    """A form question's step layout as its transcript-frame shape: each page as
+    ``{"title", "fields"}`` in order. The widget renders one step per page."""
+    return [{"title": page.title, "fields": list(page.fields)} for page in pages]
 
 
 def _location_frame_item(location: LocationElement) -> dict[str, object]:
@@ -258,6 +287,11 @@ class WebChannel:
                     delivery.timeout_at,
                     callback_url=(delivery.callback_url if delivery.answer_format == _EXTERNAL_FORMAT else None),
                     schema=delivery.schema,
+                    # A form question's per-send values/options and step layout ride the same
+                    # frame; the widget prefills, renders the per-send choices, and steps the
+                    # pages. Present only for ``form`` (the contract couples them to it).
+                    form_data=(_form_data_frame(delivery.data) if delivery.data is not None else None),
+                    pages=(_form_pages_frame(delivery.pages) if delivery.pages is not None else None),
                     # Display media rides the question frame in order, in the same
                     # shape the media-card renders — an ``image`` inline, a ``link``
                     # as a safe anchor; display-only, never part of the answer.

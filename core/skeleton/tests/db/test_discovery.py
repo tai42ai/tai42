@@ -79,8 +79,9 @@ def test_plugin_entry_resolves_package_relative_directory() -> None:
     assert entry.migrations_dir.is_dir()
 
 
-async def test_all_entries_skeleton_only_without_installed_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_all_entries_two_skeleton_chains_without_installed_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
     from tai42_skeleton.marketplace import store as mp_store
+    from tai42_skeleton.states.db import STATES_COMPONENT
 
     class _EmptyStore:
         async def list_installed(self):
@@ -89,7 +90,9 @@ async def test_all_entries_skeleton_only_without_installed_plugins(monkeypatch: 
     monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
 
     entries = await all_migration_entries()
-    assert [entry.component for entry in entries] == [SKELETON_COMPONENT]
+    # The two skeleton-owned chains, in order: the skeleton baseline first (plugin discovery
+    # reads skeleton-owned tables), then the states record store.
+    assert [entry.component for entry in entries] == [SKELETON_COMPONENT, STATES_COMPONENT]
 
 
 async def test_installed_plugin_entries_reads_marketplace_store(monkeypatch: pytest.MonkeyPatch) -> None:

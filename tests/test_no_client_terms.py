@@ -28,9 +28,24 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+_SELF = Path(__file__).resolve()
 
 _NO_LIST_MSG = "no banned-terms list: set TAI_BANNED_TERMS or ~/.config/tai42/banned-terms.txt"
 _LOCAL_LIST = Path.home() / ".config" / "tai42" / "banned-terms.txt"
+
+#: Consumer-vocabulary phrases banned in the platform tree independently of any secret
+#: client list — a consumer's (e.g. the flow engine's) own terms never appear in the
+#: platform. Committed here, not secret-sourced, so the ban holds on every checkout and
+#: applies even when no client list is present. This file names them as data, so it is
+#: excluded from the scan (:data:`_SELF`).
+_CONSUMER_TERMS: tuple[str, ...] = (
+    "babel" + "fish",  # assembled from fragments so the sibling downstream-terms guard does not flag this entry
+    "flow-views",
+    "flow_step",
+    "flow_resume",
+    "router loop",
+    "custom node",
+)
 
 
 def _raw_entries() -> list[str]:
@@ -43,7 +58,7 @@ def _raw_entries() -> list[str]:
 
 
 def _load() -> tuple[list[str], list[tuple[str, bool]]]:
-    terms: list[str] = []
+    terms: list[str] = list(_CONSUMER_TERMS)
     markers: list[tuple[str, bool]] = []
     for entry in _raw_entries():
         if not entry:
@@ -102,6 +117,8 @@ def _iter_text_lines():
     for rel in _scanned_files():
         path = ROOT / rel
         if not path.is_file():  # tracked but deleted in the worktree
+            continue
+        if path.resolve() == _SELF:  # this guard names the banned phrases as data
             continue
         data = path.read_bytes()
         if b"\x00" in data:  # binary: text-term invariant does not apply

@@ -35,6 +35,8 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_THREAD_KEY,
     AnswerFormat,
     AnswerMismatchPolicy,
+    FormData,
+    FormPage,
     InteractionRequest,
     MediaItem,
     SuspendedInteraction,
@@ -44,6 +46,7 @@ from tai42_contract.interactions import (
     repark_notice,
 )
 from tai42_contract.secrets import SecretValue
+from tai42_contract.states import StateContext
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import require
@@ -99,6 +102,8 @@ def _build_payload(
     schema: type[BaseModel] | dict[str, Any] | None,
     url: str | None = None,
     verifier: dict[str, Any] | None = None,
+    data: FormData | dict[str, Any] | None = None,
+    pages: list[FormPage] | list[dict[str, Any]] | None = None,
 ) -> dict | None:
     if answer_format is AnswerFormat.SELECT:
         if not options:
@@ -107,7 +112,17 @@ def _build_payload(
     if answer_format is AnswerFormat.FORM:
         if schema is None:
             raise ValueError("answer_format 'form' requires a schema")
-        return {"schema": _normalize_schema(schema)}
+        form_payload: dict[str, Any] = {"schema": _normalize_schema(schema)}
+        # Per-send prefill/options and stepped pages ride the FORM payload as their
+        # canonical dumps; the InteractionRequest validator cross-checks them against
+        # the schema once (the one seam every ask door flows through).
+        if data is not None:
+            form_payload["data"] = (data if isinstance(data, FormData) else FormData.model_validate(data)).model_dump()
+        if pages is not None:
+            form_payload["pages"] = [
+                (page if isinstance(page, FormPage) else FormPage.model_validate(page)).model_dump() for page in pages
+            ]
+        return form_payload
     if answer_format is AnswerFormat.EXTERNAL:
         # The URL exists only after the link is resolved, so this branch is called
         # after that step; schema (optional here) validates the callback payload.
@@ -343,6 +358,8 @@ async def ask_user(
     answer_format: str = "text",
     options: list[str] | None = None,
     schema: type[BaseModel] | dict[str, Any] | None = None,
+    data: FormData | dict[str, Any] | None = None,
+    pages: list[FormPage] | list[dict[str, Any]] | None = None,
     group_id: str | None = None,
     timeout: float | None = None,
     link: str | Callable[[str], Awaitable[str]] | None = None,
@@ -476,6 +493,17 @@ async def ask_user(
     nothing). It is stored on the question and rides a ``channel`` delivery alike; it is
     forbidden on ``confirm``/``form``/``external``.
 
+    ``data`` and ``pages`` enrich a ``form`` ask for ONE send (forbidden on every other
+    format, refused loudly). ``data`` (a ``FormData`` or its dict) prefills ``values``
+    into the form's controls and supplies per-send ``options`` — a choice list that
+    REPLACES a property's schema ``enum`` for this send only, so a variant needs no
+    re-published form. ``pages`` (a list of ``FormPage`` or their dicts) splits the form
+    into ordered steps, each naming the top-level properties it collects; every property
+    appears exactly once and absent ``pages`` means one page. Both are validated against
+    the form's schema when the ``InteractionRequest`` is built (before any state is
+    written) and, on a ``channel`` ask, ride the delivery so the channel renders the
+    prefill, the per-send choices and the steps; the answer is the union of all fields.
+
     ``mode`` selects the wait discipline. ``"sync"`` (the default) blocks and
     returns the typed answer as described above. ``"async"`` PARKS the caller: it
     persists (and optionally delivers) the question exactly as sync does but
@@ -509,6 +537,11 @@ async def ask_user(
     # drop them. The SELECT-requires-options check stays in ``_build_payload``.
     if options is not None and fmt not in (AnswerFormat.SELECT, AnswerFormat.TEXT):
         raise ValueError(f"options are not valid with answer_format {fmt.value!r}")
+    # ``data``/``pages`` enrich a FORM ask only (prefill, per-send option lists, stepped
+    # pages) — refuse them loudly on every other format before any state is written,
+    # rather than silently drop them.
+    if (data is not None or pages is not None) and fmt is not AnswerFormat.FORM:
+        raise ValueError(f"data and pages are not valid with answer_format {fmt.value!r}")
     # ``audience`` (the addressed identity) is validated loud and up front — a
     # blank/whitespace value can never address a real identity — mirroring the
     # ``notify_user`` guard so both surfaces reject it identically before any
@@ -599,6 +632,7 @@ async def ask_user(
     continuation_tool: str | None = None
     continuation_identity: str | None = None
     continuation_fingerprint: str | None = None
+    continuation_state_context: StateContext | None = None
     # The conversation thread this park binds to (None for a sync ask or an unbound run):
     # captured so a later thread delete can cascade-cancel the park via its reverse index.
     park_thread_id: str | None = None
@@ -619,6 +653,12 @@ async def ask_user(
         # continuation under the SAME fire authority the ask ran under; gate-off
         # fires carry no fingerprint, recorded as "" (the bind ignores it there).
         continuation_fingerprint = identity.execution_key_fingerprint or ""
+        # The parking turn's ambient state context, captured here inside that turn so
+        # the resume re-deposits the original door's subject + write provenance.
+        # Function-local import: continuation → store → this module would close a cycle.
+        from tai42_skeleton.interactions.continuation import _current_state_context_for_park
+
+        continuation_state_context = _current_state_context_for_park()
         # The bound conversation thread (from the turn layer's park-completion / bridge
         # context), so this park joins its thread's reverse index and a thread delete can
         # cancel it. ``None`` outside a bound conversation turn — indexed then only by its
@@ -705,7 +745,7 @@ async def ask_user(
             final_url = await _resolve_link(link, callback_url)  # type: ignore[arg-type]
         format_payload = _build_payload(fmt, options, schema, url=final_url, verifier=verifier)
     else:
-        format_payload = _build_payload(fmt, options, schema)
+        format_payload = _build_payload(fmt, options, schema, data=data, pages=pages)
 
     async with client_ctx(RedisClient, settings.redis) as r:
         # A data:image is decoded once and stored BY REFERENCE before the request is
@@ -763,6 +803,7 @@ async def ask_user(
             mode=mode,
             continuation_tool=continuation_tool,
             continuation_identity=continuation_identity,
+            continuation_state_context=continuation_state_context,
             expiry_at=expiry_at,
         )
         # Concurrency guard (all formats). ``reserve_open_slot`` prunes stale open
@@ -830,6 +871,20 @@ async def ask_user(
             # For a form the normalized schema rides the delivery; ``_build_payload``
             # already required and normalized it above (before any persist).
             schema=(format_payload or {}).get("schema") if fmt is AnswerFormat.FORM else None,
+            # A form's per-send prefill/options and stepped pages ride the delivery too,
+            # re-parsed from the payload the request already validated — the channel plugin
+            # renders them into its own form surface (a channel that cannot honor per-send
+            # data refuses loudly at deliver, naming the field). None for every other format.
+            data=(
+                FormData.model_validate((format_payload or {})["data"])
+                if fmt is AnswerFormat.FORM and (format_payload or {}).get("data") is not None
+                else None
+            ),
+            pages=(
+                [FormPage.model_validate(page) for page in (format_payload or {})["pages"]]
+                if fmt is AnswerFormat.FORM and (format_payload or {}).get("pages") is not None
+                else None
+            ),
             # The question's display media rides the delivery too — the SAME stored items,
             # here with any data: image substituted to an ABSOLUTE served reference (the
             # channel branch above passed ``base_url``), so a vendor can fetch it off-origin;

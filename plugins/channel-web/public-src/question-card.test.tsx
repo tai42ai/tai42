@@ -8,7 +8,7 @@ import {
   secondsLeft,
   type QuestionItem,
 } from '@/question-card';
-import type { AnswerFormat, JsonSchema, MediaItem } from '@/use-chat-stream';
+import type { AnswerFormat, FormPage, FormPrefill, JsonSchema, MediaItem } from '@/use-chat-stream';
 
 afterEach(() => {
   cleanup();
@@ -52,16 +52,67 @@ function question(
     ...overrides,
   } as const;
   if (format === 'external')
-    return { ...base, answerFormat: format, callbackUrl: CALLBACK, schema: null };
+    return {
+      ...base,
+      answerFormat: format,
+      callbackUrl: CALLBACK,
+      schema: null,
+      formData: null,
+      pages: null,
+    };
   if (format === 'form')
-    return { ...base, answerFormat: format, callbackUrl: null, schema: FORM_SCHEMA };
-  return { ...base, answerFormat: format, callbackUrl: null, schema: null };
+    return {
+      ...base,
+      answerFormat: format,
+      callbackUrl: null,
+      schema: FORM_SCHEMA,
+      formData: null,
+      pages: null,
+    };
+  return {
+    ...base,
+    answerFormat: format,
+    callbackUrl: null,
+    schema: null,
+    formData: null,
+    pages: null,
+  };
+}
+
+/** A `form` question carrying an explicit schema plus the per-send prefill/steps. */
+function formQuestion(
+  schema: JsonSchema,
+  formData: FormPrefill | null,
+  pages: readonly FormPage[] | null,
+): QuestionItem {
+  return {
+    kind: 'question',
+    id: 'q1',
+    interactionId: 'int-1',
+    question: 'Deploy to production?',
+    options: null,
+    media: null,
+    timeoutAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    ts: new Date().toISOString(),
+    answerFormat: 'form',
+    callbackUrl: null,
+    schema,
+    formData,
+    pages,
+  };
 }
 
 /** An `external` question pointing at `url` — the one format whose widget opens
  * the ticket it was given. */
 function externalQuestion(url: string): QuestionItem {
-  return { ...question('external'), answerFormat: 'external', callbackUrl: url, schema: null };
+  return {
+    ...question('external'),
+    answerFormat: 'external',
+    callbackUrl: url,
+    schema: null,
+    formData: null,
+    pages: null,
+  };
 }
 
 /** One turn of the card's self-rescheduling clock. React commits the tick's state
@@ -239,6 +290,102 @@ describe('QuestionCard', () => {
 
     await waitFor(() => expect(onAnswered).toHaveBeenCalled());
     expect(onAnswer).toHaveBeenCalledWith('int-1', { note: 'ship it' });
+  });
+
+  it('prefills a form value from the per-send data and submits it', async () => {
+    const user = userEvent.setup();
+    const { onAnswer, onAnswered } = renderCard(
+      formQuestion(FORM_SCHEMA, { values: { note: 'hello' }, options: {} }, null),
+    );
+
+    // The known value is shown filled in from first render.
+    expect(screen.getByRole('textbox')).toHaveValue('hello');
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    expect(onAnswer).toHaveBeenCalledWith('int-1', { note: 'hello' });
+  });
+
+  it('renders a per-send option list as a labelled select and posts the chosen value', async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { colour: { type: 'string', title: 'Colour' } },
+    };
+    const { onAnswer, onAnswered } = renderCard(
+      formQuestion(
+        schema,
+        {
+          values: {},
+          options: {
+            colour: [
+              { value: 'r', label: 'Red' },
+              { value: 'b', label: 'Blue' },
+            ],
+          },
+        },
+        null,
+      ),
+    );
+
+    // Labels are shown; the values ride the submission.
+    expect(screen.getByRole('option', { name: 'Red' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Blue' })).toBeInTheDocument();
+    await user.selectOptions(screen.getByRole('combobox'), 'b');
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    expect(onAnswer).toHaveBeenCalledWith('int-1', { colour: 'b' });
+  });
+
+  it('steps through pages and submits the union of every step', async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { first: { type: 'string' }, second: { type: 'string' } },
+    };
+    const pages: readonly FormPage[] = [
+      { title: 'Your name', fields: ['first'] },
+      { title: 'Your note', fields: ['second'] },
+    ];
+    const { onAnswer, onAnswered } = renderCard(formQuestion(schema, null, pages));
+
+    // Step 1: the progress line and only the first page's field.
+    expect(screen.getByText(/Step 1 of 2 . Your name/)).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox'), 'Ada');
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 2: progress advances, Back appears, the button becomes Submit.
+    expect(screen.getByText(/Step 2 of 2 . Your note/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Back' })).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox'), 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Submit' }));
+
+    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    expect(onAnswer).toHaveBeenCalledWith('int-1', { first: 'Ada', second: 'ship it' });
+  });
+
+  it('moves focus to the shown step first control on Next and on Back', async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { first: { type: 'string' }, second: { type: 'string' } },
+    };
+    const pages: readonly FormPage[] = [
+      { title: 'Your name', fields: ['first'] },
+      { title: 'Your note', fields: ['second'] },
+    ];
+    renderCard(formQuestion(schema, null, pages));
+
+    // Next: focus lands on the second step's control, not on the now-hidden first one.
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    const stepTwoInput = screen.getByRole('textbox');
+    await waitFor(() => expect(stepTwoInput).toHaveFocus());
+
+    // Back: focus lands on the first step's control.
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    const stepOneInput = screen.getByRole('textbox');
+    await waitFor(() => expect(stepOneInput).toHaveFocus());
   });
 
   it('shows a loud notice for a form whose schema is not an object, never a dropped control', () => {

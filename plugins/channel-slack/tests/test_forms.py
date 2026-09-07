@@ -57,6 +57,79 @@ def test_modal_view_leads_with_the_question_and_carries_metadata():
     assert [b["block_id"] for b in view["blocks"][1:]] == ["full_name", "tier", "subscribed", "count", "ratio"]
 
 
+def test_modal_prefills_each_control_from_the_per_send_values():
+    values = {"full_name": "Ada", "tier": "gold", "subscribed": True, "count": 3, "ratio": 1.5}
+    by_id = {b["block_id"]: b for b in build_modal_blocks(_SCHEMA, values)}
+
+    assert by_id["full_name"]["element"]["initial_value"] == "Ada"
+    assert by_id["count"]["element"]["initial_value"] == "3"
+    assert by_id["ratio"]["element"]["initial_value"] == "1.5"
+    # A select prefills its initial_option to the matching {text, value}.
+    assert by_id["tier"]["element"]["initial_option"] == {
+        "text": {"type": "plain_text", "text": "gold"},
+        "value": "gold",
+    }
+    # The Yes/No radio prefills the "true" option for a boolean True.
+    assert by_id["subscribed"]["element"]["initial_option"]["value"] == "true"
+
+
+def test_per_send_options_build_a_labelled_select_replacing_the_field_control():
+    schema = {"type": "object", "properties": {"colour": {"type": "string", "title": "Colour"}}}
+    options = {"colour": [{"value": "r", "label": "Red"}, {"value": "b", "label": "Blue"}]}
+    (block,) = build_modal_blocks(schema, {}, options)
+
+    element = block["element"]
+    assert element["type"] == "static_select"
+    # Labels shown, values submitted.
+    assert element["options"] == [
+        {"text": {"type": "plain_text", "text": "Red"}, "value": "r"},
+        {"text": {"type": "plain_text", "text": "Blue"}, "value": "b"},
+    ]
+
+
+def test_per_send_option_without_a_label_shows_its_value():
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}}}
+    (block,) = build_modal_blocks(schema, {}, {"colour": [{"value": "r"}]})
+    assert block["element"]["options"] == [{"text": {"type": "plain_text", "text": "r"}, "value": "r"}]
+
+
+def test_per_send_options_prefilled_value_selects_the_matching_option():
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}}}
+    options = {"colour": [{"value": "r", "label": "Red"}, {"value": "b", "label": "Blue"}]}
+    (block,) = build_modal_blocks(schema, {"colour": "b"}, options)
+    assert block["element"]["initial_option"] == {"text": {"type": "plain_text", "text": "Blue"}, "value": "b"}
+
+
+def test_per_send_options_on_a_non_string_property_raise_naming_it():
+    schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
+    with pytest.raises(FormSchemaError, match="count"):
+        build_modal_blocks(schema, {}, {"count": [{"value": "1"}]})
+
+
+def test_prefilled_select_value_not_among_options_raises_naming_it():
+    schema = {"type": "object", "properties": {"tier": {"type": "string", "enum": ["gold", "silver"]}}}
+    with pytest.raises(FormSchemaError, match="tier"):
+        build_modal_blocks(schema, {"tier": "bronze"})
+
+
+def test_pages_render_as_titled_header_sections_in_one_modal():
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+    }
+    pages = [{"title": "First", "fields": ["a"]}, {"title": "Second", "fields": ["b"]}]
+    blocks = build_modal_blocks(schema, {}, {}, pages)
+
+    kinds = [(b["type"], b.get("text", {}).get("text") or b.get("block_id")) for b in blocks]
+    assert kinds == [("header", "First"), ("input", "a"), ("header", "Second"), ("input", "b")]
+
+
+def test_pages_naming_an_unknown_property_raise():
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    with pytest.raises(FormSchemaError, match="ghost"):
+        build_modal_blocks(schema, {}, {}, [{"title": "P", "fields": ["ghost"]}])
+
+
 def test_modal_blocks_map_each_supported_type():
     by_id = {b["block_id"]: b for b in build_modal_blocks(_SCHEMA)}
 

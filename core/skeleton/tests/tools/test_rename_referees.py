@@ -412,3 +412,52 @@ async def test_parked_referee_feature_off_is_empty(monkeypatch) -> None:
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     reset_all_settings()
     assert await platform_referees._parked_interaction_referee("echo") == []
+
+
+# -- states referee ----------------------------------------------------------
+
+
+async def test_states_referee_blocks_on_records_under_the_tool_target(monkeypatch) -> None:
+    import tai42_skeleton.states.db as states_db
+    import tai42_skeleton.states.store as states_store
+
+    monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
+
+    async def _count(self, target_kind: str, target_name: str) -> int:
+        assert target_kind == "tool"
+        return 3 if target_name == "echo" else 0
+
+    monkeypatch.setattr(states_store.PostgresStatesStore, "count_records_for_target", _count)
+    holders = await platform_referees._states_referee("echo")
+    assert holders == ["3 state records under target tool/echo"]
+    assert await platform_referees._states_referee("other") == []
+
+
+async def test_states_referee_singular_record_wording(monkeypatch) -> None:
+    import tai42_skeleton.states.db as states_db
+    import tai42_skeleton.states.store as states_store
+
+    monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
+
+    async def _count(self, target_kind: str, target_name: str) -> int:
+        return 1
+
+    monkeypatch.setattr(states_store.PostgresStatesStore, "count_records_for_target", _count)
+    assert await platform_referees._states_referee("echo") == ["1 state record under target tool/echo"]
+
+
+async def test_states_referee_feature_off_is_empty(monkeypatch) -> None:
+    import tai42_skeleton.states.db as states_db
+
+    monkeypatch.setattr(states_db, "states_store_configured", lambda: False)
+    assert await platform_referees._states_referee("echo") == []
+
+
+def test_states_referee_is_registered(monkeypatch) -> None:
+    # The platform arms the states referee alongside the other in-house holders, so a
+    # rename gate consults it by construction.
+    registered: list = []
+    fake_app = SimpleNamespace(tools=SimpleNamespace(register_rename_referee=registered.append))
+    monkeypatch.setattr(platform_referees, "tai42_app", fake_app)
+    platform_referees.register_platform_rename_referees()
+    assert platform_referees._states_referee in registered

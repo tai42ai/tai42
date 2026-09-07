@@ -794,15 +794,18 @@ def test_validate_form_schema_hook_is_optional_and_does_not_tighten_the_check():
 def test_channel_delivery_shape():
     from tai42_contract.channels import ChannelDelivery
 
-    # The ask_user delivery path carries the form ``schema`` and the question's display
-    # ``media`` (full parity with the inbox), but never a ``template`` — a template is an
-    # out-of-window notification send, not a question delivery.
+    # The ask_user delivery path carries the form ``schema``, its per-send ``data`` and
+    # ``pages``, and the question's display ``media`` (full parity with the inbox), but
+    # never a ``template`` — a template is an out-of-window notification send, not a
+    # question delivery.
     assert set(ChannelDelivery.model_fields) == {
         "interaction_id",
         "recipient",
         "question",
         "answer_format",
         "schema",
+        "data",
+        "pages",
         "options",
         "media",
         "on_mismatch",
@@ -811,6 +814,49 @@ def test_channel_delivery_shape():
         "timeout_at",
     }
     assert "template" not in ChannelDelivery.model_fields
+
+
+def test_channel_delivery_carries_form_data_and_pages():
+    from datetime import UTC, datetime
+
+    from tai42_contract.channels import ChannelDelivery
+    from tai42_contract.interactions import FormData, FormOption, FormPage
+
+    schema = {"type": "object", "properties": {"color": {"type": "string"}}}
+    delivery = ChannelDelivery(
+        interaction_id="i1",
+        question="Pick",
+        answer_format="form",
+        schema=schema,
+        data=FormData(values={"color": "red"}, options={"color": [FormOption(value="red", label="Red")]}),
+        pages=[FormPage(title="Step", fields=["color"])],
+        callback_url="https://x/api/interactions/callback/t",
+        timeout_at=datetime.now(UTC),
+    )
+    assert delivery.data is not None
+    assert delivery.data.values == {"color": "red"}
+    assert delivery.data.options["color"][0].label == "Red"
+    assert delivery.pages is not None
+    assert delivery.pages[0].fields == ["color"]
+
+
+def test_channel_delivery_rejects_form_extras_on_non_form():
+    from datetime import UTC, datetime
+
+    import pytest
+
+    from tai42_contract.channels import ChannelDelivery
+    from tai42_contract.interactions import FormData
+
+    with pytest.raises(ValueError, match="carries no form data"):
+        ChannelDelivery(
+            interaction_id="i1",
+            question="Hi",
+            answer_format="text",
+            data=FormData(values={"x": 1}),
+            callback_url="https://x/cb",
+            timeout_at=datetime.now(UTC),
+        )
 
 
 def test_ask_user_accepts_channel_and_recipient_keywords():

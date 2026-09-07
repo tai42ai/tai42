@@ -60,6 +60,7 @@ from tai42_contract.interactions import (
     set_park_completion,
 )
 from tai42_contract.monitoring import RunAttribution
+from tai42_contract.states import StateContext, SubjectCandidates
 from tai42_kit.utils.data import run_jq_bounded
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
@@ -79,6 +80,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
 from tai42_skeleton.operations.errors import NotSupportedError, PermissionDenied
+from tai42_skeleton.states.context import state_context
 from tai42_skeleton.tools.attribution import run_attribution
 from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
 
@@ -658,20 +660,18 @@ def _failed_result_detail(result: object) -> str | None:
 #: DIFFERENT dispositions because they differ in one fact: whether the paused reply has a
 #: DELIVERY LEG back to this turn.
 #:
-#: ``"suspended"`` is an async re-park whose envelope did not cross a tool-face — the engine's own
-#: ``flow_resume`` / ``flow_step`` callers keep the run-outcome dict rather than the
-#: :class:`SuspendedInteraction` sentinel the ``flow`` auto-pilot tool-face emits. It HAS a
-#: delivery leg: the completion continuation bound around the dispatch carries this thread, so the
-#: resumed answer arrives out of band when the resume drives past the pause. The turn ends
-#: SILENTLY, exactly as the :class:`SuspendedInteraction` marker path does, and the recorded note
-#: reads as pending — not lost.
+#: ``"suspended"`` is an async re-park whose envelope did not cross a tool-face — a consumer's own
+#: resume caller keeps the run-outcome dict rather than the :class:`SuspendedInteraction` sentinel a
+#: consumer's auto-pilot tool-face emits. It HAS a delivery leg: the completion continuation bound
+#: around the dispatch carries this thread, so the resumed answer arrives out of band when the
+#: resume drives past the pause. The turn ends SILENTLY, exactly as the :class:`SuspendedInteraction`
+#: marker path does, and the recorded note reads as pending — not lost.
 #:
-#: ``"interrupt"`` is a step-mode tool-call pause. A step-mode run cannot be driven by a
-#: conversation turn, so an interrupt reaching one has NO delivery leg — the reply would never
-#: arrive. That is a permanent route misconfiguration (a hidden looping tool no route sensibly
-#: targets), and the standard disposition for a permanent misconfiguration is LOUD: it takes the
-#: ERROR path (the same client-safe error reply a failed run gets), so the failure is noticed
-#: rather than converted into silent data loss.
+#: ``"interrupt"`` is a tool-call pause on a run a conversation turn cannot drive, so an interrupt
+#: reaching one has NO delivery leg — the reply would never arrive. That is a permanent route
+#: misconfiguration (a hidden looping tool no route sensibly targets), and the standard disposition
+#: for a permanent misconfiguration is LOUD: it takes the ERROR path (the same client-safe error
+#: reply a failed run gets), so the failure is noticed rather than converted into silent data loss.
 #:
 #: POSITIVE discrimination on CLOSED, exact, case-sensitive sets — never "anything not success" —
 #: for the same reason :data:`_FAILED_RESULT_STATUSES` is closed: a ``status`` from a tool's OWN
@@ -707,11 +707,11 @@ def _suspended_result_note(result: object) -> str | None:
 
 
 def _interrupt_result_detail(result: object) -> str | None:
-    """The internal error detail for a tool result that NAMES a step-mode INTERRUPT pause
+    """The internal error detail for a tool result that NAMES an INTERRUPT pause
     (:data:`_INTERRUPT_RESULT_STATUSES`), or ``None`` when it names none.
 
-    A step-mode interrupt reaching a conversation turn is a permanent route misconfiguration: the
-    turn cannot drive a step-mode run, so the pause has NO delivery leg and the reply would never
+    An interrupt reaching a conversation turn is a permanent route misconfiguration: the turn
+    cannot drive such a run, so the pause has NO delivery leg and the reply would never
     arrive. It is surfaced as the SAME client-safe error a failed run is, so the failure is loud
     and noticed rather than silent data loss. The detail names the real cause and, for a producer
     that rides it, the ``missing_results`` surfaces the run will never produce here. Recorded and
@@ -724,7 +724,7 @@ def _interrupt_result_detail(result: object) -> str | None:
     missing = result.get("missing_results")
     surfaces = f"; missing_results={_capped_repr(missing)}" if isinstance(missing, list) and missing else ""
     return (
-        f"tool run paused in step mode (status {status!r}) on a conversation turn that cannot "
+        f"tool run paused (status {status!r}) on a conversation turn that cannot "
         f"drive it — a route misconfiguration; the reply has no delivery leg{surfaces}"
     )
 
@@ -788,27 +788,63 @@ def _result_shape(result: object) -> str:
     return "; ".join(parts)
 
 
-def _turn_block(record: ConversationRecord, route: ConversationRoute) -> dict[str, object]:
-    """The generic ``turn`` block surfaced on EVERY tool turn's payload: the turn id (the
-    record's ``message_id``, no new mint) and the inbound descriptor. ``inbound.id`` is the
-    channel provider id / the event id / the api record id; ``inbound.kind`` is
-    ``message``/``event``; ``inbound.source`` is the channel name / ``event:{kind}`` /
-    ``api`` — the door the turn entered through, named generically."""
+def _inbound_id_and_source(record: ConversationRecord, route: ConversationRoute) -> tuple[str | None, str | None]:
+    """The inbound descriptor's ``id`` and ``source``: the channel provider id / the event
+    id / the api record id, and the channel name / ``event:{kind}`` / ``api`` — the door the
+    turn entered through, named generically. Shared by the ``turn`` block and the ambient
+    conversation state context so both name the same inbound message."""
     if record.inbound_kind == "event":
         # The model invariant guarantees an event record carries its ``inbound_event``.
         event = record.inbound_event or {}
-        inbound_id: str | None = event["event_id"]
-        source = f"event:{event['kind']}"
-    elif record.door == "channel":
-        inbound_id = record.provider_message_id
-        source = route.channel
-    else:
-        inbound_id = record.message_id
-        source = "api"
+        return event["event_id"], f"event:{event['kind']}"
+    if record.door == "channel":
+        return record.provider_message_id, route.channel
+    return record.message_id, "api"
+
+
+def _turn_block(
+    record: ConversationRecord, route: ConversationRoute, *, person: Person | None, thread_id: str
+) -> dict[str, object]:
+    """The generic ``turn`` block surfaced on EVERY tool turn's payload: the turn id (the
+    record's ``message_id``, no new mint), the inbound descriptor (``inbound.id`` /
+    ``inbound.kind`` message/event / ``inbound.source``), and the ``subject`` block a flow's
+    ``subject_expr`` reads — the target scope plus the ``person`` id (null off a
+    non-multichannel target) and the resolved ``thread`` id, the same candidates the ambient
+    state context carries."""
+    inbound_id, source = _inbound_id_and_source(record, route)
     return {
         "id": record.message_id,
         "inbound": {"id": inbound_id, "kind": record.inbound_kind, "source": source},
+        "subject": {
+            "target_kind": route.target_kind,
+            "target_name": route.target_name,
+            "person": person.person_id if person is not None else None,
+            "thread": thread_id,
+        },
     }
+
+
+def _conversation_state_context(
+    route: ConversationRoute, intake: ConversationRecord, person: Person | None, *, actor: str | None
+) -> StateContext:
+    """The ambient :class:`StateContext` a conversation turn deposits so every downstream
+    state write resolves its subject and completes its provenance from this one door.
+
+    The candidates are the ``thread`` (always) and the ``person`` id (only a multichannel
+    target resolves a person), keyed under the route's target scope; ``actor`` is the turn's
+    generic attribution ``user_id``, ``turn_id`` the intake's ``message_id`` and ``inbound_id``
+    the inbound message the turn answers — the same identity the run trace is stamped with."""
+    by_kind: dict[str, str] = {"thread": intake.thread_id}
+    if person is not None:
+        by_kind["person"] = person.person_id
+    inbound_id, _source = _inbound_id_and_source(intake, route)
+    return StateContext(
+        door="conversation",
+        candidates=SubjectCandidates(target_kind=route.target_kind, target_name=route.target_name, by_kind=by_kind),
+        actor=actor,
+        turn_id=intake.message_id,
+        inbound_id=inbound_id,
+    )
 
 
 async def _run_tool_turn(
@@ -872,7 +908,7 @@ async def _run_tool_turn(
         "our_identity": route.our_identity,
         "channel": route.channel,
         "thread_id": thread_id,
-        "turn": _turn_block(record, route),
+        "turn": _turn_block(record, route, person=person, thread_id=thread_id),
     }
     if record.inbound_kind == "event":
         # An event turn has no human text and no sender; its structured payload rides the
@@ -952,7 +988,7 @@ async def _run_tool_turn(
         return _SilentOutcome(note=suspended_note)
     interrupt_detail = _interrupt_result_detail(result)
     if interrupt_detail is not None:
-        # The run handed back a step-mode INTERRUPT envelope. Unlike a suspend, a step-mode pause
+        # The run handed back an INTERRUPT envelope. Unlike a suspend, an interrupt pause
         # reaching a conversation turn has NO delivery leg — the turn cannot drive the run, so the
         # reply would never arrive. That is a permanent route misconfiguration, and silencing it
         # would convert a noticed failure into quiet data loss. It is surfaced as the SAME failed
@@ -1266,7 +1302,9 @@ async def _target_outcome(
     route as a tag, the channel/our_identity as metadata) and interprets none of them."""
     if await effective_mode(route, intake.thread_id) == "manual":
         return await _manual_target_outcome(route, intake, text)
-    with run_attribution(_conversation_attribution(route, intake, person)):
+    attribution = _conversation_attribution(route, intake, person)
+    context = _conversation_state_context(route, intake, person, actor=attribution.user_id)
+    with run_attribution(attribution), state_context(context):
         if route.target_kind == "tool":
             return await _run_tool_turn(
                 route,

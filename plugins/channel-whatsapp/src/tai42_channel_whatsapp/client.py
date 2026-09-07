@@ -393,16 +393,32 @@ async def delete_flow(flow_id: str) -> None:
     await _send(url, method="delete")
 
 
-async def send_flow(phone_number_id: str, to: str, body_text: str, flow_id: str, flow_token: str) -> str:
+async def send_flow(
+    phone_number_id: str,
+    to: str,
+    body_text: str,
+    flow_id: str,
+    flow_token: str,
+    screen: str = "FORM",
+    data: dict[str, Any] | None = None,
+) -> str:
     """Send an interactive Flow message opening the published ``flow_id``; return
     its ``wamid``.
 
     ``flow_token`` correlates the completed form back to its origin: a form ask
     passes the delivery's ``interaction_id`` verbatim, an ask-less form
-    notification a token in its own namespace. The send navigates to the flow's
-    single terminal screen; the human fills it and the completed payload returns
+    notification a token in its own namespace. The send navigates to ``screen`` (the
+    flow's entry screen); the human fills it and the completed payload returns
     inbound as an ``nfm_reply`` carrying this token.
+
+    ``data`` is the per-send ``flow_action_payload.data`` — the prefilled values and
+    the dynamic option data-sources a stepped/per-send form's screen reads. It is
+    omitted from the payload when ``None`` (an ask-less form carries none), so a plain
+    Flow send is byte-identical to before.
     """
+    flow_action_payload: dict[str, Any] = {"screen": screen}
+    if data is not None:
+        flow_action_payload["data"] = data
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -418,7 +434,7 @@ async def send_flow(phone_number_id: str, to: str, body_text: str, flow_id: str,
                     "flow_id": flow_id,
                     "flow_cta": "Fill form",
                     "flow_action": "navigate",
-                    "flow_action_payload": {"screen": "FORM"},
+                    "flow_action_payload": flow_action_payload,
                 },
             },
         },

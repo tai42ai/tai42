@@ -58,4 +58,5 @@ async def test_returns_data_envelope_of_kind_rows(bound_app) -> None:
         "tool_meta",
         "connectors",
         "versioning",
+        "states",
     }

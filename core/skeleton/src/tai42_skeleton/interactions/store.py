@@ -39,6 +39,7 @@ from tai42_contract.interactions import (
     InteractionState,
     served_media_id,
 )
+from tai42_contract.states import StateContext
 
 ADD_EVENT = "interaction.add"
 ANSWERED_EVENT = "interaction.answered"
@@ -221,6 +222,7 @@ class ContinuationDue:
     fingerprint: str
     answer: Any
     attempts: int
+    state_context: StateContext | None = None
 
 
 class ContinuationRetryDrop(enum.Enum):
@@ -236,21 +238,28 @@ class ContinuationRetryDrop(enum.Enum):
 CONTINUATION_DROPPED: Final = ContinuationRetryDrop.DROPPED
 
 
-def _continuation_due_mapping(tool: str, identity: str, fingerprint: str, answer: Any) -> dict[str, str]:
+def _continuation_due_mapping(
+    tool: str, identity: str, fingerprint: str, answer: Any, state_context: str | None = None
+) -> dict[str, str]:
     """The flow-blind continuation-due record fields: a registered tool NAME, the
     stored execution identity + key fingerprint, the generic answer (JSON-encoded so
-    any answer shape — a scalar, the expiry sentinel, a form object — round-trips), and
-    a zeroed attempt count. Nothing engine/flow/session specific. Written into the SAME
-    MULTI as the resolving claim (``record_answer``), so the outbox enqueue commits
-    atomically with the ``answered`` state change — a crash can never leave a claimed
-    answer with no due-record."""
-    return {
+    any answer shape — a scalar, the expiry sentinel, a form object — round-trips), a
+    zeroed attempt count, and the original door's state context (JSON) when the park
+    carried one, so a redelivery keeps the same door/actor as the immediate fire.
+    Nothing engine/flow/session specific. Written into the SAME MULTI as the resolving
+    claim (``record_answer``), so the outbox enqueue commits atomically with the
+    ``answered`` state change — a crash can never leave a claimed answer with no
+    due-record."""
+    mapping = {
         "tool": tool,
         "identity": identity,
         "fingerprint": fingerprint,
         "answer": json.dumps(answer),
         "attempts": "0",
     }
+    if state_context is not None:
+        mapping["state_context"] = state_context
+    return mapping
 
 
 def _now_ms() -> int:
@@ -551,6 +560,13 @@ class InteractionStore:
             state_mapping["continuation_identity"] = request.continuation_identity
             if continuation_fingerprint is not None:
                 state_mapping["continuation_fingerprint"] = continuation_fingerprint
+            if request.continuation_state_context is not None:
+                # Denormalized like ``continuation_identity`` so the durable continuation-due
+                # record carries the original door's state context into an at-least-once
+                # REDELIVERY (which never re-reads the request) — the resumed write keeps the
+                # same door/actor there as on the immediate fire. Absent when the park ran
+                # under no state context.
+                state_mapping["continuation_state_context"] = request.continuation_state_context.model_dump_json()
             if thread_id is not None:
                 # The conversation thread this park is bound to, denormalized like
                 # ``continuation_tool`` so a terminal claim (record_answer/prune_pending)
@@ -780,12 +796,16 @@ class InteractionStore:
                     )
                     continuation_identity: str | None = None
                     continuation_fingerprint: str | None = None
+                    continuation_state_context: str | None = None
                     if continuation_tool is not None:
                         continuation_identity = as_str(
                             await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_identity"))
                         )
                         continuation_fingerprint = as_str(
                             await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_fingerprint"))
+                        )
+                        continuation_state_context = as_str(
+                            await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_state_context"))
                         )
                         if continuation_due_ttl is None or continuation_first_attempt_at_ms is None:
                             raise RuntimeError(
@@ -861,7 +881,11 @@ class InteractionStore:
                         assert continuation_first_attempt_at_ms is not None
                         due_key = self.continuation_due_key(interaction_id)
                         due_mapping = _continuation_due_mapping(
-                            continuation_tool, continuation_identity, continuation_fingerprint or "", response.answer
+                            continuation_tool,
+                            continuation_identity,
+                            continuation_fingerprint or "",
+                            response.answer,
+                            continuation_state_context,
                         )
                         pipe.hset(due_key, mapping=due_mapping)
                         pipe.expire(due_key, continuation_due_ttl)
@@ -1215,6 +1239,7 @@ class InteractionStore:
             return CONTINUATION_DROPPED
         it = iter(cast("list[Any]", raw))
         fields = {as_str(k): as_str(v) for k, v in zip(it, it, strict=True)}
+        raw_context = fields.get("state_context")
         return ContinuationDue(
             interaction_id=interaction_id,
             tool=fields["tool"],
@@ -1222,6 +1247,7 @@ class InteractionStore:
             fingerprint=fields["fingerprint"],
             answer=json.loads(fields["answer"]),
             attempts=int(fields["attempts"]),
+            state_context=StateContext.model_validate_json(raw_context) if raw_context is not None else None,
         )
 
     async def count_open(self, r: Redis) -> int:

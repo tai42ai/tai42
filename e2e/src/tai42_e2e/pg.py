@@ -26,6 +26,7 @@ from tai42_kit.clients import PostgresConnectionSettings
 from tai42_kit.db import MigrationEntry, apply_migrations
 from tai42_kit.plugins import parse_plugin_spec
 from tai42_skeleton.db.discovery import SKELETON_COMPONENT, skeleton_migrations_dir
+from tai42_skeleton.states.db import STATES_COMPONENT, states_migrations_dir
 
 from tai42_e2e.settings import HarnessSettings
 
@@ -62,15 +63,22 @@ def _accounts_plugin_entry(settings: PostgresConnectionSettings) -> MigrationEnt
 
 def product_migration_entries(settings: PostgresConnectionSettings) -> list[MigrationEntry]:
     """The migration chains the product applies to a platform database: the
-    skeleton chain plus the accounts-postgres plugin chain, both pointed at
-    ``settings``. Building the template DB and the fresh-install replay leg run this
-    exact set, so the harness template matches a from-scratch ``tai db migrate``."""
+    skeleton chain, the skeleton-owned ``states`` record-store chain, and the
+    accounts-postgres plugin chain, all pointed at ``settings``. The order mirrors
+    production discovery (``skeleton_entry`` → ``states_entry`` → plugin entries),
+    so the harness template matches a from-scratch ``tai db migrate``. Building the
+    template DB and the fresh-install replay leg run this exact set."""
     skeleton = MigrationEntry(
         component=SKELETON_COMPONENT,
         migrations_dir=skeleton_migrations_dir(),
         settings=settings,
     )
-    return [skeleton, _accounts_plugin_entry(settings)]
+    states = MigrationEntry(
+        component=STATES_COMPONENT,
+        migrations_dir=states_migrations_dir(),
+        settings=settings,
+    )
+    return [skeleton, states, _accounts_plugin_entry(settings)]
 
 
 class PostgresAdmin:

@@ -33,6 +33,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import request_identity
 from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
+from tai42_skeleton.interactions.form_schema import effective_answer_schema
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.operations import (
@@ -145,9 +146,13 @@ def _validate_answer(request: InteractionRequest, answer: Any) -> Any:
     if fmt is AnswerFormat.FORM:
         if not isinstance(answer, dict):
             raise _AnswerInvalid("answer must be an object")
-        schema = (request.format_payload or {}).get("schema")
+        payload = request.format_payload or {}
+        schema = payload.get("schema")
         if not isinstance(schema, dict):
             raise _AnswerInvalid("question schema is invalid: missing or non-object schema")
+        # Per-send option lists replace a property's enum for THIS send, so the answer is
+        # judged against the choices the human was shown (the union of all pages' fields).
+        schema = effective_answer_schema(schema, payload.get("data"))
         mismatch = _schema_mismatch(answer, schema)
         if mismatch is not None:
             message, field = mismatch

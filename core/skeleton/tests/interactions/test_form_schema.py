@@ -10,8 +10,41 @@ from pydantic import BaseModel
 
 from tai42_skeleton.interactions.form_schema import (
     channel_form_fields,
+    effective_answer_schema,
     validate_channel_form_schema,
 )
+
+
+def test_effective_answer_schema_replaces_enum_with_per_send_options():
+    schema = {"type": "object", "properties": {"color": {"type": "string", "enum": ["red", "blue"]}}}
+    data = {"options": {"color": [{"value": "green"}, {"value": "amber", "label": "Amber"}]}}
+    effective = effective_answer_schema(schema, data)
+    assert effective["properties"]["color"]["enum"] == ["green", "amber"]
+    # The original schema is not mutated.
+    assert schema["properties"]["color"]["enum"] == ["red", "blue"]
+
+
+def test_effective_answer_schema_applies_array_options_to_items():
+    # For a multi-select (array) property the per-send choices belong on ``items``,
+    # not the array itself — an ``enum`` on the array would demand the whole submitted
+    # list equal one option, rejecting every real multi-select answer.
+    schema = {
+        "type": "object",
+        "properties": {"tags": {"type": "array", "items": {"type": "string"}}},
+    }
+    data = {"options": {"tags": [{"value": "a"}, {"value": "b", "label": "Bee"}]}}
+    effective = effective_answer_schema(schema, data)
+    prop = effective["properties"]["tags"]
+    assert "enum" not in prop
+    assert prop["items"] == {"type": "string", "enum": ["a", "b"]}
+    # The original schema is not mutated.
+    assert schema["properties"]["tags"]["items"] == {"type": "string"}
+
+
+def test_effective_answer_schema_no_options_returns_schema_unchanged():
+    schema = {"type": "object", "properties": {"color": {"type": "string"}}}
+    assert effective_answer_schema(schema, None) is schema
+    assert effective_answer_schema(schema, {"values": {"color": "x"}}) is schema
 
 
 class _OptForm(BaseModel):

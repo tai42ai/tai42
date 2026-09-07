@@ -31,6 +31,8 @@ from tai42_contract.interactions.models import (
     MISMATCH_NOTICE_MAX_CHARS,
     AnswerFormat,
     AnswerMismatchPolicy,
+    FormData,
+    FormPage,
     LocationElement,
     MediaItem,
     MediaKind,
@@ -122,6 +124,16 @@ with warnings.catch_warnings():
         # deprecated ``BaseModel.schema()`` alias, which this model never uses.
         schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
         options: list[str] | None = None  # required for select; optional suggested replies for text
+        # Per-send form enrichment, present only for ``form``: known ``values`` shown filled
+        # in and per-send ``options`` (a choice list REPLACING a property's enum for this
+        # send). None means the ask carried none. The values/options were validated against
+        # the answer schema at the ask door; a channel renders them into its own form surface.
+        data: FormData | None = None
+        # The form's step layout, present only for ``form``: each :class:`FormPage` names the
+        # top-level properties one step collects. None means one page (the whole form). A
+        # channel with native steps renders one step per page; a channel without them may
+        # render the pages as titled groups on one surface; the completed answer is the union.
+        pages: list[FormPage] | None = None
         media: list[MediaItem] | None = None  # display media rendered WITH the question; None -> none
         # The ask's digression policy for a rejected reply; the channel carries it onto the
         # ``Correlation`` it parks so the shared answer ladder reads it at the 400 decision.
@@ -210,6 +222,18 @@ with warnings.catch_warnings():
                     raise ValueError("form answer_format requires a non-empty schema")
             elif self.schema is not None:
                 raise ValueError(f"{self.answer_format} answer_format carries no schema")
+            return self
+
+        @model_validator(mode="after")
+        def _check_form_extras(self) -> ChannelDelivery:
+            # ``data``/``pages`` ride ONLY a form delivery — they enrich the form's answer
+            # schema, which no other format carries. Present on any other format is a caller
+            # bug, refused loudly rather than silently ignored.
+            if self.answer_format != AnswerFormat.FORM:
+                if self.data is not None:
+                    raise ValueError(f"{self.answer_format} answer_format carries no form data")
+                if self.pages is not None:
+                    raise ValueError(f"{self.answer_format} answer_format carries no form pages")
             return self
 
 

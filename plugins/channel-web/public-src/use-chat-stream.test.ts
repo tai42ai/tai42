@@ -97,6 +97,34 @@ describe('applyFrame', () => {
     expect(model.items[0]).toMatchObject({ answerFormat: 'form', schema, callbackUrl: null });
   });
 
+  it('carries the per-send data and pages on a form question', () => {
+    const schema = {
+      type: 'object',
+      properties: { colour: { type: 'string' }, note: { type: 'string' } },
+    };
+    const data = { values: { note: 'hi' }, options: { colour: [{ value: 'r', label: 'Red' }] } };
+    const pages = [
+      { title: 'Pick', fields: ['colour'] },
+      { title: 'Say', fields: ['note'] },
+    ];
+    const model = fold(EMPTY_MODEL, questionFrame('form', { schema, data, pages }));
+
+    expect(model.items[0]).toMatchObject({
+      answerFormat: 'form',
+      formData: { values: { note: 'hi' }, options: { colour: [{ value: 'r', label: 'Red' }] } },
+      pages,
+    });
+  });
+
+  it('defaults a form question with no per-send data or pages to null', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      questionFrame('form', { schema: { type: 'object', properties: {} } }),
+    );
+
+    expect(model.items[0]).toMatchObject({ answerFormat: 'form', formData: null, pages: null });
+  });
+
   it('carries display media on a question, in order, with its captions', () => {
     const model = fold(
       EMPTY_MODEL,
@@ -459,6 +487,32 @@ describe('applyFrame', () => {
     [
       'a callback ticket on a form question, whose ticket never leaves the server',
       questionFrame('form', { schema: { type: 'object' }, callback_url: CALLBACK }),
+    ],
+    [
+      'per-send form data on a text question, whose format carries none',
+      questionFrame('text', { data: { values: {}, options: {} } }),
+    ],
+    [
+      'form pages on a select question, whose format carries none',
+      questionFrame('select', { pages: [{ title: 'x', fields: ['a'] }] }),
+    ],
+    [
+      'a form whose per-send option list is empty',
+      questionFrame('form', {
+        schema: { type: 'object' },
+        data: { values: {}, options: { a: [] } },
+      }),
+    ],
+    [
+      'a form whose per-send option value is blank',
+      questionFrame('form', {
+        schema: { type: 'object' },
+        data: { values: {}, options: { a: [{ value: ' ' }] } },
+      }),
+    ],
+    [
+      'a form page with no fields',
+      questionFrame('form', { schema: { type: 'object' }, pages: [{ title: 'x', fields: [] }] }),
     ],
     ['an answered frame with no interaction id', frame('chat.answered', { id: 'a' })],
     [

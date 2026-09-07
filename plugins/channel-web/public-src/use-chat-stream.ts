@@ -39,19 +39,60 @@ const ANSWER_FORMATS: ReadonlySet<string> = new Set<AnswerFormat>([
   'external',
 ]);
 
+/** One per-send choice for a form field: `value` is submitted as the answer,
+ * `label` is shown in its place (`null` shows the value itself). A per-send option
+ * list REPLACES a property's schema choices for this one delivery. */
+export interface FormOptionData {
+  readonly value: string;
+  readonly label: string | null;
+}
+
+/** A form question's per-send enrichment: `values` prefills top-level properties
+ * (shown filled in) and `options` supplies the per-send choice list for a property,
+ * keyed by property name. Both keyed by the schema's top-level property names. */
+export interface FormPrefill {
+  readonly values: Readonly<Record<string, unknown>>;
+  readonly options: Readonly<Record<string, readonly FormOptionData[]>>;
+}
+
+/** One step of a stepped form: `title` heads the step and `fields` names the
+ * top-level properties shown on it, in order. Across a form's pages every property
+ * appears exactly once; absent pages means one page. */
+export interface FormPage {
+  readonly title: string;
+  readonly fields: readonly string[];
+}
+
 /** The format-dependent extras a question row carries, keyed by the format that
  * decides whether the wire carries each: the interactions callback ticket for
  * `external` (the one widget that opens it), the JSON answer schema for `form` (the
- * one widget that builds an answer from it), and neither for the scalar formats.
- * Extras and format travel as ONE type, so a widget that reads an extra has the
- * format that guarantees it. */
+ * one widget that builds an answer from it) plus that form's optional per-send
+ * `formData` and `pages`, and none of these for the scalar formats. Extras and format
+ * travel as ONE type, so a widget that reads an extra has the format that guarantees
+ * it. */
 export type QuestionFacet =
-  | { readonly answerFormat: 'external'; readonly callbackUrl: string; readonly schema: null }
-  | { readonly answerFormat: 'form'; readonly callbackUrl: null; readonly schema: JsonSchema }
+  | {
+      readonly answerFormat: 'external';
+      readonly callbackUrl: string;
+      readonly schema: null;
+      readonly formData: null;
+      readonly pages: null;
+    }
+  | {
+      readonly answerFormat: 'form';
+      readonly callbackUrl: null;
+      readonly schema: JsonSchema;
+      /** Per-send prefill + choices, or `null` when the ask carried none. */
+      readonly formData: FormPrefill | null;
+      /** The form's steps, or `null` for one page. */
+      readonly pages: readonly FormPage[] | null;
+    }
   | {
       readonly answerFormat: 'text' | 'confirm' | 'select';
       readonly callbackUrl: null;
       readonly schema: null;
+      readonly formData: null;
+      readonly pages: null;
     };
 
 /** The media kinds the page renders: an inline `image`, a `document` download
@@ -426,27 +467,105 @@ function clientMessageIdOf(raw: unknown): string | null | undefined {
   return raw === undefined ? null : undefined;
 }
 
+/** One per-send form option: a non-blank string `value` and an optional non-blank
+ * `label` (absent → `null`). `undefined` on anything off-shape. */
+function formOptionOf(raw: unknown): FormOptionData | undefined {
+  if (!isRecord(raw)) return undefined;
+  const { value } = raw;
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const label = secondaryLabelOf(raw.label);
+  if (label === undefined) return undefined;
+  return { value, label };
+}
+
+/** A form question's per-send enrichment: absent (`null`), or a `{values, options}`
+ * record whose `values` is an object and whose `options` maps each property to a
+ * NON-EMPTY list of valid options. One off-shape entry taints the whole frame:
+ * `undefined` says malformed. */
+function formPrefillOf(raw: unknown): FormPrefill | null | undefined {
+  if (raw === null || raw === undefined) return null;
+  if (!isRecord(raw)) return undefined;
+  const { values, options } = raw;
+  if (!isRecord(values) || !isRecord(options)) return undefined;
+  const parsed: Record<string, readonly FormOptionData[]> = {};
+  for (const [name, list] of Object.entries(options)) {
+    if (!Array.isArray(list) || list.length === 0) return undefined;
+    const choices: FormOptionData[] = [];
+    for (const one of list) {
+      const option = formOptionOf(one);
+      if (option === undefined) return undefined;
+      choices.push(option);
+    }
+    parsed[name] = choices;
+  }
+  return { values, options: parsed };
+}
+
+/** One form page: a non-blank `title` and a NON-EMPTY list of non-blank field names.
+ * `undefined` on anything off-shape. */
+function formPageOf(raw: unknown): FormPage | undefined {
+  if (!isRecord(raw)) return undefined;
+  const { title, fields } = raw;
+  if (typeof title !== 'string' || title.trim() === '') return undefined;
+  if (!Array.isArray(fields) || fields.length === 0) return undefined;
+  const names: string[] = [];
+  for (const field of fields) {
+    if (typeof field !== 'string' || field.trim() === '') return undefined;
+    names.push(field);
+  }
+  return { title, fields: names };
+}
+
+/** A form question's step layout: absent (`null`), or a NON-EMPTY list whose every
+ * page validates. `undefined` says malformed. */
+function formPagesOf(raw: unknown): readonly FormPage[] | null | undefined {
+  if (raw === null || raw === undefined) return null;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const pages: FormPage[] = [];
+  for (const one of raw) {
+    const page = formPageOf(one);
+    if (page === undefined) return undefined;
+    pages.push(page);
+  }
+  return pages;
+}
+
 /** The format-dependent extras, validated together by the format that decides
  * whether the wire carries each: `external` carries a string callback ticket and no
- * schema; `form` carries an object schema and no ticket; the scalar formats carry
- * neither. Any other spelling — a missing/non-string ticket, a missing/non-object
- * schema, or either extra on a format that carries none — is a frame this page will
+ * schema; `form` carries an object schema, no ticket, and optional per-send
+ * `data`/`pages`; the scalar formats carry none. Any other spelling — a
+ * missing/non-string ticket, a missing/non-object schema, malformed `data`/`pages`,
+ * or any of these extras on a format that carries none — is a frame this page will
  * not render: `undefined` says malformed. */
 function facetOf(
   callbackRaw: unknown,
   schemaRaw: unknown,
+  dataRaw: unknown,
+  pagesRaw: unknown,
   format: AnswerFormat,
 ): QuestionFacet | undefined {
   if (format === 'external') {
     if (typeof callbackRaw !== 'string' || schemaRaw !== undefined) return undefined;
-    return { answerFormat: format, callbackUrl: callbackRaw, schema: null };
+    if (dataRaw !== undefined || pagesRaw !== undefined) return undefined;
+    return {
+      answerFormat: format,
+      callbackUrl: callbackRaw,
+      schema: null,
+      formData: null,
+      pages: null,
+    };
   }
   if (format === 'form') {
     if (callbackRaw !== undefined || !isRecord(schemaRaw)) return undefined;
-    return { answerFormat: format, callbackUrl: null, schema: schemaRaw };
+    const formData = formPrefillOf(dataRaw);
+    if (formData === undefined) return undefined;
+    const pages = formPagesOf(pagesRaw);
+    if (pages === undefined) return undefined;
+    return { answerFormat: format, callbackUrl: null, schema: schemaRaw, formData, pages };
   }
   if (callbackRaw !== undefined || schemaRaw !== undefined) return undefined;
-  return { answerFormat: format, callbackUrl: null, schema: null };
+  if (dataRaw !== undefined || pagesRaw !== undefined) return undefined;
+  return { answerFormat: format, callbackUrl: null, schema: null, formData: null, pages: null };
 }
 
 /** Add or replace one item, keeping arrival order. A redelivered entry (the
@@ -569,7 +688,13 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
     if (typeof answer_format !== 'string' || !ANSWER_FORMATS.has(answer_format)) {
       return { kind: 'malformed', event: frame.event };
     }
-    const facet = facetOf(callback_url, schema, answer_format as AnswerFormat);
+    const facet = facetOf(
+      callback_url,
+      schema,
+      payload.data,
+      payload.pages,
+      answer_format as AnswerFormat,
+    );
     if (facet === undefined) return { kind: 'malformed', event: frame.event };
     if (!isTimestamp(timeout_at) || !isTimestamp(ts)) {
       return { kind: 'malformed', event: frame.event };

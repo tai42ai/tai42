@@ -43,6 +43,20 @@
   }
 }
 
+/* This standalone page reads its theme from the OS preference alone — it never
+   stamps `data-theme`, the hook `tokens.css` otherwise pins `color-scheme` from.
+   So under a dark preference the design system swaps the `--tai-*` colours to
+   dark but leaves `color-scheme` at its `light dark` default, and native control
+   internals (number spinners, the composer's resize grip, autofill, scrollbars)
+   are left free to render in the light scheme over the dark surface. Pin it to
+   the resolved theme here, the same way the `data-theme` blocks in `tokens.css`
+   pin the explicit override. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+  }
+}
+
 /* -- Frame ----------------------------------------------------------------- */
 
 .tcw-app {
@@ -391,6 +405,64 @@
   margin: 0;
   color: var(--tai-color-err-text);
   font-size: var(--tai-text-sm);
+}
+
+/* -- Stepped / per-send form ----------------------------------------------- */
+
+/* The step marker ("Step 1 of 3 · Title") above a paged form. */
+.tcw-form-progress {
+  margin: 0;
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-xs);
+  font-weight: 600;
+}
+
+/* One step's fields, stacked; the nav row sits below them. */
+.tcw-form-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-2);
+}
+
+.tcw-form-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--tai-space-2);
+}
+
+/* A per-send option field: its label above a native select. */
+.tcw-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-1);
+}
+
+.tcw-form-field-label {
+  color: var(--tai-color-heading);
+  font-size: var(--tai-text-sm);
+  font-weight: 600;
+}
+
+.tcw-form-field-error {
+  color: var(--tai-color-err-text);
+  font-size: var(--tai-text-sm);
+}
+
+/* The per-send option control — a native select themed by the widget's tokens so
+   it reads as one class of thing with the schema form's own inputs in both
+   themes. */
+.tcw-select {
+  padding: var(--tai-space-2) var(--tai-space-3);
+  border-radius: var(--tai-radius-lg);
+  border: 1px solid var(--tai-color-border);
+  background: var(--tai-color-surface);
+  color: var(--tai-color-text);
+  font: inherit;
+}
+
+.tcw-select:focus-visible {
+  outline: 2px solid var(--tai-color-focus-ring);
+  outline-offset: 1px;
 }
 
 /* -- Media cards ----------------------------------------------------------- */

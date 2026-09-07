@@ -15,8 +15,10 @@ from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
+from tai42_skeleton.app.conversations_facet import ConversationsFacet
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError
 
@@ -54,7 +56,10 @@ class _FakeAgents:
 
 
 class _FakeApp:
-    agents = _FakeAgents()
+    def __init__(self) -> None:
+        self.agents = _FakeAgents()
+        self._target_validator_registry = TargetBindValidatorRegistry()
+        self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
 
 
 class _FakeResourceManager:

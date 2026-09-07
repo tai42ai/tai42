@@ -152,9 +152,11 @@ def test_fresh_database_migrates_without_traceback(
     assert "Traceback" not in result.stderr
     assert "Applied skeleton 0001_baseline." in result.stdout
 
-    # The baseline really landed: the history records the skeleton chain and the
-    # marketplace install store (a skeleton-owned table) now exists.
-    assert _history_components(harness_settings, scratch_db) == {"skeleton"}
+    # The baseline really landed: the history records both skeleton-owned chains —
+    # the skeleton baseline and the ``states`` record store the CLI always applies
+    # ahead of plugin discovery — and the marketplace install store (a
+    # skeleton-owned table) now exists.
+    assert _history_components(harness_settings, scratch_db) == {"skeleton", "states"}
     assert "marketplace_installs" in _public_tables(harness_settings, scratch_db)
 
 
@@ -174,8 +176,10 @@ def test_prefix_preinstalled_plugin_chain_applies_with_skeleton(
     assert "Applied skeleton 0001_baseline." in result.stdout
     assert f"Applied {_ACCOUNTS_DISTRIBUTION} 0001_baseline." in result.stdout
 
-    # Both chains are recorded, and the plugin's own tables exist.
-    assert _history_components(harness_settings, scratch_db) == {"skeleton", _ACCOUNTS_DISTRIBUTION}
+    # Every chain is recorded — both skeleton-owned chains (skeleton baseline and
+    # the ``states`` record store) and the plugin's — and the plugin's own tables
+    # exist.
+    assert _history_components(harness_settings, scratch_db) == {"skeleton", "states", _ACCOUNTS_DISTRIBUTION}
     tables = _public_tables(harness_settings, scratch_db)
     assert {"accounts_users", "accounts_sessions", "accounts_invites"} <= tables
 

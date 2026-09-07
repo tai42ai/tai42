@@ -114,7 +114,7 @@ def schedule_task(func: Any, name: str, description: str) -> Any:
     sig = add_signature_params(func, RQ_SCHEDULE_OPTS, exclude_fastmcp_ctx=True)
 
     async def func_impl(*args: Any, **kwargs: Any) -> None:
-        kwargs = await prepare_backend_kwargs(func, rq_settings().tool_name_arg, name, kwargs)
+        kwargs = await prepare_backend_kwargs(func, rq_settings().tool_name_arg, name, kwargs, scheduled=True)
 
         schedule_name = kwargs.pop("backend_schedule_name", None)
         schedule_in = kwargs.pop("backend_schedule", None)

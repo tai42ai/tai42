@@ -70,6 +70,7 @@ _CORE_ROUTERS = [
     "tai42_skeleton.routers.tool_runs",
     "tai42_skeleton.routers.schedules",
     "tai42_skeleton.routers.interactions",
+    "tai42_skeleton.routers.states",
     "tai42_skeleton.routers.sub_mcp",
     "tai42_skeleton.routers.tool_extensions",
     "tai42_skeleton.routers.presets",
@@ -141,6 +142,13 @@ _SEAMS_TOOLS_ENTRY = {
 # from the operations registry via ``api_tools`` (see ``_PROJECTED_API_TOOLS``).
 _INTERACTIONS_ENTRY = {"title": "builtin-interactions", "module": "tai42_skeleton.tools.builtin.interactions"}
 
+# The builtin subject-state tools (state_read / state_replace / state_merge /
+# state_apply): the module registers all four, so no ``include`` filter is needed. They
+# resolve their subject from the ambient door context and write through the
+# ``tai42_app.states`` facet — a stack with the states component bound exercises the
+# composed door→tool→store path; a stack without it sees the tools refuse 501 on call.
+_STATES_TOOLS_ENTRY = {"title": "builtin-states", "module": "tai42_skeleton.tools.builtin.states"}
+
 # Projects the management operations onto the MCP tool surface with the default curation:
 # destructive ops exposed, the tier-1 ``run_tool`` blocked, tier-2 ``/api/auth/*`` ops
 # default-excluded. Which ops project is scoped by the profile's mounted routers.
@@ -149,8 +157,9 @@ _PROJECTED_API_TOOLS = {"enabled": True}
 
 def _builtin_entries() -> list[dict]:
     """The builtin ``tools[]`` entries a profile carries: ``builtin-interactions``
-    (ask_user). Management ops project via ``api_tools`` instead."""
-    return [_INTERACTIONS_ENTRY]
+    (ask_user) and ``builtin-states`` (the four subject-state tools). Management ops
+    project via ``api_tools`` instead."""
+    return [_INTERACTIONS_ENTRY, _STATES_TOOLS_ENTRY]
 
 
 def _toolbox_tools_entry() -> dict:
@@ -490,6 +499,11 @@ def build_replicas_stack(res: StackResources, variants: Variants) -> StackConfig
         # kind; the github verifier keeps its pre-canonical ``lifecycle_modules`` slot
         # above (both loaders read either), so the two verifiers coexist on this stack.
         "webhook_verifier_modules": ["tai42_webhook_verifier_stripe"],
+        # A generic deliver-only stub channel (registers on import, mounts no route) that
+        # advertises form delivery, so the interactions suite can drive a channel-delivered
+        # ``form`` ask (per-send data/pages) and reach its callback form page without a real
+        # medium plugin.
+        "channel_modules": ["tai42_e2e_fixtures.stub_channel"],
         "routers_modules": _CORE_ROUTERS,
         "extensions_modules": _EXTENSION_MODULES,
         "backend_module": variants.backend.module,
@@ -1211,7 +1225,10 @@ def build_schedule_stack(res: StackResources, variants: Variants) -> StackConfig
         "storage_module": variants.storage.module,
         "tools": [
             _probe_tools_entry(with_backend_branches=True, with_schedule_branch=True),
-            *_builtin_entries(),
+            _INTERACTIONS_ENTRY,
+            # The state tools carry a ``schedule_task`` branch here so a scheduled fire can
+            # write a subject's record — the schedule door of the state store under test.
+            {**_STATES_TOOLS_ENTRY, "extensions": {"state_merge": [["schedule_task"]]}},
         ],
         "api_tools": _PROJECTED_API_TOOLS,
         "user_tools": ["ask_user", "reload_config"],
@@ -2125,10 +2142,18 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         # the injected import map: the reference plugin and the accounts plugin (its
         # API routers alone register no Studio page, so it must be listed here).
         "studio_plugins": ["reference_plugin", "tai42_accounts_postgres"],
+        # The web channel: its PUBLIC chat page, asset, stream and answer doors serve the
+        # browser widget alongside the Studio, so the ``ui/`` suite can drive a real
+        # web-channel ``ask_user`` in the rendered widget. The doors are ``public: true``
+        # and bypass access control by their own declaration (as in build_bridge_stack).
+        "channel_modules": ["tai42_channel_web.register"],
         "api_tools": _PROJECTED_API_TOOLS,
         "user_tools": ["ask_user", "notify_user", "reload_config"],
     }
     env = _base_env(res, variants)
+    # The web channel's own transcript store + limiter windows, so the widget's chat page
+    # mints a session and its stream/answer doors work under the browser origin.
+    env.update(_web_channel_env(res))
     env["ACCESS_CONTROL_ENABLE"] = "true"
     # Ordered resolution: the accounts provider claims tai-sess- tokens, the key provider
     # claims sk- keys; a non-matching provider is a MISS, not an error.
@@ -2163,8 +2188,10 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     # delivery then fails verification with a clean 401 rather than a 500.
     if res.gh_webhook_secret is not None:
         env["E2E_GH_WEBHOOK_SECRET"] = res.gh_webhook_secret
-    # ask_user mints its callback ticket from a public base URL; the stack's own origin.
-    env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
+    # ask_user mints its callback ticket against the stack's OWN app origin, filled at boot
+    # (app_origin_env_keys below): the web channel's answer door forwards the widget's answer
+    # to that callback URL, so it must resolve back on this single-port stack, not an
+    # off-host placeholder.
     env.update(_memory_agent_state_env())
     if res.llm_base_url is not None:
         env["LLM_BASE_URL"] = res.llm_base_url
@@ -2208,6 +2235,9 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         # CONNECTORS_REDIRECT_URI_ALLOWLIST fail-closed; the app port is only known at
         # boot, so the stack fills this with its own origin.
         origin_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
+        # The ask_user callback base the web channel's answer door forwards to must be this
+        # stack's own reachable origin (single app port, known only at boot).
+        app_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
     )
 
 

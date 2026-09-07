@@ -19,6 +19,7 @@ from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
 from tai42_skeleton.db import SKELETON_COMPONENT, assert_skeleton_schema_applied
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
+from tai42_skeleton.states.db import assert_states_schema_applied
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,20 @@ def build_app() -> TaiMCP:
         # fires only for a CONFIGURED schema-owning feature, so an all-off
         # deployment is a no-op.
         app.lifecycle.on_startup(assert_skeleton_schema_applied)
+        # The states component's chain is a second skeleton-owned schema-gate: it
+        # defaults to the same database as the skeleton (component_store_configured),
+        # so it is verified whenever a database is bound, before any state read/write.
+        app.lifecycle.on_startup(assert_states_schema_applied)
+
+        # Reconcile the shipped state-module seeds once the store is live (a no-op while
+        # the feature is off). Registered after the schema gate so it never runs against
+        # a pending-migration database. A closure over the persistent app reads the LIVE
+        # per-epoch service at call time, so a reload reconciles the freshly-registered
+        # seeds rather than a boot-epoch snapshot.
+        async def _reconcile_state_module_seeds() -> None:
+            await app._states_service.apply_module_seeds()
+
+        app.lifecycle.on_startup(_reconcile_state_module_seeds)
         if settings.enable:
             # The configured identity providers probe their OWN record stores once at
             # startup, so a deployment against a backend a provider cannot use fails
@@ -246,6 +261,15 @@ def build_app() -> TaiMCP:
 
         app.lifecycle.on_startup(register_platform_rename_referees)
         app.lifecycle.on_reload(register_platform_rename_referees)
+        # The platform's own state-consumer listers (hooks/schedules/agents) re-arm the
+        # same way: the consumer-lister registry is reset on each start(), so these
+        # platform-owned families re-register here (the public register_consumer_lister
+        # seam is for plugins, which register their own consumer kinds). A state bound only by a hook or a
+        # schedule is thus shown as a consumer and refused deletion.
+        from tai42_skeleton.states.consumers import register_platform_consumer_listers
+
+        app.lifecycle.on_startup(register_platform_consumer_listers)
+        app.lifecycle.on_reload(register_platform_consumer_listers)
         # Declared preset seeds are applied AFTER the preset-rehydrate handler (handler
         # dicts run in insertion order): a seed CREATES through the operations-layer
         # internal path, which registers the tool, so ordering it here makes a seeded

@@ -38,7 +38,13 @@ import pytest
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.authz.resolver import OperationSurfaceUnsettledError
-from tai42_skeleton.operations import NotFoundError, NotSupportedError, OperationFailed, UnavailableError
+from tai42_skeleton.operations import (
+    BadRequestError,
+    NotFoundError,
+    NotSupportedError,
+    OperationFailed,
+    UnavailableError,
+)
 from tai42_skeleton.operations import schedules as schedules_ops
 from tai42_skeleton.operations.errors import PermissionDenied
 from tai42_skeleton.tools.binding import UnknownToolError
@@ -445,3 +451,20 @@ async def test_delete_unsettled_operation_surface_is_503(install, caplog) -> Non
         await schedules_ops.delete_schedule("nightly")
     assert caught.value.status == 503
     _assert_nothing_logged_server_side(caplog)
+
+
+# -- schedule subject validation --------------------------------------
+
+_VALID_SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
+
+
+async def test_create_accepts_a_well_formed_subject(install) -> None:
+    install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
+    out = await schedules_ops.create_schedule("send", {"subject": _VALID_SUBJECT, "to": "x"}, {"cron": "* * * * *"})
+    assert out == "ok"
+
+
+async def test_create_refuses_a_malformed_subject_before_dispatch(install) -> None:
+    install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
+    with pytest.raises(BadRequestError, match="invalid schedule subject"):
+        await schedules_ops.create_schedule("send", {"subject": {"kind": "person"}}, {"cron": "* * * * *"})

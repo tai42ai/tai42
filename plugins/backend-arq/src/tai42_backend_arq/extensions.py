@@ -79,7 +79,7 @@ def schedule_task(func: Callable[..., Any], name: str, description: str) -> Call
     sig = add_signature_params(func, ARQ_SCHEDULE_OPTS, exclude_fastmcp_ctx=True)
 
     async def func_impl(*args: Any, **kwargs: Any) -> None:
-        kwargs = await prepare_backend_kwargs(func, arq_settings().tool_name_arg, name, kwargs)
+        kwargs = await prepare_backend_kwargs(func, arq_settings().tool_name_arg, name, kwargs, scheduled=True)
 
         arq_redis = await RedisPoolManager.get()
         schedule_name = kwargs.pop("backend_schedule_name", None)

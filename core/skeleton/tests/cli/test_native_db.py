@@ -53,6 +53,7 @@ def _fake_target(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(db, "all_migration_entries", _entries)
     monkeypatch.setattr(db, "installed_plugin_entries", _entries)
     monkeypatch.setattr(db, "skeleton_entry", lambda: SimpleNamespace(component="skeleton", settings=_TARGET))
+    monkeypatch.setattr(db, "states_entry", lambda: SimpleNamespace(component="states", settings=_TARGET))
 
 
 # --- migrate --------------------------------------------------------------
@@ -73,8 +74,8 @@ def test_migrate_applies_and_reports(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_migrate_applies_skeleton_before_plugin_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     # Plugin discovery reads skeleton-owned tables, so migrate must land the
-    # skeleton chain BEFORE it enumerates plugin chains — the order is observable
-    # as apply(skeleton), then discovery, then apply(plugins).
+    # two skeleton-owned chains BEFORE it enumerates plugin chains — the order is
+    # observable as apply(skeleton,states), then discovery, then apply(plugins).
     calls: list[str] = []
 
     async def _apply(entries: object) -> list[AppliedMigration]:
@@ -92,7 +93,7 @@ def test_migrate_applies_skeleton_before_plugin_discovery(monkeypatch: pytest.Mo
     result = CliRunner().invoke(app_module.app, ["db", "migrate"])
 
     assert result.exit_code == 0, result.output
-    assert calls == ["apply:skeleton", "discover-plugins", "apply:tai42-widget"]
+    assert calls == ["apply:skeleton,states", "discover-plugins", "apply:tai42-widget"]
 
 
 def test_migrate_json_reports_applied(monkeypatch: pytest.MonkeyPatch) -> None:

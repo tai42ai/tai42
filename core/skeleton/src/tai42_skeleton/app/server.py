@@ -35,6 +35,7 @@ from tai42_skeleton.app.facets import (
     MonitoringFacet,
     PresetsFacet,
     SandboxesFacet,
+    StatesFacet,
     StorageFacet,
     SubAppFacet,
     ToolMetaFacet,
@@ -52,6 +53,7 @@ from tai42_skeleton.backend.registry import BackendHolder
 from tai42_skeleton.backup import BackupRegistry, register_core_sections
 from tai42_skeleton.channels.registry import ChannelRegistry
 from tai42_skeleton.config import ConfigManagerFactory
+from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
 from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
@@ -65,6 +67,13 @@ from tai42_skeleton.presets.seeds import PresetSeedRegistry
 from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
 from tai42_skeleton.sandbox import SandboxHolder
 from tai42_skeleton.settings.audit_log import audit_log_settings
+from tai42_skeleton.states.backup import register_states_backup_section
+from tai42_skeleton.states.seeds import StateModuleSeedRegistry
+from tai42_skeleton.states.service import (
+    StatesConsumerListerRegistry,
+    StatesMountValidatorRegistry,
+    StatesService,
+)
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.tools import ToolRefsRegistry, ToolRegistry, ToolRetryRegistry
@@ -240,6 +249,12 @@ class ServingCore:
         # reload re-imports the tool modules and re-registers cleanly.
         self._write_validator_registry = PresetWriteValidatorRegistry()
 
+        # Per-target-kind conversation-route bind-validator registry, reset each start()
+        # so a reload re-imports the plugin modules and re-registers cleanly. Route
+        # creation consults it after the target exists, so a target carrying a bind-time
+        # defect is refused at create, not at first message.
+        self._target_validator_registry = TargetBindValidatorRegistry()
+
         # Per-base-tool preset input-schema support + registration-tier registries,
         # reset each start() alongside the write-validator registry so a reload
         # re-imports the tool modules and re-registers cleanly.
@@ -267,6 +282,21 @@ class ServingCore:
         # object), so the duplicate-name guard is never tripped.
         self._backup_registry = BackupRegistry()
         register_core_sections(self._backup_registry)
+
+        # The subject-keyed state store: one shared service over the record substrate,
+        # plus the consumer-owned registries (mount validators, consumer listers, module
+        # seeds) reset each start() so a reload re-imports the plugin modules and
+        # re-registers cleanly. The service holds refs to the SAME registry objects, so a
+        # reset+re-register is visible to it without rebuilding the service.
+        self._states_mount_validators = StatesMountValidatorRegistry()
+        self._states_consumer_listers = StatesConsumerListerRegistry()
+        self._states_module_seeds = StateModuleSeedRegistry()
+        self._states_service = StatesService(
+            mount_validators=self._states_mount_validators,
+            consumer_listers=self._states_consumer_listers,
+            seeds=self._states_module_seeds,
+        )
+        register_states_backup_section(self._backup_registry)
 
         # The preset register/reload engine, rehydrated per epoch from the store by the
         # startup/reload handler.
@@ -355,6 +385,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._versioning_facet = VersioningFacet(self)
         self._presets_facet = PresetsFacet(self)
         self._tool_meta_facet = ToolMetaFacet(self)
+        self._states_facet = StatesFacet(self)
 
         # The eager boot-scaffold core: an un-booted app (bare construction, an
         # embedded read, the boot-time ``http_app`` build) needs a live serving
@@ -468,6 +499,12 @@ class TaiMCP(TaiMCPLifecycleMixin):
     @property
     def presets(self) -> PresetsFacet:
         return self._presets_facet
+
+    @property
+    def states(self) -> StatesFacet:
+        """The subject-keyed state store facet — the ``tai42_contract.app.AppStates``
+        namespace."""
+        return self._states_facet
 
     @property
     def tool_meta(self) -> ToolMetaFacet:

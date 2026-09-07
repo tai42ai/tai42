@@ -37,6 +37,7 @@ from tai42_skeleton.db import (
     installed_plugin_entries,
     skeleton_entry,
 )
+from tai42_skeleton.states.db import states_entry
 
 app = typer.Typer(
     name="db",
@@ -54,11 +55,12 @@ def _target() -> str:
 
 
 async def _apply() -> list[AppliedMigration]:
-    """Apply the skeleton chain FIRST and alone, then discover and apply the plugin
-    chains. Plugin discovery reads skeleton-owned tables (the marketplace install
-    store), so a fresh database must receive the skeleton baseline before the plugin
-    chains can even be enumerated."""
-    applied = await apply_migrations([skeleton_entry()])
+    """Apply the two skeleton-owned chains (the skeleton baseline and the ``states``
+    record store) FIRST, then discover and apply the plugin chains. Plugin discovery
+    reads skeleton-owned tables (the marketplace install store), so a fresh database
+    must receive the skeleton baseline before the plugin chains can even be
+    enumerated."""
+    applied = await apply_migrations([skeleton_entry(), states_entry()])
     plugin_entries = await installed_plugin_entries()
     if plugin_entries:
         applied.extend(await apply_migrations(plugin_entries))

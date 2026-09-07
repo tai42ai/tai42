@@ -231,7 +231,9 @@ def test_a_chained_dispatch_parks_on_the_call_not_the_nested_interaction():
     # terminal re-enters it through that binding's delivery tool.
     deadline = datetime(2030, 1, 1, tzinfo=UTC)
     result = asyncio.run(
-        _run_parking_tool("flow_resume", bound="agent_resume", chained="tai42:chained-park:k1", expiry_at=deadline)
+        _run_parking_tool(
+            "nested_driver_resume", bound="agent_resume", chained="tai42:chained-park:k1", expiry_at=deadline
+        )
     )
     marker = read_suspended_interaction_marker(result)
     assert marker is not None

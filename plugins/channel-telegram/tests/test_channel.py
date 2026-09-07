@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -49,6 +50,8 @@ def _delivery(
     timeout_in: float = 600,
     recipient: str | None = None,
     schema: dict | None = None,
+    data: Any = None,
+    pages: Any = None,
 ) -> ChannelDelivery:
     return ChannelDelivery(
         interaction_id="int-1",
@@ -56,6 +59,8 @@ def _delivery(
         answer_format=answer_format,
         options=options,
         schema=schema,
+        data=data,
+        pages=pages,
         callback_url=_CALLBACK,
         timeout_at=datetime.now(UTC) + timedelta(seconds=timeout_in),
         recipient=recipient,
@@ -214,6 +219,24 @@ async def test_form_sends_web_app_button_and_skips_correlation(http_recorder, fa
     assert "force_reply" not in json.dumps(body)
     # The callback page posts the answer itself: no correlation, no inbound leg.
     assert fake_redis.data == {}
+
+
+async def test_form_with_per_send_data_and_pages_is_pass_through_to_the_callback_page(http_recorder, fake_redis):
+    # Telegram delivers a form as a web_app button opening the callback page — the page
+    # renders the per-send values/options/pages, so the delivery ignores them and the
+    # button is unchanged. The new fields must NOT disturb the send or be dropped loudly.
+    from tai42_contract.interactions.models import FormData, FormOption, FormPage
+
+    delivery = _delivery(
+        answer_format="form",
+        schema=_FORM_SCHEMA,
+        data=FormData(values={"note": "hi"}, options={"name": [FormOption(value="r", label="Red")]}),
+        pages=[FormPage(title="Step", fields=list(_FORM_SCHEMA["properties"]))],
+    )
+    await TelegramChannel().deliver(delivery)
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Fill form", "web_app": {"url": _CALLBACK}}]]}
     assert fake_redis.ttls == {}
 
 

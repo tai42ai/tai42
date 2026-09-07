@@ -15,10 +15,12 @@ from typing import Any
 from tai42_contract.access_control.context import caller_may_read_secrets
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import CallbackSchema as CallbackFields
+from tai42_contract.states import StateSubject
 
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.lc.signature_util import exclude_fastmcp_ctx_from_kwargs
+from tai42_kit.utils.schedule_subject import SCHEDULE_SUBJECT_ARG
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
 
@@ -42,18 +44,43 @@ class CallbackSchema(CallbackFields):
 
 
 async def prepare_backend_kwargs(
-    func: Callable[..., Any], tool_name_arg: str, tool_name: str, kwargs: dict[str, Any]
+    func: Callable[..., Any], tool_name_arg: str, tool_name: str, kwargs: dict[str, Any], *, scheduled: bool = False
 ) -> dict[str, Any]:
     """Strip the FastMCP context kwarg, inject the tool name for dispatch, and stamp
     the submitting caller's secret-read capability so the worker binds it for the job.
 
     Runs in the submitter's request context, so :func:`caller_may_read_secrets` reads the
     submitter's own admin verdict; stamped AFTER the caller's arguments are stripped, so a
-    caller can never forge a higher capability."""
+    caller can never forge a higher capability.
+
+    With ``scheduled=True`` and a parseable top-level ``subject`` argument, the job's
+    subject is additionally stamped under :data:`SCHEDULE_SUBJECT_ARG` so the worker fire
+    can re-establish a ``schedule`` state context the anonymous/system fire otherwise loses;
+    a submit wrapper passes ``scheduled=False`` and stamps nothing. The ``subject`` argument
+    stays in ``kwargs`` (a flow reads ``.subject``, a state tool takes it as an explicit
+    override) — the stamp is the door signal, not a replacement."""
     kwargs = exclude_fastmcp_ctx_from_kwargs(func, kwargs)
     kwargs[tool_name_arg] = tool_name
     kwargs[WORKER_SECRET_CAPABILITY_ARG] = caller_may_read_secrets()
+    if scheduled:
+        subject = _parse_schedule_subject(kwargs.get("subject"))
+        if subject is not None:
+            kwargs[SCHEDULE_SUBJECT_ARG] = subject.model_dump()
     return kwargs
+
+
+def _parse_schedule_subject(raw: Any) -> StateSubject | None:
+    """A schedule's top-level ``subject`` argument as a full :class:`StateSubject`, or
+    ``None`` when it is absent or not a full subject (a flow may carry a subject shape the
+    ambient door resolves rather than a stamped one — only a full subject is a door signal)."""
+    if raw is None or isinstance(raw, StateSubject):
+        return raw
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return StateSubject.model_validate(raw)
+    except ValueError:
+        return None
 
 
 async def callback_execution(result: Any, callback: CallbackSchema) -> Any:

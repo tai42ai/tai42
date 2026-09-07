@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -41,6 +42,7 @@ from tai42_contract.interactions import (
     register_execution_identity_accessor,
     register_execution_identity_binder,
 )
+from tai42_contract.states import StateContext
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -48,6 +50,7 @@ from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
 from tai42_skeleton.interactions.store import ContinuationDue, InteractionStore
 from tai42_skeleton.runs.chokepoint import resume_origin
+from tai42_skeleton.states.context import current_state_context, state_context
 
 logger = logging.getLogger(__name__)
 
@@ -88,37 +91,44 @@ def _log_continuation_done(task: asyncio.Task[Any], tool: str, interaction_id: s
 
 
 async def _run_continuation(
-    identity: str, fingerprint: str | None, tool: str, interaction_id: str, answer: Any
+    identity: str,
+    fingerprint: str | None,
+    tool: str,
+    interaction_id: str,
+    answer: Any,
+    park_context: StateContext | None = None,
 ) -> None:
     """Rebind ``identity`` (under the captured ``fingerprint``) and run ``tool`` with
     the park's ``{interaction_id, answer}``. Runs in a detached task so a long resume
     never blocks the resolving door; the bind is refused loudly if the key can no
-    longer carry the fire."""
-    # ATTRIBUTION SEAM (deliberately UNATTRIBUTED for now): this continuation/reaper
-    # re-drive resumes a parked run OUT OF BAND on a fresh detached task, so no ambient
-    # ``RunAttribution`` is deposited and ``run_tool``'s ``stamp_run_attribution`` no-ops
-    # — the run's trace here carries no user/session/route. The ORIGINAL turn that parked
-    # WAS attributed (the conversation door deposited it), so the parked question's own
-    # run is traced; only its resume tail is not. Attributing the resume would require the
-    # attribution to survive the park durably: the stored ``InteractionRequest`` gaining a
-    # NON-OPAQUE attribution field (the original ``RunAttribution``'s user_id/session_id/
-    # tags), re-deposited via ``run_attribution(...)`` around this ``run_tool`` call, so the
-    # resumed run rejoins its originating session. Left to a follow-up (the same known,
-    # non-regressing boundary the thread-index binding notes in ``interactions.helper``).
-    #
-    # LIFECYCLE CORRELATION: the ``resume_origin`` deposit names the parked
-    # interaction this fire resumes, so the runs-index chokepoint can link the
-    # resume dispatch's row to the parked dispatch's row (both carry this id).
-    # Flow-blind — an id, never resume state — and covering every resolution door
-    # by construction: answers, the expiry reaper, and reaper redelivery all fire
-    # through this one drive.
+    longer carry the fire.
+
+    ``park_context`` is the original turn's ambient state context, carried verbatim
+    across the park and re-deposited around ``run_tool`` so the resumed run's state
+    writes complete their provenance from the SAME door the park entered through — every
+    resolution door (an answer, the expiry reaper, an at-least-once redelivery) supplies
+    it, so the door coverage holds on all three."""
+    # The resume tail runs UNATTRIBUTED: this out-of-band re-drive deposits no ambient
+    # ``RunAttribution``, so ``run_tool``'s ``stamp_run_attribution`` no-ops and the resume's
+    # trace carries no user/session/route. The ``StateContext`` (not the ``RunAttribution``)
+    # survives the park on ``park_context`` and is re-deposited around ``run_tool`` so the
+    # resumed run's state writes complete their provenance. ``resume_origin`` deposits the
+    # parked interaction id so the runs-index links the resume dispatch's row to the parked
+    # dispatch's row.
+    park_ctx: AbstractContextManager[Any] = state_context(park_context) if park_context is not None else nullcontext()
     async with bind_execution_identity(identity, bound_fingerprint=fingerprint or ""):
-        with resume_origin(interaction_id):
+        with resume_origin(interaction_id), park_ctx:
             await tai42_app.tools.run_tool(tool, {"interaction_id": interaction_id, "answer": answer})
 
 
 async def _run_and_clear(
-    store: InteractionStore, identity: str, fingerprint: str | None, tool: str, interaction_id: str, answer: Any
+    store: InteractionStore,
+    identity: str,
+    fingerprint: str | None,
+    tool: str,
+    interaction_id: str,
+    answer: Any,
+    park_context: StateContext | None = None,
 ) -> None:
     """Run the continuation, then clear its durable due-record — the at-least-once
     delivery body. ``run_tool`` returning means the consumer durably applied the
@@ -128,20 +138,26 @@ async def _run_and_clear(
     done-callback (logged loudly, never swallowed) and the record stays for the reaper
     to redeliver on backoff. The clear opens its own client: the detached task outlives
     the resolving door's connection."""
-    await _run_continuation(identity, fingerprint, tool, interaction_id, answer)
+    await _run_continuation(identity, fingerprint, tool, interaction_id, answer, park_context)
     async with client_ctx(RedisClient, interactions_settings().redis) as r:
         await store.clear_continuation_due(r, interaction_id)
 
 
 def _spawn_continuation_task(
-    store: InteractionStore, identity: str, fingerprint: str | None, tool: str, interaction_id: str, answer: Any
+    store: InteractionStore,
+    identity: str,
+    fingerprint: str | None,
+    tool: str,
+    interaction_id: str,
+    answer: Any,
+    park_context: StateContext | None = None,
 ) -> None:
     """Spawn the detached run-and-clear task, holding a strong reference until it ends.
     The loop's own reference is weak, so an untracked task can be GC'd mid-flight and
     lose the resume; the done-callback drops the reference and surfaces the outcome
     loudly."""
     task = asyncio.create_task(
-        _run_and_clear(store, identity, fingerprint, tool, interaction_id, answer),
+        _run_and_clear(store, identity, fingerprint, tool, interaction_id, answer, park_context),
         name=f"interaction-continuation-{interaction_id}",
     )
     _CONTINUATION_TASKS.add(task)
@@ -184,6 +200,7 @@ def dispatch_continuation(
         request.continuation_tool,
         request.interaction_id,
         answer,
+        request.continuation_state_context,
     )
 
 
@@ -193,7 +210,9 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
     attempt). A healthy fire clears the record; a raised ``run_tool`` leaves it for the
     next backoff window. At-least-once — the consumer's idempotency covers a redelivery
     that races the original fire to completion."""
-    _spawn_continuation_task(store, due.identity, due.fingerprint, due.tool, due.interaction_id, due.answer)
+    _spawn_continuation_task(
+        store, due.identity, due.fingerprint, due.tool, due.interaction_id, due.answer, due.state_context
+    )
 
 
 async def fire_continuation_after_claim(
@@ -207,6 +226,13 @@ async def fire_continuation_after_claim(
         return
     fingerprint = await store.continuation_fingerprint(r, request.interaction_id)
     dispatch_continuation(store, request, fingerprint, answer)
+
+
+def _current_state_context_for_park() -> StateContext | None:
+    """The ambient state context a park records so its resume re-deposits the original
+    door's subject + write provenance — or ``None`` when the park ran under no state
+    context. Read at request-build time, inside the parking turn's own context."""
+    return current_state_context()
 
 
 def _current_execution_identity_for_park() -> tuple[str | None, str]:

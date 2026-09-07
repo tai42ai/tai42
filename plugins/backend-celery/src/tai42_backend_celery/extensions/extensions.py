@@ -99,7 +99,7 @@ def schedule_task(func: Callable[..., Any], name: str, description: str) -> Call
             raise ValueError("backend_schedule_name is required")
         if schedule_in is None:
             raise ValueError("backend_schedule is required")
-        kwargs = await prepare_backend_kwargs(func, celery_settings().tool_name_arg, name, kwargs)
+        kwargs = await prepare_backend_kwargs(func, celery_settings().tool_name_arg, name, kwargs, scheduled=True)
 
         norm = normalize_schedule(schedule_in)
         if norm["__type__"] == "interval":

@@ -51,6 +51,45 @@ def test_form_rejects_bad_schema_type():
         _build_payload(AnswerFormat.FORM, None, cast("type[BaseModel]", 123))
 
 
+def test_form_payload_carries_data_and_pages():
+    from tai42_contract.interactions import FormData, FormOption, FormPage
+
+    schema = {"type": "object", "properties": {"c": {"type": "string"}}}
+    data = FormData(values={"c": "x"}, options={"c": [FormOption(value="x", label="X")]})
+    pages = [FormPage(title="A", fields=["c"])]
+    payload = _build_payload(AnswerFormat.FORM, None, schema, data=data, pages=pages)
+    assert payload is not None
+    assert payload["schema"] == schema
+    assert payload["data"] == {"values": {"c": "x"}, "options": {"c": [{"value": "x", "label": "X"}]}}
+    assert payload["pages"] == [{"title": "A", "fields": ["c"]}]
+
+
+def test_form_payload_accepts_dict_data_and_pages():
+    schema = {"type": "object", "properties": {"c": {"type": "string"}}}
+    payload = _build_payload(
+        AnswerFormat.FORM,
+        None,
+        schema,
+        data={"values": {"c": "x"}, "options": {}},
+        pages=[{"title": "A", "fields": ["c"]}],
+    )
+    assert payload is not None
+    assert payload["data"] == {"values": {"c": "x"}, "options": {}}
+    assert payload["pages"] == [{"title": "A", "fields": ["c"]}]
+
+
+def test_form_payload_omits_absent_data_and_pages():
+    schema = {"type": "object", "properties": {"c": {"type": "string"}}}
+    assert _build_payload(AnswerFormat.FORM, None, schema) == {"schema": schema}
+
+
+async def test_ask_user_rejects_data_on_non_form():
+    with pytest.raises(ValueError, match="data and pages are not valid"):
+        await ask_user("q", answer_format="text", data={"values": {}})
+    with pytest.raises(ValueError, match="data and pages are not valid"):
+        await ask_user("q", answer_format="select", options=["a"], pages=[{"title": "A", "fields": ["a"]}])
+
+
 async def test_ask_user_rejects_unknown_format():
     with pytest.raises(ValueError, match="unknown answer_format"):
         await ask_user("q", answer_format="telepathy")

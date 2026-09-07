@@ -92,6 +92,29 @@ async def test_answer_form_schema_mismatch_names_the_field(wired):
         await ops.answer_interaction("p1", {"count": "abc"})
 
 
+async def test_answer_form_array_per_send_options_accept_and_reject(wired):
+    # An inbox form ask with a multi-select (array-of-strings) property carrying a
+    # per-send option list: the choices apply to the array's ITEMS, so a valid subset
+    # answer is accepted while a value outside the per-send list is a 400 naming the
+    # field. An enum placed on the array itself would reject even the valid answer.
+    schema = {
+        "type": "object",
+        "properties": {"tags": {"type": "array", "items": {"type": "string"}}},
+    }
+    data = {"options": {"tags": [{"value": "a"}, {"value": "b"}]}}
+    payload = {"schema": schema, "data": data}
+    await wired.store.add(
+        wired.fake, _req(wired.store, AnswerFormat.FORM, iid="fa", gid="fg", payload=payload), idle_ttl=86400
+    )
+    assert await ops.answer_interaction("fa", {"tags": ["a", "b"]}) == {"interaction_id": "fa", "status": "answered"}
+
+    await wired.store.add(
+        wired.fake, _req(wired.store, AnswerFormat.FORM, iid="fr", gid="fg2", payload=payload), idle_ttl=86400
+    )
+    with pytest.raises(BadRequestError, match="tags"):
+        await ops.answer_interaction("fr", {"tags": ["a", "z"]})
+
+
 def test_schema_error_message_field_paths():
     # ``_schema_mismatch`` returns ``(message, field)``: a field-level error names the
     # field (``$``-root and leading ``.`` stripped) in BOTH the message and the bare

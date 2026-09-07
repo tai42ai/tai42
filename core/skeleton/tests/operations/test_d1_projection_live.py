@@ -4,8 +4,8 @@ Boots the app through the real ``app.app_context`` harness with an ``api_tools``
 manifest that loads no management tool modules and enables projection, then
 asserts the projected surface end-to-end (checklist items 1-6):
 
-1. the projected tool surface is exactly the expected op surface — the 135
-   default-projected ops (180 total - 41 tier-2 default-excluded - 4 tier-1
+1. the projected tool surface is exactly the expected op surface — the 165
+   default-projected ops (210 total - 41 tier-2 default-excluded - 4 tier-1
    hardcode-blocked);
 2. ``destructiveHint`` is present on destructive ops (a DELETE, a mutating POST)
    and absent on reads (a GET);
@@ -118,7 +118,7 @@ class _RecordingApp:
         self.tools = _RecordingTools()
 
 
-# -- checklist 1: the projected surface is exactly the 135 default ops ---------
+# -- checklist 1: the projected surface is exactly the 165 default ops ---------
 
 
 def test_d1_projected_surface_is_the_expected_op_count():
@@ -130,62 +130,18 @@ def test_d1_projected_surface_is_the_expected_op_count():
             tier1 = sorted(op.name for op in ops if is_tier1(op))
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
-            # The arithmetic: 180 total - 41 tier-2 default-excluded - 4 tier-1 hardcode-blocked = 135.
-            # The +8 over the historical 143 are the settings-profile CRUD ops (list/get/put/
-            # delete/diff/versions/version/rollback under /api/config/profiles*) — tier-0
-            # default-projected like the sibling config ops (read_env/write_env/reload_config);
-            # the HTTP secret/fenced action-class fences the door, not the MCP projection. The
-            # +1 to 152 is ``apply_profile`` — authority_changing (tier-2, off the default MCP
-            # surface): it replaces the whole env + recycles the fleet, never a default tool.
-            # The +2 to 154 are the manifest ops ``get_manifest_preserved`` (the preserved
-            # markers-intact read) and ``set_mcp_secret_env`` (the combined env+manifest secret
-            # write) — both tier-0 default-projected like their siblings ``get_manifest`` /
-            # ``set_mcp_config`` (the HTTP read/fenced action-class fences the door, not the
-            # projection; neither is authority_changing). The +2 to 156 are the conversations
-            # read doors ``list_conversation_threads`` / ``get_conversation_thread`` — tier-0
-            # reads scoped by the route's own read-door policy. The +4 to 160 are the
-            # conversation target-config CRUD ops ``list``/``get``/``set``/``delete_conversation_config``
-            # — tier-0 default-projected (``set`` is destructive but not authority_changing, so
-            # it stays on the default surface, like ``upsert_tool_meta``). The +1 to 161 is
-            # ``get_mcp_env_refs`` — the manifest MCP section's !ENV-marker checklist (names +
-            # set/unset booleans only), a tier-0 read like its ``get_manifest`` siblings. The +1
-            # to 162 is ``delete_conversation_thread`` (the thread-forget door) — tier-0
-            # default-projected like its ``delete_conversation_config`` sibling (destructive but
-            # not authority_changing). The +7 to 169 are the granular manifest-family
-            # add/remove ops ``add_mcp_entries``/``remove_mcp_entry``,
-            # ``add_tools_entries``/``remove_tools_entry``, ``add_agents_entries``/``remove_agents_entry``
-            # and ``modify_tool_extension_combos`` — all tier-0 default-projected (module-selection
-            # writes; the combo door mirrors its ``set_tool_extensions`` sibling, neither
-            # authority_changing). The +3 to 172 are ``update_api_tools`` and ``modify_role_grants``
-            # (authority_changing) and ``modify_api_key_scopes`` (tier-2 by the ``/api/auth/`` route
-            # prefix) — all off the default MCP surface. The +3 to 175 are the operator send + per-thread
-            # mode doors ``send_conversation_thread_message`` / ``get_conversation_thread_mode`` /
-            # ``set_conversation_thread_mode`` — tier-0 default-projected like their
-            # ``delete_conversation_thread`` sibling (the send/set writes are destructive but not
-            # authority_changing; the mode read is a plain GET). The +1 to 176 is
-            # ``marketplace_install_preview`` — the no-side-effect install/update route preview,
-            # a tier-0 read like the other marketplace reads (the HTTP fenced action-class fences
-            # the door, not the projection; it is not authority_changing). The +2 to 178 are the
-            # conversations filter/search + person-forget doors ``search_conversation_messages``
-            # (a tier-0 read like ``list_conversation_threads``) and ``delete_conversation_person``
-            # — tier-0 default-projected like its ``delete_conversation_thread`` sibling
-            # (destructive but not authority_changing). The +2 to 180 are ``sandbox_info``
-            # — the sandbox identity + resolved-policy read, tier-0 default-projected like its
-            # ``backend_info`` sibling — and ``list_interactions`` — the paged pending-inbox
-            # read door, a tier-0 read like ``list_notifications`` (neither authority_changing).
-            # The +1 to 181 is ``list_pending_interactions`` — the read-only parked-asks audit
-            # door, a tier-0 read like its ``list_interactions`` sibling (neither
-            # authority_changing; the operator-only gate lives in the op, not the projection).
-            # The +2 to 183 are the platform runs-index doors ``list_runs`` — the paged,
-            # filterable runs enumeration, a tier-0 read like ``list_notifications`` — and
-            # ``prune_runs`` — the retention purge, tier-0 default-projected like its
-            # ``delete_conversation_config`` sibling (destructive/fenced but not
-            # authority_changing, so it stays on the default surface; the HTTP fenced
-            # action-class fences the door, not the MCP projection). The +1 to 184 is
-            # ``cancel_interaction`` — the per-interaction withdraw door, tier-0
-            # default-projected like its ``answer_interaction`` sibling (destructive but not
-            # authority_changing, so it rides the default surface under expose_destructive).
-            assert total == 184, total
+            # The registered surface decomposes by projection tier (each asserted below):
+            # 210 total = 4 tier-1 (hardcode-blocked from projection) + 41 tier-2
+            # (default-excluded, includable) + 165 tier-0 (default-projected). A destructive
+            # tier-0 op is still default-projected under ``expose_destructive`` — a data write
+            # or purge (``delete_*``, ``erase_*``, ``prune_runs``, ``prune_state_retention``)
+            # is destructive but not authority_changing, so it stays tier-0 like
+            # ``delete_conversation_config``; authority_changing writes (roles, api keys,
+            # api_tools) and the ``/api/auth/`` family are the tier-2 set. The 26 states-surface
+            # doors (module + state ``list``/``get``/``put``/``delete``, the record CRUD plus
+            # ``search``/``fold``/``apply`` doors, the mount/migrate/subjects/consumers/stats
+            # reads, and ``prune_state_retention``) are all tier-0 CRUD over the states service.
+            assert total == 210, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -245,30 +201,28 @@ def test_d1_projected_surface_is_the_expected_op_count():
                 "validate_condition",
             }, tier2
 
-            # The default-projected surface = 139 (the +2 are ``sandbox_info`` and
-            # ``list_interactions``; the +1 is ``list_pending_interactions``; the +2 are
-            # ``list_runs`` and ``prune_runs``; the final +1 is ``cancel_interaction`` — a
-            # destructive tier-0 op projected under the default ``expose_destructive`` like
-            # ``answer_interaction``), measured two ways.
+            # The default-projected surface = 165 (every op that is neither tier-1 nor
+            # tier-2, destructive tier-0 ops included under the default ``expose_destructive``),
+            # measured two ways.
             recorder = _RecordingApp()
             projected = project_operations(recorder, ApiToolsConfig(), registry=reg)
-            assert len(projected) == 139, len(projected)
-            assert total - len(tier2) - len(tier1) == 139
+            assert len(projected) == 165, len(projected)
+            assert total - len(tier2) - len(tier1) == 165
 
-            # The LIVE booted tool surface is the 139 projected ops PLUS the two
+            # The LIVE booted tool surface is the 165 projected ops PLUS the two
             # force-registered hidden mechanism tools the conversations router installs at
             # startup: ``conversation_deliver`` (a parked AGENT turn's resumed answer) and
             # ``deliver_tool_completion`` (a parked TOOL turn's terminal, mapped via reply_expr),
             # both fired through ``run_tool`` by the resumer. Neither is an api_tools projection
-            # (``projected`` stays 139) — they are mandatory bridges registered independently of
+            # (``projected`` stays 165) — they are mandatory bridges registered independently of
             # the api_tools toggle and carried on the live surface like any hidden tool, so the
-            # live count is 141.
+            # live count is 167.
             hidden_bridges = {"conversation_deliver", "deliver_tool_completion"}
             live = await app.tools.get_tools()
             assert set(live) == set(projected) | hidden_bridges
             for name in hidden_bridges:
                 assert (live[name].meta or {}).get("tai42/hidden") is True
-            assert len(live) == 141
+            assert len(live) == 167
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -465,13 +419,13 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             }
         )
         async with app.app_context(manifest):
-            # api_tools projected the surface: the 139 projected ops plus the two
+            # api_tools projected the surface: the 165 projected ops plus the two
             # force-registered hidden completion mechanisms the conversations router installs at
-            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 141 live.
+            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 167 live.
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 141
+            assert len(live) == 167
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process
