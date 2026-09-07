@@ -30,30 +30,16 @@ from typing import LiteralString
 import pytest
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
-from tai42_kit.db import component_store_settings
+from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.tool_meta.store as tool_meta_store
-from tai42_skeleton.db import SKELETON_COMPONENT
+from tai42_skeleton.db import SKELETON_COMPONENT, skeleton_entry
 from tai42_skeleton.tool_meta.store import PostgresToolMetaStore
 
 pytestmark = pytest.mark.integration
 
 _OPT_IN_ENV = "TAI42_SKELETON_REAL_PG"
-
-# The overlay tables, verbatim from the skeleton baseline migration (idempotent
-# ``IF NOT EXISTS`` so an already-migrated database is left untouched).
-_SCHEMA_SQL: tuple[LiteralString, ...] = (
-    "CREATE TABLE IF NOT EXISTS tool_folders ("
-    " id UUID NOT NULL DEFAULT gen_random_uuid(), name TEXT NOT NULL,"
-    " parent_id UUID REFERENCES tool_folders(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-    " PRIMARY KEY (id),"
-    " CONSTRAINT tool_folders_parent_name_unique UNIQUE NULLS NOT DISTINCT (parent_id, name))",
-    "CREATE TABLE IF NOT EXISTS tool_meta ("
-    " tool_name TEXT NOT NULL, display_name TEXT, folder_id UUID REFERENCES tool_folders(id),"
-    " tags TEXT[] NOT NULL DEFAULT '{}', hidden BOOLEAN, badges TEXT[] NOT NULL DEFAULT '{}',"
-    " created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (tool_name))",
-)
 
 
 async def _exec(sql: LiteralString, params: tuple = ()) -> None:
@@ -77,8 +63,7 @@ async def real_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Pos
     monkeypatch.setattr(tool_meta_store, "client_ctx", client_ctx)
     # Rebuild the cached settings so ``TAI_DATABASE_DEFAULT_PG_*`` from the environment is read.
     reset_all_settings()
-    for statement in _SCHEMA_SQL:
-        await _exec(statement)
+    await apply_migrations([skeleton_entry()])
     # A unique tool name confines the test to its own row.
     tool_name = f"seed_race_it_{uuid.uuid4().hex}"
     try:

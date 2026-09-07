@@ -28,30 +28,22 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import AsyncIterator
-from typing import LiteralString, cast
+from typing import LiteralString
 
 import psycopg
 import pytest
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
-from tai42_kit.db import component_store_settings, discover_migrations
+from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.versioning.store as versioning_store
-from tai42_skeleton.db import SKELETON_COMPONENT, skeleton_migrations_dir
+from tai42_skeleton.db import SKELETON_COMPONENT, skeleton_entry
 from tai42_skeleton.versioning.store import PostgresVersionedStore
 
 pytestmark = pytest.mark.integration
 
 _OPT_IN_ENV = "TAI42_SKELETON_REAL_PG"
-
-
-def load_ddl() -> str:
-    """The skeleton baseline migration's SQL — applied directly to the live server so
-    the test exercises the EXACT role_audit triggers that ship (never a hand-copied
-    duplicate that could drift)."""
-    return discover_migrations(skeleton_migrations_dir())[0].sql
-
 
 _AUDIT_KIND = "role_audit"
 
@@ -110,9 +102,9 @@ async def real_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Pos
     monkeypatch.setattr(versioning_store, "client_ctx", client_ctx)
     # Rebuild cached settings so ``TAI_DATABASE_DEFAULT_PG_*`` from the environment is read.
     reset_all_settings()
-    # Apply the FULL shipped DDL (idempotent) so the test exercises the EXACT triggers
-    # that ship — never a hand-copied duplicate that could drift.
-    await _exec(cast(LiteralString, load_ddl()))
+    # Apply the skeleton chain through the real runner so the test exercises the EXACT
+    # role_audit triggers that ship — never a hand-copied duplicate that could drift.
+    await apply_migrations([skeleton_entry()])
     tag = uuid.uuid4().hex
     try:
         yield PostgresVersionedStore(), tag

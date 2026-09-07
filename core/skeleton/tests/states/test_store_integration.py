@@ -18,10 +18,10 @@ import pytest
 from tai42_contract.states.models import CompletedOrigin, StateSubject
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
-from tai42_kit.db import component_store_settings
+from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
-from tai42_skeleton.states.db import STATES_COMPONENT
+from tai42_skeleton.states.db import STATES_COMPONENT, states_entry
 from tai42_skeleton.states.modules import compose_effective_schema, validate_module
 from tai42_skeleton.states.service import _validate_document
 from tai42_skeleton.states.store import PostgresStatesStore, make_cursor
@@ -29,36 +29,6 @@ from tai42_skeleton.states.store import PostgresStatesStore, make_cursor
 pytestmark = pytest.mark.integration
 
 _OPT_IN_ENV = "TAI42_SKELETON_REAL_PG"
-
-# The states baseline tables, verbatim structure from the chain's 0001_baseline.sql
-# (idempotent ``IF NOT EXISTS`` so an already-migrated database is left untouched).
-_SCHEMA_SQL: tuple[LiteralString, ...] = (
-    "CREATE TABLE IF NOT EXISTS state_declarations (name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '',"
-    " schema JSONB NOT NULL DEFAULT '{}'::jsonb, effective_schema JSONB NOT NULL DEFAULT '{}'::jsonb,"
-    " subject_kinds JSONB NOT NULL DEFAULT '[]'::jsonb, default_subject_kind TEXT NOT NULL DEFAULT '',"
-    " retention_days INTEGER, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
-    "CREATE TABLE IF NOT EXISTS state_modules (name TEXT PRIMARY KEY, body JSONB NOT NULL DEFAULT '{}'::jsonb,"
-    " shipped_hash TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
-    "CREATE TABLE IF NOT EXISTS state_mounts (state TEXT NOT NULL, module TEXT NOT NULL,"
-    " path JSONB NOT NULL DEFAULT '[]'::jsonb, parameters JSONB NOT NULL DEFAULT '{}'::jsonb,"
-    " declarations JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-    " PRIMARY KEY (state, module))",
-    "CREATE TABLE IF NOT EXISTS state_records (state TEXT NOT NULL, target_kind TEXT NOT NULL,"
-    " target_name TEXT NOT NULL, subject_kind TEXT NOT NULL, subject_key TEXT NOT NULL,"
-    " data JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-    " PRIMARY KEY (state, target_kind, target_name, subject_kind, subject_key))",
-    "CREATE INDEX IF NOT EXISTS state_records_data_gin ON state_records USING gin (data jsonb_path_ops)",
-    "CREATE TABLE IF NOT EXISTS state_subject_aliases (state TEXT NOT NULL, target_kind TEXT NOT NULL,"
-    " target_name TEXT NOT NULL, alias_kind TEXT NOT NULL, alias_key TEXT NOT NULL, canonical_kind TEXT NOT NULL,"
-    " canonical_key TEXT NOT NULL, mode TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-    " PRIMARY KEY (state, target_kind, target_name, alias_kind, alias_key))",
-    "CREATE TABLE IF NOT EXISTS state_applied_ops (op_id TEXT PRIMARY KEY,"
-    " applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
-    "CREATE TABLE IF NOT EXISTS state_writes (id BIGSERIAL PRIMARY KEY, state TEXT NOT NULL, target_kind TEXT NOT NULL,"
-    " target_name TEXT NOT NULL, subject_kind TEXT NOT NULL, subject_key TEXT NOT NULL, seq DOUBLE PRECISION,"
-    " at TIMESTAMPTZ NOT NULL DEFAULT now(), door TEXT NOT NULL, actor TEXT, consumer TEXT, meta JSONB, run_id TEXT,"
-    " turn_id TEXT, paths JSONB NOT NULL DEFAULT '[]'::jsonb, op_id TEXT)",
-)
 
 _ORIGIN = CompletedOrigin(
     consumer="consumer-x",
@@ -87,8 +57,7 @@ async def real_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Pos
             "TAI_DATABASE_DEFAULT_PG_* env at a live Postgres to run it (needs jsonb + row locking — no fake)"
         )
     reset_all_settings()
-    for sql in _SCHEMA_SQL:
-        await _exec(sql)
+    await apply_migrations([states_entry()])
     state = f"st_{uuid.uuid4().hex[:12]}"
     yield PostgresStatesStore(), state
     # Every row this run wrote is scoped by the unique ``state``: state-columned tables

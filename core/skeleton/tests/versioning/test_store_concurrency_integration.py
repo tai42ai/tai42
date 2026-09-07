@@ -30,33 +30,16 @@ import pytest
 from tai42_contract.versioning.errors import DocumentExistsError
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
-from tai42_kit.db import component_store_settings
+from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.versioning.store as versioning_store
-from tai42_skeleton.db import SKELETON_COMPONENT
+from tai42_skeleton.db import SKELETON_COMPONENT, skeleton_entry
 from tai42_skeleton.versioning.store import PostgresVersionedStore
 
 pytestmark = pytest.mark.integration
 
 _OPT_IN_ENV = "TAI42_SKELETON_REAL_PG"
-
-# The two tables + the partial-unique active index, verbatim from the skeleton init SQL
-# (idempotent ``IF NOT EXISTS`` so an already-migrated database is left untouched).
-_SCHEMA_SQL: tuple[LiteralString, ...] = (
-    "CREATE TABLE IF NOT EXISTS versioned_documents ("
-    " id BIGSERIAL NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,"
-    " active_version INTEGER NOT NULL, is_active BOOLEAN NOT NULL DEFAULT TRUE,"
-    " created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (id))",
-    "CREATE UNIQUE INDEX IF NOT EXISTS versioned_documents_active_name_unique"
-    " ON versioned_documents (kind, name) WHERE is_active",
-    "CREATE TABLE IF NOT EXISTS versioned_document_versions ("
-    " id BIGSERIAL NOT NULL,"
-    " document_id BIGINT NOT NULL REFERENCES versioned_documents (id) ON DELETE CASCADE,"
-    " version INTEGER NOT NULL, body JSONB NOT NULL, tags TEXT[] NOT NULL DEFAULT '{}',"
-    " created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (id),"
-    " CONSTRAINT versioned_document_versions_doc_version_unique UNIQUE (document_id, version))",
-)
 
 
 async def _exec(sql: LiteralString, params: tuple = ()) -> None:
@@ -81,8 +64,7 @@ async def real_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Pos
     # Rebuild the cached settings so ``TAI_DATABASE_DEFAULT_PG_*`` from the environment is read
     # (a stale cached settings object would target the wrong database).
     reset_all_settings()
-    for statement in _SCHEMA_SQL:
-        await _exec(statement)
+    await apply_migrations([skeleton_entry()])
     kind = f"role_tx1_it_{uuid.uuid4().hex}"
     try:
         yield PostgresVersionedStore(), kind
