@@ -1,3 +1,5 @@
 # Per-run coordinates the studio_runner writes at boot and removes on teardown
 # (the SUT Redis URL the web-widget spec reads a visitor session id from). Never tracked.
 .stack-handoff.json
+# Screenshot output of the widget spec (the orchestrator copies what it needs).
+form-shots-output/

@@ -15,12 +15,17 @@
  * steps ("Step 1 of 2 · Basics"); stepping through and submitting resolves the ask with the
  * union of every page's fields — asserted through the run-tool door the ask blocked on.
  */
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
 import { apiHeaders, resolveWebVisitorId, uniq, WEB_SESSION_COOKIE } from './helpers';
 
-/** Where the orchestrator reads the widget shots from. */
-const SHOTS_DIR = '/home/tai/agent-runs/agenda/_ops/shots/form';
+/** Where the widget shots land: `TAI_E2E_SHOTS_DIR` when set, else a per-suite output
+ * dir beside the tests (untracked). */
+const SHOTS_DIR = process.env.TAI_E2E_SHOTS_DIR ?? join(__dirname, '..', 'form-shots-output');
+mkdirSync(SHOTS_DIR, { recursive: true });
 
 /** The question card rises in on a `tcw-rise` opacity/translate animation
  * (`--tai-motion-base`, 250ms) carried by its enclosing `.tcw-row`. Shoot only
