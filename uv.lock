@@ -5148,7 +5148,7 @@ provides-extras = ["park", "dev"]
 
 [[package]]
 name = "tai42-backend-arq"
-version = "2.0.7"
+version = "2.1.0"
 source = { editable = "plugins/backend-arq" }
 dependencies = [
     { name = "arq" },
@@ -5258,7 +5258,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "2.0.6"
+version = "2.1.0"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5650,7 +5650,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "7.1.0"
+version = "7.1.1"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6183,7 +6183,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "10.1.0"
+version = "10.1.1"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
