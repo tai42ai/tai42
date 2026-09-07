@@ -55,24 +55,10 @@ class SchemaValidationError(StatesError):
 
 
 class NonAdditiveRedeclareError(StatesError):
-    """A plain re-declare would remove or change a field while records exist (409) —
-    the change must go through the guarded migrate door, never a silent re-declare."""
+    """A plain re-declare would remove or change a field while records exist (409);
+    the records must be erased first, never a silent re-declare."""
 
     __tai_error_kind__ = ErrorKind.CONFLICT
-
-
-class NarrowingRequiresConfirmationError(StatesError):
-    """A narrowing migrate supplied neither a transform nor a drop confirmation (412);
-    exactly one is required for any field removal or change."""
-
-    __tai_error_kind__ = ErrorKind.CONFLICT
-
-
-class MigrationConversionError(StatesError):
-    """A migrate transform failed or produced a record invalid under the new schema
-    (422). The whole change aborts — no partial state is ever committed."""
-
-    __tai_error_kind__ = ErrorKind.BAD_INPUT
 
 
 class DeclarationInUseError(StatesError):

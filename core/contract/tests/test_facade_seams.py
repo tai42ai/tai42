@@ -198,3 +198,23 @@ def test_registration_tier_reuses_the_route_action_vocabulary():
     assert reg_hints["tier"] == RouteAction
     read_hints = get_type_hints(AppPresets.registration_tier)
     assert read_hints["return"] == RouteAction | None
+
+
+def test_app_tools_declares_the_run_time_tier_accessors():
+    from tai42_contract.tools import AppTools
+
+    members = protocol_members(AppTools)
+    for name in ("register_tier", "tier"):
+        assert name in members, f"AppTools is missing {name}"
+
+
+def test_tools_tier_reuses_the_route_action_vocabulary():
+    from tai42_contract.app import RouteAction
+    from tai42_contract.tools import AppTools
+
+    # The tools-facet tier declaration and read use the SAME RouteAction vocabulary as the
+    # presets-side name — one registry, one tier type, no second vocabulary.
+    reg_hints = get_type_hints(AppTools.register_tier)
+    assert reg_hints["tier"] == RouteAction
+    read_hints = get_type_hints(AppTools.tier)
+    assert read_hints["return"] == RouteAction | None

@@ -315,7 +315,7 @@ def test_errors_stamp_their_transport_neutral_kind(exc: Exception, kind: ErrorKi
 # --------------------------------------------------------------------------- #
 # The facet surface
 # --------------------------------------------------------------------------- #
-def test_appstates_enumerates_its_thirty_four_members():
+def test_appstates_enumerates_its_twenty_eight_members():
     members = protocol_members(AppStates)
     assert members == {
         "list_declarations",
@@ -323,8 +323,6 @@ def test_appstates_enumerates_its_thirty_four_members():
         "put_declaration",
         "delete_declaration",
         "stats",
-        "migrate",
-        "preview_migrate",
         "list_modules",
         "get_module",
         "put_module",
@@ -333,9 +331,6 @@ def test_appstates_enumerates_its_thirty_four_members():
         "mount",
         "update_mount_declarations",
         "unmount",
-        "import_aliases",
-        "import_applied_ops",
-        "import_records",
         "read",
         "replace",
         "merge",
@@ -350,6 +345,5 @@ def test_appstates_enumerates_its_thirty_four_members():
         "register_consumer_lister",
         "consumers",
         "register_module_seed",
-        "register_retired_module_name",
         "register_mount_validator",
     }

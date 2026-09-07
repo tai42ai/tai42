@@ -59,7 +59,7 @@ MAX_ORIGIN_META_BYTES = 4096
 
 #: The literal every write door records: which door completed the write, stamped by
 #: the platform chokepoint from the ambient context (never consumer-supplied).
-StateDoor = Literal["conversation", "hook", "schedule", "tool", "api", "operator", "transfer"]
+StateDoor = Literal["conversation", "hook", "schedule", "tool", "api", "operator"]
 
 
 class StateSubject(BaseModel):

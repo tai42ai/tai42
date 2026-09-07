@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload, runtime_chec
 
 from pydantic import BaseModel
 
+from tai42_contract.app.facets import RouteAction
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.tools.invocation import (
     ToolInvocation,
@@ -75,7 +76,11 @@ class AppTools(Protocol):
     # tool). ``retry`` is the optional declared :class:`ToolRetryPolicy` the host
     # dispatch seam retries transient failures of this tool under (likewise
     # registered only when the manifest includes the tool; no declaration = one
-    # attempt, exactly).
+    # attempt, exactly). ``tier`` is the optional declared registration tier (a
+    # :data:`RouteAction`): ``fenced``/``secret`` gates both AUTHORING a preset over the
+    # tool AND RUNNING it (admin-only); ``read``/``write`` carry no execution gate. It is
+    # the declarative form of :meth:`register_tier` and, like the two above, registers
+    # only when the manifest includes the tool.
     @overload
     def tool(self, func: F, /) -> F: ...
     @overload
@@ -85,6 +90,7 @@ class AppTools(Protocol):
         force: bool = False,
         tool_refs: ToolRefsExtractor | None = None,
         retry: ToolRetryPolicy | None = None,
+        tier: RouteAction | None = None,
         **kwargs: Any,
     ) -> Callable[[F], F]: ...
 
@@ -128,6 +134,24 @@ class AppTools(Protocol):
         descriptions name the holders. Registering the same provider object twice
         raises loudly — a double registration is a plugin bug, never a silent
         duplicate consult."""
+        ...
+
+    def register_tier(self, base_tool: str, tier: RouteAction) -> None:
+        """Declare ``base_tool``'s registration tier — the authorization character
+        (a :data:`RouteAction`) enforced everywhere the tier is consulted.
+
+        A ``fenced`` or ``secret`` tier gates BOTH authoring a preset over the base tool
+        (admin-only) AND running the tool: a ``fenced``/``secret`` tool runs only for an
+        administrator, at every execution door, and a preset authored over it inherits
+        that fence at run time. ``read``/``write`` carry no execution gate. This is the
+        programmatic form of ``@app.tools.tool(tier=...)``; both write the one shared
+        registry (also read on the authoring side as ``app.presets.registration_tier``).
+        One declaration per base tool; a duplicate raises loudly."""
+        ...
+
+    def tier(self, base_tool: str) -> RouteAction | None:
+        """The registration tier ``base_tool`` declared, or ``None`` when it declared
+        none (no execution fence; authoring keeps the presets' default ``write`` action)."""
         ...
 
 

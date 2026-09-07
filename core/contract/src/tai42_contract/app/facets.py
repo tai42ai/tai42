@@ -9,7 +9,7 @@ Vendor return types follow the ``TYPE_CHECKING`` rule.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import (
@@ -864,21 +864,9 @@ class AppPresets(Protocol):
 
         A plugin calls this through the ``tai42_app`` handle when its module loads.
         The declared seeds are applied by the startup/reload seed applier — created
-        when absent, upgraded when a shipped default drifts, never touching an
-        operator-edited preset. Declaring two seeds under the same ``name`` raises
-        loudly — a silent overwrite could drop one plugin's default under another's."""
-        ...
-
-    def register_retired_seed(self, name: str) -> None:
-        """Declare a retired preset-seed ``name`` so deployed instances clean up its stale record.
-
-        A plugin calls this through the ``tai42_app`` handle when its module loads —
-        in the release where it STOPS declaring the seed itself — so deployed
-        instances clean up the stale record instead of showing it forever. The
-        startup/reload seed applier deletes the record only while the seed still
-        owns it (its active version wears the shipped-default tag); an
-        operator-edited record under the name is left in place with a visible skip.
-        Declaring a name both seeded and retired raises loudly, in either order."""
+        when absent, a preset already present left untouched. Declaring two seeds
+        under the same ``name`` raises loudly — a silent overwrite could drop one
+        plugin's default under another's."""
         ...
 
     @property
@@ -945,8 +933,8 @@ class AppStates(Protocol):
 
         An additive re-declare (new optional fields, new subject kinds) is applied in
         place; a change that would remove or narrow a field while records exist raises
-        :class:`~tai42_contract.states.NonAdditiveRedeclareError` pointing at the guarded
-        ``migrate`` door, and removing a subject kind still present in records raises
+        :class:`~tai42_contract.states.NonAdditiveRedeclareError` (erase the records
+        first), and removing a subject kind still present in records raises
         :class:`~tai42_contract.states.DeclarationInUseError`. Never a silent overwrite."""
         ...
 
@@ -958,33 +946,6 @@ class AppStates(Protocol):
 
     async def stats(self, name: str) -> dict[str, Any]:
         """Counts for a state — records, subjects by kind, consumers — for the listing."""
-        ...
-
-    async def migrate(
-        self,
-        name: str,
-        new_schema: dict[str, Any],
-        *,
-        origin: WriteOrigin,
-        transform_expr: str | None = None,
-        confirm_drop: bool = False,
-        resolutions: list[dict[str, Any]] | None = None,
-    ) -> None:
-        """Migrate a state to ``new_schema``, converting every record in one transaction.
-
-        A narrowing change requires exactly one of ``transform_expr`` (a jq applied to
-        each record), ``resolutions`` (per-record fixes) or ``confirm_drop`` (drop the
-        removed fields); supplying none raises
-        :class:`~tai42_contract.states.NarrowingRequiresConfirmationError`. A record that
-        will not validate under ``new_schema`` aborts the WHOLE migrate —
-        :class:`~tai42_contract.states.MigrationConversionError`, nothing committed.
-        Records one ``state_writes`` row per converted subject (whole-document paths)
-        under the completed ``origin``, inside the migration transaction."""
-        ...
-
-    async def preview_migrate(self, name: str, new_schema: dict[str, Any]) -> dict[str, Any]:
-        """Dry-run a migrate to ``new_schema``: the narrowing verdict and the records
-        that would fail, writing nothing."""
         ...
 
     # --- Modules ---
@@ -1036,22 +997,6 @@ class AppStates(Protocol):
 
     async def unmount(self, state: str, module: str) -> None:
         """Remove a mount and recompose the state's effective schema."""
-        ...
-
-    # --- Bulk import (backup restore + the transfer tool) ---
-    async def import_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
-        """Import subject-alias rows for ``state`` verbatim. Aliases are identity rows,
-        not writes, so no ``state_writes`` row is recorded; ``origin`` is accepted for
-        call-shape uniformity with the rest of the bulk-import trio and is unused."""
-        ...
-
-    async def import_applied_ops(self, rows: Sequence[dict[str, Any]]) -> None:
-        """Import applied-op ledger rows verbatim (the idempotency keys carry no subject)."""
-        ...
-
-    async def import_records(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
-        """Import record rows for ``state`` under the completed origin, validating each
-        document against the effective schema."""
         ...
 
     # --- Records ---
@@ -1161,14 +1106,8 @@ class AppStates(Protocol):
         """Declare a platform module document the platform seeds at import time.
 
         A plugin calls this through the ``tai42_app`` handle when its module loads. The
-        startup/reload seed applier creates it when absent and upgrades it when the
-        shipped default drifts, never touching an operator edit. Declaring two seeds
-        under one name raises loudly."""
-        ...
-
-    def register_retired_module_name(self, name: str) -> None:
-        """Declare a retired module-seed ``name`` so deployed instances clean up its stale
-        record. Declaring a name both seeded and retired raises loudly, in either order."""
+        startup/reload seed applier creates it when absent and leaves a module already
+        present untouched. Declaring two seeds under one name raises loudly."""
         ...
 
     # --- Mount validation ---
