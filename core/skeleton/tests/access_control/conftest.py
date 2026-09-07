@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import fnmatch
+import os
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -34,7 +35,13 @@ from tai42_kit.clients.impl.postgres import Json, PostgresClient
 def _default_database(monkeypatch: pytest.MonkeyPatch) -> None:
     """The policy store resolves its Postgres through the registry; these offline
     tests fake the transport, so they model a configured deployment with the default
-    database on. A test wanting it absent deletes the var itself."""
+    database on. A test wanting it absent deletes the var itself.
+
+    Under the real-Postgres integration opt-in (``TAI42_SKELETON_REAL_PG``) this stands
+    down: the store integration layer connects to the operator-provided
+    TAI_DATABASE_DEFAULT_PG_* and a fake password would break the real connection."""
+    if os.environ.get("TAI42_SKELETON_REAL_PG") in ("1", "true", "True"):
+        return
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
 
 

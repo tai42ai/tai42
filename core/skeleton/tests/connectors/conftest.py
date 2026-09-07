@@ -9,6 +9,7 @@ test never bleeds into the next.
 from __future__ import annotations
 
 import base64
+import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -61,7 +62,13 @@ def crypto_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _default_database(monkeypatch: pytest.MonkeyPatch) -> None:
     """The connector store resolves its durable Postgres through the registry; these
     offline tests fake the transport, so they model a configured deployment with the
-    default database on. A test wanting it absent deletes the var itself."""
+    default database on. A test wanting it absent deletes the var itself.
+
+    Under the real-Postgres integration opt-in (``TAI42_SKELETON_REAL_PG``) this stands
+    down: the store integration layer connects to the operator-provided
+    TAI_DATABASE_DEFAULT_PG_* and a fake password would break the real connection."""
+    if os.environ.get("TAI42_SKELETON_REAL_PG") in ("1", "true", "True"):
+        return
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
 
 
