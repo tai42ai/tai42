@@ -3,7 +3,7 @@
 The kit owns the runner (:mod:`tai42_kit.db`) and the central database registry;
 this package owns the skeleton's integration: chain discovery for the skeleton and
 installed plugins (:mod:`.discovery`), the boot-time schema gate every schema-owning
-feature and plugin shares (:mod:`.boot_gate`), and and the fleet-wide advisory lock a
+feature and plugin shares (:mod:`.boot_gate`), and the fleet-wide advisory lock a
 read-then-write takes to stay atomic across processes (:mod:`.locks`).
 """
 
