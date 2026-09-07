@@ -19,14 +19,22 @@ from tai42_skeleton.operations import operation, operation_metadata_of, register
 calls: list[tuple[str, str]] = []
 
 
-@operation(summary="Echo a mark through a fenced route", tags=["tools"])
+@operation(
+    summary="Echo a mark through a fenced route",
+    tags=["tools"],
+    no_body_reason="test fixture: response body not under test",
+)
 async def exec_probe_fenced(target: str, mark: str = "") -> str:
     """Echo ``target``/``mark``; reached only on an allow."""
     calls.append(("fenced", mark))
     return f"fenced:{target}:{mark}"
 
 
-@operation(summary="Echo a mark through a grantable read route", tags=["tools"])
+@operation(
+    summary="Echo a mark through a grantable read route",
+    tags=["tools"],
+    no_body_reason="test fixture: response body not under test",
+)
 async def exec_probe_read(mark: str = "") -> str:
     """Echo ``mark``; reached only on an allow."""
     calls.append(("read", mark))

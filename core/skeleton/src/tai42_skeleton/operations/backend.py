@@ -29,6 +29,7 @@ from tai42_skeleton.app.bus import FleetResult, LastOp, WorkerKind, WorkerState,
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.operations import BadRequestError, operation
 from tai42_skeleton.operations._broadcast import broadcast
+from tai42_skeleton.operations.response_models_group_c import BackendInfo
 
 
 class ReloadConfig(BaseModel):
@@ -63,7 +64,7 @@ class WorkerListing(BaseModel):
     workers: list[WorkerListingRow]
 
 
-@operation(summary="Get the backend identity", tags=["backend"])
+@operation(summary="Get the backend identity", tags=["backend"], response_model=BackendInfo)
 async def backend_info() -> dict:
     backend = tai42_app.backends.backend
     if backend is None:

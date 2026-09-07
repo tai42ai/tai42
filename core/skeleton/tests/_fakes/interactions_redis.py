@@ -389,9 +389,10 @@ class FakeRedis:
 
     # -- direct (non-pipeline) async surface ---------------------------------
 
-    async def xrange(self, key) -> list[tuple[str, dict]]:
+    async def xrange(self, key, count=None) -> list[tuple[str, dict]]:
         self._expired(key)
-        return list(self._streams.get(key, []))
+        entries = list(self._streams.get(key, []))
+        return entries[:count] if count is not None else entries
 
     async def xrevrange(self, key, count=None) -> list[tuple[str, dict]]:
         entries = list(reversed(self._streams.get(key, [])))

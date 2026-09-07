@@ -122,6 +122,7 @@ list_studio_plugins = register_operation_route(
     summary="Serve a studio plugin asset",
     tags=["plugins"],
     response_model=None,
+    no_body_reason="Studio plugin asset: raw bytes",
     authed=False,
     declared=DeclaredRouteMetadata(
         reload_gated=False,
@@ -223,6 +224,7 @@ def _serve_static(dist_root: Path, rel: str, target: Path) -> Response:
     summary="Serve the studio SPA (history fallback + static files)",
     tags=["plugins"],
     response_model=None,
+    no_body_reason="Studio SPA history fallback + static files",
     authed=False,
 )
 async def serve_spa(request: Request) -> Response:

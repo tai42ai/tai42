@@ -9,9 +9,10 @@ Routes (all AUTHED), prefixed ``/api/connectors``:
 - ``DELETE /connections/{id}``                 — disconnect.
 - ``POST   /connections/{id}/reconnect``       — re-run the OAuth flow.
 - ``PATCH  /connections/{id}/sub-services``    — toggle enabled sub-services.
+- ``POST   /tokens/reencrypt``                 — re-encrypt all token blobs under the current KEK.
 - ``POST   /oauth/complete``                   — finalize a callback (code + signed state).
 
-The first seven doors are thin adapters over the operations in
+The first eight doors are thin adapters over the operations in
 ``tai42_skeleton.operations.connectors`` — no connector logic lives here. Each
 mutating door's body is parsed and validated at the HTTP edge into the operation's
 flat arguments (producing an explicit 400 surface), and the
@@ -34,11 +35,13 @@ secrets — only the stored, non-secret record fields.
 from __future__ import annotations
 
 from json import JSONDecodeError
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, RootModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import FanoutSummary
 from tai42_contract.connectors.models import (
     PatchSubServicesRequest,
     StartConnectRequest,
@@ -61,6 +64,7 @@ from tai42_skeleton.operations.connectors import list_connections as _list_conne
 from tai42_skeleton.operations.connectors import list_connector_providers as _list_connector_providers_op
 from tai42_skeleton.operations.connectors import patch_sub_services as _patch_sub_services_op
 from tai42_skeleton.operations.connectors import reconnect as _reconnect_op
+from tai42_skeleton.operations.connectors import reencrypt_connector_tokens as _reencrypt_connector_tokens_op
 from tai42_skeleton.operations.connectors import start_connect as _start_connect_op
 
 
@@ -75,6 +79,53 @@ class OAuthComplete(BaseModel):
     state: str | None = None
     code: str | None = None
     error: str | None = None
+
+
+class OAuthNotConfigured(BaseModel):
+    """No connector store configured — the flow cannot complete (served 400)."""
+
+    kind: Literal["not_configured"]
+
+
+class OAuthCancelled(BaseModel):
+    """The provider reported the user cancelled or denied the grant (served 200)."""
+
+    kind: Literal["cancelled"]
+    message: str
+
+
+class OAuthFailed(BaseModel):
+    """A post-exchange completion failure — ``reason`` is the failure class name
+    (invalid state, alias collision, CAS miss, removed provider). Served 400."""
+
+    kind: Literal["failed"]
+    reason: str
+
+
+class OAuthSuccess(BaseModel):
+    """A completed connection (served 200): the new connection's id, the same-origin
+    ``return_url`` to send the operator back to, and the fleet reload fan-out."""
+
+    kind: Literal["success"]
+    connection_id: str
+    return_url: str
+    fanout: FanoutSummary
+
+
+class OAuthCompletionResult(
+    RootModel[
+        Annotated[
+            OAuthNotConfigured | OAuthCancelled | OAuthFailed | OAuthSuccess,
+            Field(discriminator="kind"),
+        ]
+    ]
+):
+    """The discriminated ``/oauth/complete`` body. The door serves ALL four variants
+    through the ``{"data": {"kind": ...}}`` envelope (never the ``{"error": ...}``
+    shape): ``cancelled``/``success`` answer 200, ``not_configured``/``failed``
+    answer 400 with the same discriminated body, so the union describes the route's
+    whole success surface honestly. The HTTP status is a router behavior, not part of
+    this body model."""
 
 
 def _error(message: str, status_code: int) -> JSONResponse:
@@ -230,6 +281,14 @@ patch_sub_services = register_operation_route(
     action="write",
 )
 
+reencrypt_connector_tokens = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_reencrypt_connector_tokens_op),
+    path="/api/connectors/tokens/reencrypt",
+    method="POST",
+    action="fenced",
+)
+
 
 # -- OAuth completion (native: discriminated body + load-bearing status) ------
 
@@ -240,7 +299,7 @@ patch_sub_services = register_operation_route(
     summary="Complete an OAuth connection flow",
     tags=["connectors"],
     request_model=OAuthComplete,
-    response_model=None,
+    response_model=OAuthCompletionResult,
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=True,

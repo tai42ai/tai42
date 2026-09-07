@@ -14,6 +14,7 @@ budget both run unbounded.
 """
 
 import asyncio
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -92,14 +93,28 @@ async def turn_budget() -> AsyncIterator[None]:
 
 
 class TurnBudgetMiddleware(Middleware):
-    """Arm the synchronous turn budget at the MCP session tool-call edge.
+    """A retained, standalone FastMCP middleware that arms the synchronous turn budget
+    around a ``tools/call``. NOT registered by the platform.
 
-    An MCP ``tools/call`` dispatches through the FastMCP middleware chain to
-    ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam, so this door arms
-    the budget itself. Added INNERMOST (after the authz/reload middleware) so a denied
-    or reload-rejected call never opens a window; the shared ContextVar guard keeps a
-    nested in-process re-dispatch (a tool body reaching ``run_tool``) from opening a
-    second one."""
+    The live MCP ``tools/call`` edge arms the run lifecycle — the turn budget included —
+    through ``DispatchScopeMiddleware`` (:mod:`tai42_skeleton.tools.dispatch_scope`),
+    which enters the same shared :func:`turn_budget` seam. This class remains a public
+    component that budgets a ``call_next`` on its own, but nothing in the platform wires
+    it into a server. Scheduled for removal in the next skeleton major.
+
+    ``on_call_tool`` stamps the run attribution and arms :func:`turn_budget` around
+    ``call_next``; the shared ContextVar guard keeps a nested in-process re-dispatch
+    from opening a second window."""
+
+    def __init__(self) -> None:
+        warnings.warn(
+            "TurnBudgetMiddleware is not registered by the platform; the MCP tools/call "
+            "edge lifecycle is handled by DispatchScopeMiddleware "
+            "(tai42_skeleton.tools.dispatch_scope). Scheduled for removal in the next "
+            "skeleton major.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     async def on_call_tool(
         self,

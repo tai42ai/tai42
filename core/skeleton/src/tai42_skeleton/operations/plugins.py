@@ -12,10 +12,16 @@ than a fabricated empty list.
 from __future__ import annotations
 
 from tai42_skeleton.operations import OperationFailed, operation
+from tai42_skeleton.operations.response_models_group_c import StudioPluginListing
 from tai42_skeleton.plugins.registry import StudioPluginError, current_registry
 
 
-@operation(summary="List the registered studio plugins", tags=["plugins"], errors=[OperationFailed])
+@operation(
+    summary="List the registered studio plugins",
+    tags=["plugins"],
+    errors=[OperationFailed],
+    response_model=StudioPluginListing,
+)
 async def list_studio_plugins() -> list:
     try:
         registry = current_registry()

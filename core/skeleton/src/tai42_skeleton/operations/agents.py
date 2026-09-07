@@ -19,6 +19,7 @@ from tai42_contract.agent import Agent
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations import operation
+from tai42_skeleton.operations.response_models_group_c import AgentListing
 
 
 def _agents_registry() -> dict[str, Agent]:
@@ -41,13 +42,13 @@ def _agent_view(name: str, agent: Agent) -> dict[str, Any]:
     }
 
 
-@operation(summary="List every registered agent", tags=["agents"])
+@operation(summary="List every registered agent", tags=["agents"], response_model=AgentListing)
 async def list_agents() -> dict:
     items = [_agent_view(name, agent) for name, agent in _agents_registry().items()]
     return {"items": items, "total": len(items)}
 
 
-@operation(summary="List the spec-runnable (authorable) agents", tags=["agents"])
+@operation(summary="List the spec-runnable (authorable) agents", tags=["agents"], response_model=AgentListing)
 async def list_spec_runnable_agents() -> dict:
     """Only the authorable agents (``spec_runnable`` True) — the compose UI's
     base-agent picker. Filters on the marker, never on a known agent name; an empty

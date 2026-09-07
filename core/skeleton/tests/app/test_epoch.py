@@ -185,6 +185,7 @@ async def test_route_audit_failure_in_rebuild_keeps_old_epoch_serving(monkeypatc
         authed=False,
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
         owner=owner,
         public=True,
     )

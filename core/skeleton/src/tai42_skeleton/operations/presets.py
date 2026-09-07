@@ -36,6 +36,7 @@ from tai42_contract.presets.errors import (
     PresetVersionNotFoundError,
 )
 from tai42_contract.versioning.errors import DocumentVersionNotFoundError
+from tai42_contract.versioning.models import DocumentVersion
 from tai42_kit.db import component_store_configured
 from tai42_kit.utils.data.json_schema_util import (
     InvalidJsonSchemaError,
@@ -56,6 +57,19 @@ from tai42_skeleton.operations import (
 )
 from tai42_skeleton.operations._authority import require_admin, resolve_caller
 from tai42_skeleton.operations._broadcast import fleet_fanout, log_non_convergence, snapshot_membership
+from tai42_skeleton.operations.response_models_group_a import (
+    DocumentVersionList,
+    PresetCreateResult,
+    PresetDeleteResult,
+    PresetDetailView,
+    PresetRecordList,
+    PresetRefereesResult,
+    PresetRenameResult,
+    PresetRollbackResult,
+    PresetValidateVerdict,
+    PresetVersionSaveResult,
+    PresetVersionTagsResult,
+)
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
 logger = logging.getLogger(__name__)
@@ -786,7 +800,7 @@ def _union_census(
 # -- list --------------------------------------------------------------------
 
 
-@operation(summary="List presets", tags=["presets"])
+@operation(summary="List presets", tags=["presets"], response_model=PresetRecordList)
 async def list_presets() -> list[dict[str, Any]]:
     """One row per store-backed record (the presets plus the ``conflicted``
     quarantined ones) — the population the presets management table shows."""
@@ -1033,6 +1047,7 @@ async def _create_preset_core(
     reload_gated=True,
     errors=[BadRequestError, ConflictError, NotSupportedError],
     request_model=PresetCreate,
+    response_model=PresetCreateResult,
 )
 async def create_preset(
     name: str,
@@ -1106,7 +1121,7 @@ async def _create_response(
 # -- get one -----------------------------------------------------------------
 
 
-@operation(summary="Get a preset", tags=["presets"], errors=[NotFoundError])
+@operation(summary="Get a preset", tags=["presets"], errors=[NotFoundError], response_model=PresetDetailView)
 async def get_preset(name: str) -> dict[str, Any]:
     """The store record + the active ``fixed_kwargs`` + the ``uses`` / ``used_by``
     cross-references; 404 for an absent name."""
@@ -1130,7 +1145,12 @@ async def get_preset(name: str) -> dict[str, Any]:
 # -- versions ----------------------------------------------------------------
 
 
-@operation(summary="List a preset's versions", tags=["presets"], errors=[NotFoundError])
+@operation(
+    summary="List a preset's versions",
+    tags=["presets"],
+    errors=[NotFoundError],
+    response_model=DocumentVersionList,
+)
 async def list_versions(name: str) -> list[dict[str, Any]]:
     """The full version history for a preset; 404 for an absent name."""
     try:
@@ -1140,7 +1160,12 @@ async def list_versions(name: str) -> list[dict[str, Any]]:
     return [v.model_dump() for v in versions]
 
 
-@operation(summary="Get a specific preset version", tags=["presets"], errors=[BadRequestError, NotFoundError])
+@operation(
+    summary="Get a specific preset version",
+    tags=["presets"],
+    errors=[BadRequestError, NotFoundError],
+    response_model=DocumentVersion,
+)
 async def get_version(name: str, version: str) -> dict[str, Any]:
     """One version of a preset by its integer version number; a non-integer segment
     is a 400 and an unknown version a 404."""
@@ -1306,6 +1331,7 @@ async def _save_version_core(
     reload_gated=True,
     errors=[BadRequestError, ConflictError, NotFoundError],
     request_model=PresetVersionSave,
+    response_model=PresetVersionSaveResult,
 )
 async def save_version(
     name: str,
@@ -1356,6 +1382,7 @@ def _save_version_response(row: Any, report: FleetResult) -> dict[str, Any]:
     reload_gated=True,
     errors=[BadRequestError, ConflictError, NotFoundError],
     request_model=PresetRollback,
+    response_model=PresetRollbackResult,
 )
 async def rollback_preset(name: str, version: int) -> dict[str, Any]:
     """Re-point the active version then reload and fan out; 409 if the record is
@@ -1439,6 +1466,7 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
     reload_gated=True,
     errors=[BadRequestError, ConflictError, NotFoundError],
     request_model=PresetRename,
+    response_model=PresetRenameResult,
 )
 async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     """Rename a preset, ATOMIC (a preset's name IS its live tool name). Runs create's
@@ -1589,8 +1617,10 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
 @operation(
     summary="Delete a preset",
     tags=["presets"],
+    destructive=True,
     reload_gated=True,
     errors=[NotFoundError],
+    response_model=PresetDeleteResult,
 )
 async def delete_preset(name: str) -> dict[str, Any]:
     """Delete a preset. A non-conflicted record is soft-deleted and its base + branch
@@ -1653,7 +1683,12 @@ async def delete_preset(name: str) -> dict[str, Any]:
 # -- referees ----------------------------------------------------------------
 
 
-@operation(summary="List live references to this preset", tags=["presets"], errors=[NotFoundError])
+@operation(
+    summary="List live references to this preset",
+    tags=["presets"],
+    errors=[NotFoundError],
+    response_model=PresetRefereesResult,
+)
 async def preset_referees(name: str) -> dict[str, Any]:
     """Every live reference a rename of this preset would strand — the SAME full union
     the rename door blocks on: the OTHER presets whose active body composes it, plus every
@@ -1788,6 +1823,7 @@ async def _verdict_bind_chain(
     tags=["presets"],
     errors=[BadRequestError, NotSupportedError],
     request_model=PresetValidate,
+    response_model=PresetValidateVerdict,
 )
 async def validate_preset(
     name: str,
@@ -1887,6 +1923,7 @@ async def validate_preset(
     destructive=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=PresetVersionTags,
+    response_model=PresetVersionTagsResult,
 )
 async def set_preset_version_tags(name: str, version: str, tags: list[str]) -> dict[str, Any]:
     """Replace one version's ``tags`` annotation. Tags are labels on an immutable

@@ -217,6 +217,19 @@ class RouteMetadata:
     # route, because every other route is matched by Starlette on the decoded path and
     # authz must never reason on a different form than the router.
     raw_path_matched: bool = False
+    # The justification a route with no ``{"data": <model>}`` JSON body declares in
+    # place of a ``response_model`` (mutually exclusive with it — see
+    # :meth:`RouteRegistry.record`). The emitter surfaces it on the None-branch success
+    # response so a bodyless route is a declared, described exception, never a silent
+    # empty ``data``.
+    no_body_reason: str | None = None
+    # Whether the JSON success body is wrapped in the ``{"data": <response_model>}``
+    # envelope (the default) or is the ``response_model``'s schema DIRECTLY at the top
+    # level (a RAW non-enveloped body). An unwrapped route ALWAYS carries a
+    # ``response_model`` — the record guard refuses ``enveloped=False`` with a bare
+    # ``None`` — so the emitter renders its 200 body as the model's ``$ref`` with no
+    # ``data`` wrapper.
+    enveloped: bool = True
 
 
 def _handler_source(func: Callable[..., object]) -> str:
@@ -370,6 +383,8 @@ class RouteRegistry:
         declared: DeclaredRouteMetadata | None = None,
         owner: RouteOwner = CORE_OWNER,
         public: bool = False,
+        no_body_reason: str | None = None,
+        enveloped: bool = True,
     ) -> None:
         """Record one route's metadata.
 
@@ -385,9 +400,34 @@ class RouteRegistry:
             raise ValueError(f"route {'/'.join(methods)} {path} is missing a non-empty summary")
         if not tags:
             raise ValueError(f"route {'/'.join(methods)} {path} is missing at least one tag")
+        if response_model is None:
+            if not enveloped:
+                raise ValueError(
+                    f"route {'/'.join(methods)} {path} declares enveloped=False but no response_model — "
+                    "a raw non-enveloped body still needs a real response_model to describe its schema"
+                )
+            if not (no_body_reason and no_body_reason.strip()):
+                raise ValueError(
+                    f"route {'/'.join(methods)} {path} declares no response_model and no no_body_reason — "
+                    "declare a response model, or pass a non-blank no_body_reason for a route with no JSON body"
+                )
+        elif no_body_reason is not None:
+            raise ValueError(
+                f"route {'/'.join(methods)} {path} passes both a response_model and a no_body_reason — "
+                "a route has a typed body OR is declared no-body, never both"
+            )
         source = _handler_source(handler)
         method_key = tuple(sorted(m.upper() for m in methods))
         resolved_action = _resolve_route_action(action, method_key, path, authed)
+        success_media_types: dict[str, tuple[str, ...]]
+        if enveloped:
+            success_media_types = _success_media_types(source, method_key)
+        else:
+            # An unwrapped route serves a RAW JSON body (its response_model) — the wire
+            # Content-Type is application/json for every method. A download disposition a
+            # JSON-file door sets (the source-derived octet-stream marker) is a delivery
+            # concern, not a second body shape, so the declared JSON body wins over it.
+            success_media_types = dict.fromkeys(method_key, (_JSON_MEDIA_TYPE,))
         if declared is None:
             reload_gated = False
             reads_body = False
@@ -416,11 +456,13 @@ class RouteRegistry:
             error_statuses=error_statuses,
             success_status=success_status,
             additional_success_statuses=additional_success_statuses,
-            success_media_types=_success_media_types(source, method_key),
+            success_media_types=success_media_types,
             action=resolved_action,
             destructive=destructive,
             owner=owner,
             public=public,
+            no_body_reason=no_body_reason,
+            enveloped=enveloped,
         )
         self._record_shape(meta, method_key)
         self._routes[path, method_key] = meta

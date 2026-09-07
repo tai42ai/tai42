@@ -15,11 +15,14 @@ import asyncio
 
 import pytest
 from tai42_contract.interactions import SuspendedInteraction
-from tai42_contract.monitoring import RunAttribution
+from tai42_contract.monitoring import RunAttribution, get_ambient_trace_context
 
 import tai42_skeleton.runs.chokepoint as chokepoint
+from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 from tai42_skeleton.runs.chokepoint import record_outermost_preset_run, resume_origin
 from tai42_skeleton.tools.attribution import run_attribution
+
+from .._fakes.recording_monitoring import RecordingMonitoring
 
 
 class _SpyStore:
@@ -240,3 +243,88 @@ async def test_terminal_write_failure_does_not_mask_a_body_error(wire):
             raise ValueError("body boom")
     assert type(exc_info.value) is ValueError
     assert exc_info.value.__context__ is None
+
+
+# -- trace ROOT opened where none is ambient ----------------------------------
+
+
+@pytest.fixture
+def recording_backend():
+    """Install a recording monitoring backend for the test, then reset so it cannot
+    leak into the next test. Its writer establishes a trace when a root span opens
+    over no active trace — modelling a real backend."""
+    backend = RecordingMonitoring()
+    init_monitoring(backend)
+    try:
+        yield backend
+    finally:
+        reset_monitoring()
+
+
+def _store_on(monkeypatch, store: _SpyStore) -> None:
+    """Force the runs store ON with ``store``, WITHOUT stubbing ``_safe_trace_id`` —
+    so the real ambient probe reads the recording backend and the root-open path runs."""
+    monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
+    monkeypatch.setattr(chokepoint, "get_run_index_store", lambda: store)
+
+
+async def test_direct_registration_opens_a_root_and_stores_its_trace_id(recording_backend, monkeypatch):
+    # A direct (no-ambient) registration: the chokepoint OPENS a root span so the row
+    # gets a trace + deep link, and stores the opened trace's id.
+    store = _SpyStore()
+    _store_on(monkeypatch, store)
+    async with record_outermost_preset_run("wx", 1) as run:
+        run.observe("ok")
+    assert [s["name"] for s in recording_backend.writer.spans] == ["run"]
+    assert recording_backend.writer.spans[0]["kind"].value == "CHAIN"
+    assert store.starts[0]["trace_id"] == "trace-root"
+
+
+async def test_direct_registration_deposits_the_ambient_carrier(recording_backend, monkeypatch):
+    # The root-open ALSO deposits the ambient trace context through the generic carrier,
+    # so a consumer the preset runs (agent/flow) nests under this root instead of
+    # minting a fresh, orphaned trace. Read the carrier from INSIDE the dispatch body.
+    _store_on(monkeypatch, _SpyStore())
+    seen = {}
+    async with record_outermost_preset_run("wx", 1) as run:
+        ctx = get_ambient_trace_context()
+        seen["trace_id"] = ctx.trace_id if ctx is not None else None
+        seen["parent_span_id"] = ctx.parent_span_id if ctx is not None else None
+        run.observe("ok")
+    assert seen["trace_id"] == "trace-root"
+    assert seen["parent_span_id"] == recording_backend.writer.next_span_id
+    # The carrier deposit is unwound once the dispatch ends — never leaked.
+    assert get_ambient_trace_context() is None
+
+
+async def test_ambient_root_present_nests_without_opening_a_second_root(recording_backend, monkeypatch):
+    # A root already exists (a hook/flow/agent parent opened it): the chokepoint NESTS,
+    # opening NO second root and stamping the row with the ambient trace id.
+    recording_backend.writer.active_trace_id = "trace-ambient"
+    store = _SpyStore()
+    _store_on(monkeypatch, store)
+    async with record_outermost_preset_run("wx", 1) as run:
+        run.observe("ok")
+    assert recording_backend.writer.spans == []
+    assert store.starts[0]["trace_id"] == "trace-ambient"
+
+
+async def test_noop_backend_leaves_trace_id_null(monkeypatch):
+    # No recording backend (the noop default): the root-open yields no trace id, so the
+    # row's trace_id is legitimately NULL — the completeness gate excludes this case.
+    reset_monitoring()
+    store = _SpyStore()
+    _store_on(monkeypatch, store)
+    async with record_outermost_preset_run("wx", 1) as run:
+        run.observe("ok")
+    assert store.starts[0]["trace_id"] is None
+
+
+async def test_mcp_wire_park_records_parked(wire):
+    # The MCP edge recognizes a park from the SERIALIZED wire marker (no sentinel type
+    # in hand) and records it as ``parked`` with the marker's interaction id.
+    store = wire(store=_SpyStore())
+    async with record_outermost_preset_run("wx", 1) as run:
+        run.observe_park("i-wire")
+    assert store.terminals[0]["outcome"] == "parked"
+    assert store.terminals[0]["interaction_id"] == "i-wire"

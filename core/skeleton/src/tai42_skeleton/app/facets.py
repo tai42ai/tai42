@@ -394,6 +394,8 @@ class HttpFacet(_Facet):
         destructive: bool = False,
         action: RouteAction | None = None,
         declared: DeclaredRouteMetadata | None = None,
+        no_body_reason: str | None = None,
+        enveloped: bool = True,
     ) -> Callable[[Callable[[Request], Awaitable[Response]]], Callable[[Request], Awaitable[Response]]]:
         return self._app._http_surface.custom_route(
             path,
@@ -409,6 +411,8 @@ class HttpFacet(_Facet):
             destructive=destructive,
             action=action,
             declared=declared,
+            no_body_reason=no_body_reason,
+            enveloped=enveloped,
         )
 
     def use_raw_path_key(self, path_prefix: str) -> None:

@@ -46,16 +46,23 @@ from typing import Any, cast
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import ApplyResponse, OpaqueJson
 from tai42_kit.utils.data import load_manifest
 from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
+from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.manifest import AgentsConfig, TaiMCPConfig, ToolsConfig
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response, broadcast, translate_orphan_env_write
+from tai42_skeleton.operations.response_models_group_a import (
+    McpEnvRefList,
+    McpStatusSnapshot,
+    PreservedManifestView,
+)
 
 # The env var the operator's "treat these env keys as secret" marks live under — a
 # comma-separated key-name list backing ``EnvSecretMarksSettings.secret_keys``. The
@@ -182,7 +189,11 @@ def _preserved_manifest_view() -> dict:
     return {"mcp": preserved.get("mcp", []), "user_tools": user_tools}
 
 
-@operation(summary="Read the PRESERVED manifest MCP section and user tools", tags=["manifest"])
+@operation(
+    summary="Read the PRESERVED manifest MCP section and user tools",
+    tags=["manifest"],
+    response_model=PreservedManifestView,
+)
 async def get_manifest() -> dict:
     """Return the MCP section and user tools of the PRESERVED persisted manifest —
     ``!ENV ${KEY}`` markers kept intact, so a secret leaf is its placeholder marker,
@@ -195,7 +206,11 @@ async def get_manifest() -> dict:
     return _preserved_manifest_view()
 
 
-@operation(summary="Read the PRESERVED manifest (markers intact) MCP section and user tools", tags=["manifest"])
+@operation(
+    summary="Read the PRESERVED manifest (markers intact) MCP section and user tools",
+    tags=["manifest"],
+    response_model=PreservedManifestView,
+)
 async def get_manifest_preserved() -> dict:
     """Return the PRESERVED persisted manifest's MCP section + user tools with every
     ``!ENV ${KEY}`` marker intact (no secret is resolved) — the source the Studio McpTab
@@ -205,7 +220,11 @@ async def get_manifest_preserved() -> dict:
     return _preserved_manifest_view()
 
 
-@operation(summary="List the manifest MCP section's !ENV marker refs (names + set/unset only)", tags=["manifest"])
+@operation(
+    summary="List the manifest MCP section's !ENV marker refs (names + set/unset only)",
+    tags=["manifest"],
+    response_model=McpEnvRefList,
+)
 async def get_mcp_env_refs() -> list[dict[str, Any]]:
     """The ``!ENV ${VAR[:default]}`` markers carried by the manifest's MCP section —
     NAMES and BOOLEANS only, never values.
@@ -231,17 +250,22 @@ async def get_mcp_env_refs() -> list[dict[str, Any]]:
     ]
 
 
-@operation(summary="Get the JSON schema for one MCP-config entry", tags=["manifest"])
+@operation(summary="Get the JSON schema for one MCP-config entry", tags=["manifest"], response_model=OpaqueJson)
 async def get_mcp_config_schema() -> dict:
     return TaiMCPConfig.model_json_schema()
 
 
-@operation(summary="Snapshot the live MCP binding status", tags=["manifest"])
+@operation(summary="Snapshot the live MCP binding status", tags=["manifest"], response_model=McpStatusSnapshot)
 async def get_mcp_status() -> dict:
     return tai42_app.admin.live_mcp_status()
 
 
-@operation(summary="List MCP servers skipped by the viability check", tags=["manifest"], request_model=FailedMcpsQuery)
+@operation(
+    summary="List MCP servers skipped by the viability check",
+    tags=["manifest"],
+    request_model=FailedMcpsQuery,
+    response_model=FleetResult,
+)
 async def list_failed_mcps(targets: list[str] | None = None) -> Any:
     """List MCP servers skipped due to a failed viability check (server down or
     slow at boot or last reload). Use ``reload_mcp`` to re-attach one once healthy.
@@ -273,6 +297,7 @@ async def list_failed_mcps(targets: list[str] | None = None) -> Any:
     reload_gated=True,
     errors=[BadRequestError],
     request_model=McpConfigUpdate,
+    response_model=ApplyResponse,
 )
 async def set_mcp_config(mcp: list[Any]) -> dict:
     # Replace the manifest's ``mcp`` section through the pipeline: the mutator edits
@@ -390,6 +415,7 @@ async def _apply_entry_remove(section: str, title: str) -> dict:
     reload_gated=True,
     errors=[BadRequestError],
     request_model=McpEntriesAdd,
+    response_model=ApplyResponse,
 )
 async def add_mcp_entries(entries: list[Any], replace: bool = False) -> dict:
     return await _apply_entries_add("mcp", entries, replace)
@@ -401,6 +427,7 @@ async def add_mcp_entries(entries: list[Any], replace: bool = False) -> dict:
     destructive=True,
     reload_gated=True,
     errors=[BadRequestError, NotFoundError],
+    response_model=ApplyResponse,
 )
 async def remove_mcp_entry(title: str) -> dict:
     return await _apply_entry_remove("mcp", title)
@@ -413,6 +440,7 @@ async def remove_mcp_entry(title: str) -> dict:
     reload_gated=True,
     errors=[BadRequestError],
     request_model=ToolsEntriesAdd,
+    response_model=ApplyResponse,
 )
 async def add_tools_entries(entries: list[Any], replace: bool = False) -> dict:
     return await _apply_entries_add("tools", entries, replace)
@@ -424,6 +452,7 @@ async def add_tools_entries(entries: list[Any], replace: bool = False) -> dict:
     destructive=True,
     reload_gated=True,
     errors=[BadRequestError, NotFoundError],
+    response_model=ApplyResponse,
 )
 async def remove_tools_entry(title: str) -> dict:
     return await _apply_entry_remove("tools", title)
@@ -436,6 +465,7 @@ async def remove_tools_entry(title: str) -> dict:
     reload_gated=True,
     errors=[BadRequestError],
     request_model=AgentsEntriesAdd,
+    response_model=ApplyResponse,
 )
 async def add_agents_entries(entries: list[Any], replace: bool = False) -> dict:
     return await _apply_entries_add("agents", entries, replace)
@@ -447,6 +477,7 @@ async def add_agents_entries(entries: list[Any], replace: bool = False) -> dict:
     destructive=True,
     reload_gated=True,
     errors=[BadRequestError, NotFoundError],
+    response_model=ApplyResponse,
 )
 async def remove_agents_entry(title: str) -> dict:
     return await _apply_entry_remove("agents", title)
@@ -477,6 +508,7 @@ def _edit_name_list(current: list[Any], add: list[str], remove: list[str], field
     reload_gated=True,
     errors=[BadRequestError, NotFoundError],
     request_model=ApiToolsListsUpdate,
+    response_model=ApplyResponse,
 )
 async def update_api_tools(
     include_add: list[str] | None = None,
@@ -622,6 +654,7 @@ def _pointer_index(node: list[Any], segment: str, segments: list[str]) -> int:
     reload_gated=True,
     errors=[BadRequestError],
     request_model=SetMcpSecretEnv,
+    response_model=ApplyResponse,
 )
 async def set_mcp_secret_env(
     value: str, manifest_pointer: str, key: str | None = None, key_hint: str | None = None
@@ -689,6 +722,7 @@ async def set_mcp_secret_env(
     reload_gated=True,
     errors=[NotFoundError],
     request_model=McpTargets,
+    response_model=FleetResult,
 )
 async def reload_mcp(title: str, targets: list[str] | None = None) -> Any:
     # Re-probe a single MCP server by title (unknown title → loud 404), applied on
@@ -715,6 +749,7 @@ async def reload_mcp(title: str, targets: list[str] | None = None) -> Any:
     authority_changing=True,
     errors=[BadRequestError],
     request_model=ManifestReplace,
+    response_model=ApplyResponse,
 )
 async def update_manifest(manifest_text: str) -> Any:
     """Replace the WHOLE manifest fleet-wide and persist it.
@@ -753,6 +788,7 @@ async def update_manifest(manifest_text: str) -> Any:
     destructive=True,
     reload_gated=True,
     request_model=McpTargets,
+    response_model=FleetResult,
 )
 async def reload_failed_mcps(targets: list[str] | None = None) -> Any:
     """Re-probe every MCP server currently in the failed list and attach the ones now
@@ -773,6 +809,7 @@ async def reload_failed_mcps(targets: list[str] | None = None) -> Any:
     destructive=True,
     reload_gated=True,
     request_model=McpTargets,
+    response_model=FleetResult,
 )
 async def deregister_mcp(title: str, targets: list[str] | None = None) -> Any:
     """Detach a single MCP server's tools (by manifest title) without touching the

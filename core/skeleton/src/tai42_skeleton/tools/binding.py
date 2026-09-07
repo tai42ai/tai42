@@ -37,29 +37,20 @@ from tai42_contract.interactions import (
 from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
 from tai42_contract.secrets import SecretValue, contains_secrets, mask_secrets, unwrap_secrets
 from tai42_contract.tools import (
-    ToolInvocation,
     ToolRefsExtractor,
     ToolRetryPolicy,
-    reset_current_tool_invocation,
-    set_current_tool_invocation,
 )
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_config, extension_name, factory_accepts_config
-from tai42_skeleton.runs.chokepoint import record_outermost_preset_run
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func
-from tai42_skeleton.tools.attribution import (
-    preset_attribution_armed,
-    stamp_preset_attribution,
-    stamp_run_attribution,
-)
 from tai42_skeleton.tools.context_bridge import bridge_context
+from tai42_skeleton.tools.dispatch_scope import dispatch_scope
 from tai42_skeleton.tools.retry import dispatch_with_retry
 from tai42_skeleton.tools.reveal_gate import InprocessRevealGate, inprocess_reveal_gate, note_secret_reveal
 from tai42_skeleton.tools.tier import enforce_run_tier
-from tai42_skeleton.tools.turn_budget import turn_budget
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -456,6 +447,21 @@ class _SecretRevealingTool(FunctionTool):
                 gate.has_payload = True
                 return super().convert_result(mask_secrets(raw_value))
             return super().convert_result(raw_value)
+        if isinstance(raw_value, SuspendedInteraction):
+            # Unarmed MCP edge: an async ask_user through this tool (or a preset over it)
+            # parked the caller and returned this sentinel. FastMCP's own serialization
+            # would FLATTEN the pydantic model into ``structured_content`` (its plain
+            # fields), dropping the reserved marker key a dispatch edge recognizes a park
+            # by — so the park would record ``success``. Emit the same reserved marker the
+            # in-graph seam commits, as the result's ``structured_content``, so
+            # ``DispatchScopeMiddleware`` records the park by its interaction id at this
+            # edge exactly as the in-process seam records it by the sentinel's TYPE. Built
+            # as the ToolResult's structured content directly (never routed through the
+            # tool's output_schema) since the marker is a control signal, not the tool's
+            # declared output — it must ride the wire top-level, unwrapped, whatever the
+            # base tool's return schema.
+            marker = suspended_interaction_marker(raw_value.interaction_id, raw_value.expiry_at, raw_value.resume_owner)
+            return ToolResult(structured_content=marker)
         if contains_secrets(raw_value):
             # Unarmed MCP edge: this reveal exposes a secret into ``structured_content``.
             # Flag it so the preset output-schema guard redacts any validation failure
@@ -615,11 +621,14 @@ class ToolBinding:
         A dispatch under a bound execution identity is authorized against it first, on the
         arguments actually about to be fired (:meth:`_authorize_execution_dispatch`).
 
-        The shared execution seam every in-process door flows through, so the synchronous
-        turn budget is armed here ONCE: :func:`turn_budget` guards a live caller's held
-        connection and its ContextVar keeps a nested re-dispatch from opening a fresh
-        window; a detached run (a background submit, a hook/trigger fire, a backend-worker
-        execution) runs unbounded."""
+        The shared in-process execution seam every door flows through: it enters the
+        shared :func:`dispatch_scope`, which arms the run lifecycle (the ambient
+        invoked-tool deposit, the run-attribution stamp, the turn budget, and — for the
+        OUTERMOST registered-preset dispatch — the preset version stamp and the
+        runs-index record that opens the run's trace root). The MCP ``tools/call`` edge
+        enters the SAME scope via ``DispatchScopeMiddleware``. Retry and bound-identity
+        authorization live in :meth:`_dispatch_tool`, so a retried call is one logical
+        dispatch inside one scope."""
         # Run-time tier fence: a ``fenced``/``secret`` tool — or a preset/branch over one —
         # runs only for an administrator. Enforced here at the shared in-process seam every
         # door flows through, before argument work or the invoked-tool deposit, so a refused
@@ -633,58 +642,24 @@ class ToolBinding:
         # own defaults apply instead of a sentinel failing validation. No external
         # caller can produce _UNSET, so this is a no-op for ordinary arguments.
         arguments = {name: value for name, value in arguments.items() if value is not _UNSET}
-        # Ambient invoked-tool seam: deposit this door's tool for the span of its
-        # execution and restore in ``finally`` (token discipline) — a nested
-        # re-dispatch re-sets for the inner tool and restores the outer name on exit.
-        # The reset lives in ``finally``, so a raising tool still propagates its error
-        # while the deposit is unwound.
-        invocation_token = set_current_tool_invocation(ToolInvocation(tool_name=key))
+        async with dispatch_scope(self._app, key) as scope:
+            result = await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+            scope.observe(result)
+            return result
+
+    async def resolve_retry_policy(self, key: str) -> ToolRetryPolicy | None:
+        """The declared retry policy governing a dispatch of ``key``, resolved from the
+        live tool, or ``None``.
+
+        The MCP ``tools/call`` edge has no resolved target in hand (the in-process seam
+        reads the policy off the target :meth:`_dispatch_tool` already resolved), so this
+        resolves the tool and reads its policy for that edge. An unknown name yields
+        ``None`` — the edge's own dispatch surfaces the not-found, never this lookup."""
         try:
-            # Attribution WRAPS the drive together with the turn-budget arming (the same
-            # door set), so the tool work and its spans run INSIDE the run's attribution
-            # scope; it no-ops when no ambient attribution is deposited. When ``key`` is a
-            # REGISTERED preset, its identity + active version are layered onto the trace
-            # here (outermost preset dispatch only — a nested sub-preset re-dispatch sees
-            # the armed guard and adds nothing). A draft/inline run is not a registered
-            # preset, so it stays unstamped.
-            with stamp_run_attribution():
-                async with turn_budget():
-                    return await self._dispatch_attributed_by_preset(key, arguments, offload_sync=offload_sync)
-        finally:
-            reset_current_tool_invocation(invocation_token)
-
-    async def _dispatch_attributed_by_preset(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
-        """Dispatch ``key``, layering a registered preset's version-attribution around it.
-
-        When ``key`` names a registered preset with a retained active version, wrap the
-        dispatch in :func:`stamp_preset_attribution` so the run's trace carries the
-        ``preset:``/``preset-v:`` tags and root version; otherwise dispatch bare. The
-        armed-guard inside the stamp keeps a nested sub-preset from restamping.
-
-        The OUTERMOST registered-preset dispatch is also the platform-side runs-index
-        write point: exactly one enumerable ``run_index`` row is recorded around it
-        (start + terminal outcome) via :func:`record_outermost_preset_run`, aligning a
-        row with the run's trace. The outermost check reads the SAME armed guard the
-        stamp uses (before it arms), so a nested sub-preset dispatch — like the trace
-        stamp — writes no second row. A non-preset/draft key (``version is None``) is
-        never a run row: a raw tool call is infrastructure plumbing that carries no
-        preset identity or version and would explode the index with nested tool calls;
-        its execution belongs to the tool-run surface, not this per-run enumeration.
-        The record is fail-safe (a store outage never breaks the dispatch)."""
-        manager = self._app.preset_manager
-        version = manager.active_version(key) if manager.is_registered(key) else None
-        if version is None:
-            return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
-        # Read the outermost state BEFORE the stamp arms it: True here means an ancestor
-        # preset dispatch already owns this run's row.
-        outermost = not preset_attribution_armed()
-        with stamp_preset_attribution(key, version):
-            if not outermost:
-                return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
-            async with record_outermost_preset_run(key, version) as run:
-                result = await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
-                run.observe(result)
-                return result
+            mcp_tool = await self._resolve_run_target(key)
+        except UnknownToolError:
+            return None
+        return self._retry_policy_for(key, mcp_tool)
 
     def _retry_policy_for(self, key: str, mcp_tool: Tool) -> ToolRetryPolicy | None:
         """The declared retry policy governing a dispatch of ``key``, or ``None``.

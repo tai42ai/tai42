@@ -65,7 +65,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import Request
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
@@ -147,12 +147,22 @@ async def _read_bounded_body(request: Request, cap: int) -> bytes:
 # -- Inbound event ingress (PUBLIC, native) ----------------------------------
 
 
+class WebhookIngressResult(BaseModel):
+    """The webhook ingress door's raw (non-enveloped) 200 body: the delivery's
+    disposition (``accepted`` for a dispatched delivery, ``already_seen`` for an
+    idempotent replay that dispatched nothing) and the topic it addressed."""
+
+    status: str
+    topic: str
+
+
 @tai42_app.http.custom_route(
     "/universal_webhook/{topic}",
     methods=["POST", "GET"],
     summary="Public webhook ingress door for a topic",
     tags=["hooks"],
-    response_model=None,
+    response_model=WebhookIngressResult,
+    enveloped=False,
     authed=False,
 )
 async def universal_webhook(request: Request) -> Response:
@@ -197,12 +207,21 @@ async def universal_webhook(request: Request) -> Response:
     return _ingress_json({"status": "accepted", "topic": topic}, background=task)
 
 
+class TriggerResult(BaseModel):
+    """The trigger-link door's raw (non-enveloped) 200 body: the delivery's
+    disposition. It carries NO topic — a trigger link hides its topic from the URL
+    holder."""
+
+    status: str
+
+
 @tai42_app.http.custom_route(
     "/trigger/{token}",
     methods=["POST", "GET"],
     summary="Public trigger-link door",
     tags=["hooks"],
-    response_model=None,
+    response_model=TriggerResult,
+    enveloped=False,
     authed=False,
 )
 async def trigger_link(request: Request) -> Response:

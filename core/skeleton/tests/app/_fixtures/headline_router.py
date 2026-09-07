@@ -21,6 +21,7 @@ HEADLINE_PATH = "/api/headline-probe"
     summary="Headline probe route added by a reload.",
     tags=["test"],
     response_model=None,
+    no_body_reason="test fixture: response body not under test",
     authed=False,
 )
 async def headline_probe(_request: Request) -> JSONResponse:

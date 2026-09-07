@@ -57,6 +57,15 @@ class OperationMetadata:
     # arguments name path segments in ``route_template``.
     path_params: tuple[str, ...] = field(default_factory=tuple)
 
+    # The required-when-``response_model``-is-``None`` justification for an operation that
+    # serves no ``{"data": <model>}`` JSON body. Mutually exclusive with ``response_model``.
+    no_body_reason: str | None = None
+
+    # Whether ``response_model`` is wrapped in the ``{"data": ...}`` success envelope (the
+    # default) or published as the model's schema DIRECTLY at the top level (a RAW
+    # non-enveloped body). ``enveloped=False`` requires a ``response_model``.
+    enveloped: bool = True
+
 
 class OperationRegistry:
     """In-memory map of every registered operation, keyed by operation name.

@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 
+from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from tai42_contract.access_control.registry import get_identity_provider_factory
@@ -43,12 +44,25 @@ logger = logging.getLogger(__name__)
 _READINESS_TIMEOUT_SECONDS = 5.0
 
 
+class ReadinessStatus(BaseModel):
+    """The readiness probe's raw (non-enveloped) body.
+
+    ``checks`` maps each wired subsystem to ``"ok"`` or, on failure, the raised
+    exception's TYPE name only — never its message, which would leak internal
+    hosts/ports. ``plugin_quarantine`` is diagnostic and never flips ``status`` red."""
+
+    status: str
+    checks: dict[str, str]
+    plugin_quarantine: int
+
+
 @tai42_app.http.custom_route(
     "/health",
     methods=["GET"],
     summary="Liveness probe",
     tags=["health"],
     response_model=None,
+    no_body_reason="Liveness probe: text/plain",
     authed=False,
 )
 async def health_check(request):
@@ -161,7 +175,8 @@ async def _ping_connection(client_cls: type, settings: ClientSettings) -> Except
     methods=["GET"],
     summary="Readiness probe",
     tags=["health"],
-    response_model=None,
+    response_model=ReadinessStatus,
+    enveloped=False,
     authed=False,
 )
 async def readiness_check(request: Request) -> JSONResponse:

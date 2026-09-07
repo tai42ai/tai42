@@ -51,6 +51,7 @@ def register_route(
         authed=False,
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
         owner=owner,
         public=True,
     )

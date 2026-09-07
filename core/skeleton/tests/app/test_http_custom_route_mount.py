@@ -64,6 +64,7 @@ def _register(surface: HttpSurface, path: str, methods: list[str], **extra: obje
         summary="s",
         tags=["t"],
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
         **extra,  # type: ignore[arg-type]
     )(_handler)
 
@@ -152,7 +153,9 @@ def test_declared_route_resolves_through_the_full_facade(monkeypatch: pytest.Mon
     app = TaiMCP(name="mount-facade")
 
     with bind_module(_binding()):
-        app.http.custom_route("/ping", ["GET"], summary="s", tags=["t"], response_model=None)(_handler)
+        app.http.custom_route(
+            "/ping", ["GET"], summary="s", tags=["t"], response_model=None, no_body_reason="test fixture"
+        )(_handler)
 
     meta = registry.match("/api/acme/one/ping", "GET")
     assert meta is not None
@@ -247,9 +250,15 @@ def test_core_route_through_the_facade_defaults_authed_true(monkeypatch: pytest.
     monkeypatch.setattr("tai42_skeleton.app.http.route_registry", registry)
     app = TaiMCP(name="mount-facade-core")
 
-    app.http.custom_route("/api/thing", ["POST"], summary="s", tags=["t"], response_model=None, action="write")(
-        _handler
-    )
+    app.http.custom_route(
+        "/api/thing",
+        ["POST"],
+        summary="s",
+        tags=["t"],
+        response_model=None,
+        no_body_reason="test fixture",
+        action="write",
+    )(_handler)
 
     meta = registry.match("/api/thing", "POST")
     assert meta is not None

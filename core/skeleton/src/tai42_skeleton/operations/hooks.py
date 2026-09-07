@@ -54,6 +54,16 @@ from tai42_skeleton.hooks.trigger_links import TriggerLinkError
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._authority import assert_execution_key_bindable, resolve_caller
 from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError, OperationError
+from tai42_skeleton.operations.response_models_group_b import (
+    HookListView,
+    HookRegisterResult,
+    RemovedByName,
+    RemovedByTopic,
+    StringListResponse,
+    TopicVerifierView,
+    TriggerLinkCreated,
+    TriggerLinkListView,
+)
 
 
 class HookListQuery(BaseModel):
@@ -119,7 +129,12 @@ def _map_trigger_error(exc: TriggerLinkError) -> OperationError:
     return error_cls(exc.message)
 
 
-@operation(summary="List registered hooks", tags=["hooks"], request_model=HookListQuery)
+@operation(
+    summary="List registered hooks",
+    tags=["hooks"],
+    request_model=HookListQuery,
+    response_model=HookListView,
+)
 async def list_hooks(topic: str | None = None) -> dict[str, Any]:
     """List registered hooks plus the per-topic verifier bindings.
 
@@ -199,6 +214,7 @@ _HOOK_EXPR_PARAM = Annotated[
     authority_changing=True,
     errors=[BadRequestError, ForbiddenError, NotFoundError],
     request_model=HookRegister,
+    response_model=HookRegisterResult,
 )
 async def register_hook(
     name: str,
@@ -253,7 +269,7 @@ async def register_hook(
     return {"registered": registered, "name": name}
 
 
-@operation(summary="Unregister a hook", tags=["hooks"], errors=[NotFoundError])
+@operation(summary="Unregister a hook", tags=["hooks"], errors=[NotFoundError], response_model=RemovedByName)
 async def unregister_hook(name: str) -> dict[str, Any]:
     """Unregister a hook by name. An unknown hook name is a loud 404.
 
@@ -265,7 +281,7 @@ async def unregister_hook(name: str) -> dict[str, Any]:
     return {"removed": True, "name": name}
 
 
-@operation(summary="List registered webhook verifiers", tags=["hooks"])
+@operation(summary="List registered webhook verifiers", tags=["hooks"], response_model=StringListResponse)
 async def list_verifiers() -> list[str]:
     """The sorted names of every registered webhook verifier — the catalog the
     Studio bind form offers instead of free text. Names ONLY: a verifier object and
@@ -287,6 +303,7 @@ async def list_verifiers() -> list[str]:
     authority_changing=True,
     errors=[BadRequestError],
     request_model=TopicVerifierBinding,
+    response_model=TopicVerifierView,
 )
 async def set_topic_verifier(topic: str, verifier: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Bind (or replace) a topic's webhook verifier.
@@ -311,6 +328,7 @@ async def set_topic_verifier(topic: str, verifier: str, config: dict[str, Any] |
     destructive=True,
     authority_changing=True,
     errors=[NotFoundError],
+    response_model=RemovedByTopic,
 )
 async def delete_topic_verifier(topic: str) -> dict[str, Any]:
     """Remove a topic's verifier binding, reopening its public ingress door; a missing
@@ -338,6 +356,7 @@ async def delete_topic_verifier(topic: str) -> dict[str, Any]:
     authority_changing=True,
     errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=TriggerLinkCreate,
+    response_model=TriggerLinkCreated,
 )
 async def create_trigger_link(
     topic: str,
@@ -379,7 +398,12 @@ async def create_trigger_link(
         raise _map_trigger_error(exc) from exc
 
 
-@operation(summary="List trigger links", tags=["hooks"], errors=[NotSupportedError])
+@operation(
+    summary="List trigger links",
+    tags=["hooks"],
+    errors=[NotSupportedError],
+    response_model=TriggerLinkListView,
+)
 async def list_trigger_links() -> dict[str, Any]:
     """Every live trigger link's record plus its hash PREFIX and its derived
     ``trigger_auth`` — never a raw token (none is stored; a listed link's QR is
@@ -396,6 +420,7 @@ async def list_trigger_links() -> dict[str, Any]:
     destructive=True,
     authority_changing=True,
     errors=[NotFoundError, NotSupportedError],
+    response_model=RemovedByName,
 )
 async def delete_trigger_link(name: str) -> dict[str, Any]:
     """Revoke a trigger link by name — immediate and DURABLE (a permanent tombstone

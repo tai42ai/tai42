@@ -26,6 +26,11 @@ _KEK = base64.b64encode(bytes(32)).decode()
 _HMAC = base64.b64encode(bytes(40)).decode()
 
 
+def _b64key(fill: int) -> str:
+    """A distinct base64 32-byte key (32 copies of one byte)."""
+    return base64.b64encode(bytes([fill]) * 32).decode()
+
+
 # -- _validate_b64_key -------------------------------------------------------
 
 
@@ -127,6 +132,58 @@ def test_malformed_kek_error_does_not_leak_plaintext(monkeypatch):
 
 def test_connector_crypto_secrets_is_cached():
     assert connector_crypto_secrets() is connector_crypto_secrets()
+
+
+# -- require_decrypt_ring_bytes (KEK rotation) -------------------------------
+
+
+def test_require_decrypt_ring_current_only():
+    s = ConnectorCryptoSecrets(kek=SecretStr(_KEK), kek_previous=None)
+    assert s.require_decrypt_ring_bytes() == [bytes(32)]
+
+
+def test_require_decrypt_ring_single_previous():
+    s = ConnectorCryptoSecrets(kek=SecretStr(_KEK), kek_previous=SecretStr(_b64key(1)))
+    assert s.require_decrypt_ring_bytes() == [bytes(32), bytes([1]) * 32]
+
+
+def test_require_decrypt_ring_comma_separated_list():
+    s = ConnectorCryptoSecrets(kek=SecretStr(_KEK), kek_previous=SecretStr(f"{_b64key(1)}, {_b64key(2)}"))
+    assert s.require_decrypt_ring_bytes() == [bytes(32), bytes([1]) * 32, bytes([2]) * 32]
+
+
+def test_require_decrypt_ring_from_env_list(monkeypatch):
+    monkeypatch.setenv("CONNECTORS_KEK", _KEK)
+    monkeypatch.setenv("CONNECTORS_KEK_PREVIOUS", f"{_b64key(1)},{_b64key(2)}")
+    reset_all_settings()
+    assert ConnectorCryptoSecrets().require_decrypt_ring_bytes() == [bytes(32), bytes([1]) * 32, bytes([2]) * 32]
+
+
+def test_require_decrypt_ring_dedupes_current_and_repeats():
+    # A previous entry equal to the current key, or a repeated previous, collapses so a
+    # blob is never tried against the same key twice.
+    s = ConnectorCryptoSecrets(kek=SecretStr(_KEK), kek_previous=SecretStr(f"{_KEK}, {_b64key(1)}, {_b64key(1)}"))
+    assert s.require_decrypt_ring_bytes() == [bytes(32), bytes([1]) * 32]
+
+
+def test_require_decrypt_ring_rejects_malformed_previous():
+    short = base64.b64encode(bytes(16)).decode()
+    s = ConnectorCryptoSecrets(kek=SecretStr(_KEK), kek_previous=SecretStr(short))
+    with pytest.raises(ValueError, match="exactly 32 bytes"):
+        s.require_decrypt_ring_bytes()
+
+
+def test_require_decrypt_ring_raises_when_current_unset():
+    s = ConnectorCryptoSecrets(kek=None, kek_previous=SecretStr(_b64key(1)))
+    with pytest.raises(RuntimeError):
+        s.require_decrypt_ring_bytes()
+
+
+def test_kek_previous_masked_in_repr_and_dump():
+    prev = _b64key(1)
+    s = ConnectorCryptoSecrets(kek=SecretStr(_KEK), kek_previous=SecretStr(prev), state_hmac_key=SecretStr(_HMAC))
+    assert prev not in repr(s)
+    assert prev not in s.model_dump_json()
 
 
 # -- ConnectorEngineConfig ---------------------------------------------------

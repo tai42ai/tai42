@@ -55,6 +55,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import OpaqueJson
 from tai42_contract.states import StateSubject
 from tai42_kit.utils.data import text_to_md5
 
@@ -193,6 +194,7 @@ async def _scheduling_backend_present() -> bool:
     summary="List schedules",
     tags=["schedules"],
     errors=[NotSupportedError, PermissionDenied, UnavailableError, OperationFailed],
+    response_model=OpaqueJson,
 )
 async def list_schedules() -> Any:
     if not await _scheduling_backend_present():
@@ -250,6 +252,7 @@ async def export_schedules_raw() -> Any:
     summary="Get the server date and time",
     tags=["schedules"],
     errors=[NotSupportedError, PermissionDenied, UnavailableError, OperationFailed],
+    response_model=OpaqueJson,
 )
 async def server_datetime() -> Any:
     try:
@@ -297,6 +300,7 @@ def _validate_schedule_subject(tool_kwargs: dict[str, Any]) -> None:
         OperationFailed,
     ],
     request_model=ScheduleCreate,
+    response_model=OpaqueJson,
 )
 async def create_schedule(tool_name: str, tool_kwargs: dict[str, Any], schedule_kwargs: dict[str, Any]) -> Any:
     """Schedule a caller-named tool to run on a cadence — a run-ANY-tool door.
@@ -331,6 +335,7 @@ async def create_schedule(tool_name: str, tool_kwargs: dict[str, Any], schedule_
     tags=["schedules"],
     reload_gated=True,
     errors=[NotSupportedError, PermissionDenied, UnavailableError, OperationFailed],
+    response_model=OpaqueJson,
 )
 async def delete_schedule(schedule_name: str) -> Any:
     if not await _scheduling_backend_present():

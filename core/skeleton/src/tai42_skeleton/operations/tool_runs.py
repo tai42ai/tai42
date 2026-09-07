@@ -67,6 +67,7 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._submitted_tool_authz import authorize_submitted_tool
+from tai42_skeleton.operations.response_models_group_b import RunSubmitted, ToolRunListResponse, ToolRunView
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings, tool_runs_settings, tool_runs_store_configured
 
 if TYPE_CHECKING:
@@ -779,6 +780,7 @@ def _list_view(run_id: str, record: dict[str, str]) -> dict[str, Any]:
     meta_executor=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError, UnavailableError],
     request_model=ToolRunSubmission,
+    response_model=RunSubmitted,
 )
 async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
     """Submit a tool for background execution — returns ``202 {run_id}`` at once
@@ -855,6 +857,18 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
         if caller_identity is not None:
             bind_token = set_execution_identity(caller_identity)
 
+    # Deposit the caller's identity as this run's attribution around the spawn so the
+    # supervisor's copied context carries it: a runs-index row the detached dispatch
+    # registers (a preset target) is then born with a ``user_id`` rather than NULL. Reset
+    # after the spawn — the supervisor already copied it — exactly like the bind above.
+    from tai42_contract.monitoring import RunAttribution
+
+    from tai42_skeleton.tools.attribution import reset_run_attribution, set_run_attribution
+
+    attribution_token = (
+        set_run_attribution(RunAttribution(user_id=owning_identity)) if owning_identity is not None else None
+    )
+
     run_id = secrets.token_urlsafe(16)
     started = _now()
     try:
@@ -869,10 +883,12 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
         _ACTIVE_RUNS -= 1
         raise
     finally:
-        # Release the submit-scope binding: the spawned supervisor already copied it
-        # into its own context, and this request must not stay bound past the submit.
+        # Release the submit-scope binding + attribution: the spawned supervisor already
+        # copied both into its own context, and this request must not stay bound past the submit.
         if bind_token is not None:
             reset_execution_identity(bind_token)
+        if attribution_token is not None:
+            reset_run_attribution(attribution_token)
     return {"run_id": run_id}
 
 
@@ -881,6 +897,7 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
     summary="Get a background tool run's status and result",
     tags=["tool-runs"],
     errors=[ForbiddenError, NotFoundError],
+    response_model=ToolRunView,
 )
 async def get_run(run_id: str) -> dict:
     # OFF gate: with no store, no run can exist — a 404 byte-identical to the
@@ -911,6 +928,7 @@ async def get_run(run_id: str) -> dict:
     tags=["tool-runs"],
     errors=[BadRequestError],
     request_model=ToolRunsListQuery,
+    response_model=ToolRunListResponse,
 )
 async def list_tool_runs(tool_name: str) -> list[dict]:
     """List the recent runs for one tool, newest first.

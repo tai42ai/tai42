@@ -17,7 +17,7 @@ import pytest
 from click.testing import CliRunner
 from jsonschema import Draft202012Validator, ValidationError
 from openapi_spec_validator import validate
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 from tai42_cli import app as app_module
 
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
@@ -28,6 +28,7 @@ from tai42_skeleton.cli.openapi import (
     _openapi_path,
     _query_parameters,
     _register_model,
+    _success_response,
     build_openapi_spec,
 )
 from tai42_skeleton.cli.openapi import _operation as _emit_operation
@@ -74,9 +75,15 @@ def test_every_route_meets_the_self_describe_bar(api_routes: list[RouteMetadata]
         # public external door (authed=False) may accept an opaque provider body.
         if meta.authed and meta.reads_body:
             assert meta.request_model is not None, f"{meta.path} reads a body but declares no request_model"
-        # response_model is always present as an attribute; None IS the accepted
-        # opaque marker, so its mere presence is the bar (never AttributeError).
-        assert meta.response_model is None or isinstance(meta.response_model, type)
+        # A route declares a typed body OR a reasoned no-body, never a bare None:
+        # response_model=None REQUIRES a non-blank no_body_reason (the registration
+        # guard enforces this; the bar is mirrored here as the offline backstop for
+        # core routers, exactly like reads_body => request_model above).
+        if meta.response_model is None:
+            assert meta.no_body_reason, f"{meta.path} declares response_model=None but no no_body_reason"
+            assert meta.no_body_reason.strip(), f"{meta.path} declares response_model=None but a blank no_body_reason"
+        else:
+            assert isinstance(meta.response_model, type)
 
 
 def test_gated_routes_declare_the_retriable_503(spec: dict, api_routes: list[RouteMetadata]) -> None:
@@ -346,6 +353,8 @@ _EXPECTED_READS_BODY: set[tuple[str, str]] = {
     ("POST", "/api/conversations/{route_name}"),
     ("POST", "/api/conversations/{route_name}/events"),
     ("POST", "/api/conversations/{route_name}/messages"),
+    ("POST", "/api/conversations/{route_name}/thread/messages"),
+    ("PUT", "/api/conversations/{route_name}/thread/mode"),
     ("PUT", "/api/conversation-configs/{target_kind}/{target_name}"),
     ("POST", "/api/delete-template"),
     ("POST", "/api/delete-template-dir"),
@@ -1075,6 +1084,168 @@ def test_register_model_allows_idempotent_reregistration() -> None:
     assert _register_model(Gadget, components) == "Gadget"
     # The same model reached from a second route registers identically — no raise.
     assert _register_model(Gadget, components) == "Gadget"
+
+
+# -- no_body_reason: the reasoned no-body declaration surfaces in the spec ------
+
+
+def _typed_meta(response_model, *, no_body_reason=None, enveloped=True) -> RouteMetadata:
+    """A synthetic core JSON route carrying ``response_model`` (or a reasoned no-body),
+    for the emitter's per-operation/success builders — no product surface loaded."""
+    return RouteMetadata(
+        path="/api/_probe",
+        methods=("POST",),
+        name="_probe",
+        summary="probe",
+        description="",
+        tags=("probe",),
+        authed=True,
+        request_model=None,
+        response_model=response_model,
+        reload_gated=False,
+        reads_body=False,
+        error_statuses=(),
+        success_status=200,
+        additional_success_statuses=(),
+        success_media_types={"POST": ("application/json",)},
+        action="write",
+        no_body_reason=no_body_reason,
+        enveloped=enveloped,
+    )
+
+
+def test_no_body_reason_becomes_the_success_description_and_extension() -> None:
+    # A route declared with no typed body carries its no_body_reason as the 200's
+    # description AND an x-no-body extension, so the absence of a {"data": <model>}
+    # schema is a described, declared exception rather than a silent empty data.
+    reason = "serves a raw streaming body, not the {data} envelope"
+    meta = _typed_meta(None, no_body_reason=reason)
+    response = _success_response(meta, "POST", {})
+    assert response["description"] == reason
+    assert response["x-no-body"] == reason
+    # The data schema stays the empty None-branch object (no reshaping of the wire).
+    assert response["content"]["application/json"]["schema"]["properties"]["data"] == {}
+
+
+def test_typed_route_success_carries_no_no_body_extension() -> None:
+    # A typed route documents its {"data": $ref} schema and never an x-no-body marker.
+    class _Body(BaseModel):
+        value: int
+
+    meta = _typed_meta(_Body)
+    components: dict = {}
+    response = _success_response(meta, "POST", components)
+    assert "x-no-body" not in response
+    assert response["description"] == "Success."
+    assert response["content"]["application/json"]["schema"]["properties"]["data"] == {
+        "$ref": "#/components/schemas/_Body"
+    }
+
+
+# -- enveloped=False: the RAW top-level body renders as the model's $ref directly --
+
+
+def test_unwrapped_model_renders_as_a_top_level_body_schema() -> None:
+    # A route declared enveloped=False publishes its model's schema DIRECTLY as the
+    # 200 application/json body — a $ref with NO {"data": ...} wrapper and NO x-no-body
+    # marker, so a raw non-enveloped body carries a real schema rather than a reasoned
+    # no-body exception.
+    class _Raw(BaseModel):
+        status: str
+
+    meta = _typed_meta(_Raw, enveloped=False)
+    components: dict = {}
+    response = _success_response(meta, "POST", components)
+    schema = response["content"]["application/json"]["schema"]
+    assert schema == {"$ref": "#/components/schemas/_Raw"}
+    assert "properties" not in schema  # no data envelope
+    assert "x-no-body" not in response
+    assert response["description"] == "Success."
+    assert "_Raw" in components
+
+
+def test_the_four_raw_json_routes_emit_their_real_top_level_schema() -> None:
+    # Each of the four RAW-JSON routes now declares a response_model + enveloped=False,
+    # so its 200 application/json body is the model's schema directly (no {"data": ...}
+    # wrapper, no x-no-body). The metadata is read from the live registry, not a
+    # synthetic probe, so this pins the actual registrations.
+    from tai42_skeleton.app.route_registry import load_all_routes
+
+    expected = {
+        ("/ready", "GET"): "ReadinessStatus",
+        ("/universal_webhook/{topic}", "POST"): "WebhookIngressResult",
+        ("/trigger/{token}", "POST"): "TriggerResult",
+        ("/api/backup/export", "POST"): "BackupExportDocument",
+    }
+    by_path = {meta.path: meta for meta in load_all_routes()}
+    for (path, method), model_name in expected.items():
+        meta = by_path.get(path)
+        assert meta is not None, f"{path} not registered"
+        assert meta.enveloped is False, f"{path} is not declared enveloped=False"
+        assert meta.no_body_reason is None, f"{path} still carries a no_body_reason"
+        components: dict = {}
+        op = _emit_operation(meta, method, components)
+        schema = op["responses"]["200"]["content"]["application/json"]["schema"]
+        assert schema == {"$ref": f"#/components/schemas/{model_name}"}, path
+        assert "x-no-body" not in op["responses"]["200"], path
+        assert model_name in components, path
+
+
+# -- RootModel bodies render as a registered, resolvable component --------------
+
+
+def test_opaque_json_root_model_renders_a_resolvable_ref() -> None:
+    from tai42_contract.app.responses import OpaqueJson
+
+    meta = _typed_meta(OpaqueJson)
+    components: dict = {}
+    op = _emit_operation(meta, "POST", components)
+    ref = op["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["data"]["$ref"]
+    assert ref == "#/components/schemas/OpaqueJson"
+    # The named subclass registers under its own stable name and its schema matches
+    # the model's own JSON schema (a bare alias would register the ugly RootModel name).
+    assert "OpaqueJson" in components
+    assert OpaqueJson.__name__ == "OpaqueJson"
+
+
+def test_named_root_model_list_subclass_renders_and_resolves() -> None:
+    class Point(BaseModel):
+        x: int
+
+    class PointList(RootModel[list[Point]]):
+        pass
+
+    meta = _typed_meta(PointList)
+    components: dict = {}
+    op = _emit_operation(meta, "POST", components)
+    ref = op["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["data"]["$ref"]
+    assert ref == "#/components/schemas/PointList"
+    # The component resolves and its members' $defs are registered (no dangling ref).
+    assert components["PointList"] == {
+        "items": {"$ref": "#/components/schemas/Point"},
+        "type": "array",
+        "title": "PointList",
+    }
+    assert "Point" in components
+
+
+# -- The three already-typed core response models still render their $ref -------
+
+
+def test_already_typed_core_models_render_their_ref() -> None:
+    # The models the three already-typed core ops declare (unchanged by this seam)
+    # each register and emit a resolvable {"data": $ref}, so a typed route never hits
+    # the None-branch guard.
+    from tai42_skeleton.access_control.projection import ProjectionResult
+    from tai42_skeleton.app.bus import FleetResult
+    from tai42_skeleton.operations.backend import WorkerListing
+
+    for model in (ProjectionResult, WorkerListing, FleetResult):
+        components: dict = {}
+        op = _emit_operation(_typed_meta(model), "POST", components)
+        ref = op["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["data"]["$ref"]
+        assert ref == f"#/components/schemas/{model.__name__}"
+        assert model.__name__ in components
 
 
 def test_error_schema_documents_the_optional_machine_readable_code(spec: dict) -> None:

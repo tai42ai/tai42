@@ -46,6 +46,7 @@ register_identity_provider(PROVIDER_NAME, _factory)
     summary="Pre-auth probe resolving the live epoch's provider.",
     tags=["test"],
     response_model=None,
+    no_body_reason="test fixture: response body not under test",
     authed=False,
 )
 async def preauth_probe(_request: Request) -> JSONResponse:

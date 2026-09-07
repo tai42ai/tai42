@@ -57,6 +57,14 @@ def _validate_b64_key(value: str | None, *, env_var: str, min_bytes: int, exact:
     return value
 
 
+def _split_key_list(value: str | None) -> list[str]:
+    """Split a comma-separated base64 key list into its entries, dropping blanks and
+    surrounding whitespace. An unset/empty value yields no keys."""
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 def _require_key_bytes(value: str | None, *, env_var: str, what: str) -> bytes:
     """Decode a required base64 secret to bytes, raising loudly if unset."""
     if not value:
@@ -87,6 +95,12 @@ class ConnectorCryptoSecrets(TaiBaseSettings):
     # accessors validate + reveal it only when the engine actually encrypts/signs.
     kek: KeyMaterial | None = None
 
+    # Comma-separated base64 32-byte previous KEKs, retained ONLY so decrypt can open
+    # blobs still encrypted under a superseded key while a KEK rotation converges. Key
+    # material (see ``kek``): masked and profile-excluded. Emptied once the re-encrypt
+    # sweep has rewritten every blob under the current key and the old key is retired.
+    kek_previous: KeyMaterial | None = None
+
     # Base64 key (>=32 bytes) signing the OAuth ``state`` param. Key material,
     # excluded from profiles (see ``kek``).
     state_hmac_key: KeyMaterial | None = None
@@ -103,6 +117,23 @@ class ConnectorCryptoSecrets(TaiBaseSettings):
         kek = self.kek.get_secret_value() if self.kek is not None else None
         _validate_b64_key(kek, env_var="CONNECTORS_KEK", min_bytes=_KEK_BYTE_LENGTH, exact=True)
         return _require_key_bytes(kek, env_var="CONNECTORS_KEK", what="encryption KEK")
+
+    def require_decrypt_ring_bytes(self) -> list[bytes]:
+        """Return the decrypt key ring: the current KEK first, then each distinct
+        previous KEK from ``CONNECTORS_KEK_PREVIOUS`` (a comma-separated base64 list).
+
+        Raises (value-free) when the current KEK is unset/malformed or any previous
+        entry is not valid base64 of exactly 32 bytes. Duplicate keys (a previous entry
+        equal to the current key or to another previous entry) are collapsed so a blob
+        is never tried against the same key twice."""
+        ring: list[bytes] = [self.require_kek_bytes()]
+        previous = self.kek_previous.get_secret_value() if self.kek_previous is not None else None
+        for entry in _split_key_list(previous):
+            _validate_b64_key(entry, env_var="CONNECTORS_KEK_PREVIOUS", min_bytes=_KEK_BYTE_LENGTH, exact=True)
+            key = base64.b64decode(entry, validate=True)
+            if key not in ring:
+                ring.append(key)
+        return ring
 
     def require_state_hmac_key_bytes(self) -> bytes:
         """Return the decoded state-HMAC key, or raise (value-free) if unset/malformed."""

@@ -14,6 +14,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -769,6 +770,24 @@ async def _collect_stream(gen) -> list[str]:
     return frames
 
 
+def _frame_fields(frame: str) -> dict[str, str]:
+    # Parse one SSE frame into its ``id``/``event``/``data`` fields. Every event
+    # frame now leads with an ``id:`` line (the Redis stream message-id for the
+    # Last-Event-ID resume), so tests match on the parsed ``event`` field rather
+    # than a frame prefix. Comment frames (``:`` lead) carry no fields.
+    fields: dict[str, str] = {}
+    for line in frame.split("\n"):
+        if not line or line.startswith(":"):
+            continue
+        key, _, value = line.partition(": ")
+        fields[key] = value
+    return fields
+
+
+def _is_event(frame: str, event: str) -> bool:
+    return _frame_fields(frame).get("event") == event
+
+
 async def _events_cursor(wired) -> str:
     """The events-stream tail cursor the route handler captures BEFORE returning the
     response — reproduced here so the generator is driven exactly as production drives
@@ -826,8 +845,12 @@ class _AliveRequest:
     """A request that reports connected for exactly ``alive`` tail iterations, then
     disconnects — lets a clock-driven test step the tail a fixed number of windows."""
 
-    def __init__(self, alive: int) -> None:
+    def __init__(self, alive: int, headers: dict[str, str] | None = None) -> None:
         self._alive = alive
+        # ``stream()`` reads the Last-Event-ID header + query param on connect;
+        # empty mappings stand in for the plain (no-resume) connect these tests drive.
+        self.headers: dict[str, str] = headers or {}
+        self.query_params: dict[str, str] = {}
 
     async def is_disconnected(self) -> bool:
         if self._alive > 0:
@@ -837,14 +860,11 @@ class _AliveRequest:
 
 
 def _add_ids(frames: list[str]) -> list[str]:
-    return [
-        json.loads(f.split("data: ", 1)[1])["interaction_id"] for f in frames if f.startswith("event: interaction.add")
-    ]
+    return [json.loads(_frame_fields(f)["data"])["interaction_id"] for f in frames if _is_event(f, "interaction.add")]
 
 
 def _event_ids(frames: list[str], event: str) -> list[str]:
-    prefix = f"event: {event}"
-    return [json.loads(f.split("data: ", 1)[1])["interaction_id"] for f in frames if f.startswith(prefix)]
+    return [json.loads(_frame_fields(f)["data"])["interaction_id"] for f in frames if _is_event(f, event)]
 
 
 async def test_list_add_carries_external_url(wired):
@@ -999,9 +1019,9 @@ async def test_stream_tail_add_carries_sensitive_flag(wired):
         await wired.store.add(wired.fake, _sensitive_request(wired.store, iid="s7", gid="sg7"), idle_ttl=86400)
 
     frames = await _tail_collect(wired, _inject)
-    add_frames = [f for f in frames if f.startswith("event: interaction.add")]
+    add_frames = [f for f in frames if _is_event(f, "interaction.add")]
     assert add_frames, frames
-    payload = json.loads(add_frames[-1].split("data: ", 1)[1].strip())
+    payload = json.loads(_frame_fields(add_frames[-1])["data"])
     assert payload["interaction_id"] == "s7"
     assert payload["sensitive"] is True
 
@@ -1013,7 +1033,7 @@ async def test_stream_tail_forwards_add(wired):
         await _seed(wired, iid="i5", gid="g5")
 
     frames = await _tail_collect(wired, _inject)
-    assert any(f.startswith("event: interaction.add") for f in frames)
+    assert any(_is_event(f, "interaction.add") for f in frames)
 
 
 # -- display-only media: the add frame -------------------------------------
@@ -1070,7 +1090,7 @@ async def _tail_add_frames(wired, request: InteractionRequest) -> list[dict]:
         await wired.store.add(wired.fake, request, idle_ttl=86400)
 
     frames = await _tail_collect(wired, _inject)
-    return [json.loads(f.split("data: ", 1)[1].strip()) for f in frames if f.startswith("event: interaction.add")]
+    return [json.loads(_frame_fields(f)["data"]) for f in frames if _is_event(f, "interaction.add")]
 
 
 async def test_list_add_carries_media(wired):
@@ -1419,8 +1439,8 @@ async def test_stream_tail_forwards_answered_and_removed(wired):
         )
 
     frames = await _tail_collect(wired, _inject)
-    assert any(f.startswith("event: interaction.answered") for f in frames)
-    assert any(f.startswith("event: interaction.removed") for f in frames)
+    assert any(_is_event(f, "interaction.answered") for f in frames)
+    assert any(_is_event(f, "interaction.removed") for f in frames)
 
 
 async def test_stream_tail_skips_malformed_event_without_crashing(wired):
@@ -1435,10 +1455,101 @@ async def test_stream_tail_skips_malformed_event_without_crashing(wired):
         )
 
     frames = await _tail_collect(wired, _inject)
-    answered = [f for f in frames if f.startswith("event: interaction.answered")]
+    answered = [f for f in frames if _is_event(f, "interaction.answered")]
     # The malformed entry was skipped; only the well-formed one surfaced.
     assert len(answered) == 1
-    assert json.loads(answered[0].split("data: ", 1)[1])["interaction_id"] == "i9"
+    assert json.loads(_frame_fields(answered[0])["data"])["interaction_id"] == "i9"
+
+
+# -- SSE resume: Last-Event-ID over a reconnect gap --------------------------
+
+
+async def test_stream_frames_carry_the_stream_id(wired):
+    # Every event frame leads with an ``id:`` = the Redis stream message-id — the
+    # resume token a reconnecting client echoes back as Last-Event-ID.
+    async def _inject():
+        await _seed(wired, iid="i1", gid="g1")
+
+    frames = await _tail_collect(wired, _inject)
+    add_frames = [f for f in frames if _is_event(f, "interaction.add")]
+    assert add_frames, frames
+    stream_id = _frame_fields(add_frames[0]).get("id")
+    assert stream_id, add_frames[0]
+    # It is the actual Redis message-id (a ``<ms>-<seq>`` token), not a placeholder.
+    ms, _, seq = stream_id.partition("-")
+    assert ms.isdigit(), stream_id
+    assert seq.isdigit(), stream_id
+
+
+async def test_stream_resume_delivers_gap_answered_frame(wired):
+    # Composed path (the live report): a card goes pending, the client saw the add
+    # frame's id, the connection drops, an ``answered`` event is XADDed WHILE the
+    # client is disconnected, then the client reconnects sending that id as
+    # Last-Event-ID. The resumed tail resumes AFTER the id and DELIVERS the gap
+    # ``answered`` frame, so the card converges to answered instead of vanishing.
+    from starlette.responses import StreamingResponse
+
+    await _seed(wired, iid="i1", gid="g1")  # the add event -> the client's last-seen id
+    last_seen = await _events_cursor(wired)
+    # The answer lands during the disconnect gap.
+    prior = InteractionResponse(
+        interaction_id="i1", answer={}, answered_by="external-callback", answered_at=datetime.now(UTC)
+    )
+    await wired.store.record_answer(wired.fake, prior, "g1", reply_ttl=60, ticket="TKT", ticket_ttl=86400)
+    # Reconnect carrying the last-seen id as Last-Event-ID.
+    resp = await router.stream(cast(Request, _AliveRequest(alive=1, headers={"last-event-id": last_seen})))
+    assert isinstance(resp, StreamingResponse)
+    frames = [cast(str, f) async for f in resp.body_iterator]
+    answered = [f for f in frames if _is_event(f, "interaction.answered")]
+    assert answered, frames
+    assert json.loads(_frame_fields(answered[0])["data"])["interaction_id"] == "i1"
+    # The resumed frame still carries its own id (so the next reconnect resumes past it).
+    assert _frame_fields(answered[0]).get("id")
+
+
+async def test_stream_resume_falls_back_when_last_event_id_trimmed(wired, caplog):
+    # A Last-Event-ID that predates the retained stream window (the id was trimmed)
+    # must NOT silently resume past a gap it cannot cover: the route falls back to the
+    # tail END (the client's pending-base reseed via the paged list door heals the
+    # rest) and LOGS the fallback rather than silently skipping.
+    from starlette.responses import StreamingResponse
+
+    await _seed(wired, iid="i1", gid="g1")  # add event, well past a "0-1" id
+    prior = InteractionResponse(
+        interaction_id="i1", answer={}, answered_by="external-callback", answered_at=datetime.now(UTC)
+    )
+    await wired.store.record_answer(wired.fake, prior, "g1", reply_ttl=60, ticket="TKT", ticket_ttl=86400)
+    with caplog.at_level(logging.INFO, logger="tai42_skeleton.routers.interactions"):
+        resp = await router.stream(cast(Request, _AliveRequest(alive=1, headers={"last-event-id": "0-1"})))
+        assert isinstance(resp, StreamingResponse)
+        frames = [cast(str, f) async for f in resp.body_iterator]
+    # Fell back to the tail END: the gap answered frame is NOT replayed on the wire
+    # (the client reseeds the answered/pending state from the list door instead).
+    assert not [f for f in frames if _is_event(f, "interaction.answered")]
+    # Never silent: the fallback is logged.
+    assert any("trimmed" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+async def test_stream_resume_falls_back_when_last_event_id_malformed(wired, caplog):
+    # A Last-Event-ID the client never got from us (it does not parse as a ``<ms>-<seq>``
+    # stream id) is not a resume we can honour: the route falls back to the tail END (the
+    # paged pending-base reseed heals the rest) and LOGS the malformed id rather than
+    # silently skipping — the never-silent guarantee's ValueError branch.
+    from starlette.responses import StreamingResponse
+
+    await _seed(wired, iid="i1", gid="g1")  # add event
+    prior = InteractionResponse(
+        interaction_id="i1", answer={}, answered_by="external-callback", answered_at=datetime.now(UTC)
+    )
+    await wired.store.record_answer(wired.fake, prior, "g1", reply_ttl=60, ticket="TKT", ticket_ttl=86400)
+    with caplog.at_level(logging.WARNING, logger="tai42_skeleton.routers.interactions"):
+        resp = await router.stream(cast(Request, _AliveRequest(alive=1, headers={"last-event-id": "not-an-id"})))
+        assert isinstance(resp, StreamingResponse)
+        frames = [cast(str, f) async for f in resp.body_iterator]
+    # Fell back to the tail END: the gap answered frame is NOT replayed on the wire.
+    assert not [f for f in frames if _is_event(f, "interaction.answered")]
+    # Never silent: the malformed id is logged at WARNING.
+    assert any("malformed" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
 
 
 # -- audience isolation: stream filtering ------------------------------------

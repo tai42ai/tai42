@@ -26,6 +26,11 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
+from tai42_skeleton.operations.response_models_group_c import (
+    SubMcpMapListing,
+    SubMcpRegistrationResult,
+    SubMcpRemovalResult,
+)
 from tai42_skeleton.sub_mcp import service
 from tai42_skeleton.sub_mcp.store import get_sub_mcp_store
 
@@ -39,7 +44,7 @@ class SubMcpRegistration(BaseModel):
     transport: str = "http"
 
 
-@operation(summary="List the registered sub-MCP apps", tags=["sub-mcp"])
+@operation(summary="List the registered sub-MCP apps", tags=["sub-mcp"], response_model=SubMcpMapListing)
 async def list_sub_mcp() -> dict:
     # Read the durable store, not this worker's in-process cache, so the list is
     # coherent across workers. RouteConfig is a pydantic model; model_dump yields
@@ -55,6 +60,7 @@ async def list_sub_mcp() -> dict:
     reload_gated=True,
     errors=[BadRequestError, NotFoundError],
     request_model=SubMcpRegistration,
+    response_model=SubMcpRegistrationResult,
 )
 async def register_sub_mcp(slug: str, tools: list[str], transport: str = "http") -> dict:
     # Resolve every tool against the live registry BEFORE registering: an unknown
@@ -81,6 +87,7 @@ async def register_sub_mcp(slug: str, tools: list[str], transport: str = "http")
     tags=["sub-mcp"],
     reload_gated=True,
     errors=[NotFoundError],
+    response_model=SubMcpRemovalResult,
 )
 async def unregister_sub_mcp(slug: str) -> dict:
     # The service deletes from the store and, if bound here, the local router. It

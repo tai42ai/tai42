@@ -904,3 +904,34 @@ async def test_reaper_loop_survives_a_raising_pass(monkeypatch, caplog):
         await task
     assert calls["n"] >= 2
     assert any("expiry reaper pass failed" in r.message for r in caplog.records)
+
+
+async def test_continuation_resume_runs_detached(monkeypatch):
+    # A continuation resume runs OUT OF BAND on a fresh task with no live caller, so it
+    # must be flagged detached — else a set ``TAI_TURN_TIMEOUT_SECONDS`` would arm the
+    # turn budget around the resume and cancel a legitimately long resume mid-flight.
+    from contextlib import asynccontextmanager
+
+    from tai42_contract.app import tai42_app
+    from tai42_kit.utils.detached_util import in_detached_run
+
+    seen: dict[str, bool] = {}
+
+    @asynccontextmanager
+    async def _fake_bind(identity, *, bound_fingerprint=""):
+        yield
+
+    monkeypatch.setattr(continuation_module, "bind_execution_identity", _fake_bind)
+
+    class _Tools:
+        async def run_tool(self, key, arguments, *, offload_sync=False):
+            seen["detached"] = in_detached_run()
+            return None
+
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=_Tools()))
+
+    await continuation_module._run_continuation("id-1", None, "resume_tool", "iid-1", {"a": 1})
+
+    assert seen["detached"] is True
+    # The flag is unwound once the resume ends — never leaked past it.
+    assert in_detached_run() is False

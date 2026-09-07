@@ -8,9 +8,10 @@ Skeleton legs of the invocation seam (the contract channel itself is pinned in
   it is ``None`` outside any tool, a nested re-dispatch restores the OUTER name after
   the inner returns (token discipline), and the deposit is unwound in ``finally`` even
   when the body raises.
-* ``InvocationSeamMiddleware`` deposits the called tool's name at the MCP
-  ``tools/call`` edge (which reaches ``Tool.run`` directly, never the ``run_tool``
-  seam) and resets it in ``finally``.
+* ``InvocationSeamMiddleware`` (a retained, standalone middleware NOT registered by
+  the platform — the live edge deposit is ``DispatchScopeMiddleware``'s) deposits the
+  called tool's name around the ``call_next`` it wraps and resets it in ``finally``,
+  and warns ``DeprecationWarning`` on instantiation.
 """
 
 from __future__ import annotations
@@ -128,9 +129,10 @@ def test_middleware_deposits_for_the_called_tool():
     seen: dict[str, str | None] = {}
 
     async def run() -> None:
-        mw = InvocationSeamMiddleware()
-        # The MCP call edge hands the middleware a context whose message names the
-        # called tool; a minimal stand-in suffices to exercise the deposit.
+        with pytest.warns(DeprecationWarning, match="not registered by the platform"):
+            mw = InvocationSeamMiddleware()
+        # A ``MiddlewareContext`` whose message names the called tool; a minimal
+        # stand-in suffices to exercise the middleware's standalone deposit.
         context = SimpleNamespace(message=SimpleNamespace(name="acme_echo"))
 
         async def call_next(_context: object) -> str:
@@ -151,7 +153,8 @@ def test_middleware_deposits_for_the_called_tool():
 
 def test_middleware_resets_when_the_call_raises():
     async def run() -> None:
-        mw = InvocationSeamMiddleware()
+        with pytest.warns(DeprecationWarning, match="not registered by the platform"):
+            mw = InvocationSeamMiddleware()
         context = SimpleNamespace(message=SimpleNamespace(name="acme_echo"))
 
         async def call_next(_context: object) -> str:
@@ -162,3 +165,10 @@ def test_middleware_resets_when_the_call_raises():
         assert current_tool_invocation() is None
 
     asyncio.run(run())
+
+
+def test_instantiation_warns_it_is_not_registered():
+    # The class is a retained standalone component the platform does not register (the
+    # live edge deposit is DispatchScopeMiddleware's); instantiation warns.
+    with pytest.warns(DeprecationWarning, match="not registered by the platform"):
+        InvocationSeamMiddleware()

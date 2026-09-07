@@ -19,9 +19,10 @@ from __future__ import annotations
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import operation
+from tai42_skeleton.operations.response_models_group_c import SandboxInfo
 
 
-@operation(summary="Get the sandbox identity and resolved policy", tags=["sandbox"])
+@operation(summary="Get the sandbox identity and resolved policy", tags=["sandbox"], response_model=SandboxInfo)
 async def sandbox_info() -> dict:
     from tai42_skeleton.sandbox.policy import resolve_sandbox_policy
 

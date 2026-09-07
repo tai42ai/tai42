@@ -484,6 +484,8 @@ def test_http_facet_forwarding():
         destructive=False,
         action=None,
         declared=None,
+        no_body_reason=None,
+        enveloped=True,
     )
 
 
@@ -512,6 +514,21 @@ def test_http_facet_forwards_declared():
     f.custom_route("/p", ["POST"], summary="P", tags=["t"], response_model=None, action="write", declared=declared)
     _, kwargs = app._http_surface.custom_route.call_args
     assert kwargs["declared"] is declared
+
+
+def test_http_facet_forwards_enveloped():
+    """A route's ``enveloped`` flag — whether the success body is wrapped in the
+    ``{"data": ...}`` envelope or is the model's schema directly — reaches the impl
+    surface unchanged, so a raw non-enveloped body is declared through the seam."""
+
+    class _Body(BaseModel):
+        status: str
+
+    app = _app()
+    f = HttpFacet(app)
+    f.custom_route("/p", ["POST"], summary="P", tags=["t"], response_model=_Body, action="write", enveloped=False)
+    _, kwargs = app._http_surface.custom_route.call_args
+    assert kwargs["enveloped"] is False
 
 
 # -- LifecycleFacet -----------------------------------------------------------

@@ -58,6 +58,7 @@ from tai42_skeleton.operations import (
     UpstreamError,
     operation,
 )
+from tai42_skeleton.operations.response_models_group_c import NotificationListing, NotifyResult
 
 with warnings.catch_warnings():
     # The ``schema`` field intentionally shadows pydantic's deprecated
@@ -206,7 +207,7 @@ with warnings.catch_warnings():
             return self
 
 
-@operation(summary="List internal notifications", tags=["notifications"])
+@operation(summary="List internal notifications", tags=["notifications"], response_model=NotificationListing)
 async def list_notifications() -> dict:
     """List internal notifications, newest-first.
 
@@ -227,6 +228,7 @@ async def list_notifications() -> dict:
     destructive=True,
     errors=[BadRequestError, ForbiddenError, NotSupportedError, UnavailableError, UpstreamError],
     request_model=NotifyUser,
+    response_model=NotifyResult,
 )
 async def notify_user(
     message: str,

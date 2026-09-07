@@ -16,7 +16,9 @@ from tai42_contract.app import tai42_app
 MOUNT_BASE = tai42_app.http.mount_base()
 
 
-@tai42_app.http.custom_route("/session", ["POST"], summary="login", tags=["auth"], response_model=None)
+@tai42_app.http.custom_route(
+    "/session", ["POST"], summary="login", tags=["auth"], response_model=None, no_body_reason="test fixture"
+)
 async def session(request: Request) -> Response:
     """The fixture session handler."""
     return JSONResponse({"data": {}})

@@ -35,6 +35,14 @@ from tai42_contract.app import tai42_app
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
+from tai42_skeleton.operations.response_models_group_b import (
+    CacheClearResult,
+    RenderedTemplate,
+    StringListResponse,
+    TemplateDeleteResult,
+    TemplateFetchView,
+    TemplateUploadResult,
+)
 from tai42_skeleton.template import TemplateNotFoundError
 from tai42_skeleton.template.path_guard import _TEMPLATE_ROOT, UnsafeTemplatePathError, safe_template_path
 
@@ -91,7 +99,7 @@ def _resolves_to_template_root(key: str) -> bool:
     return os.path.realpath(os.path.join(root, key)) == root
 
 
-@operation(summary="List templates", tags=["templates"])
+@operation(summary="List templates", tags=["templates"], response_model=StringListResponse)
 async def list_templates() -> list[str]:
     """List the stored template ids/paths from the active storage provider."""
     return await tai42_app.storage.resource_manager.list_resources()
@@ -102,6 +110,7 @@ async def list_templates() -> list[str]:
     tags=["templates"],
     errors=[BadRequestError, NotFoundError],
     request_model=TemplateFetch,
+    response_model=TemplateFetchView,
 )
 async def get_template(template_id: str) -> dict:
     """Return a stored template's content and its inferred input schema.
@@ -136,6 +145,7 @@ async def get_template(template_id: str) -> dict:
     destructive=True,
     errors=[BadRequestError],
     request_model=TemplateUpload,
+    response_model=TemplateUploadResult,
 )
 async def upload_template(path: str, content: str) -> dict:
     """Write ``content`` to the template store under ``path`` (create or overwrite).
@@ -169,6 +179,7 @@ async def upload_template(path: str, content: str) -> dict:
     destructive=True,
     errors=[BadRequestError],
     request_model=TemplateDelete,
+    response_model=TemplateDeleteResult,
 )
 async def delete_template(path: str) -> dict:
     """Delete the stored template at ``path``.
@@ -198,6 +209,7 @@ async def delete_template(path: str) -> dict:
     destructive=True,
     errors=[BadRequestError, NotFoundError],
     request_model=TemplateDirDelete,
+    response_model=TemplateDeleteResult,
 )
 async def delete_template_dir(path: str) -> dict:
     """Delete every stored template under the directory ``path``.
@@ -246,6 +258,7 @@ async def delete_template_dir(path: str) -> dict:
     tags=["templates"],
     errors=[BadRequestError, NotFoundError],
     request_model=TemplateRender,
+    response_model=RenderedTemplate,
 )
 async def render_template(
     content: str | None = None,
@@ -283,7 +296,7 @@ async def render_template(
     return {"rendered": rendered}
 
 
-@operation(summary="Clear the template render cache", tags=["templates"])
+@operation(summary="Clear the template render cache", tags=["templates"], response_model=CacheClearResult)
 async def clear_templates_cache() -> dict:
     """Drop every compiled template from the render cache, fleet-wide.
 

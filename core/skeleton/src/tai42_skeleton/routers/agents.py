@@ -249,6 +249,7 @@ async def _agent_event_stream(request: Request, agent: Agent, run_kwargs: dict[s
     tags=["agents"],
     request_model=AgentRunInput,
     response_model=None,
+    no_body_reason="Agent run: SSE StreamingResponse (text/event-stream)",
     declared=DeclaredRouteMetadata(
         reload_gated=True,
         reads_body=True,
@@ -310,6 +311,7 @@ async def run_agent(request: Request) -> Response:
     tags=["agents"],
     request_model=AgentRunInput,
     response_model=None,
+    no_body_reason="Authored-agent run: SSE StreamingResponse",
     declared=DeclaredRouteMetadata(
         reload_gated=True,
         reads_body=True,

@@ -11,8 +11,9 @@ from __future__ import annotations
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import operation
+from tai42_skeleton.operations.response_models_group_c import ExtensionListing
 
 
-@operation(summary="List every registered extension", tags=["extensions"])
+@operation(summary="List every registered extension", tags=["extensions"], response_model=ExtensionListing)
 async def list_extensions() -> list[dict[str, str]]:
     return tai42_app.extensions.available_extensions()

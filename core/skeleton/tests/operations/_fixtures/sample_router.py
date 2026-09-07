@@ -17,7 +17,13 @@ class GreetBody(BaseModel):
     name: str
 
 
-@operation(summary="Greet by name", tags=["sample"], request_model=GreetBody, errors=[NotFoundError])
+@operation(
+    summary="Greet by name",
+    tags=["sample"],
+    request_model=GreetBody,
+    errors=[NotFoundError],
+    no_body_reason="test fixture: response body not under test",
+)
 async def sample_greet(name: str) -> dict:
     """Greet someone by name."""
     if name == "missing":

@@ -93,6 +93,7 @@ _REGISTERED_AUTHED = {
     ("/api/connectors/connections/{connection_id}/reconnect", ("POST",)): True,
     ("/api/connectors/connections/{connection_id}/sub-services", ("PATCH",)): True,
     ("/api/connectors/oauth/complete", ("POST",)): True,
+    ("/api/connectors/tokens/reencrypt", ("POST",)): True,
 }
 
 

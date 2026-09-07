@@ -18,6 +18,7 @@ from tai42_contract.connectors.errors import OperatorMisconfiguredError
 from tai42_contract.connectors.models import AuthHealthState
 from tai42_contract.manifest import ApiToolsConfig
 
+from tai42_skeleton.connectors.oauth.crypto import ConnectorEncryptionConfigError
 from tai42_skeleton.connectors.runtime.resolver import ConnectorReconnectRequiredError, ManagedAuth
 from tai42_skeleton.connectors.store.catalog_store import ConnectorCategory
 from tai42_skeleton.operations import (
@@ -204,6 +205,54 @@ async def test_patch_sub_services_off_is_not_found(monkeypatch: pytest.MonkeyPat
             redirect_uri="https://app/oauth-bridge.html",
             origin="https://app",
         )
+
+
+async def test_reencrypt_tokens_off_refuses_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The sweep enumerates the connector store; with none configured it refuses with a
+    # named, machine-readable reason rather than reaching for an absent store.
+    _off(monkeypatch)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await conn_ops.reencrypt_connector_tokens()
+    assert exc_info.value.extra["code"] == "connectors-not-configured"
+
+
+async def test_reencrypt_tokens_delegates_and_returns_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The ON path delegates to the store sweep and returns its count report verbatim.
+    report = {
+        "scanned": 3,
+        "reencrypted": 2,
+        "skipped": 1,
+        "failed": 0,
+        "failed_connection_ids": [],
+        "cas_retries": 0,
+    }
+
+    async def _fake_sweep():
+        return report
+
+    monkeypatch.setattr(conn_ops, "reencrypt_connection_tokens", _fake_sweep)
+    assert await conn_ops.reencrypt_connector_tokens() == report
+
+
+async def test_reencrypt_tokens_missing_current_kek_is_named_501(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A missing/malformed CURRENT CONNECTORS_KEK fails the sweep for every row. The op maps
+    # that deployment-wide config fault to a named, actionable 501 (never an unnamed 500).
+    async def _fake_sweep():
+        raise ConnectorEncryptionConfigError("CONNECTORS_KEK is missing or malformed")
+
+    monkeypatch.setattr(conn_ops, "reencrypt_connection_tokens", _fake_sweep)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await conn_ops.reencrypt_connector_tokens()
+    assert exc_info.value.extra["code"] == "connectors-kek-misconfigured"
+    assert "CONNECTORS_KEK" in exc_info.value.message
+
+
+def test_reencrypt_tokens_is_authority_changing_and_declares_not_supported() -> None:
+    # authority_changing keeps the sweep off the default MCP surface (tier 2); the 501 is
+    # a declared error class so the route's error-status surface publishes it.
+    meta = operation_metadata_of(conn_ops.reencrypt_connector_tokens)
+    assert meta.authority_changing is True
+    assert NotSupportedError in meta.error_classes
 
 
 async def test_reconnect_unknown_connection_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
