@@ -125,10 +125,12 @@ def test_fresh_install_replay_matches_template(
 
     by_component = {(a.component, a.version) for a in applied}
     assert ("skeleton", 1) in by_component
+    assert ("states", 1) in by_component
     assert ("tai42-accounts-postgres", 1) in by_component
 
-    # Both baselines are recorded in the fresh database's history table.
+    # Every baseline is recorded in the fresh database's history table.
     assert 1 in _history(harness_settings, scratch_db, "skeleton")
+    assert 1 in _history(harness_settings, scratch_db, "states")
     assert 1 in _history(harness_settings, scratch_db, "tai42-accounts-postgres")
 
     # A from-scratch migrate yields the same ``public`` table-name set as the
@@ -136,6 +138,16 @@ def test_fresh_install_replay_matches_template(
     assert _public_tables(harness_settings, scratch_db) == _public_tables(harness_settings, _TEMPLATE_DB)
     # The accounts plugin's own tables are present (the plugin chain really ran).
     assert {"accounts_users", "accounts_sessions", "accounts_invites"} <= _public_tables(harness_settings, scratch_db)
+    # The skeleton-owned state store's tables are present (the states chain really ran).
+    assert {
+        "state_declarations",
+        "state_modules",
+        "state_mounts",
+        "state_records",
+        "state_writes",
+        "state_applied_ops",
+        "state_subject_aliases",
+    } <= _public_tables(harness_settings, scratch_db)
 
     # Re-applying the fully-migrated chain is an inert no-op, and the boot-gate
     # verdict is clean.

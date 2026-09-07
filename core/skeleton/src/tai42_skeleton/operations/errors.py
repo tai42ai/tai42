@@ -117,6 +117,21 @@ class ConflictError(OperationError):
     __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.CONFLICT
 
 
+class PreconditionFailedError(OperationError):
+    """A precondition on the current resource state was not met (412).
+
+    A destructive change the caller must explicitly confirm was requested without that
+    confirmation — a state-record migrate that would narrow the schema without a
+    transform or a drop confirmation. The caller re-issues with the confirmation once
+    the precondition is understood; distinct from a plain :class:`ConflictError`, which
+    the caller cannot resolve by confirming.
+    """
+
+    status: ClassVar[int] = 412
+    # A precondition on the current state — nearest transport-neutral fit is CONFLICT.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.CONFLICT
+
+
 class NotSupportedError(OperationError):
     """The operation needs a capability this deployment does not provide.
 

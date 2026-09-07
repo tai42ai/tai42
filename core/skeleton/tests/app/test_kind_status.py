@@ -43,6 +43,7 @@ _GATED_KINDS = [
     "tool_meta",
     "connectors",
     "versioning",
+    "states",
 ]
 
 _EXPECTED_KINDS = [*_PLUGGABLE_KINDS, *_GATED_KINDS]
@@ -128,6 +129,7 @@ def test_gated_features_off_when_unconfigured(bound_app, monkeypatch: pytest.Mon
         "tool_meta",
         "connectors",
         "versioning",
+        "states",
     ):
         assert _row(kind).state == "off"
 

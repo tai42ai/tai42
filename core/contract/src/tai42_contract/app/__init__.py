@@ -34,6 +34,7 @@ from .facets import (
     AppMonitoring,
     AppPresets,
     AppSandboxes,
+    AppStates,
     AppStorage,
     AppSubApp,
     AppToolMeta,
@@ -118,6 +119,9 @@ class TaiApp(Protocol):
     @property
     def tool_meta(self) -> AppToolMeta: ...
 
+    @property
+    def states(self) -> AppStates: ...
+
 
 class _TaiAppRuntime(TaiApp, Protocol):
     """The runtime forwarding handle: the assembled ``TaiApp`` facade plus the two
@@ -151,6 +155,7 @@ __all__ = [
     "AppMonitoring",
     "AppPresets",
     "AppSandboxes",
+    "AppStates",
     "AppStorage",
     "AppSubApp",
     "AppToolMeta",

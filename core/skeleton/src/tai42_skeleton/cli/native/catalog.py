@@ -1,6 +1,6 @@
 """``tai catalog`` — the ecosystem catalog, marketplace-backed.
 
-The 6 tai42-skeleton builtins are a static table colocated here (the core is not a
+The tai42-skeleton builtins are a static table colocated here (the core is not a
 marketplace listing, so nothing else carries them); every other row is queried live
 from the marketplace registry's item-enumeration route. The network is REQUIRED —
 offline is a loud error, never a silent empty or cached fallback.
@@ -33,7 +33,7 @@ _ITEM_IDENTITY_FIELDS = ("name", "kind", "package", "namespace", "listing")
 # there).
 _COLUMNS = ["name", "kind", "package", "source", "module", "description"]
 
-# The 6 tai42-skeleton builtins — the ONE place they live (the core is not a
+# The tai42-skeleton builtins — the ONE place they live (the core is not a
 # marketplace listing, so nothing else carries them). test_native_catalog.py pins this
 # table to the actual builtin registrations so it cannot rot silently.
 _BUILTIN_ROWS: list[dict[str, str]] = [
@@ -44,6 +44,38 @@ _BUILTIN_ROWS: list[dict[str, str]] = [
         "source": "builtin",
         "module": "tai42_skeleton.tools.builtin.interactions",
         "description": "Ask a human a question mid-run and block until they answer.",
+    },
+    {
+        "name": "state_read",
+        "kind": "tool",
+        "package": "tai42-skeleton",
+        "source": "builtin",
+        "module": "tai42_skeleton.tools.builtin.states",
+        "description": "Read the calling subject's document for a state.",
+    },
+    {
+        "name": "state_replace",
+        "kind": "tool",
+        "package": "tai42-skeleton",
+        "source": "builtin",
+        "module": "tai42_skeleton.tools.builtin.states",
+        "description": "Replace the calling subject's whole document for a state.",
+    },
+    {
+        "name": "state_merge",
+        "kind": "tool",
+        "package": "tai42-skeleton",
+        "source": "builtin",
+        "module": "tai42_skeleton.tools.builtin.states",
+        "description": "Shallow-merge a patch into the calling subject's document for a state.",
+    },
+    {
+        "name": "state_apply",
+        "kind": "tool",
+        "package": "tai42-skeleton",
+        "source": "builtin",
+        "module": "tai42_skeleton.tools.builtin.states",
+        "description": "Apply a batch of path operations to the calling subject's document for a state.",
     },
     {
         "name": "file_loader",

@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
+from tai42_contract.conversations import ConversationTargetKind
+from tai42_contract.states.models import SUBJECT_KIND_RE
 from tai42_contract.template import ConditionMixin, ExprMixin
 
 # A hook's ``topic`` is dispatched as ONE path segment of the public webhook URL
@@ -32,6 +34,29 @@ class TopicVerifierBinding(BaseModel):
 
     verifier: str = Field(min_length=1)
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class HookSubject(BaseModel):
+    """The optional state subject a hook fire targets: the conversation-target scope
+    ``(target_kind, target_name)``, the subject ``kind`` (matching
+    :data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` jq evaluated
+    over the event payload at fire — it must yield a non-empty string, else the fire
+    fails loudly like any hook error. Frozen; deposited as the ambient state context so
+    a state write during the fire is keyed and attributed to the hook."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_kind: ConversationTargetKind
+    target_name: str = Field(min_length=1)
+    kind: str
+    key_expr: str = Field(min_length=1)
+
+    @field_validator("kind")
+    @classmethod
+    def _check_kind(cls, value: str) -> str:
+        if not SUBJECT_KIND_RE.fullmatch(value):
+            raise ValueError(f"subject kind {value!r} must match {SUBJECT_KIND_RE.pattern}")
+        return value
 
 
 class HookRegister(ConditionMixin, ExprMixin):
@@ -63,6 +88,10 @@ class HookRegister(ConditionMixin, ExprMixin):
         ),
     )
     tool_kwargs: dict[str, Any] = Field(default_factory=dict)
+
+    # The optional state subject the fire targets; ``None`` leaves the fire with no
+    # ambient state context, so a state tool it calls must carry an explicit subject.
+    subject: HookSubject | None = None
 
     # ``expr``/``expr_id``/``condition``/``condition_id`` come from the mixins;
     # the ``*_kwargs`` fields are re-declared non-optional (hooks default them

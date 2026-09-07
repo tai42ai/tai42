@@ -574,7 +574,17 @@ async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> R
     trigger_id = payload.get("trigger_id")
     if not isinstance(trigger_id, str) or not trigger_id:
         raise ValueError("block_actions payload carried no trigger_id")
-    view = build_modal_view(interaction_id, record["question"], record["schema"])
+    # The per-send prefill/choices and step layout reserved at delivery are what this
+    # modal renders; absent (a plain ask) render the plain modal.
+    data = record.get("data") or {}
+    view = build_modal_view(
+        interaction_id,
+        record["question"],
+        record["schema"],
+        data.get("values"),
+        data.get("options"),
+        record.get("pages"),
+    )
     await open_modal_view(trigger_id, view)
     return JSONResponse({"status": "opened"})
 

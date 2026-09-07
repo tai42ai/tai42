@@ -51,6 +51,7 @@ from tai42_skeleton.operations.errors import (
     NotSupportedError,
     OperationFailed,
     UnavailableError,
+    ValidationRejected,
 )
 
 if TYPE_CHECKING:
@@ -107,6 +108,23 @@ async def _assert_target_exists(target_kind: str, target_name: str) -> None:
         await instance.app.tools.get_tool(target_name)
     except UnknownToolError as exc:
         raise NotFoundError(f"tool not found: {target_name!r}") from exc
+
+
+async def _assert_target_bindable(target_kind: str, target_name: str) -> None:
+    """Consult the registered bind validator for the target's kind, if any, once the target
+    is known to exist. A plugin registers a validator through
+    ``app.conversations.register_target_validator``; a validator returning message lines
+    refuses the route with them (a 422), so a defect the target carries — a flow reading a
+    state no binding supplies — is caught at bind, never deferred to run time. No validator
+    for the kind leaves the create unchanged."""
+    from tai42_skeleton.app import instance
+
+    validator = instance.app.conversations.target_validator(target_kind)
+    if validator is None:
+        return
+    messages = await validator(target_name)
+    if messages:
+        raise ValidationRejected("\n".join(messages))
 
 
 def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
@@ -194,7 +212,7 @@ async def get_conversation_route(route_name: str) -> dict[str, Any]:
     tags=["conversations"],
     destructive=True,
     authority_changing=True,
-    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError, ValidationRejected],
     request_model=ConversationRouteCreate,
 )
 async def create_conversation_route(
@@ -259,6 +277,7 @@ async def create_conversation_route(
     manager = _require_backend()
 
     await _assert_target_exists(create.target_kind, create.target_name)
+    await _assert_target_bindable(create.target_kind, create.target_name)
     _assert_exprs_compile(create)
 
     stored = create.model_dump()

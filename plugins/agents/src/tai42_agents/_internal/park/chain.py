@@ -11,7 +11,7 @@ the tool's result.
 
 The whole chain, for a flow called inside an agent turn::
 
-    the human answers -> flow_resume -> the flow's terminal -> deliver_chained_park
+    the human answers -> the driver's resume -> the nested run's terminal -> deliver_chained_park
                       -> agent_resume -> the agent loop -> the agent's own completion
 
 Nothing here knows what a flow is. It reads the contract-generic completion payload — the bound

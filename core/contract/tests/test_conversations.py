@@ -964,6 +964,9 @@ def test_app_conversations_is_runtime_checkable_and_shaped():
         async def record_delivery_status(self, channel: str, provider_message_id: str, status: object) -> None:
             return None
 
+        def register_target_validator(self, target_kind: object, validator: object) -> None:
+            return None
+
     class _Missing:
         async def accept(
             self, channel: str, our_identity: str, client_address: str, text: str, provider_message_id: str

@@ -58,7 +58,7 @@ def captured(monkeypatch):
     # real execution-identity bind / run_tool machinery.
     calls: list[dict] = []
 
-    async def _stub(identity, fingerprint, tool, interaction_id, answer):
+    async def _stub(identity, fingerprint, tool, interaction_id, answer, park_context=None):
         calls.append(
             {
                 "identity": identity,
@@ -66,6 +66,7 @@ def captured(monkeypatch):
                 "tool": tool,
                 "interaction_id": interaction_id,
                 "answer": answer,
+                "park_context": park_context,
             }
         )
 
@@ -426,7 +427,7 @@ async def test_dispatch_continuation_retains_task_until_done(wired, monkeypatch)
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _slow(identity, fingerprint, tool, interaction_id, answer):
+    async def _slow(identity, fingerprint, tool, interaction_id, answer, park_context=None):
         started.set()
         await release.wait()
 
@@ -626,7 +627,7 @@ async def test_due_record_is_flow_blind_and_cleared_on_return(wired, monkeypatch
     # violation. The fire clears the record once ``run_tool`` returns.
     release = asyncio.Event()
 
-    async def _block(identity, fingerprint, tool, interaction_id, answer):
+    async def _block(identity, fingerprint, tool, interaction_id, answer, park_context=None):
         await release.wait()
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _block)
@@ -667,7 +668,7 @@ async def test_crash_before_run_tool_is_redelivered_by_reaper(wired, monkeypatch
     applied: list[Any] = []
     attempts = {"n": 0}
 
-    async def _flaky(identity, fingerprint, tool, interaction_id, answer):
+    async def _flaky(identity, fingerprint, tool, interaction_id, answer, park_context=None):
         attempts["n"] += 1
         if attempts["n"] == 1:
             raise RuntimeError("worker crashed mid-resume")

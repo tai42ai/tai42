@@ -1134,7 +1134,7 @@ async def test_async_park_callback_door_answerable_through_reaper_margin(
     _tune(monkeypatch, wired, idle_ttl_seconds=10, expiry_reaper_interval_seconds=45)
     resumed: list[Any] = []
 
-    async def _stub(identity, fingerprint, tool, interaction_id, answer):
+    async def _stub(identity, fingerprint, tool, interaction_id, answer, park_context=None):
         resumed.append(answer)
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _stub)

@@ -397,6 +397,104 @@ async def test_get_form_ticket_renders_schema_form(wired):
     assert resp.headers["cache-control"] == "no-store"
 
 
+async def _seed_form_payload(w, *, format_payload, ticket="TKT", iid="i1", gid="g1", budget=60) -> str:
+    now = datetime.now(UTC)
+    request = InteractionRequest(
+        interaction_id=iid,
+        group_id=gid,
+        question="Fill?",
+        answer_format=AnswerFormat.FORM,
+        format_payload=format_payload,
+        reply_to=w.store.reply_key(iid),
+        created_at=now,
+        timeout_at=now + timedelta(seconds=budget),
+    )
+    await w.store.add(w.fake, request, idle_ttl=86400, ticket=ticket, ticket_ttl=budget)
+    return iid
+
+
+async def test_get_form_ticket_renders_prefill_and_per_send_options(wired):
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "color": {"type": "string", "enum": ["red", "blue"]},
+            "count": {"type": "integer"},
+            "agree": {"type": "boolean"},
+        },
+    }
+    data = {
+        "values": {"name": "Al", "color": "green", "count": 3, "agree": True},
+        "options": {"color": [{"value": "green", "label": "Green"}, {"value": "amber", "label": "Amber"}]},
+    }
+    await _seed_form_payload(wired, format_payload={"schema": schema, "data": data})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    # Prefilled text/number values ride the control's ``value`` attribute.
+    assert 'data-field="name" data-kind="string" type="text" value="Al"' in body
+    assert 'data-field="count" data-kind="number" type="number" step="1" value="3"' in body
+    # A prefilled checkbox is checked.
+    assert 'data-field="agree" data-kind="boolean" type="checkbox" checked' in body
+    # Per-send options REPLACE the schema enum: labels shown, values posted, prefill selected.
+    assert '<option value="green" selected>Green</option>' in body
+    assert '<option value="amber">Amber</option>' in body
+    # The replaced enum values never render.
+    assert ">red<" not in body
+    assert ">blue<" not in body
+
+
+async def test_get_form_ticket_renders_pages_as_steps(wired):
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "count": {"type": "integer"}},
+    }
+    pages = [{"title": "Who", "fields": ["name"]}, {"title": "How many", "fields": ["count"]}]
+    await _seed_form_payload(wired, format_payload={"schema": schema, "pages": pages})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    # One step section per page; the first is visible, the rest hidden until Next.
+    assert '<section class="step" data-step="0">' in body
+    assert '<section class="step" data-step="1" hidden>' in body
+    # Each step's heading is focusable (``tabindex="-1"``) so the script can move focus
+    # to it when a step becomes visible; the script's ``show(i)`` targets ``h2`` as its
+    # fallback focus target after the step's first control.
+    assert '<h2 tabindex="-1">Who</h2>' in body
+    assert '<h2 tabindex="-1">How many</h2>' in body
+    assert "steps[i].querySelector('h2')" in body
+    assert "focusTarget.focus()" in body
+    # Back/Next/Submit nav is present for the step script to wire.
+    assert 'data-nav="back"' in body
+    assert 'data-nav="next"' in body
+    assert 'data-nav="submit"' in body
+
+
+async def test_post_form_answer_honors_per_send_options(wired):
+    # A per-send option value REPLACES the schema enum for this send, so a value outside
+    # the published enum but inside the per-send list is accepted; one outside both is 400.
+    schema = {"type": "object", "properties": {"color": {"type": "string", "enum": ["red", "blue"]}}}
+    data = {"options": {"color": [{"value": "green"}, {"value": "amber"}]}}
+    await _seed_form_payload(wired, format_payload={"schema": schema, "data": data})
+    ok = await router.callback(
+        make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": {"color": "green"}}')
+    )
+    assert ok.status_code == 200
+    assert _json(ok)["data"]["status"] == "answered"
+
+
+async def test_post_form_answer_rejects_value_outside_per_send_options(wired):
+    schema = {"type": "object", "properties": {"color": {"type": "string", "enum": ["red", "blue"]}}}
+    data = {"options": {"color": [{"value": "green"}, {"value": "amber"}]}}
+    await _seed_form_payload(wired, format_payload={"schema": schema, "data": data})
+    # ``red`` is in the PUBLISHED enum but not the per-send list — rejected.
+    resp = await router.callback(
+        make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": {"color": "red"}}')
+    )
+    assert resp.status_code == 400
+    assert "does not match schema" in _json(resp)["error"]
+
+
 async def test_get_answered_form_ticket_returns_done_page(wired):
     schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
     await _seed_form(wired, schema=schema)

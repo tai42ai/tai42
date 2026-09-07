@@ -67,7 +67,14 @@ def test_side_effecting_init_runs_exactly_once():
     # pop+reimport step is the ONLY import — the __init__ runs exactly once.
     # ``walk_packages`` would import the package to recurse, then reimport it,
     # running the __init__ twice (the double-register bug).
-    from ._fixtures import counter_probe
+    # Hold the probe by the same absolute dotted name the importer resolves the
+    # manifest package under, so this is the exact module ``side_effect_pkg``'s
+    # __init__ appends to. A relative import would instead bind the probe under
+    # whatever package name pytest derived for THIS test module, which is the
+    # rootdir-relative ``core.skeleton.tests.app._fixtures.counter_probe`` in a
+    # whole-repo run and ``tests.app._fixtures.counter_probe`` in a skeleton-only
+    # run — a different object whose list never sees the side effect.
+    counter_probe = importlib.import_module("tests.app._fixtures.counter_probe")
 
     counter_probe.INIT_CALLS.clear()
     reloaded = import_or_reload_package("tests.app._fixtures.side_effect_pkg")

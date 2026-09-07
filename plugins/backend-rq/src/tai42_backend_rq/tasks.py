@@ -19,6 +19,7 @@ from tai42_kit.backend import CallbackSchema, callback_execution
 from tai42_kit.clients import client_ctx, shutdown_all_clients
 from tai42_kit.clients.impl.redis import SyncRedisClient
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
+from tai42_kit.utils.schedule_subject import schedule_state_context
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
 from tai42_backend_rq.settings import rq_settings
@@ -48,9 +49,13 @@ async def tool_execution(*args: Any, **kwargs: Any) -> Any:
     # the secret-read capability — the worker binds the submitter's own capability
     # carried with the job (falling back to the gate state when none rode along).
     secret_capability = kwargs.pop(WORKER_SECRET_CAPABILITY_ARG, None)
+    # A scheduled fire carries its subject under a reserved kwarg (stamped at creation);
+    # popped and re-established as the ``schedule`` state context here so a state write
+    # during the fire is keyed and attributed to it. A plain background run carries none
+    # and runs context-free (``api`` door).
     detached_token = mark_detached_run()
     try:
-        with bind_worker_secret_capability(secret_capability):
+        with schedule_state_context(kwargs), bind_worker_secret_capability(secret_capability):
             return await tai42_app.tools.run_tool(tool_name, kwargs, offload_sync=True)
     finally:
         reset_detached_run(detached_token)

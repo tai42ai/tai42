@@ -44,7 +44,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
-from tai42_contract.hooks import HookParams, HookRegister
+from tai42_contract.hooks import HookParams, HookRegister, HookSubject
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
 
 from tai42_skeleton.hooks import trigger_links
@@ -212,6 +212,8 @@ async def register_hook(
     expr: _HOOK_EXPR_PARAM = None,
     expr_id: str | None = None,
     expr_kwargs: dict[str, Any] | None = None,
+    *,
+    subject: HookSubject | None = None,
 ) -> dict[str, Any]:
     """Register a hook from its flat parameters — an UPSERT, so this is the create
     path AND the edit path for a hook of that name.
@@ -233,6 +235,7 @@ async def register_hook(
             execution_key=execution_key,
             execution_key_fingerprint=execution_key_fingerprint,
             tool_kwargs=tool_kwargs or {},
+            subject=subject,
             condition=condition,
             condition_id=condition_id,
             condition_kwargs=condition_kwargs or {},

@@ -541,6 +541,8 @@ async def append_question(
     callback_url: str | None = None,
     schema: dict[str, Any] | None = None,
     media: list[dict[str, Any]] | None = None,
+    form_data: dict[str, Any] | None = None,
+    pages: list[dict[str, Any]] | None = None,
 ) -> str:
     """Append one ``chat.question`` entry (the UI renders the per-format widget) and
     return its id.
@@ -553,6 +555,13 @@ async def append_question(
     ``schema`` is the ``form`` question's JSON answer schema — display-input material
     the page's form widget renders, never a secret — carried in the frame ONLY when
     present (non-None exactly for the ``form`` format); otherwise the key is absent.
+
+    ``form_data`` is the ``form`` question's per-send enrichment — ``{"values", "options"}``,
+    the known values shown filled in and the per-send choice lists (``{"value", "label"?}``
+    each) that replace a property's choices for this send — carried under the frame key
+    ``data`` ONLY when present. ``pages`` is the form's step layout — each ``{"title",
+    "fields"}`` — carried ONLY when present (absent means one page). Both ride the ``form``
+    format alone, display-input material the widget renders, never part of the answer.
 
     ``media`` is the question's display items — each ``{"kind", "url", "caption"?,
     "filename"?}`` (``filename`` on a ``document`` only), the SAME frame shape a
@@ -573,6 +582,10 @@ async def append_question(
         data["callback_url"] = callback_url
     if schema is not None:
         data["schema"] = schema
+    if form_data is not None:
+        data["data"] = form_data
+    if pages is not None:
+        data["pages"] = pages
     if media:
         data["media"] = media
     await _append(identity, address, QUESTION_EVENT, data)

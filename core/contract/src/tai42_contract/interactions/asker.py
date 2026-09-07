@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from pydantic import BaseModel
 
-    from tai42_contract.interactions.models import MediaItem
+    from tai42_contract.interactions.models import FormData, FormPage, MediaItem
 
 
 def check_ask_timing(*, timeout: float | None, expiry_at: datetime | None) -> None:
@@ -45,6 +45,8 @@ class AskUser(Protocol):
         answer_format: str = "text",
         options: list[str] | None = None,
         schema: type[BaseModel] | dict[str, Any] | None = None,
+        data: FormData | dict[str, Any] | None = None,
+        pages: list[FormPage] | list[dict[str, Any]] | None = None,
         group_id: str | None = None,
         timeout: float | None = None,
         link: str | Callable[[str], Awaitable[str]] | None = None,
@@ -75,6 +77,17 @@ class AskUser(Protocol):
         The returned answer for external is the payload delivered by the callback
         (a dict from the POST body, or a dict of query params via the GET confirm
         flow), validated against ``schema`` when one was declared.
+
+        ``data`` and ``pages`` enrich a ``form`` ask for ONE send (forbidden on
+        every other format). ``data`` (a :class:`FormData` or its dict) prefills
+        ``values`` into the form's controls and supplies per-send ``options`` — a
+        choice list that REPLACES a property's schema ``enum`` for this send only,
+        so a variant needs no re-published form. ``pages`` (a list of
+        :class:`FormPage` or their dicts) splits the form into ordered steps, each
+        naming the top-level properties it collects; every property appears exactly
+        once and absent ``pages`` means one page. Both are validated against the
+        form's schema before any state is written; the answer is the union of all
+        fields regardless of paging.
 
         ``verifier`` (``{"name", "config"}``) binds a registered webhook verifier
         to the external callback so the signed server-to-server answer is

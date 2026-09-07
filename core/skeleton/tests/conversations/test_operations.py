@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
 
+from tai42_skeleton.app.conversations_facet import ConversationsFacet
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations.managers.base_conversations_manager import (
@@ -20,8 +21,9 @@ from tai42_skeleton.conversations.managers.base_conversations_manager import (
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
 from tai42_skeleton.operations import conversations as ops
-from tai42_skeleton.operations.errors import BadRequestError, ConflictError, NotFoundError
+from tai42_skeleton.operations.errors import BadRequestError, ConflictError, NotFoundError, ValidationRejected
 
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
@@ -115,6 +117,8 @@ class _FakeApp:
     def __init__(self, agents: dict[str, Agent], tools: set[str]) -> None:
         self.agents = _FakeAgents(agents)
         self.tools = _FakeTools(tools)
+        self._target_validator_registry = TargetBindValidatorRegistry()
+        self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
 
 
 class _FakeRouteRequest:
@@ -1564,3 +1568,86 @@ async def test_delete_route_cascade_cancels_every_thread_park(wired, record_redi
     # Every thread the route owned had its park cancelled.
     await _assert_park_cancelled(store, fake, interaction_id="ia", thread_id=thread_a)
     await _assert_park_cancelled(store, fake, interaction_id="ib", thread_id=thread_b)
+
+
+# -- the registered target bind validator (D-8: warn-then-error at bind) --------
+
+
+async def test_create_consults_the_registered_target_validator_and_refuses_on_messages(wired):
+    """A plugin's bind validator for the target's kind refuses the create with its message
+    lines (a 422), and no row is written — a defect the target carries (a flow reading a
+    state no binding supplies) is caught at bind, not deferred to run time."""
+    from tai42_skeleton.app import instance
+
+    async def _validator(target_name: str) -> list[str]:
+        return [
+            f"state acct is read by n1.jq (.acct) but flow {target_name} binds no such state "
+            "— bind it on the flow's Bindings tab"
+        ]
+
+    instance.app.conversations.register_target_validator("tool", _validator)
+
+    with pytest.raises(ValidationRejected, match="binds no such state"):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="tool",
+            target_name="echo-tool",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+    assert "chat" not in wired.rows
+
+
+async def test_create_passes_when_the_target_validator_returns_no_messages(wired):
+    from tai42_skeleton.app import instance
+
+    async def _validator(target_name: str) -> list[str]:
+        return []
+
+    instance.app.conversations.register_target_validator("tool", _validator)
+
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="tool",
+        target_name="echo-tool",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    assert result["created"] is True
+
+
+async def test_a_tool_validator_does_not_fire_for_an_agent_target(wired):
+    """The registry is keyed by target kind: a validator registered for ``tool`` never runs
+    for an ``agent`` route."""
+    from tai42_skeleton.app import instance
+
+    async def _validator(target_name: str) -> list[str]:
+        raise AssertionError("the tool validator must not run for an agent target")
+
+    instance.app.conversations.register_target_validator("tool", _validator)
+
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    assert result["created"] is True
+
+
+async def test_registering_two_validators_for_one_kind_raises(wired):
+    from tai42_skeleton.app import instance
+
+    async def _one(target_name: str) -> list[str]:
+        return []
+
+    async def _two(target_name: str) -> list[str]:
+        return []
+
+    instance.app.conversations.register_target_validator("tool", _one)
+    with pytest.raises(ValueError, match="already registered"):
+        instance.app.conversations.register_target_validator("tool", _two)

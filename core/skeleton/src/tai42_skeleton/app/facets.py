@@ -47,6 +47,20 @@ if TYPE_CHECKING:
         PresetWriteValidator,
     )
     from tai42_contract.sandbox import Sandbox, SandboxPolicy
+    from tai42_contract.states import (
+        ApplyResult,
+        ConsumerLister,
+        ConsumerRow,
+        MountBody,
+        MountValidator,
+        RecordView,
+        StateContext,
+        StateDeclaration,
+        StateModuleDocument,
+        StateSubject,
+        WriteOrigin,
+        WritesPage,
+    )
     from tai42_contract.storage import Storage
     from tai42_contract.sub_mcp import SubMcpAppRouter
     from tai42_contract.tool_meta import ToolMetaStore
@@ -748,3 +762,175 @@ class BackupFacet(_Facet):
 
     def import_section(self, name: str, payload: Any) -> Any:
         return self._app._backup_registry.import_section(name, payload)
+
+
+class StatesFacet(_Facet):
+    """``app.states`` — the subject-keyed state store namespace (``AppStates``): the
+    door-agnostic record substrate every door and tool reads and writes a subject's
+    document through, plus the module/mount lifecycle and the consumer/seed/mount-validator
+    seams. Forwards to the app's shared :class:`~tai42_skeleton.states.service.StatesService`
+    and its registries; the write chokepoint completes provenance and the gate refuses 501
+    while the store is unbound."""
+
+    # -- declarations --
+    async def list_declarations(self) -> list[StateDeclaration]:
+        return await self._app._states_service.list_declarations()
+
+    async def get_declaration(self, name: str) -> StateDeclaration | None:
+        return await self._app._states_service.get_declaration(name)
+
+    async def served_declaration(self, name: str) -> dict[str, Any]:
+        """The composed declaration read the ``GET /api/states/{name}`` route serves: base
+        ``schema``, composed ``effective_schema``, ``subject_kinds``, ``default_subject_kind``,
+        the state's ``mounts`` and computed ``regimes``. Skeleton-only (the HTTP composed
+        view), so it is off the ``AppStates`` protocol — a consumer reads the typed
+        :meth:`get_declaration` + :meth:`list_mounts` — the ``target_validator`` precedent."""
+        return await self._app._states_service.served_declaration(name)
+
+    async def put_declaration(self, decl: StateDeclaration) -> StateDeclaration:
+        return await self._app._states_service.put_declaration(decl)
+
+    async def delete_declaration(self, name: str) -> None:
+        return await self._app._states_service.delete_declaration(name)
+
+    async def stats(self, name: str) -> dict[str, Any]:
+        return await self._app._states_service.stats(name)
+
+    async def migrate(
+        self,
+        name: str,
+        new_schema: dict[str, Any],
+        *,
+        origin: WriteOrigin,
+        transform_expr: str | None = None,
+        confirm_drop: bool = False,
+        resolutions: list[dict[str, Any]] | None = None,
+    ) -> None:
+        return await self._app._states_service.migrate(
+            name,
+            new_schema,
+            origin=origin,
+            transform_expr=transform_expr,
+            confirm_drop=confirm_drop,
+            resolutions=resolutions,
+        )
+
+    async def preview_migrate(self, name: str, new_schema: dict[str, Any]) -> dict[str, Any]:
+        return await self._app._states_service.preview_migrate(name, new_schema)
+
+    # -- modules --
+    async def list_modules(self) -> list[StateModuleDocument]:
+        return await self._app._states_service.list_modules()
+
+    async def list_modules_catalog(self) -> list[dict[str, Any]]:
+        """The module-catalog projection the ``GET /api/state-modules`` list route serves:
+        each stored document plus ``mounted_on`` (the number of states it is mounted on)
+        and ``shipped_default`` (whether it is an unedited shipped default). Skeleton-only
+        (the HTTP catalog view), so it is off the ``AppStates`` protocol — a consumer reads
+        the typed :meth:`list_modules` — the ``served_declaration`` precedent."""
+        return await self._app._states_service.list_modules_catalog()
+
+    async def get_module(self, name: str) -> StateModuleDocument | None:
+        return await self._app._states_service.get_module(name)
+
+    async def put_module(self, doc: StateModuleDocument, *, replace: bool) -> StateModuleDocument:
+        return await self._app._states_service.put_module(doc, replace=replace)
+
+    async def delete_module(self, name: str) -> None:
+        return await self._app._states_service.delete_module(name)
+
+    # -- mounts --
+    async def list_mounts(self, state: str | None = None, *, module: str | None = None) -> list[dict[str, Any]]:
+        return await self._app._states_service.list_mounts(state, module=module)
+
+    async def mount(self, state: str, module: str, body: MountBody) -> None:
+        return await self._app._states_service.mount(state, module, body)
+
+    async def update_mount_declarations(self, state: str, module: str, declarations: dict[str, Any]) -> None:
+        return await self._app._states_service.update_mount_declarations(state, module, declarations)
+
+    async def unmount(self, state: str, module: str) -> None:
+        return await self._app._states_service.unmount(state, module)
+
+    # -- bulk import --
+    async def import_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
+        return await self._app._states_service.import_aliases(state, rows, origin=origin)
+
+    async def import_applied_ops(self, rows: Sequence[dict[str, Any]]) -> None:
+        return await self._app._states_service.import_applied_ops(rows)
+
+    async def import_records(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
+        return await self._app._states_service.import_records(state, rows, origin=origin)
+
+    # -- records --
+    async def read(self, state: str, subject: StateSubject) -> RecordView | None:
+        return await self._app._states_service.read(state, subject)
+
+    async def replace(
+        self, state: str, subject: StateSubject, data: dict[str, Any], *, origin: WriteOrigin
+    ) -> RecordView:
+        return await self._app._states_service.replace(state, subject, data, origin=origin)
+
+    async def merge(
+        self, state: str, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin
+    ) -> RecordView:
+        return await self._app._states_service.merge(state, subject, patch, origin=origin)
+
+    async def apply(
+        self,
+        state: str,
+        subject: StateSubject,
+        ops: list[dict[str, Any]],
+        *,
+        op_id: str | None,
+        origin: WriteOrigin,
+    ) -> ApplyResult:
+        return await self._app._states_service.apply(state, subject, ops, op_id=op_id, origin=origin)
+
+    async def erase(self, state: str, subject: StateSubject, *, origin: WriteOrigin) -> None:
+        return await self._app._states_service.erase(state, subject, origin=origin)
+
+    async def fold(
+        self, state: str, subject: StateSubject, into: StateSubject, mode: str, *, origin: WriteOrigin
+    ) -> dict[str, Any]:
+        return await self._app._states_service.fold(state, subject, into, mode, origin=origin)
+
+    async def list_subjects(
+        self, state: str, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+    ) -> dict[str, Any]:
+        return await self._app._states_service.list_subjects(state, kind=kind, limit=limit, cursor=cursor)
+
+    async def search(
+        self, state: str, filters: dict[str, Any], *, limit: int | None = None, cursor: str | None = None
+    ) -> dict[str, Any]:
+        return await self._app._states_service.search(state, filters, limit=limit, cursor=cursor)
+
+    async def writes(
+        self, state: str, subject: StateSubject, *, limit: int | None = None, cursor: str | None = None
+    ) -> WritesPage:
+        return await self._app._states_service.writes(state, subject, limit=limit, cursor=cursor)
+
+    async def prune_expired(self) -> dict[str, int]:
+        return await self._app._states_service.prune_expired()
+
+    # -- context --
+    def context(self) -> StateContext | None:
+        return self._app._states_service.context()
+
+    # -- consumers --
+    def register_consumer_lister(self, kind: str, lister: ConsumerLister) -> None:
+        return self._app._states_service.register_consumer_lister(kind, lister)
+
+    async def consumers(self, state: str) -> list[ConsumerRow]:
+        return await self._app._states_service.consumers(state)
+
+    # -- seeds --
+    def register_module_seed(self, doc: StateModuleDocument) -> None:
+        return self._app._states_service.register_module_seed(doc)
+
+    def register_retired_module_name(self, name: str) -> None:
+        return self._app._states_service.register_retired_module_name(name)
+
+    # -- mount validation --
+    def register_mount_validator(self, validator: MountValidator) -> None:
+        return self._app._states_service.register_mount_validator(validator)

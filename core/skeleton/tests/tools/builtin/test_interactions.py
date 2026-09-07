@@ -22,6 +22,7 @@ from tai42_skeleton.access_control.request_scopes import (
 from tai42_skeleton.access_control.user import CrossIdentityAudienceError
 from tai42_skeleton.interactions import InteractionStore, InteractionTimeoutError
 from tai42_skeleton.interactions import helper as helper_module
+from tai42_skeleton.interactions.settings import interactions_settings
 from tai42_skeleton.tools.builtin import interactions as builtin_interactions
 
 from ..._helpers import await_add_event
@@ -31,8 +32,13 @@ from ..._helpers import await_add_event
 def _interactions_store_configured(monkeypatch):
     # the interactions surface is OFF with no Redis. These tests exercise the ON
     # feature, so configure its store — the fake connection still stands in; only the
-    # presence gate reads this env var.
+    # presence gate reads this env var. The settings are cached, so clear the cache after
+    # setting the env (an earlier test may have cached the unconfigured value) and again on
+    # teardown so the configured value does not leak to a later test.
     monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+    interactions_settings.cache_clear()
+    yield
+    interactions_settings.cache_clear()
 
 
 @contextmanager
@@ -86,6 +92,8 @@ async def test_ask_user_forwards_arguments_and_returns_answer(monkeypatch: pytes
                 "answer_format": "select",
                 "options": ["red", "blue"],
                 "schema": None,
+                "data": None,
+                "pages": None,
                 "group_id": "g1",
                 "timeout": 30.0,
                 "link": None,
@@ -116,6 +124,8 @@ async def test_ask_user_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> N
                 "answer_format": "text",
                 "options": None,
                 "schema": None,
+                "data": None,
+                "pages": None,
                 "group_id": None,
                 "timeout": None,
                 "link": None,

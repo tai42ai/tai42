@@ -50,6 +50,7 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations.errors import PermissionDenied
 from tai42_skeleton.presets.bind import preset_bind
+from tai42_skeleton.states.context import current_state_context
 
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
@@ -369,6 +370,12 @@ async def test_tool_target_delivers_its_string_reply(env, monkeypatch):
                 "turn": {
                     "id": message_id,
                     "inbound": {"id": "PID1", "kind": "message", "source": "twilio"},
+                    "subject": {
+                        "target_kind": "tool",
+                        "target_name": "echo-tool",
+                        "person": None,
+                        "thread": "bridge:tool-line:+15550002222",
+                    },
                 },
             },
             "offload_sync": True,
@@ -438,8 +445,17 @@ async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatc
     assert kwargs["sender"] == "+15550002222"
     assert kwargs["channel"] == "twilio"
     assert kwargs["our_identity"] == "+15550001111"
-    # Every tool turn's payload carries the generic turn block.
-    assert kwargs["turn"] == {"id": "m-x", "inbound": {"id": "PID1", "kind": "message", "source": "twilio"}}
+    # Every tool turn's payload carries the generic turn block, subject included.
+    assert kwargs["turn"] == {
+        "id": "m-x",
+        "inbound": {"id": "PID1", "kind": "message", "source": "twilio"},
+        "subject": {
+            "target_kind": "tool",
+            "target_name": "echo-tool",
+            "person": None,
+            "thread": "bridge:tool-line:+15550002222",
+        },
+    }
 
 
 async def test_tool_target_kwargs_carry_the_turn_thread_id(env, monkeypatch):
@@ -820,9 +836,9 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
 
 # -- a PAUSED (non-terminal) run envelope reaching the tool turn --------------------------------
 #
-# A conversation route whose tool target is a flow does NOT always get the `SuspendedInteraction`
-# marker: the `flow` auto-pilot tool-face converts a park to that marker, but the engine's own
-# `flow_resume`/`flow_step` callers keep the RAW run-outcome dict. When such a run pauses with its
+# A conversation route whose tool target drives a nested run does NOT always get the
+# `SuspendedInteraction` marker: a consumer's auto-pilot tool-face converts a park to that marker,
+# but a consumer's own resume caller keeps the RAW run-outcome dict. When such a run pauses with its
 # flagged reply surface still DOWNSTREAM of the pause, the turn receives a paused envelope
 # (`status` "suspended" or "interrupt"), NOT a terminal — mapping it through reply_expr would read
 # an empty/not-ready surface as though it were the produced reply.
@@ -1025,7 +1041,7 @@ async def test_result_shape_is_value_free_and_structural():
 
 
 async def test_tool_target_paused_envelope_binds_completion_and_delivers_on_resume(env, monkeypatch):
-    # End-to-end: a paused envelope reaches the turn (the engine `flow_resume` caller kept the raw
+    # End-to-end: a paused envelope reaches the turn (a consumer's resume caller kept the raw
     # dict), the turn ends silently, and the generic tool-route completion is bound around the
     # dispatch naming THIS thread — so when the resume drives past the pause to the flagged
     # terminal and fires deliver_tool_completion, the route's reply_expr maps the final result and
@@ -2019,7 +2035,16 @@ async def test_tool_payload_carries_params_when_passed(env, monkeypatch):
 
     kwargs = tools.calls[0]["arguments"]
     # The generic turn block rides every tool payload; its id is this turn's record id.
-    assert kwargs.pop("turn") == {"id": message_id, "inbound": {"id": "PID1", "kind": "message", "source": "twilio"}}
+    assert kwargs.pop("turn") == {
+        "id": message_id,
+        "inbound": {"id": "PID1", "kind": "message", "source": "twilio"},
+        "subject": {
+            "target_kind": "tool",
+            "target_name": "echo-tool",
+            "person": None,
+            "thread": "bridge:tool-line:+15550002222",
+        },
+    }
     assert kwargs == {**_BASELINE_CHANNEL_PAYLOAD, "params": {"token": "abc-123"}}
 
 
@@ -2037,7 +2062,16 @@ async def test_tool_payload_omits_params_when_none_or_empty(env, monkeypatch, pa
 
     # Byte-identical to today's payload apart from the generic turn block: no ``params`` key.
     kwargs = tools.calls[0]["arguments"]
-    assert kwargs.pop("turn") == {"id": message_id, "inbound": {"id": "PID1", "kind": "message", "source": "twilio"}}
+    assert kwargs.pop("turn") == {
+        "id": message_id,
+        "inbound": {"id": "PID1", "kind": "message", "source": "twilio"},
+        "subject": {
+            "target_kind": "tool",
+            "target_name": "echo-tool",
+            "person": None,
+            "thread": "bridge:tool-line:+15550002222",
+        },
+    }
     assert kwargs == _BASELINE_CHANNEL_PAYLOAD
     assert "params" not in kwargs
 
@@ -3808,7 +3842,16 @@ async def test_accept_with_attachments_and_location_stamps_record_and_the_tool_p
 
     kwargs = tools.calls[0]["arguments"]
     # The generic turn block rides every tool payload; its id is this turn's record id.
-    assert kwargs.pop("turn") == {"id": message_id, "inbound": {"id": "PID1", "kind": "message", "source": "twilio"}}
+    assert kwargs.pop("turn") == {
+        "id": message_id,
+        "inbound": {"id": "PID1", "kind": "message", "source": "twilio"},
+        "subject": {
+            "target_kind": "tool",
+            "target_name": "echo-tool",
+            "person": None,
+            "thread": "bridge:tool-line:+15550002222",
+        },
+    }
     assert kwargs == {
         **_BASELINE_CHANNEL_PAYLOAD,
         "message": "see attached",
@@ -3977,6 +4020,12 @@ async def test_turn_block_on_the_channel_door(env, monkeypatch):
     assert kwargs["turn"] == {
         "id": message_id,
         "inbound": {"id": "PID1", "kind": "message", "source": "twilio"},
+        "subject": {
+            "target_kind": "tool",
+            "target_name": "echo-tool",
+            "person": None,
+            "thread": "bridge:tool-line:+15550002222",
+        },
     }
     assert "event" not in kwargs
 
@@ -3994,6 +4043,12 @@ async def test_turn_block_on_the_api_door(env, monkeypatch):
     assert kwargs["turn"] == {
         "id": result.message_id,
         "inbound": {"id": result.message_id, "kind": "message", "source": "api"},
+        "subject": {
+            "target_kind": "tool",
+            "target_name": "echo-tool",
+            "person": None,
+            "thread": result.thread_id,
+        },
     }
     assert "event" not in kwargs
 
@@ -4017,6 +4072,12 @@ async def test_turn_block_on_the_event_door(env, monkeypatch):
     assert kwargs["turn"] == {
         "id": result.message_id,
         "inbound": {"id": "evt-1", "kind": "event", "source": "event:provider.update"},
+        "subject": {
+            "target_kind": "tool",
+            "target_name": "echo-tool",
+            "person": None,
+            "thread": thread_id,
+        },
     }
     assert kwargs["event"] == {"id": "evt-1", "kind": "provider.update", "payload": {"amount": 5}}
     assert result.thread_id == thread_id
@@ -4043,6 +4104,37 @@ async def test_operator_send_runs_no_tool_turn_and_carries_no_turn_block(env, mo
     assert record is not None
     assert record.origin == "operator"
     assert record.answer == "a human reply"
+
+
+# -- (i.b) the ambient state context every tool/agent turn deposits ----------
+
+
+async def test_conversation_state_context_deposited_for_the_tool_branch(env, monkeypatch):
+    # The tool a conversation turn dispatches runs inside a ``conversation``-door state
+    # context: candidates carry the thread (a non-multichannel target resolves no person),
+    # actor is the turn's attribution user_id, turn_id is the record id.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    seen: list = []
+    _wire_tool(monkeypatch, lambda kw: seen.append(current_state_context()) or "ok")
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    assert len(seen) == 1
+    ctx = seen[0]
+    assert ctx is not None
+    assert ctx.door == "conversation"
+    assert ctx.candidates.target_kind == "tool"
+    assert ctx.candidates.target_name == "echo-tool"
+    # Non-multichannel: only the thread candidate, no person.
+    assert ctx.candidates.by_kind == {"thread": "bridge:tool-line:+15550002222"}
+    assert ctx.turn_id == message_id
+    assert ctx.actor is not None
+    # The context is torn down once the turn ends. The agent branch shares this exact seam —
+    # both branches run inside the single ``with run_attribution(...), state_context(...)`` in
+    # ``_target_outcome`` — so the tool-branch capture proves the deposit for both.
+    assert current_state_context() is None
 
 
 # -- (ii) event happy path on a channel thread -------------------------------
@@ -4483,7 +4575,7 @@ async def test_preset_target_sees_turn_and_event_under_its_payload_arg(env, monk
     channel = FakeChannel()
     route = _tool_channel_route(target_name="relay", reply_expr=".echo.turn.id")
     _wire(monkeypatch, FakeManager(route), channel)
-    await _seed_channel_thread(monkeypatch, env, channel)
+    thread_id = await _seed_channel_thread(monkeypatch, env, channel)
 
     received: dict = {}
     tool = await _payload_arg_preset_tool(received)
@@ -4498,6 +4590,12 @@ async def test_preset_target_sees_turn_and_event_under_its_payload_arg(env, monk
     assert received["turn"] == {
         "id": result.message_id,
         "inbound": {"id": "evt-1", "kind": "event", "source": "event:provider.update"},
+        "subject": {
+            "target_kind": "tool",
+            "target_name": "relay",
+            "person": None,
+            "thread": thread_id,
+        },
     }
     assert received["event"] == {"id": "evt-1", "kind": "provider.update", "payload": {"n": 1}}
     assert received["message"] is None

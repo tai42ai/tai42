@@ -41,7 +41,7 @@ def wired(monkeypatch, fake_redis, fake_client_ctx):
 def captured(monkeypatch):
     calls: list[dict] = []
 
-    async def _stub(identity, fingerprint, tool, interaction_id, answer):
+    async def _stub(identity, fingerprint, tool, interaction_id, answer, park_context=None):
         calls.append({"identity": identity, "fingerprint": fingerprint, "answer": answer})
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _stub)

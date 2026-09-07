@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from tai42_contract.conversations import DeliveryReceipt
+from tai42_contract.conversations import ConversationTargetKind, DeliveryReceipt, TargetBindValidator
 
 if TYPE_CHECKING:
     from tai42_contract.interactions.models import LocationElement, MediaItem
@@ -55,3 +55,13 @@ class ConversationsFacet:
 
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:
         await self._app._conversation_record_delivery_status(channel, provider_message_id, status)
+
+    def register_target_validator(self, target_kind: ConversationTargetKind, validator: TargetBindValidator) -> None:
+        self._app._target_validator_registry.register(target_kind, validator)
+
+    def target_validator(self, target_kind: str) -> TargetBindValidator | None:
+        """The registered bind validator for ``target_kind``, or ``None`` when none is
+        registered. Skeleton-only — ``create_conversation_route`` consults it, so it is not
+        on the ``AppConversations`` protocol (the register-only seam), the precedent
+        ``AppPresets.write_validator`` sets."""
+        return self._app._target_validator_registry.get(target_kind)

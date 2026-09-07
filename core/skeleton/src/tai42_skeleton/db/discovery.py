@@ -286,6 +286,9 @@ async def installed_plugin_entries() -> list[MigrationEntry]:
 
 
 async def all_migration_entries() -> list[MigrationEntry]:
-    """Every chain this process is responsible for: the skeleton chain plus every
-    installed plugin chain, each under its component's bound migrator identity."""
-    return [skeleton_entry(), *await installed_plugin_entries()]
+    """Every chain this process is responsible for: the two skeleton-owned chains (the
+    skeleton baseline and the ``states`` record store) plus every installed plugin chain,
+    each under its component's bound identity."""
+    from tai42_skeleton.states.db import states_entry
+
+    return [skeleton_entry(), states_entry(), *await installed_plugin_entries()]

@@ -36,6 +36,7 @@ import asyncio
 import base64
 import contextlib
 import importlib
+import json
 import os
 import secrets
 import signal
@@ -124,6 +125,23 @@ def _resolve_dist_path(runner: StudioRunnerSettings) -> Path:
 
 def _print_ready(url: str, api_key: str) -> None:
     print(f"tai42-e2e-studio-stack ready at {url} (test-only api key: {api_key})", flush=True)
+
+
+# Per-run coordinates the ``ui/`` specs cannot pin ahead of boot. It carries the SUT
+# Redis URL (a DB index reserved dynamically at ``allocate_resources`` time), which the
+# web-widget spec reads a visitor's server-side session id from — the web channel never
+# discloses that id to the client. Rewritten every boot, removed on teardown so a stale
+# file can never point a later run at a released DB.
+_STACK_HANDOFF = Path(__file__).resolve().parents[2] / "ui" / ".stack-handoff.json"
+
+
+def _write_stack_handoff(resources: Any) -> None:
+    _STACK_HANDOFF.write_text(json.dumps({"redis_url": resources.redis_url}), encoding="utf-8")
+
+
+def _remove_stack_handoff() -> None:
+    with contextlib.suppress(FileNotFoundError):
+        _STACK_HANDOFF.unlink()
 
 
 def _pids_listening_on(port: int) -> set[int]:
@@ -495,6 +513,10 @@ def main() -> None:
             release_resources(infra, resources)
             raise
         stack = TaiStack(config, infra, resources, root, app_port=runner.ui_port)
+        # Publish the per-run coordinates BEFORE boot: Playwright gates the suite on the
+        # app URL responding, which a readiness probe can satisfy before ``boot()`` returns,
+        # so a post-boot write would race the first spec that reads the handoff.
+        _write_stack_handoff(resources)
         try:
             # The readiness probes hit /health and /metrics, which access control
             # denies until the route table pins them public, so the seed must land
@@ -509,6 +531,7 @@ def main() -> None:
             _print_ready(f"http://{stack.host}:{stack.port_a}", runner.ui_api_key)
             stop.wait()
         finally:
+            _remove_stack_handoff()
             stack.teardown()
     finally:
         # Tear down every surface even if one raises, aggregating the failures so

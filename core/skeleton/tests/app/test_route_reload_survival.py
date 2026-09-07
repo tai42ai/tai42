@@ -419,7 +419,7 @@ def test_accounts_shape_runs_each_route_module_body_exactly_once_per_pass(
     # The accounts-postgres shape: the ROOT package is a lifecycle entry AND its two route
     # submodules are their own router entries. Driven through the REAL role-loop dedup
     # (``_import_additive_plugin`` with the pass's run-once ledger), the lifecycle walk runs
-    # each route module body once under its own binding, and the router loop — reaching
+    # each route module body once under its own binding, and the router-role import — reaching
     # already-executed modules — does NOT re-run them. Exactly one execution per module per
     # pass, all routes registered, completeness green (no MountRegistrationError). A second
     # pass with a FRESH ledger re-executes cleanly, proving the ledger is per-pass.
@@ -436,10 +436,10 @@ def test_accounts_shape_runs_each_route_module_body_exactly_once_per_pass(
         executed: set[str] = set()
         # Lifecycle loop: the root package sweeps in both route submodules under their bindings.
         assert app._import_additive_plugin("multi_router_plugin", "lifecycle", {}, executed) is True
-        # Router loop: each route submodule is its own entry — already executed by the walk.
+        # Router role: each route submodule is its own entry — already executed by the walk.
         assert app._import_additive_plugin(_LOGIN_LEAF, "router", {}, executed) is True
         assert app._import_additive_plugin(_USERS_LEAF, "router", {}, executed) is True
-        # The walk executed the submodules and the ledger recorded them, so the router loop skipped.
+        # The walk executed the submodules and the ledger recorded them, so the router-role import skipped.
         assert {_LOGIN_LEAF, _USERS_LEAF} <= executed
         assert _regprobe.exec_count[_LOGIN_LEAF] == 1
         assert _regprobe.exec_count[_USERS_LEAF] == 1

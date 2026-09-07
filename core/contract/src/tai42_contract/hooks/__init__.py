@@ -4,6 +4,6 @@
 from __future__ import annotations
 
 from tai42_contract.hooks.manager import HooksManager
-from tai42_contract.hooks.models import HookParams, HookRegister, TopicVerifierBinding
+from tai42_contract.hooks.models import HookParams, HookRegister, HookSubject, TopicVerifierBinding
 
-__all__ = ["HookParams", "HookRegister", "HooksManager", "TopicVerifierBinding"]
+__all__ = ["HookParams", "HookRegister", "HookSubject", "HooksManager", "TopicVerifierBinding"]

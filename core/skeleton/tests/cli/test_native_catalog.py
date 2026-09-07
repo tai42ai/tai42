@@ -154,7 +154,7 @@ def _registrations(dotted: str) -> set[tuple[str, str]]:
 
 
 def test_builtin_rows_match_registrations() -> None:
-    # The static _BUILTIN_ROWS table is the only place the 6 skeleton builtins are
+    # The static _BUILTIN_ROWS table is the only place the skeleton builtins are
     # enumerated. Pin each row's (kind, name) to its module's ACTUAL registration read
     # from source, so a builtin renamed, moved, OR its kind flipped fails this test
     # rather than silently rotting the table.

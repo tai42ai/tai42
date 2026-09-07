@@ -272,6 +272,29 @@ async def open_modal_view(trigger_id: str, view: dict[str, Any]) -> None:
         raise ChannelDeliveryError(f"views.open failed: {body.get('error', 'unknown error')}")
 
 
+def _form_data_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
+    """The form's per-send ``{values, options}`` as plain JSON for the record and the
+    modal builder — each option ``{"value", "label"?}`` (label omitted when absent).
+    ``None`` when the ask carried no data."""
+    if delivery.data is None:
+        return None
+    options: dict[str, list[dict[str, Any]]] = {}
+    for name, choices in delivery.data.options.items():
+        options[name] = [
+            {"value": choice.value, **({"label": choice.label} if choice.label is not None else {})}
+            for choice in choices
+        ]
+    return {"values": delivery.data.values, "options": options}
+
+
+def _form_pages_list(delivery: ChannelDelivery) -> list[dict[str, Any]] | None:
+    """The form's step layout as plain JSON — each page ``{"title", "fields"}`` — or
+    ``None`` when the ask carried one page."""
+    if delivery.pages is None:
+        return None
+    return [{"title": page.title, "fields": list(page.fields)} for page in delivery.pages]
+
+
 async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> None:
     """Deliver a ``form`` question: post a section + a button whose click opens the
     Block Kit modal, after reserving the form's state.
@@ -289,12 +312,18 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
         # The contract guarantees a non-empty schema for a form; a gap here is a
         # delivery failure, not a silent plain-text send.
         raise ChannelDeliveryError("form answer_format requires a non-empty schema")
+    # The per-send prefill/choices and the step layout are what the modal (built AT
+    # CLICK TIME) renders, so they ride the record and the compose-and-discard below.
+    form_data = _form_data_dict(delivery)
+    pages = _form_pages_list(delivery)
+    values = form_data.get("values") if form_data is not None else None
+    options = form_data.get("options") if form_data is not None else None
     # Compose the exact modal the click will build, discarding it — same single
     # source of truth, so every cap it enforces is enforced here. An unmappable
-    # schema or a modal past a Slack cap is a permanent input refusal
-    # (:class:`FormSchemaError`, a ``ChannelInputError``), raised before any store
-    # or send — never a retryable delivery failure.
-    build_modal_view(delivery.interaction_id, delivery.question, schema)
+    # schema, an unmappable per-send extra, or a modal past a Slack cap is a permanent
+    # input refusal (:class:`FormSchemaError`, a ``ChannelInputError``), raised before
+    # any store or send — never a retryable delivery failure.
+    build_modal_view(delivery.interaction_id, delivery.question, schema, values, options, pages)
     # Any display media rides above the form's section + open-modal button (a data:
     # image is refused here, before the reserve or send).
     message_blocks = [
@@ -302,7 +331,13 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
         *build_message_blocks(delivery.question, delivery.interaction_id),
     ]
     await store_form_record(
-        delivery.interaction_id, delivery.callback_url, schema, delivery.question, delivery.timeout_at
+        delivery.interaction_id,
+        delivery.callback_url,
+        schema,
+        delivery.question,
+        delivery.timeout_at,
+        data=form_data,
+        pages=pages,
     )
     try:
         await _post_message(token, target, delivery.question, blocks=message_blocks)

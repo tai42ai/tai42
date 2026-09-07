@@ -16,6 +16,7 @@ BUILTIN_TOOLS: dict[str, list[str]] = {
     "tai42_skeleton.tools.builtin.file_loader": ["file_loader"],
     "tai42_skeleton.tools.builtin.interactions": ["ask_user"],
     "tai42_skeleton.tools.builtin.get_pairing_code": ["get_pairing_code"],
+    "tai42_skeleton.tools.builtin.states": ["state_read", "state_replace", "state_merge", "state_apply"],
 }
 
 BUILTIN_EXTENSION_MODULE = "tai42_skeleton.extensions.builtin.monitor"

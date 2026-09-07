@@ -73,7 +73,7 @@ from tai42_channel_whatsapp.correlation import (
     release_pending,
     reserve_pending,
 )
-from tai42_channel_whatsapp.flows import build_flow
+from tai42_channel_whatsapp.flows import build_flow, build_flow_data, build_form_flow
 from tai42_channel_whatsapp.settings import (
     WhatsAppSettings,
     require_delivery_setting,
@@ -123,6 +123,10 @@ _NOTIFY_FORM_TOKEN_PREFIX = "tai42-nf:"
 # orphan-draft cleanup, never from the name.
 _FLOW_NAME_PREFIX = "tai42-form-"
 
+# The entry screen a stepped form's send navigates to (``build_form_flow``'s first
+# screen); the send injects the per-send values/options as its ``data``.
+_FORM_ENTRY_SCREEN = "SCREEN_0"
+
 
 async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, Any]) -> str:
     """The published flow id for this schema under ``waba_id``: the cached id, else
@@ -150,23 +154,56 @@ async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, 
     return flow_id
 
 
+def _form_pages_list(delivery: ChannelDelivery) -> list[dict[str, Any]] | None:
+    """The form's step layout as plain JSON — each page ``{"title", "fields"}`` — or
+    ``None`` when the ask carried one page."""
+    if delivery.pages is None:
+        return None
+    return [{"title": page.title, "fields": list(page.fields)} for page in delivery.pages]
+
+
+def _form_values_and_options(
+    delivery: ChannelDelivery,
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+    """The form's per-send ``values`` and ``options`` as plain JSON — each option
+    ``{"value", "label"?}`` (label omitted when absent). Empty when the ask carried no
+    data."""
+    if delivery.data is None:
+        return {}, {}
+    options: dict[str, list[dict[str, Any]]] = {}
+    for name, choices in delivery.data.options.items():
+        options[name] = [
+            {"value": choice.value, **({"label": choice.label} if choice.label is not None else {})}
+            for choice in choices
+        ]
+    return dict(delivery.data.values), options
+
+
 async def _deliver_form(
     settings: WhatsAppSettings, phone_number_id: str, target: str, delivery: ChannelDelivery
 ) -> None:
     """Deliver a form ask as a WhatsApp Flow (Tier-2: reserve BEFORE send).
 
-    The Flow is built and its schema validated BEFORE any network work — an
-    unsupported schema raises here, before the ``CHANNEL_WHATSAPP_WABA_ID`` gate,
-    the reservation, or a send. The reservation carries the answer schema (so an
-    inbound Flow response is coerced to its types) and the question text (so a
-    door-rejected answer is re-asked with a fresh Flow), and uses the
-    ``interaction_id`` as the ``flow_token`` correlating the completed form. A
-    failure resolving the
-    Flow or sending releases the reservation and raises — never a fallback format.
+    The Flow (one screen per page) and its per-send data are built and validated
+    BEFORE any network work — an unsupported schema, an unmappable per-send option, or
+    an unknown page field raises here, before the ``CHANNEL_WHATSAPP_WABA_ID`` gate, the
+    reservation, or a send. The reservation carries the answer schema (so an inbound
+    Flow response is coerced to its types) and the question text (so a door-rejected
+    answer is re-asked), and uses the ``interaction_id`` as the ``flow_token``
+    correlating the completed form. The published Flow is keyed by the
+    ``(schema, pages, option_fields)`` triple (the option-bearing fields decide which
+    string properties render as dropdowns) and REUSED across sends; the prefilled values
+    and per-send option lists ride the send's ``flow_action_payload.data`` (a dynamic
+    data-source), never a new Flow.
+    A failure resolving the Flow or sending releases the reservation and raises — never a
+    fallback format.
     """
     if delivery.schema is None:
         raise ChannelDeliveryError(f"form delivery {delivery.interaction_id} is missing its schema")
-    flow_json, schema_hash = build_flow(delivery.schema)
+    pages = _form_pages_list(delivery)
+    values, options = _form_values_and_options(delivery)
+    flow_json, schema_hash = build_form_flow(delivery.schema, pages, set(options))
+    flow_data = build_flow_data(delivery.schema, values, options)
     waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
 
     await reserve_pending(
@@ -186,6 +223,8 @@ async def _deliver_form(
             body_text=delivery.question,
             flow_id=flow_id,
             flow_token=delivery.interaction_id,
+            screen=_FORM_ENTRY_SCREEN,
+            data=flow_data,
         )
     except Exception:
         # Any create/publish/store/send failure frees the pair instead of holding

@@ -92,6 +92,8 @@ function pendingQuestion(): ChatItem {
     media: null,
     callbackUrl: null,
     schema: null,
+    formData: null,
+    pages: null,
     timeoutAt: new Date(Date.now() + 600_000).toISOString(),
     ts: TS,
   };

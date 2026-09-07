@@ -32,6 +32,7 @@ from tai42_skeleton.app.facets import (
     MonitoringFacet,
     PresetsFacet,
     SandboxesFacet,
+    StatesFacet,
     StorageFacet,
     SubAppFacet,
     ToolsFacet,
@@ -561,3 +562,62 @@ def test_sub_app_facet_forwarding():
     app = _app()
     app._mcp_sub_app_router = "router"
     assert SubAppFacet(app).mcp_sub_app_router == "router"
+
+
+async def test_states_facet_forwarding():
+    app = _app()
+    svc = MagicMock()
+    for name in (
+        "list_declarations",
+        "get_declaration",
+        "put_declaration",
+        "delete_declaration",
+        "stats",
+        "list_modules",
+        "get_module",
+        "put_module",
+        "delete_module",
+        "list_mounts",
+        "mount",
+        "update_mount_declarations",
+        "unmount",
+        "read",
+        "replace",
+        "merge",
+        "apply",
+        "erase",
+        "fold",
+        "list_subjects",
+        "search",
+        "writes",
+        "prune_expired",
+        "consumers",
+        "import_aliases",
+        "import_applied_ops",
+        "import_records",
+        "migrate",
+        "preview_migrate",
+    ):
+        setattr(svc, name, AsyncMock(return_value=f"{name}-result"))
+    app._states_service = svc
+    f = StatesFacet(app)
+
+    assert await f.list_declarations() == "list_declarations-result"
+    assert await f.read("s", "subj") == "read-result"  # type: ignore[arg-type]
+    svc.read.assert_awaited_once_with("s", "subj")
+    assert await f.apply("s", "subj", [], op_id="o", origin="orig") == "apply-result"  # type: ignore[arg-type]
+    svc.apply.assert_awaited_once_with("s", "subj", [], op_id="o", origin="orig")
+    assert await f.mount("s", "m", "body") == "mount-result"  # type: ignore[arg-type]
+    svc.mount.assert_awaited_once_with("s", "m", "body")
+
+    # the register/context seams are sync forwards
+    f.register_mount_validator("v")  # type: ignore[arg-type]
+    svc.register_mount_validator.assert_called_once_with("v")
+    f.register_consumer_lister("consumer", "lister")  # type: ignore[arg-type]
+    svc.register_consumer_lister.assert_called_once_with("consumer", "lister")
+    f.register_module_seed("doc")  # type: ignore[arg-type]
+    svc.register_module_seed.assert_called_once_with("doc")
+    f.register_retired_module_name("old")
+    svc.register_retired_module_name.assert_called_once_with("old")
+    svc.context.return_value = "ctx"
+    assert f.context() == "ctx"

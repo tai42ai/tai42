@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.backend.registry import BackendHolder
     from tai42_skeleton.backup import BackupRegistry
     from tai42_skeleton.channels.registry import ChannelRegistry
+    from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
     from tai42_skeleton.presets.base_tool_config import (
         PresetInputSchemaSupportRegistry,
         PresetRegistrationTierRegistry,
@@ -70,6 +71,12 @@ if TYPE_CHECKING:
     from tai42_skeleton.presets.seeds import PresetSeedRegistry
     from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
     from tai42_skeleton.sandbox import SandboxHolder
+    from tai42_skeleton.states.seeds import StateModuleSeedRegistry
+    from tai42_skeleton.states.service import (
+        StatesConsumerListerRegistry,
+        StatesMountValidatorRegistry,
+        StatesService,
+    )
     from tai42_skeleton.template import ResourceManager
     from tai42_skeleton.tools import ToolRefsRegistry, ToolRetryRegistry
     from tai42_skeleton.tools.binding import ToolBinding
@@ -309,6 +316,10 @@ class TaiMCPLifecycleMixin(ABC):
         return self._serving_core._write_validator_registry
 
     @property
+    def _target_validator_registry(self) -> "TargetBindValidatorRegistry":
+        return self._serving_core._target_validator_registry
+
+    @property
     def _input_schema_support_registry(self) -> "PresetInputSchemaSupportRegistry":
         return self._serving_core._input_schema_support_registry
 
@@ -335,6 +346,22 @@ class TaiMCPLifecycleMixin(ABC):
     @property
     def _backup_registry(self) -> "BackupRegistry":
         return self._serving_core._backup_registry
+
+    @property
+    def _states_service(self) -> "StatesService":
+        return self._serving_core._states_service
+
+    @property
+    def _states_mount_validators(self) -> "StatesMountValidatorRegistry":
+        return self._serving_core._states_mount_validators
+
+    @property
+    def _states_consumer_listers(self) -> "StatesConsumerListerRegistry":
+        return self._serving_core._states_consumer_listers
+
+    @property
+    def _states_module_seeds(self) -> "StateModuleSeedRegistry":
+        return self._serving_core._states_module_seeds
 
     @property
     def _preset_manager(self) -> "PresetManager":
@@ -852,6 +879,11 @@ class TaiMCPLifecycleMixin(ABC):
         # register_write_validator() call each start(). Mirrors the resets above.
         self._write_validator_registry.reset()
 
+        # Reset so a dropped conversation target validator doesn't linger across
+        # update()/reload — the manifest's plugin modules re-run their
+        # register_target_validator() call each start(). Mirrors the reset above.
+        self._target_validator_registry.reset()
+
         # Reset the per-base-tool preset input-schema support + registration-tier
         # declarations alongside the write validator, for the same reload reason.
         self._input_schema_support_registry.reset()
@@ -874,6 +906,14 @@ class TaiMCPLifecycleMixin(ABC):
         # stale referee or a dropped seed never lingers across update()/reload.
         self._rename_referee_registry.reset()
         self._seed_registry.reset()
+
+        # Reset the state store's consumer-owned registries (mount validators, consumer
+        # listers, module seeds) alongside the registries above: a reload re-imports the
+        # plugin modules (which re-run their register_mount_validator/register_consumer_lister/
+        # register_module_seed calls), so a stale validator, lister or seed never lingers.
+        self._states_mount_validators.reset()
+        self._states_consumer_listers.reset()
+        self._states_module_seeds.reset()
 
         # Drop the cached resource manager: a reload re-imports the storage
         # module and rebuilds the storage provider, so a stale cache would keep

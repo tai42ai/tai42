@@ -41,6 +41,7 @@ from tai42_skeleton.monitoring.registry import get_monitoring_staged
 from tai42_skeleton.plugins.registry import StudioPluginError, current_registry_staged
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
 from tai42_skeleton.settings.rate_limit import RateLimitSettings
+from tai42_skeleton.states.db import STATES_COMPONENT, states_store_configured
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.facets import AdminFacet, StorageFacet
@@ -303,6 +304,13 @@ _GATED_FEATURES: list[GatedFeature] = [
         configured=lambda: component_store_configured(SKELETON_COMPONENT),
         enabling_var=lambda: database_password_env(component_binding(SKELETON_COMPONENT)),
         off_behavior="Preset and version reads answer 200 empty or 404; writes refuse 501 versioning-not-configured.",
+    ),
+    GatedFeature(
+        kind="states",
+        label="Subject state records",
+        configured=states_store_configured,
+        enabling_var=lambda: database_password_env(component_binding(STATES_COMPONENT)),
+        off_behavior="Every states read and write refuses 501 states-not-configured.",
     ),
 ]
 

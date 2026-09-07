@@ -311,6 +311,39 @@ async def test_block_actions_opens_modal_with_exact_payload(fake_redis, http_scr
     }
 
 
+async def test_block_actions_modal_carries_the_reserved_per_send_data_and_pages(fake_redis, http_script):
+    # The modal is built AT CLICK TIME from the reserved record, so the per-send
+    # values/options and step layout reach the opened view.
+    schema = {
+        "type": "object",
+        "properties": {"full_name": {"type": "string", "title": "Full name"}, "tier": {"type": "string"}},
+    }
+    data = {"values": {"full_name": "Ada"}, "options": {"tier": [{"value": "g", "label": "Gold"}]}}
+    pages = [{"title": "You", "fields": ["full_name"]}, {"title": "Plan", "fields": ["tier"]}]
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        schema,
+        _QUESTION,
+        datetime.now(UTC) + timedelta(minutes=10),
+        data=data,
+        pages=pages,
+    )
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+
+    await slack_interactive(_signed(_block_actions()))
+
+    (req,) = http_script.requests
+    view = json.loads(req.content)["view"]
+    assert view == build_modal_view(_INTERACTION_ID, _QUESTION, schema, data["values"], data["options"], pages)
+    # A concrete assertion the built view reflects the enrichment: the prefill, the
+    # per-send select, and the page headers are all present.
+    by_id = {b.get("block_id"): b for b in view["blocks"] if b["type"] == "input"}
+    assert by_id["full_name"]["element"]["initial_value"] == "Ada"
+    assert by_id["tier"]["element"]["options"] == [{"text": {"type": "plain_text", "text": "Gold"}, "value": "g"}]
+    assert [b["text"]["text"] for b in view["blocks"] if b["type"] == "header"] == ["You", "Plan"]
+
+
 async def test_block_actions_missing_record_acks_without_opening(fake_redis, http_script):
     # The button outlived its question (record expired) — nothing to open.
     response = await slack_interactive(_signed(_block_actions()))

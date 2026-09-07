@@ -5,6 +5,11 @@
  * copied from tai-studio's own suite rather than imported across repos so the
  * two Node lockfiles stay uncoupled.
  */
+import { readFileSync } from 'node:fs';
+import { connect } from 'node:net';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import {
   expect,
   type APIRequestContext,
@@ -420,4 +425,115 @@ export async function runToolAsync(
   key: string = API_KEY,
 ): Promise<unknown> {
   return awaitToolRun(request, await submitToolRun(request, toolName, args, key), key);
+}
+
+/** The visitor's web-session cookie: the plugin mints it on the chat page and every
+ * public web door resolves it. It carries a SECRET token only — never the visitor id. */
+export const WEB_SESSION_COOKIE = 'tai_web_session';
+
+/** The plugin's session-registration key shape: a cookie token resolves to a server-side
+ * record holding the visitor id. Read directly because the doors never disclose that id. */
+const WEB_SESSION_KEY_PREFIX = 'channel:web:session:';
+
+/** The per-run handoff the studio_runner writes at boot: coordinates the specs cannot pin
+ * ahead of a dynamically reserved Redis DB. Resolved next to this file (`e2e/ui/`). */
+const STACK_HANDOFF_PATH = join(dirname(dirname(fileURLToPath(import.meta.url))), '.stack-handoff.json');
+
+/** The SUT Redis URL the booted stack reserved, read from the runner's handoff file. */
+export function stackRedisUrl(): string {
+  const raw = readFileSync(STACK_HANDOFF_PATH, 'utf8');
+  const url = (JSON.parse(raw) as { redis_url?: unknown }).redis_url;
+  if (typeof url !== 'string' || url.length === 0) {
+    throw new Error(`stack handoff ${STACK_HANDOFF_PATH} carries no redis_url: ${raw}`);
+  }
+  return url;
+}
+
+interface RedisReply {
+  readonly value: string | null;
+  readonly consumed: number;
+}
+
+/** Parse ONE RESP reply from the head of `buf`, or `null` when it is incomplete. Handles
+ * the simple-string/error/integer line replies and the bulk-string reply (incl. nil). */
+function parseRedisReply(buf: Buffer): RedisReply | null {
+  const nl = buf.indexOf('\r\n');
+  if (nl === -1) return null;
+  const type = String.fromCharCode(buf[0]);
+  const line = buf.subarray(1, nl).toString('utf8');
+  if (type === '$') {
+    const len = Number(line);
+    if (len === -1) return { value: null, consumed: nl + 2 };
+    const start = nl + 2;
+    const end = start + len;
+    if (buf.length < end + 2) return null;
+    return { value: buf.subarray(start, end).toString('utf8'), consumed: end + 2 };
+  }
+  if (type === '-') throw new Error(`redis error reply: ${line}`);
+  return { value: line, consumed: nl + 2 };
+}
+
+function respCommand(args: readonly string[]): Buffer {
+  let out = `*${args.length}\r\n`;
+  for (const arg of args) out += `$${Buffer.byteLength(arg)}\r\n${arg}\r\n`;
+  return Buffer.from(out, 'utf8');
+}
+
+/** GET one key off the SUT Redis over a raw RESP socket — no client dependency, mirroring
+ * the pytest harness's `registered_visitor_id`. Selects the URL's DB, GETs the key, and
+ * returns the bulk string (or `null` when the key is absent). */
+async function redisGet(redisUrl: string, key: string): Promise<string | null> {
+  const url = new URL(redisUrl);
+  const db = url.pathname.length > 1 ? url.pathname.slice(1) : '0';
+  const host = url.hostname;
+  const port = Number(url.port.length > 0 ? url.port : '6379');
+  return await new Promise<string | null>((resolve, reject) => {
+    const socket = connect({ host, port });
+    let buf = Buffer.alloc(0);
+    const replies: (string | null)[] = [];
+    const fail = (err: Error): void => {
+      socket.destroy();
+      reject(err);
+    };
+    socket.setTimeout(5000, () => fail(new Error(`redis GET timed out for ${key}`)));
+    socket.on('error', fail);
+    socket.on('connect', () => {
+      socket.write(respCommand(['SELECT', db]));
+      socket.write(respCommand(['GET', key]));
+    });
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      try {
+        for (;;) {
+          const reply = parseRedisReply(buf);
+          if (reply === null) break;
+          replies.push(reply.value);
+          buf = buf.subarray(reply.consumed);
+          // Reply 0 is SELECT's +OK; reply 1 is the GET we want.
+          if (replies.length >= 2) {
+            socket.end();
+            resolve(replies[1]);
+            return;
+          }
+        }
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  });
+}
+
+/** The server-side visitor id a web-session cookie token is registered against — the
+ * conversation address a web `ask_user` names its recipient by (`<identity>:<visitor>`),
+ * which the public doors never disclose to the client. Read from the SUT Redis. */
+export async function resolveWebVisitorId(token: string): Promise<string> {
+  const raw = await redisGet(stackRedisUrl(), `${WEB_SESSION_KEY_PREFIX}${token}`);
+  if (raw === null) {
+    throw new Error(`no web session registration for cookie token ${token.slice(0, 8)}...`);
+  }
+  const visitorId = (JSON.parse(raw) as { visitor_id?: unknown }).visitor_id;
+  if (typeof visitorId !== 'string' || visitorId.length === 0) {
+    throw new Error(`web session registration carries no visitor_id: ${raw}`);
+  }
+  return visitorId;
 }

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from tai42_contract.hooks import HookRegister, TopicVerifierBinding
+from tai42_contract.hooks import HookRegister, HookSubject, TopicVerifierBinding
 
 
 def _valid_register(**overrides: object) -> dict[str, object]:
@@ -101,3 +101,33 @@ def test_stored_params_inherit_the_charset_rule():
 
     with pytest.raises(ValidationError):
         HookParams.model_validate(_valid_register(topic="a/b", execution_key_fingerprint="fp-fire"))
+
+
+def test_register_defaults_subject_to_none():
+    # A hook with no Subject group carries no ambient state context at the fire.
+    assert HookRegister.model_validate(_valid_register()).subject is None
+
+
+def test_register_accepts_a_subject_group():
+    reg = HookRegister.model_validate(
+        _valid_register(
+            subject={"target_kind": "tool", "target_name": "assistant", "kind": "thread", "key_expr": ".id"}
+        )
+    )
+    assert reg.subject is not None
+    assert reg.subject.key_expr == ".id"
+
+
+def test_hook_subject_is_frozen_and_validates_its_shape():
+    subject = HookSubject(target_kind="tool", target_name="assistant", kind="person", key_expr=".actor")
+    with pytest.raises(ValidationError):
+        subject.kind = "other"  # type: ignore[misc]
+    # A blank key_expr, a bad kind charset, and an extra key are each refused.
+    with pytest.raises(ValidationError):
+        HookSubject(target_kind="tool", target_name="assistant", kind="person", key_expr="")
+    with pytest.raises(ValidationError):
+        HookSubject(target_kind="tool", target_name="assistant", kind="Person", key_expr=".actor")
+    with pytest.raises(ValidationError):
+        HookSubject.model_validate(
+            {"target_kind": "tool", "target_name": "a", "kind": "person", "key_expr": ".x", "bogus": 1}
+        )

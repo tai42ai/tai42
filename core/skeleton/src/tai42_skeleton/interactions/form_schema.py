@@ -81,3 +81,33 @@ def validate_channel_form_schema(schema: dict) -> None:
     falls outside the channel-deliverable form subset; return ``None`` when it
     conforms. Callers pass a JSON-schema dict — normalize a pydantic model first."""
     channel_form_fields(schema)
+
+
+def effective_answer_schema(schema: dict[str, Any], data: Any) -> dict[str, Any]:
+    """Return ``schema`` with each per-send option list applied as its property's
+    ``enum`` for ANSWER validation: a per-send list replaces the published ``enum``
+    for one send, so a submitted value is judged against the choices the human was
+    actually shown. ``data`` is the stored :class:`FormData` dump (or ``None``);
+    absent options return ``schema`` unchanged. Non-mutating (shallow copies only)."""
+    options = (data or {}).get("options") if isinstance(data, dict) else None
+    if not options:
+        return schema
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return schema
+    new_properties = dict(properties)
+    for name, option_list in options.items():
+        prop = new_properties.get(name)
+        if not isinstance(prop, dict):
+            continue
+        enum = [option["value"] for option in option_list]
+        if prop.get("type") == "array":
+            # An array property carries its choices on ``items``, not the array itself:
+            # placing the ``enum`` on the array would demand the whole submitted list
+            # equal one option, rejecting every real multi-select answer.
+            items = prop.get("items")
+            items = items if isinstance(items, dict) else {}
+            new_properties[name] = {**prop, "items": {**items, "enum": enum}}
+        else:
+            new_properties[name] = {**prop, "enum": enum}
+    return {**schema, "properties": new_properties}

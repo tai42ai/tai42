@@ -170,27 +170,45 @@ async def store_correlation(ts: str, callback_url: str, interaction_id: str, tim
 
 
 async def store_form_record(
-    interaction_id: str, callback_url: str, schema: dict[str, Any], question: str, timeout_at: datetime
+    interaction_id: str,
+    callback_url: str,
+    schema: dict[str, Any],
+    question: str,
+    timeout_at: datetime,
+    data: dict[str, Any] | None = None,
+    pages: list[dict[str, Any]] | None = None,
 ) -> None:
     """Reserve the form's rich state before its message is sent, TTL = budget.
 
-    Raises :class:`ChannelDeliveryError` when the budget is already spent — never a
+    ``data`` (``{values, options}``) and ``pages`` are the per-send enrichment the modal
+    is built from AT CLICK TIME (a modal opens on the button tap, not at delivery), so they
+    ride the record; ``None``/absent renders the plain modal. Raises
+    :class:`ChannelDeliveryError` when the budget is already spent — never a
     non-positive-TTL write.
     """
     ttl = remaining_seconds(timeout_at)
     if ttl <= 0:
         raise ChannelDeliveryError(f"question budget already expired (timeout_at={timeout_at.isoformat()})")
-    record = json.dumps(
-        {"callback_url": callback_url, "schema": schema, "question": question, "timeout_at": timeout_at.isoformat()}
-    )
+    payload: dict[str, Any] = {
+        "callback_url": callback_url,
+        "schema": schema,
+        "question": question,
+        "timeout_at": timeout_at.isoformat(),
+    }
+    if data is not None:
+        payload["data"] = data
+    if pages is not None:
+        payload["pages"] = pages
+    record = json.dumps(payload)
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.set(_FORM_KEY.format(key=interaction_id), record, ex=ttl)
 
 
 async def get_form_record(interaction_id: str) -> dict[str, Any] | None:
-    """The pending form's ``{callback_url, schema, question, timeout_at}`` record, or
-    ``None`` when unknown/expired (the button outlived its question). The adapter-private
-    rich read the modal open + submission decode use, distinct from the port's projection."""
+    """The pending form's ``{callback_url, schema, question, timeout_at, data?, pages?}``
+    record, or ``None`` when unknown/expired (the button outlived its question). The
+    adapter-private rich read the modal open + submission decode use, distinct from the
+    port's projection."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         raw = cast("str | None", await redis.get(_FORM_KEY.format(key=interaction_id)))
     return json.loads(raw) if raw is not None else None

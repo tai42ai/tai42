@@ -5,7 +5,8 @@ references, armed skeleton-side at boot (never through the public
 Each referee answers the rename gate for the OLD tool name with human-readable
 descriptions of the live references it still has: a schedule firing it, a hook
 targeting it, a conversation route pointing at it, a tool-extensions map entry
-carrying it, or a parked interaction whose resume continuation is it. An empty
+carrying it, a parked interaction whose resume continuation is it, or state
+records keyed under it as a ``tool`` subject target. An empty
 answer is no objection; a raising referee fails the rename loudly — an unreadable
 holder store must never let a stranding rename through.
 
@@ -147,6 +148,22 @@ async def _parked_interaction_referee(old_name: str) -> list[str]:
     return holders
 
 
+async def _states_referee(old_name: str) -> list[str]:
+    # A ``tool`` target renamed would strand every state record keyed under it — the
+    # subject scope ``(tool, <old_name>)`` no longer names a live target. Count them across
+    # every state; feature-off (the states component's database unbound) holds none.
+    from tai42_skeleton.states.db import states_store_configured
+    from tai42_skeleton.states.store import PostgresStatesStore
+
+    if not states_store_configured():
+        return []
+    count = await PostgresStatesStore().count_records_for_target("tool", old_name)
+    if count == 0:
+        return []
+    records = "record" if count == 1 else "records"
+    return [f"{count} state {records} under target tool/{old_name}"]
+
+
 def register_platform_rename_referees() -> None:
     """Arm the platform-internal referees on the live app's referee collection — a
     startup/reload handler (the collection is reset each ``start()``, so this re-arms
@@ -157,5 +174,6 @@ def register_platform_rename_referees() -> None:
         _conversation_route_referee,
         _tool_extensions_referee,
         _parked_interaction_referee,
+        _states_referee,
     ):
         tai42_app.tools.register_rename_referee(referee)

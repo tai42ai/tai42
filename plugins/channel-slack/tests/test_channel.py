@@ -21,7 +21,14 @@ from tai42_contract.channels import (
     OptionSection,
     ReplyOption,
 )
-from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
+from tai42_contract.interactions.models import (
+    FormData,
+    FormOption,
+    FormPage,
+    LocationElement,
+    MediaItem,
+    MediaKind,
+)
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import reset_all_settings
 
@@ -345,6 +352,38 @@ async def test_deliver_form_posts_blocks_and_stores_record(http_script, fake_red
     assert fake_redis.ttls[_FORM_KEY] == remaining_seconds(delivery.timeout_at)
     # The form path never writes a ts-correlation (its answer comes via the modal).
     assert "channel:slack:corr:1.1" not in fake_redis.store
+
+
+async def test_deliver_form_stores_the_per_send_data_and_pages_on_the_record(http_script, fake_redis):
+    # The modal is built AT CLICK TIME from the record, so the per-send values/options
+    # and the step layout ride the record for the open handler to render.
+    http_script.results.append(_ok_response(ts="1.1"))
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}, "note": {"type": "string"}}}
+    delivery = make_delivery(
+        answer_format="form",
+        schema=schema,
+        data=FormData(values={"note": "hi"}, options={"colour": [FormOption(value="r", label="Red")]}),
+        pages=[FormPage(title="Pick", fields=["colour"]), FormPage(title="Say", fields=["note"])],
+    )
+
+    await SlackChannel().deliver(delivery)
+
+    record = json.loads(fake_redis.store[_FORM_KEY])
+    assert record["data"] == {"values": {"note": "hi"}, "options": {"colour": [{"value": "r", "label": "Red"}]}}
+    assert record["pages"] == [{"title": "Pick", "fields": ["colour"]}, {"title": "Say", "fields": ["note"]}]
+
+
+async def test_deliver_form_unmappable_per_send_option_raises_before_any_io(http_script, fake_redis):
+    # A per-send option on a non-string property can never render — refused before any
+    # store or send, naming the field, never a fallback plain-text delivery.
+    schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
+    delivery = make_delivery(
+        answer_format="form", schema=schema, data=FormData(values={}, options={"count": [FormOption(value="1")]})
+    )
+    with pytest.raises(ChannelInputError, match="count"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
 
 
 async def test_deliver_form_reserves_record_before_send(stub_app, fake_redis):

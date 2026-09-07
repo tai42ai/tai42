@@ -237,6 +237,35 @@ async def test_append_question_omits_the_schema_when_none(fake_redis: FakeRedis)
     assert "schema" not in _data(_entries(fake_redis)[0])
 
 
+async def test_append_question_carries_form_data_and_pages_only_when_given(fake_redis: FakeRedis):
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}}}
+    form_data = {"values": {"colour": "r"}, "options": {"colour": [{"value": "r", "label": "Red"}]}}
+    pages = [{"title": "Pick", "fields": ["colour"]}]
+    await append_question(
+        IDENTITY,
+        VISITOR_ID,
+        "int-1",
+        "Your details",
+        "form",
+        None,
+        _deadline(),
+        schema=schema,
+        form_data=form_data,
+        pages=pages,
+    )
+    payload = _data(_entries(fake_redis)[0])
+    assert payload["data"] == form_data
+    assert payload["pages"] == pages
+
+
+async def test_append_question_omits_form_data_and_pages_when_none(fake_redis: FakeRedis):
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    await append_question(IDENTITY, VISITOR_ID, "int-1", "Your details", "form", None, _deadline(), schema=schema)
+    payload = _data(_entries(fake_redis)[0])
+    assert "data" not in payload
+    assert "pages" not in payload
+
+
 async def test_append_answered_carries_answer(fake_redis: FakeRedis):
     await append_answered(IDENTITY, VISITOR_ID, "int-1", {"choice": "staging"})
     entry = _entries(fake_redis)[0]

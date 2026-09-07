@@ -23,7 +23,14 @@ STUB_CHANNEL_NAME = "stub"
 class _StubChannel:
     """Satisfies the full ``Channel`` protocol. ``deliver`` succeeds without
     contacting any medium; ``notify`` raises, exactly as the contract prescribes
-    for a channel without a notify capability."""
+    for a channel without a notify capability.
+
+    Advertises ``supports_form_delivery`` so a channel-delivered ``form`` ask (with
+    per-send ``data``/``pages``) is accepted and its callback form page minted — the
+    generic vehicle a core e2e uses to drive the form surface without a real medium
+    plugin. It renders nothing itself: the human answers on the callback form page."""
+
+    supports_form_delivery = True
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         return None

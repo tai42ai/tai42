@@ -1,11 +1,13 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.hooks.models import HookParams
+from tai42_contract.hooks.models import HookParams, HookSubject
 from tai42_contract.monitoring import MonitoringLevel, SpanKind
+from tai42_contract.states import StateContext, SubjectCandidates
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.jq_util import get_compiled_jq
 
@@ -13,6 +15,7 @@ from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.monitoring import get_monitoring
 from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.states.context import state_context
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +106,13 @@ class BaseHooksManager(ABC):
             # keys must stay unoverridable — they are the hook's only lock against a link
             # minted by someone with no relation to the topic.
             tool_input = {**event_input, **(tool_kwargs_override or {}), **(hook.tool_kwargs or {})}
+            hook_context = await _hook_state_context(hook, payload)
+            context_scope: AbstractContextManager[Any] = (
+                state_context(hook_context) if hook_context is not None else nullcontext()
+            )
             async with bind_execution_identity(hook.execution_key, bound_fingerprint=hook.execution_key_fingerprint):
-                await run_recorded(hook.tool, tool_input)
+                with context_scope:
+                    await run_recorded(hook.tool, tool_input)
 
     async def _run_hook_with_limit(
         self, hook: HookParams, payload: dict[str, Any], tool_kwargs_override: dict[str, Any] | None = None
@@ -202,3 +210,27 @@ class BaseHooksManager(ABC):
                         result,
                         exc_info=result,
                     )
+
+
+async def _hook_state_context(hook: HookParams, payload: dict[str, Any]) -> StateContext | None:
+    """The ambient ``hook``-door state context for a fire, or ``None`` when the hook declares
+    no ``subject``. The subject's ``key_expr`` runs over the event payload and MUST yield a
+    non-empty string — an empty/blank/non-string key fails the fire loudly, never a silent
+    skip — so a state write during the fire is keyed and attributed to the hook (actor = the
+    hook's execution key; ``turn_id`` is None, a hook fire is not a conversation turn)."""
+    subject: HookSubject | None = hook.subject
+    if subject is None:
+        return None
+    key = await run_jq_first(subject.key_expr, payload)
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError(
+            f"hook {hook.name!r} subject key_expr {subject.key_expr!r} must yield a non-empty string, got {key!r}"
+        )
+    return StateContext(
+        door="hook",
+        candidates=SubjectCandidates(
+            target_kind=subject.target_kind, target_name=subject.target_name, by_kind={subject.kind: key}
+        ),
+        actor=hook.execution_key,
+        turn_id=None,
+    )

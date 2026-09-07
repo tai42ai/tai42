@@ -55,6 +55,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.states import StateSubject
 from tai42_kit.utils.data import text_to_md5
 
 from tai42_skeleton.operations import (
@@ -265,6 +266,22 @@ async def server_datetime() -> Any:
         raise OperationFailed(f"server-datetime lookup failed ({type(exc).__name__})") from exc
 
 
+def _validate_schedule_subject(tool_kwargs: dict[str, Any]) -> None:
+    """A schedule that carries a ``subject`` in its tool kwargs must carry a well-formed
+    full :class:`~tai42_contract.states.StateSubject` — the value the fire re-establishes
+    as its ``schedule``-door state context (the fire is anonymous, so the subject is
+    stamped at creation, where it is known). A malformed one is refused HERE, loudly, so
+    a job that could never resolve its subject is never persisted. Absent leaves the fire
+    with no state context."""
+    subject = tool_kwargs.get("subject")
+    if subject is None:
+        return
+    try:
+        StateSubject.model_validate(subject)
+    except ValueError as exc:
+        raise BadRequestError(f"invalid schedule subject: {exc}") from exc
+
+
 @operation(
     summary="Create a schedule",
     tags=["schedules"],
@@ -290,6 +307,7 @@ async def create_schedule(tool_name: str, tool_kwargs: dict[str, Any], schedule_
     surface — matching ``run_tool`` and ``submit_run``."""
     if not await _scheduling_backend_present():
         raise NotSupportedError(_NO_BACKEND_MESSAGE)
+    _validate_schedule_subject(tool_kwargs)
     dispatch_name, arguments = await _resolve_schedule_dispatch(tool_name, tool_kwargs, schedule_kwargs)
     # The recurring firing has no live caller, so this creation is the ONLY edge the inner
     # tool reaches — decide it here, over the exact arguments the dispatch below fires.

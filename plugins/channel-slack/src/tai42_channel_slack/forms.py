@@ -18,6 +18,18 @@ a silently dropped or truncated field. A schema/cap violation is a permanent inp
 refusal (the medium cannot render it BY NATURE), so :class:`FormSchemaError` is a
 :class:`~tai42_contract.channels.ChannelInputError`, never a retryable delivery
 failure.
+
+Per-send enrichment rides the same mapping: a ``values`` map prefills each named
+property's control (``initial_value`` for a text/number input, ``initial_option``
+for a select or the Yes/No radio); an ``options`` map supplies a per-send choice
+list for a string property that BUILDS its ``static_select`` (its labels shown, its
+values submitted), replacing the schema ``enum`` for this one send — per-send
+options on a non-string property are refused, naming it. ``pages`` render as titled
+``header`` sections within ONE modal: Slack modals have NO native multi-step (a view
+is one surface with a single submit), so the steps become in-order titled groups of
+the same input blocks; the submitted answer is the union of every field, exactly as
+an unpaged modal. A per-send value not among its field's options is refused, naming
+it — never silently dropped.
 """
 
 from __future__ import annotations
@@ -46,6 +58,8 @@ _MAX_SECTION_TEXT_LEN = 3000
 _MAX_OPTION_TEXT_LEN = 75
 _MAX_STATIC_SELECT_OPTIONS = 100
 _MAX_BUTTON_VALUE_LEN = 2000
+# A ``header`` block's plain_text cap — the surface a form page's title renders on.
+_MAX_HEADER_LEN = 150
 
 
 class FormSchemaError(ChannelInputError):
@@ -84,20 +98,67 @@ def is_declared_field(schema: dict[str, Any], name: str) -> bool:
     return name in _properties(schema)
 
 
+def _option_block(name: str, label: str, value: str) -> dict[str, Any]:
+    """One ``static_select`` option: the ``label`` shown, the ``value`` submitted."""
+    if len(label) > _MAX_OPTION_TEXT_LEN:
+        raise FormSchemaError(
+            f"form schema property {name!r} option {label!r} exceeds {_MAX_OPTION_TEXT_LEN} characters"
+        )
+    return {"text": {"type": "plain_text", "text": label}, "value": value}
+
+
 def _static_select(name: str, enum: Any) -> dict[str, Any]:
     if not isinstance(enum, list) or not enum:
         raise FormSchemaError(f"form schema property {name!r} enum must be a non-empty list")
     if len(enum) > _MAX_STATIC_SELECT_OPTIONS:
         raise FormSchemaError(f"form schema property {name!r} enum exceeds {_MAX_STATIC_SELECT_OPTIONS} options")
-    options: list[dict[str, Any]] = []
-    for choice in enum:
-        text = str(choice)
-        if len(text) > _MAX_OPTION_TEXT_LEN:
-            raise FormSchemaError(
-                f"form schema property {name!r} option {text!r} exceeds {_MAX_OPTION_TEXT_LEN} characters"
-            )
-        options.append({"text": {"type": "plain_text", "text": text}, "value": text})
+    # A schema enum shows and submits the same string — the label IS the value.
+    options = [_option_block(name, str(choice), str(choice)) for choice in enum]
     return {"type": "static_select", "action_id": FIELD_ACTION_ID, "options": options}
+
+
+def _static_select_from_options(name: str, choices: list[dict[str, Any]]) -> dict[str, Any]:
+    """A ``static_select`` built from a per-send option list — each ``{"value", "label"?}``
+    becomes an option whose label (falling back to the value) is shown and whose value is
+    submitted. An empty list or one past the option cap is refused, naming the property."""
+    if not choices:
+        raise FormSchemaError(f"form schema property {name!r} per-send options must be a non-empty list")
+    if len(choices) > _MAX_STATIC_SELECT_OPTIONS:
+        raise FormSchemaError(f"form schema property {name!r} per-send options exceed {_MAX_STATIC_SELECT_OPTIONS}")
+    options: list[dict[str, Any]] = []
+    for choice in choices:
+        value = choice["value"]
+        label = choice.get("label") or value
+        options.append(_option_block(name, label, value))
+    return {"type": "static_select", "action_id": FIELD_ACTION_ID, "options": options}
+
+
+def _find_option(options: list[dict[str, Any]], value: str) -> dict[str, Any] | None:
+    """The option whose ``value`` matches, or ``None``."""
+    return next((option for option in options if option["value"] == value), None)
+
+
+def _apply_initial(name: str, element: dict[str, Any], value: Any) -> None:
+    """Prefill one control from a per-send value: ``initial_value`` for a text/number
+    input, ``initial_option`` for a select or the Yes/No radio. A select value that is
+    not among the control's options — or a boolean value that is not a bool — is a
+    caller bug, refused naming the field rather than silently dropped."""
+    etype = element["type"]
+    if etype in ("plain_text_input", "number_input"):
+        element["initial_value"] = value if isinstance(value, str) else str(value)
+        return
+    if etype == "static_select":
+        match = _find_option(element["options"], str(value))
+        if match is None:
+            raise FormSchemaError(f"form field {name!r} prefilled value {value!r} is not among its options")
+        element["initial_option"] = match
+        return
+    # radio_buttons (boolean): the true/false option keyed by the bool.
+    if not isinstance(value, bool):
+        raise FormSchemaError(f"form field {name!r} prefilled boolean value must be true or false, got {value!r}")
+    match = _find_option(element["options"], "true" if value else "false")
+    if match is not None:
+        element["initial_option"] = match
 
 
 def _radio_buttons() -> dict[str, Any]:
@@ -110,8 +171,17 @@ def _radio_buttons() -> dict[str, Any]:
     }
 
 
-def _element(name: str, spec: dict[str, Any]) -> dict[str, Any]:
+def _element(name: str, spec: dict[str, Any], per_send_options: list[dict[str, Any]] | None) -> dict[str, Any]:
     ptype = spec.get("type")
+    if per_send_options is not None:
+        # A per-send option list BUILDS the select, replacing the schema enum for this send.
+        # It rides a string property only; on anything else it is refused loudly (never
+        # rendered as a mismatched control).
+        if ptype != "string":
+            raise FormSchemaError(
+                f"form schema property {name!r} carries per-send options but its type is {ptype!r}, not string"
+            )
+        return _static_select_from_options(name, per_send_options)
     if ptype == "string":
         enum = spec.get("enum")
         if enum is not None:
@@ -124,17 +194,26 @@ def _element(name: str, spec: dict[str, Any]) -> dict[str, Any]:
     raise FormSchemaError(f"form schema property {name!r} has unsupported type {ptype!r}")
 
 
-def _input_block(name: str, spec: Any, is_required: bool) -> dict[str, Any]:
+def _input_block(
+    name: str,
+    spec: Any,
+    is_required: bool,
+    value: Any = None,
+    per_send_options: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if not isinstance(spec, dict):
         raise FormSchemaError(f"form schema property {name!r} must be an object")
     label = str(spec.get("title") or name)
     if len(label) > _MAX_LABEL_LEN:
         raise FormSchemaError(f"form schema property {name!r} label exceeds {_MAX_LABEL_LEN} characters")
+    element = _element(name, spec, per_send_options)
+    if value is not None:
+        _apply_initial(name, element, value)
     block: dict[str, Any] = {
         "type": "input",
         "block_id": name,
         "label": {"type": "plain_text", "text": label},
-        "element": _element(name, spec),
+        "element": element,
     }
     if not is_required:
         # Slack input blocks are required unless flagged optional.
@@ -148,17 +227,58 @@ def _question_section(question: str) -> dict[str, Any]:
     return {"type": "section", "text": {"type": "plain_text", "text": question}}
 
 
-def build_modal_blocks(schema: dict[str, Any]) -> list[dict[str, Any]]:
-    """One input block per property; raises :class:`FormSchemaError` on any
-    property this mapping cannot express."""
+def _page_header(title: str) -> dict[str, Any]:
+    """One form page's title as a Block Kit ``header`` — a bold titled group, Slack's
+    stand-in for a step (a modal has no native multi-step)."""
+    if len(title) > _MAX_HEADER_LEN:
+        raise FormSchemaError(f"form page title {title!r} exceeds {_MAX_HEADER_LEN} characters")
+    return {"type": "header", "text": {"type": "plain_text", "text": title}}
+
+
+def build_modal_blocks(
+    schema: dict[str, Any],
+    values: dict[str, Any] | None = None,
+    options: dict[str, list[dict[str, Any]]] | None = None,
+    pages: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """One input block per property, each prefilled from ``values`` and — for a string
+    property named in ``options`` — built as a select from that per-send choice list.
+    With ``pages`` the blocks are grouped under a ``header`` per page (in page order);
+    without them the properties render in schema order. Raises :class:`FormSchemaError`
+    on any property this mapping cannot express or any per-send extra it cannot map."""
+    values = values or {}
+    options = options or {}
     required = _required_set(schema)
-    return [_input_block(str(name), spec, str(name) in required) for name, spec in _properties(schema).items()]
+    properties = _properties(schema)
+    if pages is not None:
+        blocks: list[dict[str, Any]] = []
+        for page in pages:
+            blocks.append(_page_header(str(page["title"])))
+            for field in page["fields"]:
+                name = str(field)
+                spec = properties.get(name)
+                if spec is None:
+                    raise FormSchemaError(f"form page names unknown property {name!r}")
+                blocks.append(_input_block(name, spec, name in required, values.get(name), options.get(name)))
+        return blocks
+    return [
+        _input_block(str(name), spec, str(name) in required, values.get(str(name)), options.get(str(name)))
+        for name, spec in properties.items()
+    ]
 
 
-def build_modal_view(interaction_id: str, question: str, schema: dict[str, Any]) -> dict[str, Any]:
-    """The ``views.open`` modal: the question as a section, then the input blocks.
+def build_modal_view(
+    interaction_id: str,
+    question: str,
+    schema: dict[str, Any],
+    values: dict[str, Any] | None = None,
+    options: dict[str, list[dict[str, Any]]] | None = None,
+    pages: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """The ``views.open`` modal: the question as a section, then the input blocks
+    (prefilled, per-send selects, and page headers as applicable).
     ``private_metadata`` carries the interaction id back on ``view_submission``."""
-    blocks = [_question_section(question), *build_modal_blocks(schema)]
+    blocks = [_question_section(question), *build_modal_blocks(schema, values, options, pages)]
     if len(blocks) > _MAX_MODAL_BLOCKS:
         raise FormSchemaError(f"form modal exceeds {_MAX_MODAL_BLOCKS} blocks")
     return {

@@ -53,6 +53,7 @@ from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.connectors.store.catalog_store as catalog_store
 import tai42_skeleton.db.boot_gate as boot_gate
+import tai42_skeleton.states.db as states_db
 import tai42_skeleton.tool_meta.store as tool_meta_store
 import tai42_skeleton.versioning.store as versioning_store
 
@@ -130,6 +131,12 @@ def _offline_schema_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     own suite (``tests/db/test_boot_gate.py``) re-patches this seam to drive the
     configured / pending / refusal branches."""
     monkeypatch.setattr(boot_gate, "component_store_configured", lambda component: False)
+    # The ``states`` component owns a second skeleton chain with the same posture: its
+    # boot gate + seed applier read the store only when configured. Report it unconfigured
+    # too, so an offline app-boot that sets the database password (to turn another feature
+    # ON) does not have the states gate reach a Postgres it never provided. The states
+    # store/service suites drive the configured behavior directly (fake store / real PG).
+    monkeypatch.setattr(states_db, "states_store_configured", lambda: False)
 
 
 @pytest.fixture(autouse=True)
