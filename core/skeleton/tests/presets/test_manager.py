@@ -942,4 +942,11 @@ def test_input_schema_preset_over_sandbox_exec_authors_validates_and_routes(
             with pytest.raises(SandboxUnavailableError):
                 await app.tools.run_tool("sbx_typed", {"msg": "routed"})
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        # Reading settings under ``ACCESS_CONTROL_ENABLE=false`` above cached the
+        # disabled ``AccessControlSettings`` in the process-wide settings cache;
+        # ``monkeypatch`` restores the env but not the cache, so drop it here or the
+        # disabled gate leaks into every later test.
+        reset_all_settings()
