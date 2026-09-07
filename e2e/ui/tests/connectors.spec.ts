@@ -58,23 +58,26 @@ test.afterEach(async ({ request }) => {
 
   // The denial knob is stack-global and outlives the test that flipped it, so restore
   // the granting default here rather than inside a test body — a test that ends early
-  // (a timeout) never reaches its own restore.
+  // (a timeout) never reaches its own restore. It is ISSUED first and ASSERTED last, so a
+  // restore that answers non-200 still cannot skip the connection sweep between them.
   const allow = await request.post(`${IDP_CONTROL_URL}/_allow`);
-  expect(allow.status()).toBe(200);
 
-  if (aliases.size === 0) return;
-  const res = await request.get('/api/connectors/connections', { headers: apiHeaders() });
-  expect(res.status(), await res.text()).toBe(200);
-  const body = (await res.json()) as {
-    data: { items: Array<{ alias: string; connection_id: string }> };
-  };
-  for (const item of body.data.items) {
-    if (!aliases.has(item.alias)) continue;
-    const deleted = await request.delete(`/api/connectors/connections/${item.connection_id}`, {
-      headers: apiHeaders(),
-    });
-    expect(deleted.status(), await deleted.text()).toBe(200);
+  if (aliases.size > 0) {
+    const res = await request.get('/api/connectors/connections', { headers: apiHeaders() });
+    expect(res.status(), await res.text()).toBe(200);
+    const body = (await res.json()) as {
+      data: { items: Array<{ alias: string; connection_id: string }> };
+    };
+    for (const item of body.data.items) {
+      if (!aliases.has(item.alias)) continue;
+      const deleted = await request.delete(`/api/connectors/connections/${item.connection_id}`, {
+        headers: apiHeaders(),
+      });
+      expect(deleted.status(), await deleted.text()).toBe(200);
+    }
   }
+
+  expect(allow.status()).toBe(200);
 });
 
 test('connect a provider through the OAuth popup, then disconnect it', async ({ page, request }) => {

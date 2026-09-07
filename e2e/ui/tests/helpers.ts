@@ -77,20 +77,11 @@ export function apiHeaders(key: string = API_KEY): Record<string, string> {
 }
 
 /**
- * The defensive ceiling on a fleet-mutating request's RESPONSE — the ONE place the
- * browser suite bounds "how long may a mutation take before it is a hang".
- *
- * It is not a wait sized to the work: every caller resolves the instant the response
- * lands. A write that fans a reload out (`/api/config/env`, `/api/mcp-config`, its
- * `secret-env` sibling, a profile apply, a connector connect/disconnect, a marketplace
- * install/uninstall/update) rebuilds and swaps an epoch on this worker AND awaits the
- * sibling worker's reload (MULTIWORKER(2)); on a saturated CI runner that measures at
- * up to ~35s. Playwright's own default for `waitForResponse` is 30s, i.e. INSIDE that
- * range — a default-bounded wait therefore abandons a mutation that is still
- * succeeding, and inside a retry loop it re-fires the click, which is how a save can
- * lose the client-side state (an orphan-sweep set, a dirty buffer) its first attempt
- * carried. This ceiling clears the measured range; a genuinely wedged mutation still
- * fails loudly, just later.
+ * The ceiling on a fleet-mutating request's RESPONSE: a write that fans a reload out and
+ * awaits the sibling worker's reload measures at up to ~35s, past Playwright's 30s default.
+ * It MUST exceed every `toPass` window that wraps a mutation — a wait that expires inside
+ * `toPass` re-issues the mutation, losing the client-side state (a dirty buffer, an
+ * orphan-sweep set) the first attempt carried.
  */
 export const MUTATION_RESPONSE_CEILING_MS = 60_000;
 

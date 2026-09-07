@@ -12,7 +12,7 @@
  * reads the unfenced census. Two sessions prove both sides of the gate.
  */
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import { apiHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, awaitMutation, seedCredential, uniq } from './helpers';
 
 /** A password comfortably over the accounts provider's minimum length. */
 const VIEWER_PASSWORD = 'e2e-viewer-password-000';
@@ -63,21 +63,26 @@ test('system (admin): worker census + enabled fleet-reload → reload-framed con
   // Drive the fleet soft-restart through the reload-framed dialog.
   await reload.click();
   const dialog = page.getByRole('dialog', { name: 'Reload worker config' });
+
+  // The request stays PENDING (the dialog's Reload button spins) until the fan-out converges:
+  // the publisher awaits every sibling's terminal reload reply up to the bus apply_timeout
+  // (TAI_BUS_APPLY_TIMEOUT, 30s). The banner is driven by that response, so observe the
+  // response rather than polling the repaint against a fixed budget the fan-out can outrun.
+  // Armed before the click so a fast reload cannot land first.
+  const reloaded = awaitMutation(
+    page,
+    (r) =>
+      new URL(r.url()).pathname === '/api/fleet/reload-config' && r.request().method() === 'POST',
+  );
   await dialog.getByRole('button', { name: 'Reload config' }).click();
+  const response = await reloaded;
+  expect(response.status(), await response.text()).toBe(200);
 
   // A healthy fleet converges: the System page shows the reload-framed success status
   // ("reload" framing, NOT the config-save "Change saved" framing). A non-converged fleet
   // would instead render the shared <FleetReport> alert; a real degraded state is not forcible
   // through this harness, so convergence is the honest observable here.
-  //
-  // The request stays PENDING (the dialog's Reload button spins) until the fan-out converges:
-  // the publisher awaits every sibling's terminal reload reply up to the bus apply_timeout
-  // (TAI_BUS_APPLY_TIMEOUT, 30s). Under CI load a slow sibling reload pushes convergence toward
-  // that ceiling, so the success banner can take ~20-30s to render — far past the default 10s
-  // expect budget. Wait past the apply_timeout so the assertion observes the settled convergence
-  // rather than a mid-flight spinner; a genuine non-convergence still renders the <FleetReport>
-  // alert (not this text) within the same window and fails.
-  await expect(page.getByText('Reload converged across the fleet.')).toBeVisible({ timeout: 45_000 });
+  await expect(page.getByText('Reload converged across the fleet.')).toBeVisible();
 });
 
 test('system (non-admin viewer): census visible, fleet-reload button gated out', async ({
