@@ -431,7 +431,8 @@
           "path": "src/tai42_toolbox/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "2.0.4"
     },
     "plugins/tools-github": {
       "package-name": "tai42-tools-github",
@@ -448,7 +449,8 @@
           "path": "src/tai42_tools_github/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.0.9"
     },
     "plugins/tools-stripe": {
       "package-name": "tai42-tools-stripe",
@@ -482,7 +484,8 @@
           "path": "src/tai42_tools_twilio/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.0.9"
     },
     "plugins/tools-whatsapp": {
       "package-name": "tai42-tools-whatsapp",
