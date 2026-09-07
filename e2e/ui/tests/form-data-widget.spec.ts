@@ -16,7 +16,7 @@
  * union of every page's fields — asserted through the run-tool door the ask blocked on.
  */
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
@@ -24,7 +24,8 @@ import { apiHeaders, resolveWebVisitorId, uniq, WEB_SESSION_COOKIE } from './hel
 
 /** Where the widget shots land: `TAI_E2E_SHOTS_DIR` when set, else a per-suite output
  * dir beside the tests (untracked). */
-const SHOTS_DIR = process.env.TAI_E2E_SHOTS_DIR ?? join(__dirname, '..', 'form-shots-output');
+const SHOTS_DIR =
+  process.env.TAI_E2E_SHOTS_DIR ?? fileURLToPath(new URL('../form-shots-output', import.meta.url));
 mkdirSync(SHOTS_DIR, { recursive: true });
 
 /** The question card rises in on a `tcw-rise` opacity/translate animation
