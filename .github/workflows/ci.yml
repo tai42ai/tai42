@@ -687,7 +687,6 @@ jobs:
             e2e/**/stack-*/
           if-no-files-found: ignore
 
-  # skips it; the `ci-ok` aggregate counts a skipped needed job as a pass.
   ui-e2e:
     needs: [reuse, changes, e2e]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && !cancelled() && needs.changes.outputs.run_e2e == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
