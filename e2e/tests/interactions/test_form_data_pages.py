@@ -130,8 +130,8 @@ async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_eve
         # The pages render as ordered steps: the first visible, the rest hidden, with nav.
         assert '<section class="step" data-step="0">' in body
         assert '<section class="step" data-step="1" hidden>' in body
-        assert "<h2>Who</h2>" in body
-        assert "<h2>How many</h2>" in body
+        assert '<h2 tabindex="-1">Who</h2>' in body
+        assert '<h2 tabindex="-1">How many</h2>' in body
         assert 'data-nav="back"' in body
         assert 'data-nav="next"' in body
         assert 'data-nav="submit"' in body
