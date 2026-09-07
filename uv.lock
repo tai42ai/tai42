@@ -5313,7 +5313,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "3.1.0"
+version = "3.0.1"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -5356,7 +5356,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-telegram"
-version = "3.1.0"
+version = "3.0.1"
 source = { editable = "plugins/channel-telegram" }
 dependencies = [
     { name = "httpx" },
@@ -5399,7 +5399,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-twilio"
-version = "3.1.0"
+version = "3.0.1"
 source = { editable = "plugins/channel-twilio" }
 dependencies = [
     { name = "httpx" },
@@ -5650,7 +5650,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "7.2.0"
+version = "7.1.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6183,7 +6183,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "10.2.0"
+version = "10.1.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
