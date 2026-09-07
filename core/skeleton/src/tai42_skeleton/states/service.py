@@ -24,6 +24,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 if TYPE_CHECKING:
     from tai42_skeleton.states.seeds import StateModuleSeedRegistry
@@ -164,7 +165,7 @@ def _validate_refs(schema: dict[str, Any]) -> None:
             continue
         if ref.startswith("#/"):
             node: Any = schema
-            for raw in ref[2:].split("/"):
+            for raw in unquote(ref[2:]).split("/"):
                 token = raw.replace("~1", "/").replace("~0", "~")
                 if isinstance(node, dict) and token in node:
                     node = node[token]

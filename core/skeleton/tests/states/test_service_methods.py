@@ -89,6 +89,46 @@ def test_validate_schema_accepts_resolvable_local_refs() -> None:
     )
 
 
+def test_validate_schema_percent_decodes_refs() -> None:
+    # RFC 6901 §6: a URI-fragment pointer is percent-decoded WHOLE, then split on "/", then
+    # ~1/~0-unescaped — matching jsonschema's resolver, so this syntax pre-check accepts
+    # exactly what _validate_document later resolves. "%20" decodes to a space in the key.
+    _validate_schema(
+        {
+            "type": "object",
+            "properties": {"a": {"$ref": "#/$defs/a%20b"}},
+            "$defs": {"a b": {"type": "integer"}},
+        }
+    )
+    # A key that literally contains "/" is named with ~1 (RFC 6901), never %2F: %2F decodes
+    # to a separator before the split, so only #/$defs/a~1b reaches the key "a/b".
+    _validate_schema(
+        {
+            "type": "object",
+            "properties": {"a": {"$ref": "#/$defs/a~1b"}},
+            "$defs": {"a/b": {"type": "integer"}},
+        }
+    )
+    # %2F decodes to a separator before the split, so it can never name a key holding "/".
+    with pytest.raises(SchemaValidationError, match="does not resolve"):
+        _validate_schema(
+            {
+                "type": "object",
+                "properties": {"a": {"$ref": "#/$defs/a%2Fb"}},
+                "$defs": {"a/b": {"type": "integer"}},
+            }
+        )
+    # A percent-encoded ref that names no key is still refused loudly.
+    with pytest.raises(SchemaValidationError, match="does not resolve"):
+        _validate_schema(
+            {
+                "type": "object",
+                "properties": {"a": {"$ref": "#/$defs/x%20y"}},
+                "$defs": {"a b": {"type": "integer"}},
+            }
+        )
+
+
 def test_validate_schema_ref_refusals() -> None:
     with pytest.raises(SchemaValidationError, match="remote"):
         _validate_schema({"type": "object", "properties": {"a": {"$ref": "http://x/y"}}})
