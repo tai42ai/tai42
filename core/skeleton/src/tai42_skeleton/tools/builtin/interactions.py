@@ -73,18 +73,6 @@ async def ask_user(
             (string/boolean/integer/number), ``enum`` only on a string property
             (a non-empty list of strings), and ``required`` naming only declared
             properties. A richer schema is rejected before the question is stored.
-        data: Per-send enrichment for a "form" ask (forbidden otherwise). An object
-            ``{"values": {prop: value}, "options": {prop: [{"value", "label"?}]}}``:
-            ``values`` prefills a property's control with a known value (validated
-            against that property's schema); ``options`` supplies a per-send choice
-            list for a string property, REPLACING its schema ``enum`` for this send
-            only (labels shown, values submitted). Unknown property, a value that
-            fails its schema, or options on a non-string property is rejected before
-            the question is stored.
-        pages: Per-send step layout for a "form" ask (forbidden otherwise). A list of
-            ``{"title": ..., "fields": [prop, ...]}`` splitting the form into ordered
-            steps; every top-level property must appear on exactly one page. Omit for
-            a single-page form. The submitted answer is the union of all pages' fields.
         group_id: An optional thread key grouping related questions.
         timeout: Seconds to wait before raising; defaults to the configured
             interactions timeout.
@@ -145,6 +133,18 @@ async def ask_user(
             rejection reason by a plain substitution (a notice without it is sent
             verbatim). IGNORED under ``on_mismatch="bridge"`` (a digression never
             notifies). Omit to use the built-in notice.
+        data: Per-send enrichment for a "form" ask (forbidden otherwise). An object
+            ``{"values": {prop: value}, "options": {prop: [{"value", "label"?}]}}``:
+            ``values`` prefills a property's control with a known value (validated
+            against that property's schema); ``options`` supplies a per-send choice
+            list for a string property, REPLACING its schema ``enum`` for this send
+            only (labels shown, values submitted). Unknown property, a value that
+            fails its schema, or options on a non-string property is rejected before
+            the question is stored.
+        pages: Per-send step layout for a "form" ask (forbidden otherwise). A list of
+            ``{"title": ..., "fields": [prop, ...]}`` splitting the form into ordered
+            steps; every top-level property must appear on exactly one page. Omit for
+            a single-page form. The submitted answer is the union of all pages' fields.
 
     Returns:
         The typed answer (text -> str, confirm -> bool, select -> chosen value,
