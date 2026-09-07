@@ -18,9 +18,11 @@ from tai42_kit.utils.data.string_util import hash_api_key
 import tai42_skeleton.conversations as conversations_package
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
+from tai42_skeleton.access_control import settings as ac_settings_module
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
+from tai42_skeleton.access_control.projection import NO_AUTH_USER_ID
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.conversations.turn import ApiSubmitResult
 
@@ -158,6 +160,23 @@ def test_an_authorized_caller_is_admitted_and_invokes_the_turn_as_itself(client,
     assert turns.calls == [("chat", "u-7", "sender")]
 
 
+@pytest.fixture
+def acoff_client(monkeypatch, bound_app) -> TestClient:
+    """The message door with access control OFF: no auth middleware binds a caller id, so the
+    door must supply the platform's synthetic no-auth principal, not refuse the turn."""
+    monkeypatch.setattr(ac_settings_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
+    routes = [Route("/api/conversations/{route_name}/messages", _door(), methods=["POST"])]
+    return TestClient(Starlette(routes=routes))
+
+
+def test_ac_off_send_reaches_the_turn_as_the_synthetic_no_auth_principal(acoff_client, turns):
+    response = _send(acoff_client)
+    assert response.status_code == 202
+    # No caller id is bound with the gate off, so the door acts AS the synthetic no-auth
+    # identity — a non-blank principal, so the turn seam admits it instead of raising 501.
+    assert turns.calls == [("chat", "u-7", NO_AUTH_USER_ID)]
+
+
 # -- the event door: same write action, same caller-principal wiring -----------
 
 _EVENTS_PATTERN = r"/api/conversations/.+/events"
@@ -248,3 +267,18 @@ def test_an_authorized_caller_reaches_the_event_engine_as_itself(event_client, e
     # The event engine carries the authorized CALLER — the accountable principal recorded as
     # the event's authorizer — never the route's execution key.
     assert event_turns.calls == [("chat", "evt-1", "sender")]
+
+
+@pytest.fixture
+def acoff_event_client(monkeypatch, bound_app) -> TestClient:
+    """The event door with access control OFF: no auth middleware binds a caller id, so the
+    door must supply the platform's synthetic no-auth principal, not refuse the event."""
+    monkeypatch.setattr(ac_settings_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
+    routes = [Route("/api/conversations/{route_name}/events", _event_door(), methods=["POST"])]
+    return TestClient(Starlette(routes=routes))
+
+
+def test_ac_off_event_reaches_the_engine_as_the_synthetic_no_auth_principal(acoff_event_client, event_turns):
+    response = _send_event(acoff_event_client)
+    assert response.status_code == 202
+    assert event_turns.calls == [("chat", "evt-1", NO_AUTH_USER_ID)]

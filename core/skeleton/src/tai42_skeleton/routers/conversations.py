@@ -522,6 +522,26 @@ def _error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
 
 
+def _door_caller_principal() -> str | None:
+    """The accountable principal for an api/event-door turn — the id the turn keys its
+    thread and rate bucket on.
+
+    With access control ON the auth gate binds the caller's id before the door runs. With
+    it OFF no id is bound, so the door acts AS the platform's synthetic no-auth identity
+    (the same principal the gate-off projection names), keyed exactly as a real caller's id
+    would be. ``None`` is returned only with the gate ON and no id bound — a state the auth
+    gate makes unreachable — which the turn seam refuses."""
+    principal = get_current_user_id()
+    if principal is not None and principal.strip():
+        return principal
+    from tai42_skeleton.access_control.projection import NO_AUTH_USER_ID
+    from tai42_skeleton.access_control.settings import access_control_settings
+
+    if not access_control_settings().enable:
+        return NO_AUTH_USER_ID
+    return None
+
+
 @http_surface().custom_route(
     "/api/conversations/{route_name}/messages",
     methods=["POST"],
@@ -583,7 +603,7 @@ async def send_conversation_message(request: Request) -> Response:
             route_name,
             message.external_user_id,
             message.text,
-            get_current_user_id(),
+            _door_caller_principal(),
             wait_seconds,
             params=message.params,
             form=message.form,
@@ -663,7 +683,7 @@ async def send_conversation_event(request: Request) -> Response:
     from tai42_skeleton.conversations import submit_event
 
     try:
-        result = await submit_event(route_name, submission, get_current_user_id())
+        result = await submit_event(route_name, submission, _door_caller_principal())
     except ThreadNotFoundError as exc:
         return _error(str(exc), 404)
     except ConversationRouteResolutionError as exc:

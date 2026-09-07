@@ -1986,8 +1986,8 @@ async def submit_api_message(
     checked_location = _checked_location(location)
     if caller_principal is None or not caller_principal.strip():
         raise UnauthenticatedApiCallerError(
-            f"api conversation route {route_name!r} needs an authenticated caller principal and this "
-            "deployment resolved none; the api door requires access control to be enabled"
+            f"api conversation route {route_name!r} needs an accountable caller principal and this "
+            "deployment resolved none"
         )
     address = canonical_address(external_user_id)
     route = await _get_api_route(route_name)
@@ -2170,8 +2170,8 @@ async def submit_event(
     returns the original turn's ``message_id`` (``202``) and starts no second turn."""
     if caller_principal is None or not caller_principal.strip():
         raise UnauthenticatedApiCallerError(
-            f"event conversation route {route_name!r} needs an authenticated caller principal and this "
-            "deployment resolved none; the event door requires access control to be enabled"
+            f"event conversation route {route_name!r} needs an accountable caller principal and this "
+            "deployment resolved none"
         )
     route = await _get_event_route(route_name)
     store = _store()
