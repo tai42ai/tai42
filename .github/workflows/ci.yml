@@ -640,9 +640,11 @@ jobs:
             e2e/**/stack-*/
           if-no-files-found: ignore
 
+  # Release trains: the browser lane is not required, so a `release-please--` head
+  # skips it; the `ci-ok` aggregate counts a skipped needed job as a pass.
   ui-e2e:
     needs: [reuse, changes, e2e]
-    if: ${{ needs.reuse.outputs.should_skip != 'true' && !cancelled() && needs.changes.outputs.run_e2e == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
+    if: ${{ needs.reuse.outputs.should_skip != 'true' && !cancelled() && needs.changes.outputs.run_e2e == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') && !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-latest
     # The failed-MCP reprobe runs unmasked throughout the suite (the mcp / secret-ref specs seed
     # many never-recovering stub servers it keeps probing off the reload gate), lengthening the

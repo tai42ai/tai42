@@ -1,10 +1,16 @@
 name: release-please
 
-# Tags exist only for commits whose full `ci` succeeded on main.
+# Release trains: tags mint on the train's own green. The release job runs on the
+# push of the `release-please` merge commit to main, without waiting for main's `ci`
+# to rerun; normal commits still open/update the release PR via the post-`ci`
+# `workflow_run`. release-please is idempotent on tags, so a later `workflow_run` for
+# the same merge commit finds the tag present and no-ops.
 on:
   workflow_run:
     workflows: [ci]
     types: [completed]
+    branches: [main]
+  push:
     branches: [main]
 
 permissions:
@@ -19,9 +25,13 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'push' &&
+       (startsWith(github.event.head_commit.message, 'chore: release') ||
+        startsWith(github.event.head_commit.message, 'chore(main): release')))
     permissions:
       contents: write # push the release PR branch; create the tags + GitHub Releases
       pull-requests: write # open and update the release PR
