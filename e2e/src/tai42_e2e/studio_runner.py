@@ -130,9 +130,12 @@ def _print_ready(url: str, api_key: str) -> None:
 # Per-run coordinates the ``ui/`` specs cannot pin ahead of boot. It carries the SUT
 # Redis URL (a DB index reserved dynamically at ``allocate_resources`` time), which the
 # web-widget spec reads a visitor's server-side session id from — the web channel never
-# discloses that id to the client. Rewritten every boot, removed on teardown so a stale
-# file can never point a later run at a released DB.
-_STACK_HANDOFF = Path(__file__).resolve().parents[2] / "ui" / ".stack-handoff.json"
+# discloses that id to the client. Written in the runner's working directory — the
+# playwright ``webServer`` launches the runner from the specs' own directory, which is
+# where the specs read it — so an installed wheel and a source checkout behave alike.
+# Rewritten every boot, removed on teardown so a stale file can never point a later run
+# at a released DB.
+_STACK_HANDOFF = Path.cwd() / ".stack-handoff.json"
 
 
 def _write_stack_handoff(resources: Any) -> None:
