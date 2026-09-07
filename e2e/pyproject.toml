@@ -30,7 +30,7 @@ dependencies = [
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
     "tai42-contract>=8.0,<9",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=3.10,<4",
-    "tai42-skeleton[toolbox,files]>=10.1,<11",
+    "tai42-skeleton[toolbox,files]>=11.0,<12",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=2.0,<3",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
@@ -63,9 +63,9 @@ dependencies = [
     "tai42-webhook-verifier-github>=1.2,<2",
     "tai42-webhook-verifier-stripe>=1.2,<2",
     # The channel plugins that deliver ask_user questions over a chat transport.
-    "tai42-channel-telegram>=3.0,<4",
-    "tai42-channel-slack>=3.0,<4",
-    "tai42-channel-twilio>=3.0,<4",
+    "tai42-channel-telegram>=3.1,<4",
+    "tai42-channel-slack>=3.1,<4",
+    "tai42-channel-twilio>=3.1,<4",
     "tai42-channel-whatsapp>=3.1,<4",
     "tai42-channel-web>=4.1,<5",
     # Loaded only by the monitoring stack's manifest.
