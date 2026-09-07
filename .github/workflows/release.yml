@@ -100,6 +100,9 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+          # A lane re-run after the upload landed (or a tag re-minted for a version
+          # PyPI already serves) is idempotent instead of red.
+          skip-existing: true
           # Attestations are minted from the OIDC identity token, which token
           # auth does not issue.
           attestations: false
