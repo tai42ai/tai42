@@ -33,8 +33,6 @@ async def ask_user(
     answer_format: str = "text",
     options: list[str] | None = None,
     schema: dict[str, Any] | None = None,
-    data: dict[str, Any] | None = None,
-    pages: list[dict[str, Any]] | None = None,
     group_id: str | None = None,
     timeout: float | None = None,
     link: str | None = None,
@@ -46,6 +44,8 @@ async def ask_user(
     expiry_at: datetime | None = None,
     on_mismatch: Literal["retry", "bridge"] = "retry",
     mismatch_notice: str | None = None,
+    data: dict[str, Any] | None = None,
+    pages: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Ask a human a question mid-run: in "sync" mode block until they answer; in
     "async" mode park the caller and return a suspension sentinel immediately.
