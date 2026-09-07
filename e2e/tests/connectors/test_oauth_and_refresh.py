@@ -8,6 +8,8 @@ are the highest-uncertainty seams in the suite (see the repo README notes)."""
 from __future__ import annotations
 
 import asyncio
+import base64
+import secrets
 from collections.abc import Callable
 from urllib.parse import parse_qs, urlparse
 
@@ -117,4 +119,66 @@ async def test_concurrent_refresh_takes_lock_once(
     assert all(r.get("resolved") for r in results), f"a connector resolve returned no token: {results}"
     assert oauth_idp.refresh_count == before + 1, (
         f"expected exactly one upstream refresh under the lock, saw {oauth_idp.refresh_count - before}"
+    )
+
+
+async def test_kek_rotation_serves_via_ring_and_converges(
+    connectors_stack: TaiStack, oauth_idp: OAuthIdp, uniq: Callable[[str], str]
+) -> None:
+    # The reporter's rotation path end-to-end: connect under KEK=A → rotate (current=B,
+    # previous=[A]) → a serving READ still resolves the token via the decrypt ring → run
+    # the re-encrypt sweep → retire A (previous=[]) → the same read STILL works. On the
+    # unfixed single-key code the post-rotation read fails (InvalidTag), so this is born
+    # red for the ring. Fresh tokens (3600s) keep a serving read a pure decrypt, not a
+    # refresh that would re-encrypt under the current key on its own.
+    oauth_idp.set_expires_in(3600)
+    alias = uniq("conn")
+    api_a = connectors_stack.api(port=connectors_stack.port_a)
+
+    start = await api_a.post(
+        "/api/connectors/connections/start",
+        json={"provider_id": "e2e_idp", "alias": alias, "enabled_sub_services": ["default"]},
+    )
+    code, state = await _authorize(start["authorize_url"])
+    completed = await connectors_stack.api(port=connectors_stack.port_b).post(
+        "/api/connectors/oauth/complete", json={"code": code, "state": state}
+    )
+    assert completed["kind"] == "success", f"oauth completion failed: {completed}"
+
+    with _pg(connectors_stack) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT connection_id FROM connector_connections WHERE provider_id = %s AND alias = %s",
+            ("e2e_idp", alias),
+        )
+        row = cur.fetchone()
+    assert row is not None, "connection row was not written"
+    connection_id = str(row[0])
+
+    async def resolve(port: int) -> dict:
+        async with connectors_stack.mcp(port=port) as mcp:
+            result = await mcp.call_tool("e2e_resolve_connector", {"connection_id": connection_id})
+        return result.data
+
+    # Baseline: the token resolves under the boot key A.
+    assert (await resolve(connectors_stack.port_a)).get("resolved"), "token did not resolve before rotation"
+
+    # Rotate to a new current key B, keeping A in the previous ring. The stored blob is
+    # still under A, so serving it now depends on the ring trying the previous key.
+    key_a = connectors_stack.resources.connectors_kek
+    assert key_a is not None
+    key_b = base64.b64encode(secrets.token_bytes(32)).decode()
+    connectors_stack.rotate_connectors_kek(new_kek=key_b, previous=[key_a])
+
+    assert (await resolve(connectors_stack.port_a)).get("resolved"), "token did not resolve via the ring after rotation"
+
+    # Converge: re-encrypt every stored blob under the current key B.
+    result = await api_a.post("/api/connectors/tokens/reencrypt")
+    assert result["failed"] == 0, f"re-encrypt sweep reported failures: {result}"
+    assert result["reencrypted"] >= 1, f"sweep re-encrypted nothing: {result}"
+
+    # Retire A: drop the previous ring. Every blob is now under B alone.
+    connectors_stack.rotate_connectors_kek(new_kek=key_b, previous=[])
+
+    assert (await resolve(connectors_stack.port_b)).get("resolved"), (
+        "token did not resolve after the old key was retired — rotation did not converge"
     )

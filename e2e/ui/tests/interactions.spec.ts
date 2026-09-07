@@ -61,6 +61,66 @@ test('ask_user blocks a run, is answered in the browser, and the run unblocks', 
   expect(JSON.stringify(body.data)).toContain(answer);
 });
 
+test('an answer during an SSE reconnect gap still heals the inbox card', async ({
+  page,
+  request,
+  browserName,
+}) => {
+  // Server-stream-rendered inbox: CI's Linux WebKit build delivers fetch-streams
+  // unreliably, so this stream-dependent flow flakes only there; chromium+firefox
+  // cover the stream path and webkit still runs the rest of the suite.
+  test.skip(browserName === 'webkit', 'Linux CI WebKit delivers fetch-streams unreliably');
+  const question = uniq('question');
+  const answer = uniq('answer');
+
+  await seedCredential(page);
+  // Open the inbox FIRST and let its stream connect + resync, so the question below
+  // streams in as a LIVE add the client tracks (it holds the card body in its overlay
+  // and the frame's id as its resume cursor) — the operator-watching-the-inbox path.
+  const inboxResynced = armInboxResynced(page);
+  await page.goto('/interactions');
+  await inboxResynced();
+
+  // ask_user parks the run until answered; fire it WITHOUT awaiting.
+  const askPromise = request.post('/api/run-tool', {
+    headers: apiHeaders(),
+    data: { tool_name: 'ask_user', arguments: { question } },
+  });
+
+  const card = page.getByTestId('interaction-card').filter({ hasText: question });
+  await expect(card).toBeVisible();
+  await expect(card.getByTestId('interaction-answered')).toHaveCount(0);
+
+  // Drop the live SSE connection: network offline tears down the fetch stream.
+  await page.context().setOffline(true);
+
+  // While the browser is disconnected, answer the interaction through the API — its
+  // `interaction.answered` frame lands in the stream entirely inside the disconnect gap.
+  const listRes = await request.get('/api/interactions', { headers: apiHeaders() });
+  expect(listRes.status(), await listRes.text()).toBe(200);
+  const items = (
+    (await listRes.json()) as { data: { items: { interaction_id: string; question: string }[] } }
+  ).data.items;
+  const pending = items.find((item) => item.question === question);
+  expect(pending, JSON.stringify(items)).toBeTruthy();
+  const answerRes = await request.post(`/api/interactions/${pending?.interaction_id ?? ''}/answer`, {
+    headers: apiHeaders(),
+    data: { answer },
+  });
+  expect(answerRes.status(), await answerRes.text()).toBe(200);
+
+  // Reconnect: the client resumes from its Last-Event-ID, the server replays the gap
+  // `answered` frame, and the tracked card converges to Answered instead of vanishing.
+  await page.context().setOffline(false);
+  await expect(card.getByTestId('interaction-answered')).toBeVisible({ timeout: 30_000 });
+
+  // API: the parked run woke on the API answer and returns the value verbatim.
+  const askRes = await askPromise;
+  expect(askRes.status(), await askRes.text()).toBe(200);
+  const body = (await askRes.json()) as { data: unknown };
+  expect(JSON.stringify(body.data)).toContain(answer);
+});
+
 // A 1x1 PNG data URI passed as the image item's INPUT url. A data:image is stored
 // BY REFERENCE server-side (`substitute_media`): the durable record carries a
 // served-media reference (`/api/interactions/media/<id>`), never these inline

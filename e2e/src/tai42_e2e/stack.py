@@ -936,6 +936,22 @@ class TaiStack:
         self._spawn(spec)
         self._wait_after_restart(name, before_backends)
 
+    def rotate_connectors_kek(self, *, new_kek: str, previous: list[str]) -> None:
+        """Rotate ``CONNECTORS_KEK`` across every serve replica and the backend worker.
+
+        Sets the new current key and the previous-key ring in each running process's env,
+        then restarts it so the new keys take effect — modelling an operator rotating the
+        deployment's KEK. An empty ``previous`` clears ``CONNECTORS_KEK_PREVIOUS`` (the old
+        key retired after the re-encrypt sweep converged)."""
+        for name in [n for n in self._specs if n.startswith("serve") or n == "backend"]:
+            env = self._specs[name].env
+            env["CONNECTORS_KEK"] = new_kek
+            if previous:
+                env["CONNECTORS_KEK_PREVIOUS"] = ",".join(previous)
+            else:
+                env.pop("CONNECTORS_KEK_PREVIOUS", None)
+            self.restart(name)
+
     def _ports_for(self, name: str) -> list[int]:
         """The loopback ports a process kind binds (empty for the backend worker,
         which joins the worker bus over Redis rather than binding a port)."""
