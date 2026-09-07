@@ -43,6 +43,9 @@ from tai42_skeleton.operations.states import (
     get_state_module as _get_state_module_op,
 )
 from tai42_skeleton.operations.states import (
+    get_state_mount as _get_state_mount_op,
+)
+from tai42_skeleton.operations.states import (
     list_state_modules as _list_state_modules_op,
 )
 from tai42_skeleton.operations.states import (
@@ -275,6 +278,13 @@ list_state_mounts = register_operation_route(
     tai42_app,
     operation_metadata_of(_list_state_mounts_op),
     path="/api/states/{name}/mounts",
+    method="GET",
+    action="read",
+)
+get_state_mount = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_state_mount_op),
+    path="/api/states/{name}/mounts/{module}",
     method="GET",
     action="read",
 )

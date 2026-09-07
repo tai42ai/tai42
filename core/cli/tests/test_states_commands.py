@@ -110,6 +110,17 @@ def test_mounts_lists_the_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     assert json.loads(result.output) == [{"module": "counters", "path": "/c"}]
 
 
+def test_get_mount_reads_one_mount(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/states/status/mounts/counters"
+        return data_response({"module": "counters", "path": "/c", "parameters": {}, "declarations": {}})
+
+    result = run_cli(monkeypatch, handler, ["states", "get-mount", "status", "counters"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"module": "counters", "path": "/c", "parameters": {}, "declarations": {}}
+
+
 def test_mount_puts_the_body_from_a_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     body = tmp_path / "mount.json"
     body.write_text('{"path": "/c", "parameters": {}}')

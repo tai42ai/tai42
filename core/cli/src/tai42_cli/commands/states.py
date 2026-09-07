@@ -121,6 +121,19 @@ def list_state_mounts(ctx: typer.Context, name: Annotated[str, typer.Argument(he
         emit_result(ctx_obj, client.get(f"/api/states/{name}/mounts"))
 
 
+@app.command("get-mount")
+@covers(("GET", "/api/states/{name}/mounts/{module}"))
+def get_state_mount(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="The state name.")],
+    module: Annotated[str, typer.Argument(help="The module name.")],
+) -> None:
+    """Read one module's mount on a state (404 when it is not mounted)."""
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        emit_result(ctx_obj, client.get(f"/api/states/{name}/mounts/{module}"))
+
+
 @app.command("mount")
 @covers(("PUT", "/api/states/{name}/mounts/{module}"))
 def mount_state_module(

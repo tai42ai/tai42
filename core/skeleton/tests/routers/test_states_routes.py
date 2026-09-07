@@ -34,7 +34,7 @@ from tai42_contract.states.models import (
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.route_registry import load_api_routes
-from tai42_skeleton.operations import NotSupportedError, ValidationRejected
+from tai42_skeleton.operations import NotFoundError, NotSupportedError, ValidationRejected
 from tai42_skeleton.operations import states as ops
 from tai42_skeleton.routers import states as router
 
@@ -69,6 +69,7 @@ _EXPECTED: set[tuple[str, str]] = {
     ("DELETE", "/api/states/{name}"),
     ("GET", "/api/states/{name}/stats"),
     ("GET", "/api/states/{name}/mounts"),
+    ("GET", "/api/states/{name}/mounts/{module}"),
     ("PUT", "/api/states/{name}/mounts/{module}"),
     ("PATCH", "/api/states/{name}/mounts/{module}"),
     ("DELETE", "/api/states/{name}/mounts/{module}"),
@@ -320,6 +321,41 @@ def test_mount_validator_refusal_is_422_on_every_door(monkeypatch: pytest.Monkey
         asyncio.run(door())
     assert excinfo.value.status == 422
     assert str(excinfo.value) == _VALIDATOR_REFUSAL
+
+
+_MOUNT_ROW: dict[str, Any] = {
+    "state": "alerts",
+    "module": "tagmod",
+    "path": ["sub"],
+    "parameters": {"cap": 5},
+    "declarations": {"intents": []},
+}
+
+
+class _MountReads:
+    """A facet stand-in whose ``list_mounts`` serves one known mount, so the single read and
+    the collection read draw from the same row."""
+
+    async def list_mounts(self, name: str, *, module: str | None = None) -> list[dict[str, Any]]:
+        if module is None:
+            return [_MOUNT_ROW]
+        return [_MOUNT_ROW] if module == _MOUNT_ROW["module"] else []
+
+
+def test_get_mount_serves_the_envelope_and_agrees_with_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ops, "_states", _MountReads)
+    single = asyncio.run(ops.get_state_mount("alerts", "tagmod"))
+    listed = asyncio.run(ops.list_state_mounts("alerts"))
+    # The single GET returns the same envelope row the list serves — same shape, same values.
+    assert single == _MOUNT_ROW
+    assert single == listed[0]
+
+
+def test_get_mount_absent_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ops, "_states", _MountReads)
+    with pytest.raises(NotFoundError) as excinfo:
+        asyncio.run(ops.get_state_mount("alerts", "nope"))
+    assert excinfo.value.status == 404
 
 
 def test_unmapped_store_error_reraises_not_500(monkeypatch: pytest.MonkeyPatch) -> None:

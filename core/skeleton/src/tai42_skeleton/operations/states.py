@@ -187,6 +187,17 @@ async def list_state_mounts(name: str) -> list[dict[str, Any]]:
         return await _states().list_mounts(name)
 
 
+@operation(summary="Get a state's mount", tags=["states"], errors=[NotSupportedError, NotFoundError])
+async def get_state_mount(name: str, module: str) -> dict[str, Any]:
+    """One module's mount on the state — its path, resolved parameters and declarations; the
+    same row the list serves. A module not mounted on the state is a 404."""
+    with _states_door():
+        rows = await _states().list_mounts(name, module=module)
+    if not rows:
+        raise NotFoundError(f"module {module!r} is not mounted on state {name!r}")
+    return rows[0]
+
+
 @operation(
     summary="Mount a module on a state",
     tags=["states"],
