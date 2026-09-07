@@ -1,5 +1,5 @@
-import { fileURLToPath } from 'node:url';
-import { defineConfig, devices } from '@playwright/test';
+import { fileURLToPath } from "node:url";
+import { defineConfig, devices } from "@playwright/test";
 
 import {
   API_KEY,
@@ -9,7 +9,7 @@ import {
   MP_PORT,
   MP_WEB_PORT,
   UI_PORT,
-} from './tests/helpers';
+} from "./tests/helpers";
 
 /**
  * The live browser-e2e harness. The Studio is SERVED BY THE SKELETON (never
@@ -31,10 +31,10 @@ import {
 const baseURL = `http://127.0.0.1:${String(UI_PORT)}`;
 
 export default defineConfig({
-  testDir: './tests',
+  testDir: "./tests",
   // CI stamps the resolved tai-studio commit into the HTML report as provenance;
   // a local run without the env var records an empty string, never `undefined`.
-  metadata: { 'tai-studio-sha': process.env.TAI_STUDIO_SHA ?? '' },
+  metadata: { "tai-studio-sha": process.env.TAI_STUDIO_SHA ?? "" },
   // One shared live stack: serial, no auto-rerun (a flaky UI e2e is a real race
   // until proven otherwise — the mission's no-auto-rerun policy).
   fullyParallel: false,
@@ -50,11 +50,11 @@ export default defineConfig({
   // just later). Local single-worker runs finish these in a fraction of the budget.
   timeout: 120_000,
   expect: { timeout: 10_000 },
-  reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : 'list',
+  reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL,
-    trace: 'retain-on-failure',
-    screenshot: 'only-on-failure',
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
   },
   // The specs run on chromium as the PR/default browser; firefox + webkit widen
   // the matrix when the ui suite changed or the CI run is manual (the workflow's
@@ -66,24 +66,33 @@ export default defineConfig({
   // ladder — and re-running the axe pass — three times over.
   projects: [
     {
-      name: 'chromium',
+      name: "chromium",
       // Override the desktop default's 720px height: the compose/create dialogs
       // grow once a base tool/agent is chosen (they render the tool's input hints),
       // and the modal does not scroll its own body, so a short viewport pushes the
       // submit button below the fold where it is unreachable. A tall viewport keeps
       // the whole dialog — including its footer buttons — on screen. The two
       // widening browsers inherit the same tall viewport for the same reason.
-      use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 1600 } },
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1280, height: 1600 },
+      },
     },
     {
-      name: 'firefox',
+      name: "firefox",
       testIgnore: /(viewport-sweep|a11y-audit)\.spec\.ts$/,
-      use: { ...devices['Desktop Firefox'], viewport: { width: 1280, height: 1600 } },
+      use: {
+        ...devices["Desktop Firefox"],
+        viewport: { width: 1280, height: 1600 },
+      },
     },
     {
-      name: 'webkit',
+      name: "webkit",
       testIgnore: /(viewport-sweep|a11y-audit)\.spec\.ts$/,
-      use: { ...devices['Desktop Safari'], viewport: { width: 1280, height: 1600 } },
+      use: {
+        ...devices["Desktop Safari"],
+        viewport: { width: 1280, height: 1600 },
+      },
     },
   ],
   webServer: {
@@ -96,10 +105,10 @@ export default defineConfig({
     // Playwright's direct child, the SIGTERM below reaches its own handler and its
     // grace window covers the full leak-checked teardown. `uv sync` (CI) / a local
     // `uv run` first materializes this venv.
-    command: '../.venv/bin/tai42-e2e-studio-stack',
+    command: "../.venv/bin/tai42-e2e-studio-stack",
     // cwd is the tai42-e2e project (`e2e/`, one level up); the uv workspace venv
     // holding the console script lives at the monorepo root, one level above that.
-    cwd: '..',
+    cwd: "..",
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     // The runner spawns each stack process as its OWN session leader (for
@@ -108,15 +117,17 @@ export default defineConfig({
     // grace window so it can run that teardown before Playwright SIGKILLs it;
     // without this the stack orphans and a reused-server rerun serves a degraded
     // stack (e.g. a dead LLM stub).
-    gracefulShutdown: { signal: 'SIGTERM', timeout: 30_000 },
+    gracefulShutdown: { signal: "SIGTERM", timeout: 30_000 },
     // The runner brings up a multi-process stack against Docker services; give
     // it room on a cold boot.
     timeout: 300_000,
-    stdout: 'pipe',
-    stderr: 'pipe',
+    stdout: "pipe",
+    stderr: "pipe",
     env: {
       // The per-run handoff the specs read next to this file (helpers.ts).
-      TAI_E2E_STACK_HANDOFF: fileURLToPath(new URL('./.stack-handoff.json', import.meta.url)),
+      TAI_E2E_STACK_HANDOFF: fileURLToPath(
+        new URL("./.stack-handoff.json", import.meta.url),
+      ),
       TAI_E2E_UI_PORT: String(UI_PORT),
       TAI_E2E_UI_LLM_PORT: String(LLM_PORT),
       TAI_E2E_UI_IDP_PORT: String(IDP_PORT),
@@ -124,7 +135,7 @@ export default defineConfig({
       // The opt-in marketplace gate + its pinned coordinates. When unset the
       // runner boots nothing marketplace-flavored and the specs skip; the pnpm
       // site build (only under the gate) lands inside the timeout above.
-      TAI_E2E_MARKETPLACE: process.env.TAI_E2E_MARKETPLACE ?? '0',
+      TAI_E2E_MARKETPLACE: process.env.TAI_E2E_MARKETPLACE ?? "0",
       TAI_E2E_UI_MP_PORT: String(MP_PORT),
       TAI_E2E_UI_MP_WEB_PORT: String(MP_WEB_PORT),
       TAI_E2E_UI_MP_ADMIN_TOKEN: MP_ADMIN_TOKEN,
