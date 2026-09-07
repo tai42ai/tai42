@@ -1087,6 +1087,64 @@ async def test_the_api_retry_stops_when_it_loses_the_lease_during_backoff(monkey
     assert _claim(fake, "m-taken")[0] == "worker-2"
 
 
+def _no_callback_api_route() -> ConversationRoute:
+    return ConversationRoute(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="echo",
+        execution_key="svc",
+        callback_url=None,
+        callback_secret=None,
+        execution_key_fingerprint="fp-1",
+    )
+
+
+def _no_callback_api_record(message_id: str, answer: str) -> ConversationRecord:
+    now = time.time()
+    return ConversationRecord(
+        message_id=message_id,
+        route_name="chat",
+        door="api",
+        thread_id="bridge:chat:alice/user-7",
+        client_address="alice/user-7",
+        caller_principal="alice",
+        callback_url=None,
+        origin="client",
+        inbound_text=f"ask {message_id}",
+        answer_status="answered",
+        answer=answer,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def test_a_no_callback_api_record_delivers_readable_without_a_post(monkeypatch, fake, store):
+    """An api route that declares no callback serves its answer from the poll door, so
+    delivery is terminal the moment the outcome is written: the record goes DELIVERED, no
+    callback is POSTed, and no send attempt is spent."""
+    await store.create_record(_no_callback_api_record("m-poll", "the answer"))
+    posted: list = []
+
+    async def _post(url, body, signature, timeout_seconds):
+        posted.append(url)
+        return 200
+
+    monkeypatch.setattr(
+        delivery_module, "get_conversations_manager", lambda: _FakeRouteManager(_no_callback_api_route())
+    )
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+    assert await store.claim_delivery("m-poll", time.time(), "worker-1", 120) == 1
+    await delivery_module._deliver_api(store, await _get(store, "m-poll"), "worker-1")
+
+    assert posted == []  # no callback attempt
+    delivered = await _get(store, "m-poll")
+    assert delivered.delivery_status is DeliveryStatus.DELIVERED
+    assert delivered.attempts == 0  # no send attempt was spent
+    # The poll door reads the answer back off the terminal record.
+    assert delivered.caller_view()["answer"] == "the answer"
+
+
 # -- the periodic loop drives both recovery passes -----------------------------
 
 

@@ -1256,9 +1256,9 @@ def _with_channel_silent(intake: ConversationRecord, note: str | None = None) ->
 
 def _with_api_silent(intake: ConversationRecord, note: str | None = None) -> ConversationRecord:
     """``intake`` moved to ``pending_delivery`` carrying a ``silent`` outcome — an API-door
-    tool turn that produced no reply. The api door answered ``202`` promising a callback, so
-    the silent outcome is delivered through the same durable machine an answer takes; it
-    carries no answer text. ``note`` is an optional internal detail (never sent — the silent
+    tool turn that produced no reply. The silent outcome rides the same durable machine an
+    answer takes (a signed callback when the route declares one, else terminal-readable for
+    the poll door); it carries no answer text. ``note`` is an optional internal detail (never sent — the silent
     marker delivered to the caller carries no answer or error) — the paused-run pending reason —
     recorded so a silent-because-pending turn is diagnosable; ``None`` records no detail."""
     return ConversationRecord.model_validate(

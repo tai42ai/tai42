@@ -126,9 +126,9 @@ async def import_conversation_routes(
             report["skipped"] += 1
             continue
 
-        # Export carried no secret; mint one here and show it once. A ``channel`` row
-        # signs nothing and carries none.
-        callback_secret = secrets.token_urlsafe(32) if route.door == "api" else None
+        # Export carried no secret; mint one here and show it once. A ``channel`` row and a
+        # poll-only api row (no callback declared) sign nothing and carry none.
+        callback_secret = secrets.token_urlsafe(32) if route.door == "api" and route.callback_url is not None else None
         restored = route.model_copy(update={"callback_secret": callback_secret})
 
         # created/updated follows the pre-restore snapshot, not the store's return.

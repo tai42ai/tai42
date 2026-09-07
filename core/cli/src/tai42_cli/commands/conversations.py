@@ -89,7 +89,11 @@ def create_route(
         str | None, typer.Option("--identity", help="door=channel: the medium address we are texted at.")
     ] = None,
     callback_url: Annotated[
-        str | None, typer.Option("--callback-url", help="door=api: the https answer-delivery URL.")
+        str | None,
+        typer.Option(
+            "--callback-url",
+            help="door=api: optional https answer-delivery URL; without one the caller polls the message.",
+        ),
     ] = None,
     turns_per_hour_override: Annotated[
         int | None,

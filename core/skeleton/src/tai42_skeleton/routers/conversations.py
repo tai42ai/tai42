@@ -7,7 +7,8 @@ the operator and Studio drive over the routing table.
   name is a loud 404.
 - ``POST /api/conversations/{route_name}`` (AUTHED, ``authority_changing``) — create or
   replace a route from a ``ConversationRouteCreate`` body. An ``api`` row's minted
-  ``callback_secret`` is returned ONCE here and never again. Binding the route's
+  ``callback_secret`` (present only when the row declares a ``callback_url``) is returned
+  ONCE here and never again. Binding the route's
   ``execution_key`` is a pass-role decision the operation takes before any write.
 - ``DELETE /api/conversations/{route_name}`` (AUTHED) — delete a route by name; an
   unknown name is a loud 404.
@@ -544,11 +545,13 @@ async def send_conversation_message(request: Request) -> Response:
     execution key.
 
     The auth gate authorizes who may SEND; the turn's own authority is the route's
-    execution key, not the caller. Default answer is ``202 {message_id, thread_id}`` with
-    the answer delivered later by signed callback. With a ``wait_seconds`` body field
-    (clamped here to ``sync_wait_max_seconds``) a turn finishing in time answers ``200``
-    inline — an answered/error turn with the answer, a silent turn with the silent marker
-    (status ``silent``, no answer text) — and its callback (which otherwise carries
+    execution key, not the caller. Default answer is ``202 {message_id, thread_id}``; the
+    answer is then delivered later by signed callback when the route declares a
+    ``callback_url``, and otherwise read back from the poll door
+    (``GET .../messages/{message_id}``). With a ``wait_seconds`` body field (clamped here to
+    ``sync_wait_max_seconds``) a turn finishing in time answers ``200`` inline — an
+    answered/error turn with the answer, a silent turn with the silent marker (status
+    ``silent``, no answer text) — and any callback (which otherwise carries
     answered/error/silent) is suppressed the same way, so it never double-fires; a turn
     still running when the wait elapses falls back to ``202``.
     """

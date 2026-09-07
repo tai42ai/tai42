@@ -145,6 +145,21 @@ def _api_route(
     )
 
 
+def _api_route_no_callback(route_name: str = "chat") -> ConversationRoute:
+    """A poll-only api route: no callback declared, so it carries no signing secret and its
+    answer is read back from the poll door."""
+    return ConversationRoute(
+        route_name=route_name,
+        door="api",
+        target_kind="agent",
+        target_name="echo",
+        execution_key="svc",
+        callback_url=None,
+        callback_secret=None,
+        execution_key_fingerprint="fp-1",
+    )
+
+
 def _tool_channel_route(
     route_name: str = "tool-line",
     our_identity: str = "+15550001111",
@@ -2273,6 +2288,58 @@ async def test_api_slow_wait_returns_202_then_posts_the_callback(env, monkeypatc
     record = await _store().get_record(result.message_id)
     assert record is not None
     assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_api_no_callback_slow_wait_202_then_readable_by_poll_and_no_callback(env, monkeypatch):
+    # A poll-only api route (no callback declared): a turn that outruns the wait falls back
+    # to 202, its answer is served terminal-readable from the poll door, and NO callback is
+    # ever attempted — the exact path a caller using only sync/poll takes.
+    from types import SimpleNamespace
+
+    from tai42_skeleton.operations import conversations as ops_module
+
+    route = _api_route_no_callback()
+    _wire(monkeypatch, FakeManager(route))
+    monkeypatch.setattr(ops_module, "get_conversations_manager", lambda: FakeManager(route))
+
+    async def _caller():
+        return SimpleNamespace(is_admin=False)
+
+    monkeypatch.setattr(ops_module, "resolve_caller", _caller)
+
+    release = asyncio.Event()
+
+    class _SlowAgent(Agent):
+        tool_name = "slow"
+        ToolInput = _EchoInput
+
+        async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+            await release.wait()
+            return f"echo: {user_message}"
+
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": _SlowAgent()})
+    posted: list = []
+
+    async def _post(url, body, signature, timeout_seconds):
+        posted.append(url)
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+
+    result = await turn_module.submit_api_message("chat", "user-7", "hello", "alice", wait_seconds=1)
+    assert result.answer is None  # the wait elapsed before the turn finished: 202
+
+    release.set()
+    await _settle()
+
+    assert posted == []  # a poll-only route never POSTs a callback
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+    # The consumer's seam: the poll door serves the answer back off the terminal record.
+    view = await ops_module.get_conversation_message("chat", result.message_id)
+    assert view["answer"] == "echo: hello"
+    assert view["delivery_status"] == DeliveryStatus.DELIVERED.value
 
 
 async def test_api_callback_retries_then_fails(env, monkeypatch):

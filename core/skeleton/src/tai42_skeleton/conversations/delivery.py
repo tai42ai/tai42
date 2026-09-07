@@ -3,8 +3,10 @@ terminal state, exactly once.
 
 ``door=channel`` chunks the answer through the channel's ``notify``, resuming an interrupted
 send from the per-chunk ledger; ``door=api`` POSTs it to the row's ``callback_url`` under an
-HMAC ``X-Tai-Signature``, retried with backoff. Every send is guarded by an atomic per-record
-leased claim, and a periodic sweep re-drives the records whose lease has lapsed.
+HMAC ``X-Tai-Signature``, retried with backoff, or — for a poll-only row that declares no
+callback — drives the record terminal-readable for the poll door without a POST. Every send
+is guarded by an atomic per-record leased claim, and a periodic sweep re-drives the records
+whose lease has lapsed.
 """
 
 from __future__ import annotations
@@ -550,8 +552,21 @@ async def _refuse_unrenderable_parts(
 
 async def _deliver_api(store: ConversationRecordStore, record: ConversationRecord, token: str) -> None:
     settings = store.settings
+    if record.callback_url is None:
+        # A poll-only api route declares no callback: its answer is served by the poll door
+        # (GET /api/conversations/{route}/messages/{message_id}), so delivery is terminal the
+        # moment the outcome is written — nothing is POSTed and no send attempt is spent.
+        delivered = await store.mark_delivered(record.message_id, [], record.attempts, time.time(), token)
+        if delivered != 1:
+            logger.warning(
+                "conversations: api record %s is poll-only; the delivered write returned %d; the record's "
+                "outcome stands as another writer left it",
+                record.message_id,
+                delivered,
+            )
+        return
     route = await get_conversations_manager().get_route(record.route_name)
-    if route is None or route.callback_secret is None or record.callback_url is None:
+    if route is None or route.callback_secret is None:
         await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
         logger.error(
             "conversations: api record %s cannot be delivered — route %r is gone or carries no callback secret; "

@@ -30,7 +30,8 @@ class DeliveryStatus(StrEnum):
     out-of-band receipt or grace expiry; ``delivered``/``failed``/``shed``/``silent`` are
     terminal and are the only states carrying the retention TTL. ``shed`` ran no turn and
     never sends; ``silent`` ran a tool turn whose reply mapped to nothing and so, by
-    design, sends nothing.
+    design, sends nothing; ``delivered`` on an api record without a callback means the
+    answer is readable at the message door and nothing was sent.
     """
 
     ACCEPTED = "accepted"

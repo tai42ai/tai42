@@ -551,7 +551,8 @@ class ConversationRouteCreate(BaseModel):
     an ``execution_key`` the turn runs AS (bound with pass-role at create). A ``tool``
     target may carry a ``payload_expr`` (jq mapping the inbound message to the tool's
     kwargs) and a ``reply_expr`` (jq mapping the tool's result to the reply); both are
-    tool-only. ``api`` rows carry an https ``callback_url``; ``channel`` rows carry the
+    tool-only. ``api`` rows MAY carry an https ``callback_url`` (the answer sink; when absent
+    the caller reads its answer back from the poll door); ``channel`` rows carry the
     registry ``channel`` plus the ``our_identity`` the medium is texted at (N rows may
     share a channel, each its own identity). The server-derived ``callback_secret`` and
     ``execution_key_fingerprint`` are deliberately absent; :class:`ConversationRoute` is
@@ -624,7 +625,7 @@ class ConversationRouteCreate(BaseModel):
     )
     channel: str | None = None  # door=channel: the registry name, ``:``-free
     our_identity: str | None = None  # door=channel: the medium address we are texted at
-    callback_url: str | None = None  # door=api: the https answer sink
+    callback_url: str | None = None  # door=api: the optional https answer sink; absent = poll-only
     # A per-route override of the global ``per_address_turns_per_hour`` cap: the positive
     # per-hour turn rate this route's per-address buckets run at, or ``None`` to run at the
     # global rate.
@@ -671,8 +672,8 @@ class ConversationRouteCreate(BaseModel):
             if self.callback_url is not None:
                 raise ValueError("door=channel carries no callback_url")
         else:
-            if not (self.callback_url and _is_https_url(self.callback_url)):
-                raise ValueError("door=api requires an absolute https callback_url")
+            if self.callback_url is not None and not _is_https_url(self.callback_url):
+                raise ValueError("door=api callback_url must be an absolute https url when set")
             if self.channel is not None:
                 raise ValueError("door=api carries no channel")
             if self.our_identity is not None:
@@ -684,9 +685,10 @@ class ConversationRoute(ConversationRouteCreate):
     """The stored routing row: :class:`ConversationRouteCreate` plus the two
     server-derived fields. What the manager persists and backup restore validates.
 
-    ``callback_secret`` (``api`` rows) signs the delivery callback; it is excluded from
-    export and re-minted per row on import, so callbacks signed with the pre-import
-    secret no longer verify. ``execution_key_fingerprint`` is the bound key's per-mint
+    ``callback_secret`` (present only on an ``api`` row that declares a ``callback_url``)
+    signs the delivery callback; it is excluded from export and re-minted per row on import,
+    so callbacks signed with the pre-import secret no longer verify.
+    ``execution_key_fingerprint`` is the bound key's per-mint
     identity: a turn matches it against the live key, so a revoke+remint of the same
     ``user_id`` fails closed.
     """

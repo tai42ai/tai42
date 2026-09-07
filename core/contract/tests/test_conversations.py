@@ -745,9 +745,19 @@ def test_channel_route_round_trips_and_is_frozen():
         route.target_name = "changed"
 
 
-def test_api_route_requires_https_callback_and_forbids_channel_fields():
+def test_api_route_callback_is_optional_https_when_set_and_forbids_channel_fields():
     from tai42_contract.conversations import ConversationRouteCreate
 
+    # A callback is OPTIONAL: a caller reading its answer back from the poll door declares
+    # none, and the route is valid.
+    no_callback = ConversationRouteCreate(
+        route_name="api-desk",
+        door="api",
+        target_kind="agent",
+        target_name="assistant",
+        execution_key="svc-bridge",
+    )
+    assert no_callback.callback_url is None
     ok = ConversationRouteCreate(
         route_name="api-desk",
         door="api",
@@ -757,8 +767,8 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
         callback_url="https://host.example/hook",
     )
     assert ok.callback_url == "https://host.example/hook"
-    # non-https callback rejected
-    with pytest.raises(ValidationError, match="https callback_url"):
+    # a declared callback must be https
+    with pytest.raises(ValidationError, match="https"):
         ConversationRouteCreate(
             route_name="api-desk",
             door="api",
@@ -768,7 +778,7 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
             callback_url="http://host.example/hook",
         )
     # a credential-form authority is not an acceptable https url
-    with pytest.raises(ValidationError, match="https callback_url"):
+    with pytest.raises(ValidationError, match="https"):
         ConversationRouteCreate(
             route_name="api-desk",
             door="api",
@@ -778,7 +788,7 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
             callback_url="https://user@evil.example/hook",
         )
     # a malformed authority (unterminated IPv6 literal) makes urlsplit raise → not https
-    with pytest.raises(ValidationError, match="https callback_url"):
+    with pytest.raises(ValidationError, match="https"):
         ConversationRouteCreate(
             route_name="api-desk",
             door="api",

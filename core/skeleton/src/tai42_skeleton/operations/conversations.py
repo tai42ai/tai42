@@ -246,7 +246,9 @@ async def create_conversation_route(
     on that channel. An edit that would change the ``door`` of a route already HOLDING
     threads is refused: the two doors key their threads differently, so the held threads
     cannot be re-keyed under the new door.
-    An ``api`` row's ``callback_secret`` is minted here and returned ONCE. A positive
+    An ``api`` row that declares a ``callback_url`` has its ``callback_secret`` minted here
+    and returned ONCE; a poll-only api row (no callback) mints none and reads its answers
+    back from the poll door. A positive
     ``turns_per_hour_override`` runs this route's per-address buckets at that rate instead
     of the global ``per_address_turns_per_hour`` cap; ``None`` runs them at the global rate.
     A non-blank ``error_reply_text`` is the guest-facing reply sent when a turn on this route
@@ -289,8 +291,9 @@ async def create_conversation_route(
 
     execution_key_fingerprint = await assert_execution_key_bindable(await resolve_caller(), create.execution_key)
 
-    # Signs the api-door callback; a ``channel`` row signs nothing and carries no secret.
-    callback_secret = secrets.token_urlsafe(32) if create.door == "api" else None
+    # Signs the api-door callback; a ``channel`` row and a poll-only api row (no callback
+    # declared) sign nothing and carry no secret.
+    callback_secret = secrets.token_urlsafe(32) if create.door == "api" and create.callback_url is not None else None
 
     route = ConversationRoute(
         **stored,

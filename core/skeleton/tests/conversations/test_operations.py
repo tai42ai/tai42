@@ -358,6 +358,22 @@ async def test_create_channel_route_carries_no_secret(wired):
     assert wired.rows["line"].callback_secret is None
 
 
+async def test_create_poll_only_api_route_carries_no_secret(wired):
+    # A poll-only api route (no callback declared) signs nothing: it mints no secret and
+    # reads its answers back from the poll door.
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+    )
+    assert result["created"] is True
+    assert result["callback_secret"] is None
+    assert wired.rows["chat"].callback_secret is None
+    assert wired.rows["chat"].callback_url is None
+
+
 async def test_create_is_an_upsert(wired):
     await ops.create_conversation_route(
         route_name="chat",
