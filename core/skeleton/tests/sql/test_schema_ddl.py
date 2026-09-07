@@ -2,9 +2,11 @@
 
 Loads the packaged chain through the kit runner (the same discovery production
 uses) and asserts the single-namespace connector shape, the role_audit
-append-only triggers, the tool-metadata overlay, and — the migration-model
-invariant — that the two marketplace version-stamp columns are folded INTO the
-``CREATE TABLE`` body with no ``ALTER ... ADD COLUMN`` backfill left behind.
+append-only triggers, the tool-metadata overlay, the runs index, and — the
+migration-model invariant — that every column, CHECK, and index lives INSIDE the
+``CREATE TABLE`` body of the single baseline, with no ``ALTER`` backfill: the
+marketplace version-stamp columns, the descriptor-only ``spec`` source value, and
+the ``route_mounts`` map are all folded in, never added by a later ALTER.
 """
 
 import re
@@ -152,51 +154,29 @@ def test_tool_meta_hidden_is_nullable_tristate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 0002_spec_source — widen the marketplace source CHECK to admit 'spec'
+# Marketplace `source` CHECK — the descriptor-only `spec` channel
 # ---------------------------------------------------------------------------
 
 
-def _spec_source_sql() -> str:
-    scripts = discover_migrations(skeleton_migrations_dir())
-    names = [(s.version, s.name) for s in scripts]
-    assert (2, "spec_source") in names, f"the 0002_spec_source migration must ship in the chain; got {names}"
-    return next(s.sql for s in scripts if s.version == 2)
-
-
-def test_baseline_source_check_is_pypi_github_only() -> None:
-    # The baseline pins the pre-descriptor set; the widening is the 0002 migration's job.
-    ddl = _baseline_sql()
-    assert "source IN ('pypi', 'github')" in ddl
-    assert "'spec'" not in ddl
-
-
-def test_spec_source_migration_widens_the_check_via_alter_on_a_populated_table() -> None:
-    # The CHECK is widened by DROP CONSTRAINT + ADD CONSTRAINT — an in-place ALTER that
-    # applies to an already-populated table, never a table recreate that would drop rows.
-    sql = _spec_source_sql()
-    assert "ALTER TABLE marketplace_installs" in sql
-    assert "DROP CONSTRAINT IF EXISTS marketplace_installs_source_check" in sql
-    assert re.search(r"CHECK\s*\(\s*source IN \('pypi', 'github', 'spec'\)\s*\)", sql) is not None
-    # No table recreate: a widening migration must not CREATE/DROP the table.
-    assert "CREATE TABLE" not in sql
-    assert "DROP TABLE" not in sql
+def test_baseline_source_check_admits_spec() -> None:
+    """The install-attribution ``source`` CHECK admits the descriptor-only ``spec``
+    channel alongside ``pypi``/``github``, folded into the ``CREATE TABLE`` body (no
+    ALTER that widens a live constraint). Text-level guard so a narrowed CHECK fails
+    without a live Postgres."""
+    match = re.search(r"CREATE TABLE IF NOT EXISTS marketplace_installs\s*\((.*?)\n\);", _baseline_sql(), re.DOTALL)
+    assert match is not None, "marketplace_installs table not found in the baseline"
+    block = match.group(1)
+    assert re.search(r"CHECK\s*\(\s*source IN \('pypi', 'github', 'spec'\)\s*\)", block) is not None
 
 
 # ---------------------------------------------------------------------------
-# 0003_run_index — the platform-side runs index table
+# Runs index — the platform-side runs-enumeration table
 # ---------------------------------------------------------------------------
-
-
-def _run_index_sql() -> str:
-    scripts = discover_migrations(skeleton_migrations_dir())
-    names = [(s.version, s.name) for s in scripts]
-    assert (3, "run_index") in names, f"the 0003_run_index migration must ship in the chain; got {names}"
-    return next(s.sql for s in scripts if s.version == 3)
 
 
 def _run_index_block(ddl: str) -> str:
     match = re.search(r"CREATE TABLE IF NOT EXISTS run_index\s*\((.*?)\n\);", ddl, re.DOTALL)
-    assert match is not None, "run_index table not found in the 0003 migration"
+    assert match is not None, "run_index table not found in the baseline"
     return match.group(1)
 
 
@@ -205,7 +185,7 @@ def test_run_index_table_columns_present() -> None:
     identity+version, the deep-link trace id, the attribution identity, the outcome,
     and the start/end window. Text-level guards so a dropped/renamed column fails
     without a live Postgres."""
-    block = _run_index_block(_run_index_sql())
+    block = _run_index_block(_baseline_sql())
     assert re.search(r"\brun_id\s+TEXT\s+NOT NULL", block) is not None
     assert re.search(r"\bpreset_name\s+TEXT\s+NOT NULL", block) is not None
     assert re.search(r"\bpreset_version\s+INTEGER\s+NOT NULL", block) is not None
@@ -220,14 +200,14 @@ def test_run_index_table_columns_present() -> None:
 
 
 def test_run_index_run_id_is_primary_key() -> None:
-    block = _run_index_block(_run_index_sql())
+    block = _run_index_block(_baseline_sql())
     assert re.search(r"PRIMARY KEY\s*\(\s*run_id\s*\)", block) is not None
 
 
 def test_run_index_outcome_check_pins_the_vocabulary() -> None:
     """The outcome column is CHECK-constrained to the closed run vocabulary, so a bad
     outcome can never be persisted."""
-    block = _run_index_block(_run_index_sql())
+    block = _run_index_block(_baseline_sql())
     assert re.search(r"outcome\s+TEXT\s+NOT NULL\s+DEFAULT\s+'running'", block) is not None
     match = re.search(r"CHECK\s*\(outcome IN \(([^)]*)\)\)", block)
     assert match is not None, "run_index must CHECK-constrain outcome"
@@ -239,7 +219,7 @@ def test_run_index_ships_the_filter_and_page_indexes() -> None:
     """The list/prune paths need a ``started_at`` DESC index and the
     preset/user/session/interaction filter indexes; text-level guards so a dropped
     index fails without a live Postgres."""
-    ddl = _run_index_sql()
+    ddl = _baseline_sql()
     assert "CREATE INDEX IF NOT EXISTS run_index_started_at_idx" in ddl
     assert "CREATE INDEX IF NOT EXISTS run_index_preset_idx" in ddl
     assert "CREATE INDEX IF NOT EXISTS run_index_user_idx" in ddl
