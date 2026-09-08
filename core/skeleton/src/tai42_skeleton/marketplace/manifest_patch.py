@@ -36,9 +36,12 @@ The six patch shapes:
   already present (hand-written or previously installed) is a collision, never an
   overwrite; uninstall removes by ``id``, convergently.
 - ``scalar_module`` (``backend_module``, ``sandbox_module``, ``storage_module``,
-  ``monitoring_module``) — a single-module slot; a second plugin claiming an
-  occupied slot is a collision, as is one spec providing two distinct modules for
-  the same slot.
+  ``monitoring_module``) — a single-module slot holding the plugin's TOP-LEVEL
+  import package (``item.module`` up to its first dot), never the descriptor's
+  impl submodule: the skeleton imports the slot and whitelists every module under
+  that package root, so the package ``__init__`` registers the provider and its
+  sibling tool/extension modules. A second plugin claiming an occupied slot is a
+  collision, as is one spec providing two distinct modules for the same slot.
 - ``env_selected`` (``config``) — no manifest field. A DECIDED no-op in all three
   functions: pip install/uninstall IS the whole registration, and activation goes
   through the skeleton's fixed ``TAI_CONFIG_MODE`` → module map (a new config
@@ -111,7 +114,18 @@ def _grouped_targets(spec: PluginSpec) -> dict[str, _FieldTargets]:
                 if not any(existing["id"] == provider_payload["id"] for existing in target.values):
                     target.values.append(provider_payload)
             continue
-        value = spec.package if binding.mode == "package_list" else item.module
+        if binding.mode == "package_list":
+            value = spec.package
+        elif binding.mode == "scalar_module":
+            # A scalar slot holds the plugin's top-level import package, not the
+            # descriptor's impl submodule: the loader whitelists every module under
+            # the slot's package root, so importing it registers the provider and the
+            # sibling tool/extension modules the package ``__init__`` pulls in. Naming
+            # the submodule leaves those siblings un-whitelisted and aborts boot.
+            assert item.module is not None
+            value = item.module.partition(".")[0]
+        else:
+            value = item.module
         if value not in target.values:
             target.values.append(value)
     return grouped
