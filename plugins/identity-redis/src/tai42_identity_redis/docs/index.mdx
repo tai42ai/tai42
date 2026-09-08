@@ -29,16 +29,33 @@ owns no `CHANNEL_`/`IDENTITY_` env group of its own.
 | `ACCESS_CONTROL_ENABLE` | `true` | The access-control gate. Turn it off only for local, auth-free work. |
 | `ACCESS_CONTROL_AUTH_PROVIDERS` | `["redis"]` | Ordered provider chain the verifier tries. |
 | `ACCESS_CONTROL_REDIS_URL` | unset | Redis holding the key records and per-user live counters. Falls back to the shared `TAI_DEFAULT_REDIS_URL`; with the gate on, one must be set. |
+| `ACCESS_CONTROL_BOOTSTRAP_TOKEN` | unset | Gate token for the first-key bootstrap door. Unset, the platform auto-generates one and logs it once at startup; set it to pin a known value. |
 
 Any standard `redis-server` works — no RedisJSON module or `redis-stack` image is
 required.
 
-## Provision a key
+## Bootstrap the first admin key
 
-The raw `sk-…` value is printed once — capture it then.
+A fresh install has no key, and `tai keys create` authenticates with one — so the
+first key is minted through the public, one-shot `POST /api/keys/bootstrap` door
+instead. It is gated by a boot-time token: set `ACCESS_CONTROL_BOOTSTRAP_TOKEN`, or
+let the platform auto-generate one and read it from the startup log (`first-key
+bootstrap token: …`). The door refuses once any key exists.
 
 ```bash
-tai keys create --user alice --description 'CI key' --scope read
+tai keys bootstrap --user alice --description 'root key' --token -
+```
+
+The raw `sk-…` admin key is printed once — capture it then. Pass `-` to read the
+token from stdin, keeping the secret off the command line.
+
+## Provision more keys
+
+With the first admin key in hand, mint further keys the normal way — the raw
+`sk-…` value is printed once.
+
+```bash
+tai keys create --user ci --description 'CI key' --scope read
 ```
 
 ## See also

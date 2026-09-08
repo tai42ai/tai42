@@ -7,6 +7,7 @@ by ``create`` — capture it then.
 
 from __future__ import annotations
 
+import sys
 from typing import Annotated
 
 import typer
@@ -104,6 +105,41 @@ def create_key(
         body["policy_data"] = policy_data_obj
     with ctx_obj.client() as client:
         data = client.post("/api/auth/api-keys", json=body)
+    emit_result(ctx_obj, data)
+
+
+@app.command("bootstrap")
+@covers(("POST", "/api/keys/bootstrap"))
+def bootstrap_key(
+    ctx: typer.Context,
+    user: Annotated[str, typer.Option("--user", help="The first admin key's user id.")],
+    description: Annotated[str, typer.Option("--description", help="Human description (required identity field).")],
+    token: Annotated[
+        str,
+        typer.Option(
+            "--token",
+            help="The boot-time bootstrap token (printed in the server log at startup), or '-' to read it from "
+            "stdin instead of putting the secret on the command line (a value on argv leaks via ps and shell "
+            "history).",
+        ),
+    ],
+) -> None:
+    """Mint the FIRST admin API key on a fresh deployment — runs WITHOUT a credential.
+
+    Access control ON with no key yet has no authenticated door to mint the first key;
+    this is the one-shot public door. Gated by the boot-time bootstrap token; refused
+    once any key exists. The raw ``sk-…`` value is printed ONCE — capture it now.
+
+    Example: ``tai keys bootstrap --user alice --description 'root key' --token -``
+    """
+    ctx_obj = app_context(ctx)
+    if token == "-":
+        token = sys.stdin.readline().strip()
+    body = {"user_id": user, "description": description, "bootstrap_token": token}
+    # The caller has no key yet — the whole point — so the mint runs over the
+    # no-credential client path; a stale/wrong credential is never sent to the public door.
+    with ctx_obj.client(anonymous=True) as client:
+        data = client.post("/api/keys/bootstrap", json=body)
     emit_result(ctx_obj, data)
 
 

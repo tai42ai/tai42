@@ -19,6 +19,28 @@ from .remote_harness import Handler, data_response, run_cli, visible
 # -- keys --------------------------------------------------------------------
 
 
+def test_keys_bootstrap_posts_first_admin_credential_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/keys/bootstrap"
+        # The mint runs credential-free — the caller has no key yet — so no auth header
+        # or api-key header rides the request.
+        assert request.headers.get("authorization") is None
+        assert request.headers.get("x-api-key") is None
+        body = json.loads(request.content)
+        assert body == {"user_id": "alice", "description": "root key", "bootstrap_token": "tok-from-stdin"}
+        return data_response({"token": "sk-secret", "user_id": "alice"})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["keys", "bootstrap", "--user", "alice", "--description", "root key", "--token", "-"],
+        stdin="tok-from-stdin\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "sk-secret" in result.output
+
+
 def test_keys_list_renders_identity_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"

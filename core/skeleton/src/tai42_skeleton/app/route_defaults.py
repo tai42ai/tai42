@@ -50,6 +50,7 @@ DEFAULT_API_ROUTERS: tuple[str, ...] = (
     "tai42_skeleton.routers.health",
     "tai42_skeleton.routers.hooks",
     "tai42_skeleton.routers.interactions",
+    "tai42_skeleton.routers.keys_bootstrap",
     "tai42_skeleton.routers.login",
     "tai42_skeleton.routers.manifest",
     "tai42_skeleton.routers.marketplace",

@@ -56,6 +56,10 @@ STUDIO_ROUTE_ANCHORS: dict[str, tuple[str, str, dict | None]] = {
     # interaction is ever looked up, so this proves the route is mounted without a
     # seeded interaction.
     "tai42_skeleton.routers.interactions": ("POST", "/api/interactions/e2e-probe/answer", {}),
+    # An empty body is rejected at the HTTP edge (422) — the request model requires
+    # user_id/description — before the token check or any key lookup, so this proves the
+    # public first-key bootstrap door is mounted without minting anything.
+    "tai42_skeleton.routers.keys_bootstrap": ("POST", "/api/keys/bootstrap", {}),
     "tai42_skeleton.routers.login": ("GET", "/api/login/methods", None),
     "tai42_skeleton.routers.manifest": ("GET", "/api/manifest", None),
     "tai42_skeleton.routers.marketplace": ("GET", "/api/marketplace/installed", None),

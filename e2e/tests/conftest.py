@@ -49,6 +49,7 @@ from tai42_e2e.manifests import (
     build_default_router_stack,
     build_embed_stack,
     build_extensions_stack,
+    build_keys_bootstrap_stack,
     build_minimal_stack,
     build_monitoring_stack,
     build_off_stack,
@@ -282,6 +283,14 @@ def async_park_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> 
 @pytest.fixture(scope="module")
 def auth_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
     yield from _boot(infra, tmp_path_factory.mktemp("auth"), build_auth_stack, seed_auth=True)
+
+
+@pytest.fixture(scope="module")
+def keys_bootstrap_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """Access control ON with the redis provider and NO seeded key (``seed_auth=False``)
+    — the fresh install where the public ``/api/keys/bootstrap`` door mints the first
+    admin key behind the pinned bootstrap token."""
+    yield from _boot(infra, tmp_path_factory.mktemp("keys-bootstrap"), build_keys_bootstrap_stack, seed_auth=False)
 
 
 @pytest.fixture(scope="module")

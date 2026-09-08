@@ -353,6 +353,7 @@ _EXPECTED_READS_BODY: set[tuple[str, str]] = {
     ("POST", "/api/hooks/trigger-links"),
     ("PUT", "/api/hooks/topics/{topic}/verifier"),
     ("POST", "/api/interactions/{interaction_id}/answer"),
+    ("POST", "/api/keys/bootstrap"),
     ("POST", "/api/login/claim"),
     ("POST", "/api/manifest/replace"),
     ("POST", "/api/marketplace/install"),

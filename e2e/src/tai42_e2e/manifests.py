@@ -1398,6 +1398,48 @@ def build_auth_stack(res: StackResources, variants: Variants) -> StackConfig:
     )
 
 
+# The keys-bootstrap stack's known first-key bootstrap token. Pinning a known value
+# drives the gated first-admin-key mint deterministically (the auto-token is logged only
+# by the SET-NX winner, so a spec could not read it) while still exercising the gate. The
+# auto-token SET-NX convergence rests on the skeleton's own unit tests.
+_KEYS_BOOTSTRAP_TOKEN = "e2e-keys-bootstrap-token"
+
+
+def build_keys_bootstrap_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """Access control ON with the redis key provider and NO seeded key — a one-worker,
+    busless stack so readiness is HTTP ``/health`` alone (no authed MCP drain), the fresh
+    install the first-key bootstrap door serves. The public ``/api/keys/bootstrap`` door
+    (its own ``routers_modules`` entry) mints the first admin key behind the pinned token;
+    the ``api_keys`` router carries the authed ``/api/auth/me`` the minted key then reaches."""
+    manifest = {
+        "default_routers": "none",
+        "lifecycle_modules": [variants.identity.lifecycle_module],
+        "routers_modules": [
+            *_CORE_ROUTERS,
+            "tai42_skeleton.routers.api_keys",
+            "tai42_skeleton.routers.keys_bootstrap",
+        ],
+        "extensions_modules": _EXTENSION_MODULES,
+        "tools": [*_builtin_entries()],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    env["ACCESS_CONTROL_ENABLE"] = "true"
+    env.update(variants.identity.auth_provider_env())
+    env["ACCESS_CONTROL_BOOTSTRAP_TOKEN"] = _KEYS_BOOTSTRAP_TOKEN
+    return StackConfig(
+        name="keys-bootstrap",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=True,
+    )
+
+
 # The accounts stack's known first-owner bootstrap token. Pinning a known value drives
 # the gated bootstrap path deterministically (the auto-token is logged only by the
 # SET-NX winner, so a spec could not read it) while still exercising the gate. The

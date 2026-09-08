@@ -131,7 +131,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
             # The registered surface decomposes by projection tier (each asserted below):
-            # 208 total = 4 tier-1 (hardcode-blocked from projection) + 41 tier-2
+            # 209 total = 4 tier-1 (hardcode-blocked from projection) + 42 tier-2
             # (default-excluded, includable) + 163 tier-0 (default-projected). A destructive
             # tier-0 op is still default-projected under ``expose_destructive`` — a data write
             # or purge (``delete_*``, ``erase_*``, ``prune_runs``, ``prune_state_retention``)
@@ -141,7 +141,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # doors (module + state ``list``/``get``/``put``/``delete``, the record CRUD plus
             # ``search``/``fold``/``apply`` doors, the mount/subjects/consumers/stats
             # reads, and ``prune_state_retention``) are all tier-0 CRUD over the states service.
-            assert total == 208, total
+            assert total == 209, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -155,11 +155,13 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # create_conversation_route and apply_profile (the C5 env-replace + fleet-recycle
             # door), plus the granular-config authority ops update_api_tools and
             # modify_role_grants (authority_changing) and modify_api_key_scopes (tier-2 by the
-            # ``/api/auth/`` route prefix, like the sibling api-key ops) — 41 in all. ``get_me``
-            # is tier-1 hardcode-blocked, not tier-2.
+            # ``/api/auth/`` route prefix, like the sibling api-key ops) plus bootstrap_admin_key
+            # (authority_changing — the public first-key mint door, off /api/auth, that must never
+            # project) — 42 in all. ``get_me`` is tier-1 hardcode-blocked, not tier-2.
             assert set(tier2) == {
                 "add_scope_url",
                 "apply_profile",
+                "bootstrap_admin_key",
                 "create_api_key",
                 "create_claim_link",
                 "create_conversation_route",

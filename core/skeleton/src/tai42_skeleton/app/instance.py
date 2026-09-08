@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from tai42_kit.db import component_binding, component_store_configured, database_password_env
 from tai42_kit.logging import logging_settings, setup_logging
 
+from tai42_skeleton.access_control.bootstrap import ensure_bootstrap_token
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.startup import (
     check_accounts_providers_configured,
@@ -214,6 +215,12 @@ def build_app() -> TaiMCP:
             # The control-plane role templates (admin/editor/viewer) are seeded before
             # traffic, so a bootstrap ``apply_role`` can never KeyError on a fresh deploy.
             app.lifecycle.on_startup(seed_roles)
+            # The first-key bootstrap token is fixed once (SET NX on the shared AC Redis)
+            # and logged once by the winner while no key exists, so a fresh deployment can
+            # mint its first admin key through the public /api/keys/bootstrap door. Runs
+            # after the providers are probed and roles seeded so the key-existence log gate
+            # can resolve the mint provider and the mint path is ready.
+            app.lifecycle.on_startup(ensure_bootstrap_token)
             # The always-public login surface is enumerated (visible at every boot) and
             # an accidental authed mount under it fails the boot closed.
             app.lifecycle.on_startup(check_always_public_routes)

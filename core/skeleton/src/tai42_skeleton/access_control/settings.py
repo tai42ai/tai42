@@ -2,7 +2,7 @@ import re
 from re import Pattern
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
@@ -66,6 +66,33 @@ class AccessControlSettings(TaiBaseSettings):
 
     key_prefix: str = "ac:key:"
     context_prefix: str = "ac:context:"
+
+    # First-key bootstrap gate. Secure-by-default: with neither field set the gate is
+    # ON with an auto-generated token fixed once at startup via SET NX on
+    # ``bootstrap_token_key`` (shared across workers, logged once by the winner) so the
+    # ``/api/keys/bootstrap`` door can mint the first admin key on a fresh deployment
+    # while access control is enabled and no key exists yet. An operator-set
+    # ``bootstrap_token`` replaces the auto-token; ``bootstrap_open`` is the only ungated
+    # config (a local/dev opt-out that mints without a token), never the default.
+    bootstrap_token: SecretStr | None = None
+    bootstrap_open: bool = False
+    bootstrap_token_key: str = "ac:bootstrap:token"
+
+    # The mint mutex: the existence-check-and-mint of the first key runs under this
+    # single AC-Redis lock, so two concurrent bootstraps can never both mint. The TTL
+    # is a crash-safety ceiling (a dead holder's lock auto-expires), never the normal
+    # release path (the door deletes its own lock on completion).
+    bootstrap_lock_key: str = "ac:bootstrap:lock"
+    bootstrap_lock_ttl_seconds: int = 10
+
+    # Per-IP brute-force backoff on wrong-token attempts (failures-only, same posture as
+    # the redeem/login throttles): a run of wrong tokens from one IP escalates a capped
+    # backoff lock; while locked, attempts are refused WITHOUT comparing the token, and a
+    # correct token clears the counter. Redis-backed so it holds across workers.
+    bootstrap_throttle_fail_prefix: str = "ac:bootstrap:fail:"
+    bootstrap_throttle_lock_prefix: str = "ac:bootstrap:throttle:"
+    bootstrap_throttle_threshold: int = 5
+    bootstrap_throttle_cap_seconds: int = 900
 
     # The claim-link store prefix: a one-time claim record lives at
     # ``ac:claim:<sha256(token)>`` as a TTL-bound Redis STRING holding the raw key it
