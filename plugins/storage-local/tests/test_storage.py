@@ -123,3 +123,25 @@ async def test_stat_does_not_verify_existence(storage):
     # The default stat answers from the path string, not the filesystem.
     stat = await storage.stat("never/written.mp3")
     assert stat.content_type == "audio/mpeg"
+
+
+# --- file/directory id collision (propagated through the backend) -----------
+
+
+async def test_upload_over_non_empty_directory_conflicts(storage, storage_root):
+    from tai42_contract.storage import StoragePathConflictError
+
+    await storage.upload("a/b/c.j2", "c")
+    with pytest.raises(StoragePathConflictError) as exc:
+        await storage.upload("a/b", "cannot")
+    assert exc.value.conflicts == ["a/b/c.j2"]
+
+
+async def test_delete_then_upload_at_freed_id(storage, storage_root):
+    # The reported path: a template id occupied by a directory is freed by deleting
+    # its last child, after which an upload at that id succeeds.
+    await storage.upload("a/b/c.j2", "c")
+    await storage.delete("a/b/c.j2")
+    # "a/b" and "a" are pruned once empty, so the id "a/b" is free to hold a file.
+    await storage.upload("a/b", "now a file")
+    assert await storage.load("a/b") == "now a file"

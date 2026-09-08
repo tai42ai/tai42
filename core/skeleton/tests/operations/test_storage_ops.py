@@ -154,3 +154,19 @@ def test_projection_destructive_hints() -> None:
     assert app.tools.registered["upload_resource"]["annotations"].destructiveHint is True
     assert app.tools.registered["list_resources"]["annotations"] is None  # read
     assert app.tools.registered["storage_info"]["annotations"] is None  # read
+
+
+async def test_upload_resource_path_conflict_maps_to_409(install) -> None:
+    from tai42_contract.storage import StoragePathConflictError
+
+    from tai42_skeleton.operations import ConflictError
+
+    class _ConflictingStorage(_FakeStorage):
+        async def upload(self, path: str, content: str) -> None:
+            raise StoragePathConflictError(path, ["a/b/c.j2"])
+
+    install(_ConflictingStorage())
+    with pytest.raises(ConflictError) as exc:
+        await upload_resource("a/b", content_text="hi")
+    assert exc.value.status == 409
+    assert "a/b/c.j2" in exc.value.message

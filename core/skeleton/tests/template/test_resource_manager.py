@@ -157,3 +157,20 @@ async def test_render_and_fetch_by_id_reject_traversal() -> None:
     # A clean id still fetches and renders through the same seam.
     assert await manager.fetch_template("greeting.j2") == "Hello {{ name }}!"
     assert await manager.render_by_id("greeting.j2", {"name": "World"}) == "Hello World!"
+
+
+async def test_delete_template_missing_is_noop_at_the_store_seam() -> None:
+    """A missing template's delete is the documented idempotent no-op: the store
+    seam maps the backends' ``FileNotFoundError`` to success (never a leaked 500)."""
+
+    registry = StorageRegistry()
+
+    @registry.register_storage
+    class _RaisingProvider(_InMemoryStorage):
+        async def delete(self, path: str) -> None:
+            raise FileNotFoundError(f"Object not found: {path}")
+
+    manager = ResourceManager(registry.provider)
+
+    # No raise despite the provider raising FileNotFoundError for the absent key.
+    await manager.delete_template("never-existed.j2")

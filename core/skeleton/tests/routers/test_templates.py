@@ -123,6 +123,22 @@ async def test_upload_traversal_rejected(manager, bad):
     assert manager.uploaded == {}
 
 
+async def test_upload_directory_id_collision_is_409(manager, monkeypatch):
+    # An id that still names a directory holding templates can't also become a
+    # file: the provider's typed conflict maps to a 409 naming the templates.
+    from tai42_contract.storage import StoragePathConflictError
+
+    async def _conflict(path, content):
+        raise StoragePathConflictError(path, ["dir/x.j2", "dir/y.j2"])
+
+    monkeypatch.setattr(manager, "upload_template", _conflict)
+    resp = await router.upload_template(_req({"path": "dir", "content": "hi"}))
+    assert resp.status_code == 409
+    body = _data(resp)
+    assert "dir/x.j2" in body["error"]
+    assert "delete them first" in body["error"]
+
+
 async def test_delete_traversal_rejected(manager):
     resp = await router.delete_template(_req({"path": "../secret"}))
     assert resp.status_code == 400

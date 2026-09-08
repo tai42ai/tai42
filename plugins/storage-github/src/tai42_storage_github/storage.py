@@ -14,7 +14,7 @@ import logging
 
 import httpx
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import Storage, assert_not_root
+from tai42_contract.storage import Storage, StoragePathConflictError, assert_not_root
 
 from tai42_storage_github.client import GithubHttpxClient
 from tai42_storage_github.settings import GithubStorageSettings, github_storage_settings
@@ -171,6 +171,11 @@ class GithubStorage(Storage):
             get_resp = await client.get(url, headers=headers, params={"ref": settings.branch})
             if get_resp.status_code == 200:
                 existing = get_resp.json()
+                if isinstance(existing, list):
+                    # The Contents API returns an array for a directory: the id names a
+                    # directory that holds objects and cannot also become a file.
+                    conflicts = sorted(item["path"] for item in existing if isinstance(item, dict) and "path" in item)
+                    raise StoragePathConflictError(path, conflicts)
                 if isinstance(existing, dict):
                     sha = existing.get("sha")
             elif get_resp.status_code != 404:

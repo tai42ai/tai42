@@ -125,13 +125,24 @@ async def test_upload_update_reuses_existing_sha(client):
     assert client.put.call_args.kwargs["json"]["sha"] == "deadbeef"
 
 
-async def test_upload_existing_non_dict_treated_as_create(client):
-    client.get.return_value = make_response(status=200, json_body=[{"x": 1}])
-    client.put.return_value = make_response(status=200)
+async def test_upload_onto_directory_path_refused(client):
+    from tai42_contract.storage import StoragePathConflictError
 
-    await GithubStorage().upload("a/b.j2", "hello")
+    # The Contents API returns an ARRAY for a directory path: the id names a
+    # directory that holds objects, so it can't also become a file.
+    client.get.return_value = make_response(
+        status=200,
+        json_body=[
+            {"path": "a/b/c.j2", "type": "file"},
+            {"path": "a/b/d.j2", "type": "file"},
+        ],
+    )
 
-    assert "sha" not in client.put.call_args.kwargs["json"]
+    with pytest.raises(StoragePathConflictError) as exc:
+        await GithubStorage().upload("a/b", "hello")
+
+    assert exc.value.conflicts == ["a/b/c.j2", "a/b/d.j2"]
+    client.put.assert_not_called()
 
 
 async def test_upload_lookup_error_propagates(client):
