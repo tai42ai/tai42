@@ -109,7 +109,7 @@ async def _run_continuation(
     writes complete their provenance from the SAME door the park entered through — every
     resolution door (an answer, the expiry reaper, an at-least-once redelivery) supplies
     it, so the door coverage holds on all three."""
-    # ATTRIBUTION SEAM (deliberately UNATTRIBUTED for now): this continuation/reaper
+    # ATTRIBUTION SEAM (deliberately UNATTRIBUTED): this continuation/reaper
     # re-drive resumes a parked run OUT OF BAND on a fresh detached task, so no ambient
     # ``RunAttribution`` is deposited and ``run_tool``'s ``stamp_run_attribution`` no-ops
     # — the run's trace here carries no user/session/route. The ORIGINAL turn that parked

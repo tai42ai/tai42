@@ -42,7 +42,7 @@ def test_notifications_list_derives_the_envelope_items_key(monkeypatch) -> None:
 
 def test_roles_list_derives_the_full_row_model_columns(monkeypatch) -> None:
     # RoleDefinitionList (a bare list of RoleDefinition) -> the row model's fields, so
-    # columns the old hand-written list omitted (condition*, scopes) now appear.
+    # every RoleDefinition field is a column, including condition* and scopes.
     payload = [
         {
             "condition": None,
