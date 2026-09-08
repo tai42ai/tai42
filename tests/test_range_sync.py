@@ -482,14 +482,15 @@ def test_malformed_pin_raises_via_check(tmp_path: Path):
 
 
 def test_real_workspace_pin_feature_is_inert():
-    """The live fleet is synced and carries no pins: the feature must add no
-    warnings, no preservation, no untouched-descriptor markers, and no drift
-    (zero-diff proof)."""
+    """The live fleet carries no pins: the feature must add no warnings, no
+    preservation, and no untouched-descriptor markers. Drift itself is not asserted
+    here — a release train runs its dependents' ranges behind the bumped member until
+    the post-merge re-pin, and the workflow's range-sync step gates drift on
+    development PRs, where the fleet is expected in sync."""
     report = range_sync.check(range_sync._repo_root())
     assert report.warnings == []
     assert report.preserved == []
     assert report.descriptor_untouched == []
-    assert report.dirty is False
 
 
 # ---------------------------------------- guarded rewrite: widened cap / compat
