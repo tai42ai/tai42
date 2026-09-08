@@ -9,7 +9,7 @@ from tai42_contract.access_control.models import JqAuthContext
 # manager via this interface.
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path
+from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
 from tai42_skeleton.access_control.role_gate import DenialCause
 from tai42_skeleton.access_control.role_grants import role_level_decision
@@ -145,30 +145,37 @@ class AccessControlAuthBackend(AuthenticationBackend):
         # Case C: Credentials were provided, but NONE were valid -> deny loudly.
         raise AuthenticationError("Invalid API key")
 
-    def _is_always_public_path(self, path: str) -> bool:
-        """Whether ``path`` is the pre-auth login surface, asked of the ONE definition of
-        that family over the SAME canonical form the resource guard resolves on.
+    def _is_always_public_path(self, canonical: str | None) -> bool:
+        """Whether the request's ``canonical`` path is the pre-auth login surface, asked of
+        the ONE definition of that family over the SAME canonical form the resource guard
+        resolves on.
 
-        A malformed path has no canonical form, so it is NOT this surface: it falls
-        through to the credential path and is denied downstream, never admitted
-        unauthenticated on a shape the guard itself refuses to reason about."""
-        try:
-            canonical = canonicalize_path(path)
-        except MalformedPathError:
-            logger.warning(
-                "access_control: request path %r is malformed (NUL/control/backslash or residual "
-                "percent-escape) — not admitting it as the pre-auth login surface",
-                path,
-            )
+        A malformed path (``canonical is None``) is NOT this surface: it falls through to
+        the credential path and is denied downstream, never admitted unauthenticated on a
+        shape the guard itself refuses to reason about."""
+        if canonical is None:
             return False
         return is_always_public_prefix(canonical, self.settings)
 
     async def authenticate(self, conn):
+        # The canonical request path, from the RAW target so a record ``{key}``'s encoded
+        # slash stays ONE segment — the SAME form the router and the resource guard reason
+        # on. A malformed target has no canonical form (``None``): not the login surface,
+        # and denied below if it reaches the authenticated path.
+        try:
+            canonical_path = request_canonical_path(conn.scope)
+        except MalformedPathError:
+            logger.warning(
+                "access_control: request path is malformed (NUL/control/backslash or non-ASCII) — "
+                "not admitting it as the pre-auth login surface"
+            )
+            canonical_path = None
+
         # 0. Public login surface: ignore any presented credential outright. Identity is
         # never needed here, and this middleware runs BEFORE the resource guard's public
         # short-circuit — so verifying a stale ``tai-sess-``/``sk-`` token would 401 the
         # recovery path this namespace exists for. No verification, no provider I/O.
-        if self._is_always_public_path(conn.url.path):
+        if self._is_always_public_path(canonical_path):
             return AuthCredentials(["unauthenticated"]), UnauthenticatedUser()
 
         # 1. Resolve Identity
@@ -179,6 +186,13 @@ class AccessControlAuthBackend(AuthenticationBackend):
             return AuthCredentials(["unauthenticated"]), UnauthenticatedUser()
 
         user_id = access_token.client_id
+
+        # An authenticated request whose path has no canonical form is denied fail-closed:
+        # every downstream term (jq fences, per-tag level) reasons on the canonical path,
+        # so a shape the guard refuses to canonicalize can never be authorized.
+        if canonical_path is None:
+            logger.warning("access_control: denied principal %s — malformed request path", user_id)
+            raise AuthorizationError("Access Denied")
 
         # 2 & 3. Fetch Policy (Cached) and Live Context (Fresh)
         # A backend error here (redis down, etc.) must fail closed as a clean
@@ -284,10 +298,9 @@ class AccessControlAuthBackend(AuthenticationBackend):
         # the governing role's per-tag level (the OWNER's role for an owned key — keys
         # inherit the owner). A resolution/infra fault fails closed as a clean deny.
         method = conn.scope.get("method")
-        path = conn.url.path
         try:
             version = await self.enforcer.current_policy_version()
-            allowed, cause = await role_level_decision(policy, owner_policy, path, method, version)
+            allowed, cause = await role_level_decision(policy, owner_policy, canonical_path, method, version)
         except Exception as e:
             logger.exception("access_control: per-tag level resolution failed for user %s", user_id)
             raise AuthorizationError("Access Denied") from e
@@ -296,7 +309,7 @@ class AccessControlAuthBackend(AuthenticationBackend):
                 "access_control: per-tag level denied user %s on %s %s (%s)",
                 user_id,
                 method,
-                path,
+                canonical_path,
                 cause.value if cause else "deny",
             )
             raise AuthorizationError("Access Denied", cause=cause)

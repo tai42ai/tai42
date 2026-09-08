@@ -611,8 +611,7 @@ async def test_h1_bypass_corpus(monkeypatch):
     v = _verifier(settings)
     public = [settings.public_resource_id]
 
-    # A residual percent-escape (the ASGI decode already ran) is a double-encoded byte:
-    # canonicalize REJECTS it rather than re-decoding, so it is denied (empty), never public.
+    # ``%61`` decodes once to ``a`` → /api/x, an unmapped /api path — gated (never shell).
     assert await v.resolve_resource_ids("/%61pi/x", method="GET") == []
     # Duplicate leading slash collapses to /api/x — gated.
     assert await v.resolve_resource_ids("//api/x", method="GET") == []
@@ -620,8 +619,9 @@ async def test_h1_bypass_corpus(monkeypatch):
     assert await v.resolve_resource_ids("/api/../agents", method="GET") == public
     # …and /agents/../api/secret is genuinely /api/secret — gated.
     assert await v.resolve_resource_ids("/agents/../api/secret", method="GET") == []
-    # A residual encoded slash (%2F) is NOT decoded again — it is REJECTED as a
-    # double-encoded byte and denied, rather than canonicalized into a /api/ segment.
+    # An encoded slash (%2F) keeps the key one segment (canonical /api%2Fx), which the ASGI
+    # router would decode to a real /api/ segment and route elsewhere. It resolves to no
+    # raw-path-matched route, so it is denied fail-closed rather than served as the shell.
     assert await v.resolve_resource_ids("/api%2Fx", method="GET") == []
     # Case-sensitive: /API is not the lowercase /api mount, so it never reaches API
     # DATA; shell-or-deny is acceptable (here: the shell).

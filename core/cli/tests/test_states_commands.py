@@ -523,6 +523,78 @@ def test_prune_posts_to_the_retention_door(monkeypatch: pytest.MonkeyPatch) -> N
     assert "pruned" in result.output
 
 
+# -- record key percent-encoding ----------------------------------------------
+
+# A thread subject's key is the thread id ``bridge:{route}:{quote(principal)}/{id}`` — it
+# carries ``/`` and ``:``, both of which must be percent-encoded into ONE path segment so
+# the server routes the record door (raw-path matched) rather than splitting the key.
+_SLASH_KEY = "bridge:relay:+15550001111/u-42"
+_ENCODED_KEY = "bridge%3Arelay%3A%2B15550001111%2Fu-42"
+
+
+def _read_slash_key_args(key: str) -> list[str]:
+    return [
+        "states",
+        "read",
+        "status",
+        "--target-kind",
+        "agent",
+        "--target-name",
+        "relay",
+        "--kind",
+        "thread",
+        "--key",
+        key,
+    ]
+
+
+def test_record_key_with_slash_is_one_encoded_segment(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # The raw (wire) path keeps the key percent-encoded as a single segment; the
+        # decoded path carries the ``/`` back inside the key.
+        assert request.url.raw_path.decode() == f"/api/states/status/records/agent/relay/thread/{_ENCODED_KEY}"
+        assert request.url.path == f"/api/states/status/records/agent/relay/thread/{_SLASH_KEY}"
+        return data_response({"document": {"count": 1}})
+
+    result = run_cli(monkeypatch, handler, _read_slash_key_args(_SLASH_KEY))
+    assert result.exit_code == 0, result.output
+
+
+def test_record_key_ending_in_writes_stays_one_segment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A key whose tail is a sub-action name must not read as ``…/{key}/writes``.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.raw_path.decode() == "/api/states/status/records/agent/relay/thread/t%2Fwrites"
+        return data_response({"document": None})
+
+    result = run_cli(monkeypatch, handler, _read_slash_key_args("t/writes"))
+    assert result.exit_code == 0, result.output
+
+
+def test_record_writes_door_of_a_slashed_key_encodes_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.raw_path.decode() == (f"/api/states/status/records/agent/relay/thread/{_ENCODED_KEY}/writes")
+        return data_response({"entries": [], "next_cursor": None})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "states",
+            "writes",
+            "status",
+            "--target-kind",
+            "agent",
+            "--target-name",
+            "relay",
+            "--kind",
+            "thread",
+            "--key",
+            _SLASH_KEY,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
 # -- error surfacing ----------------------------------------------------------
 
 

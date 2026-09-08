@@ -257,6 +257,49 @@ async def test_protected_route_with_matching_scope_runs_app_and_sets_context():
     assert get_current_user_id() is None
 
 
+async def test_slashed_key_record_door_is_gated_like_a_plain_key_never_public(monkeypatch):
+    """A NON-ADMIN scoped identity hitting a record door whose ``{key}`` carries ``/`` (sent
+    as one ``%2F`` segment) is authorized/denied EXACTLY as with a plain key, and NEVER
+    served as the public shell. The guard reasons on the canonical form of the RAW target,
+    so the record family's protected resource resolves — the encoded slash never drops the
+    key off the route into the public SPA catch-all."""
+    from tai42_skeleton.access_control.role_gate import reset_route_index
+
+    reset_route_index()
+    pg = FakeAccessControlPg()
+    # The record family maps to a protected resource on the canonical, one-segment form.
+    pg.add_route(
+        "/api/records-family",
+        "records-res",
+        pattern=r"^/api/states/[^/]+/records/[^/]+/[^/]+/[^/]+/[^/]+$",
+    )
+    mw = _real_guard(monkeypatch, pg)
+
+    def _record_scope(key, *, user, auth):
+        raw = f"/api/states/s/records/agent/a-42/thread/{key}"
+        scope = _http_scope(path=raw.replace("%2F", "/"), user=user, auth=auth)
+        scope["raw_path"] = raw.encode("ascii")
+        return scope
+
+    slashed = "bridge:web:acme.example.com%2Fu-42"
+    plain = "plainkey"
+
+    # (a) Unauthenticated: DENIED (401 — a protected route), NEVER the public shell (200).
+    for key in (slashed, plain):
+        sent = await _drive(mw, _record_scope(key, user=UnauthenticatedUser(), auth=AuthCredentials()))
+        assert _status(sent) == 401, f"unauth {key} was not gated as protected: {_status(sent)}"
+
+    # (b) Authenticated NON-ADMIN holding the resource scope: allowed, identically for both.
+    for key in (slashed, plain):
+        sent = await _drive(mw, _record_scope(key, user=_authed_user("editor"), auth=AuthCredentials(["records-res"])))
+        assert _status(sent) == 200, f"scoped non-admin denied on {key}: {_status(sent)}"
+
+    # (c) Authenticated NON-ADMIN WITHOUT the scope: denied 403, identically for both.
+    for key in (slashed, plain):
+        sent = await _drive(mw, _record_scope(key, user=_authed_user("editor"), auth=AuthCredentials(["other"])))
+        assert _status(sent) == 403, f"scopeless non-admin not denied on {key}: {_status(sent)}"
+
+
 async def test_admin_caller_is_secret_capable_mid_request_and_reset_after():
     """The guard binds the caller's secret-read capability from the admin discriminator
     the auth backend stamped: an admin reads secret-capable mid-request, and the flag is
@@ -635,13 +678,13 @@ async def test_h5_unauthenticated_route_walk(monkeypatch, bound_app):
         assert _status(sent) == 200
 
     # Hostile corpus: every /api-canonicalizing form is gated (401/403), never data;
-    # a form that genuinely resolves to a non-/api path reaches the public shell. (The
-    # verifier-unit corpus classifies the raw strings directly; here they arrive via
-    # Starlette's ``conn.url.path``, which parses a leading ``//`` as protocol-relative
-    # and yields ``/x`` for ``//api/x`` — so at the guard that form is a bare shell path,
-    # never /api data. The invariant "hostile never reaches /api data" holds either way.)
-    gated = ("/%61pi/x", "/agents/../api/secret", "/api%2Fx")
-    shell = ("/api/../agents", "/API/x", "//api/x")
+    # a form that genuinely resolves to a non-/api path reaches the public shell. The guard
+    # reasons on the canonical form of the RAW target (``scope["path"]``/``raw_path``), the
+    # SAME form the router matches — so ``//api/x`` collapses to ``/api/x`` and is GATED (a
+    # leading ``//`` is not a protocol-relative escape into the shell), and ``/api%2Fx``'s
+    # encoded slash resolves to no raw-path-matched route and is gated too.
+    gated = ("/%61pi/x", "/agents/../api/secret", "/api%2Fx", "//api/x")
+    shell = ("/api/../agents", "/API/x")
     for path in gated:
         sent = await _drive(mw, _http_scope(path=path, user=UnauthenticatedUser(), auth=AuthCredentials()))
         assert _status(sent) in (401, 403), f"hostile {path} was not gated"

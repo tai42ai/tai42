@@ -21,6 +21,7 @@ from tai42_cli.commands._common import (
     merge_assignments,
     parse_assignment_arg,
     parse_env_lines,
+    seg,
 )
 
 app = typer.Typer(
@@ -201,7 +202,7 @@ def show_profile(ctx: typer.Context, name: Annotated[str, typer.Argument(help="P
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/config/profiles/{name}")
+        data = client.get(f"/api/config/profiles/{seg(name)}")
     emit_result(ctx_obj, data)
 
 
@@ -282,7 +283,7 @@ def set_profile(
         merge_assignments(env, stdin_pairs, source="--stdin")
     body = {"description": description, "env": env, "secret_keys": list(secret_key or [])}
     with ctx_obj.client() as client:
-        data = client.put(f"/api/config/profiles/{name}", json=body)
+        data = client.put(f"/api/config/profiles/{seg(name)}", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -295,7 +296,7 @@ def delete_profile(ctx: typer.Context, name: Annotated[str, typer.Argument(help=
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/config/profiles/{name}")
+        data = client.delete(f"/api/config/profiles/{seg(name)}")
     emit_result(ctx_obj, data)
 
 
@@ -309,7 +310,7 @@ def diff_profile(ctx: typer.Context, name: Annotated[str, typer.Argument(help="P
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/config/profiles/{name}/diff")
+        data = client.post(f"/api/config/profiles/{seg(name)}/diff")
     emit_result(ctx_obj, data)
 
 
@@ -325,7 +326,7 @@ def apply_profile(ctx: typer.Context, name: Annotated[str, typer.Argument(help="
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/config/profiles/{name}/apply")
+        data = client.post(f"/api/config/profiles/{seg(name)}/apply")
     emit_result(ctx_obj, data)
 
 
@@ -349,11 +350,11 @@ def profile_versions(
     ctx_obj = app_context(ctx)
     if version is None:
         with ctx_obj.client() as client:
-            data = client.get(f"/api/config/profiles/{name}/versions")
+            data = client.get(f"/api/config/profiles/{seg(name)}/versions")
         emit_records(ctx_obj, data, ["version", "created_at", "is_current"])
         return
     with ctx_obj.client() as client:
-        data = client.get(f"/api/config/profiles/{name}/versions/{version}")
+        data = client.get(f"/api/config/profiles/{seg(name)}/versions/{seg(version)}")
     emit_result(ctx_obj, data)
 
 
@@ -371,5 +372,5 @@ def rollback_profile(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/config/profiles/{name}/rollback", json={"version": version})
+        data = client.post(f"/api/config/profiles/{seg(name)}/rollback", json={"version": version})
     emit_result(ctx_obj, data)

@@ -20,7 +20,7 @@ from enum import Enum
 
 from tai42_kit.settings import register_settings_reset
 
-from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path
+from tai42_skeleton.access_control.path_canon import ENCODED_SLASH, MalformedPathError, canonicalize_path
 from tai42_skeleton.app.route_registry import (
     RouteMetadata,
     load_all_routes,
@@ -177,13 +177,27 @@ def resolve_route_meta(path: str, method: str | None) -> RouteMetadata | None:
         canonical = canonicalize_path(path)
     except MalformedPathError:
         return None
+    carries_encoded_slash = ENCODED_SLASH in canonical
     exact = _concrete_index.get((canonical, method))
     if exact is not None:
-        return exact
+        return _fail_closed_on_encoded_slash(exact, canonical, carries_encoded_slash)
     for pattern, methods, meta in _templated_matchers:
         if method in methods and pattern.fullmatch(canonical):
-            return meta
+            return _fail_closed_on_encoded_slash(meta, canonical, carries_encoded_slash)
     return None
+
+
+def _fail_closed_on_encoded_slash(meta: RouteMetadata, canonical: str, carries_encoded_slash: bool) -> RouteMetadata:
+    """``meta`` unless the canonical path carries an encoded slash and ``meta`` is not a
+    raw-path-matched route, in which case authz would be reasoning on a different form
+    than the router — Starlette matched that route on the decoded path, where the encoded
+    slash split the segment — so raise :class:`MalformedPathError` (a fail-closed deny the
+    callers turn into a denial), never return the route."""
+    if carries_encoded_slash and not meta.raw_path_matched:
+        raise MalformedPathError(
+            f"path {canonical!r} carries an encoded slash but route {meta.path!r} is not raw-path-matched"
+        )
+    return meta
 
 
 def refusal_route(path: str, method: str | None) -> str:
@@ -192,8 +206,11 @@ def refusal_route(path: str, method: str | None) -> str:
     A refusal is answered BEFORE (or instead of) routing, so the scope carries no
     route match: resolve the registered template from the registry rather than the
     bare path, which can carry a path-borne secret (``/trigger/{token}``). A path
-    with no registered gated route has no template — ``<unmatched>``. Shared by every
-    refusal site (the auth-error handler, the resource guard) so one derivation feeds
-    them all."""
-    meta = resolve_route_meta(path, method)
+    with no registered gated route has no template — ``<unmatched>``, as does an
+    encoded-slash path fenced off a non-raw route. Shared by every refusal site (the
+    auth-error handler, the resource guard) so one derivation feeds them all."""
+    try:
+        meta = resolve_route_meta(path, method)
+    except MalformedPathError:
+        return UNMATCHED_ROUTE
     return meta.path if meta is not None else UNMATCHED_ROUTE

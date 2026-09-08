@@ -302,6 +302,55 @@ async def check_fenced_routes_resolvable() -> None:
         )
 
 
+async def check_raw_path_routes_resolvable() -> None:
+    """Fail the boot — and every in-place reload — if a raw-path-matched route does not
+    resolve back to itself when its key carries an encoded slash.
+
+    A record ``{key}`` legitimately carries ``/`` (a thread key), sent as one ``%2F``
+    segment; ``HttpSurface.use_raw_path_key`` marks these routes raw-path-matched so the
+    resolver keeps the encoded slash to one segment and resolves them to their protected
+    resource. An unmarked route is fail-CLOSED (an encoded slash outside a marked route is
+    refused as malformed, and no ``/api`` path resolves to the public catch-all), so this
+    check audits the other direction: every route that IS marked must still resolve, via
+    ``resolve_route_meta``, back to ITSELF under an encoded-slash probe — else the marked
+    door would refuse the exact keys it exists to serve, and the run refuses to proceed.
+    Wired as both a startup and a reload handler; runs after the routers register so the
+    whole marked surface is audited (a raw-path family re-marked each epoch)."""
+    import re
+
+    from tai42_skeleton.access_control.path_canon import MalformedPathError
+    from tai42_skeleton.access_control.role_gate import reset_route_index, resolve_route_meta
+    from tai42_skeleton.app.route_registry import load_all_routes
+
+    def _probe(template: str) -> str:
+        # A plain ``{name}`` becomes an ENCODED-slash value (exercises the raw-path fence);
+        # a ``{name:path}`` becomes a plain multi-segment value.
+        return re.sub(r"\{[^}]+\}", lambda m: "a/b" if ":path" in m.group(0) else "a%2Fb", template)
+
+    reset_route_index()
+    unresolvable: list[str] = []
+    for meta in load_all_routes():
+        if not meta.raw_path_matched:
+            continue
+        probe = _probe(meta.path)
+        for method in meta.methods:
+            # A raise means the encoded slash fenced off a route the mark no longer covers:
+            # the condition audited here, so it counts as unresolvable rather than propagating.
+            try:
+                resolved = resolve_route_meta(probe, method)
+            except MalformedPathError:
+                resolved = None
+            if resolved is not meta:
+                unresolvable.append(f"{method} {meta.path}")
+
+    if unresolvable:
+        raise RuntimeError(
+            "access_control: raw-path-matched route(s) do not resolve back to themselves under an encoded "
+            "slash — the resolver would refuse the keys these doors exist to serve, "
+            f"for: {sorted(unresolvable)}"
+        )
+
+
 async def check_accounts_providers_configured() -> None:
     """Refuse to boot when a registered accounts provider is left out of the chain.
 

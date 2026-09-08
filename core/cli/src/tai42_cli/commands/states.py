@@ -22,6 +22,7 @@ from tai42_cli.commands._common import (
     emit_result,
     parse_json_object,
     parse_json_value,
+    seg,
 )
 
 app = typer.Typer(name="states", help="Manage the subject-keyed state store.", no_args_is_help=True)
@@ -36,7 +37,7 @@ _KEY = Annotated[str, typer.Option("--key", help="The subject key within its kin
 
 
 def _record_path(name: str, target_kind: str, target_name: str, kind: str, key: str) -> str:
-    return f"/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"
+    return f"/api/states/{seg(name)}/records/{seg(target_kind)}/{seg(target_name)}/{seg(kind)}/{seg(key)}"
 
 
 def _read_document(data: str | None, file: Path | None) -> Any:
@@ -73,7 +74,7 @@ def get_state(ctx: typer.Context, name: Annotated[str, typer.Argument(help="The 
     """Show a state's declaration, effective schema, mounts and regimes."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.get(f"/api/states/{name}"))
+        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}"))
 
 
 @app.command("put")
@@ -88,7 +89,7 @@ def put_state(
     ctx_obj = app_context(ctx)
     body = _read_document(data, file)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.put(f"/api/states/{name}", json=body))
+        emit_result(ctx_obj, client.put(f"/api/states/{seg(name)}", json=body))
 
 
 @app.command("delete")
@@ -97,7 +98,7 @@ def delete_state(ctx: typer.Context, name: Annotated[str, typer.Argument(help="T
     """Delete a state with its records, mounts and aliases."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.delete(f"/api/states/{name}"))
+        emit_result(ctx_obj, client.delete(f"/api/states/{seg(name)}"))
 
 
 @app.command("stats")
@@ -106,7 +107,7 @@ def state_stats(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Th
     """Show a state's record counts (total and per subject kind)."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.get(f"/api/states/{name}/stats"))
+        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/stats"))
 
 
 # -- mounts -------------------------------------------------------------------
@@ -118,7 +119,7 @@ def list_state_mounts(ctx: typer.Context, name: Annotated[str, typer.Argument(he
     """List the modules mounted on a state."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.get(f"/api/states/{name}/mounts"))
+        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/mounts"))
 
 
 @app.command("get-mount")
@@ -131,7 +132,7 @@ def get_state_mount(
     """Read one module's mount on a state (404 when it is not mounted)."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.get(f"/api/states/{name}/mounts/{module}"))
+        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/mounts/{seg(module)}"))
 
 
 @app.command("mount")
@@ -149,7 +150,7 @@ def mount_state_module(
     ctx_obj = app_context(ctx)
     body = _read_document(data, file)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.put(f"/api/states/{name}/mounts/{module}", json=body))
+        emit_result(ctx_obj, client.put(f"/api/states/{seg(name)}/mounts/{seg(module)}", json=body))
 
 
 @app.command("update-mount")
@@ -170,7 +171,7 @@ def update_state_mount(
     if options is not None:
         body["options"] = parse_json_object(options, param_hint="--options")
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.patch(f"/api/states/{name}/mounts/{module}", json=body))
+        emit_result(ctx_obj, client.patch(f"/api/states/{seg(name)}/mounts/{seg(module)}", json=body))
 
 
 @app.command("unmount")
@@ -183,7 +184,7 @@ def unmount_state_module(
     """Unmount a module from a state."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.delete(f"/api/states/{name}/mounts/{module}"))
+        emit_result(ctx_obj, client.delete(f"/api/states/{seg(name)}/mounts/{seg(module)}"))
 
 
 # -- subjects + records -------------------------------------------------------
@@ -202,7 +203,7 @@ def list_state_subjects(
     ctx_obj = app_context(ctx)
     params = {k: v for k, v in {"kind": kind, "limit": limit, "cursor": cursor}.items() if v is not None}
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.get(f"/api/states/{name}/subjects", params=params or None))
+        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/subjects", params=params or None))
 
 
 @app.command("search")
@@ -222,7 +223,7 @@ def search_state_records(
     if cursor is not None:
         body["cursor"] = cursor
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.post(f"/api/states/{name}/records/search", json=body))
+        emit_result(ctx_obj, client.post(f"/api/states/{seg(name)}/records/search", json=body))
 
 
 @app.command("read")
@@ -368,7 +369,7 @@ def state_consumers(ctx: typer.Context, name: Annotated[str, typer.Argument(help
     """List everything that binds a state — flows, hooks, schedules, agents."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.get(f"/api/states/{name}/consumers"))
+        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/consumers"))
 
 
 @app.command("prune")

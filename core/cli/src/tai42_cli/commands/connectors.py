@@ -17,6 +17,7 @@ from tai42_cli.commands._common import (
     emit_records,
     emit_result,
     load_json_object_arg,
+    seg,
 )
 
 app = typer.Typer(
@@ -68,7 +69,7 @@ def get_connection(ctx: typer.Context, connection_id: Annotated[str, typer.Argum
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/connectors/connections/{connection_id}")
+        data = client.get(f"/api/connectors/connections/{seg(connection_id)}")
     emit_result(ctx_obj, data)
 
 
@@ -112,7 +113,7 @@ def disconnect(ctx: typer.Context, connection_id: Annotated[str, typer.Argument(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/connectors/connections/{connection_id}")
+        data = client.delete(f"/api/connectors/connections/{seg(connection_id)}")
     emit_result(ctx_obj, data)
 
 
@@ -131,7 +132,7 @@ def reconnect(
     ctx_obj = app_context(ctx)
     body = {"enabled_sub_services": list(sub_service), "return_url": return_url}
     with ctx_obj.client() as client:
-        data = client.post(f"/api/connectors/connections/{connection_id}/reconnect", json=body)
+        data = client.post(f"/api/connectors/connections/{seg(connection_id)}/reconnect", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -154,5 +155,5 @@ def patch_sub_services(
     ctx_obj = app_context(ctx)
     body = {"enabled_sub_services": list(sub_service), "return_url": return_url}
     with ctx_obj.client() as client:
-        data = client.patch(f"/api/connectors/connections/{connection_id}/sub-services", json=body)
+        data = client.patch(f"/api/connectors/connections/{seg(connection_id)}/sub-services", json=body)
     emit_result(ctx_obj, data)

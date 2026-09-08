@@ -411,6 +411,9 @@ class HttpFacet(_Facet):
             declared=declared,
         )
 
+    def use_raw_path_key(self, path_prefix: str) -> None:
+        return self._app._http_surface.use_raw_path_key(path_prefix)
+
 
 class LifecycleFacet(_Facet):
     """``app.lifecycle`` — startup/shutdown/reload handler registration

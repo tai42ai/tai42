@@ -45,7 +45,7 @@ from __future__ import annotations
 import inspect
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel
@@ -209,6 +209,14 @@ class RouteMetadata:
     # the explicit declared flag the verifier's declared-public tier reads to grant the
     # public resource id regardless of owner.
     public: bool = False
+    # Whether the serving router matches this route on the RAW request path (see
+    # :meth:`RouteRegistry.mark_raw_path_matched` and ``HttpSurface.use_raw_path_key``),
+    # so a percent-encoded slash inside a path parameter (a state record ``{key}``) stays
+    # ONE segment. The access-control resolver reads this flag to fail closed: a request
+    # whose canonical path carries an encoded slash may resolve ONLY to a raw-path-matched
+    # route, because every other route is matched by Starlette on the decoded path and
+    # authz must never reason on a different form than the router.
+    raw_path_matched: bool = False
 
 
 def _handler_source(func: Callable[..., object]) -> str:
@@ -470,6 +478,21 @@ class RouteRegistry:
             action=derive_route_action(method_key),
             mounted=True,
         )
+        self._version += 1
+
+    def mark_raw_path_matched(self, path_prefix: str) -> None:
+        """Mark every recorded route whose template starts with ``path_prefix`` as
+        raw-path-matched, so the access-control resolver knows these routes — and ONLY
+        these — may resolve a request whose canonical path carries an encoded slash.
+
+        Called by ``HttpSurface.use_raw_path_key`` alongside the served-router upgrade, so
+        the authz metadata and the serving router are marked at the SAME seam and can never
+        diverge. Idempotent, and re-applied every epoch (a reload re-imports the routers
+        and re-calls ``use_raw_path_key``), so a route re-registered by a reload is re-marked.
+        """
+        for key, meta in list(self._routes.items()):
+            if meta.path.startswith(path_prefix) and not meta.raw_path_matched:
+                self._routes[key] = replace(meta, raw_path_matched=True)
         self._version += 1
 
     def routes(self) -> list[RouteMetadata]:

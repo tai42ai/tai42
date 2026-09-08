@@ -10,6 +10,7 @@ from tai42_skeleton.access_control.startup import (
     check_accounts_providers_configured,
     check_always_public_routes,
     check_fenced_routes_resolvable,
+    check_raw_path_routes_resolvable,
     check_route_actions,
     check_spa_shell_public,
     probe_identity_provider,
@@ -244,6 +245,12 @@ def build_app() -> TaiMCP:
             # elsewhere fails the reload loudly instead of failing open until a restart.
             app.lifecycle.on_startup(check_fenced_routes_resolvable)
             app.lifecycle.on_reload(check_fenced_routes_resolvable)
+            # Every raw-path-matched route (the record doors) must resolve back to itself
+            # under an encoded-slash key, so a missing ``use_raw_path_key`` mark can never
+            # silently make an encoded-slash record request read as the public SPA shell.
+            # Also on reload: a reload re-imports the routers and re-marks the family.
+            app.lifecycle.on_startup(check_raw_path_routes_resolvable)
+            app.lifecycle.on_reload(check_raw_path_routes_resolvable)
             # A registered accounts provider left out of the resolution chain would mint
             # sessions that never authenticate — refuse to boot instead.
             app.lifecycle.on_startup(check_accounts_providers_configured)

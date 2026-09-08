@@ -61,10 +61,14 @@ _UNSAFE_SEGMENTS = frozenset({"", ".", ".."})
 
 def synthesize_path(op: OperationMetadata, call_arguments: dict[str, object]) -> str:
     """The concrete resource path for ``op``, substituting the call's path args into the
-    route template — the shape the HTTP edge's already-decoded ``scope["path"]`` carries.
+    route template — the SAME canonical form the HTTP edge derives from the raw request
+    target (each segment decoded once, ``/`` re-encoded to ``%2F`` and ``%`` to ``%25``).
 
-    A value may fill only the segment(s) its parameter declares (``{name}`` exactly one,
-    ``{name:path}`` one or more) and may contribute no empty or ``.``/``..`` segment;
+    A plain ``{name}`` value that carries ``/`` (a state record ``{key}`` — a thread key
+    carries ``/``) is a single addressed segment: it is re-encoded so the slash stays
+    INSIDE the segment, exactly as the raw-path record doors keep it, never split across
+    segments. A ``{name:path}`` value keeps its ``/`` as separators. Either way no value
+    may contribute an empty or ``.``/``..`` segment (checked per decoded segment);
     anything else raises :class:`PermissionDenied`.
     """
     if op.route_template is None:
@@ -75,13 +79,14 @@ def synthesize_path(op: OperationMetadata, call_arguments: dict[str, object]) ->
         if param not in call_arguments:
             raise PermissionDenied(f"access denied: missing path argument {param!r} for {op.name!r}")
         value = str(call_arguments[param])
-        if match.group(2) != _MULTI_SEGMENT_CONVERTER and "/" in value:
-            raise PermissionDenied(
-                f"access denied: path argument {param!r} for {op.name!r} spans more than one path segment"
-            )
         if any(segment in _UNSAFE_SEGMENTS for segment in value.split("/")):
             raise PermissionDenied(f"access denied: path argument {param!r} for {op.name!r} is not a path segment")
-        return value
+        if match.group(2) == _MULTI_SEGMENT_CONVERTER:
+            # A ``:path`` parameter's ``/`` are genuine separators, not data.
+            return value
+        # A plain segment: re-encode reversibly so a data slash stays one segment, matching
+        # the canonical form ``request_canonical_path`` builds from the raw request path.
+        return value.replace("%", "%25").replace("/", "%2F")
 
     return _PATH_PARAM.sub(_sub, op.route_template)
 
@@ -98,9 +103,11 @@ def _own_route(op: OperationMetadata, path: str, method: str) -> RouteMetadata:
     assert template is not None  # synthesize_path already refused a template-less operation
     try:
         canonical = canonicalize_path(path)
+        # A raise here (an encoded slash resolving to a non-raw route) is a fail-closed
+        # deny, not a route: authz would otherwise reason on a form the router never serves.
+        meta = resolve_route_meta(canonical, method)
     except MalformedPathError as exc:
         raise PermissionDenied(f"access denied: {method} {path} is not a well-formed path for {op.name!r}") from exc
-    meta = resolve_route_meta(canonical, method)
     if meta is None or canonicalize_path(meta.path) != canonicalize_path(template):
         raise PermissionDenied(
             f"access denied: {method} {path} does not resolve to the route {op.name!r} is registered at"

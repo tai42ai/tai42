@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from urllib.parse import quote
 
 import httpx
 
@@ -28,7 +29,11 @@ _NOT_CONFIGURED_CODE = "states-not-configured"
 
 
 def _record_path(state: str, target_kind: str, target_name: str, kind: str, key: str) -> str:
-    return f"/api/states/{state}/records/{target_kind}/{target_name}/{kind}/{key}"
+    # Each segment is percent-encoded (``safe=""`` encodes ``/`` too), the same contract
+    # the SDK and CLI apply, so a subject key that carries ``/`` (a thread id) forms one
+    # path segment the record doors route to intact rather than splitting.
+    parts = [quote(part, safe="") for part in (state, target_kind, target_name, kind, key)]
+    return "/api/states/{}/records/{}/{}/{}/{}".format(*parts)
 
 
 async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
@@ -152,6 +157,117 @@ async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: 
     )
     folded = await api.get(record)
     assert folded["canonical_subject"]["key"] == "t2"
+
+
+async def test_core_stack_record_key_with_slash_round_trips_by_url(
+    core_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """A thread subject's key is the thread id ``bridge:{route}:{quote(principal)}/{id}`` —
+    it carries ``/``. Every single-record door (write, read, patch, the ``/writes``
+    sub-action, delete) must address such a key as ONE percent-encoded segment, and a key
+    whose tail is a sub-action name (``…/writes``) must still reach the record door."""
+    api = core_stack.api()
+    state = uniq("threadstate")
+    await api.put(
+        f"/api/states/{state}",
+        json={
+            "description": "e2e slashed-key round-trip",
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+    )
+
+    # A realistic thread id: two ``/`` and a ``:``-laden principal, all inside one key.
+    key = "bridge:web:acme.example.com/+15550001111/u-42"
+    record = _record_path(state, "agent", "a-42", "thread", key)
+    # The wire path keeps the key percent-encoded as a single segment.
+    assert "%2F" in record
+    assert record.endswith(quote(key, safe=""))
+
+    # -- write (PUT replace) then read (GET) by URL ----------------------------
+    written = await api.put(record, json={"note": "first"})
+    assert written["data"]["note"] == "first"
+    read = await api.get(record)
+    assert read["data"]["note"] == "first"
+    # The persisted subject carries the key with its slashes intact (decoded once).
+    assert read["subject"]["key"] == key
+
+    # -- patch (PATCH merge) by URL --------------------------------------------
+    merged = await api.request("PATCH", record, json={"note": "second"})
+    assert merged["data"]["note"] == "second"
+
+    # -- the ``/writes`` sub-action of the slashed key resolves (not mis-routed) --
+    writes_page = await api.get(f"{record}/writes")
+    assert [w["origin"]["door"] for w in writes_page["items"]] == ["api", "api"]
+
+    # -- a key whose tail is the sub-action name ``writes`` addresses the record --
+    tail_key = "conv/writes"
+    tail_record = _record_path(state, "agent", "a-42", "thread", tail_key)
+    await api.put(tail_record, json={"note": "tail"})
+    tail_read = await api.get(tail_record)
+    assert tail_read["data"]["note"] == "tail"
+    assert tail_read["subject"]["key"] == tail_key
+    # The record door won its own read; its write ledger holds the one PUT (a mis-route to
+    # the writes-list of a ``conv`` key would instead have listed writes for the wrong key).
+    tail_writes = await api.get(f"{tail_record}/writes")
+    assert len(tail_writes["items"]) == 1
+
+    # -- delete by URL, then the read is gone ----------------------------------
+    await api.delete(record)
+    assert await api.get(record) is None
+
+
+async def test_auth_stack_slashed_key_record_door_is_gated_for_a_non_admin_key(
+    auth_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """The COMPOSED access-control path a real caller's traffic travels: with access control
+    ON, a NON-ADMIN scoped key round-trips a slashed thread key through the record doors
+    exactly as an admin would, because the raw-path record route resolves to its PROTECTED
+    resource on the same form the router matches — never dropping the key off the route into
+    the public SPA catch-all. An unauthenticated caller is denied on the same door."""
+    admin = auth_stack.api(port=auth_stack.port_a)
+    state = uniq("threadstate")
+    await admin.put(
+        f"/api/states/{state}",
+        json={
+            "description": "e2e slashed-key non-admin round-trip",
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+    )
+
+    # A NON-admin scoped key: it holds only the seeded catch-all scope (never a condition-free
+    # ``*`` admin policy), so reaching the record door depends on that door resolving to its
+    # protected resource — the exact resolution the fix restores for a slashed key.
+    user = uniq("recordsuser")
+    raw_key = (
+        await admin.post("/api/auth/api-keys", json={"user_id": user, "description": "e2e", "scopes": ["e2e-all"]})
+    )["api_key"]
+    caller = auth_stack.api(port=auth_stack.port_b).with_token(raw_key)
+
+    key = "bridge:web:acme.example.com/+15550001111/u-42"
+    record = _record_path(state, "agent", "a-42", "thread", key)
+    assert "%2F" in record
+
+    # -- the non-admin scoped key drives the whole record ledger by URL --------
+    written = await caller.put(record, json={"note": "first"})
+    assert written["data"]["note"] == "first"
+    read = await caller.get(record)
+    assert read["data"]["note"] == "first"
+    assert read["subject"]["key"] == key
+    merged = await caller.request("PATCH", record, json={"note": "second"})
+    assert merged["data"]["note"] == "second"
+    writes_page = await caller.get(f"{record}/writes")
+    assert [w["origin"]["door"] for w in writes_page["items"]] == ["api", "api"]
+    await caller.delete(record)
+    assert await caller.get(record) is None
+
+    # -- the door is PROTECTED, never public: an unauthenticated caller is denied --
+    anon = ApiClient(f"http://{auth_stack.host}:{auth_stack.port_a}")
+    denied = await anon.request_raw("GET", record)
+    assert denied.status_code in (401, 403), f"slashed-key record door served unauthenticated: {denied.status_code}"
 
 
 async def _assert_states_off(off_stack: TaiStack, method: str, path: str, *, json=None) -> None:

@@ -30,6 +30,7 @@ from tai42_cli.commands._common import (
     emit_records,
     emit_result,
     parse_assignment_arg,
+    seg,
 )
 from tai42_cli.render import print_json
 
@@ -113,7 +114,7 @@ def info(ctx: typer.Context, ref: Annotated[str, typer.Argument(help="Plugin ref
     ctx_obj = app_context(ctx)
     namespace, name = _split_ref(ref)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/marketplace/plugins/{namespace}/{name}")
+        data = client.get(f"/api/marketplace/plugins/{seg(namespace)}/{seg(name)}")
     emit_result(ctx_obj, data)
 
 

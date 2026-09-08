@@ -18,6 +18,7 @@ from tai42_skeleton.access_control.backend import (
     ReloadInProgressError,
 )
 from tai42_skeleton.access_control.middleware import ResourceGuardMiddleware
+from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
 from tai42_skeleton.access_control.role_gate import refusal_route
 from tai42_skeleton.access_control.roles import SkeletonAccountsAdminServices
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -56,10 +57,14 @@ def handle_auth_error(conn: HTTPConnection, exc: Exception) -> JSONResponse:
     # middleware.
     if audit_log_settings().enable and conn.scope.get("type") == "http":
         cause = exc.cause if isinstance(exc, AuthorizationError) else None
+        try:
+            refusal_path = request_canonical_path(conn.scope)
+        except MalformedPathError:
+            refusal_path = conn.url.path
         emit_audit_line(
             (get_current_user_id() or ANONYMOUS) if denied else UNAUTHENTICATED,
             conn.scope["method"],
-            refusal_route(conn.url.path, conn.scope.get("method")),
+            refusal_route(refusal_path, conn.scope.get("method")),
             status,
             0,
             datetime.now(UTC).isoformat(),

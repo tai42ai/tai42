@@ -18,6 +18,7 @@ from tai42_cli.commands._common import (
     emit_result,
     load_json_object_arg,
     parse_json_object,
+    seg,
 )
 
 app = typer.Typer(
@@ -102,7 +103,7 @@ def delete_hook(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Ho
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/hooks/{name}")
+        data = client.delete(f"/api/hooks/{seg(name)}")
     emit_result(ctx_obj, data)
 
 
@@ -225,7 +226,7 @@ def delete_trigger_link(ctx: typer.Context, name: Annotated[str, typer.Argument(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/hooks/trigger-links/{name}")
+        data = client.delete(f"/api/hooks/trigger-links/{seg(name)}")
     emit_result(ctx_obj, data)
 
 
@@ -250,7 +251,7 @@ def set_topic_verifier(
     if config_json is not None:
         body["config"] = parse_json_object(config_json, param_hint="--config")
     with ctx_obj.client() as client:
-        data = client.put(f"/api/hooks/topics/{topic}/verifier", json=body)
+        data = client.put(f"/api/hooks/topics/{seg(topic)}/verifier", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -268,5 +269,5 @@ def delete_topic_verifier(ctx: typer.Context, topic: Annotated[str, typer.Argume
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/hooks/topics/{topic}/verifier")
+        data = client.delete(f"/api/hooks/topics/{seg(topic)}/verifier")
     emit_result(ctx_obj, data)

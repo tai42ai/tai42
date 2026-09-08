@@ -16,6 +16,7 @@ from tai42_cli.commands._common import (
     emit_records,
     emit_result,
     fetch_download,
+    seg,
 )
 
 app = typer.Typer(
@@ -103,8 +104,8 @@ def get_trace(
     """
     ctx_obj = app_context(ctx)
     if export:
-        typer.echo(fetch_download(ctx_obj, "GET", f"/api/observability/runs/{trace_id}/trace/export"))
+        typer.echo(fetch_download(ctx_obj, "GET", f"/api/observability/runs/{seg(trace_id)}/trace/export"))
         return
     with ctx_obj.client() as client:
-        data = client.get(f"/api/observability/runs/{trace_id}/trace")
+        data = client.get(f"/api/observability/runs/{seg(trace_id)}/trace")
     emit_result(ctx_obj, data)

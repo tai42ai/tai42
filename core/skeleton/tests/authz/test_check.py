@@ -58,6 +58,27 @@ def test_synthesize_path_substitutes_path_args():
     assert synthesize_path(meta, {"title": "srv"}) == "/api/mcp-status/srv/deregister"
 
 
+def test_a_slashed_record_key_synthesizes_and_pins_the_record_route():
+    # The tool-edge counterpart of the HTTP record fix: a thread ``{key}`` carries ``/``,
+    # so the op door synthesizes it as ONE encoded segment (the SAME canonical form the
+    # raw-path HTTP door reasons on) and pins it to the real, raw-path-matched record route
+    # — never denied for "spanning more than one segment", never mis-resolved.
+    from tai42_skeleton.authz.check import _own_route
+
+    reset_route_index()
+    reg = OperationRegistry()
+    record_template = "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"
+    meta = _op(reg, route=record_template, method="GET")
+    path = synthesize_path(
+        meta,
+        {"name": "s", "target_kind": "agent", "target_name": "a-42", "kind": "thread", "key": "bridge:web:acme/u-42"},
+    )
+    assert path == "/api/states/s/records/agent/a-42/thread/bridge:web:acme%2Fu-42"
+    route = _own_route(meta, path, "GET")
+    assert route.name == "read_state_record"
+    assert route.raw_path_matched is True
+
+
 def test_synthesize_path_preserves_slash_in_path_converter_value():
     reg = OperationRegistry()
     meta = _op(reg, route="/api/resources/{resource_id:path}")
@@ -71,12 +92,16 @@ def test_synthesize_path_missing_arg_denies():
         synthesize_path(meta, {})
 
 
-def test_synthesize_path_refuses_a_value_spanning_more_than_its_segment():
-    # A plain ``{name}`` names ONE segment; a ``/`` would re-shape the path off the route.
+def test_synthesize_path_encodes_a_data_slash_into_one_segment():
+    # A plain ``{name}`` names ONE segment; a ``/`` in its value is DATA (a thread key
+    # carries ``/``), re-encoded to ``%2F`` so it stays inside the segment — the SAME
+    # canonical form the HTTP edge derives from the raw request target. The fail-closed
+    # resolve then denies it for a non-raw route (covered by the fenced-operation test).
     reg = OperationRegistry()
     meta = _op(reg, route="/api/x/{id}")
-    with pytest.raises(PermissionDenied, match="spans more than one path segment"):
-        synthesize_path(meta, {"id": "a/b"})
+    assert synthesize_path(meta, {"id": "a/b"}) == "/api/x/a%2Fb"
+    # A double-encoded slash (a principal that itself carried ``/``) stays distinct.
+    assert synthesize_path(meta, {"id": "a%2Fb"}) == "/api/x/a%252Fb"
 
 
 @pytest.mark.parametrize("value", ["", ".", ".."])
@@ -314,15 +339,17 @@ def test_a_traversing_path_argument_is_denied_on_a_fenced_operation(ac_env, boun
 
 
 def test_a_path_argument_spanning_segments_is_denied_on_a_fenced_operation(ac_env, bound_app, fenced_template_route):
-    """A ``/`` makes the synthesized path miss the operation's templated route — a miss that
-    reads as "not a gated route" and drops the fence, while the scope test still passes off
-    the route TABLE's subtree rows. The synthesis refuses the value instead."""
+    """A ``/`` in a plain-segment value is encoded to ``%2F``; the fenced route is NOT
+    raw-path-matched, so an encoded slash resolving to it would put authz on a form the
+    router never serves. The fail-closed resolve refuses it — a miss can never read as "not
+    a gated route" and drop the fence, nor pass the scope test off the route TABLE's subtree
+    rows."""
     settings = AccessControlSettings()
     ac_env.add_route("/api/things", "things")
     ac_env.add_policy("narrow", scopes=["things"])
     reg = OperationRegistry()
     meta = _fenced_op(reg)
-    with pytest.raises(PermissionDenied, match="spans more than one path segment"):
+    with pytest.raises(PermissionDenied, match="is not a well-formed path"):
         asyncio.run(check(CallerIdentity(user_id="narrow"), meta, {"target": "a/b"}, settings=settings))
 
 

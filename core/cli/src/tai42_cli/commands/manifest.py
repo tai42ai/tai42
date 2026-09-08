@@ -21,6 +21,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_records,
     emit_result,
+    seg,
 )
 
 app = typer.Typer(
@@ -145,7 +146,7 @@ def remove_tools_entry(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/tools-config/entries/{title}")
+        data = client.delete(f"/api/tools-config/entries/{seg(title)}")
     emit_result(ctx_obj, data)
 
 
@@ -191,7 +192,7 @@ def remove_agents_entry(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/agents-config/entries/{title}")
+        data = client.delete(f"/api/agents-config/entries/{seg(title)}")
     emit_result(ctx_obj, data)
 
 

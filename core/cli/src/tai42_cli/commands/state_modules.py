@@ -19,6 +19,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_result,
     parse_json_value,
+    seg,
 )
 
 app = typer.Typer(name="state-modules", help="Manage platform state-module documents.", no_args_is_help=True)
@@ -53,7 +54,7 @@ def get_state_module(ctx: typer.Context, name: Annotated[str, typer.Argument(hel
     """Show one state-module document."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.get(f"/api/state-modules/{name}"))
+        emit_result(ctx_obj, client.get(f"/api/state-modules/{seg(name)}"))
 
 
 @app.command("put")
@@ -70,7 +71,7 @@ def put_state_module(
     body = _read_document(data, file)
     params = {"replace": "true"} if replace else None
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.put(f"/api/state-modules/{name}", json=body, params=params))
+        emit_result(ctx_obj, client.put(f"/api/state-modules/{seg(name)}", json=body, params=params))
 
 
 @app.command("delete")
@@ -79,4 +80,4 @@ def delete_state_module(ctx: typer.Context, name: Annotated[str, typer.Argument(
     """Delete a state-module document (refused while it is mounted)."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.delete(f"/api/state-modules/{name}"))
+        emit_result(ctx_obj, client.delete(f"/api/state-modules/{seg(name)}"))

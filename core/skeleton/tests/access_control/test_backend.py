@@ -455,10 +455,19 @@ async def test_step0_decides_the_login_surface_on_the_canonical_form(path):
 @pytest.mark.parametrize("path", ["/api/login/../auth/api-keys", "/apiary/login", "/api/login\\x"])
 async def test_step0_never_admits_a_path_that_only_looks_like_the_login_surface(path):
     """A traversal out of the login prefix, a neighbour the segment-aware match must not
-    swallow, and a path with no canonical form: none may skip credential verification."""
+    swallow, and a path with no canonical form: none may skip credential verification.
+
+    ``authenticate`` canonicalizes the raw target FIRST (dot-resolved, malformed → ``None``)
+    then asks ``_is_always_public_path`` of that form — the same two steps composed here."""
+    from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
+
     settings = AccessControlSettings()
     backend = _backend(_SpyVerifier(), settings)
-    assert backend._is_always_public_path(path) is False
+    try:
+        canonical = request_canonical_path({"raw_path": path.encode("ascii"), "path": path})
+    except MalformedPathError:
+        canonical = None
+    assert backend._is_always_public_path(canonical) is False
 
 
 async def test_same_credential_on_protected_path_still_verifies(monkeypatch, bound_app, store_pg):

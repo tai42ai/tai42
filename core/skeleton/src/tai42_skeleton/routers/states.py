@@ -221,6 +221,12 @@ async def _extract_module_document(request: Request) -> dict[str, Any]:
 
 # -- route registrations (literal siblings + retention FIRST) -----------------
 
+# The single-record doors. ``{key}`` is one path segment addressed by its
+# percent-encoded form: a subject key legitimately contains ``/`` (a thread key is
+# ``bridge:{route}:{quote(principal)}/{external_user_id}``), so the caller encodes the
+# slash as ``%2F``. ``use_raw_path_key`` below matches these doors on the raw path,
+# keeping the key to one segment (and the ``…/writes`` sub-action unambiguous even for a
+# key whose tail is ``writes``) before the key is decoded.
 _RECORD_PATH = "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"
 
 
@@ -378,6 +384,12 @@ list_state_writes = register_operation_route(
     context_extractor=_extract_writes_query,
     action="read",
 )
+
+# Match every single-record door against the raw request path so a percent-encoded ``/``
+# in the ``{key}`` segment (a thread key carries ``/``) keeps the key to ONE segment — see
+# ``_RECORD_PATH`` above. Applied AFTER registration, over the shared record-path prefix, so
+# it covers the plain doors and the ``/deltas`` /``/fold`` /``/writes`` sub-actions at once.
+tai42_app.http.use_raw_path_key(_RECORD_PATH)
 state_consumers = register_operation_route(
     tai42_app,
     operation_metadata_of(_state_consumers_op),

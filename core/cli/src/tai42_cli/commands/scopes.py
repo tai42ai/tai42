@@ -9,7 +9,7 @@ from typing import Annotated
 
 import typer
 
-from tai42_cli.commands._common import app_context, covers, emit_records, emit_result
+from tai42_cli.commands._common import app_context, covers, emit_records, emit_result, seg
 
 app = typer.Typer(
     name="scopes",
@@ -76,7 +76,7 @@ def delete_scope(ctx: typer.Context, scope_id: Annotated[str, typer.Argument(hel
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/auth/scopes/{scope_id}")
+        data = client.delete(f"/api/auth/scopes/{seg(scope_id)}")
     emit_result(ctx_obj, data)
 
 

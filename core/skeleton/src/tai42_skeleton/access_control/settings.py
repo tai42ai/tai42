@@ -241,8 +241,8 @@ class AccessControlSettings(TaiBaseSettings):
         # The SPA-shell reserved supplement and the acknowledged-public allowlist are
         # compared against the SAME canonical path form the resolver classifies in, so a
         # non-canonical entry could never match and would silently mis-gate. Reject any
-        # entry that is not absolute, does not canonicalize to itself (a ``.``/``..``,
-        # a double slash, or an encoded byte), or overlaps the always-public login
+        # entry that is not absolute, does not canonicalize to itself (a ``.``/``..`` or a
+        # double slash), carries a percent-encoded byte, or overlaps the always-public login
         # surface. An ``acknowledged_public_routes`` entry additionally must NOT be under
         # ``/api``/``/mcp`` — an acknowledged PUBLIC control-plane route is a contradiction.
         for field_name, entries in (
@@ -260,6 +260,15 @@ class AccessControlSettings(TaiBaseSettings):
                     raise ValueError(
                         f"{field_name} entry {entry!r} is not canonical (it canonicalizes to {canonical!r}) — "
                         "supply the canonical form (no '.'/'..', no double slash, no percent-encoding)"
+                    )
+                if "%" in canonical:
+                    # The canonical form keeps a data ``/`` or ``%`` as ``%2F``/``%25``; such an
+                    # escape is legitimate only inside a raw-path-matched route's key, never in a
+                    # reserved/acknowledged operational path (which the router serves on the
+                    # decoded form). An encoded byte here could match nothing — reject it.
+                    raise ValueError(
+                        f"{field_name} entry {entry!r} carries a percent-encoded byte — a reserved/acknowledged "
+                        "path must be a plain canonical path (no encoded slash or percent)"
                     )
                 for always in self.always_public_path_prefixes:
                     if _prefix_overlaps(entry, always):

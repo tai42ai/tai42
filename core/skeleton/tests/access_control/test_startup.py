@@ -24,6 +24,7 @@ from tai42_skeleton.access_control.startup import (
     check_accounts_providers_configured,
     check_always_public_routes,
     check_fenced_routes_resolvable,
+    check_raw_path_routes_resolvable,
     check_spa_shell_public,
     probe_identity_provider,
     seed_roles,
@@ -402,3 +403,39 @@ async def test_check_fenced_routes_resolvable_raises_when_a_fence_does_not_resol
     monkeypatch.setattr(role_gate, "resolve_route_meta", _fake_resolve)
     with pytest.raises(RuntimeError, match="fail open"):
         await check_fenced_routes_resolvable()
+
+
+# -- raw-path-route resolvability boot guarantee -----------------------------
+
+
+async def test_check_raw_path_routes_resolvable_passes_on_real_surface() -> None:
+    # Every raw-path-matched record door resolves back to itself under an encoded-slash
+    # key, so the real surface passes the boot guarantee.
+    from tai42_skeleton.access_control.role_gate import reset_route_index
+
+    reset_route_index()
+    await check_raw_path_routes_resolvable()
+
+
+async def test_check_raw_path_routes_resolvable_raises_when_a_mark_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A marked raw-path route the resolver refuses under an encoded slash would deny the
+    # exact keys its door exists to serve. Simulate the miss by forcing the resolver to
+    # deny (raise) on one real raw-path route; the boot must refuse.
+    from tai42_skeleton.access_control import role_gate
+    from tai42_skeleton.access_control.path_canon import MalformedPathError
+    from tai42_skeleton.app import route_registry as rr
+
+    rr.load_all_routes()
+    target = next(m for m in rr.route_registry.routes() if m.raw_path_matched)
+    original = role_gate.resolve_route_meta
+
+    def _fake_resolve(path, method):
+        if path.startswith(target.path.split("{", 1)[0]):
+            raise MalformedPathError("simulated missing raw-path mark")
+        return original(path, method)
+
+    monkeypatch.setattr(role_gate, "resolve_route_meta", _fake_resolve)
+    with pytest.raises(RuntimeError, match="do not resolve back to themselves"):
+        await check_raw_path_routes_resolvable()

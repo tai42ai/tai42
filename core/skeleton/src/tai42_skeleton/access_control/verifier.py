@@ -11,7 +11,12 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import register_settings_reset
 
-from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path, under_prefix
+from tai42_skeleton.access_control.path_canon import (
+    ENCODED_SLASH,
+    MalformedPathError,
+    canonicalize_path,
+    under_prefix,
+)
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.app.route_registry import load_all_routes, route_registry
@@ -187,11 +192,34 @@ class AccessControlVerifier(TokenVerifier):
             path = canonicalize_path(path)
         except MalformedPathError:
             logger.warning(
-                "access_control: rejected malformed request path %r "
-                "(NUL/control/backslash or residual percent-escape) — denying",
+                "access_control: rejected malformed request path %r (NUL/control/backslash or non-ASCII) — denying",
                 path,
             )
             return []
+
+        # Fail-closed on an encoded slash that is NOT a raw-path-matched route's key: the
+        # ASGI router decodes ``%2F`` to a real ``/`` and matches a DIFFERENT (decoded) path
+        # than this canonical form, so resolving resource ids here would authorize a path the
+        # router never serves (the ``/api%2Fsecret`` bypass). Only a raw-path-matched route (a
+        # record ``{key}``) keeps the encoded slash to one segment on the router too. Skipped
+        # when no method is carried (the tool edge, which pins its own route first).
+        if method is not None and ENCODED_SLASH in path:
+            # Imported at call time: ``role_gate`` triggers the router-import universe, which
+            # this foundational module is imported ahead of.
+            from tai42_skeleton.access_control.role_gate import resolve_route_meta
+
+            try:
+                raw_route = resolve_route_meta(path, method)
+            except MalformedPathError:
+                raw_route = None
+            if raw_route is None:
+                logger.warning(
+                    "access_control: rejected %s %r — an encoded slash resolves to no raw-path-matched route; "
+                    "the router would serve a different decoded path — denying",
+                    method,
+                    path,
+                )
+                return []
 
         # Always-public prefixes short-circuit BEFORE any route-table read: the
         # pre-auth login surface answers the public resource id unconditionally, so it

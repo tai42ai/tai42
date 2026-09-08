@@ -15,6 +15,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_records,
     emit_result,
+    seg,
 )
 
 app = typer.Typer(
@@ -51,7 +52,7 @@ def get_route(ctx: typer.Context, route_name: Annotated[str, typer.Argument(help
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/conversations/{route_name}")
+        data = client.get(f"/api/conversations/{seg(route_name)}")
     emit_result(ctx_obj, data)
 
 
@@ -146,7 +147,7 @@ def create_route(
     if error_reply_text is not None:
         body["error_reply_text"] = error_reply_text
     with ctx_obj.client() as client:
-        data = client.post(f"/api/conversations/{route_name}", json=body)
+        data = client.post(f"/api/conversations/{seg(route_name)}", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -159,7 +160,7 @@ def delete_route(ctx: typer.Context, route_name: Annotated[str, typer.Argument(h
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/conversations/{route_name}")
+        data = client.delete(f"/api/conversations/{seg(route_name)}")
     emit_result(ctx_obj, data)
 
 
@@ -187,7 +188,7 @@ def delete_thread(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/conversations/{route_name}/thread", params={"thread_id": thread_id})
+        data = client.delete(f"/api/conversations/{seg(route_name)}/thread", params={"thread_id": thread_id})
     emit_result(ctx_obj, data)
 
 
@@ -210,7 +211,7 @@ def delete_person(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/conversations/persons/{person_id}")
+        data = client.delete(f"/api/conversations/persons/{seg(person_id)}")
     emit_result(ctx_obj, data)
 
 
@@ -227,7 +228,7 @@ def get_person(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/conversations/persons/{person_id}")
+        data = client.get(f"/api/conversations/persons/{seg(person_id)}")
     emit_result(ctx_obj, data)
 
 
@@ -250,7 +251,7 @@ def set_person_locale(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.put(f"/api/conversations/persons/{person_id}/locale", json={"locale": locale})
+        data = client.put(f"/api/conversations/persons/{seg(person_id)}/locale", json={"locale": locale})
     emit_result(ctx_obj, data)
 
 
@@ -286,7 +287,7 @@ def send_message(
     if address is not None:
         body["address"] = address
     with ctx_obj.client() as client:
-        data = client.post(f"/api/conversations/{route_name}/thread/messages", json=body)
+        data = client.post(f"/api/conversations/{seg(route_name)}/thread/messages", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -304,7 +305,7 @@ def get_mode(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/conversations/{route_name}/thread/mode", params={"thread_id": thread_id})
+        data = client.get(f"/api/conversations/{seg(route_name)}/thread/mode", params={"thread_id": thread_id})
     emit_result(ctx_obj, data)
 
 
@@ -326,7 +327,9 @@ def set_mode(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.put(f"/api/conversations/{route_name}/thread/mode", json={"thread_id": thread_id, "mode": mode})
+        data = client.put(
+            f"/api/conversations/{seg(route_name)}/thread/mode", json={"thread_id": thread_id, "mode": mode}
+        )
     emit_result(ctx_obj, data)
 
 
@@ -345,7 +348,7 @@ def get_message(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/conversations/{route_name}/messages/{message_id}")
+        data = client.get(f"/api/conversations/{seg(route_name)}/messages/{seg(message_id)}")
     emit_result(ctx_obj, data)
 
 
@@ -380,7 +383,7 @@ def list_threads(
     if address is not None:
         params["address"] = address
     with ctx_obj.client() as client:
-        data = client.get(f"/api/conversations/{route_name}/threads", params=params)
+        data = client.get(f"/api/conversations/{seg(route_name)}/threads", params=params)
     emit_records(
         ctx_obj,
         data,
@@ -408,7 +411,7 @@ def search_messages(
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get(
-            f"/api/conversations/{route_name}/messages/search",
+            f"/api/conversations/{seg(route_name)}/messages/search",
             params={"q": q, "page": page, "pageSize": page_size},
         )
     emit_records(
@@ -452,7 +455,7 @@ def get_transcript(
     if q is not None:
         params["q"] = q
     with ctx_obj.client() as client:
-        data = client.get(f"/api/conversations/{route_name}/transcript", params=params)
+        data = client.get(f"/api/conversations/{seg(route_name)}/transcript", params=params)
     emit_records(
         ctx_obj,
         data,
@@ -510,7 +513,7 @@ def get_config(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/conversation-configs/{target_kind}/{target_name}")
+        data = client.get(f"/api/conversation-configs/{seg(target_kind)}/{seg(target_name)}")
     emit_result(ctx_obj, data)
 
 
@@ -546,7 +549,7 @@ def set_config(
     if greeting_template is not None:
         body["greeting_template"] = greeting_template
     with ctx_obj.client() as client:
-        data = client.put(f"/api/conversation-configs/{target_kind}/{target_name}", json=body)
+        data = client.put(f"/api/conversation-configs/{seg(target_kind)}/{seg(target_name)}", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -563,5 +566,5 @@ def delete_config(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/conversation-configs/{target_kind}/{target_name}")
+        data = client.delete(f"/api/conversation-configs/{seg(target_kind)}/{seg(target_name)}")
     emit_result(ctx_obj, data)

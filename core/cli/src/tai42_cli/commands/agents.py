@@ -17,6 +17,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_records,
     load_json_object_arg,
+    seg,
     stream_frames,
 )
 
@@ -77,7 +78,7 @@ def run_agent(
     body = load_json_object_arg(input_json, input_file, param_hint="--input", file_param_hint="--input-file")
     if body is None:
         raise typer.BadParameter("give one of --input or --input-file", param_hint="--input/--input-file")
-    stream_frames(ctx_obj, "POST", f"/api/agents/{name}/runs", json_body=body)
+    stream_frames(ctx_obj, "POST", f"/api/agents/{seg(name)}/runs", json_body=body)
 
 
 @app.command("authored-run")
@@ -99,4 +100,4 @@ def run_authored_agent(
     body = load_json_object_arg(input_json, input_file, param_hint="--input", file_param_hint="--input-file")
     if body is None:
         raise typer.BadParameter("give one of --input or --input-file", param_hint="--input/--input-file")
-    stream_frames(ctx_obj, "POST", f"/api/agents/authored/{name}/runs", json_body=body)
+    stream_frames(ctx_obj, "POST", f"/api/agents/authored/{seg(name)}/runs", json_body=body)

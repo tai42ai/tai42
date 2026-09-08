@@ -20,6 +20,7 @@ from tai42_cli.commands._common import (
     app_context,
     covers,
     emit_result,
+    seg,
 )
 
 app = typer.Typer(
@@ -118,7 +119,7 @@ def set_tool_meta(
             "--folder/--clear-folder, --tag/--clear-tags, --badge/--clear-badges, or --visibility)"
         )
     with ctx_obj.client() as client:
-        data = client.patch(f"/api/tool-meta/tools/{tool_name}", json=body)
+        data = client.patch(f"/api/tool-meta/tools/{seg(tool_name)}", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -133,7 +134,7 @@ def delete_tool_meta(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/tool-meta/tools/{tool_name}")
+        data = client.delete(f"/api/tool-meta/tools/{seg(tool_name)}")
     emit_result(ctx_obj, data)
 
 
@@ -170,7 +171,7 @@ def rename_folder(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/tool-meta/folders/{folder_id}/rename", json={"name": name})
+        data = client.post(f"/api/tool-meta/folders/{seg(folder_id)}/rename", json={"name": name})
     emit_result(ctx_obj, data)
 
 
@@ -189,7 +190,7 @@ def move_folder(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/tool-meta/folders/{folder_id}/move", json={"parent_id": parent})
+        data = client.post(f"/api/tool-meta/folders/{seg(folder_id)}/move", json={"parent_id": parent})
     emit_result(ctx_obj, data)
 
 
@@ -204,5 +205,5 @@ def delete_folder(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/tool-meta/folders/{folder_id}")
+        data = client.delete(f"/api/tool-meta/folders/{seg(folder_id)}")
     emit_result(ctx_obj, data)

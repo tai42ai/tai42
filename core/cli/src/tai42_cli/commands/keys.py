@@ -19,6 +19,7 @@ from tai42_cli.commands._common import (
     emit_result,
     load_json_object_arg,
     parse_json_object,
+    seg,
 )
 
 app = typer.Typer(
@@ -203,7 +204,7 @@ def edit_key(
     if not updates:
         raise typer.BadParameter("provide at least one field to edit")
     with ctx_obj.client() as client:
-        data = client.put(f"/api/auth/api-keys/{user}", json=updates)
+        data = client.put(f"/api/auth/api-keys/{seg(user)}", json=updates)
     emit_result(ctx_obj, data)
 
 
@@ -227,7 +228,7 @@ def modify_scopes(
     ctx_obj = app_context(ctx)
     body: dict = {"add": list(add or []), "remove": list(remove or [])}
     with ctx_obj.client() as client:
-        data = client.post(f"/api/auth/api-keys/{user}/scopes", json=body)
+        data = client.post(f"/api/auth/api-keys/{seg(user)}/scopes", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -244,7 +245,7 @@ def delete_key(ctx: typer.Context, user: Annotated[str, typer.Argument(help="The
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/auth/api-keys/{user}")
+        data = client.delete(f"/api/auth/api-keys/{seg(user)}")
     emit_result(ctx_obj, data)
 
 
@@ -328,7 +329,7 @@ def policy_versions(ctx: typer.Context, user: Annotated[str, typer.Argument(help
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/auth/api-keys/{user}/policy/versions")
+        data = client.get(f"/api/auth/api-keys/{seg(user)}/policy/versions")
     emit_records(ctx_obj, data, ["version", "is_current", "created_at"])
 
 
@@ -345,5 +346,5 @@ def policy_rollback(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/auth/api-keys/{user}/policy/rollback", json={"version": version})
+        data = client.post(f"/api/auth/api-keys/{seg(user)}/policy/rollback", json={"version": version})
     emit_result(ctx_obj, data)

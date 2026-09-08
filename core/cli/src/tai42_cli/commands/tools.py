@@ -18,6 +18,7 @@ from tai42_cli.commands._common import (
     emit_result,
     load_kwargs_arg,
     parse_extension_combo,
+    seg,
 )
 
 app = typer.Typer(
@@ -70,7 +71,7 @@ def tool_schema(ctx: typer.Context, name: Annotated[str, typer.Argument(help="To
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/tools/{name}/schema")
+        data = client.get(f"/api/tools/{seg(name)}/schema")
     emit_result(ctx_obj, data)
 
 
@@ -159,7 +160,7 @@ def tool_extensions(ctx: typer.Context, name: Annotated[str, typer.Argument(help
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/tools/{name}/extensions")
+        data = client.get(f"/api/tools/{seg(name)}/extensions")
     emit_result(ctx_obj, data)
 
 
@@ -194,7 +195,7 @@ def apply_extensions(
     ctx_obj = app_context(ctx)
     combos = [parse_extension_combo(raw, param_hint="--combo") for raw in (combo or [])]
     with ctx_obj.client() as client:
-        data = client.post(f"/api/tools/{name}/extensions", json={"combos": combos})
+        data = client.post(f"/api/tools/{seg(name)}/extensions", json={"combos": combos})
     emit_result(ctx_obj, data)
 
 
@@ -222,7 +223,7 @@ def extensions_add(
     ctx_obj = app_context(ctx)
     combos = [parse_extension_combo(raw, param_hint="--combo") for raw in (combo or [])]
     with ctx_obj.client() as client:
-        data = client.post(f"/api/tools/{name}/extensions/combos", json={"add": combos, "remove": []})
+        data = client.post(f"/api/tools/{seg(name)}/extensions/combos", json={"add": combos, "remove": []})
     emit_result(ctx_obj, data)
 
 
@@ -243,7 +244,7 @@ def extensions_remove(
     ctx_obj = app_context(ctx)
     combos = [parse_extension_combo(raw, param_hint="--combo") for raw in (combo or [])]
     with ctx_obj.client() as client:
-        data = client.post(f"/api/tools/{name}/extensions/combos", json={"add": [], "remove": combos})
+        data = client.post(f"/api/tools/{seg(name)}/extensions/combos", json={"add": [], "remove": combos})
     emit_result(ctx_obj, data)
 
 
@@ -288,7 +289,7 @@ def get_run(ctx: typer.Context, run_id: Annotated[str, typer.Argument(help="Run 
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/tool-runs/{run_id}")
+        data = client.get(f"/api/tool-runs/{seg(run_id)}")
     emit_result(ctx_obj, data)
 
 

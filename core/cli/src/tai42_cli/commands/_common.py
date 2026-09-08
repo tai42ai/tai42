@@ -20,6 +20,7 @@ import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import typer
 from tai42_contract.manifest import ExtensionElement
@@ -47,6 +48,16 @@ def covers(*routes: tuple[str, str]):
         return func
 
     return decorator
+
+
+def seg(value: Any) -> str:
+    """A user-supplied value percent-encoded as ONE path segment (``safe=""`` encodes
+    ``/`` too), so a value that carries a reserved character — a state record ``key``
+    legitimately holds ``/``, a name a space or ``#`` — forms a single valid segment the
+    server routes to intact rather than splitting or truncating. A value with no reserved
+    character is unchanged. Every ``/api/...`` path built by interpolating user input
+    wraps each interpolated segment in this."""
+    return quote(str(value), safe="")
 
 
 def app_context(ctx: typer.Context) -> AppContext:

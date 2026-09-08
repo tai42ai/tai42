@@ -11,7 +11,7 @@ from typing import Annotated, Any
 
 import typer
 
-from tai42_cli.commands._common import app_context, covers, emit_result
+from tai42_cli.commands._common import app_context, covers, emit_result, seg
 
 app = typer.Typer(
     name="mcp",
@@ -147,7 +147,7 @@ def remove_mcp_entry(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/mcp-config/entries/{title}")
+        data = client.delete(f"/api/mcp-config/entries/{seg(title)}")
     emit_result(ctx_obj, data)
 
 
@@ -173,7 +173,7 @@ def reload_mcp(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/mcp-status/{title}/reload", json=_targets_body(target))
+        data = client.post(f"/api/mcp-status/{seg(title)}/reload", json=_targets_body(target))
     emit_result(ctx_obj, data)
 
 
@@ -231,5 +231,5 @@ def deregister_mcp(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/mcp-status/{title}/deregister", json=_targets_body(target))
+        data = client.post(f"/api/mcp-status/{seg(title)}/deregister", json=_targets_body(target))
     emit_result(ctx_obj, data)

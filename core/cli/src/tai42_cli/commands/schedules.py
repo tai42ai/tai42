@@ -16,6 +16,7 @@ from tai42_cli.commands._common import (
     emit_result,
     load_kwargs_arg,
     parse_kwargs,
+    seg,
 )
 
 app = typer.Typer(
@@ -105,5 +106,5 @@ def delete_schedule(ctx: typer.Context, name: Annotated[str, typer.Argument(help
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/schedules/{name}")
+        data = client.delete(f"/api/schedules/{seg(name)}")
     emit_result(ctx_obj, data)

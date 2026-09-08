@@ -11,7 +11,7 @@ from typing import Annotated
 
 import typer
 
-from tai42_cli.commands._common import app_context, covers, emit_records, emit_result
+from tai42_cli.commands._common import app_context, covers, emit_records, emit_result, seg
 
 app = typer.Typer(
     name="roles",
@@ -108,7 +108,7 @@ def edit_role(
     if description is not None:
         body["description"] = description
     with ctx_obj.client() as client:
-        data = client.request("PUT", f"/api/auth/roles/{name}", json=body)
+        data = client.request("PUT", f"/api/auth/roles/{seg(name)}", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -149,7 +149,7 @@ def modify_grants(
         raise typer.BadParameter("provide at least one --set or --remove")
     body = {"set": _parse_set(set_items), "remove": remove_items}
     with ctx_obj.client() as client:
-        data = client.post(f"/api/auth/roles/{name}/grants", json=body)
+        data = client.post(f"/api/auth/roles/{seg(name)}/grants", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -162,7 +162,7 @@ def delete_role(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Ro
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/auth/roles/{name}")
+        data = client.delete(f"/api/auth/roles/{seg(name)}")
     emit_result(ctx_obj, data)
 
 
@@ -175,7 +175,7 @@ def list_versions(ctx: typer.Context, name: Annotated[str, typer.Argument(help="
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/auth/roles/{name}/versions")
+        data = client.get(f"/api/auth/roles/{seg(name)}/versions")
     emit_result(ctx_obj, data)
 
 
@@ -192,5 +192,5 @@ def rollback_role(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/auth/roles/{name}/rollback", json={"version": version})
+        data = client.post(f"/api/auth/roles/{seg(name)}/rollback", json={"version": version})
     emit_result(ctx_obj, data)

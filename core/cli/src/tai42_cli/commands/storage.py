@@ -20,6 +20,7 @@ from tai42_cli.commands._common import (
     emit_records,
     emit_result,
     fetch_download,
+    seg,
 )
 
 app = typer.Typer(
@@ -64,7 +65,7 @@ def stat_resource(ctx: typer.Context, resource_id: Annotated[str, typer.Argument
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/storage/resources/{resource_id}/stat")
+        data = client.get(f"/api/storage/resources/{seg(resource_id)}/stat")
     emit_result(ctx_obj, data)
 
 
@@ -76,7 +77,7 @@ def download_resource(ctx: typer.Context, resource_id: Annotated[str, typer.Argu
     Example: ``tai storage download notes/todo.txt``
     """
     ctx_obj = app_context(ctx)
-    typer.echo(fetch_download(ctx_obj, "GET", f"/api/storage/resources/{resource_id}/content"))
+    typer.echo(fetch_download(ctx_obj, "GET", f"/api/storage/resources/{seg(resource_id)}/content"))
 
 
 @app.command("upload")
@@ -131,7 +132,7 @@ def delete_resource(ctx: typer.Context, resource_id: Annotated[str, typer.Argume
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/storage/resources/{resource_id}")
+        data = client.delete(f"/api/storage/resources/{seg(resource_id)}")
     emit_result(ctx_obj, data)
 
 
@@ -144,5 +145,5 @@ def delete_dir(ctx: typer.Context, dir_path: Annotated[str, typer.Argument(help=
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/storage/dirs/{dir_path}")
+        data = client.delete(f"/api/storage/dirs/{seg(dir_path)}")
     emit_result(ctx_obj, data)

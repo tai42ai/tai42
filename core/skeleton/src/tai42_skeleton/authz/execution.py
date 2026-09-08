@@ -34,7 +34,7 @@ from tai42_contract.access_control import (
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.access_control.path_canon import canonicalize_path
+from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
 from tai42_skeleton.access_control.role_gate import resolve_route_meta
 from tai42_skeleton.access_control.settings import access_control_settings
@@ -481,7 +481,10 @@ async def authorize_execution_agent_run(
 
     path = f"/api/agents/{agent_name}/runs"
     method = "POST"
-    route = resolve_route_meta(canonicalize_path(path), method)
+    try:
+        route = resolve_route_meta(canonicalize_path(path), method)
+    except MalformedPathError as exc:
+        raise PermissionDenied(f"access denied: {method} {path} is not a well-formed path for an agent run") from exc
     if route is None:
         raise PermissionDenied(f"access denied: {method} {path} does not resolve to a registered route")
 

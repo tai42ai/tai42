@@ -17,6 +17,7 @@ from tai42_cli.commands._common import (
     emit_result,
     load_json_object_arg,
     parse_extension_combos,
+    seg,
 )
 
 app = typer.Typer(
@@ -62,7 +63,7 @@ def get_preset(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Pre
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/presets/{name}")
+        data = client.get(f"/api/presets/{seg(name)}")
     emit_result(ctx_obj, data)
 
 
@@ -107,7 +108,7 @@ def delete_preset(ctx: typer.Context, name: Annotated[str, typer.Argument(help="
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/presets/{name}")
+        data = client.delete(f"/api/presets/{seg(name)}")
     emit_result(ctx_obj, data)
 
 
@@ -120,7 +121,7 @@ def list_versions(ctx: typer.Context, name: Annotated[str, typer.Argument(help="
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/presets/{name}/versions")
+        data = client.get(f"/api/presets/{seg(name)}/versions")
     emit_records(ctx_obj, data, ["version", "created_at"])
 
 
@@ -137,7 +138,7 @@ def get_version(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/presets/{name}/versions/{version}")
+        data = client.get(f"/api/presets/{seg(name)}/versions/{seg(version)}")
     emit_result(ctx_obj, data)
 
 
@@ -173,7 +174,7 @@ def save_version(
     if not body:
         raise typer.BadParameter("provide at least one of --kwargs, --description, or --extensions")
     with ctx_obj.client() as client:
-        data = client.post(f"/api/presets/{name}/versions", json=body)
+        data = client.post(f"/api/presets/{seg(name)}/versions", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -190,7 +191,7 @@ def rollback_preset(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/presets/{name}/rollback", json={"version": version})
+        data = client.post(f"/api/presets/{seg(name)}/rollback", json={"version": version})
     emit_result(ctx_obj, data)
 
 
@@ -207,7 +208,7 @@ def rename_preset(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/presets/{name}/rename", json={"new_name": new_name})
+        data = client.post(f"/api/presets/{seg(name)}/rename", json={"new_name": new_name})
     emit_result(ctx_obj, data)
 
 
@@ -220,7 +221,7 @@ def preset_referees(ctx: typer.Context, name: Annotated[str, typer.Argument(help
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.get(f"/api/presets/{name}/referees")
+        data = client.get(f"/api/presets/{seg(name)}/referees")
     emit_result(ctx_obj, data)
 
 
@@ -275,5 +276,5 @@ def set_version_tags(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.put(f"/api/presets/{name}/versions/{version}/tags", json={"tags": list(tags or [])})
+        data = client.put(f"/api/presets/{seg(name)}/versions/{seg(version)}/tags", json={"tags": list(tags or [])})
     emit_result(ctx_obj, data)

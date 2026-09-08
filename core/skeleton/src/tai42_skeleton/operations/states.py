@@ -275,7 +275,9 @@ async def read_state_record(
     name: str, target_kind: str, target_name: str, kind: str, key: str
 ) -> dict[str, Any] | None:
     """One subject's record, or ``null`` when none exists. An unknown ``person`` subject is a
-    refusal, never an empty document."""
+    refusal, never an empty document. A subject ``key`` that contains ``/`` (a thread key is
+    a thread id) is percent-encoded as one path segment; this holds for every single-record
+    door."""
     subject = _subject(target_kind, target_name, kind, key)
     with _states_door():
         view = await _states().read(name, subject)

@@ -15,6 +15,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, current_mount_binding, note_registered
+from tai42_skeleton.app.raw_path_route import RawPathRoute
 from tai42_skeleton.app.route_registry import CORE_OWNER, MOUNT_METHODS, RouteOwner, route_registry
 
 if TYPE_CHECKING:
@@ -166,6 +167,49 @@ class HttpSurface:
             return fastmcp_route(fn)
 
         return decorator
+
+    def use_raw_path_key(self, path_prefix: str) -> None:
+        """Upgrade every already-registered route whose template starts with
+        ``path_prefix`` to a :class:`RawPathRoute`, so it matches against the raw request
+        path: a path parameter whose values carry ``/`` (a state record's ``{key}``) stays
+        ONE segment when the client percent-encodes the slash, instead of splitting once
+        the ASGI server has decoded ``%2F``; the matched parameters are decoded once after
+        the match. Called AFTER the routes are registered, over their shared prefix, so a
+        family of doors (the plain record doors and their sub-actions) is covered at one
+        seam.
+
+        This surface owns every write into the FastMCP additional-route table (see
+        ``route_table_savepoint``), so it owns the in-place upgrade too; each upgrade keeps
+        the row's position, so a bound-module savepoint/rollback is unaffected.
+
+        The route-registry metadata is marked raw-path-matched at the same seam (so the
+        access-control resolver reasons on the same form the router matches, and fails
+        closed for an encoded-slash request on any other route). An OFFLINE stand-in
+        (metadata capture, route discovery) serves no request and keeps no route table, so
+        only the registry marking runs there — the served-router upgrade is skipped. A REAL
+        served ``FastMCP`` that exposes no route table is a torn surface: raise rather than
+        silently leave the record doors matched on the decoded path."""
+        from fastmcp import FastMCP
+
+        route_registry.mark_raw_path_matched(path_prefix)
+        fast_mcp = self._app._fast_mcp
+        routes = getattr(fast_mcp, "_additional_http_routes", None)
+        if routes is None:
+            if isinstance(fast_mcp, FastMCP):
+                raise RuntimeError(
+                    "use_raw_path_key: the served FastMCP exposes no additional-route table; "
+                    "the raw-path record doors would silently match on the decoded path"
+                )
+            return
+        for index, route in enumerate(routes):
+            if getattr(route, "path", "").startswith(path_prefix) and not isinstance(route, RawPathRoute):
+                routes[index] = RawPathRoute(
+                    route.path,
+                    endpoint=route.endpoint,
+                    methods=sorted(route.methods) if route.methods else None,
+                    name=route.name,
+                    include_in_schema=route.include_in_schema,
+                )
 
     def mount_base(self) -> str:
         """The resolved absolute mount base of the module importing now — ``/api/``

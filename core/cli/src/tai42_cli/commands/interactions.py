@@ -18,6 +18,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_result,
     parse_json_value,
+    seg,
     stream_frames,
 )
 
@@ -97,7 +98,7 @@ def answer_interaction(
     ctx_obj = app_context(ctx)
     value = parse_json_value(answer, param_hint="--answer")
     with ctx_obj.client() as client:
-        data = client.post(f"/api/interactions/{interaction_id}/answer", json={"answer": value})
+        data = client.post(f"/api/interactions/{seg(interaction_id)}/answer", json={"answer": value})
     emit_result(ctx_obj, data)
 
 
@@ -116,5 +117,5 @@ def cancel_interaction(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/interactions/{interaction_id}/cancel")
+        data = client.post(f"/api/interactions/{seg(interaction_id)}/cancel")
     emit_result(ctx_obj, data)

@@ -9,7 +9,7 @@ from typing import Annotated
 
 import typer
 
-from tai42_cli.commands._common import app_context, covers, emit_result
+from tai42_cli.commands._common import app_context, covers, emit_result, seg
 
 app = typer.Typer(
     name="sub-mcp",
@@ -57,5 +57,5 @@ def delete_sub_mcp(ctx: typer.Context, slug: Annotated[str, typer.Argument(help=
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.delete(f"/api/sub-mcp/{slug}")
+        data = client.delete(f"/api/sub-mcp/{seg(slug)}")
     emit_result(ctx_obj, data)

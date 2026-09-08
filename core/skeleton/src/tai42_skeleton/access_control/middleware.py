@@ -12,6 +12,7 @@ from tai42_contract.access_control.context import (
     set_request_user_id,
 )
 
+from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_effective_scopes,
     reset_request_identity_claims,
@@ -81,7 +82,22 @@ class ResourceGuardMiddleware:
         # We build an HTTPConnection (works for both http and websocket scopes)
         # purely for URL/path helpers; we don't pass it to the app.
         conn = HTTPConnection(scope)
+        # The exact request path (decoded, un-normalized) for the carve-out membership test
+        # and its jq-fence parity — never trailing-slash/dot-normalized (see the carve-out
+        # comment below). Route/resource RESOLUTION instead reasons on the canonical form
+        # derived from the RAW target, where a record ``{key}``'s encoded slash stays ONE
+        # segment — the SAME form the router matches — so the record doors resolve to their
+        # protected resource rather than falling to the public SPA catch-all.
         path_to_check = conn.url.path
+        try:
+            canonical_path = request_canonical_path(scope)
+        except MalformedPathError:
+            logger.warning(
+                "access_control: malformed request path (NUL/control/backslash or non-ASCII) — denying; %s",
+                _DISABLE_HINT,
+            )
+            await self._deny(scope, receive, send, 403, "Forbidden: malformed path", _REASON_RESOLVE_ERROR)
+            return
 
         # Prepare User/Auth info from Scope (Populated by AuthenticationMiddleware).
         user = scope.get("user", UnauthenticatedUser())
@@ -115,7 +131,7 @@ class ResourceGuardMiddleware:
         # deep-link refresh. A websocket scope carries no HTTP method → ``None`` → the
         # fallback never fires (a websocket upgrade is not a shell GET), fail-closed.
         try:
-            resource_ids = await self.verifier.resolve_resource_ids(path_to_check, method=scope.get("method"))
+            resource_ids = await self.verifier.resolve_resource_ids(canonical_path, method=scope.get("method"))
         except Exception:
             logger.exception(
                 "access_control: route resolution failed for %s — denying; %s",
@@ -217,10 +233,14 @@ class ResourceGuardMiddleware:
         if audit_log_settings().enable:
             user = scope.get("user")
             principal = user.token.client_id if (user and user.is_authenticated) else UNAUTHENTICATED
+            try:
+                refusal_path = request_canonical_path(scope)
+            except MalformedPathError:
+                refusal_path = scope["path"]
             emit_audit_line(
                 principal,
                 scope["method"],
-                refusal_route(scope["path"], scope.get("method")),
+                refusal_route(refusal_path, scope.get("method")),
                 status_code,
                 0,
                 datetime.now(UTC).isoformat(),
