@@ -131,8 +131,8 @@ def test_d1_projected_surface_is_the_expected_op_count():
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
             # The registered surface decomposes by projection tier (each asserted below):
-            # 211 total = 4 tier-1 (hardcode-blocked from projection) + 42 tier-2
-            # (default-excluded, includable) + 165 tier-0 (default-projected). A destructive
+            # 212 total = 4 tier-1 (hardcode-blocked from projection) + 42 tier-2
+            # (default-excluded, includable) + 166 tier-0 (default-projected). A destructive
             # tier-0 op is still default-projected under ``expose_destructive`` — a data write
             # or purge (``delete_*``, ``erase_*``, ``prune_runs``, ``prune_state_retention``)
             # is destructive but not authority_changing, so it stays tier-0 like
@@ -141,7 +141,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # doors (module + state ``list``/``get``/``put``/``delete``, the record CRUD plus
             # ``search``/``fold``/``apply`` doors, the mount/subjects/consumers/stats
             # reads, and ``prune_state_retention``) are all tier-0 CRUD over the states service.
-            assert total == 211, total
+            assert total == 212, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -208,8 +208,8 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # measured two ways.
             recorder = _RecordingApp()
             projected = project_operations(recorder, ApiToolsConfig(), registry=reg)
-            assert len(projected) == 165, len(projected)
-            assert total - len(tier2) - len(tier1) == 165
+            assert len(projected) == 166, len(projected)
+            assert total - len(tier2) - len(tier1) == 166
 
             # The LIVE booted tool surface is the 163 projected ops PLUS the two
             # force-registered hidden mechanism tools the conversations router installs at
@@ -224,7 +224,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
             assert set(live) == set(projected) | hidden_bridges
             for name in hidden_bridges:
                 assert (live[name].meta or {}).get("tai42/hidden") is True
-            assert len(live) == 167
+            assert len(live) == 168
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -427,7 +427,7 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 167
+            assert len(live) == 168
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process
