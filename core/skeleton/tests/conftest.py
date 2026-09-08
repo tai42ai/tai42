@@ -201,7 +201,14 @@ def _offline_run_index_store(monkeypatch: pytest.MonkeyPatch) -> None:
     and block on the connection timeout. Fake the store's seam with the stateful
     in-memory ``FakeRunIndexPg`` so the real chokepoint code runs against it and returns
     instantly. The runs-index store's own suite re-patches this seam with its own fresh
-    fake to assert the index behavior."""
+    fake to assert the index behavior.
+
+    Under the real-Postgres integration opt-in (``TAI42_SKELETON_REAL_PG``) this stands
+    down: the ``integration`` suite drives the genuine store against the operator-provided
+    TAI_DATABASE_DEFAULT_PG_*, where the ``run_index`` CHECK constraint and COALESCE
+    write rules must fire — a fake would mask them."""
+    if os.environ.get("TAI42_SKELETON_REAL_PG") in ("1", "true", "True"):
+        return
     fake = FakeRunIndexPg()
 
     @asynccontextmanager
