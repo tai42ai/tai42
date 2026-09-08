@@ -258,6 +258,29 @@ async def test_upload_under_existing_file_id_refused(tmp_path):
     assert exc.value.conflicts == ["a/b"]
 
 
+async def test_upload_under_non_regular_file_ancestor_refused(tmp_path):
+    driver = _driver(tmp_path)
+    # A non-regular file (here a FIFO) is not a directory, so mkdir cannot descend
+    # through it; the conflict must name that ancestor id, not guess a parent.
+    os.mkfifo(tmp_path / "a")
+    with pytest.raises(driver_module.StoragePathConflictError) as exc:
+        await driver.write_file("a/b/c", "nested")
+    assert exc.value.conflicts == ["a"]
+
+
+async def test_upload_mkdir_conflict_without_blocker_reraises(tmp_path, monkeypatch):
+    driver = _driver(tmp_path)
+
+    # mkdir fails but no ancestor under the root blocks (a race): the original OS
+    # error propagates, never a fabricated StoragePathConflictError.
+    def _raise_exists(self, *args, **kwargs):
+        raise FileExistsError("raced")
+
+    monkeypatch.setattr("pathlib.Path.mkdir", _raise_exists)
+    with pytest.raises(FileExistsError, match="raced"):
+        await driver.write_file("nested/a.txt", "x")
+
+
 async def test_upload_over_empty_dir_refuses_file_racing_in(tmp_path):
     driver = _driver(tmp_path)
     empty = tmp_path / "a" / "b"
