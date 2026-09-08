@@ -49,6 +49,9 @@ Changelog = "https://github.com/tai42ai/tai42/blob/main/core/cli/CHANGELOG.md"
 # already has an unrelated `tai` on PATH still has an unambiguous entry point.
 tai = "tai42_cli.app:app"
 tai42 = "tai42_cli.app:app"
+# Release API-diff gate, runnable in any repo laid out like this workspace. Its
+# dependencies (griffe, pyyaml) ride the `api-gate` extra, never the runtime deps.
+tai42-api-gate = "tai42_cli.api_gate:main"
 
 [project.optional-dependencies]
 dev = [
@@ -56,6 +59,13 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.6",
     "pyright>=1.1.389",
+]
+# The `tai42-api-gate` console script only; griffe classifies the public-API diff
+# and pyyaml reads the mode file. Kept off the runtime deps so a plain install of
+# the client stays light.
+api-gate = [
+    "griffe>=2.1,<3",
+    "pyyaml>=6",
 ]
 
 [tool.setuptools]

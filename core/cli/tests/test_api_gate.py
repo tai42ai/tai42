@@ -1,8 +1,8 @@
-"""Unit tests for scripts/api_gate.py — the release API-diff gate. Hermetic:
-the pure decision helpers are tested directly, the git-backed helpers against a
-throwaway repo built under ``tmp_path``, and the full griffe end-to-end run is
-guarded by ``importorskip`` (griffe is the release-only ``api-gate`` group, absent
-from the fleet test environment). No network and no real PyPI or tag are touched."""
+"""Unit tests for the release API-diff gate. Hermetic: the pure decision helpers
+are tested directly, the git-backed helpers against a throwaway repo built under
+``tmp_path``, and the full griffe end-to-end run is guarded by ``importorskip``
+(griffe rides the ``api-gate`` extra). No network and no real PyPI or tag are
+touched."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-import api_gate  # importable via the scripts/ path conftest.py injects
+from tai42_cli import api_gate
 
 # ----------------------------------------------------------------- version parse
 
@@ -347,21 +347,21 @@ def test_non_additive_collection_change_stays_breaking(old: str, new: str):
 
 
 def test_read_mode_valid(tmp_path: Path):
-    (tmp_path / ".github").mkdir()
-    (tmp_path / ".github" / "api-gate.yml").write_text("mode: strict\n")
-    assert api_gate._read_mode(tmp_path) == "strict"
+    config = tmp_path / "api-gate.yml"
+    config.write_text("mode: strict\n")
+    assert api_gate._read_mode(config) == "strict"
 
 
 def test_read_mode_unknown_fails_loudly(tmp_path: Path):
-    (tmp_path / ".github").mkdir()
-    (tmp_path / ".github" / "api-gate.yml").write_text("mode: whatever\n")
+    config = tmp_path / "api-gate.yml"
+    config.write_text("mode: whatever\n")
     with pytest.raises(SystemExit):
-        api_gate._read_mode(tmp_path)
+        api_gate._read_mode(config)
 
 
 def test_read_mode_missing_file_fails_loudly(tmp_path: Path):
     with pytest.raises(SystemExit):
-        api_gate._read_mode(tmp_path)
+        api_gate._read_mode(tmp_path / "api-gate.yml")
 
 
 # --------------------------------------------------------------- module discovery
@@ -440,20 +440,18 @@ def _run_main(
     member_dir: str,
     version: str,
 ) -> None:
-    scripts = repo / "scripts"
-    scripts.mkdir(exist_ok=True)
-    monkeypatch.setattr(api_gate, "__file__", str(scripts / "api_gate.py"))
-    monkeypatch.chdir(repo)
     monkeypatch.setattr(
         "sys.argv",
         [
-            "api_gate.py",
+            "tai42-api-gate",
             "--package",
             package,
             "--dir",
             member_dir,
             "--version",
             version,
+            "--repo-root",
+            str(repo),
         ],
     )
     api_gate.main()
@@ -623,3 +621,92 @@ def test_end_to_end_field_default_change_stays_breaking_at_patch(monkeypatch: py
             member_dir="core/widget",
             version="1.0.1",
         )
+
+
+# ------------------------------------------------------------ fail-closed helpers
+
+
+def test_pop_kwarg_absent_returns_none():
+    import ast
+
+    call = ast.parse("Field(default=1)", mode="eval").body
+    assert isinstance(call, ast.Call)
+    assert api_gate._pop_kwarg(call, "json_schema_extra") is None
+
+
+def test_literal_str_key_dict_duplicate_key_is_non_literal():
+    import ast
+
+    node = ast.parse("{'a': 1, 'a': 2}", mode="eval").body
+    assert api_gate._literal_str_key_dict(node) is None
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "Option(default=None, help='x')",  # callee outside the schema-extra owners
+        "Field('positional', description='x')",  # a positional argument is real surface
+    ],
+)
+def test_literal_to_doc_field_rejects_non_forgivable(expr: str):
+    import ast
+
+    old = ast.parse("None", mode="eval").body
+    new = ast.parse(expr, mode="eval").body
+    assert isinstance(new, ast.Call)
+    assert api_gate._is_literal_to_doc_field(old, new) is False
+
+
+def test_doc_only_call_change_literal_to_non_call_stays_breaking():
+    # A literal replaced by a plain literal (not a call) is a real value change.
+    assert api_gate._is_doc_only_call_change("1", "2") is False
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("{**base, 'a': 1}", "{**base, 'a': 1, 'b': 2}"),  # a ** spread is not a plain literal
+        ("(1, 2)", "(1, *rest, 2)"),  # a starred element is not a plain literal
+    ],
+)
+def test_additive_collection_growth_rejects_non_literal(old: str, new: str):
+    assert api_gate._is_additive_collection_growth(old, new) is False
+
+
+def test_additive_tuple_growth_is_not_breaking():
+    assert api_gate._is_additive_collection_growth("(1, 2)", "(1, 2, 3)") is True
+
+
+# ----------------------------------------------------------- main() gate reports
+
+
+def test_main_first_release_passes_without_prior_tag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys):
+    (tmp_path / ".github").mkdir(parents=True)
+    (tmp_path / ".github" / "api-gate.yml").write_text("mode: label-honesty\n")
+    src = tmp_path / "core" / "widget" / "src" / "widget"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text(_KEEP)
+    _init_repo(tmp_path)
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "release")
+    _run_main(monkeypatch, tmp_path, package="widget", member_dir="core/widget", version="0.1.0")
+    assert "first release" in capsys.readouterr().out
+
+
+def test_main_reports_removed_top_level_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    # A whole shipped top-level module dropped between the tag and the worktree is a
+    # removal finding; a minor bump under label-honesty may not carry it.
+    pytest.importorskip("griffe")
+    src_root = tmp_path / "core" / "widget" / "src"
+    (src_root / "widget").mkdir(parents=True)
+    (src_root / "widget" / "__init__.py").write_text(_KEEP)
+    (src_root / "extra.py").write_text(_KEEP)
+    (tmp_path / ".github").mkdir(parents=True)
+    (tmp_path / ".github" / "api-gate.yml").write_text("mode: label-honesty\n")
+    _init_repo(tmp_path)
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "release")
+    _git(tmp_path, "tag", "widget-v1.0.0")
+    (src_root / "extra.py").unlink()
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, tmp_path, package="widget", member_dir="core/widget", version="1.1.0")
