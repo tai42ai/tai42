@@ -26,6 +26,7 @@ from tai42_contract.conversations import (
     ConversationRoute,
     ConversationRouteCreate,
     ConversationTargetKind,
+    Person,
     TargetConversationConfig,
 )
 from tai42_contract.interactions import LocationElement, MediaItem
@@ -76,8 +77,6 @@ from tai42_skeleton.operations.response_models_group_a import (
 )
 
 if TYPE_CHECKING:
-    from tai42_contract.conversations import Person
-
     from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager as _Manager
     from tai42_skeleton.conversations.mode import ConversationModeStore
     from tai42_skeleton.conversations.persons import ConversationPersonStore
@@ -1137,6 +1136,7 @@ def _mode_store() -> ConversationModeStore:
     summary="Read a conversation person",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=Person,
 )
 async def get_conversation_person(person_id: str) -> dict[str, Any]:
     """The person row named by ``person_id`` — its identity, folded addresses and stored
@@ -1156,6 +1156,7 @@ async def get_conversation_person(person_id: str) -> dict[str, Any]:
     summary="Set a conversation person's locale",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=Person,
 )
 async def set_conversation_person_locale(person_id: str, locale: str | None) -> dict[str, Any]:
     """Set (or clear) a person's stored ``locale`` — the operator override the rendering layer

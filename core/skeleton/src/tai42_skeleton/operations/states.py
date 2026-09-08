@@ -70,6 +70,7 @@ from tai42_skeleton.operations.response_models_group_states import (
     StateDeleteResult,
     StateModuleCatalog,
     StateMountList,
+    StateMountRow,
     StateRecordOrNull,
     StateSearchPage,
     StateStats,
@@ -230,7 +231,12 @@ async def list_state_mounts(name: str) -> list[dict[str, Any]]:
         return await _states().list_mounts(name)
 
 
-@operation(summary="Get a state's mount", tags=["states"], errors=[NotSupportedError, NotFoundError])
+@operation(
+    summary="Get a state's mount",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError],
+    response_model=StateMountRow,
+)
 async def get_state_mount(name: str, module: str) -> dict[str, Any]:
     """One module's mount on the state — its path, resolved parameters and declarations; the
     same row the list serves. A module not mounted on the state is a 404."""
