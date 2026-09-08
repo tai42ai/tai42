@@ -52,7 +52,10 @@ class AsyncLocalDriver:
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
                 except (NotADirectoryError, FileExistsError) as exc:
-                    raise StoragePathConflictError(path, [self._ancestor_file_id(root, target)]) from exc
+                    blocker = self._blocking_ancestor_id(root, target)
+                    if blocker is None:
+                        raise
+                    raise StoragePathConflictError(path, [blocker]) from exc
             return target
 
         return await asyncio.to_thread(_prepare)
@@ -89,15 +92,17 @@ class AsyncLocalDriver:
         return root, full_path
 
     @staticmethod
-    def _ancestor_file_id(root: Path, target: Path) -> str:
-        """The store id of the nearest ancestor of ``target`` held as a file — the
-        one blocking a directory from being created for ``target``."""
+    def _blocking_ancestor_id(root: Path, target: Path) -> str | None:
+        """The store id of the nearest ancestor of ``target`` that exists as a
+        non-directory (a file, a device) — the one blocking a directory
+        from being created for ``target``; ``None`` when the walk reaches the root
+        with nothing blocking."""
         for ancestor in target.parents:
             if ancestor == root:
                 break
-            if ancestor.is_file():
+            if ancestor.exists() and not ancestor.is_dir():
                 return ancestor.relative_to(root).as_posix()
-        return target.parent.relative_to(root).as_posix()
+        return None
 
     @staticmethod
     def _prune_empty_parents(root: Path, target: Path) -> None:
