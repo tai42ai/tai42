@@ -54,12 +54,14 @@ from tai42_kit.settings import reset_all_settings
 import tai42_skeleton.connectors.store.catalog_store as catalog_store
 import tai42_skeleton.db.boot_gate as boot_gate
 import tai42_skeleton.db.locks as db_locks
+import tai42_skeleton.runs.store as runs_store
 import tai42_skeleton.states.db as states_db
 import tai42_skeleton.tool_meta.store as tool_meta_store
 import tai42_skeleton.versioning.store as versioning_store
 
 from ._fakes.advisory_locks import FakeAdvisoryLocks
 from ._fakes.interactions_redis import FakeRedis
+from .runs.conftest import FakeRunIndexPg
 from .tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
 from .versioning.conftest import FakeVersioningPg
 
@@ -188,6 +190,25 @@ def _offline_tool_meta_store(monkeypatch: pytest.MonkeyPatch) -> None:
     overlay-store code runs against it and returns instantly. The tool-meta store's own
     suite re-patches this seam with its own fresh fake to assert the overlay behavior."""
     monkeypatch.setattr(tool_meta_store, "client_ctx", make_pg_ctx(FakeToolMetaPg()))
+
+
+@pytest.fixture(autouse=True)
+def _offline_run_index_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runs-index chokepoint writes a ``run_index`` row around every outermost
+    registered-preset dispatch through the store's own pooled ``client_ctx`` whenever
+    the skeleton database is configured, so an offline app-boot test that runs a preset
+    tool with the database configured would otherwise open a real Postgres for the index
+    and block on the connection timeout. Fake the store's seam with the stateful
+    in-memory ``FakeRunIndexPg`` so the real chokepoint code runs against it and returns
+    instantly. The runs-index store's own suite re-patches this seam with its own fresh
+    fake to assert the index behavior."""
+    fake = FakeRunIndexPg()
+
+    @asynccontextmanager
+    async def fake_client_ctx(client_cls, settings=None, **kwargs):
+        yield fake
+
+    monkeypatch.setattr(runs_store, "client_ctx", fake_client_ctx)
 
 
 class _ProbeRedis:
