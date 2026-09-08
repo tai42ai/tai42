@@ -246,10 +246,12 @@ def attribute_run(writer: MonitoringWriter, attribution: RunAttribution) -> Abst
     inside the scope, ``span_processor.py``). Short-circuiting to a ``nullcontext``
     when ``current_trace_id()`` is ``None`` therefore DROPPED the attribution on the
     common case — a door that deposits then opens the run's first span — so the guard
-    is removed. Fail-safe by construction — the stamp's fail-safety is
-    :meth:`MonitoringWriter.trace_attributes`'s (it catches + logs on enter/exit,
-    never raises), so an emit-incapable writer's ``trace_attributes`` is a safe no-op
-    even with no trace ever opened.
+    is removed. This helper is NOT itself fail-safe against a non-conforming writer: it
+    CALLS ``trace_attributes`` here, so a writer whose signature omits these keywords
+    raises a ``TypeError`` at THIS call — before any enter/exit guard inside the writer
+    could run — and a writer that raises on enter/exit surfaces likewise. A caller that
+    must not be broken by a monitoring-writer fault guards entering the returned manager
+    (the skeleton run seams do, logging the fault and continuing the run unattributed).
     """
     return writer.trace_attributes(
         name=RUN_ATTRIBUTION_TRACE_NAME,
