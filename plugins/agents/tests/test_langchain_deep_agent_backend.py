@@ -693,7 +693,7 @@ def test_inline_aread_offset_beyond_inline_reports_error(fake_tm: _FakeResourceM
     assert "exceeds file length" in res.error
 
 
-# --- whole-skill-dir widening (D2) -----------------------------------------
+# --- whole-skill-dir widening -----------------------------------------
 
 
 _MULTI_FILE_SKILL_MD = """---

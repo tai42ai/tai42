@@ -18,7 +18,7 @@ A *state* is a declared JSON document, one per *subject*
 With no subject in scope (an explicit ``{kind, key}`` or an omitted subject and no
 ambient context) the tool raises loudly rather than writing an unaddressed record.
 
-Write provenance follows the platform's chokepoint discipline (D-6): each tool
+Write provenance follows the platform's chokepoint discipline: each tool
 supplies ONLY what it knows — its own name as ``consumer``, the run's session as
 ``run_id``, and (for ``state_apply``) the ``op_id`` — in a
 :class:`~tai42_contract.states.WriteOrigin`. The ``door``, ``actor`` and
@@ -57,7 +57,7 @@ _RESULT_SCHEMA: dict[str, Any] = {
 
 
 def _origin(op_id: str | None = None) -> WriteOrigin:
-    """The consumer-only :class:`WriteOrigin` a state tool supplies (D-6): the invoked
+    """The consumer-only :class:`WriteOrigin` a state tool supplies: the invoked
     tool's name as ``consumer``, the ambient run's ``session_id`` as ``run_id`` when a
     run is attributed, and the caller's ``op_id``. ``door``/``actor``/``turn_id`` are
     absent — the facet stamps them from the ambient context, never the tool."""
@@ -72,7 +72,7 @@ def _origin(op_id: str | None = None) -> WriteOrigin:
 
 
 async def _resolve_subject(state: str, subject: dict[str, Any] | None) -> StateSubject:
-    """Resolve the subject a state tool addresses (D-7).
+    """Resolve the subject a state tool addresses.
 
     An explicit ``{target_kind, target_name, kind, key}`` is used verbatim; an explicit
     ``{kind, key}`` takes its target from the ambient context; an omitted subject

@@ -2473,7 +2473,7 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
     )
 
 
-# ---- shipped-connectors profile (B3) ------------------------------------
+# ---- shipped-connectors profile ------------------------------------
 #
 # The four SHIPPED OAuth connector plugins — google, atlassian, slack, github — carried on
 # the manifest ``connectors`` field as pure descriptor data (each plugin is a yml-only
@@ -3140,7 +3140,7 @@ def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
     )
 
 
-# ---- manifest-mcp mount profile (B8) ------------------------------------
+# ---- manifest-mcp mount profile ------------------------------------
 #
 # The FIRST manifest-level external MCP mount (``manifest.mcp: [TaiMCPConfig]``) — no
 # existing pattern to copy, ``manifests.py`` carries no ``mcp`` entries today. It mounts

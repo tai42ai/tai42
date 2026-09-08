@@ -8,7 +8,7 @@ hermetic workspace every turn, drives the runner, and maps its up-frames to cont
 events. Park/resume ride the shared ``_internal/park`` machinery; the SDK's model cost is
 emitted into the active trace (its model calls bypass the platform LLM seam).
 
-The ``crash_resume`` setting (§A6) is DECLARED to the skeleton at registration as
+The ``crash_resume`` setting is DECLARED to the skeleton at registration as
 ``meta={"tai42/crash_resume": <setting>}`` on the run tool, threaded through the generic
 ``agents.agent(name, tags=..., meta=...)`` passthrough; the skeleton's run-dispatch seam reads
 that key to decide whether to re-invoke a recycled detached run. The meta is captured ONCE at
@@ -115,7 +115,7 @@ _SESSION_ID_PATH = ".runner/session_id"
 _CREDS_DIR = ".claude-home/.creds"
 _CLAUDE_CONFIG_DIR = "project/.claude"
 _RUNNER_PAYLOAD_DIR = ".runner/payload"
-# Crash-after-terminal idempotence records (§A3.8), one per resumed super-step, keyed by the
+# Crash-after-terminal idempotence records, one per resumed super-step, keyed by the
 # ``compute_superstep_id`` of the resume's interaction ids. A resume drive writes its record on
 # the clean terminal BEFORE reporting; a redelivered resume reads it and returns the SAME output
 # without re-driving the SDK session. There is no LangGraph snapshot here, so this durable record
@@ -201,8 +201,8 @@ class ClaudeCodeInput(BaseModel):
     subagents: list[SubagentSpecShape] = Field(default_factory=list)
 
 
-# A parking agent binds the hidden ``agent_resume`` continuation from its OWN registration
-# (§C4): a claude-only box must still bind it, or every async park strands. Per-epoch
+# A parking agent binds the hidden ``agent_resume`` continuation from its OWN registration:
+# a claude-only box must still bind it, or every async park strands. Per-epoch
 # idempotent, so a combined box binds it exactly once.
 register_agent_resume_tool()
 
@@ -223,7 +223,7 @@ class _BearerMaterial(BaseModel):
 
 
 class _TerminalRecord(BaseModel):
-    """The durable crash-after-terminal idempotence record (§A3.8) for one resumed super-step.
+    """The durable crash-after-terminal idempotence record for one resumed super-step.
 
     Captures the exact terminal OUTPUT (a message ``text`` or a structured ``data``) plus the
     session id and usage; ``extra="forbid"`` so an in-session-forged record with stray keys fails
@@ -344,7 +344,7 @@ class ClaudeCodeAgent(Agent):
         ``.claude``/``.runner``, reads the persisted SDK session id, and drives to terminal
         under the SAME materialize+scrub path — the kit driver fires the stored completion tool.
 
-        CRASH-AFTER-TERMINAL IDEMPOTENCE (§A3.8): the drive is keyed by the super-step's
+        CRASH-AFTER-TERMINAL IDEMPOTENCE: the drive is keyed by the super-step's
         ``compute_superstep_id`` (over the SAME interaction ids the park persisted, so it is
         identically derivable here). A resume that reaches a clean terminal writes a durable
         ``.runner/terminal/<superstep_id>.json`` record BEFORE reporting; a redelivered resume
@@ -451,7 +451,7 @@ class ClaudeCodeAgent(Agent):
         park_suspended = False
         handle = None
         try:
-            # §A3.8 crash-after-terminal idempotence: a redelivered resume whose winner already
+            # Crash-after-terminal idempotence: a redelivered resume whose winner already
             # drove this super-step to a clean terminal reattaches the SAME durable volume and
             # finds its record — re-produce the stored output and DO NOT re-drive the SDK session.
             # The credential scrub/redact still run in the finally (idempotent on an already-scrubbed
@@ -520,7 +520,7 @@ class ClaudeCodeAgent(Agent):
                 await handle.kill()
                 await _drain_handle(handle)
             # (ii) credential scrub + (iii) transcript redaction — TERMINAL exits only; a
-            # park-suspend keeps the bearer file for the door-less expiry resume to reuse (§A3.9).
+            # park-suspend keeps the bearer file for the door-less expiry resume to reuse.
             if not park_suspended:
                 await self._scrub_credentials(session, ws=ws)
                 await self._redact_transcript(session, ws=ws, policy=policy, secrets=_secret_values(spec_env, bearer))
@@ -544,7 +544,7 @@ class ClaudeCodeAgent(Agent):
         park flag). Handles the hello version/session gate, sync asks, async parks, and proxied
         tool calls inline; a ``fatal`` or an error terminal raises loudly.
 
-        On a clean terminal in a resume drive (``terminal_key`` set), the §A3.8 idempotence
+        On a clean terminal in a resume drive (``terminal_key`` set), the idempotence
         record is written BEFORE the terminal event is yielded, so a crash between here and the
         index finalize leaves a durable record a redelivery re-produces from."""
         allowlist = set(tool_names)
@@ -595,7 +595,7 @@ class ClaudeCodeAgent(Agent):
             elif isinstance(frame, ResultFrame):
                 self._emit_usage(frame, settings=settings)
                 event = _terminal_event(frame, text_parts)
-                # §A3.8: persist the durable terminal record BEFORE reporting, so a crash after
+                # Persist the durable terminal record BEFORE reporting, so a crash after
                 # this point lets a redelivered resume re-produce the SAME output without re-driving.
                 if terminal_key is not None:
                     await self._persist_terminal_record(session, terminal_key, frame, event)
@@ -880,7 +880,7 @@ class ClaudeCodeAgent(Agent):
     async def _persist_session_id(self, session: SandboxSession, session_id: str) -> None:
         await session.put_file(_SESSION_ID_PATH, json.dumps({"session_id": session_id}).encode("utf-8"))
 
-    # --- terminal idempotence record (§A3.8) ----------------------------------------------
+    # --- terminal idempotence record ----------------------------------------------
 
     async def _read_terminal_record(self, session: SandboxSession, superstep_id: str) -> _TerminalRecord | None:
         """Read + schema-validate the durable terminal record for a resumed super-step, or
@@ -1093,7 +1093,7 @@ def _map_event(event: dict[str, Any], text_parts: list[str]) -> StreamEvent | No
 
 
 def _event_from_terminal_record(record: _TerminalRecord) -> StreamEvent:
-    """Reconstruct the terminal stream event from a §A3.8 record, mirroring ``_terminal_event``
+    """Reconstruct the terminal stream event from a durable terminal record, mirroring ``_terminal_event``
     so a redelivered resume re-produces the SAME drained value the original terminal did."""
     if record.structured:
         return StructuredFinal(data=record.data)

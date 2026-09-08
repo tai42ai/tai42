@@ -166,7 +166,7 @@ def _legacy_park(interaction_id: str = "i1") -> dict[str, Any]:
 
 
 def test_a_legacy_ownerless_park_is_claimable_only_while_the_driver_resumes_it() -> None:
-    # F3/G1: a park written by a RELEASED predecessor carries no ``resume_owner`` on its wire
+    # A park written by a RELEASED predecessor carries no ``resume_owner`` on its wire
     # marker. Replayed through the new middleware it would be refused — its answer dropped and the
     # operator's ``Command(resume=...)`` discarded. The resuming driver names the interactions it
     # is delivering answers for (``resuming_park_interaction_ids``, bound by
@@ -270,7 +270,7 @@ def test_two_siblings_park_in_one_superstep_and_resume_together() -> None:
 
 
 def test_mixed_superstep_parks_the_owned_and_refuses_the_foreign_in_one_step() -> None:
-    # F5 / mutant C: a super-step carrying BOTH a park this run owns and one it does not. The
+    # A super-step carrying BOTH a park this run owns and one it does not. The
     # interrupt payload excludes the foreign id (never interrupt on another run's park), and on
     # resume the refusal rides the SAME update as the answer — so the model never meets a raw
     # marker as a tool result. Dropping ``+ refusals`` at the resume return leaves the foreign
@@ -318,7 +318,7 @@ def test_mixed_superstep_parks_the_owned_and_refuses_the_foreign_in_one_step() -
     # The owned park's tool_call got the answer.
     assert by_call["co"].content == "the answer"
     # The foreign park's tool_call got the refusal in the SAME resume step — an error result, not
-    # the raw marker JSON (mutant C, dropping ``+ refusals``, would leave the marker here).
+    # the raw marker JSON (dropping ``+ refusals`` would leave the marker here).
     assert by_call["cf"].status == "error"
     assert SUSPENDED_INTERACTION_MARKER_KEY not in str(by_call["cf"].content)
 

@@ -230,7 +230,7 @@ def test_non_text_events_map_to_contract_steps(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_static_and_env_connection_creds_reach_the_clean_session_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """§A5 credential passthrough: a STATIC cred bakes its value under ``env_name`` in the CLEAN
+    """Credential passthrough: a STATIC cred bakes its value under ``env_name`` in the CLEAN
     session env, and a connection cred with ``delivery="env"`` bakes its RESOLVED value under
     ``env_name`` too — both distinct from the per-turn bearer FILE path. A regression here would
     silently drop an operator's service cred, so assert both land in the runner's ``os.environ``."""

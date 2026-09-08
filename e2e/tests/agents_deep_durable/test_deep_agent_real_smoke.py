@@ -1,10 +1,10 @@
-"""§5 real-vendor smoke — ONE real ``langchain_deep_agent`` model turn over the fake persistent
+"""Real-vendor smoke — ONE real ``langchain_deep_agent`` model turn over the fake persistent
 sandbox.
 
 Gated on the single ``.env`` ``ANTHROPIC_API_KEY`` (the ``claude_agent`` real seam): when
 selected, ``build_deep_agent_durable_stack`` repoints its LLM group at Anthropic keyed off that
 key, so the deep agent's ONE model turn runs SERVER-side through ``get_llm_async`` to real
-Anthropic. The MODEL credential NEVER enters the session (only service creds do, §B4) — no
+Anthropic. The MODEL credential NEVER enters the session (only service creds do) — no
 ``claude-agent-sdk``, no in-session model key. Asserts a terminal answer lands.
 
 SKIPS without the key — expected off the creds host. The loud-fail selection wiring names a

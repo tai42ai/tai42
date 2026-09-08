@@ -1,4 +1,4 @@
-"""C4 / G1 — a sub-MCP registered on replica A must serve on replica B, via the
+"""A sub-MCP registered on replica A must serve on replica B, via the
 durable sub-MCP store + dispatch-time fallback (the SUB_MCP_REDIS_URL the
 replicas profile sets). B never saw the registration."""
 
@@ -54,7 +54,7 @@ async def test_sub_mcp_registered_on_a_serves_on_b(replicas_stack: TaiStack, uni
         result = await mcp.call_tool("e2e_echo", {"payload": "via-b"})
     assert result.data == "via-b"
 
-    # Survives a reload on A (the reset() wipe half of G1). A reloads in-line
+    # Survives a reload on A (the reset() wipe half). A reloads in-line
     # (synchronous before the POST returns) and rehydrates the slug from the store;
     # B reloads only once A's fleet reload_config fan-out reaches it, so B re-serves
     # after a short, eventually-consistent delay — poll rather than sample once.

@@ -1,4 +1,4 @@
-"""B2 support — a threaded fake Kubernetes CoreV1 API server + kubeconfig writer.
+"""A threaded fake Kubernetes CoreV1 API server + kubeconfig writer.
 
 The ``config-k8s`` provider reads env from a K8s Secret and the manifest from a K8s
 ConfigMap through the real ``kubernetes`` client (``manager.py`` requires an

@@ -3,7 +3,7 @@
 A syntactically malformed connection id (not a UUID) keys no record, so the read and
 delete doors answer a plain 404 — never a 500 that would leak the store's shape as an
 oracle. And a request-body validation failure returns the failing field PATHS with the
-submitted VALUES stripped (N4): a rejected ``config_values`` secret must never ride the
+submitted VALUES stripped: a rejected ``config_values`` secret must never ride the
 400 body.
 """
 
@@ -54,5 +54,5 @@ async def test_start_connect_validation_body_carries_field_paths_not_values(conn
     # nothing else (no ``input``/``ctx`` that could carry the value).
     assert all(set(entry) == {"loc", "type"} for entry in fields), fields
     assert any("config_values" in entry["loc"] and "client_secret" in entry["loc"] for entry in fields), fields
-    # N4: the submitted value is nowhere in the response.
+    # The submitted value is nowhere in the response.
     assert secret not in resp.text, resp.text

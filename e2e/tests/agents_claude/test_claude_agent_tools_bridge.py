@@ -1,4 +1,4 @@
-"""§3b — the ``claude_code`` adapter-proxied platform-tool bridge.
+"""The ``claude_code`` adapter-proxied platform-tool bridge.
 
 The adapter proxies a runner ``tool_call`` back to a REAL platform tool via
 ``tai42_app.tools.run_tool`` UNDER THE TURN'S execution identity, validating the call against
@@ -35,7 +35,7 @@ pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("claude_agent"),
-        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the §5 smoke",
+        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
 ]
 

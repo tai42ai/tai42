@@ -1,4 +1,4 @@
-"""C7 — the preset ``description`` contract over the real versioning store: the
+"""The preset ``description`` contract over the real versioning store: the
 required-non-empty create door, and the per-version editable description
 (None-carry-forward on save, restored on rollback).
 

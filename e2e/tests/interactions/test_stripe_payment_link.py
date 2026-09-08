@@ -1,4 +1,4 @@
-"""B4(a) — ``create_stripe_payment_link`` loaded on the payments stack.
+"""``create_stripe_payment_link`` loaded on the payments stack.
 
 ``create_stripe_payment_link`` (the flexible-amount, non-blocking hosted link — no
 ask/callback) is never loaded in any other manifest. The payments profile now carries it

@@ -33,7 +33,7 @@ from tai42_skeleton.conversations.pair_codes import ConversationPairCodeStore, M
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 
-# The D1 pair-code shape (``LINK-`` + 8 ``[A-Z0-9]``), matched as a whole token so a longer
+# The pair-code shape (``LINK-`` + 8 ``[A-Z0-9]``), matched as a whole token so a longer
 # alphanumeric run adjacent to a valid-looking prefix is not mistaken for a code.
 _CODE_RE = re.compile(r"\bLINK-[A-Z0-9]{8}\b")
 

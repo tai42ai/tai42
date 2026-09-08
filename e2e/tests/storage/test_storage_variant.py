@@ -1,4 +1,4 @@
-"""C7 (P1) — a resource stored on replica A through the REAL active storage plugin
+"""A resource stored on replica A through the REAL active storage plugin
 loads on replica B (a worker that never saw the write), and the plugin really wrote
 its OWN store.
 

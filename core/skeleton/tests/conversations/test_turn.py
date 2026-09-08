@@ -785,7 +785,7 @@ async def test_tool_target_suspended_interaction_ends_the_turn_silently(env, mon
 
 
 async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env, monkeypatch):
-    # R1+D1: a conversation route to a GENERIC parking tool binds the generic tool-route
+    # A conversation route to a GENERIC parking tool binds the generic tool-route
     # completion (naming THIS thread as the opaque delivery address) around the dispatch and
     # parks silently; when the tool's own resumer later fires deliver_tool_completion with the
     # terminal outcome, the route's reply_expr maps it and it is delivered back into the thread,
@@ -1447,7 +1447,7 @@ async def test_deliver_tool_completion_success_maps_the_reply_and_warns_nothing(
 
 
 async def test_deliver_tool_completion_maps_via_the_pinned_originating_route(env, monkeypatch):
-    # FINDING 3: a park started under route A; the linked person then wrote from route B, so
+    # A park started under route A; the linked person then wrote from route B, so
     # _resolve_completion_target reverses the thread to route B (where they last wrote). The
     # completion must still map the terminal through the ORIGINATING route A's reply_expr — not
     # route B's, which would map the SAME result wrongly. Delivery still lands on route B's
@@ -1833,7 +1833,7 @@ async def test_tool_route_malformed_part_object_is_a_loud_error(env, monkeypatch
 
 
 async def test_agent_structured_array_final_stays_one_serialized_message(env, monkeypatch):
-    # F1 STRICT ruling PIN: an agent whose structured final is a JSON array of strings is
+    # An agent whose structured final is a JSON array of strings is
     # serialized to ONE string and delivered as ONE message — NEVER split into ordered parts.
     # An agent's structured output may legitimately be a string array as DATA; only TOOL routes
     # author multi-message parts. Reverting to magic-array detection reddens this.

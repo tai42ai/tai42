@@ -10,7 +10,7 @@
  * redesign that restyles light and dark separately can regress one theme's
  * contrast or name/role/value while the other stays clean.
  *
- * axe is scoped to the WCAG 2.0/2.1 A + AA rule tags — the mission's conformance
+ * axe is scoped to the WCAG 2.0/2.1 A + AA rule tags — the conformance
  * target — so any violation returned is a genuine conformance failure. The
  * blocking assertion is zero critical/serious per surface/theme; the full
  * violation list is written to `test-results/a11y-mp-<theme>.json` as evidence.

@@ -1,4 +1,4 @@
-"""A fixture router proving RS-B6: a surviving epoch's pre-auth login route resolves the
+"""A fixture router proving a surviving epoch's pre-auth login route resolves the
 LIVE epoch's provider (non-500) after a FAILED build.
 
 At import it registers a TEST-LOCAL fake identity provider under :data:`PROVIDER_NAME`
@@ -54,7 +54,7 @@ async def preauth_probe(_request: Request) -> JSONResponse:
     # CURRENT epoch's live provider instance, never a module-level holder.
     provider = tai42_app.accounts.active_provider(PROVIDER_NAME)
     if provider is None:
-        # No live provider for the surviving epoch — the failure mode RS-B6 guards
+        # No live provider for the surviving epoch — the failure mode this fixture guards
         # against (a holder left pointing at a discarded/half-built generation).
         return JSONResponse({"error": "no active provider"}, status_code=500)
     return JSONResponse({"provider": type(provider).__name__})

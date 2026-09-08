@@ -98,7 +98,7 @@ def test_preset_hides_fixed_keys_and_binds():
 
 
 def test_preset_over_a_parking_tool_stamps_the_park_marker():
-    # R3: a preset over ANY parking tool must surface the park. The base tool's async park
+    # A preset over ANY parking tool must surface the park. The base tool's async park
     # returns the SuspendedInteraction sentinel through run_tool; the preset adapter (a plain
     # langchain tool) converts it to the reserved contract park marker, so the in-graph park
     # middleware recognizes the park by RESULT shape — exactly as the direct client-tool adapter.

@@ -1,10 +1,10 @@
-"""Item D — ``notify_user`` end to end.
+"""``notify_user`` end to end.
 
-D.1 (per medium): the external notify path is plain and stateless — ONE plain
-send, no reply markup, no interaction, no correlation key. D.2: ``channel=None``
+Per medium, the external notify path is plain and stateless — ONE plain
+send, no reply markup, no interaction, no correlation key. ``channel=None``
 lands in the internal notifications sink and reads back cross-worker (written on
 A, read on B through the shared interactions Redis) — no channel plugin involved.
-D.3 (per medium): an unlisted recipient fails closed with the stable refusal
+Per medium, an unlisted recipient fails closed with the stable refusal
 substring, nothing sent, nothing stored (notify has nothing to prune)."""
 
 from __future__ import annotations

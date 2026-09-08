@@ -1841,7 +1841,7 @@ async def test_non_prefixed_form_reply_takes_the_ask_path_unchanged(
 
 # --- Inbound entry-params vocabulary (bridge-path only) ------------------------
 #
-# The channel-side lane of the channels-vocabulary wave. Every param below rides ONLY
+# The channel-side lane of the inbound entry-params vocabulary. Every param below rides ONLY
 # on the conversation-bridge path (a fresh turn via ``conversations.accept``); the
 # correlated-answer path forwards ``{"answer": …}`` to the callback door — a seam that
 # carries no params — so a tap/button that ANSWERS a pending question surfaces none.
@@ -1874,9 +1874,9 @@ def _params_envelope(message: dict, *, phone_number_id: str = PHONE_NUMBER_ID) -
 async def test_button_reply_tap_bridges_reply_id_in_params(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # Claim 1 (born-red): a button_reply tap with NO pending question bridges the tap's
-    # title AND carries the tapped wire id under params.reply_id. On the OLD code the
-    # bridge accept passed no params, so params was None.
+    # A button_reply tap with NO pending question bridges the tap's
+    # title AND carries the tapped wire id under params.reply_id; without it the
+    # bridge accept would pass no params, leaving params None.
     result = await handler(signed_request(interactive_payload(reply_id="int-9:2", title="Talk to sales")))
 
     assert result.status_code == 200

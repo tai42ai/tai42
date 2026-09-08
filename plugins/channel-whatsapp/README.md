@@ -230,8 +230,8 @@ whichever keys it understands. This is the channel's public inbound contract:
 | `contacts_count` | An inbound **contacts** message | The number of shared contact cards |
 | `contacts` | " | The raw `contacts` array as compact JSON (dropped when over the per-value cap; `contacts_count` still rides) |
 
-Guest **media** and **location** and **reactions** and **contacts** now bridge
-as turns (previously inbound-dropped). The caption of a media message becomes the
+Guest **media** and **location** and **reactions** and **contacts** bridge
+as turns. The caption of a media message becomes the
 turn text (a faithful `[image]` / `[document: file]` / `[voice message]` / … 
 placeholder when caption-less); an inbound **location** lands as a typed
 `LocationElement` on the turn's `location` (a machine-consumable field, not a

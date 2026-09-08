@@ -189,7 +189,7 @@ class FakeStatesStore:
 
     async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, retention_days, conn=None):
         self.applied_origins.append(origin)
-        # Mirror the store's D-3 chokepoint so the service-level provenance test is end to
+        # Mirror the store's chokepoint so the service-level provenance test is end to
         # end: compose the state's traced paths from its mounts + modules and stamp
         # ``_trace`` from the COMPLETED origin (the stamping mechanics themselves are pinned
         # in test_store.py). A state with no traced mount leaves the ops untouched.
@@ -523,7 +523,7 @@ def _door_ctx(door, actor, turn_id, inbound_id) -> StateContext:
     )
 
 
-# The four door contexts the plan names (§4.6): a completed origin per door, plus the
+# The four door contexts the plan names: a completed origin per door, plus the
 # no-context ``api`` fallback (``ctx is None`` → the bound request principal supplies the
 # actor). Each carries the door's actor/turn_id/inbound_id that the write ledger and, under
 # a traced mount, the ``_trace`` stamp are built from.
@@ -543,7 +543,7 @@ _PROVENANCE_DOORS = [
 
 
 async def _mount_traced(svc: StatesService, store: FakeStatesStore) -> None:
-    """A traced mount on ``alerts`` so an ``apply`` also exercises the D-3 ``_trace`` stamp
+    """A traced mount on ``alerts`` so an ``apply`` also exercises the ``_trace`` stamp
     at the fake store, populated directly (the mount lifecycle is pinned elsewhere)."""
     await svc.put_declaration(_STATE)
     store.modules["traced_m"] = {
@@ -614,7 +614,7 @@ def test_consumer_supplied_door_refused_at_model() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# served regimes (PLAN_5 item 2)                                              #
+# served regimes                                                              #
 # --------------------------------------------------------------------------- #
 _REGIME_MODULE = {
     "kind": "state-module",

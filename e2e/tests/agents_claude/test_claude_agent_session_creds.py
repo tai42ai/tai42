@@ -1,4 +1,4 @@
-"""§3b — operator session creds reach the CLEAN ``claude_code`` session env, and fail CLOSED.
+"""Operator session creds reach the CLEAN ``claude_code`` session env, and fail CLOSED.
 
 The plugin injects ONLY its operator ``creds`` list (plus the one model credential) into a
 CLEAN session env — never the host env. Two invariants are proven deterministically over the
@@ -38,7 +38,7 @@ pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("claude_agent"),
-        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the §5 smoke",
+        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
 ]
 

@@ -486,7 +486,7 @@ class LinkOption(BaseModel):
 
 # One tappable option on an interactive message: EITHER a reply (tap submits its text) or a link
 # action (tap opens its url). A discriminated union on ``kind`` — the input carries the tag, so a
-# bare string is not an option (the clean break from the old text-only ``list[str]``: an option
+# bare string is not an option (an option
 # is authored as ``{"kind": "reply", "text": …}`` or ``{"kind": "link", "label": …, "url": …}``).
 Option = Annotated[ReplyOption | LinkOption, Field(discriminator="kind")]
 

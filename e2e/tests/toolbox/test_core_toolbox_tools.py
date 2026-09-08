@@ -1,4 +1,4 @@
-"""B4(b) — the four previously-uncovered toolbox tools on the core stack.
+"""The four toolbox tools on the core stack.
 
 ``request`` / ``generate_embeddings`` / ``pad_embeddings`` / ``current_time_info`` had zero
 e2e (only ``generate_uuid`` was ever loaded). The core profile now carries all four; each is

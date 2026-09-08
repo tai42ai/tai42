@@ -63,7 +63,7 @@ def test_crash_resume_true_flows_through_the_registration_read(monkeypatch: pyte
 def test_import_without_creds_succeeds_and_full_validation_still_raises_at_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§A1: importing ``claude_code.agent`` must NOT require any ``TAI_AGENTS_CLAUDE_*`` creds —
+    """Importing ``claude_code.agent`` must NOT require any ``TAI_AGENTS_CLAUDE_*`` creds —
     the registration meta is sourced from the lightweight ``crash_resume`` read alone. The full
     ``ClaudeCodeSettings`` validation (exactly-one-auth + digest image) still fires LOUDLY at run
     start. Proven by executing a FRESH copy of the module source with the creds env cleared (its

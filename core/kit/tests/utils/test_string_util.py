@@ -80,7 +80,7 @@ class TestMakefunFuncName:
 
     def test_distinct_invalid_inputs_stay_distinct(self):
         # Names carrying invalid chars but differing in their VALID chars stay
-        # distinct valid identifiers (the old fallback collapsed all to one
+        # distinct valid identifiers (a naive fallback would collapse all to one
         # constant). Two names differing ONLY by which invalid char they carry
         # (both mapped to ``_``) may still coincide — that is inherent.
         names = ["a!b", "x!y", "café", "naïve", "tool#1", "tool#2"]

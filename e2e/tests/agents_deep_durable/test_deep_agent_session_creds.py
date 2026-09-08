@@ -1,4 +1,4 @@
-"""Operator SERVICE creds reach the deep agent's sandbox shell (§B4), and an identity-less door
+"""Operator SERVICE creds reach the deep agent's sandbox shell, and an identity-less door
 fails closed.
 
 The ``langchain_deep_agent`` ``creds`` setting injects the operator's session creds into the
@@ -19,7 +19,7 @@ Two deterministic legs, both over the fake sandbox with no real vendor key:
   ``resolve_connection_auth`` that refuses when no execution identity is bound (the skeleton seam's
   fail-close), NOT the agent detecting identity itself, and NO cred is injected (never a silent
   drop). The refreshable ``delivery="bearer"`` ``{ws}/.creds`` materialization + terminal-exit
-  scrub, and the identity-BOUND positive injection, are proven deterministically in PLAN_4's §B4
+  scrub, and the identity-BOUND positive injection, are proven deterministically in the
   unit tests (they need a bound execution identity + a live connection, an auth-on + connectors
   composition no durable e2e stack carries).
 

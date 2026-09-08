@@ -1431,8 +1431,8 @@ async def test_a_refused_answer_is_only_restored_so_many_times(
 async def test_the_answered_frame_takes_the_write_order_gate(
     web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # Every agent-side append takes the conversation's gate; this one used to be the
-    # exception, so the reply an answer sets off could XADD ahead of the frame that
+    # Every agent-side append takes the conversation's gate; this frame must take it too,
+    # or the reply an answer sets off could XADD ahead of the frame that
     # settles the question the reply is answering.
     await _seed_question()
     fake_httpx.responses.append(response(200, json={"data": {"status": "answered"}}))

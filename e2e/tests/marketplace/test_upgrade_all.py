@@ -1,4 +1,4 @@
-"""C7 — skeleton ↔ tai42-marketplace registry over HTTP. Opt-in: collects only with
+"""Skeleton ↔ tai42-marketplace registry over HTTP. Opt-in: collects only with
 ``TAI_E2E_MARKETPLACE=1``.
 
 upgrade-all, contract-aware: with alpha installed at 0.1.0 (0.2.0 published and

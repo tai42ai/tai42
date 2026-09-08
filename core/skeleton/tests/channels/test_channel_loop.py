@@ -366,7 +366,7 @@ async def test_recipient_persisted_on_record(wired, fake_channel):
 
 
 async def test_channel_delivery_forwards_media_and_inbox_keeps_it(wired, fake_channel):
-    # Clean break / full parity: display media is now FORWARDED to the channel — the
+    # Full parity: display media is FORWARDED to the channel — the
     # ChannelDelivery carries the SAME stored items the inbox add frame renders. A channel
     # that renders only text ignores ``delivery.media``; one that renders it shows it.
     media: list[MediaItem | dict[str, Any]] = [

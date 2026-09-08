@@ -3,12 +3,12 @@
 The remote half of the ``tai`` command must operate a booted stack while installed
 on its own. This builds the ``tai42-contract`` and ``tai42-cli`` wheels, installs
 ONLY those into a fresh venv (the server package is absent), and drives the slim
-``tai`` against the B7 stack: a remote read answers, ``auth whoami`` answers,
+``tai`` against the CLI-coverage stack: a remote read answers, ``auth whoami`` answers,
 ``version --json`` lists ``tai42-cli`` and NOT ``tai42-skeleton``, a pure-remote
 ``config`` command works, and the server-contributed commands (``serve``,
 ``config lint``) are simply absent.
 
-The full-tree B7 file (``test_cli_against_stack``) still covers the workspace ``tai``
+The full-tree CLI file (``test_cli_against_stack``) still covers the workspace ``tai``
 with the server installed; this leg is the standalone-install contract.
 """
 

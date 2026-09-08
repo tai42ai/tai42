@@ -3,7 +3,7 @@
 The park is unresumable unless the tools the platform and a nested driver fire —
 ``agent_resume`` for an answered ask, ``deliver_chained_park`` for a chained call's terminal —
 are registered wherever a park-capable agent can park. That registration must therefore hold
-for EVERY park-capable agent module on its own — not just the one whose import used to
+for EVERY park-capable agent module on its own — not depend on any single module's import to
 carry it — because a deployment may load only one.
 
 Each case runs in a FRESH interpreter (a subprocess), because module import is cached

@@ -1,7 +1,7 @@
 """Every platform event topic must be SUBSCRIBABLE: a topic a hook cannot
-register on fires into a namespace nobody can occupy (the original P39 gap —
-dotted topics vs the hook door's single-segment charset). The pin builds a real
-``HookRegister`` on each emitted topic, so a new event topic that hooks cannot
+register on fires into a namespace nobody can occupy (dotted topics
+vs the hook door's single-segment charset). The check builds a real
+``HookRegister`` on each emitted topic, so an event topic that hooks cannot
 subscribe to fails here at introduction, not in production."""
 
 from tai42_contract.hooks.models import HookRegister

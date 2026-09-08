@@ -126,7 +126,7 @@ test('a per-send form with data + pages renders in the widget, steps, and resolv
   await expect(card.getByRole('option', { name: 'Option A' })).toHaveAttribute('value', 'a');
   await expect(card.getByRole('option', { name: 'Option B' })).toHaveAttribute('value', 'b');
 
-  // The widget shots the orchestrator reads: the stepped, prefilled first page in both
+  // The widget shots the screenshot tooling reads: the stepped, prefilled first page in both
   // themes (the widget's tokens follow the OS colour-scheme preference). Each frame is
   // shot on a FIRST-LOAD render. Toggling `prefers-color-scheme` to dark AFTER load hits a
   // Chromium form-control repaint artifact — a native `<input>`/`<select>` keeps its light

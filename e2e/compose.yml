@@ -292,7 +292,7 @@ services:
   # deployment), and the SAME inner-bridge egress firewall (RFC1918 + link-local/
   # metadata denied, internet OPEN). Keeping it byte-faithful is what makes the
   # four isolation negatives assert the topology that actually SHIPS, not a
-  # look-alike (the PLAN_5 §4 / PLAN_6 cross-plan lockstep). The firewall is
+  # look-alike (the cross-stack lockstep). The firewall is
   # INLINED into the entrypoint here (the reference bind-mounts a script file)
   # because this e2e leg owns only this single compose file.
   #

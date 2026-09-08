@@ -83,11 +83,10 @@ def test_role_audit_append_only_triggers_present() -> None:
 
 
 def test_marketplace_version_stamps_are_folded_into_create_table() -> None:
-    """Greenfield migration model: the ``contract_version`` / ``skeleton_version``
-    columns live INSIDE the ``CREATE TABLE marketplace_installs`` body, and the
-    old ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` backfill (needed only for a
-    pre-migration in-place upgrade) is gone. Text-level guard so a re-introduced
-    ALTER — or a dropped column — fails without a live Postgres."""
+    """The ``contract_version`` / ``skeleton_version`` columns live INSIDE the
+    ``CREATE TABLE marketplace_installs`` body, with no ``ALTER TABLE ... ADD COLUMN
+    IF NOT EXISTS`` backfill. Text-level guard so an ALTER — or a dropped column —
+    fails without a live Postgres."""
     ddl = _baseline_sql()
     match = re.search(r"CREATE TABLE IF NOT EXISTS marketplace_installs\s*\((.*?)\n\);", ddl, re.DOTALL)
     assert match is not None, "marketplace_installs table not found in the baseline"

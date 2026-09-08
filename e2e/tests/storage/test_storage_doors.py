@@ -1,4 +1,4 @@
-"""C7 — the ``/api/storage*`` HTTP surface over the REAL active storage provider
+"""The ``/api/storage*`` HTTP surface over the REAL active storage provider
 (round-trip, base64 binary, directory delete, the input-guard 400s) and the honest
 absent-provider answers (``present: false`` + 501) on a stack that mounts the door
 but loads no provider.

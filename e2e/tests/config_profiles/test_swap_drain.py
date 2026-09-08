@@ -1,8 +1,8 @@
-"""F6 — swap / drain behaviours of a profile apply's epoch build+swap.
+"""Swap / drain behaviours of a profile apply's epoch build+swap.
 
 Three landed contracts of ``config/service.py::apply_replace_env`` + ``app/epoch.py``:
 
-* FAILED BUILD (C5 env-write-LAST): a build that fails leaves the old surface serving and
+* FAILED BUILD (the env is written LAST): a build that fails leaves the old surface serving and
   the stored env byte-for-byte unchanged (STEP 4 ``replace_env`` never ran, the client epoch
   never advanced). The poison is an ENV value the SAVE-time validator accepts but the BUILD
   rejects — ``ACCESS_CONTROL_CACHE_SIZE`` (a hot-class ``int``) that every build constructs
@@ -68,7 +68,7 @@ async def _settings_epoch(stack: TaiStack) -> int:
 
 async def _effective_settings_values(stack: TaiStack) -> dict[str, Any]:
     """The EFFECTIVE (os.environ-resolved) value of every non-masked registered settings field,
-    read off the live worker via the F1 probe (``e2e_settings_snapshot`` resolves each field
+    read off the live worker via the settings-snapshot probe (``e2e_settings_snapshot`` resolves each field
     from ``os.environ``). Used to assert a failed build RESTORED ``os.environ`` (not just the
     stored env) — matching the skeleton unit ``test_profile_apply.py`` os.environ==before check."""
     async with stack.mcp(port=stack.port_a) as mcp:
@@ -141,7 +141,7 @@ async def test_failed_epoch_build_keeps_old_surface_and_stored_env(
     assert after_env == before_env, f"a failed build mutated the stored env: {before_env} -> {after_env}"
     assert _BUILD_POISON_VAR not in after_env, f"the poison value leaked into the stored env: {after_env}"
 
-    # F6 / os.environ RESTORED: the failed build applied the profile to os.environ before the
+    # os.environ RESTORED: the failed build applied the profile to os.environ before the
     # rebuild raised; ``build_and_swap_epoch`` must restore os.environ exactly, so the EFFECTIVE
     # settings values (read off os.environ by the probe) are unchanged and the poison never
     # stuck in the live process env.

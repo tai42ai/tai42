@@ -242,7 +242,7 @@ async def _answer_of(message_id: str) -> str:
     return record.answer
 
 
-# -- C1: the pure classifier -------------------------------------------------
+# -- the pure classifier -------------------------------------------------
 
 
 def test_classify_is_exact_match_and_first_code_wins():
@@ -277,7 +277,7 @@ def test_classify_form_rendered_text_is_passthrough():
     assert isinstance(classify("/unlink: true"), Passthrough)
 
 
-# -- C2: link / redeem / unlink e2e ------------------------------------------
+# -- link / redeem / unlink e2e ------------------------------------------
 
 
 async def _mint_via_link(monkeypatch, fake, route, *, address="+15550002222", provider="PID-L") -> str:

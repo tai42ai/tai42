@@ -686,7 +686,7 @@ async def test_a_whitespace_tail_resume_of_a_media_part_does_not_re_send_media(m
 
 
 async def test_a_ledger_entry_without_a_part_reads_as_part_zero(monkeypatch, fake, store):
-    """F5: a ledger entry written before the ``part`` field existed names a single-part answer,
+    """A ledger entry written before the ``part`` field existed names a single-part answer,
     so it reads as part 0 — a single-part answer whose first chunk was ledgered pre-upgrade
     resumes cleanly at its remainder, never re-sending the pre-upgrade chunk."""
     await store.create_record(_record("m-f5", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10

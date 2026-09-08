@@ -331,7 +331,7 @@ def test_tools_agent_run_park_without_a_completion_binds_none(
 def test_tools_agent_resume_delivers_a_legacy_ownerless_park_answer_end_to_end(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
-    # F3/G1 PRODUCTION WIRING (end-to-end): a park written by a release predecessor carries no
+    # PRODUCTION WIRING (end-to-end): a park written by a release predecessor carries no
     # resume_owner on its persisted wire marker. Drive the REAL agent_resume over such a park and
     # prove the operator's answer is SUBSTITUTED into the parked ToolMessage, not refused/dropped.
     # This pins the driver's ``resuming_park_interaction_ids(frozenset(expected))`` wrap: removing
@@ -914,7 +914,7 @@ def test_an_unchained_run_still_refuses_a_nested_runs_park(
 
 
 def test_park_continuation_binds_none_when_not_park_capable_shadowing_the_ambient() -> None:
-    # F1: a non-park-capable run's drive wrapper binds ``None``, SHADOWING any ambient resume
+    # A non-park-capable run's drive wrapper binds ``None``, SHADOWING any ambient resume
     # continuation a park-capable caller left bound. Without it, a nested non-capable run inherits
     # the ambient binding, its ask mints a park it can never resume, the claim point adopts it, and
     # the run answers with the raw marker (or the stream ends with no terminal).
@@ -933,7 +933,7 @@ def test_park_continuation_binds_none_when_not_park_capable_shadowing_the_ambien
 def test_tools_agent_under_ambient_binding_does_not_answer_with_a_marker_when_not_hostable(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
-    # F1 (probe shape, run face): a memory-checkpoint run is not park-capable, so its drive wrapper
+    # Probe shape, run face: a memory-checkpoint run is not park-capable, so its drive wrapper
     # binds None even under an ambient resume continuation a park-capable caller left bound. A
     # relayed marker naming that ambient continuation is then REFUSED at the claim point rather than
     # adopted, so the run never answers with the marker JSON.
@@ -1162,7 +1162,7 @@ def _park() -> drv.ParkIdentity:
 
 
 def test_bind_resume_per_step_scopes_the_binding_to_the_step_not_the_consumer() -> None:
-    # F4: the resume continuation must be bound WHILE a drive step is computed, but never leak
+    # The resume continuation must be bound WHILE a drive step is computed, but never leak
     # across the yield into the consumer. PEP 568 is unimplemented, so a ``with`` in the yielding
     # generator's own body would land the ContextVar in the CONSUMER's task and persist it across
     # every yield. ``bind_resume_per_step`` re-enters the binding per ``__anext__`` instead.
@@ -1191,7 +1191,7 @@ def test_bind_resume_per_step_scopes_the_binding_to_the_step_not_the_consumer() 
 
 
 def test_bind_resume_per_step_abandoned_midstream_leaves_a_clean_context() -> None:
-    # F4: abandoning the stream mid-flight must close the inner generator and leave the consumer's
+    # Abandoning the stream mid-flight must close the inner generator and leave the consumer's
     # context clean — no binding stranded, and no ValueError from a foreign-context Token reset on
     # aclose (the failure the in-generator ``with`` produced).
     park = _park()

@@ -281,7 +281,7 @@ async def test_sibling_pending_survives_at_zero_via_prune_pending(fake_redis):
 
 
 async def test_group_revive_after_purge_keeps_consistent_count(fake_redis):
-    # F.1 desync: a group's waiter dies, an unrelated add purges the group from the
+    # Desync: a group's waiter dies, an unrelated add purges the group from the
     # pending indexes, then the group revives with a new question while the stale
     # state survives. Because the purge no longer tears down the count key (it rides
     # idle_ttl), the revive's INCR builds on the live count, so pruning the stale

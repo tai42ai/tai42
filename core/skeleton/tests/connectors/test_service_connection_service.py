@@ -976,7 +976,7 @@ async def test_disconnect_with_failed_revoke_still_purges_locally(harness, monke
 
 
 async def test_disconnect_provider_gone_purges_locally(harness, monkeypatch):
-    """Item D: with the provider plugin unregistered, get_provider raises KeyError;
+    """With the provider plugin unregistered, get_provider raises KeyError;
     disconnect skips the upstream revoke and still purges the blob + manifest so a
     retry is not wedged at 500 forever."""
     cs_mod, records, store, _, events, providers = harness

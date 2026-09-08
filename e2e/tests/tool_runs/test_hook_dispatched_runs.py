@@ -1,4 +1,4 @@
-"""C7 (P1) — a hook-dispatched tool fire is recorded in the tool-runs store: it
+"""A hook-dispatched tool fire is recorded in the tool-runs store: it
 lists under ``GET /api/tool-runs?tool_name=...`` and is gettable by run id with a
 terminal status, exactly as a run submitted through ``POST /api/tool-runs`` (the
 recording lifecycle lives in Redis, so the fire on replica B is observable on A)."""

@@ -1,6 +1,6 @@
-"""Item E — the delivery-time config error, and the boot-abort half.
+"""The delivery-time config error, and the boot-abort half.
 
-Decision (A) splits misconfiguration by WHERE it surfaces. On the deliver/notify
+Misconfiguration splits by WHERE it surfaces. On the deliver/notify
 path EVERY failure — operator misconfiguration included — is a
 ``ChannelDeliveryError`` (retyped from the config check), so a booted stack whose
 default recipient is unset fails a recipient-less send LOUDLY at delivery time,

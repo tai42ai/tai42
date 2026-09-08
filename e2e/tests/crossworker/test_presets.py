@@ -1,4 +1,4 @@
-"""C4 / G2 — presets are versioned-only (clean break, no ephemeral tier). A
+"""Presets are versioned-only (no ephemeral tier). A
 store-backed read is coherent across replicas immediately; a live TOOL rebind on
 a sibling HTTP worker follows only after that worker's own reload, while the
 backend worker gets the fan-out."""

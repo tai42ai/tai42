@@ -103,7 +103,7 @@ async def test_submit_returns_run_id_and_runs_through_the_offload_seam(wired):
 
 
 async def test_background_run_of_a_parking_tool_records_parked_not_succeeded(wired):
-    # R8: a detached tool-run whose tool async-parks returns the generic SuspendedInteraction
+    # A detached tool-run whose tool async-parks returns the generic SuspendedInteraction
     # sentinel; the recorder reflects a PARKED terminal keyed by the parked interaction id —
     # never a ``succeeded`` record over an unfinished run. GENERIC: any parking tool.
     from tai42_contract.interactions import SuspendedInteraction

@@ -154,7 +154,7 @@ def test_projected_tool_maps_operation_error_to_toolerror():
 
 
 def test_boot_projection_is_one_to_one_over_every_eligible_op():
-    """Spec↔tools parity precursor (the live-stack version runs at D.1): over the
+    """Spec↔tools parity precursor (the live-stack version runs in ``test_projection_live``): over the
     FULL registry a real boot populates, every projection-eligible operation maps to
     exactly ONE projected tool — no op yields two tools, no eligible op is missing —
     and tier-1 (``run_tool`` + any meta-executor) never projects even when every op

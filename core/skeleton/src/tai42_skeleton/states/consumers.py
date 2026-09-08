@@ -202,7 +202,7 @@ async def schedules_lister(state: str) -> Sequence[ConsumerRow]:
         records = await export_schedules_raw()
     except NotSupportedError:
         # No scheduling backend is installed — the family cannot be listed. Surface the
-        # muted row instead of a silent empty (§4.11: "never swallowed").
+        # muted row instead of a silent empty (never swallowed).
         return [ConsumerRow(kind=_SCHEDULE_KIND, unavailable=_NO_SCHEDULING_BACKEND)]
     if not isinstance(records, list):
         raise TypeError(

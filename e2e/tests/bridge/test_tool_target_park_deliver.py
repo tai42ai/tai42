@@ -10,7 +10,7 @@ This is the unified park-completion binding's core new path, end to end on the r
   ``ask_user(mode="async")``. So the PRODUCTION completion continuation is what carries the
   deferred reply back.
 * A visitor's message parks the turn SILENTLY — no synchronous reply is posted, the interaction
-  is persisted — mirroring the web round-trip harness of ``test_l12``.
+  is persisted — mirroring the web round-trip harness of ``test_web_public_chat``.
 * The park is answered OUT OF BAND through a DIFFERENT replica's interactions door (the
   cross-worker resume of ``test_async_park_resume``). Its stored continuation fires the REAL
   ``deliver_tool_completion``, which maps the terminal through the route's ``reply_expr`` and

@@ -127,8 +127,7 @@ async def notify_user(
     ``audience``-addressed channel send stores them on the in-app feed record too, so the feed
     shows the same rich content the channel delivered; on the INTERNAL sink (``channel=None``)
     they are STORED on the feed record and returned by the read doors (rendering them, media
-    included, is the host inbox's own surface) — a clean break from the old
-    sink-refuses-rich-content rule.
+    included, is the host inbox's own surface).
     On the channel path a channel advertises support with the OPTIONAL class attributes
     ``supports_media_notifications`` / ``supports_template_notifications`` /
     ``supports_interactive_notifications`` (both ``options`` and ``sections``, one choice

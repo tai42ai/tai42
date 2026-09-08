@@ -827,10 +827,10 @@ if TYPE_CHECKING:
     from tai42_contract.tools import AppTools
 
     def _typing_probes(app: TaiApp, tools: AppTools, fn: Callable[[int], str]) -> None:  # pyright: ignore[reportUnusedFunction]
-        # Item 7: the exported tai42_app carries the protocol types, not Any.
+        # The exported tai42_app carries the protocol types, not Any.
         assert_type(tai42_app.tools, AppTools)
         assert_type(app.tools, AppTools)
-        # Item 6: tool/toolkit preserve the decorated callable's type.
+        # tool/toolkit preserve the decorated callable's type.
         assert_type(tools.tool(fn), Callable[[int], str])
         assert_type(tools.tool(force=True)(fn), Callable[[int], str])
         assert_type(tools.toolkit(fn), Callable[[int], str])

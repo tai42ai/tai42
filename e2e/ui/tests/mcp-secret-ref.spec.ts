@@ -310,7 +310,7 @@ test('pasting a new secret generates a key; the save-time sweep drops it but nev
 // generated it via a paste, and kept ("decline") when it was picked / pre-existing.
 // ---------------------------------------------------------------------------
 
-test('F7 accept: removing a server whose secret was PASTED here sweeps the session-generated key', async ({
+test('removing a server whose secret was PASTED here sweeps the session-generated key', async ({
   page,
   request,
 }) => {
@@ -348,7 +348,7 @@ test('F7 accept: removing a server whose secret was PASTED here sweeps the sessi
     .toEqual({ entries: 0, genPresent: false });
 });
 
-test('F7 decline: removing a server whose secret is a PICKED pre-existing key never sweeps it', async ({
+test('removing a server whose secret is a PICKED pre-existing key never sweeps it', async ({
   page,
   request,
 }) => {
@@ -385,7 +385,7 @@ test('F7 decline: removing a server whose secret is a PICKED pre-existing key ne
     .toEqual({ entries: 0, pickedPresent: true });
 });
 
-test('F7 split: removing a two-secret server sweeps only the session-generated leaf, keeping the picked one', async ({
+test('removing a two-secret server sweeps only the session-generated leaf, keeping the picked one', async ({
   page,
   request,
 }) => {

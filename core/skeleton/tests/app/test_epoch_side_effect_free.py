@@ -152,7 +152,7 @@ def test_failed_build_leaves_the_four_registries_bit_identical(monkeypatch):
 
 
 def test_reload_with_open_loop_bound_checkpoint_does_not_raise(monkeypatch):
-    """RB-M1: a reload with a live loop-bound checkpoint resource open succeeds — the
+    """A reload with a live loop-bound checkpoint resource open succeeds — the
     reload closes the langgraph checkpoint/store registries BEFORE the build's settings
     reset drops their per-loop registries, so the reset never finds a registry still
     holding live resources on the running loop (close-before-reset ordering guarded)."""

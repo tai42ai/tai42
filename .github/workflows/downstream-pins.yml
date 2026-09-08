@@ -1,8 +1,8 @@
 # When a CORE fleet member (contract/kit/skeleton/cli/agents) cuts a release, a
-# downstream repo still carrying an EXCLUDING pin (e.g. tai42-mcp-dynamic-postgres's
-# `tai42-contract>=1.5,<2`) silently fails to resolve the new version — a class of
-# breakage that used to surface only by hand-audit after the downstream went red or
-# latent-stale. This dispatch reads each known downstream manifest, extracts every
+# downstream repo still carrying an EXCLUDING pin (e.g. a downstream pinned
+# tai42-contract>=1.5,<2) silently fails to resolve the new version — a class of
+# breakage this dispatch surfaces at release time instead of by hand-audit after the
+# downstream goes red or latent-stale. It reads each known downstream manifest, extracts every
 # tai42-<core> requirement, checks the JUST-RELEASED version against it, and opens
 # (or updates) a tracking issue on THIS repo per stale pin. It never edits a
 # downstream repo — widening a downstream pin is the downstream maintainer's call.
@@ -24,7 +24,7 @@ on:
 permissions:
   contents: read
 
-# One sweep at a time; a release wave's burst of core tags collapses to a single
+# One sweep at a time; a burst of core release tags collapses to a single
 # convergent check. Never cancel an in-flight sweep (matches release-repin.yml).
 concurrency:
   group: downstream-pins
@@ -45,9 +45,8 @@ jobs:
           enable-cache: true
       - run: uv python install 3.13
       # Pure stdlib + packaging; --no-project skips resolving the workspace just to
-      # run it. RELEASE_PLEASE_TOKEN reads the private downstreams and opens the
-      # tracking issue; the public downstreams read with it too — it is the
-      # broadest-scoped token available to this repo. The audited downstream manifest
+      # run it. RELEASE_PLEASE_TOKEN reads the dependent repos and opens the tracking
+      # issue — it is the broadest-scoped token available to this repo. The audited downstream manifest
       # map is injected as config (DOWNSTREAM_PINS_MANIFESTS), so the checker source
       # names no specific downstream.
       - name: Check downstream pins against the released core version(s)

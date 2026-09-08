@@ -1,6 +1,6 @@
 """The per-workspace lease BUSY path — a cross-worker seam with no reachable e2e door here.
 
-The intent (§C4): two near-simultaneous THREADED turns of one ``thread_id`` race the shared Redis
+The intent: two near-simultaneous THREADED turns of one ``thread_id`` race the shared Redis
 workspace lease (``agent:park:wslock:<workspace_key>`` SET-NX over the ``TAI_AGENTS_REDIS_*`` park
 store); one wins, the other gets the constant-message ``WorkspaceLeaseHeldError`` from the lease
 ``__aenter__`` BEFORE any session or ``.creds`` exists (so it leaks nothing), and the winner's

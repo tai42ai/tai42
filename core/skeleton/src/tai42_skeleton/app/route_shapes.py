@@ -4,8 +4,8 @@ A route's shape is its sequence of segments with the literal text erased from
 every template position, so two routes that can match the SAME concrete request
 have overlapping shapes. The registry indexes every ``/api`` route by shape to
 answer two questions with one algebra: does a newly registered route COLLIDE
-with an existing one of a different owner (§ registration), and which registered
-route OWNS a concrete request path (§ the verifier's declared-public tier).
+with an existing one of a different owner (at registration), and which registered
+route OWNS a concrete request path (in the verifier's declared-public tier).
 
 Three segment kinds:
 

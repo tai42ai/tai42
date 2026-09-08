@@ -1,4 +1,4 @@
-"""C5 / G4 — cross-process lost-update on the shared config file. Disjoint env
+"""Cross-process lost-update on the shared config file. Disjoint env
 writes against both replicas must all survive: the ``FileConfigManager``
 read-modify-write is serialized across processes by an exclusive ``flock`` on a
 sidecar lock file, so concurrent writers cannot interleave and drop keys."""

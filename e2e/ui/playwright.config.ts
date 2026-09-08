@@ -36,7 +36,7 @@ export default defineConfig({
   // a local run without the env var records an empty string, never `undefined`.
   metadata: { "tai-studio-sha": process.env.TAI_STUDIO_SHA ?? "" },
   // One shared live stack: serial, no auto-rerun (a flaky UI e2e is a real race
-  // until proven otherwise — the mission's no-auto-rerun policy).
+  // until proven otherwise — the no-auto-rerun policy).
   fullyParallel: false,
   workers: 1,
   retries: 0,

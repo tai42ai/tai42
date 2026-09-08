@@ -229,9 +229,8 @@ def test_load_non_utf8_file_raises_load_error(tmp_path: Path):
 def test_read_wheel_rejects_honest_oversize_member(tmp_path: Path):
     # An honestly-declared over-cap member: the bounded read pulls at most
     # MAX + 1 inflated bytes and the length check rejects it. Assert the
-    # "inflates past" fragment unique to the bounded-read guard (the downstream
-    # parse byte-cap says "bytes, exceeding", and the removed file_size guard
-    # said "bytes uncompressed, exceeding"), so this pins the real guard.
+    # "inflates past" fragment unique to the bounded-read guard (distinct from the
+    # downstream parse byte-cap's "bytes, exceeding"), so this pins the real guard.
     wheel = _write_deflate_wheel(tmp_path, b"x" * (MAX_PLUGIN_SPEC_BYTES + 1))
     with pytest.raises(
         PluginSpecLoadError,
