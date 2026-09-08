@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract the provider registers through — the accounts
     # ABC, the login-method models, and the dual-registry registration function.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=8.1,<9",
+    "tai42-contract>=8.2,<9",
     # The Redis client (session/state/SSO-code storage), the api-key hash used to
     # store session tokens at rest, AND the OIDC/JWT helper (tai42_kit.net.jwt:
     # discovery, JWKS cache, id_token verification). httpx — the token-exchange
