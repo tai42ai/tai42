@@ -347,7 +347,9 @@ class WebChannel:
         A ``schema`` notification (an ask-less form) lands as ONE ``chat.form`` card:
         the message is the form's prompt, the schema is the fillable widget, any media
         and any location ride the same card, and the frame carries a server-minted
-        submission token. The token's record (the transcript pair, the schema, the
+        submission token. A form part's per-send ``data`` (prefilled values + per-send
+        option lists) and ``pages`` (step layout) ride the same card, so the widget opens
+        already filled in. The token's record (the transcript pair, the schema, the
         message) is stored for the transcript TTL, so the card is submittable exactly as
         long as it can replay; the submission door reads it, renders the ``label: value``
         text from the STORED schema, and bridges the values as a guest message.
@@ -378,7 +380,18 @@ class WebChannel:
             )
             async with transcript_order(identity, address):
                 entry_id = await append_form(
-                    identity, address, notification.message, notification.schema, token, frame_media, frame_location
+                    identity,
+                    address,
+                    notification.message,
+                    notification.schema,
+                    token,
+                    frame_media,
+                    frame_location,
+                    # The form's per-send prefill/options and step layout ride the same
+                    # frame, so an ask-less form opens already filled in (present only for
+                    # a form send, which the contract couples them to).
+                    form_data=(_form_data_frame(notification.data) if notification.data is not None else None),
+                    pages=(_form_pages_frame(notification.pages) if notification.pages is not None else None),
                 )
             return [entry_id]
 

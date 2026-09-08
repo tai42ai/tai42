@@ -111,6 +111,38 @@ def test_part_notification_schema_rides_the_final_chunk_only():
     assert last.schema == _FORM_SCHEMA
 
 
+def test_part_notification_form_prefill_rides_the_final_chunk():
+    # A form part's per-send prefill (values + options) and step layout reach the form send
+    # on the FINAL chunk, so the channel opens the form already filled in; an earlier chunk
+    # carries neither.
+    from tai42_contract.interactions.models import FormData, FormPage
+
+    part = AnswerPart(
+        message="fill this in",
+        schema=_FORM_SCHEMA,
+        data=FormData(values={"name": "Ada"}),
+        pages=[FormPage(title="Details", fields=["name"])],
+    )
+    record = _channel_record()
+    early = _part_notification(part, "fill th", record, final=False)
+    assert early.data is None
+    assert early.pages is None
+    last = _part_notification(part, "is in", record, final=True)
+    assert last.data is not None
+    assert last.data.values == {"name": "Ada"}
+    assert last.pages is not None
+    assert last.pages[0].fields == ["name"]
+
+
+def test_reply_part_bad_prefill_is_refused_loudly():
+    # A flow's tool reply array whose form part carries a prefill value that fails the
+    # schema is refused at the parse seam, so a partly filled form is never stored or sent.
+    from tai42_skeleton.conversations.turn import _checked_reply_parts
+
+    with pytest.raises(ValueError, match="must be a string"):
+        _checked_reply_parts([{"message": "fill this in", "schema": _FORM_SCHEMA, "data": {"values": {"name": 42}}}])
+
+
 class _PlainChannel:
     async def notify(self, notification):
         return []

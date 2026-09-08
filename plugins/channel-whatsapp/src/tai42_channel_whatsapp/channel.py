@@ -154,29 +154,31 @@ async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, 
     return flow_id
 
 
-def _form_pages_list(delivery: ChannelDelivery) -> list[dict[str, Any]] | None:
+def _form_pages_list(send: ChannelDelivery | ChannelNotification) -> list[dict[str, Any]] | None:
     """The form's step layout as plain JSON — each page ``{"title", "fields"}`` — or
-    ``None`` when the ask carried one page."""
-    if delivery.pages is None:
+    ``None`` when the send carried one page. Shared by the form ask and the ask-less form
+    notification, whose ``pages`` field is the identical shape."""
+    if send.pages is None:
         return None
-    return [{"title": page.title, "fields": list(page.fields)} for page in delivery.pages]
+    return [{"title": page.title, "fields": list(page.fields)} for page in send.pages]
 
 
 def _form_values_and_options(
-    delivery: ChannelDelivery,
+    send: ChannelDelivery | ChannelNotification,
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     """The form's per-send ``values`` and ``options`` as plain JSON — each option
-    ``{"value", "label"?}`` (label omitted when absent). Empty when the ask carried no
-    data."""
-    if delivery.data is None:
+    ``{"value", "label"?}`` (label omitted when absent). Empty when the send carried no
+    data. Shared by the form ask and the ask-less form notification, whose ``data`` field
+    is the identical shape."""
+    if send.data is None:
         return {}, {}
     options: dict[str, list[dict[str, Any]]] = {}
-    for name, choices in delivery.data.options.items():
+    for name, choices in send.data.options.items():
         options[name] = [
             {"value": choice.value, **({"label": choice.label} if choice.label is not None else {})}
             for choice in choices
         ]
-    return dict(delivery.data.values), options
+    return dict(send.data.values), options
 
 
 async def _deliver_form(
@@ -794,7 +796,15 @@ async def _send_form_notification(
     """
     if notification.schema is None:  # dispatch guard; notify() branches on the field
         raise ChannelDeliveryError("form notification is missing its schema")
-    flow_json, schema_hash = build_flow(notification.schema)
+    # Mirror the form ask: the per-send Flow (one screen per page) and its prefill/option
+    # data are built and validated BEFORE any network work, and the send navigates to the
+    # entry screen injecting that data — so an ask-less form opens already filled in. The
+    # published Flow is keyed by the ``(schema, pages, option_fields)`` triple and reused
+    # across sends; the prefilled values and per-send option lists ride the send's data.
+    pages = _form_pages_list(notification)
+    values, options = _form_values_and_options(notification)
+    flow_json, schema_hash = build_form_flow(notification.schema, pages, set(options))
+    flow_data = build_flow_data(notification.schema, values, options)
     waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
 
     sent = await _send_media_prelude(phone_number_id, target, list(notification.media or []))
@@ -809,6 +819,8 @@ async def _send_form_notification(
             body_text=notification.message,
             flow_id=flow_id,
             flow_token=flow_token,
+            screen=_FORM_ENTRY_SCREEN,
+            data=flow_data,
         )
     )
     return sent

@@ -613,6 +613,8 @@ async def append_form(
     token: str,
     media: list[dict[str, Any]] | None = None,
     location: dict[str, Any] | None = None,
+    form_data: dict[str, Any] | None = None,
+    pages: list[dict[str, Any]] | None = None,
 ) -> str:
     """Append one ``chat.form`` agent entry (an ask-less form card) and return its id.
 
@@ -624,13 +626,20 @@ async def append_form(
     nothing. ``media`` is the card's display items, the same ``{"kind", "url",
     "caption"?, "filename"?}`` shape every other card carries, present ONLY when
     non-empty. ``location`` is a shared geographic point (the same map-pin shape a
-    media card carries) a form may ride alongside its fields, present ONLY when set."""
+    media card carries) a form may ride alongside its fields, present ONLY when set.
+    ``form_data`` is the card's per-send enrichment — ``{"values", "options"}``, the
+    prefilled values shown filled in and the per-send choice lists — and ``pages`` its
+    step layout, each the same frame shape a form question carries, present ONLY when set."""
     entry_id = _mint_id()
     data: dict[str, Any] = {"id": entry_id, "text": text, "schema": schema, "token": token, "ts": _now_iso()}
     if media:
         data["media"] = media
     if location is not None:
         data["location"] = location
+    if form_data is not None:
+        data["data"] = form_data
+    if pages is not None:
+        data["pages"] = pages
     await _append(identity, address, FORM_EVENT, data)
     return entry_id
 

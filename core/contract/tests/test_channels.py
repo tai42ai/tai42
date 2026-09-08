@@ -623,6 +623,37 @@ def test_notification_accepts_a_form_schema():
     assert ChannelNotification(message="hi").schema is None
 
 
+def test_notification_carries_form_prefill_data_and_pages():
+    # An ask-less form can open ALREADY FILLED IN: per-send prefill and a stepped-page
+    # layout ride the same form send as its schema (the same the ask-path delivery keeps).
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions.models import FormData, FormPage
+
+    notification = ChannelNotification(
+        message="tell us your size",
+        schema=_form_schema(),
+        data=FormData(values={"size": "M"}),
+        pages=[FormPage(title="Details", fields=["size"])],
+    )
+    assert notification.data is not None
+    assert notification.data.values == {"size": "M"}
+    assert notification.pages is not None
+    assert notification.pages[0].fields == ["size"]
+
+
+def test_notification_data_and_pages_ride_a_form_send_only():
+    # ``data``/``pages`` mean nothing without a schema; a non-form send refuses them loudly.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions.models import FormData, FormPage
+
+    with pytest.raises(ValidationError, match="no schema carries no form data"):
+        ChannelNotification(message="hi", data=FormData(values={"size": "M"}))
+    with pytest.raises(ValidationError, match="no schema carries no form pages"):
+        ChannelNotification(message="hi", pages=[FormPage(title="Details", fields=["size"])])
+
+
 def test_notification_schema_rejects_present_but_empty_dict():
     # A present schema is a non-empty dict — the same bound the ask-path delivery enforces;
     # the deep shape is the sender's shared subset walk, not this model's concern.

@@ -38,7 +38,7 @@ from tai42_channel_whatsapp.client import (
     send_video,
 )
 from tai42_channel_whatsapp.correlation import PendingQuestionExistsError
-from tai42_channel_whatsapp.flows import build_flow, build_flow_data, build_form_flow
+from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow
 
 from .conftest import ALLOWED_A, ALLOWED_B, PHONE_NUMBER_ID, FakeHttpx, FakeRedis, make_delivery, response
 
@@ -2026,7 +2026,7 @@ async def test_notify_form_sends_media_prelude_then_flow_last_no_reservation(
 ):
     import json
 
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
     fake_httpx.responses.append(_accepted("wamid.LINKS"))
     fake_httpx.responses.append(_accepted("wamid.IMG"))
@@ -2068,7 +2068,7 @@ async def test_notify_form_cache_miss_creates_publishes_then_sends(
     waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # The one-published-Flow-per-schema resolve is the SAME machinery the form ask uses.
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_httpx.responses.append(response(200, json={"id": "flow-new"}))
     fake_httpx.responses.append(response(200, json={"success": True}))
     fake_httpx.responses.append(_accepted("wamid.FLOW"))
@@ -2088,13 +2088,11 @@ async def test_notify_form_token_disjoint_from_ask_flow_tokens(waba_env, fake_re
     # Both directions of the namespace fence: an ask's flow token is its interaction id
     # verbatim (no prefix), a notification's is always prefixed — and two notifications
     # for the SAME schema still mint distinct tokens (the random suffix).
-    # The ask flow (per-send, keyed on the schema+pages pair) and the notify flow
-    # (schema only) are distinct published flows; seed both caches so all three sends
-    # are cache hits.
-    _, notify_hash = build_flow(_FORM_SCHEMA)
-    _, ask_hash = build_form_flow(_FORM_SCHEMA)
-    fake_redis.store[_flow_cache_key(notify_hash)] = "flow-nf"
-    fake_redis.store[_flow_cache_key(ask_hash)] = "flow-ask"
+    # The ask and the ask-less form build the SAME per-send Flow (keyed on the
+    # (schema, pages, option_fields) triple), so for one schema+layout they REUSE one
+    # published Flow — the per-send flow token, not the Flow, keeps their replies disjoint.
+    _, shared_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(shared_hash)] = "flow-shared"
     fake_httpx.responses.append(_accepted("wamid.ASK"))
     fake_httpx.responses.append(_accepted("wamid.NF1"))
     fake_httpx.responses.append(_accepted("wamid.NF2"))
@@ -2118,6 +2116,38 @@ async def test_notify_form_missing_waba_id_raises_loudly(fake_redis: FakeRedis, 
         await WhatsAppChannel().notify(_form_notification())
 
     assert not fake_httpx.calls
+
+
+async def test_notify_form_prefill_and_pages_reach_send_flow(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # An ask-less form's per-send prefill/options and step layout ride the send exactly as a
+    # form ask's do: the notify Flow is the dynamic per-send Flow (keyed on the
+    # (schema, pages, option_fields) triple), and the send navigates to the entry screen
+    # injecting the values/options — so the guest's form opens already filled in.
+    from tai42_contract.interactions.models import FormData, FormOption, FormPage
+
+    schema = {
+        "type": "object",
+        "properties": {"tier": {"type": "string", "enum": ["g", "s"]}, "note": {"type": "string"}},
+    }
+    data = FormData(values={"note": "hi"}, options={"tier": [FormOption(value="g", label="Gold")]})
+    pages = [FormPage(title="Plan", fields=["tier"]), FormPage(title="Say", fields=["note"])]
+    _, schema_hash = build_form_flow(
+        schema, [{"title": "Plan", "fields": ["tier"]}, {"title": "Say", "fields": ["note"]}], {"tier"}
+    )
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-nf-prefill"
+    fake_httpx.responses.append(_accepted("wamid.FLOW"))
+
+    ids = await WhatsAppChannel().notify(_form_notification(schema=schema, data=data, pages=pages))
+
+    assert ids == ["wamid.FLOW"]
+    params = fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]
+    assert params["flow_id"] == "flow-nf-prefill"
+    assert params["flow_token"].startswith(f"{_NF_PREFIX}{schema_hash}:")
+    action_payload = params["flow_action_payload"]
+    assert action_payload["screen"] == "SCREEN_0"
+    # The prefill value and the per-send option list reach the Flow's screen data model.
+    assert action_payload["data"]["note__init"] == "hi"
+    assert action_payload["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]
 
 
 async def test_channel_advertises_form_notification_capability():

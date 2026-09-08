@@ -254,6 +254,55 @@ async def test_web_form_card_submit_resubmit_foreign_404_and_no_schema_validatio
     assert violating_turn["form"] == violating
 
 
+async def test_web_form_reply_part_opens_the_card_prefilled(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+    # A flow's reply part IS a form: a tool route replies with a form AnswerPart carrying
+    # per-send ``data`` (prefill values + option lists) and ``pages``, and the whole seam —
+    # AnswerPart -> delivery -> ChannelNotification -> web notify -> chat.form card — forwards
+    # them, so the guest's card opens ALREADY FILLED IN.
+    identity = uniq("l27-reply-site").replace("_", "-")
+    prompt = uniq("l27-reply-prompt")
+    reply_part = {
+        "message": prompt,
+        "schema": _WEB_SCHEMA,
+        "data": {
+            "values": {"count": 7},
+            "options": {"topic": [{"value": "red", "label": "Red"}, {"value": "blue", "label": "Blue"}]},
+        },
+        "pages": [{"title": "Choose", "fields": ["topic"]}, {"title": "How many", "fields": ["count"]}],
+    }
+    exec_key = uniq("l27-reply-exec")
+    await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
+    # A JSON array literal is a valid jq program that emits its constant regardless of input:
+    # the tool runs (recording the inbound), and its reply is mapped to the one form part.
+    await bridge.create_tool_channel_route(
+        route_name=uniq("l27-reply-route").replace("_", "-"),
+        tool="e2e_record",
+        execution_key=exec_key,
+        channel="web",
+        our_identity=identity,
+        payload_expr=f'{{key: "{uniq("l27-reply-probe")}", value: .message}}',
+        reply_expr=json.dumps([reply_part]),
+    )
+    web, page = await WebChatClient.open_page(_base_url(bridge), identity, store_url=bridge.stack.resources.redis_url)
+    assert page.status_code == 200, page.text
+
+    sent = await web.send(uniq("l27-reply-msg"))
+    assert sent.status_code == 200, sent.text
+
+    def _is_form_card(event: str, data: dict) -> bool:
+        return event == "chat.form" and data.get("text") == prompt
+
+    frames = await web.frames(until=_is_form_card)
+    card = next(data for event, data in frames if _is_form_card(event, data))
+    assert card["schema"] == _WEB_SCHEMA
+    # The prefill values, per-send option lists and step layout all reach the card verbatim.
+    assert card["data"] == {
+        "values": {"count": 7},
+        "options": {"topic": [{"value": "red", "label": "Red"}, {"value": "blue", "label": "Blue"}]},
+    }
+    assert card["pages"] == [{"title": "Choose", "fields": ["topic"]}, {"title": "How many", "fields": ["count"]}]
+
+
 @_whatsapp_mock_leg
 async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coerced_form(
     bridge: BridgeHarness, uniq: Callable[[str], str]

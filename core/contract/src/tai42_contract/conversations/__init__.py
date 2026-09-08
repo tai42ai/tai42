@@ -40,7 +40,15 @@ from tai42_contract.entry_params import (
     validate_entry_params,
 )
 from tai42_contract.errors import ErrorKind
-from tai42_contract.interactions.models import LocationElement, MediaItem, check_media_list
+from tai42_contract.interactions.models import (
+    FormData,
+    FormPage,
+    LocationElement,
+    MediaItem,
+    check_form_data,
+    check_form_pages,
+    check_media_list,
+)
 from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
 
@@ -399,6 +407,12 @@ with warnings.catch_warnings():
         # a guest message. Intentionally named ``schema`` (matches the payload it carries);
         # shadows the deprecated ``BaseModel.schema()`` alias, which this model never uses.
         schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
+        # Per-send prefill/options layered over ``schema`` for THIS part's form, so a reply
+        # part can open its form already filled in; ride ONLY a form part (``schema`` present).
+        data: FormData | None = None
+        # Stepped-form layout over ``schema``: each :class:`FormPage` names the top-level
+        # properties on one step; ride ONLY a form part. Absent ``pages`` means one page.
+        pages: list[FormPage] | None = None
 
         @field_validator("message")
         @classmethod
@@ -464,6 +478,27 @@ with warnings.catch_warnings():
                 footer=self.footer,
                 noun="part",
             )
+            return self
+
+        @model_validator(mode="after")
+        def _check_form_extras(self) -> AnswerPart:
+            # ``data``/``pages`` enrich a form part's ``schema`` (prefill, per-send option
+            # lists, stepped pages), so they ride ONLY a part that carries a ``schema`` — on
+            # any other part they name a form that is not there and are refused loudly. When a
+            # form part carries them, each is cross-checked against THIS part's ``schema`` (the
+            # same :func:`check_form_data`/:func:`check_form_pages` the ask path's
+            # ``InteractionRequest`` runs), so a bad prefill is refused here rather than
+            # delivered as a partly filled form.
+            if self.schema is None:
+                if self.data is not None:
+                    raise ValueError("data rides a form part (a part with a schema) only")
+                if self.pages is not None:
+                    raise ValueError("pages ride a form part (a part with a schema) only")
+                return self
+            if self.data is not None:
+                check_form_data(self.schema, self.data)
+            if self.pages is not None:
+                check_form_pages(self.schema, self.pages)
             return self
 
         def is_plain_text(self) -> bool:

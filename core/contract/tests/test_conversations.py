@@ -617,6 +617,63 @@ def test_answer_part_schema_may_combine_with_media():
     assert part.schema == _part_form_schema()
 
 
+def test_answer_part_carries_form_prefill_data_and_pages():
+    # A reply part can open its form ALREADY FILLED IN: per-send prefill (values +
+    # option lists) and a stepped-page layout ride the same form part as its schema.
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import FormData, FormPage
+
+    part = AnswerPart(
+        message="tell us your size",
+        schema=_part_form_schema(),
+        data=FormData(values={"size": "M"}),
+        pages=[FormPage(title="Details", fields=["size"])],
+    )
+    assert part.data is not None
+    assert part.data.values == {"size": "M"}
+    assert part.pages is not None
+    assert part.pages[0].fields == ["size"]
+    assert not part.is_plain_text()
+
+
+def test_answer_part_data_and_pages_still_forbid_unknown_keys():
+    # The new prefill surface does not loosen strictness: an unknown key is still refused.
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import FormData
+
+    with pytest.raises(ValidationError):
+        AnswerPart(
+            message="tell us your size",
+            schema=_part_form_schema(),
+            data=FormData(values={"size": "M"}),
+            surprise="nope",  # pyright: ignore[reportCallIssue]
+        )
+
+
+def test_answer_part_data_rides_a_form_part_only():
+    # ``data``/``pages`` enrich a form's schema; on a non-form part they name a form that
+    # is not there and are refused loudly, never silently dropped.
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import FormData, FormPage
+
+    with pytest.raises(ValidationError, match="data rides a form part"):
+        AnswerPart(message="hi", data=FormData(values={"size": "M"}))
+    with pytest.raises(ValidationError, match="pages ride a form part"):
+        AnswerPart(message="hi", pages=[FormPage(title="Details", fields=["size"])])
+
+
+def test_answer_part_bad_prefill_value_is_refused():
+    # A prefill value that fails its property's schema is refused at the part, so a partly
+    # filled form is never delivered — the same check the ask path's InteractionRequest runs.
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import FormData
+
+    with pytest.raises(ValidationError, match="must be a string"):
+        AnswerPart(message="tell us your size", schema=_part_form_schema(), data=FormData(values={"size": 42}))
+    with pytest.raises(ValidationError, match="unknown property"):
+        AnswerPart(message="tell us your size", schema=_part_form_schema(), data=FormData(values={"nope": "x"}))
+
+
 def test_answer_part_field_set_is_the_notification_content_surface():
     # The mirror invariant, enforced MECHANICALLY: AnswerPart's field set IS
     # ChannelNotification's CONTENT surface — every notification field minus the

@@ -728,6 +728,12 @@ with warnings.catch_warnings():
         # a guest message. Intentionally named ``schema`` (matches the payload it carries);
         # shadows the deprecated ``BaseModel.schema()`` alias, which this model never uses.
         schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
+        # Per-send prefill/options over ``schema`` (the same :class:`ChannelDelivery` keeps),
+        # so an ask-less form can open already filled in; ride ONLY a form send (``schema``).
+        data: FormData | None = None
+        # The form's step layout over ``schema``, present only on a form send: each
+        # :class:`FormPage` names the top-level properties shown on one step.
+        pages: list[FormPage] | None = None
 
         @field_validator("message")
         @classmethod
@@ -810,6 +816,20 @@ with warnings.catch_warnings():
                 footer=self.footer,
                 noun="notification",
             )
+            return self
+
+        @model_validator(mode="after")
+        def _check_form_extras(self) -> ChannelNotification:
+            # ``data``/``pages`` enrich a form send's ``schema`` and mean nothing without it, so
+            # they ride ONLY a notification that carries a ``schema`` — present on any other send
+            # is a caller bug refused loudly, mirroring :class:`ChannelDelivery`. The deep prefill
+            # cross-check against the schema is the sender's (the :class:`AnswerPart` /
+            # ``InteractionRequest`` seam), never re-run here.
+            if self.schema is None:
+                if self.data is not None:
+                    raise ValueError("a notification with no schema carries no form data")
+                if self.pages is not None:
+                    raise ValueError("a notification with no schema carries no form pages")
             return self
 
 

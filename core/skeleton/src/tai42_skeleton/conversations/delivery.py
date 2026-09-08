@@ -150,9 +150,9 @@ def _remaining_parts(parts: list[AnswerPart], sent: list[SentChunk]) -> list[tup
 
 def _part_notification(part: AnswerPart, chunk: str, record: ConversationRecord, *, final: bool) -> ChannelNotification:
     """The :class:`ChannelNotification` for one chunk of ``part``. The part's rich fields
-    (media, location, template, options, sections, header, footer, schema) ride the FINAL chunk of
-    the part — its completed message — so a multi-chunk part's earlier chunks are plain text and
-    the media/buttons/form land with the last.
+    (media, location, template, options, sections, header, footer, schema, and a form part's
+    per-send data/pages) ride the FINAL chunk of the part — its completed message — so a
+    multi-chunk part's earlier chunks are plain text and the media/buttons/form land with the last.
     A CONTENT-ONLY part (media- or location-only) has a single final chunk of ``""``: the
     notification then carries a blank message plus that content, which the contract admits exactly
     because the content is present. ``recipient``/``sender_identity`` are the per-delivery routing
@@ -170,6 +170,8 @@ def _part_notification(part: AnswerPart, chunk: str, record: ConversationRecord,
         header=part.header if final else None,
         footer=part.footer if final else None,
         schema=part.schema if final else None,
+        data=part.data if final else None,
+        pages=part.pages if final else None,
     )
 
 

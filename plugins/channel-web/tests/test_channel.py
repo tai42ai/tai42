@@ -699,6 +699,32 @@ async def test_notify_schema_with_media_rides_the_same_card(fake_redis: FakeRedi
     assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "a pattern"}]
 
 
+async def test_notify_form_prefill_data_and_pages_ride_the_card(fake_redis: FakeRedis):
+    # An ask-less form opens ALREADY FILLED IN: the per-send values/options and the step
+    # layout ride the SAME chat.form frame the deliver path uses — values under
+    # `data.values`, choice lists under `data.options`, steps under `pages`.
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}, "note": {"type": "string"}}}
+    await WebChannel().notify(
+        make_notification(
+            message="Fill this in",
+            schema=schema,
+            data=FormData(values={"note": "hi"}, options={"colour": [FormOption(value="r", label="Red")]}),
+            pages=[FormPage(title="Pick", fields=["colour"]), FormPage(title="Say", fields=["note"])],
+        )
+    )
+    payload = _only_form_entry(fake_redis)
+    assert payload["data"] == {"values": {"note": "hi"}, "options": {"colour": [{"value": "r", "label": "Red"}]}}
+    assert payload["pages"] == [{"title": "Pick", "fields": ["colour"]}, {"title": "Say", "fields": ["note"]}]
+
+
+async def test_notify_form_omits_data_and_pages_when_absent(fake_redis: FakeRedis):
+    # A plain ask-less form (no per-send enrichment, one page) carries neither key.
+    await WebChannel().notify(make_notification(message="Fill this in", schema=_FORM_SCHEMA))
+    payload = _only_form_entry(fake_redis)
+    assert "data" not in payload
+    assert "pages" not in payload
+
+
 async def test_notify_schema_without_media_omits_the_key(fake_redis: FakeRedis):
     await WebChannel().notify(make_notification(schema=_FORM_SCHEMA))
     payload = _only_form_entry(fake_redis)
