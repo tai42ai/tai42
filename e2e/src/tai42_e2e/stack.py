@@ -943,6 +943,15 @@ class TaiStack:
         then restarts it so the new keys take effect — modelling an operator rotating the
         deployment's KEK. An empty ``previous`` clears ``CONNECTORS_KEK_PREVIOUS`` (the old
         key retired after the re-encrypt sweep converged)."""
+        # The app reads the KEK from the rendered ``.env`` file (TaiBaseSettings' env_file),
+        # so the shared ``config.env`` — the .env source — must carry the rotated keys too;
+        # updating only each process env leaves a restarted replica booting the stale .env.
+        self.config.env["CONNECTORS_KEK"] = new_kek
+        if previous:
+            self.config.env["CONNECTORS_KEK_PREVIOUS"] = ",".join(previous)
+        else:
+            self.config.env.pop("CONNECTORS_KEK_PREVIOUS", None)
+        self._render_env_file()
         for name in [n for n in self._specs if n.startswith("serve") or n == "backend"]:
             env = self._specs[name].env
             env["CONNECTORS_KEK"] = new_kek
