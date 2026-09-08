@@ -682,9 +682,43 @@ describe('applyFrame: chat.form', () => {
         token: 'tok-1',
         media: null,
         location: null,
+        formData: null,
+        pages: null,
         ts: TS,
       },
     ]);
+  });
+
+  it('folds a form entry carrying per-send prefill, options and step pages', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      formFrame({
+        schema: {
+          type: 'object',
+          properties: { note: { type: 'string' }, colour: { type: 'string' } },
+        },
+        data: {
+          values: { note: 'draft' },
+          options: { colour: [{ value: 'r', label: 'Red' }] },
+        },
+        pages: [
+          { title: 'Basics', fields: ['note'] },
+          { title: 'Extras', fields: ['colour'] },
+        ],
+      }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'form',
+      formData: {
+        values: { note: 'draft' },
+        options: { colour: [{ value: 'r', label: 'Red' }] },
+      },
+      pages: [
+        { title: 'Basics', fields: ['note'] },
+        { title: 'Extras', fields: ['colour'] },
+      ],
+    });
   });
 
   it('folds a form entry carrying media through the same vetted parse a card uses', () => {
@@ -723,6 +757,15 @@ describe('applyFrame: chat.form', () => {
       'a form with an off-scheme image',
       formFrame({ media: [{ kind: 'image', url: 'http://example.com/a.png' }] }),
     ],
+    ['a form whose data is not an object', formFrame({ data: 42 })],
+    ['a form whose data.values is not an object', formFrame({ data: { values: 1, options: {} } })],
+    [
+      'a form whose per-send option list is empty',
+      formFrame({ data: { values: {}, options: { colour: [] } } }),
+    ],
+    ['a form whose pages is not a list', formFrame({ pages: 'first' })],
+    ['a form with an empty pages list', formFrame({ pages: [] })],
+    ['a form page missing its title', formFrame({ pages: [{ fields: ['note'] }] })],
   ])('surfaces %s as malformed rather than dropping the widget', (_label, bad) => {
     expect(applyFrame(EMPTY_MODEL, bad).kind).toBe('malformed');
   });

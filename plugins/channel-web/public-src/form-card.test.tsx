@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ChatApiError } from '@/api';
 import { FormCard, type FormCardItem } from '@/form-card';
-import type { JsonSchema, MediaItem } from '@/use-chat-stream';
+import type { FormPage, FormPrefill, JsonSchema, MediaItem } from '@/use-chat-stream';
 
 afterEach(() => {
   cleanup();
@@ -24,9 +24,21 @@ function formItem(overrides: Partial<FormCardItem> = {}): FormCardItem {
     token: 'tok-0123456789abcdef0123456789abcdef',
     media: null,
     location: null,
+    formData: null,
+    pages: null,
     ts: new Date().toISOString(),
     ...overrides,
   };
+}
+
+/** A form card carrying an explicit schema plus the per-send prefill/steps — the
+ * enrichment a flow reply part rides onto the `chat.form` frame. */
+function enrichedItem(
+  schema: JsonSchema,
+  formData: FormPrefill | null,
+  pages: readonly FormPage[] | null,
+): FormCardItem {
+  return formItem({ schema, formData, pages });
 }
 
 function renderCard(item: FormCardItem = formItem(), overrides = {}) {
@@ -48,6 +60,106 @@ describe('FormCard', () => {
       expect(onSubmitForm).toHaveBeenCalledWith('tok-0123456789abcdef0123456789abcdef', {
         note: 'ship it',
       }),
+    );
+  });
+
+  it('opens prefilled from the per-send data and submits the edited values', async () => {
+    // The reporter's case: a reply-part form with prefill must render filled in, not
+    // blank. The known value shows from first render; the visitor edits and sends it.
+    const user = userEvent.setup();
+    const { onSubmitForm } = renderCard(
+      enrichedItem(SCHEMA, { values: { note: 'draft' }, options: {} }, null),
+    );
+
+    const field = screen.getByRole('textbox');
+    expect(field).toHaveValue('draft');
+    await user.clear(field);
+    await user.type(field, 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() =>
+      expect(onSubmitForm).toHaveBeenCalledWith('tok-0123456789abcdef0123456789abcdef', {
+        note: 'ship it',
+      }),
+    );
+  });
+
+  it('replaces a property choices with the per-send option list and posts the chosen value', async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { colour: { type: 'string', title: 'Colour' } },
+    };
+    const { onSubmitForm } = renderCard(
+      enrichedItem(
+        schema,
+        {
+          values: {},
+          options: {
+            colour: [
+              { value: 'r', label: 'Red' },
+              { value: 'b', label: 'Blue' },
+            ],
+          },
+        },
+        null,
+      ),
+    );
+
+    // Labels shown, values posted — the per-send list replaces the schema's choices.
+    expect(screen.getByRole('option', { name: 'Red' })).toBeInTheDocument();
+    await user.selectOptions(screen.getByRole('combobox'), 'b');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() =>
+      expect(onSubmitForm).toHaveBeenCalledWith(expect.any(String), { colour: 'b' }),
+    );
+  });
+
+  it('paginates a stepped form and sends the union of every step', async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { first: { type: 'string' }, second: { type: 'string' } },
+    };
+    const pages: readonly FormPage[] = [
+      { title: 'Your name', fields: ['first'] },
+      { title: 'Your note', fields: ['second'] },
+    ];
+    const { onSubmitForm } = renderCard(enrichedItem(schema, null, pages));
+
+    // Step 1: the progress line and only the first page's field.
+    expect(screen.getByText(/Step 1 of 2 . Your name/)).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox'), 'Ada');
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 2: progress advances, Back appears, and the terminal button still Sends.
+    expect(screen.getByText(/Step 2 of 2 . Your note/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Back' })).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox'), 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() =>
+      expect(onSubmitForm).toHaveBeenCalledWith(expect.any(String), {
+        first: 'Ada',
+        second: 'ship it',
+      }),
+    );
+  });
+
+  it('renders today empty form unchanged when the card carries no per-send data', async () => {
+    const user = userEvent.setup();
+    const { onSubmitForm } = renderCard(enrichedItem(SCHEMA, null, null));
+
+    // No prefill, no steps: a single blank field and the Send button.
+    const field = screen.getByRole('textbox');
+    expect(field).toHaveValue('');
+    expect(screen.queryByText(/Step 1 of/)).not.toBeInTheDocument();
+    await user.type(field, 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() =>
+      expect(onSubmitForm).toHaveBeenCalledWith(expect.any(String), { note: 'ship it' }),
     );
   });
 

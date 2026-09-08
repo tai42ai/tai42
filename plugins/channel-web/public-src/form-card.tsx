@@ -3,6 +3,12 @@
  * any images/links, and the schema-driven form whose submission enters the
  * conversation as a regular guest message.
  *
+ * The form is the SAME paged, prefill-aware component the ask path renders
+ * (`SchemaFormAnswer`): the card opens with any per-send `data.values` filled in,
+ * `data.options` replacing a property's choices, and `pages` shown as steps — a
+ * reply-part form thus opens already filled in, exactly as a `form` question does.
+ * The terminal button reads "Send": a submission is a guest message, not an answer.
+ *
  * Unlike a question there is no deadline and no answered state: the card follows
  * the option-chips precedent. Settle is LOCAL — a "Sent" badge for this page
  * session only, with the form still fillable (every submission is its own guest
@@ -19,19 +25,11 @@
  */
 import type { ReactElement } from 'react';
 import { useState } from 'react';
-import {
-  Badge,
-  Button,
-  Markdown,
-  SchemaForm,
-  Spinner,
-  defaultValueForSchema,
-  validateAgainstSchema,
-} from '@tai42/studio-sdk';
-import type { SchemaFormErrors } from '@tai42/studio-sdk';
+import { Badge, Markdown } from '@tai42/studio-sdk';
 
 import { isFormGone } from '@/api';
 import { LocationPin, MediaItems } from '@/media-card';
+import { SchemaFormAnswer } from '@/question-card';
 import type { ChatItem } from '@/use-chat-stream';
 
 /** The transcript item this card renders. */
@@ -46,34 +44,30 @@ export interface FormCardProps {
   readonly locked: boolean;
 }
 
-/** The one values shape the form door accepts. A schema whose root builds
- * anything else has no submittable form — surfaced loudly, never sent. */
+/** The one values shape the form door accepts. `SchemaFormAnswer` always builds an
+ * object from an object schema, so this is the defensive last line, never a path a
+ * well-formed frame reaches. */
 function isValuesObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function FormCard({ item, onSubmitForm, locked }: FormCardProps): ReactElement {
-  const [value, setValue] = useState<unknown>(() => defaultValueForSchema(item.schema));
-  const [errors, setErrors] = useState<SchemaFormErrors>({});
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const [gone, setGone] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Validate against the schema before sending — a courtesy to the visitor, not a
-  // gate the server relies on: the door never validates values against the schema
-  // (guest-shaped data), so this only saves a round trip for obvious misses.
-  const submit = (): void => {
-    const found = validateAgainstSchema(item.schema, value);
-    setErrors(found);
-    if (Object.keys(found).length > 0) return;
-    if (!isValuesObject(value)) {
+  // The submit the shared form calls with the validated values: it schema-validates
+  // upstream and only reaches here on a clean object, so this just carries the send
+  // through the card's token door and settles the local state.
+  const submit = (values: unknown): void => {
+    if (!isValuesObject(values)) {
       setError('This form is malformed: it does not build an object to send.');
       return;
     }
     setSending(true);
     setError(null);
-    onSubmitForm(item.token, value).then(
+    onSubmitForm(item.token, values).then(
       () => {
         setSending(false);
         setSent(true);
@@ -105,18 +99,17 @@ export function FormCard({ item, onSubmitForm, locked }: FormCardProps): ReactEl
           </p>
         ) : null}
         {!gone && !locked ? (
-          <div className="tcw-question-actions tcw-question-form">
-            <SchemaForm
-              schema={item.schema}
-              value={value}
-              onChange={setValue}
-              errors={errors}
-              idPrefix={item.id}
-            />
-            <Button type="button" variant="primary" disabled={sending} onClick={submit}>
-              {sending ? <Spinner label="Sending the form" /> : 'Send'}
-            </Button>
-          </div>
+          <SchemaFormAnswer
+            schema={item.schema}
+            formData={item.formData}
+            pages={item.pages}
+            sending={sending}
+            onSubmit={submit}
+            idPrefix={item.id}
+            submitLabel="Send"
+            steppedSubmitLabel="Send"
+            sendingLabel="Sending the form"
+          />
         ) : null}
         {error !== null && !gone ? (
           <p className="tcw-question-error" role="alert">

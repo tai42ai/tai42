@@ -178,6 +178,11 @@ export type ChatItem =
       /** A shared location the form rides alongside its fields — a map-pin
        * element. `null` when the form carries none. */
       readonly location: LocationPoint | null;
+      /** Per-send prefill + choices, or `null` when the card carried none — the
+       * same enrichment a `form` question rides, so an ask-less form opens filled in. */
+      readonly formData: FormPrefill | null;
+      /** The form's steps, or `null` for one page. */
+      readonly pages: readonly FormPage[] | null;
       readonly ts: string;
     }
   | {
@@ -673,9 +678,27 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
     if (media === undefined) return { kind: 'malformed', event: frame.event };
     const location = locationOf(payload.location);
     if (location === undefined) return { kind: 'malformed', event: frame.event };
+    // The per-send enrichment the card opens filled in from — parsed exactly as a
+    // `form` question's, so a malformed `data`/`pages` taints the frame rather than
+    // rendering a blank or half-built form.
+    const formData = formPrefillOf(payload.data);
+    if (formData === undefined) return { kind: 'malformed', event: frame.event };
+    const pages = formPagesOf(payload.pages);
+    if (pages === undefined) return { kind: 'malformed', event: frame.event };
     return {
       kind: 'model',
-      model: withItem(model, { kind: 'form', id, text, schema, token, media, location, ts }),
+      model: withItem(model, {
+        kind: 'form',
+        id,
+        text,
+        schema,
+        token,
+        media,
+        location,
+        formData,
+        pages,
+        ts,
+      }),
     };
   }
 

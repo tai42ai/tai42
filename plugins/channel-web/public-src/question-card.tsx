@@ -336,6 +336,9 @@ function FormAnswer({
       sending={sending}
       onSubmit={onSubmit}
       idPrefix={idPrefix}
+      submitLabel="Answer"
+      steppedSubmitLabel="Submit"
+      sendingLabel="Sending your answer"
     />
   );
 }
@@ -393,13 +396,21 @@ function firstPageWithError(pages: readonly FormPage[], errors: SchemaFormErrors
   return pages.findIndex((page) => page.fields.some((field) => errored.has(field)));
 }
 
-function SchemaFormAnswer({
+/** The paged, prefill-aware form the ask path and the ask-less form card share: the
+ * schema's defaults overlaid with `formData.values`, `formData.options` replacing a
+ * property's choices, and `pages` rendered as steps. The terminal button's copy is the
+ * caller's — a question ANSWERS/Submits, an ask-less card SENDS — so the one
+ * implementation serves both without new copy of its own. */
+export function SchemaFormAnswer({
   schema,
   formData,
   pages,
   sending,
   onSubmit,
   idPrefix,
+  submitLabel,
+  steppedSubmitLabel,
+  sendingLabel,
 }: {
   readonly schema: JsonSchema;
   readonly formData: FormPrefill | null;
@@ -407,6 +418,12 @@ function SchemaFormAnswer({
   readonly sending: boolean;
   readonly onSubmit: (answer: unknown) => void;
   readonly idPrefix: string;
+  /** The terminal button on a single-page form. */
+  readonly submitLabel: string;
+  /** The terminal button on the last step of a paged form. */
+  readonly steppedSubmitLabel: string;
+  /** The spinner label shown while a submission is in flight. */
+  readonly sendingLabel: string;
 }): ReactElement {
   const resolvedPages = resolvePages(schema, pages);
   const stepped = resolvedPages.length > 1;
@@ -535,7 +552,13 @@ function SchemaFormAnswer({
           </Button>
         ) : (
           <Button type="button" variant="primary" disabled={sending} onClick={submit}>
-            {sending ? <Spinner label="Sending your answer" /> : stepped ? 'Submit' : 'Answer'}
+            {sending ? (
+              <Spinner label={sendingLabel} />
+            ) : stepped ? (
+              steppedSubmitLabel
+            ) : (
+              submitLabel
+            )}
           </Button>
         )}
       </div>

@@ -759,6 +759,8 @@ describe('form cards', () => {
       token: 'tok-1',
       media: null,
       location: null,
+      formData: null,
+      pages: null,
       ts: TS,
     };
   }
