@@ -4,8 +4,8 @@ Boots the app through the real ``app.app_context`` harness with an ``api_tools``
 manifest that loads no management tool modules and enables projection, then
 asserts the projected surface end-to-end (checklist items 1-6):
 
-1. the projected tool surface is exactly the expected op surface — the 165
-   default-projected ops (210 total - 41 tier-2 default-excluded - 4 tier-1
+1. the projected tool surface is exactly the expected op surface — the 166
+   default-projected ops (212 total - 42 tier-2 default-excluded - 4 tier-1
    hardcode-blocked);
 2. ``destructiveHint`` is present on destructive ops (a DELETE, a mutating POST)
    and absent on reads (a GET);
@@ -118,7 +118,7 @@ class _RecordingApp:
         self.tools = _RecordingTools()
 
 
-# -- checklist 1: the projected surface is exactly the 165 default ops ---------
+# -- checklist 1: the projected surface is exactly the 166 default ops ---------
 
 
 def test_d1_projected_surface_is_the_expected_op_count():
@@ -203,7 +203,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
                 "validate_condition",
             }, tier2
 
-            # The default-projected surface = 163 (every op that is neither tier-1 nor
+            # The default-projected surface = 166 (every op that is neither tier-1 nor
             # tier-2, destructive tier-0 ops included under the default ``expose_destructive``),
             # measured two ways.
             recorder = _RecordingApp()
@@ -211,14 +211,14 @@ def test_d1_projected_surface_is_the_expected_op_count():
             assert len(projected) == 166, len(projected)
             assert total - len(tier2) - len(tier1) == 166
 
-            # The LIVE booted tool surface is the 163 projected ops PLUS the two
+            # The LIVE booted tool surface is the 166 projected ops PLUS the two
             # force-registered hidden mechanism tools the conversations router installs at
             # startup: ``conversation_deliver`` (a parked AGENT turn's resumed answer) and
             # ``deliver_tool_completion`` (a parked TOOL turn's terminal, mapped via reply_expr),
             # both fired through ``run_tool`` by the resumer. Neither is an api_tools projection
-            # (``projected`` stays 163) — they are mandatory bridges registered independently of
+            # (``projected`` stays 166) — they are mandatory bridges registered independently of
             # the api_tools toggle and carried on the live surface like any hidden tool, so the
-            # live count is 165.
+            # live count is 168.
             hidden_bridges = {"conversation_deliver", "deliver_tool_completion"}
             live = await app.tools.get_tools()
             assert set(live) == set(projected) | hidden_bridges
@@ -421,9 +421,9 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             }
         )
         async with app.app_context(manifest):
-            # api_tools projected the surface: the 165 projected ops plus the two
+            # api_tools projected the surface: the 166 projected ops plus the two
             # force-registered hidden completion mechanisms the conversations router installs at
-            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 165 live.
+            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 168 live.
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
