@@ -198,12 +198,23 @@ async def test_bootstrap_open_skips_the_token_gate(
     assert provider.identities == {"root": "root key"}
 
 
-async def test_ensure_bootstrap_token_fixes_and_logs_once(
-    bootstrap_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+@pytest.fixture
+def serviceable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the bootstrap door serviceable: the gate on, a key-minting provider
+    (the ``provider`` spy), and the AC Redis URL set — the three conditions the
+    startup handler mints an auto-token under."""
+    monkeypatch.setattr(access_control_settings(), "enable", True)
     monkeypatch.setattr(access_control_settings(), "bootstrap_token", None)
     monkeypatch.setattr(access_control_settings(), "bootstrap_open", False)
+    monkeypatch.setattr(access_control_settings().redis, "redis_url", "redis://fake:6379/0")
 
+
+async def test_ensure_bootstrap_token_fixes_and_logs_once(
+    provider: _SpyProvider,
+    serviceable: None,
+    bootstrap_redis: FakeRedis,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     with caplog.at_level(logging.INFO, logger="tai42_skeleton.access_control.bootstrap"):
         await bootstrap_mod.ensure_bootstrap_token()
         await bootstrap_mod.ensure_bootstrap_token()
@@ -213,6 +224,53 @@ async def test_ensure_bootstrap_token_fixes_and_logs_once(
     # The winner's value is the effective token the door then resolves.
     key = access_control_settings().bootstrap_token_key
     assert await bootstrap_mod.resolve_bootstrap_token() == bootstrap_redis._strings[key]
+
+
+async def test_ensure_bootstrap_token_is_a_noop_without_the_ac_redis(
+    provider: _SpyProvider, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Redis-less deployment (an optional feature it does not use) must boot: the
+    startup handler mints nothing and raises nothing when the AC Redis is unset, even
+    with the gate on and a minting provider present. Uses the REAL ``client_ctx`` (no
+    fake): unfixed code reaches for the unconfigured AC Redis at boot instead of a
+    clean no-op."""
+    monkeypatch.setattr(access_control_settings(), "enable", True)
+    monkeypatch.setattr(access_control_settings(), "bootstrap_token", None)
+    monkeypatch.setattr(access_control_settings(), "bootstrap_open", False)
+    monkeypatch.setattr(access_control_settings().redis, "redis_url", None)
+
+    with caplog.at_level(logging.INFO, logger="tai42_skeleton.access_control.bootstrap"):
+        await bootstrap_mod.ensure_bootstrap_token()
+
+    assert not any("first-key bootstrap token" in r.getMessage() for r in caplog.records)
+
+
+async def test_ensure_bootstrap_token_is_a_noop_without_a_minting_provider(
+    monkeypatch: pytest.MonkeyPatch, bootstrap_redis: FakeRedis, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The door self-disables (501) when no configured provider can mint api keys, so
+    the startup handler mints no auto-token then either — the deployment boots. Mirrors
+    the plugins/agents skeleton e2e, whose only provider is a non-api-key stand-in."""
+    from tai42_contract.access_control.identity import IdentityProvider
+
+    class _NonMintingProvider(IdentityProvider):
+        def __init__(self, _settings: object) -> None: ...
+
+        async def validate_token(self, token: str) -> None:
+            return None
+
+    registry._REGISTRY["redis"] = _NonMintingProvider
+    monkeypatch.setattr(access_control_settings(), "enable", True)
+    monkeypatch.setattr(access_control_settings(), "bootstrap_token", None)
+    monkeypatch.setattr(access_control_settings(), "bootstrap_open", False)
+    monkeypatch.setattr(access_control_settings().redis, "redis_url", "redis://fake:6379/0")
+
+    with caplog.at_level(logging.INFO, logger="tai42_skeleton.access_control.bootstrap"):
+        await bootstrap_mod.ensure_bootstrap_token()
+
+    assert not any("first-key bootstrap token" in r.getMessage() for r in caplog.records)
+    key = access_control_settings().bootstrap_token_key
+    assert key not in bootstrap_redis._strings
 
 
 async def test_operator_token_takes_precedence_over_the_auto_token(

@@ -23,7 +23,8 @@ from contextlib import asynccontextmanager
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
-from tai42_skeleton.access_control.settings import access_control_settings
+from tai42_skeleton.access_control.management import provider_capabilities
+from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.utils.redis_typing import awaited
 
 logger = logging.getLogger(__name__)
@@ -34,11 +35,39 @@ class BootstrapContended(RuntimeError):
     loser is turned away as already-initialized."""
 
 
+def _bootstrap_serviceable(settings: AccessControlSettings) -> bool:
+    """Whether the ``/api/keys/bootstrap`` door can actually mint, mirroring the door's
+    own self-disable checks so boot never mints a token for a door that would 501/403.
+
+    Serviceable iff access control is on, a configured identity provider can mint api
+    keys, and the AC Redis (the home of the token, throttle, and mint lock) is set. A
+    missing piece is logged, never raised: the door already refuses cleanly at request
+    time, so the startup handler does nothing for a deployment that does not use it."""
+    if not settings.enable:
+        return False
+    if not any(mintable for _name, mintable in provider_capabilities()):
+        logger.debug(
+            "first-key bootstrap: no configured identity provider can mint api keys; "
+            "the bootstrap door is disabled, nothing to mint at startup"
+        )
+        return False
+    if not settings.redis.redis_url:
+        logger.debug(
+            "first-key bootstrap: the access-control Redis is not configured "
+            "(ACCESS_CONTROL_REDIS_URL / TAI_DEFAULT_REDIS_URL); the bootstrap door is "
+            "unavailable, nothing to mint at startup"
+        )
+        return False
+    return True
+
+
 async def ensure_bootstrap_token() -> None:
     """Fix the shared auto-token once at startup (no-op when no token is needed).
 
-    Skips entirely when the gate is open or an operator token is set. Otherwise each
-    worker attempts ``SET key <fresh> NX`` on the shared access-control Redis; the winner
+    Skips entirely when the gate is open, an operator token is set, or the door is not
+    serviceable (see :func:`_bootstrap_serviceable`) — so a deployment that does not use
+    the feature boots without reaching for an absent Redis. Otherwise each worker
+    attempts ``SET key <fresh> NX`` on the shared access-control Redis; the winner
     fixes the effective token and is the only one to log it. ``NX`` makes the fix — and
     the single log line — happen exactly once for the deployment: a later boot finds the
     token already set, so it neither regenerates nor re-logs. Read, never regenerated, on
@@ -46,6 +75,14 @@ async def ensure_bootstrap_token() -> None:
     """
     settings = access_control_settings()
     if settings.bootstrap_open or settings.bootstrap_token is not None:
+        return
+    # An optional feature's startup work never breaks boot for a deployment that does
+    # not use it. Mint the shared auto-token only when the door is SERVICEABLE — access
+    # control on, a key-minting identity provider configured, and the AC Redis (which
+    # holds the token, throttle, and mint lock) present. Otherwise the door self-disables
+    # at request time (501 / 403), so there is nothing to fix at boot: log and return
+    # rather than reach for a Redis that is not there.
+    if not _bootstrap_serviceable(settings):
         return
     candidate = secrets.token_urlsafe(32)
     async with client_ctx(RedisClient, settings.redis) as r:
