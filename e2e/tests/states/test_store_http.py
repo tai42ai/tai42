@@ -89,6 +89,16 @@ async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: 
     # An operator-uploaded module is not a shipped default.
     assert module_row["shipped_default"] is False
 
+    # -- the mount read door serves the same envelope row the list serves -------
+    mount_rows = await api.get(f"/api/states/{state}/mounts")
+    assert [m["module"] for m in mount_rows] == [module]
+    one_mount = await api.get(f"/api/states/{state}/mounts/{module}")
+    assert one_mount == mount_rows[0]
+    # A module not mounted on the state is a 404 at the read door (never an empty 200).
+    absent = uniq("absent-mod").replace("_", "-")
+    resp = await api.request_raw("GET", f"/api/states/{state}/mounts/{absent}")
+    assert resp.status_code == 404, resp.text
+
     record = _record_path(state, "agent", "a-42", "thread", "t1")
 
     # -- a whole-path ``set`` over the composing path is refused (422) ----------
