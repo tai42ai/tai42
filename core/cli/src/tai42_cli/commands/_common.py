@@ -55,9 +55,19 @@ def seg(value: Any) -> str:
     ``/`` too), so a value that carries a reserved character — a state record ``key``
     legitimately holds ``/``, a name a space or ``#`` — forms a single valid segment the
     server routes to intact rather than splitting or truncating. A value with no reserved
-    character is unchanged. Every ``/api/...`` path built by interpolating user input
-    wraps each interpolated segment in this."""
+    character is unchanged. Every ``/api/...`` path built by interpolating user input into
+    a single-segment ``{name}`` parameter wraps it in this."""
     return quote(str(value), safe="")
+
+
+def subpath(value: Any) -> str:
+    """A user-supplied value bound to a ``{name:path}`` route parameter — a multi-segment
+    path by contract. Each segment is percent-encoded while ``safe="/"`` keeps the ``/``
+    separators, so a reserved character inside a segment forms a valid segment and the
+    path structure the ``:path`` converter matches on survives on the wire. Contrast
+    :func:`seg`, which encodes a value as ONE segment (``/`` included) for a single-segment
+    ``{name}`` parameter."""
+    return quote(str(value), safe="/")
 
 
 def app_context(ctx: typer.Context) -> AppContext:
