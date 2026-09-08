@@ -41,6 +41,7 @@ from tai42_contract.entry_params import (
 )
 from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions.models import LocationElement, MediaItem, check_media_list
+from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
 
 #: Which door a route is reached through: ``api`` delivers by signed callback,
@@ -220,6 +221,15 @@ class ConversationMessage(BaseModel):
             "every reader consumes."
         ),
     )
+    locale: str | None = Field(
+        default=None,
+        description=(
+            "The end user's BCP 47 language tag (e.g. ``he-IL``). Captured onto the turn's "
+            "subject so the platform's rendering layer resolves every template and list format "
+            "against it — the caller states the language, the flow never selects one. ``null`` "
+            "means none supplied (no silent default)."
+        ),
+    )
 
     @field_validator("external_user_id", "text")
     @classmethod
@@ -252,6 +262,11 @@ class ConversationMessage(BaseModel):
         if value is not None:
             check_media_list(value)
         return value
+
+    @field_validator("locale")
+    @classmethod
+    def _canonical_locale(cls, value: str | None) -> str | None:
+        return normalize_optional_locale(value)
 
 
 # An event ``kind`` is a namespaced identifier-like label (e.g. ``provider.update``): the
@@ -784,6 +799,16 @@ class Person(BaseModel):
     target_name: str = Field(min_length=1)
     created_at: datetime
     addresses: list[PersonAddress] = Field(min_length=1)
+    # The person's BCP 47 locale the rendering layer resolves text against: seeded
+    # from the channel at first contact and overridable through the write door, or
+    # ``None`` when none is known. Canonical spelling (see
+    # :func:`tai42_contract.locale.canonical_locale`); never a silent default.
+    locale: str | None = None
+
+    @field_validator("locale")
+    @classmethod
+    def _canonical_locale(cls, value: str | None) -> str | None:
+        return normalize_optional_locale(value)
 
     @field_validator("created_at")
     @classmethod

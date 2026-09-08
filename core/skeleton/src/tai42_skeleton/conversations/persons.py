@@ -302,6 +302,29 @@ return {removed_row, removed_fields}
 """
 
 
+# Set (or clear) a person's stored locale in place. KEYS[1]=person row key. ARGV[1]=mode
+# ("set"/"clear"), ARGV[2]=the canonical locale when mode is "set". Read-modify-write of the
+# one JSON row in a single script so a concurrent read never sees a half-written row; a "clear"
+# removes the field so the row reads back as an explicit absent locale. Returns {"missing"} when
+# no such person row exists, else {"ok", updated_json}.
+_SET_LOCALE_LUA = """
+-- conversations:person:set_locale
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  return {'missing'}
+end
+local person = cjson.decode(raw)
+if ARGV[1] == 'clear' then
+  person.locale = nil
+else
+  person.locale = ARGV[2]
+end
+local encoded = cjson.encode(person)
+redis.call('SET', KEYS[1], encoded)
+return {'ok', encoded}
+"""
+
+
 class ConversationPersonStore:
     """The Redis-backed per-target person registry. Construction refuses with a loud 501
     without the redis conversations backend — a person folded across channels must not live in
@@ -345,11 +368,16 @@ class ConversationPersonStore:
             return None
         return Person.model_validate_json(_as_str(raw))
 
-    async def ensure_provisional(self, target: PairingTarget, address_row: PersonAddress) -> tuple[Person, bool]:
+    async def ensure_provisional(
+        self, target: PairingTarget, address_row: PersonAddress, *, locale: str | None = None
+    ) -> tuple[Person, bool]:
         """Get-or-create the single-address person for ``address_row`` on ``target``, atomic
         against a concurrent first contact. On an EXISTING person, unions ``address_row``'s
-        routes into its matching address. Returns ``(person, created)`` — ``created`` is True
-        ONLY when this call wrote the row, the first-contact signal a greeting keys off."""
+        routes into its matching address and leaves its stored ``locale`` untouched (a later
+        turn never clobbers an operator override). Returns ``(person, created)`` — ``created``
+        is True ONLY when this call wrote the row, the first-contact signal a greeting keys
+        off. ``locale`` seeds a NEWLY created person's stored locale (the channel's
+        first-contact hint); it is ignored when the person already exists."""
         new_id = str(uuid4())
         person = Person(
             person_id=new_id,
@@ -357,6 +385,7 @@ class ConversationPersonStore:
             target_name=target.target_name,
             created_at=datetime.now(UTC),
             addresses=[address_row],
+            locale=locale,
         )
         dak = _address_key_of(address_row)
         index_key = self.settings.person_index_key(target.target_kind, target.target_name)
@@ -395,6 +424,22 @@ class ConversationPersonStore:
         async with client_ctx(RedisClient, self.settings.redis) as r:
             result = await eval_script(r, _ERASE_LUA, 2, row_key, index_key, person.person_id)
         return bool(int(result[0])), int(result[1])
+
+    async def set_locale(self, person_id: str, locale: str | None) -> Person | None:
+        """Set ``person_id``'s stored locale to ``locale`` (canonical BCP 47) or clear it with
+        ``None``, in place on the person row, and return the updated person — or ``None`` when
+        no such person exists. The one WRITE door an operator drives to override the
+        channel-seeded locale; a later turn's ``ensure_provisional`` never clobbers it."""
+        row_key = self.settings.person_key(person_id)
+        mode = "clear" if locale is None else "set"
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            result = await eval_script(r, _SET_LOCALE_LUA, 1, row_key, mode, locale or "")
+        status = _as_str(result[0])
+        if status == "missing":
+            return None
+        if status == "ok":
+            return Person.model_validate_json(_as_str(result[1]))
+        raise RuntimeError(f"conversations: set_locale returned an unexpected status {status!r}")
 
     async def merge(self, person_id_a: str, person_id_b: str) -> Person:
         """Merge two persons of the SAME target into one and return the survivor. The store

@@ -33,6 +33,7 @@ class _FakeApp:
         form=None,
         attachments=None,
         location=None,
+        locale=None,
     ) -> str:
         self.accepted.append((channel, our_identity, client_address, cap_key, text, provider_message_id, params, form))
         return "mid-1"

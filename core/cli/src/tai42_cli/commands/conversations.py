@@ -214,6 +214,46 @@ def delete_person(
     emit_result(ctx_obj, data)
 
 
+@app.command("get-person")
+@covers(("GET", "/api/conversations/persons/{person_id}"))
+def get_person(
+    ctx: typer.Context,
+    person_id: Annotated[str, typer.Argument(help="Person id (uuid4).")],
+) -> None:
+    """Read a person — its identity, folded addresses and stored ``locale`` (the BCP 47 tag
+    the rendering layer resolves text against, or ``null`` when none is known).
+
+    Example: ``tai conversations get-person 4f1c0e2a-...``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get(f"/api/conversations/persons/{person_id}")
+    emit_result(ctx_obj, data)
+
+
+@app.command("set-person-locale")
+@covers(("PUT", "/api/conversations/persons/{person_id}/locale"))
+def set_person_locale(
+    ctx: typer.Context,
+    person_id: Annotated[str, typer.Argument(help="Person id (uuid4).")],
+    locale: Annotated[
+        str | None,
+        typer.Argument(help="BCP 47 tag (e.g. he-IL); omit to CLEAR the stored locale."),
+    ] = None,
+) -> None:
+    """Set (or clear) a person's stored ``locale`` — the operator override the rendering layer
+    resolves text against, winning over the channel-seeded value on every later turn. Omit
+    ``locale`` to clear it back to no-locale-known. The same write grant that forgets a thread
+    sets a person's locale.
+
+    Example: ``tai conversations set-person-locale 4f1c0e2a-... he-IL``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.put(f"/api/conversations/persons/{person_id}/locale", json={"locale": locale})
+    emit_result(ctx_obj, data)
+
+
 @app.command("send")
 @covers(("POST", "/api/conversations/{route_name}/thread/messages"))
 def send_message(

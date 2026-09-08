@@ -401,6 +401,7 @@ class AppConversations(Protocol):
         form: dict[str, Any] | None = None,
         attachments: list[MediaItem] | None = None,
         location: LocationElement | None = None,
+        locale: str | None = None,
     ) -> str:
         """Accept one inbound channel message, persist it, and return its
         ``message_id`` (a uuid4).
@@ -444,6 +445,13 @@ class AppConversations(Protocol):
         ``attachments`` / ``location`` keys, present only when the inbound carried them, so
         a form-/media-unaware target still sees the whole turn as ``text``. ``None`` leaves
         the payload unchanged.
+
+        ``locale`` is the guest's BCP 47 language tag the channel resolved from its native
+        inbound (a per-message language hint), captured onto the turn's subject so the
+        rendering layer resolves every text template and list format against it — flows and
+        state modules never select a language. It seeds a first-contact person's stored
+        locale and, absent a stored operator override, is the turn's resolved locale;
+        ``None`` means the channel supplied none (no silent default to any language).
         """
         ...
 

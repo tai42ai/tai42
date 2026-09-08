@@ -6,11 +6,13 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote_to_bytes, urlsplit
 
 from async_lru import alru_cache
-from jinja2 import FunctionLoader, meta
+from babel.core import Locale, UnknownLocaleError
+from babel.lists import format_list
+from jinja2 import FunctionLoader, meta, pass_context
 from jinja2 import Template as JinjaTemplate
 from jinja2.sandbox import SandboxedEnvironment
 from jinja2schema import JSONSchemaDraft4Encoder, infer, to_json_schema
@@ -39,6 +41,49 @@ class TemplateNotFoundError(Exception):
     leaking storage's ``FileNotFoundError`` as a 500. Genuine storage/transport
     failures are NOT this type and keep propagating.
     """
+
+
+#: The reserved render-context key the rendering layer stamps the subject's locale onto,
+#: read by :func:`_list_format` — never a template author's variable (a collision raises).
+_LOCALE_CONTEXT_KEY = "_tai_locale"
+
+
+class TemplateLocaleNotFoundError(Exception):
+    """A stored template has no variant for the resolved locale fallback chain and no
+    default (bare) variant either.
+
+    Raised by :meth:`ResourceManager.render_by_id` when a locale-scoped render walks the
+    chain (``he-IL`` -> ``he`` -> the bare default id) and finds NONE of them stored, so
+    the render refuses loudly naming the template and locale instead of silently rendering
+    the wrong language.
+    """
+
+
+@pass_context
+def _list_format(context: Any, value: Any, style: str = "standard") -> str:
+    """Format a sequence with the CLDR list patterns of the render's subject locale.
+
+    A template writes ``{{ names | list_format }}`` and the separator + final connective
+    come from the locale the rendering layer resolved (``_tai_locale`` in the render
+    context) — the template never selects a language. ``style`` picks a CLDR list style
+    (``standard`` and/or babel's ``standard-short``, ``or``, ``unit``). A render that
+    resolved NO locale, or a locale babel has no CLDR data for, raises loudly rather than
+    guessing a separator.
+    """
+    locale = context.get(_LOCALE_CONTEXT_KEY)
+    if locale is None:
+        raise ValueError(
+            "list_format needs the subject's locale, but this render resolved none; the "
+            "channel or operator must supply a locale for the platform to format a list"
+        )
+    items = [str(item) for item in value]
+    try:
+        # The subject's locale is a BCP 47 tag (``-`` separator); babel keys CLDR data by
+        # its own ``_`` identifier, so parse the tag rather than hand it the raw string.
+        parsed = Locale.parse(locale, sep="-")
+    except (UnknownLocaleError, ValueError) as exc:
+        raise ValueError(f"list_format has no CLDR list patterns for locale {locale!r}") from exc
+    return format_list(items, style=cast(Any, style), locale=parsed)
 
 
 def _decode_data_uri(uri: str) -> tuple[bytes, str | None]:
@@ -79,6 +124,9 @@ class ResourceManager:
         # instead of reaching host primitives. Normal ``{{ var }}``, filters, and
         # ``{% include %}`` are unaffected.
         self._env = SandboxedEnvironment(loader=FunctionLoader(self._sync_loader))
+        # The locale-aware list formatter is available to every rendered template; it reads
+        # the render's resolved locale from the reserved context key, never a template arg.
+        self._env.filters["list_format"] = _list_format
 
         # Per-render event loop bound to the rendering thread so every
         # {% include %}/{% extends %} dependency resolves through one loop — hence
@@ -219,8 +267,10 @@ class ResourceManager:
             # Genuinely missing -> raise clearly. ``Storage.load`` contractually
             # raises ``FileNotFoundError`` only for absent content; present-but-
             # empty content returns "" and is a valid template that renders to
-            # empty, so it must NOT be treated as missing.
-            logger.error(f"Template '{template_id}' lookup failed.")
+            # empty, so it must NOT be treated as missing. Logged at debug, not error:
+            # the raised ``TemplateNotFoundError`` is the loud signal, and a locale-variant
+            # probe walks expected misses down the fallback chain.
+            logger.debug(f"Template '{template_id}' lookup failed.")
             raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
 
         if self._cache_enabled:
@@ -413,9 +463,50 @@ class ResourceManager:
             return cache_info()
         return None
 
-    async def render_by_id(self, template_id: str, kwargs: dict[str, Any] | None = None) -> str:
-        template = await self._get_compiled_template(template_id)
-        context = kwargs or {}
+    @staticmethod
+    def _locale_variant_ids(template_id: str, locale: str) -> list[str]:
+        """The ordered fallback chain of variant ids for ``template_id`` under ``locale``:
+        the most-specific subtag form first, each shorter form next, then the bare
+        ``template_id`` (the declared default variant). A variant lives at
+        ``"{template_id}@{subtags}"`` — e.g. ``he-IL`` yields ``id@he-IL``, ``id@he``,
+        ``id``. The locale is already canonical, so the chain is built from one spelling."""
+        subs = locale.split("-")
+        ids = [f"{template_id}@{'-'.join(subs[:i])}" for i in range(len(subs), 0, -1)]
+        ids.append(template_id)
+        return ids
+
+    async def _compiled_for_locale(self, template_id: str, locale: str | None) -> JinjaTemplate:
+        """Resolve ``template_id`` to a compiled template for ``locale``.
+
+        ``None`` locale renders the bare id unchanged (the locale-agnostic callers — hooks,
+        authz, access-control — keep today's behavior). A present locale walks the fallback
+        chain and returns the first stored variant; when NONE of the chain (variants AND the
+        bare default) is stored, it refuses with :class:`TemplateLocaleNotFoundError` naming
+        the template and locale, never a silent wrong-language render."""
+        if locale is None:
+            return await self._get_compiled_template(template_id)
+        for candidate in self._locale_variant_ids(template_id, locale):
+            try:
+                return await self._get_compiled_template(candidate)
+            except TemplateNotFoundError:
+                continue
+        raise TemplateLocaleNotFoundError(
+            f"template {template_id!r} has no variant for locale {locale!r} and no default variant"
+        )
+
+    def _with_locale(self, context: dict[str, Any], locale: str | None) -> dict[str, Any]:
+        """The render context with the resolved ``locale`` stamped under the reserved key so
+        the ``list_format`` filter reads it — the render carries the language, the template
+        never names one. A user variable colliding with the reserved key raises loudly."""
+        if _LOCALE_CONTEXT_KEY in context:
+            raise ValueError(f"{_LOCALE_CONTEXT_KEY!r} is a reserved render variable and cannot be a template variable")
+        return {**context, _LOCALE_CONTEXT_KEY: locale}
+
+    async def render_by_id(
+        self, template_id: str, kwargs: dict[str, Any] | None = None, locale: str | None = None
+    ) -> str:
+        template = await self._compiled_for_locale(template_id, locale)
+        context = self._with_locale(kwargs or {}, locale)
 
         def _render() -> str:
             with self._render_scope():
@@ -429,11 +520,12 @@ class ResourceManager:
         template_id: str | None = None,
         kwargs: dict[str, Any] | None = None,
         allow_empty: bool = True,
+        locale: str | None = None,
     ) -> str:
         if content is not None and template_id is not None:
             raise ValueError("Provide either 'content' OR 'template_id', not both.")
 
-        context = kwargs or {}
+        context = self._with_locale(kwargs or {}, locale)
 
         if content is not None:
 
@@ -444,7 +536,7 @@ class ResourceManager:
             return await asyncio.to_thread(_parse_and_render)
 
         elif template_id is not None:
-            return await self.render_by_id(template_id, context)
+            return await self.render_by_id(template_id, kwargs or {}, locale=locale)
 
         elif allow_empty:
             return ""

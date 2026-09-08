@@ -564,6 +564,36 @@ async def test_the_manifest_is_parsed_once_per_process(web_env, stub_app, public
 # -- POST /messages -------------------------------------------------------------
 
 
+async def test_messages_map_the_top_accept_language_to_the_turn_locale(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    stub_app.conversations.accept_result = "turn-42"
+    handler = _handler(stub_app, _MESSAGES)
+
+    resp = await handler(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "hi"},
+            token=SESSION_TOKEN,
+            extra_headers=[(b"accept-language", b"he-IL,he;q=0.9,en;q=0.8")],
+        )
+    )
+
+    assert resp.status_code == 200
+    assert stub_app.conversations.accept_calls[0]["locale"] == "he-IL"
+
+
+async def test_messages_without_accept_language_carry_no_locale(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    stub_app.conversations.accept_result = "turn-42"
+    handler = _handler(stub_app, _MESSAGES)
+
+    resp = await handler(build_request(json_body={"identity": IDENTITY, "text": "hi"}, token=SESSION_TOKEN))
+
+    assert resp.status_code == 200
+    assert stub_app.conversations.accept_calls[0]["locale"] is None
+
+
 async def test_messages_bridges_and_appends_inbound(web_env, stub_app, registered_session: FakeRedis):
     stub_app.conversations.accept_result = "turn-42"
     handler = _handler(stub_app, _MESSAGES)

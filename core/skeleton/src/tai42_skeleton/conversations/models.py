@@ -20,6 +20,7 @@ from tai42_contract.conversations import (
     joined_answer_text,
 )
 from tai42_contract.interactions.models import LocationElement, MediaItem, check_media_list
+from tai42_contract.locale import normalize_optional_locale
 
 
 class DeliveryStatus(StrEnum):
@@ -106,6 +107,11 @@ class ConversationRecord(BaseModel):
     # an ``operator`` record carries neither (it answers, it does not submit).
     inbound_attachments: list[MediaItem] | None = None
     inbound_location: LocationElement | None = None
+    # The guest's BCP 47 locale the channel resolved from its native inbound (a
+    # per-message language hint), stored beside the text so the scheduled turn resolves
+    # the subject's locale for the rendering layer. ``None`` when the door supplied none
+    # (channel with no native hint, api caller that set none, every operator/event record).
+    inbound_locale: str | None = None
 
     # What kind of inbound this record's turn ran on: ``message`` is an inbound text/form
     # turn (the default every channel/api message and operator send carries); ``event`` is
@@ -143,6 +149,11 @@ class ConversationRecord(BaseModel):
 
     created_at: float
     updated_at: float
+
+    @field_validator("inbound_locale")
+    @classmethod
+    def _canonical_inbound_locale(cls, value: str | None) -> str | None:
+        return normalize_optional_locale(value)
 
     @field_validator("inbound_attachments")
     @classmethod

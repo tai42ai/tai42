@@ -150,6 +150,7 @@ class _StubConversations:
         text: str,
         provider_message_id: str,
         params: dict[str, str] | None = None,
+        locale: str | None = None,
     ) -> str:
         self.accept_calls.append(
             SimpleNamespace(
@@ -160,6 +161,7 @@ class _StubConversations:
                 text=text,
                 provider_message_id=provider_message_id,
                 params=params,
+                locale=locale,
             )
         )
         if self.accept_error is not None:

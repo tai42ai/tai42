@@ -192,6 +192,8 @@ def test_delete_config_rejected_without_auth(monkeypatch):
 # credential-less door. The ``load_api_routes()`` enumeration is what supplies the set, so
 # the config doors are covered by the mechanism, not by a hand-maintained per-door stance.
 _REGISTERED_AUTHED = {
+    ("/api/conversations/persons/{person_id}", ("GET",)): True,
+    ("/api/conversations/persons/{person_id}/locale", ("PUT",)): True,
     ("/api/conversations", ("GET",)): True,
     ("/api/conversations/messages/failed", ("GET",)): True,
     ("/api/conversations/{route_name}", ("GET",)): True,

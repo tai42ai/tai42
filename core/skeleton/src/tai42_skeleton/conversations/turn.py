@@ -59,6 +59,7 @@ from tai42_contract.interactions import (
     reset_park_completion,
     set_park_completion,
 )
+from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.monitoring import RunAttribution
 from tai42_contract.states import StateContext, SubjectCandidates
 from tai42_kit.utils.data import run_jq_bounded
@@ -802,6 +803,16 @@ def _inbound_id_and_source(record: ConversationRecord, route: ConversationRoute)
     return record.message_id, "api"
 
 
+def _resolved_locale(person: Person | None, record: ConversationRecord) -> str | None:
+    """The subject's locale for the rendering layer, by precedence: a person's STORED locale
+    (an operator override or a first-contact seed) wins, else the channel's per-message hint
+    on this record, else ``None`` — the explicit "no locale known" the renderer never
+    silently defaults away. Both stored forms are already canonical, so no reparse here."""
+    if person is not None and person.locale is not None:
+        return person.locale
+    return record.inbound_locale
+
+
 def _turn_block(
     record: ConversationRecord, route: ConversationRoute, *, person: Person | None, thread_id: str
 ) -> dict[str, object]:
@@ -820,6 +831,7 @@ def _turn_block(
             "target_name": route.target_name,
             "person": person.person_id if person is not None else None,
             "thread": thread_id,
+            "locale": _resolved_locale(person, record),
         },
     }
 
@@ -840,7 +852,12 @@ def _conversation_state_context(
     inbound_id, _source = _inbound_id_and_source(intake, route)
     return StateContext(
         door="conversation",
-        candidates=SubjectCandidates(target_kind=route.target_kind, target_name=route.target_name, by_kind=by_kind),
+        candidates=SubjectCandidates(
+            target_kind=route.target_kind,
+            target_name=route.target_name,
+            by_kind=by_kind,
+            locale=_resolved_locale(person, intake),
+        ),
         actor=actor,
         turn_id=intake.message_id,
         inbound_id=inbound_id,
@@ -1146,6 +1163,7 @@ def _new_record(
     inbound_form: dict[str, Any] | None = None,
     inbound_attachments: list[MediaItem] | None = None,
     inbound_location: LocationElement | None = None,
+    inbound_locale: str | None = None,
     inbound_kind: Literal["message", "event"] = "message",
     inbound_event: dict[str, Any] | None = None,
     submitted_by: str | None = None,
@@ -1188,6 +1206,7 @@ def _new_record(
         inbound_form=inbound_form,
         inbound_attachments=inbound_attachments,
         inbound_location=inbound_location,
+        inbound_locale=inbound_locale,
         inbound_kind=inbound_kind,
         inbound_event=inbound_event,
         submitted_by=submitted_by,
@@ -1452,7 +1471,9 @@ async def _resolve_turn_record(
             ),
         )
 
-    person, created = await _person_store().ensure_provisional(multichannel.target, multichannel.address_row())
+    person, created = await _person_store().ensure_provisional(
+        multichannel.target, multichannel.address_row(), locale=intake.inbound_locale
+    )
     greeting, greeting_code = await _greeting_and_code(multichannel) if created else (None, None)
     action = classify(text)
     if isinstance(action, Passthrough):
@@ -1750,6 +1771,7 @@ async def accept(
     form: dict[str, Any] | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
+    locale: str | None = None,
 ) -> str:
     """Accept one inbound channel message, persist-and-deliver its answer, and return its
     ``message_id`` (a uuid4). See :meth:`AppConversations.accept`.
@@ -1789,6 +1811,7 @@ async def accept(
     checked_form = _checked_form(form)
     checked_attachments = _checked_attachments(attachments)
     checked_location = _checked_location(location)
+    checked_locale = normalize_optional_locale(locale)
     if not text.strip():
         raise BlankInboundTextError(
             f"channel {channel!r} inbound {provider_message_id!r} carries blank text; nothing to run a turn on"
@@ -1860,6 +1883,7 @@ async def accept(
         form=checked_form,
         attachments=checked_attachments,
         location=checked_location,
+        locale=checked_locale,
     )
 
 
@@ -1878,6 +1902,7 @@ async def _accept_for_turn(
     form: dict[str, Any] | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
+    locale: str | None = None,
 ) -> str:
     """Commit an admitted channel message to a turn in the one order that keeps the
     release-less inbound claim sound: reserve the per-thread FIFO slot (the last gate that
@@ -1898,6 +1923,7 @@ async def _accept_for_turn(
         inbound_form=form,
         inbound_attachments=attachments,
         inbound_location=location,
+        inbound_locale=locale,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -1950,6 +1976,7 @@ async def submit_api_message(
     form: dict[str, Any] | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
+    locale: str | None = None,
 ) -> ApiSubmitResult:
     """Accept one authed API-door message and run its turn.
 
@@ -1984,6 +2011,7 @@ async def submit_api_message(
     checked_form = _checked_form(form)
     checked_attachments = _checked_attachments(attachments)
     checked_location = _checked_location(location)
+    checked_locale = normalize_optional_locale(locale)
     if caller_principal is None or not caller_principal.strip():
         raise UnauthenticatedApiCallerError(
             f"api conversation route {route_name!r} needs an accountable caller principal and this "
@@ -2021,6 +2049,7 @@ async def submit_api_message(
         inbound_form=checked_form,
         inbound_attachments=checked_attachments,
         inbound_location=checked_location,
+        inbound_locale=checked_locale,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:

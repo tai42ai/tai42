@@ -94,6 +94,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import OPTION_ID_MAX_CHARS
 from tai42_contract.conversations import BlankInboundTextError, validate_entry_params
+from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.utils.client_address import XFF_HEADER, client_bucket
 
@@ -541,6 +542,22 @@ def _client_bucket(request: Request) -> str:
     return client_bucket(request.client.host if request.client else None, request.headers.get(XFF_HEADER, ""))
 
 
+def _inbound_locale(request: Request) -> str | None:
+    """The visitor's BCP 47 locale from the request's ``Accept-Language`` header — the
+    browser's top-ranked language range, canonicalized. A wildcard (``*``), an absent
+    header or a malformed range is dropped to ``None`` (no locale hint), so the turn still
+    runs; the platform never guesses a language from nothing."""
+    header = request.headers.get("accept-language", "")
+    top = header.split(",", 1)[0].split(";", 1)[0].strip()
+    if not top or top == "*":
+        return None
+    try:
+        return normalize_optional_locale(top)
+    except InvalidLocaleError:
+        logger.warning("web inbound: dropping malformed Accept-Language %r", top)
+        return None
+
+
 def _read_link_params(request: Request, identity: str) -> tuple[dict[str, str], Response | None]:
     """Parse the navigation's query into the validated link params, or a byte-constant
     400 refusal page. A DUPLICATE key — checked on the RAW query, reserved names
@@ -947,6 +964,7 @@ async def web_messages(request: Request) -> Response:
                 text=body.text,
                 provider_message_id=_provider_message_id(body.identity, address, body.client_message_id),
                 params=params,
+                locale=_inbound_locale(request),
             )
         except BlankInboundTextError:
             return _error("message text is blank", 400)
@@ -1182,6 +1200,7 @@ async def web_form_submit(request: Request) -> Response:
                 text=text,
                 provider_message_id=_provider_message_id(record.identity, address, body.client_message_id),
                 params=registration.params or None,
+                locale=_inbound_locale(request),
                 form=body.values,
             )
         except BlankInboundTextError:

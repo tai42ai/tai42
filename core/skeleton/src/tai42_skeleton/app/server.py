@@ -750,6 +750,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         form: dict[str, Any] | None = None,
         attachments: "list[MediaItem] | None" = None,
         location: "LocationElement | None" = None,
+        locale: str | None = None,
     ) -> str:
         from tai42_skeleton.conversations import accept
 
@@ -764,6 +765,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
             form=form,
             attachments=attachments,
             location=location,
+            locale=locale,
         )
 
     async def _conversation_record_delivery_status(

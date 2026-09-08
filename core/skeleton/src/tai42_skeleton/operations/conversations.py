@@ -28,6 +28,7 @@ from tai42_contract.conversations import (
     TargetConversationConfig,
 )
 from tai42_contract.interactions import LocationElement, MediaItem
+from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
 from tai42_kit.utils.data import get_compiled_jq
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
@@ -1038,6 +1039,49 @@ def _mode_store() -> ConversationModeStore:
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
     return ConversationModeStore(ConversationsSettings())
+
+
+@operation(
+    summary="Read a conversation person",
+    tags=["conversations"],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+)
+async def get_conversation_person(person_id: str) -> dict[str, Any]:
+    """The person row named by ``person_id`` — its identity, folded addresses and stored
+    ``locale`` (the BCP 47 tag the rendering layer resolves text against, or ``null`` when
+    none is known). The subject read that serves a person's locale. A blank ``person_id`` is a
+    400; an unknown one a 404; no backend a loud 501."""
+    if not person_id.strip():
+        raise BadRequestError("person_id must be a non-blank person identifier")
+    _require_backend()
+    person = await _person_store().get_by_id(person_id)
+    if person is None:
+        raise NotFoundError(f"conversation person not found: {person_id!r}")
+    return person.model_dump(mode="json")
+
+
+@operation(
+    summary="Set a conversation person's locale",
+    tags=["conversations"],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+)
+async def set_conversation_person_locale(person_id: str, locale: str | None) -> dict[str, Any]:
+    """Set (or clear) a person's stored ``locale`` — the operator override the rendering layer
+    resolves text against, winning over the channel-seeded value on every later turn. ``locale``
+    is a BCP 47 tag (canonicalized here — ``he-il`` stores as ``he-IL``); ``null`` clears it back
+    to no-locale-known. A blank ``person_id`` or a malformed ``locale`` is a 400; an unknown
+    person a 404; no backend a loud 501. Returns the updated person."""
+    if not person_id.strip():
+        raise BadRequestError("person_id must be a non-blank person identifier")
+    try:
+        canonical = normalize_optional_locale(locale)
+    except InvalidLocaleError as exc:
+        raise BadRequestError(str(exc)) from exc
+    _require_backend()
+    person = await _person_store().set_locale(person_id, canonical)
+    if person is None:
+        raise NotFoundError(f"conversation person not found: {person_id!r}")
+    return person.model_dump(mode="json")
 
 
 async def _route_keyed_target(named_route: ConversationRoute, thread_id: str, address: str | None) -> tuple[str, str]:

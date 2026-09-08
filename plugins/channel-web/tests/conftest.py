@@ -119,6 +119,7 @@ class _StubConversations:
         provider_message_id: str,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
+        locale: str | None = None,
     ) -> str:
         self.accept_calls.append(
             {
@@ -130,6 +131,7 @@ class _StubConversations:
                 "provider_message_id": provider_message_id,
                 "params": params,
                 "form": form,
+                "locale": locale,
             }
         )
         if self.accept_error is not None:

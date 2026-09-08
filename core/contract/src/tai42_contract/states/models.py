@@ -30,6 +30,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract.conversation_target import ConversationTargetKind
+from tai42_contract.locale import normalize_optional_locale
 
 #: A subject ``kind`` (and every entry of a declaration's ``subject_kinds``): a
 #: lowercase identifier of at most 63 characters.
@@ -108,6 +109,16 @@ class SubjectCandidates(BaseModel):
     target_kind: ConversationTargetKind
     target_name: str = Field(min_length=1)
     by_kind: dict[str, str] = Field(default_factory=dict)
+    # The subject's BCP 47 locale the rendering layer resolves text against — the
+    # channel-supplied or operator-set language, canonical (see
+    # :func:`tai42_contract.locale.canonical_locale`). ``None`` is the explicit
+    # "no locale known" marker: the renderer never silently defaults to a language.
+    locale: str | None = None
+
+    @field_validator("locale")
+    @classmethod
+    def _canonical_locale(cls, value: str | None) -> str | None:
+        return normalize_optional_locale(value)
 
 
 class StateContext(BaseModel):

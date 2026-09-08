@@ -6187,6 +6187,7 @@ version = "11.0.2"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
+    { name = "babel" },
     { name = "cachetools" },
     { name = "click" },
     { name = "cryptography" },
@@ -6267,6 +6268,7 @@ toolbox = [
 [package.metadata]
 requires-dist = [
     { name = "async-lru", specifier = ">=2.3" },
+    { name = "babel", specifier = ">=2.18" },
     { name = "beautifulsoup4", marker = "extra == 'files'", specifier = ">=4.12" },
     { name = "cachetools", specifier = ">=7.0" },
     { name = "click", specifier = ">=8.3" },

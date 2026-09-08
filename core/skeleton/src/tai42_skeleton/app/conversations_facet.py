@@ -39,6 +39,7 @@ class ConversationsFacet:
         form: dict[str, Any] | None = None,
         attachments: list[MediaItem] | None = None,
         location: LocationElement | None = None,
+        locale: str | None = None,
     ) -> str:
         return await self._app._conversation_accept(
             channel,
@@ -51,6 +52,7 @@ class ConversationsFacet:
             form=form,
             attachments=attachments,
             location=location,
+            locale=locale,
         )
 
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:

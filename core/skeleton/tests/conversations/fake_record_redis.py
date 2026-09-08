@@ -375,6 +375,20 @@ class FakeRecordRedis:
                     del index[field]
                     removed_fields += 1
             return [removed_row, removed_fields]
+        if "conversations:person:set_locale" in script:
+            row_key = keys[0]
+            mode, locale = argv[0], argv[1]
+            raw = self._strings.get(row_key)
+            if raw is None:
+                return ["missing"]
+            person = json.loads(raw)
+            if mode == "clear":
+                person.pop("locale", None)
+            else:
+                person["locale"] = locale
+            encoded = json.dumps(person)
+            self._strings[row_key] = encoded
+            return ["ok", encoded]
         if "conversations:pair_code:mint" in script:
             open_key, new_code_key = keys[0], keys[1]
             new_hash, record_json, ttl, code_prefix = argv[0], argv[1], int(argv[2]), argv[3]

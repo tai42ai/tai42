@@ -60,8 +60,11 @@ class _Engine:
         form=None,
         attachments=None,
         location=None,
+        locale=None,
     ):
-        self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds, params, form))
+        self.calls.append(
+            (route_name, external_user_id, text, caller_principal, wait_seconds, params, form, locale)
+        )
         if self._raises is not None:
             raise self._raises
         return self._result or ApiSubmitResult(message_id="m-1", thread_id="t-1", answer=None)
@@ -424,3 +427,28 @@ async def test_extract_route_create_rejects_an_invalid_route_body():
     router = _router()
     with pytest.raises(BadRequestError, match="invalid conversation route"):
         await router._extract_route_create(_create_request(b'{"door": "channel"}'))
+
+
+def test_a_body_locale_reaches_the_engine(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    resp = _post(client, body={"external_user_id": "u-7", "text": "hi", "locale": "he-il"})
+    assert resp.status_code == 202  # pure-async default (no wait_seconds)
+    # Canonicalized by the body model and forwarded to the turn engine.
+    assert engine.calls[0][7] == "he-IL"
+
+
+def test_an_absent_locale_is_forwarded_as_none(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    resp = _post(client)
+    assert resp.status_code == 202
+    assert engine.calls[0][7] is None
+
+
+def test_a_malformed_locale_is_a_400(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    resp = _post(client, body={"external_user_id": "u-7", "text": "hi", "locale": "not a locale!"})
+    assert resp.status_code == 400
+    assert engine.calls == []

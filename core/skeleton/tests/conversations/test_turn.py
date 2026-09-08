@@ -390,6 +390,7 @@ async def test_tool_target_delivers_its_string_reply(env, monkeypatch):
                         "target_name": "echo-tool",
                         "person": None,
                         "thread": "bridge:tool-line:+15550002222",
+                        "locale": None,
                     },
                 },
             },
@@ -469,6 +470,7 @@ async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatc
             "target_name": "echo-tool",
             "person": None,
             "thread": "bridge:tool-line:+15550002222",
+            "locale": None,
         },
     }
 
@@ -2058,6 +2060,7 @@ async def test_tool_payload_carries_params_when_passed(env, monkeypatch):
             "target_name": "echo-tool",
             "person": None,
             "thread": "bridge:tool-line:+15550002222",
+            "locale": None,
         },
     }
     assert kwargs == {**_BASELINE_CHANNEL_PAYLOAD, "params": {"token": "abc-123"}}
@@ -2085,6 +2088,7 @@ async def test_tool_payload_omits_params_when_none_or_empty(env, monkeypatch, pa
             "target_name": "echo-tool",
             "person": None,
             "thread": "bridge:tool-line:+15550002222",
+            "locale": None,
         },
     }
     assert kwargs == _BASELINE_CHANNEL_PAYLOAD
@@ -3917,6 +3921,7 @@ async def test_accept_with_attachments_and_location_stamps_record_and_the_tool_p
             "target_name": "echo-tool",
             "person": None,
             "thread": "bridge:tool-line:+15550002222",
+            "locale": None,
         },
     }
     assert kwargs == {
@@ -4092,6 +4097,7 @@ async def test_turn_block_on_the_channel_door(env, monkeypatch):
             "target_name": "echo-tool",
             "person": None,
             "thread": "bridge:tool-line:+15550002222",
+            "locale": None,
         },
     }
     assert "event" not in kwargs
@@ -4115,6 +4121,7 @@ async def test_turn_block_on_the_api_door(env, monkeypatch):
             "target_name": "echo-tool",
             "person": None,
             "thread": result.thread_id,
+            "locale": None,
         },
     }
     assert "event" not in kwargs
@@ -4144,6 +4151,7 @@ async def test_turn_block_on_the_event_door(env, monkeypatch):
             "target_name": "echo-tool",
             "person": None,
             "thread": thread_id,
+            "locale": None,
         },
     }
     assert kwargs["event"] == {"id": "evt-1", "kind": "provider.update", "payload": {"amount": 5}}
@@ -4662,6 +4670,7 @@ async def test_preset_target_sees_turn_and_event_under_its_payload_arg(env, monk
             "target_name": "relay",
             "person": None,
             "thread": thread_id,
+            "locale": None,
         },
     }
     assert received["event"] == {"id": "evt-1", "kind": "provider.update", "payload": {"n": 1}}
@@ -4832,3 +4841,71 @@ async def test_event_with_no_caller_principal_is_refused(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_channel_route()))
     with pytest.raises(turn_module.UnauthenticatedApiCallerError):
         await turn_module.submit_event("tool-line", _event_submission(address="x", event=_event()), None)
+
+
+# -- composed path: channel locale -> subject context -> render variant ------
+
+
+async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(env, monkeypatch):
+    """The composed guest path: a channel accepts a message with the guest's locale, the turn
+    carries it onto the subject block AND the ambient state context, and the rendering layer
+    resolves the per-locale template variant off that same locale — the flow selects no
+    language. Without a variant (and no default) the render refuses loudly."""
+    from tai42_contract.storage import Storage
+
+    from tai42_skeleton.storage import StorageRegistry
+    from tai42_skeleton.template import ResourceManager
+    from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError
+
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+
+    seen: dict[str, object] = {}
+
+    def _fn(kw: dict) -> str:
+        ctx = current_state_context()
+        seen["subject_block_locale"] = kw["turn"]["subject"]["locale"]
+        seen["ambient_locale"] = ctx.candidates.locale if ctx is not None else None
+        return "ok"
+
+    _wire_tool(monkeypatch, _fn)
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", locale="he-IL")
+    await _settle()
+
+    # Channel -> turn -> subject: the guest's locale reached both the payload subject block
+    # and the ambient context the renderer reads.
+    assert seen["subject_block_locale"] == "he-IL"
+    assert seen["ambient_locale"] == "he-IL"
+
+    # Context locale -> render: the store resolves the he variant off that same locale, and a
+    # locale with no variant and no default refuses loudly.
+    class _InMemory(Storage):
+        def __init__(self) -> None:
+            self.items = {"welcome": "default", "welcome@he": "shalom"}
+
+        async def load(self, path: str) -> str:
+            try:
+                return self.items[path]
+            except KeyError as exc:
+                raise FileNotFoundError(path) from exc
+
+        async def list(self) -> list[str]:
+            return sorted(self.items)
+
+        async def upload(self, path: str, content: str) -> None:
+            self.items[path] = content
+
+        async def delete(self, path: str) -> None:
+            self.items.pop(path, None)
+
+        async def delete_dir(self, path: str) -> None:
+            pass
+
+    registry = StorageRegistry()
+    registry.register_storage(_InMemory)
+    manager = ResourceManager(registry.provider)
+
+    assert await manager.render_by_id("welcome", locale=cast(str, seen["ambient_locale"])) == "shalom"
+    with pytest.raises(TemplateLocaleNotFoundError):
+        await manager.render_by_id("missing", locale=cast(str, seen["ambient_locale"]))

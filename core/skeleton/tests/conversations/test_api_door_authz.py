@@ -73,6 +73,7 @@ class _Recorder:
         form=None,
         attachments=None,
         location=None,
+        locale=None,
     ):
         self.calls.append((route_name, external_user_id, caller_principal))
         return ApiSubmitResult(message_id="m-1", thread_id=f"bridge:{route_name}:{external_user_id}", answer=None)

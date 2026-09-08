@@ -143,12 +143,21 @@ async def test_unset_secret_fails_closed(http_recorder, fake_redis, monkeypatch:
     assert _body(response) == {"error": "channel misconfigured"}
 
 
-def _text_update(chat_id: int = 777, text: str = "hello bridge", update_id: int = 7, username: str | None = None):
+def _text_update(
+    chat_id: int = 777,
+    text: str = "hello bridge",
+    update_id: int = 7,
+    username: str | None = None,
+    language_code: str | None = None,
+):
     """A plain (non-reply) text update — a bridge message, not an answer."""
     chat: dict[str, Any] = {"id": chat_id}
     if username is not None:
         chat["username"] = username
-    return {"update_id": update_id, "message": {"message_id": 1001, "chat": chat, "text": text}}
+    message: dict[str, Any] = {"message_id": 1001, "chat": chat, "text": text}
+    if language_code is not None:
+        message["from"] = {"id": chat_id, "language_code": language_code}
+    return {"update_id": update_id, "message": message}
 
 
 async def test_bridge_only_deployment_no_recipients_does_not_misconfigure(
@@ -249,6 +258,14 @@ async def test_uncorrelated_routed_message_reaches_bridge_with_verbatim_args(htt
     assert call.client_address == "777"
     assert call.text == "hello bridge"
     assert call.provider_message_id == "7"
+    assert call.locale is None  # no sender language_code on this update
+
+
+async def test_bridge_maps_the_sender_language_code_to_the_turn_locale(http_recorder, fake_redis, conversations):
+    response = await inbound(make_inbound_request(_text_update(language_code="pt-br"), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert len(conversations.accept_calls) == 1
+    assert conversations.accept_calls[0].locale == "pt-BR"
 
 
 async def test_inbound_fires_typing_chat_action_before_bridge(http_recorder, fake_redis, conversations):

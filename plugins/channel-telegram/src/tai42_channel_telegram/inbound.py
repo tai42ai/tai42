@@ -33,6 +33,7 @@ from tai42_contract.conversations import (
     BlankInboundTextError,
     validate_entry_params,
 )
+from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
 from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.client import answer_callback_query, send_chat_action
@@ -148,6 +149,30 @@ def _sanitize_params(params: dict[str, str] | None) -> dict[str, str] | None:
         logger.warning("telegram inbound params rejected (%s); proceeding without params", exc)
         return None
     return params
+
+
+def _inbound_locale(update: dict[str, object]) -> str | None:
+    """The guest's BCP 47 locale off a Telegram update — the sender's ``language_code``
+    (the IETF tag Telegram attaches to every ``from``), read off the message or the
+    callback_query. Canonicalized defensively: a malformed value is dropped to ``None``
+    (never a 5xx that would have Telegram redeliver the poison update), so the turn still
+    runs, just without a locale hint."""
+    sender: object = None
+    for key in ("message", "callback_query"):
+        node = update.get(key)
+        if isinstance(node, dict) and isinstance(node.get("from"), dict):
+            sender = node["from"]
+            break
+    if not isinstance(sender, dict):
+        return None
+    code = sender.get("language_code")
+    if not isinstance(code, str) or not code.strip():
+        return None
+    try:
+        return normalize_optional_locale(code)
+    except InvalidLocaleError:
+        logger.warning("telegram inbound: dropping malformed language_code %r", code)
+        return None
 
 
 def _is_recipient_chat(chat: dict[str, object], settings: TelegramSettings) -> bool:
@@ -316,6 +341,7 @@ async def _bridge(
             text=text,
             provider_message_id=str(update_id),
             params=_sanitize_params(params),
+            locale=_inbound_locale(update),
         )
     except BlankInboundTextError:
         # A whitespace-only message is nothing to bridge — ack so Telegram stops

@@ -119,6 +119,7 @@ from tai42_skeleton.operations.conversations import delete_conversation_route as
 from tai42_skeleton.operations.conversations import delete_conversation_thread as _delete_conversation_thread_op
 from tai42_skeleton.operations.conversations import get_conversation_config as _get_conversation_config_op
 from tai42_skeleton.operations.conversations import get_conversation_message as _get_conversation_message_op
+from tai42_skeleton.operations.conversations import get_conversation_person as _get_conversation_person_op
 from tai42_skeleton.operations.conversations import get_conversation_route as _get_conversation_route_op
 from tai42_skeleton.operations.conversations import get_conversation_thread as _get_conversation_thread_op
 from tai42_skeleton.operations.conversations import get_conversation_thread_mode as _get_conversation_thread_mode_op
@@ -131,6 +132,7 @@ from tai42_skeleton.operations.conversations import (
     send_conversation_thread_message as _send_conversation_thread_message_op,
 )
 from tai42_skeleton.operations.conversations import set_conversation_config as _set_conversation_config_op
+from tai42_skeleton.operations.conversations import set_conversation_person_locale as _set_conversation_person_locale_op
 from tai42_skeleton.operations.conversations import set_conversation_thread_mode as _set_conversation_thread_mode_op
 from tai42_skeleton.operations.errors import NotSupportedError
 
@@ -340,6 +342,40 @@ delete_conversation_person = register_operation_route(
     operation_metadata_of(_delete_conversation_person_op),
     path="/api/conversations/persons/{person_id}",
     method="DELETE",
+    action="write",
+)
+
+
+async def _extract_person_locale_body(request: Request) -> dict:
+    """The person-locale write body ``{locale}`` as the operation's ``locale`` field. A
+    non-object body or a ``locale`` that is neither a string nor ``null`` is a loud 400 here;
+    the operation validates the tag itself. ``null`` clears the stored locale."""
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise BadRequestError("body must be a JSON object of {locale}") from None
+    locale = body.get("locale")
+    if locale is not None and not isinstance(locale, str):
+        raise BadRequestError("locale must be a BCP 47 string or null") from None
+    return {"locale": locale}
+
+
+get_conversation_person = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_conversation_person_op),
+    path="/api/conversations/persons/{person_id}",
+    method="GET",
+    action="read",
+)
+
+set_conversation_person_locale = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_set_conversation_person_locale_op),
+    path="/api/conversations/persons/{person_id}/locale",
+    method="PUT",
+    context_extractor=_extract_person_locale_body,
     action="write",
 )
 
@@ -609,6 +645,7 @@ async def send_conversation_message(request: Request) -> Response:
             form=message.form,
             attachments=message.attachments,
             location=message.location,
+            locale=message.locale,
         )
     except ConversationRouteResolutionError as exc:
         return _error(str(exc), 404)
