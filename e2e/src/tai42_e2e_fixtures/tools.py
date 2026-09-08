@@ -72,7 +72,7 @@ async def e2e_worker_info() -> dict:
 
     ``value_class`` is the frozen ``prometheus_client`` value backend —
     ``MmapedValue`` when the multiproc env froze correctly, ``MutexValue`` when
-    it did not (the C2 in-vivo probe). ``socket_class`` doubles as the C8
+    it did not (the in-vivo probe). ``socket_class`` doubles as the
     pristine-socket check (a proxy leak would leave a non-stdlib socket class).
 
     ``state_digest`` is a PROBE-COMPUTED hash of this process's OWN live view —

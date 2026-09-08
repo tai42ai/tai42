@@ -1,4 +1,4 @@
-"""The durable scratch backend is a HARD sandbox dependency (§B3.7).
+"""The durable scratch backend is a HARD sandbox dependency.
 
 ``langchain_deep_agent``'s scratch moved onto a durable sandbox WORKSPACE volume, so a
 run/astream drive acquires the session BEFORE the graph compiles and raises the every-door

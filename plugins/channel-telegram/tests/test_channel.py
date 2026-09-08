@@ -94,7 +94,7 @@ async def test_text_ask_sends_force_reply_and_stores_correlation(http_recorder, 
 
 
 async def test_select_renders_options_as_inline_keyboard(http_recorder, fake_redis):
-    # Clean break from numbered text: a select ask renders its options as a native
+    # A select ask renders its options as a native
     # inline keyboard, one callback button per option (callback_data = the index),
     # and keeps the option list in a side record so an inbound tap maps back to text.
     await TelegramChannel().deliver(_delivery(answer_format="select", options=["red", "blue"]))

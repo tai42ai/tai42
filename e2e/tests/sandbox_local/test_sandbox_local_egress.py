@@ -3,7 +3,7 @@
 A bare host process runs on the host network and cannot be confined, so the direct/host
 provider accepts EXACTLY network ``egress`` and REJECTS ``none`` / ``internal`` LOUDLY — it
 cannot enforce network isolation on the host, and never silently falls back to an open
-network for a request that asked for lockdown (PLAN_9).
+network for a request that asked for lockdown.
 
 The operator egress CEILING is ``egress`` (open) on this stack, so a tighter ``none`` /
 ``internal`` request passes the kit ceiling check and reaches the provider, where the

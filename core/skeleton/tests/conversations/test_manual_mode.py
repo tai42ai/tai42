@@ -282,8 +282,8 @@ async def test_manual_channel_memoryless_agent_appends_nothing_and_records_silen
 
 async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_not_error(env, monkeypatch):
     # A LINKED person's aggregated thread folds to manual when ANY spanned route defaults
-    # manual. Reaching the route's MEMORYLESS agent target that way previously errored on every
-    # message (an append it cannot serve); now the inbound records silent, no append, no error.
+    # manual. Reaching the route's MEMORYLESS agent target that way records silent — no append
+    # (it cannot serve one), no error.
     from datetime import UTC, datetime
 
     from tai42_contract.conversations import Person, PersonAddress

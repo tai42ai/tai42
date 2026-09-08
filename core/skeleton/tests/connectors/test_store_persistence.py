@@ -257,7 +257,7 @@ async def test_load_record_or_none_broken_kek_config_raises(install_store, monke
     assert [r for r in caplog.records if r.name == persistence.logger.name] == []
 
 
-# -- C3: a malformed (non-UUID) connection_id maps to not-found, no shape oracle --
+# -- a malformed (non-UUID) connection_id maps to not-found, no shape oracle --
 
 
 class _MalformedIdStore:

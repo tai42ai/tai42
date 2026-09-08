@@ -1,4 +1,4 @@
-"""§3b/§3f — ``claude_code`` fails CLOSED and raises LOUDLY.
+"""``claude_code`` fails CLOSED and raises LOUDLY.
 
 Three loud-failure invariants, all engine-agnostic and driven deterministically over the fake
 sandbox:
@@ -36,7 +36,7 @@ pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("claude_agent"),
-        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the §5 smoke",
+        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
 ]
 

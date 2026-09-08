@@ -1,4 +1,4 @@
-"""C7 — skeleton ↔ tai42-marketplace registry over HTTP. Opt-in: collects only with
+"""Skeleton ↔ tai42-marketplace registry over HTTP. Opt-in: collects only with
 ``TAI_E2E_MARKETPLACE=1``.
 
 The advisory round-trip: an admin-created advisory against the installed version

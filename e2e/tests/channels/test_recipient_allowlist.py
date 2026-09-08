@@ -1,4 +1,4 @@
-"""Item C — the F1 recipient allowlist, end to end, per medium.
+"""The recipient allowlist, end to end, per medium.
 
 An allowlisted caller-supplied recipient is delivered to (and its reply routes
 home); an unlisted one is refused BEFORE any provider call — fail closed, nothing

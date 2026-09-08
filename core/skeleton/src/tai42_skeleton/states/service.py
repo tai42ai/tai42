@@ -9,7 +9,7 @@ lifecycle, and the WRITE-PROVENANCE CHOKEPOINT: it completes a consumer's
 :class:`~tai42_contract.states.WriteOrigin` into a
 :class:`~tai42_contract.states.CompletedOrigin` — stamping ``door``/``actor``/``turn_id``
 from the ambient :class:`~tai42_contract.states.StateContext` (or ``api`` + the request
-principal with none) — so the audit ledger is never optional or forgeable (D-6).
+principal with none) — so the audit ledger is never optional or forgeable.
 
 The ambient state-context carrier the write chokepoint reads lives in the kit
 (``tai42_kit.utils.state_context``) so backend workers can deposit it without importing
@@ -388,7 +388,7 @@ class StatesService:
     # -- subject validation ------------------------------------------------------
 
     async def validate_subject(self, decl: StateDeclaration, subject: StateSubject) -> None:
-        """Refuse a subject that a state's declaration does not admit (D-1): an undeclared
+        """Refuse a subject that a state's declaration does not admit: an undeclared
         kind, or — for kind ``person`` — an unknown person or a person whose target does
         not match the subject's. The ``ConversationPersonStore`` is constructed LAZILY and
         ONLY on the ``person`` branch (its constructor raises 501 without the redis
@@ -414,7 +414,7 @@ class StatesService:
                 f"not the subject's {subject.target_kind}/{subject.target_name}"
             )
 
-    # -- write-provenance chokepoint (D-6) --------------------------------------
+    # -- write-provenance chokepoint --------------------------------------
 
     def _complete_origin(self, origin: WriteOrigin) -> CompletedOrigin:
         """Complete a consumer's :class:`WriteOrigin` into a :class:`CompletedOrigin`:
@@ -923,7 +923,7 @@ class StatesService:
         """Mount a module on a state: validate path/parameters/declarations (+ check), run
         every registered mount validator over the composed effective schema, run every
         registered reconciler, then store the resolved parameters and the recomposed
-        effective schema in one transaction (D-5 — nothing derived is materialized). The
+        effective schema in one transaction (nothing derived is materialized). The
         reconcilers and the mount write share ONE transaction, so a reconciler's record
         writes commit with the mount or roll back together with a refusal. ``body.options``
         is a per-operation directive passed to the reconcilers, never stored.
@@ -1014,7 +1014,7 @@ class StatesService:
             await self._store.update_mount_declarations(state, module_name, declarations, effective_schema=effective)
 
     async def unmount(self, state: str, module_name: str) -> None:
-        """Remove a mount and recompose the state's effective schema (D-5 — nothing else)."""
+        """Remove a mount and recompose the state's effective schema (nothing else)."""
         self._ensure_available()
         if await self._store.get_mount(state, module_name) is None:
             raise StateNotFoundError(f"module {module_name!r} is not mounted on state {state!r}")

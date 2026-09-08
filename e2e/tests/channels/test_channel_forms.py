@@ -15,7 +15,7 @@ loudly on one that does not:
 
 web's own in-chat form widget is driven through the web plugin's public doors in
 ``test_web_public_chat``. The whatsapp Flow + nfm_reply leg needs the conversations backend
-and lives on the bridge stack (``tests/bridge/test_l7_whatsapp_cloud``).
+and lives on the bridge stack (``tests/bridge/test_whatsapp_cloud``).
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""RS-B6: a surviving epoch's pre-auth login route returns non-500 after a FAILED build.
+"""A surviving epoch's pre-auth login route returns non-500 after a FAILED build.
 
 A profile-apply reload whose build fails must leave the live epoch — including the
 provider instances its ``probe_identity_provider`` recorded — completely untouched, so the

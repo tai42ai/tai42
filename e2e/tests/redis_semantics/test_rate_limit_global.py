@@ -1,4 +1,4 @@
-"""C6 — the fixed-window rate limiter is GLOBAL across workers, not per-worker.
+"""The fixed-window rate limiter is GLOBAL across workers, not per-worker.
 Ten requests alternating across two replicas fill one 10-second burst window;
 the eleventh is refused on either replica. A per-worker counter would allow ~2L."""
 

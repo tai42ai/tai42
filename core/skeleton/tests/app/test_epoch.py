@@ -396,7 +396,7 @@ async def test_a_non_exempt_in_flight_request_is_drained_before_aclose() -> None
     """A NORMAL in-flight request (an MCP tool call / a sync REST tool run) is NOT exempt: the
     bus-driven retire DRAINS it — waits for it to finish — BEFORE ``aclose``ing the lifespan, so
     its transport is never severed mid-response. Proven by ``aclose`` running only AFTER it
-    releases (the F6 "in-flight sync tool run completes on the old epoch" contract)."""
+    releases (the "in-flight sync tool run completes on the old epoch" contract)."""
     import asyncio
 
     _install_boot("boot-app")

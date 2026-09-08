@@ -8,7 +8,7 @@ drives auto-pilot to completion or the next park.
 
 EVERY parking agent calls this from ITS OWN registration (``claude_code``,
 ``langchain_deep_agent``, ``tools_agent``) — there is no shared module-import site that
-would fire it exactly once, and a MODULE-IMPORT side effect (the old shape) would starve
+would fire it exactly once, and a MODULE-IMPORT side effect would starve
 every post-boot reload epoch of its binding (kit/plugin modules are import-cached, not
 re-imported on reload). Per-epoch IDEMPOTENCE makes the multiple callers safe: the first
 call binds, later ones catch the FastMCP duplicate-bind error and no-op, so a box loading

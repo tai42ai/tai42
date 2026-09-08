@@ -325,7 +325,7 @@ async def test_list_and_search_page_over_full_subject_identity(
 async def test_threaded_conn_makes_the_record_write_and_the_mount_atomic(
     real_store: tuple[PostgresStatesStore, str],
 ) -> None:
-    # F1: a write threaded onto ``begin()``'s connection joins that transaction. Here a
+    # A write threaded onto ``begin()``'s connection joins that transaction. Here a
     # record write and a mount write run on the shared connection and the transaction rolls
     # back — BOTH must vanish. Were ``apply_ops`` to open its own connection (the bug), the
     # record write would commit independently and survive the rollback.

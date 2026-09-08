@@ -1,4 +1,4 @@
-"""The shared preset-authoring chokepoint gates (ruling 14 + input-schema authoring).
+"""The shared preset-authoring chokepoint gates (registration-tier fence + input-schema authoring).
 
 The registration-tier fence and the input-schema authoring rejection land at the SAME
 sites the write validator does (create/save/rollback/rename), so they inherit the

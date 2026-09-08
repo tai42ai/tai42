@@ -488,9 +488,6 @@ jobs:
     needs: [reuse, changes]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.browser_lane != 'true' }}
     runs-on: ubuntu-latest
-    env:
-      # The banned-terms list is data, never source: the naming guard reads it here.
-      TAI_BANNED_TERMS: ${{ secrets.TAI_BANNED_TERMS }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -520,7 +517,7 @@ jobs:
           github.head_ref != 'fleet-repin'
         run: uv run --no-sync python scripts/range_sync.py --check
       - name: Fleet consistency
-        run: uv run pytest tests/
+        run: uv run pytest tests scripts/tests
       - name: Plugin docs gate
         # Every first-party plugin's in-package docs/ tree validated against the
         # canonical contract (kit's validate_docs) — the fleet's docs enforcement

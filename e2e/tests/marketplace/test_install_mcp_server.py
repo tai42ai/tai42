@@ -1,4 +1,4 @@
-"""C7 — installing an ``mcp-server``-kind plugin item, end to end. Opt-in: collects
+"""Installing an ``mcp-server``-kind plugin item, end to end. Opt-in: collects
 only with ``TAI_E2E_MARKETPLACE=1``.
 
 The eta fixture provides ONE item of kind ``mcp-server`` (no module, no

@@ -335,7 +335,7 @@ IOTA_SCOPE_V2_ADDED = "write"
 
 # iota, seeded MONOREPO-style (the shape the shipped connectors use): a subdir listing
 # with a ``<component>-v<version>`` tag whose component equals ``<namespace>-<name>``.
-# A distinct plugin name so the tag component routes to it (see PLAN_4 §3). The listing
+# A distinct plugin name so the tag component routes to it. The listing
 # is seeded at 0.1.0 (registering it under the tree URL), then a 0.2.0 tag push is routed
 # by its component and published by the webhook.
 IOTA_MONOREPO_NAME = "connector-iota"

@@ -1,7 +1,7 @@
 """The deep agent's scratch is a LIVE durable shell over the sandbox volume; the caller-facing
 tier is ephemeral by security design.
 
-The ``StateBackend`` -> ``SandboxSessionBackend`` swap (§B2) makes the deep agent's built-in
+The ``StateBackend`` -> ``SandboxSessionBackend`` swap makes the deep agent's built-in
 filesystem tools AND its built-in ``execute`` shell one live surface over a real sandbox
 WORKSPACE volume (dormant under ``StateBackend``, where ``execute`` is inert and the file tools
 live in graph state). Two reachable truths of that swap:

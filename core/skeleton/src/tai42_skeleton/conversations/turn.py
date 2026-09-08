@@ -445,7 +445,7 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _Agent
         elif isinstance(event, MessageFinal):
             message = event
     if structured is not None:
-        # F1 (strict ruling): an agent's structured final is ALWAYS serialized to one
+        # An agent's structured final is ALWAYS serialized to one
         # string, even when its data is a JSON array of strings — an agent's structured
         # output may legitimately be a string array as DATA, so there is no magic-array
         # detection here. Ordered multi-message answers come from TOOL routes only (see

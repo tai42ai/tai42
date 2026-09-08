@@ -78,7 +78,7 @@ async def test_get_connection_returns_secret_free_view(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(conn_ops, "load_record_or_none", _load)
     # This test pins the secret-free view; the live reachability probe is exercised
-    # by the N1 tests below.
+    # by the reachability-probe tests below.
     monkeypatch.setattr(conn_ops, "_probe_unreachable", _no_probe)
     view = await conn_ops.get_connection(connection_id="c1")
     assert view["connection_id"] == "c1"
@@ -316,7 +316,7 @@ def test_connector_reads_project_and_mutations_carry_destructive_hint() -> None:
     assert app.tools.registered["patch_sub_services"]["annotations"].destructiveHint is True
 
 
-# -- C1: missing OAuth provider creds → named actionable 501 -----------------
+# -- missing OAuth provider creds → named actionable 501 -----------------
 
 
 async def test_start_connect_missing_provider_creds_is_501(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -389,7 +389,7 @@ def test_reconnect_and_patch_declare_not_supported_error() -> None:
     assert NotSupportedError in operation_metadata_of(conn_ops.patch_sub_services).error_classes
 
 
-# -- N1: single-connection reachability probe --------------------------------
+# -- single-connection reachability probe --------------------------------
 
 
 def _acall(mapping):
@@ -496,7 +496,7 @@ async def test_get_connection_missing_creds_is_unreachable_not_500(monkeypatch: 
     # An OAuth connection whose credential read hits a missing provider-credential
     # gap (OperatorMisconfiguredError, a RuntimeError) reads unreachable — a 200 with
     # the sub-service in unreachable_sub_services, NEVER the unnamed 500 the read door
-    # must not emit. (Guards the C1 failure mode from reappearing on the N1 read door.)
+    # must not emit. (Guards this failure mode from reappearing on the read door.)
     record = make_oauth_record(provider_id="acme", enabled_sub_services=["mail"])
     monkeypatch.setattr(conn_ops, "load_record_or_none", _acall({record.connection_id: record}))
     monkeypatch.setattr(conn_ops, "get_provider", lambda pid: make_oauth_descriptor(provider_id="acme"))
@@ -594,7 +594,7 @@ async def test_list_connections_is_probe_free(monkeypatch: pytest.MonkeyPatch) -
     assert all(item["unreachable_sub_services"] == [] for item in out["items"])
 
 
-# -- N2: list health surface (filter / unhealthy count / limit guard) --------
+# -- list health surface (filter / unhealthy count / limit guard) --------
 
 
 def _wire_list(monkeypatch, records) -> None:
@@ -657,7 +657,7 @@ async def test_list_connections_invalid_limit_is_400() -> None:
         await conn_ops.list_connections(limit=10_000)
 
 
-# -- N3: categories served on the providers listing --------------------------
+# -- categories served on the providers listing --------------------------
 
 
 async def test_list_connector_providers_serves_categories(monkeypatch: pytest.MonkeyPatch) -> None:

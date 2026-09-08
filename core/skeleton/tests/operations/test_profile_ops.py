@@ -334,7 +334,7 @@ async def test_reads_refuse_501_when_store_unconfigured(monkeypatch: pytest.Monk
         await config_ops.put_profile("p", **_body())
 
 
-# -- apply (C5) --------------------------------------------------------------
+# -- apply --------------------------------------------------------------
 
 
 def _stub_apply_service(monkeypatch: pytest.MonkeyPatch, outcome: ProfileApplyOutcome) -> dict[str, Any]:

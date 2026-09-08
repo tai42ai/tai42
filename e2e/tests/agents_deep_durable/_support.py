@@ -3,8 +3,8 @@
 The suite rides ``deep_agent_durable_stack`` (REPLICAS + redis checkpoint + the fake
 persistent sandbox, ``manifests.build_deep_agent_durable_stack``). The deterministic legs
 drive the SCRIPTED llm_stub, so they step aside on the real leg — the durable stack repoints
-its LLM group at Anthropic when ``claude_agent`` is the selected real seam (``manifests``
-§B4), which the scripted turns cannot survive; the one real turn lives in
+its LLM group at Anthropic when ``claude_agent`` is the selected real seam (in ``manifests``),
+which the scripted turns cannot survive; the one real turn lives in
 ``test_deep_agent_real_smoke``.
 
 The deep agent's built-in filesystem tools (``write_file`` / ``read_file`` / ``execute``) are
@@ -27,7 +27,7 @@ from tai42_e2e.stack import StackConfig, StackResources, TaiStack
 from tai42_e2e.variants import Variants
 
 # The durable stack replaces the scripted-stub LLM group with real Anthropic when the
-# ``claude_agent`` real seam is selected (the ONE real turn is the §5 smoke), so every
+# ``claude_agent`` real seam is selected (the ONE real turn is the real-vendor smoke), so every
 # scripted-stub deterministic leg steps aside there — the module stays inert in the default
 # mock run (``is_real("claude_agent")`` is False, so collection is byte-for-byte today's).
 DETERMINISTIC_MARKS = [
@@ -80,9 +80,9 @@ def build_deep_durable_no_sandbox_stack(res: StackResources, variants: Variants)
 
     Composed off the foundation ``build_deep_agent_durable_stack`` (never a hand-rebuilt
     manifest) with the one scalar sandbox slot dropped, so a run/astream drive raises the
-    every-door ``SandboxUnavailableError`` at the ``require_sandbox`` chokepoint (§B3.7) while
+    every-door ``SandboxUnavailableError`` at the ``require_sandbox`` chokepoint while
     the checkpoint-only ``append_thread_messages`` path — which acquires no session — still
-    works (§B3.5). The agent registers regardless: its digest-``session_image`` validation and
+    works. The agent registers regardless: its digest-``session_image`` validation and
     the sandbox dependency both fire at RUN start, never at plugin import."""
     config = build_deep_agent_durable_stack(res, variants)
     manifest = {key: value for key, value in config.manifest.items() if key != "sandbox_module"}

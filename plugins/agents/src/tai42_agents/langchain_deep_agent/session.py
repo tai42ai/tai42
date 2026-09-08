@@ -1,6 +1,6 @@
 """Durable-session acquisition for a ``langchain_deep_agent`` run.
 
-The ``StateBackend``→``SandboxSessionBackend`` swap (§B2/§B4) gives every run/astream drive a
+The ``StateBackend``→``SandboxSessionBackend`` swap gives every run/astream drive a
 live sandbox session. This module owns the run-door side of that: acquire the session BEFORE
 the graph compiles (the backend needs it), inject the operator's connection-reference SERVICE
 creds the SAME way the coding agent does (static ``delivery="env"`` values in the CLEAN
@@ -48,7 +48,7 @@ _CREDS_DIR: Final[str] = ".creds"
 #: A generous per-drive wall-clock ceiling used ONLY to size the workspace lease so it never
 #: expires under a live drive. The deep-agent turn is bounded by its recursion limit / model
 #: calls, not an exec timeout, so this is a lease-sizing constant (not a run timeout): the
-#: lease is LONG and never heartbeated (§C4), so it must exceed any real drive.
+#: lease is LONG and never heartbeated, so it must exceed any real drive.
 _DRIVE_CEILING_SECONDS: Final[int] = 3600
 
 
@@ -140,7 +140,7 @@ class DeepAgentSession:
 
         ``require_sandbox()`` is the ONE raising chokepoint — a box with no provider raises
         :class:`~tai42_contract.sandbox.SandboxUnavailableError` here, so run/astream carry a
-        HARD sandbox dependency (§B3.7). ``workspace_key`` is supplied on a resume (reattach the
+        HARD sandbox dependency. ``workspace_key`` is supplied on a resume (reattach the
         parked volume); otherwise it is derived from ``thread_id`` (threaded) or a fresh
         ``uuid4`` (tool-face).
 
@@ -183,7 +183,7 @@ class DeepAgentSession:
         """The latest wall-time this run's durable WORKSPACE volume is guaranteed to still
         hold it: ``now + session_ttl`` (the idle-reap horizon; the park write is activity that
         (re)starts the idle clock). Passed as the ``extra_retention_horizon`` so a park's bound
-        is ``min(checkpoint, workspace)`` (§B3.1)."""
+        is ``min(checkpoint, workspace)``."""
         return datetime.now(UTC) + timedelta(seconds=self._settings.session_ttl_seconds)
 
     async def scrub_credentials(self) -> None:

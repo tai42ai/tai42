@@ -1,4 +1,4 @@
-"""C9 — the worker-bus confirmed broadcast. A reload reaches every live worker (both
+"""The worker-bus confirmed broadcast. A reload reaches every live worker (both
 HTTP replicas and the backend runtime) and each confirms ``applied``; a dispatch with a
 dead worker still on the presence census names it with a non-applied outcome — never a
 silent drop — and every survivor confirms once the corpse's presence row expires. Workers

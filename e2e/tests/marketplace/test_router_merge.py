@@ -1,4 +1,4 @@
-"""C7 — the plugin ROUTER/MIDDLEWARE auto-merge, end to end. Opt-in: collects only
+"""The plugin ROUTER/MIDDLEWARE auto-merge, end to end. Opt-in: collects only
 with ``TAI_E2E_MARKETPLACE=1``.
 
 Installing a plugin that provides a ``router`` (and a ``middleware``) proves the README router and

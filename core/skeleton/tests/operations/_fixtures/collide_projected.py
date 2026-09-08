@@ -2,7 +2,7 @@
 projected operation claims.
 
 Naming this module in a manifest ``tools[]`` entry while ``api_tools`` projects
-the same op is the duplicate-bind collision the D.1 guard defends against: there
+the same op is the duplicate-bind collision the boot guard defends against: there
 must never be a running window with both a hand-bound tool and the projected op
 of the same name. The tool binding raises on the duplicate name at boot.
 """

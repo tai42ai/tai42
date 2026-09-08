@@ -1,5 +1,5 @@
-"""The store's pure helpers — the trace-stamping rule (D-3), the composing-shape refusal
-(D-4), the regime/traced-path derivation from mount rows, and the retention-window
+"""The store's pure helpers — the trace-stamping rule, the composing-shape refusal, the
+regime/traced-path derivation from mount rows, and the retention-window
 validation. The SQL behaviors (subject-keyed read/apply/fold/alias/search and the
 ``state_writes`` ledger) run against an in-memory fake Postgres in ``test_store_sql.py``
 and against a real Postgres in ``test_store_integration.py``."""
@@ -72,7 +72,7 @@ def test_composing_shape_ignores_non_mutating_and_pathless_ops() -> None:
     # an op with no list path is skipped (nothing to refuse) …
     _refuse_composing_shape([{"op": "set", "path": None, "value": 1}], regime_paths)
     # … and an op whose kind is neither a keyed op nor a whole-path set/remove is skipped,
-    # even squarely over the composing path (only whole-path set/remove is the D-4 hazard)
+    # even squarely over the composing path (only whole-path set/remove is the hazard)
     _refuse_composing_shape([{"op": "increment", "path": ["a", "items"], "value": 1}], regime_paths)
 
 

@@ -1,4 +1,4 @@
-"""F5 — the settings-profile RECYCLE leg.
+"""The settings-profile RECYCLE leg.
 
 A profile whose diff carries a RECYCLE-class key on a SUPERVISED shape rolls a fleet
 recycle (``config/service.py::apply_replace_env`` STEP 5 → ``orchestrate_recycle``): each

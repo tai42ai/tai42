@@ -10,7 +10,8 @@ exclude = [
 ]
 
 [dependency-groups]
-# The whole-repo test closure: the root fleet tests (scripts/, tests/) plus the
+# The whole-repo test closure: the root repo-integrity tests (tests/) and the
+# script tests (scripts/tests/) plus the
 # cross-package test deps that a single ``uv sync --all-packages`` must carry so
 # every member's suite collects. ``fakeredis[lua]`` backs the skeleton's Redis
 # suites and ``trustme`` the toolbox HTTPS-proxy path; each member also keeps its

@@ -1,4 +1,4 @@
-"""Q2 default-boot: the three ``default_routers`` modes end-to-end on real boots.
+"""Default-boot: the three ``default_routers`` modes end-to-end on real boots.
 
 The skeleton's loader composes the served router set from ``Manifest.default_routers``:
 

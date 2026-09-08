@@ -176,7 +176,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 """
 
 
-# A resume drive that reaches a clean terminal with a fixed result — proves the §A3.8 terminal
+# A resume drive that reaches a clean terminal with a fixed result — proves the terminal
 # idempotence record is written on a resumed super-step's clean terminal.
 RESUME_ONCE = (
     _PREAMBLE
@@ -197,7 +197,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 )
 
 # Writes a transcript file under HOME (``{ws}/.claude-home``) carrying the injected model
-# credential value, so a ``scrub_transcript``-ON drive can be asserted to redact it (§A3.9 iii).
+# credential value, so a ``scrub_transcript``-ON drive can be asserted to redact it.
 REDACT_TRANSCRIPT = """import sys, json, os
 def emit(o):
     sys.stdout.write(json.dumps({"v": 1, **o}) + "\\n")

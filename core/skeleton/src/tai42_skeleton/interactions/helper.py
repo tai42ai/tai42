@@ -84,7 +84,7 @@ class InteractionLimitError(Exception):
     are already open (the ``max_concurrent`` guard)."""
 
     # Judgment call: the open-question ceiling is a saturated resource, so the ask is
-    # refused for now — UNAVAILABLE (a temporary refusal), not a caller BAD_INPUT.
+    # refused as UNAVAILABLE (a temporary refusal), not a caller BAD_INPUT.
     __tai_error_kind__ = ErrorKind.UNAVAILABLE
 
 

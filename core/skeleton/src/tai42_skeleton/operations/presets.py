@@ -552,7 +552,7 @@ async def _write_validator_error(body: PresetBody) -> str | None:
 
 
 async def _enforce_registration_tier(base_tool: str) -> None:
-    """Enforce the base tool's authoring tier BEFORE any store write — ruling 14.
+    """Enforce the base tool's authoring tier BEFORE any store write.
 
     A base tool declaring ``fenced`` (or ``secret``) requires the caller clears the admin
     fence to author (create/save/rollback/rename) a preset over it: resolve the acting
@@ -1017,7 +1017,7 @@ async def _create_preset_core(
     write_validator_error = await _write_validator_error(body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
-    # Registration-tier fence (ruling 14): a base tool declaring ``fenced``/``secret``
+    # Registration-tier fence: a base tool declaring ``fenced``/``secret``
     # requires the caller clears the admin fence to author a preset over it. Skipped for
     # a platform seed (``enforce_tier=False``) — no caller to fence.
     if enforce_tier:
@@ -1272,7 +1272,7 @@ async def _save_version_core(
     write_validator_error = await _write_validator_error(new_body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
-    # Registration-tier fence (ruling 14): the tier is the CURRENT preset's base tool,
+    # Registration-tier fence: the tier is the CURRENT preset's base tool,
     # so editing a fenced base tool's preset is admin-fenced too. Skipped for a platform
     # seed (``enforce_tier=False``) — no caller to fence.
     if enforce_tier:
@@ -1428,7 +1428,7 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
     write_validator_error = await _write_validator_error(target_body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
-    # Registration-tier fence (ruling 14): the tier is the target body's base tool.
+    # Registration-tier fence: the tier is the target body's base tool.
     await _enforce_registration_tier(target_body.base_tool)
 
     prior_active = prior_record.active_version
@@ -1505,7 +1505,7 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
         active_body = await store.get_active_body(name)
     except PresetNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} not found") from exc
-    # Registration-tier fence (ruling 14): the tier is the CURRENT preset's base tool, so
+    # Registration-tier fence: the tier is the CURRENT preset's base tool, so
     # renaming a fenced base tool's preset is admin-fenced too. Runs BEFORE the store move.
     await _enforce_registration_tier(active_body.base_tool)
 

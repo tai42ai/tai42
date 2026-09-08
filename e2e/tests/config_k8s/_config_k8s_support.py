@@ -1,4 +1,4 @@
-"""B2 support — the config-k8s stack builder and its fixed K8s coordinates.
+"""The config-k8s stack builder and its fixed K8s coordinates.
 
 A bare-name sibling module (the suite's convention). The profile boots a real
 ``tai serve`` fleet in ``TAI_CONFIG_MODE=k8s``: the manifest is read from the fake

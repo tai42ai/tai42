@@ -1,4 +1,4 @@
-"""B7 — the ``tai`` CLI command groups against a live booted stack.
+"""The ``tai`` CLI command groups against a live booted stack.
 
 ~30 command modules are unit-only. This file drives a representative command from
 each group against a real stack over subprocess (``tai --server <url>``, auth via

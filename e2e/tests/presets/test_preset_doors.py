@@ -1,4 +1,4 @@
-"""C7 — the presets polish doors over the REAL versioning store: the referees
+"""The presets polish doors over the REAL versioning store: the referees
 preflight, the dry-run validate door (create + version modes), and the
 version-tags annotation door.
 

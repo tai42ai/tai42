@@ -206,7 +206,7 @@ register_agent_resume_tool()
 register_chained_park_tool()
 
 
-# The §B4 ``crash_resume`` setting is DECLARED to the skeleton at registration as
+# The ``crash_resume`` setting is DECLARED to the skeleton at registration as
 # ``meta={"tai42/crash_resume": <setting>}`` on the run tool, threaded through the generic
 # ``agents.agent(name, tags=..., meta=...)`` passthrough; the run-dispatch seam reads that key to
 # decide whether to re-invoke a recycled detached run. Captured ONCE at registration (the setting
@@ -318,11 +318,11 @@ class DeepAgent(Agent):
         # projection, so the synthetic tool names match by identity.
         strategy = as_tool_strategy(response_format)
 
-        # HARD sandbox dependency (§B3.7): the scratch backend is durable, so a run requires a
+        # HARD sandbox dependency: the scratch backend is durable, so a run requires a
         # provider — acquire the session BEFORE the graph compiles (the backend needs it), a
         # loud SandboxUnavailableError on a box with none. A threaded run reattaches its durable
         # volume by workspace_key; a tool-face run gets a fresh ephemeral one. The workspace lease
-        # wraps session-acquire + cred-materialize + drive as one guarded region (§B3.2), so two
+        # wraps session-acquire + cred-materialize + drive as one guarded region, so two
         # same-thread_id workers never each open a session on the shared volume (the lease-loser
         # raises before any session/cred exists).
         async with DeepAgentSession.leased(thread_id=thread_id) as drive:
@@ -358,7 +358,7 @@ class DeepAgent(Agent):
                 # checkpoint, an ephemeral (tool-face) workspace, or an unconfigured park index is
                 # not park-capable — build_park_identity returns None and the async ask refuses
                 # loudly pre-persist. The park's retention bound is min(checkpoint, workspace): the
-                # paused graph lives only as long as BOTH stores hold it (§B3.1).
+                # paused graph lives only as long as BOTH stores hold it.
                 park = build_park_identity(
                     agent_name=self.tool_name,
                     config=config,
@@ -396,7 +396,7 @@ class DeepAgent(Agent):
                         response_format=response_format,
                     )
                 # A park-suspend is still a LIVE run: skip the credential scrub so the bearer file
-                # stays for the door-less expiry resume (its own terminal exit scrubs it, §B4).
+                # stays for the door-less expiry resume (its own terminal exit scrubs it).
                 suspended = _is_suspended_receipt(result)
                 return result
             finally:
@@ -428,7 +428,7 @@ class DeepAgent(Agent):
         This path acquires NO sandbox session (``session=None`` → the non-sandbox
         ``StateBackend`` default): it does no file work and makes no model call, so a
         deployment can record manual-mode history without a live sandbox — the sandbox hard
-        dependency is on the run/astream drive only (§B3.5), never here.
+        dependency is on the run/astream drive only, never here.
         """
         converted = to_thread_messages(messages)
         reject_blank_memory_keys(
@@ -449,7 +449,7 @@ class DeepAgent(Agent):
             store_provider=store_provider,
             llm_kwargs=llm_kwargs,
             # No sandbox session — the non-sandbox StateBackend default; a checkpoint-only write
-            # does no file work and requires no live sandbox (§B3.5).
+            # does no file work and requires no live sandbox.
             session=None,
         )
         await awrite_thread_messages(agent, config, converted)
@@ -553,10 +553,10 @@ class DeepAgent(Agent):
         # projection, so the synthetic tool names match by identity.
         strategy = as_tool_strategy(response_format)
 
-        # HARD sandbox dependency (§B3.7): acquire the durable session BEFORE compile and thread
+        # HARD sandbox dependency: acquire the durable session BEFORE compile and thread
         # it into the backend, a loud SandboxUnavailableError on a box with none. The workspace
         # lease wraps session-acquire + cred-materialize + drive as one guarded region so threaded
-        # turns serialize across workers (§B3.2) and the lease-loser never opens a leaked session; a
+        # turns serialize across workers and the lease-loser never opens a leaked session; a
         # tool-face run takes none.
         async with DeepAgentSession.leased(thread_id=thread_id) as drive:
             saw_structured = False
@@ -595,7 +595,7 @@ class DeepAgent(Agent):
                 # with the final answer on a clean terminal drive. A run carrying live tools or
                 # neutral (live) subagents is not rebuildable, so it never parks; with no
                 # completion bound, an async ask refuses loudly pre-persist. The retention bound is
-                # min(checkpoint, workspace) (§B3.1). The binding's opaque context is stored beside
+                # min(checkpoint, workspace). The binding's opaque context is stored beside
                 # the tool name and merged into the completion fire, so the delivery tool receives
                 # the address it routes by.
                 completion_tool, completion_context = get_park_completion()
@@ -663,7 +663,7 @@ class DeepAgent(Agent):
                     raise RuntimeError("agent run requested a response_format but produced no structured output")
             finally:
                 # A park-suspend is still LIVE: keep the bearer file for the door-less expiry
-                # resume (its own terminal exit scrubs it, §B4); every other exit is terminal.
+                # resume (its own terminal exit scrubs it); every other exit is terminal.
                 if not saw_suspended:
                     await drive.scrub_credentials()
 
@@ -721,7 +721,7 @@ class DeepAgent(Agent):
         ``session`` is the acquired durable sandbox session threaded through to the backend:
         set on a run/astream drive (scratch on the workspace VOLUME via
         ``SandboxSessionBackend``), ``None`` on the append path (the non-sandbox
-        ``StateBackend`` — a checkpoint-only write needs no session, §B3.5)."""
+        ``StateBackend`` — a checkpoint-only write needs no session)."""
         provider = llm_provider or llm_provider_settings().llm
         llm = await get_llm_async(provider=provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
 
@@ -821,7 +821,7 @@ class DeepAgent(Agent):
         deliberately absent here.
 
         ``workspace_key`` is the engine extra a cross-worker resume needs to REATTACH THE SAME
-        durable volume (§B3.4); like ``recursion_limit`` it is NOT a ``DeepAgentInput`` field, so
+        durable volume; like ``recursion_limit`` it is NOT a ``DeepAgentInput`` field, so
         :meth:`aresume_park` pops it out before the JSON inputs validate."""
         return {
             "tool_names": list(tool_names),
@@ -861,7 +861,7 @@ class DeepAgent(Agent):
         The LangGraph ``recursion_limit`` and the ``workspace_key`` are engine extras carried
         INSIDE ``rebuild_kwargs`` (the provider-free park identity holds no engine facts), popped
         out here before the JSON inputs validate against ``DeepAgentInput``. The ``workspace_key``
-        REATTACHES THE SAME durable volume the park wrote (§B3.4), so a cross-worker resume drives
+        REATTACHES THE SAME durable volume the park wrote, so a cross-worker resume drives
         the same scratch tree. Resume is a turn like any other: it reacquires the session, takes
         the shared workspace lease, and scrubs the bearer credential material on its own terminal
         exit."""
@@ -882,7 +882,7 @@ class DeepAgent(Agent):
         ]
 
         # Reattach the SAME durable volume by workspace_key and serialize this drive on the shared
-        # workspace lease, exactly like a fresh turn (§B3.4): the lease wraps session-acquire +
+        # workspace lease, exactly like a fresh turn: the lease wraps session-acquire +
         # cred-materialize + drive, so a concurrent resume for the same thread loses the lease
         # before opening a second session on the volume.
         async with DeepAgentSession.leased(thread_id=thread_id, workspace_key=workspace_key) as drive:

@@ -363,7 +363,7 @@ async def test_empty_media_list_refusal_leaves_no_phantom_feed_entry(register_ch
 
 
 async def test_media_with_channel_none_stored_on_sink(sink_redis):
-    # Clean break: the internal sink STORES rich content (parity with the channel path)
+    # The internal sink STORES rich content (parity with the channel path)
     # rather than refusing it, so media with no named channel lands on the feed record for
     # the inbox to render — serialized as MediaItem dicts.
     await notify_user("photo", media=[_IMAGE])

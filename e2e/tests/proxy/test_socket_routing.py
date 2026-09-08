@@ -1,4 +1,4 @@
-"""C8 — the proxy extension flips ``socket.socket`` process-wide. A leak is
+"""The proxy extension flips ``socket.socket`` process-wide. A leak is
 invisible single-process, so these assert "exactly N CONNECTs" and a pristine
 socket class under real concurrency: proxied and plain calls in flight at once."""
 

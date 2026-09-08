@@ -1,4 +1,4 @@
-"""B2 — the config-k8s stack fixture: a real ``tai serve`` fleet in k8s config mode.
+"""The config-k8s stack fixture: a real ``tai serve`` fleet in k8s config mode.
 
 Wires the threaded fake apiserver (``_fake_k8s.FakeKubernetes``) to the SUT: seeds the
 ConfigMap with the profile's manifest (byte-for-byte the dump the file path would write,

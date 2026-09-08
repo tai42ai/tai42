@@ -1,4 +1,4 @@
-"""``append_thread_messages`` takes NO sandbox — the checkpoint-only history write (§B3.5).
+"""``append_thread_messages`` takes NO sandbox — the checkpoint-only history write.
 
 The durable run/astream drive carries a HARD sandbox dependency, but ``append_thread_messages``
 is a checkpoint-only write that never calls ``require_sandbox`` (``session=None``, the non-sandbox

@@ -1,7 +1,7 @@
 """Host-directory durability of the direct/host ``sandbox-local`` provider.
 
 Durability under the direct provider IS the named host directory
-``<SANDBOX_LOCAL_ROOT>/<workspace_key>`` (PLAN_9): a ``persistent`` session keyed by
+``<SANDBOX_LOCAL_ROOT>/<workspace_key>``: a ``persistent`` session keyed by
 ``workspace_key`` writes under that stable dir. The two teardown paths are pinned as a
 CONTRAST — a ``reap`` (``remove_workspace=False``) PRESERVES the named host dir, so a
 LATER ``create_session`` on the SAME key RE-ATTACHES the very same dir and reads the

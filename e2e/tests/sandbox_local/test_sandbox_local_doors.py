@@ -1,6 +1,6 @@
 """The sandbox-kind doors against the REAL direct/host ``sandbox-local`` provider.
 
-The §3a door doctrine, but over ``build_sandbox_local_stack`` (the REAL PLAN_9
+The door doctrine, but over ``build_sandbox_local_stack`` (the REAL
 provider — host-subprocess exec, host-dir workspaces, no docker) instead of the
 process-based fake: the ``GET /api/sandbox`` identity door reports the real provider
 present alongside the resolved security-as-config policy, and the ``e2e_sandbox_probe``

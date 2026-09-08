@@ -1,4 +1,4 @@
-"""F3 — combined-op (``apply_env_and_change``) doors over the REAL store.
+"""Combined-op (``apply_env_and_change``) doors over the REAL store.
 
 The ``POST /api/mcp-config/secret-env`` door writes a secret VALUE to the env
 store AND an ``!ENV ${KEY}`` MARKER into the manifest as ONE consistent unit, then reloads
@@ -15,7 +15,7 @@ same real component store the profile/preset doors exercise:
 * (f) SECRET MARKS APPENDED — a second op APPENDS its key to ``TAI_ENV_SECRET_KEYS`` read
   from the STORED env, never clobbering the first op's mark.
 
-The remaining F3 combined-op items are authoritative at skeleton-unit level, where the
+The remaining combined-op items are authoritative at skeleton-unit level, where the
 required fault injection lives (not reproducible over the live file-mode store):
 NO-ROLLBACK orphan+report (b) and k8s-409 replay purity (g) need a forced manifest-persist
 failure / a fake-K8s 409 harness — ``core/skeleton/tests/config/test_service.py``

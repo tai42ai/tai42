@@ -1,6 +1,6 @@
-"""F2 — the settings-profile HOT flip, end to end over ONE stack boot.
+"""The settings-profile HOT flip, end to end over ONE stack boot.
 
-A profile apply is the C5 env-write-LAST reload: it builds a FRESH serving epoch under
+A profile apply is the env-written-last reload: it builds a FRESH serving epoch under
 the proposed env, swaps it in atomically (``epoch.build_and_swap_epoch``), and broadcasts
 the reload to the whole fleet. This test certifies the flip CONVERGED for a hot-class
 registered settings group the leg's manifest loads — the kit ``LoggingSettings`` group

@@ -12,7 +12,7 @@ GATED on the creds host: it needs the operator-installed SDK wheel + a live mode
 credential (the single ``.env`` ``ANTHROPIC_API_KEY`` mapped onto ``TAI_AGENTS_CLAUDE_API_KEY``
 by the stack builder). It SKIPS by default and runs only under ``TAI_E2E_REAL=claude_agent``;
 an absent runtime on the gated host surfaces LOUDLY, never a silent skip past the gate. This
-is the direct-mode counterpart to the fake-sandbox real-SDK smoke (§5) — with
+is the direct-mode counterpart to the fake-sandbox real-SDK smoke — with
 ``test_deep_agent_local.py``, BOTH agents are proven runnable under ``sandbox-local``."""
 
 from __future__ import annotations

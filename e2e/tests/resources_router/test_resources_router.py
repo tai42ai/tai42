@@ -1,4 +1,4 @@
-"""B6 — the resources router's read behavior and its envelope contract.
+"""The resources router's read behavior and its envelope contract.
 
 Beyond the mount-anchor coverage in ``tests/routing/test_default_router_coverage.py``:
 store a resource through the storage surface, then ``POST /api/resources/get``

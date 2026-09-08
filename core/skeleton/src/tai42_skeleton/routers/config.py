@@ -210,7 +210,7 @@ rollback_profile = register_operation_route(
     action="fenced",
 )
 
-# The C5 apply door — fenced + destructive + reload_gated (the last two declared on the
+# The apply door — fenced + destructive + reload_gated (the last two declared on the
 # operation). NO request body: the profile name in the path is the whole request.
 apply_profile = register_operation_route(
     tai42_app,

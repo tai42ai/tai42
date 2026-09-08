@@ -1,4 +1,4 @@
-"""The durable session-model rewiring of ``langchain_deep_agent`` (§B2/§B3/§B4).
+"""The durable session-model rewiring of ``langchain_deep_agent``.
 
 Covers the run-door invariants the ``StateBackend``→``SandboxSessionBackend`` swap introduces:
 
@@ -103,7 +103,7 @@ def test_session_cred_spec_variants_are_discriminated() -> None:
 
 def test_run_requires_a_sandbox_provider() -> None:
     """The scratch backend is durable, so a run REQUIRES a provider — a box with none raises the
-    every-door ``SandboxUnavailableError`` at the ``require_sandbox`` chokepoint (§B3.7)."""
+    every-door ``SandboxUnavailableError`` at the ``require_sandbox`` chokepoint."""
     _sandboxes().provider = None
     with pytest.raises(SandboxUnavailableError):
         asyncio.run(DeepAgent().run(user_message="go"))
@@ -122,7 +122,7 @@ def test_astream_requires_a_sandbox_provider() -> None:
 
 def test_append_thread_messages_acquires_no_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     """The append path is a checkpoint-only write — no file work, no model call — so it acquires
-    NO session and works with the sandbox provider absent (§B3.5)."""
+    NO session and works with the sandbox provider absent."""
     _sandboxes().provider = None
     captured: dict[str, Any] = {}
 
@@ -197,7 +197,7 @@ def test_bearer_cred_is_materialized_then_scrubbed(monkeypatch: pytest.MonkeyPat
     """A refreshable ``delivery="bearer"`` connection cred is re-resolved per turn and written as
     an ``Authorization: Bearer`` credential-helper file under ``{ws}/.creds`` (OUTSIDE the
     agent-writable project tree), then removed on the terminal-exit scrub — the deep-agent
-    analogue of the coding agent's teardown scrub (§B4)."""
+    analogue of the coding agent's teardown scrub."""
     _connectors().resolved["conn-gh"] = ResolvedConnectionAuth(access_token=SecretStr("gho_secret"))
     _settings_with_creds(
         monkeypatch,

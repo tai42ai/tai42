@@ -1,4 +1,4 @@
-"""C7 — the cross-process LLM->tool->LLM loop. The agent runs inside the real
+"""The cross-process LLM->tool->LLM loop. The agent runs inside the real
 server process and talks to a real socket LLM (the scripted stub); the whole
 loop (tool call, tool result fed back, final content) happens over HTTP."""
 

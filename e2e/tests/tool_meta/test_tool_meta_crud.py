@@ -1,4 +1,4 @@
-"""C7 — the tool-metadata overlay doors over the REAL Postgres overlay store on a
+"""The tool-metadata overlay doors over the REAL Postgres overlay store on a
 running stack: the folder tree (create / nest / rename / move / delete with the
 not-empty and cycle failures), the per-tool merge-patch overlay
 (display_name / tags / folder / hidden), and the preset-lifecycle cascade

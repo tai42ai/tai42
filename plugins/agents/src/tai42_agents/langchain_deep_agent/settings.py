@@ -1,11 +1,11 @@
 """Operator settings for the durable ``langchain_deep_agent`` session model.
 
-The ``StateBackend``→``SandboxSessionBackend`` swap (§B2) gives the deep agent a live
+The ``StateBackend``→``SandboxSessionBackend`` swap gives the deep agent a live
 sandbox session per threaded run, so it needs its own operator group: the session image,
 the connection-reference SERVICE creds injected into that session's shell, the network
 posture, the resource caps, and the crash-resume declaration.
 
-PLANNER PICK (flagged, not a ruling): ``env_prefix="TAI_AGENTS_LANGCHAIN_DEEP_"`` — one
+The ``env_prefix="TAI_AGENTS_LANGCHAIN_DEEP_"`` gives one
 coherent ``TAI_AGENTS_`` family, a distinct group per agent so a deep-agent image is never
 named under another agent's prefix.
 
@@ -59,12 +59,12 @@ class LangchainDeepAgentSettings(TaiBaseSettings):
     # start, so an unconfigured deployment fails rather than silently running an unpinned image.
     session_image: str = ""
 
-    # The operator's session-cred list (§A5/§B4). Each entry resolves per-caller; the deep
+    # The operator's session-cred list. Each entry resolves per-caller; the deep
     # agent's sandbox shell gets ONLY these service creds (never a model credential).
     creds: list[SessionCredSpec] = Field(default_factory=list)
 
     # The workspace/session idle-reap horizon; also feeds the workspace retention horizon that
-    # bounds a park (retention = min(checkpoint, workspace), §B3.1). Must be positive.
+    # bounds a park (retention = min(checkpoint, workspace)). Must be positive.
     session_ttl_seconds: int = Field(default=86400, gt=0)
 
     # NARROWS the platform egress posture (default OPEN). ``None`` inherits the platform
@@ -101,7 +101,7 @@ class _CrashResumeMeta(TaiBaseSettings):
     :class:`LangchainDeepAgentSettings` validation: the digest-pinned ``session_image`` config
     error is declared to fire at RUN START, before any sandbox session is acquired — never at
     plugin import (so a marketplace/plugin-spec or import-graph read that merely imports the module
-    never needs the operator env). Reading the full settings here would REGRESS a previously
+    never needs the operator env). Reading the full settings here would REGRESS a
     zero-config agent to raising on bare import. The ``crash_resume`` registration meta is
     recycle-class and read ONCE at registration, so it is sourced HERE from a model that shares the
     ``TAI_AGENTS_LANGCHAIN_DEEP_`` prefix (``TAI_AGENTS_LANGCHAIN_DEEP_CRASH_RESUME`` still controls

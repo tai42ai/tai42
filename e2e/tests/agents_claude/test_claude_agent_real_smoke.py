@@ -1,4 +1,4 @@
-"""§5 — the ONE real ``claude-agent-sdk`` smoke turn inside the process-based fake sandbox.
+"""The ONE real ``claude-agent-sdk`` smoke turn inside the process-based fake sandbox.
 
 Gated on ``is_real("claude_agent")`` (a single ``.env`` ``ANTHROPIC_API_KEY``): the
 ``claude_agent_stack`` builder maps that key onto the plugin's operator auth env

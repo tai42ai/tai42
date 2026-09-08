@@ -1,6 +1,6 @@
 """Concurrency, persistence, and outage on the multi-worker no-backend fleet.
 
-The mission's promises under contention and failure: two writers racing the same
+The promises under contention and failure: two writers racing the same
 manifest both land, ruamel comments survive a UI-path edit, and a bus outage (dead
 redis or a silent worker) is surfaced honestly and healed.
 
@@ -93,8 +93,8 @@ async def test_concurrent_connects_both_persist(
     # Fire both writers simultaneously — the race the lost-update regression lives
     # in (a read-modify-write pair with no serialization would drop one append).
     alpha, beta = await asyncio.gather(
-        connect("e2e_noauth_alpha", uniq("d1_alpha")),
-        connect("e2e_noauth_beta", uniq("d1_beta")),
+        connect("e2e_noauth_alpha", uniq("alpha")),
+        connect("e2e_noauth_beta", uniq("beta")),
     )
     alpha_entry = alpha["added_manifest_entries"][0]
     beta_entry = beta["added_manifest_entries"][0]

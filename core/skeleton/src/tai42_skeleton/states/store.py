@@ -107,7 +107,7 @@ def _traced_paths(mount_rows: list[dict[str, Any]]) -> tuple[tuple[str | int, ..
 
 
 def _refuse_composing_shape(ops: list[dict[str, Any]], regime_paths: list[tuple[list[Any], str, str]]) -> None:
-    """Refuse a write whose SHAPE violates a ``composing`` path (D-4): a whole-path
+    """Refuse a write whose SHAPE violates a ``composing`` path: a whole-path
     ``set``/``remove`` over a composing path admits only a keyed op or an append ``set``
     (path ending ``"-"``). Anything else raises :class:`RegimeViolationError` naming the
     path — BEFORE the ledger insert, so a refused batch consumes no op-id."""
@@ -628,7 +628,7 @@ class PostgresStatesStore:
     async def delete_mount(self, state: str, module: str, *, effective_schema: dict[str, Any]) -> bool:
         """Delete a mount row and rewrite the state's effective schema — in ONE txn under
         the declaration lock. ``False`` when no such mount exists. A consumer's bindings
-        are DERIVED (never stored), so a mount delete cleans up nothing else (D-5)."""
+        are DERIVED (never stored), so a mount delete cleans up nothing else."""
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
@@ -845,10 +845,10 @@ class PostgresStatesStore:
         Order (pinned): declaration row ``FOR SHARE`` (the schema-change serialization pin
         AND the effective-schema read); compose the state's regime + traced paths from its
         mounts under the lock; refuse a ``composing`` shape violation BEFORE the op-ledger
-        insert (D-4); the op-ledger ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is
+        insert; the op-ledger ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is
         set (replay ⇒ return without touching the record); the ATOMIC UPSERT-LOCK on the
         record row; the COMPARE-AND-SET GUARD filter; the ``_trace`` stamp under a traced
-        mount (D-3); the SHARED pure ops apply; the whole-document validation; the UPDATE;
+        mount; the SHARED pure ops apply; the whole-document validation; the UPDATE;
         the ``state_writes`` row; opportunistic ledger prune. With ``conn`` the write joins
         the caller's transaction (a reconciler's record write commits or rolls back with
         the mount).
@@ -870,7 +870,7 @@ class PostgresStatesStore:
             regime_paths = _abs_regime_paths(mount_rows)
             traced_paths = _traced_paths(mount_rows)
 
-            # (i) refuse a composing shape violation BEFORE the ledger insert (D-4).
+            # (i) refuse a composing shape violation BEFORE the ledger insert.
             _refuse_composing_shape(ops, regime_paths)
 
             kind, key = await self._resolve_subject(cur, state, subject)

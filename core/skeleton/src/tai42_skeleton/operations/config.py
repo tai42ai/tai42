@@ -236,7 +236,7 @@ async def reload_config(targets: list[str] | None = None) -> Any:
 # -- settings profiles -------------------------------------------------------
 #
 # CRUD + diff + versions/rollback over the versioned settings_profile store, PLUS the
-# C5 apply pipeline (``apply_profile``). A *settings profile* is a named, versioned
+# apply pipeline (``apply_profile``). A *settings profile* is a named, versioned
 # snapshot of the profile-managed env band (``{description, env, secret_keys}``). A save
 # (``put_profile``) runs the shared env-write boundary validator over the profile's
 # DECLARED env so a profile carrying a deployment X-band key or a dangling ``!ENV`` marker

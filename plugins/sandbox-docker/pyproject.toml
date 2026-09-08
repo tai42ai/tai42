@@ -88,7 +88,7 @@ xfail_strict = true
 # instead of passing green.
 filterwarnings = ["error"]
 # The live-engine conformance leg is gated behind this marker: it needs a real
-# Docker engine (PLAN_5's e2e leg) and is never collected in a bare venv.
+# Docker engine and is never collected in a bare venv.
 markers = [
     "docker: requires a live Docker engine (SANDBOX_DOCKER_TEST_HOST); not run in the unit gate",
 ]

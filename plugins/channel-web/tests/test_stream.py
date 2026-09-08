@@ -230,8 +230,8 @@ async def test_a_raising_stream_still_releases_its_slot(stub_app):
 
 
 async def test_a_stream_that_is_never_advanced_takes_no_slot(fake_redis: FakeRedis):
-    # THE leak: the slot used to be taken at the door and given back only by the
-    # generator's ``finally`` — and an async generator that is never advanced runs no
+    # THE leak: taking the slot at the door and giving it back only by the
+    # generator's ``finally`` strands it — an async generator that is never advanced runs no
     # ``finally`` at all. Starlette awaits ``http.response.start`` before the first
     # ``__anext__``, and a disconnect there kills the response before the body ever
     # begins, so every aborted open would pin a slot for the life of the process.

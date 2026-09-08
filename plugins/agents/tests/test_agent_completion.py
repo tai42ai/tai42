@@ -100,7 +100,7 @@ class _SequentialAsk:
         self.calls = 0
         self._ids = ids
         # The durable ``langchain_deep_agent`` acquires a persistent workspace whose TTL bounds
-        # the park retention to min(checkpoint, workspace) (§B3.1), so its parks must carry an ask
+        # the park retention to min(checkpoint, workspace), so its parks must carry an ask
         # deadline within that horizon; the non-durable ``tools_agent`` keeps a keep-forever
         # (None) retention and its parks pass with no deadline.
         self._expiry_at = expiry_at

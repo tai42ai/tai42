@@ -156,7 +156,7 @@ async def test_combined_demote_and_reenable_applies_both(wire):
     # Role demoted...
     assert ("apply_role", "usr-2", "user") in wire.admin.calls
     assert wire.users.rows["usr-2"]["role"] == "user"
-    # ...AND re-enabled (the previously silently-dropped half).
+    # ...AND re-enabled (the disable half of the same call).
     assert ("set_user_disabled", "usr-2", "False") in wire.admin.calls
     assert wire.users.rows["usr-2"]["disabled"] is False
 
