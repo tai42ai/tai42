@@ -12,6 +12,7 @@ trace at the OUTERMOST preset dispatch only — a nested sub-preset dispatch add
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 
 import pytest
@@ -50,7 +51,9 @@ class _SpyWriter:
 
 
 class _SpyMonitoring:
-    def __init__(self, writer: _SpyWriter) -> None:
+    # Carries whatever writer a test injects — a conforming spy or a deliberately
+    # off-contract/faulting one — so the type is ``object``, not the spy's concrete type.
+    def __init__(self, writer: object) -> None:
         self.writer = writer
 
 
@@ -146,3 +149,82 @@ def test_preset_arm_guard_resets_after_the_block(spy) -> None:
     with stamp_preset_attribution("second", 2):
         pass
     assert [s["tags"] for s in writer.stamps] == [["preset:first", "preset-v:1"], ["preset:second", "preset-v:2"]]
+
+
+# -- hardening: a monitoring-writer fault never breaks the run ----------------
+
+
+class _OffContractWriter:
+    """A writer whose trace_attributes is OFF-CONTRACT — missing the user_id/session_id
+    kwargs the contract declares (a plugin that fell behind). Called with them it raises
+    TypeError at argument binding, BEFORE any enter guard could run."""
+
+    @contextmanager
+    def trace_attributes(self, *, name=None, tags=None, metadata=None):
+        yield
+
+
+class _EnterRaisingWriter:
+    """A contract-shaped writer that raises INSIDE trace_attributes on enter."""
+
+    @contextmanager
+    def trace_attributes(self, *, name=None, tags=None, metadata=None, user_id=None, session_id=None):
+        raise RuntimeError("writer boom on enter")
+        yield  # pragma: no cover - unreachable, keeps this a generator
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, writer: object) -> None:
+    monkeypatch.setattr(monitoring_mod, "get_monitoring", lambda: _SpyMonitoring(writer))
+
+
+def test_off_contract_writer_does_not_break_the_run(monkeypatch, caplog) -> None:
+    # An off-contract writer (TypeError at binding) must NOT break the run: the drive
+    # completes UNattributed and the fault is logged loudly, not swallowed silently.
+    _install(monkeypatch, _OffContractWriter())
+    ran = []
+    with (
+        caplog.at_level(logging.WARNING),
+        run_attribution(RunAttribution(tags=["t"], user_id="u", session_id="s")),
+        stamp_run_attribution(),
+    ):
+        ran.append("drive")
+    assert ran == ["drive"]
+    assert "monitoring writer" in caplog.text.lower()
+
+
+def test_writer_raising_on_enter_does_not_break_the_run(monkeypatch) -> None:
+    _install(monkeypatch, _EnterRaisingWriter())
+    ran = []
+    with run_attribution(RunAttribution(tags=["t"])), stamp_run_attribution():
+        ran.append("drive")
+    assert ran == ["drive"]
+
+
+def test_off_contract_writer_still_propagates_the_bodys_own_error(monkeypatch) -> None:
+    # The guard tolerates WRITER faults; it must never swallow the run's OWN error.
+    _install(monkeypatch, _OffContractWriter())
+    with (
+        pytest.raises(ValueError, match="boom"),
+        run_attribution(RunAttribution(tags=["t"], user_id="u")),
+        stamp_run_attribution(),
+    ):
+        raise ValueError("boom")
+
+
+def test_conforming_writer_scope_still_propagates_the_bodys_own_error(spy) -> None:
+    # With the scope genuinely entered, the exit must not mask the body's exception.
+    spy(trace_id="trace-1")
+    with (
+        pytest.raises(ValueError, match="boom"),
+        run_attribution(RunAttribution(tags=["t"])),
+        stamp_run_attribution(),
+    ):
+        raise ValueError("boom")
+
+
+def test_off_contract_writer_does_not_break_a_preset_stamp(monkeypatch) -> None:
+    _install(monkeypatch, _OffContractWriter())
+    ran = []
+    with stamp_preset_attribution("weather_ny", 7):
+        ran.append("drive")
+    assert ran == ["drive"]

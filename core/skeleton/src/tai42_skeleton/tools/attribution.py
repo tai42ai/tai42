@@ -14,11 +14,18 @@ attributed.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from typing import TYPE_CHECKING
 
 from tai42_contract.monitoring import RUN_VERSION_METADATA_KEY, RunAttribution, attribute_run
+
+if TYPE_CHECKING:
+    from tai42_contract.monitoring import MonitoringWriter
+
+logger = logging.getLogger(__name__)
 
 _current_run_attribution: ContextVar[RunAttribution | None] = ContextVar("tai42_current_run_attribution", default=None)
 
@@ -70,15 +77,54 @@ def run_attribution(attribution: RunAttribution) -> Iterator[None]:
 
 
 @contextmanager
+def _safe_attribution_scope(writer: MonitoringWriter, attribution: RunAttribution) -> Iterator[None]:
+    """Enter ``attribute_run`` around the drive, but NEVER let a monitoring-writer fault
+    break the run.
+
+    Observability must not break the operation it observes. A writer that faults — an
+    off-contract ``trace_attributes`` signature (a ``TypeError`` at call binding, which
+    lands BEFORE the writer's own enter/exit guard runs), or an exception on enter or
+    exit — is logged LOUDLY and the run continues UNattributed. The fault is surfaced in
+    logs (never swallowed silently) and is never converted into the run's own failure.
+    The body's OWN exception always propagates unchanged.
+    """
+    cm = None
+    try:
+        cm = attribute_run(writer, attribution)
+        cm.__enter__()
+    except Exception:
+        logger.warning(
+            "run attribution: the monitoring writer raised entering the trace scope; "
+            "continuing the run UNattributed (observability must not break a run)",
+            exc_info=True,
+        )
+        cm = None
+    if cm is None:
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            cm.__exit__(None, None, None)
+        except Exception:
+            logger.warning(
+                "run attribution: the monitoring writer raised exiting the trace scope; ignored",
+                exc_info=True,
+            )
+
+
+@contextmanager
 def stamp_run_attribution() -> Iterator[None]:
     """Wrap the drive in the ambient attribution's trace scope, when one is deposited.
 
-    Reads :func:`get_run_attribution`; when present, ENTERS
-    ``attribute_run(get_monitoring().writer, attribution)`` so the drive's spans are
-    created INSIDE the attribution scope; when absent, yields without wrapping. Fail-safe
-    by construction — ``attribute_run`` no-ops outside a trace and its stamp catches +
-    logs, never raises — so it cannot break a run. It NESTS harmlessly: an inner seam
-    re-entering the scope around an already-attributed drive does not corrupt the trace.
+    Reads :func:`get_run_attribution`; when present, enters the attribution scope around
+    the drive so its spans are created INSIDE it; when absent, yields without wrapping.
+    Genuinely fail-safe: the scope is entered through :func:`_safe_attribution_scope`, so
+    a monitoring-writer fault (off-contract or erroring) is logged loudly and the run
+    continues UNattributed — a broken writer can never break a run. It NESTS harmlessly:
+    an inner seam re-entering the scope around an already-attributed drive does not
+    corrupt the trace.
     """
     attribution = get_run_attribution()
     if attribution is None:
@@ -86,7 +132,7 @@ def stamp_run_attribution() -> Iterator[None]:
         return
     from tai42_skeleton.monitoring import get_monitoring
 
-    with attribute_run(get_monitoring().writer, attribution):
+    with _safe_attribution_scope(get_monitoring().writer, attribution):
         yield
 
 
@@ -105,9 +151,10 @@ def stamp_preset_attribution(preset_name: str, version: int) -> Iterator[None]:
     Stamps at the OUTERMOST preset dispatch only: a nested sub-preset dispatch sees
     :data:`_preset_attribution_armed` and yields unwrapped, so nested preset tags
     never pollute the root trace (the armed-guard discipline ``turn_budget`` uses).
-    Fail-safe by construction — ``attribute_run`` inherits ``trace_attributes``'s
-    catch-and-log guarantee. Only a REGISTERED preset reaches here; a draft/inline
-    run is never stamped (absent = draft, never ``preset-v:draft``)."""
+    Genuinely fail-safe: the scope is entered through :func:`_safe_attribution_scope`, so
+    a monitoring-writer fault is logged loudly and the run continues unattributed rather
+    than failing. Only a REGISTERED preset reaches here; a draft/inline run is never
+    stamped (absent = draft, never ``preset-v:draft``)."""
     if _preset_attribution_armed.get():
         yield
         return
@@ -123,7 +170,7 @@ def stamp_preset_attribution(preset_name: str, version: int) -> Iterator[None]:
                 RUN_VERSION_METADATA_KEY: str(version),
             },
         )
-        with attribute_run(get_monitoring().writer, attribution):
+        with _safe_attribution_scope(get_monitoring().writer, attribution):
             yield
     finally:
         _preset_attribution_armed.reset(token)
