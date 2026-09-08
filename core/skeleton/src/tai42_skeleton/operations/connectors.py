@@ -50,6 +50,7 @@ from tai42_contract.connectors.service import (
 from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.connectors.oauth import client as oauth_client
+from tai42_skeleton.connectors.oauth.crypto import ConnectorEncryptionConfigError
 from tai42_skeleton.connectors.providers.registry import get_provider, list_providers
 from tai42_skeleton.connectors.runtime.probe import probe
 from tai42_skeleton.connectors.runtime.resolver import resolve_managed_auth
@@ -57,8 +58,10 @@ from tai42_skeleton.connectors.service import connection_service
 from tai42_skeleton.connectors.store import token_store
 from tai42_skeleton.connectors.store.catalog_store import fetch_categories
 from tai42_skeleton.connectors.store.persistence import load_record_or_none
+from tai42_skeleton.connectors.store.reencrypt import reencrypt_connection_tokens
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, NotSupportedError, operation
+from tai42_skeleton.operations.response_models_group_b import ConnectorReencryptResult, StartConnectOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,12 @@ _NOT_CONFIGURED_CODE = "connectors-not-configured"
 # store-not-configured code above: this names a per-provider credential gap, not the
 # whole feature being off.
 _PROVIDER_NOT_CONFIGURED_CODE = "connector-provider-not-configured"
+
+# The machine-readable code the KEK-rotation sweep refusal carries when the CURRENT
+# ``CONNECTORS_KEK`` is missing or malformed — a deployment-wide config fault for every
+# row, not a per-blob failure. Distinct from the store-not-configured and per-provider
+# credential codes above.
+_KEK_MISCONFIGURED_CODE = "connectors-kek-misconfigured"
 
 
 def _not_supported_from_misconfig(exc: OperatorMisconfiguredError) -> NotSupportedError:
@@ -221,7 +230,7 @@ def _start_result_view(result: StartConnectResult | NoAuthConnectResult) -> dict
 # -- Providers + connections (reads) -----------------------------------------
 
 
-@operation(summary="List connector providers", tags=["connectors"])
+@operation(summary="List connector providers", tags=["connectors"], response_model=ProviderCatalogResponse)
 async def list_connector_providers() -> dict[str, Any]:
     """The provider catalog — one entry per registered connector provider, plus
     the category groupings the UI arranges them under.
@@ -265,7 +274,11 @@ class ConnectionsListQuery(BaseModel):
 
 
 @operation(
-    summary="List connections", tags=["connectors"], errors=[BadRequestError], request_model=ConnectionsListQuery
+    summary="List connections",
+    tags=["connectors"],
+    errors=[BadRequestError],
+    request_model=ConnectionsListQuery,
+    response_model=ConnectionsListResponse,
 )
 async def list_connections(health: str | None = None, limit: int | None = None) -> dict[str, Any]:
     """The installed connections as secret-free views.
@@ -314,7 +327,12 @@ def _parse_limit(limit: int | None) -> int | None:
     return limit
 
 
-@operation(summary="Get a connection", tags=["connectors"], errors=[NotFoundError])
+@operation(
+    summary="Get a connection",
+    tags=["connectors"],
+    errors=[NotFoundError],
+    response_model=ConnectedAccountView,
+)
 async def get_connection(connection_id: str) -> dict[str, Any]:
     """One connection's secret-free view, with live sub-service reachability; an
     unknown id is a loud 404."""
@@ -338,6 +356,7 @@ async def get_connection(connection_id: str) -> dict[str, Any]:
     destructive=True,
     errors=[BadRequestError, ConflictError, NotSupportedError],
     request_model=StartConnectRequest,
+    response_model=StartConnectOutcome,
 )
 async def start_connect(
     provider_id: str,
@@ -376,7 +395,12 @@ async def start_connect(
     return _start_result_view(result)
 
 
-@operation(summary="Disconnect a connection", tags=["connectors"], errors=[NotFoundError])
+@operation(
+    summary="Disconnect a connection",
+    tags=["connectors"],
+    errors=[NotFoundError],
+    response_model=DisconnectResponse,
+)
 async def disconnect(connection_id: str) -> dict[str, Any]:
     """Disconnect (purge) a connection; a genuinely-absent connection is a 404."""
     # OFF gate: with no store no connection can exist — a 404 byte-identical to the
@@ -406,6 +430,7 @@ async def disconnect(connection_id: str) -> dict[str, Any]:
     destructive=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=StartReconnectRequest,
+    response_model=StartConnectResponse,
 )
 async def reconnect(
     connection_id: str,
@@ -446,6 +471,7 @@ async def reconnect(
     destructive=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=PatchSubServicesRequest,
+    response_model=PatchSubServicesResponse,
 )
 async def patch_sub_services(
     connection_id: str,
@@ -487,3 +513,38 @@ async def patch_sub_services(
         removed_manifest_entries=result.removed_manifest_entries,
         fanout=result.fanout,
     ).model_dump(mode="json")
+
+
+# -- KEK rotation sweep ------------------------------------------------------
+
+
+@operation(
+    summary="Re-encrypt connector tokens under the current KEK",
+    tags=["connectors"],
+    authority_changing=True,
+    errors=[NotSupportedError],
+    response_model=ConnectorReencryptResult,
+)
+async def reencrypt_connector_tokens() -> dict[str, Any]:
+    """Re-encrypt every stored connector token blob under the current ``CONNECTORS_KEK``.
+
+    The KEK-rotation convergence sweep: after ``CONNECTORS_KEK`` is rotated (new current
+    key, old key moved to ``CONNECTORS_KEK_PREVIOUS``), this rewrites every blob still
+    under a previous key so the previous key can be retired. Idempotent — a blob already
+    under the current key is skipped. A blob no configured key can open is counted and
+    named in ``failed_connection_ids``, never silently dropped. A missing/malformed
+    current ``CONNECTORS_KEK`` is a deployment-wide config fault and surfaces as a named
+    ``NotSupportedError`` (501), never an unnamed 500.
+    """
+    # OFF gate: the sweep enumerates the connector store's Postgres — with no store
+    # configured there are no blobs to rewrite; refuse with a named, machine-readable
+    # reason rather than reaching for an absent store.
+    if not component_store_configured(SKELETON_COMPONENT):
+        raise NotSupportedError(not_configured_message("connector token store"), extra={"code": _NOT_CONFIGURED_CODE})
+    try:
+        return await reencrypt_connection_tokens()
+    except ConnectorEncryptionConfigError as exc:
+        # A missing/malformed CURRENT CONNECTORS_KEK is a deployment fault for every
+        # row, not a per-blob failure: surface it as a named, actionable 501 rather
+        # than an unnamed 500. Loud, never swallowed.
+        raise NotSupportedError(str(exc), extra={"code": _KEK_MISCONFIGURED_CODE}) from exc

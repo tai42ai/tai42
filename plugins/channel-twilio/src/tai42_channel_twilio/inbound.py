@@ -157,6 +157,7 @@ def _auth_error_response(exc: ValueError | PayloadTooLargeError | SignatureRejec
     summary="Twilio inbound message webhook",
     tags=["channels"],
     response_model=None,
+    no_body_reason="Twilio inbound webhook: 204/plain-text, no JSON body",
 )
 async def twilio_inbound(request: Request) -> Response:
     """Receive a Twilio inbound message and resolve the pair's pending question,
@@ -249,6 +250,7 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
     summary="Twilio delivery status webhook",
     tags=["channels"],
     response_model=None,
+    no_body_reason="Twilio delivery-status webhook: 204/plain-text",
 )
 async def twilio_status(request: Request) -> Response:
     """Ingest a Twilio-signed delivery-status callback for a bridge outbound message.

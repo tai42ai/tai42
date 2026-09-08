@@ -83,7 +83,7 @@ import math
 import re
 from datetime import UTC, datetime
 from stat import S_ISREG
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import httpx
@@ -413,6 +413,69 @@ class FormSubmissionBody(BaseModel):
     @classmethod
     def _opaque_retry_key(cls, value: str | None) -> str | None:
         return _validated_retry_key(value)
+
+
+# -- response bodies (the inner payload each door wraps in ``{"data": ...}``) ----
+
+
+class MessageAcceptedResponse(BaseModel):
+    """Ack of a bridged inbound turn — the id the transcript keys the message on.
+    Shared by the messages door and the form-submission door (same wire shape)."""
+
+    message_id: str
+
+
+class AnswerResultResponse(BaseModel):
+    """Ack of a forwarded answer that the callback door accepted and recorded."""
+
+    status: Literal["answered"]
+
+
+class SessionRotatedResponse(BaseModel):
+    """Ack of a session rotation. The fresh session token rides a Set-Cookie header,
+    not this body."""
+
+    status: Literal["rotated"]
+
+
+class CodeView(BaseModel):
+    """One minted entry code as the management door lists it — its id and metadata,
+    never the raw code. ``created_at``/``expires_at`` are ISO-8601 strings as stored
+    (mirrors the ``EntryCode`` record)."""
+
+    code_id: str
+    label: str | None
+    created_at: str
+    expires_at: str | None
+
+
+class GateStateResponse(BaseModel):
+    """A web route's entry-gate state: whether it is gated and its live codes."""
+
+    enabled: bool
+    codes: list[CodeView]
+
+
+class GateToggledResponse(BaseModel):
+    """Ack of a gate toggle — echoes the flag now in force."""
+
+    enabled: bool
+
+
+class MintedCodeResponse(BaseModel):
+    """A freshly minted entry code. ``code`` is the raw code, returned this once only
+    (a one-time secret — only its hash is stored). ``expires_at`` is an ISO-8601
+    string, or ``None`` for a code with no expiry."""
+
+    code: str
+    code_id: str
+    expires_at: str | None
+
+
+class CodeRevokedResponse(BaseModel):
+    """Ack of an entry code revocation."""
+
+    status: Literal["revoked"]
 
 
 class AnswerForwardError(Exception):
@@ -763,6 +826,7 @@ async def _forward_answer(callback_url: str, answer: Any) -> httpx.Response:
     summary="Serve the public chat page for a web route",
     tags=["channels"],
     response_model=None,
+    no_body_reason="Chat HTML page: text/html document, not a JSON body",
 )
 async def web_chat_page(request: Request) -> Response:
     """Serve the visitor-facing chat page and (re)establish the session.
@@ -852,6 +916,7 @@ async def web_chat_page(request: Request) -> Response:
     summary="Serve a built chat page asset",
     tags=["channels"],
     response_model=None,
+    no_body_reason="Static asset FileResponse: raw bytes",
 )
 async def web_asset(request: Request) -> Response:
     """Serve one file of the built chat bundle.
@@ -899,7 +964,7 @@ async def web_asset(request: Request) -> Response:
     methods=["POST"],
     summary="Send a web chat message into the visitor's conversation",
     tags=["channels"],
-    response_model=None,
+    response_model=MessageAcceptedResponse,
 )
 async def web_messages(request: Request) -> Response:
     """Bridge one visitor message into their own web conversation.
@@ -992,6 +1057,7 @@ async def web_messages(request: Request) -> Response:
     summary="Stream the visitor's web conversation (backlog then live)",
     tags=["channels"],
     response_model=None,
+    no_body_reason="SSE StreamingResponse: text/event-stream, no fixed body",
 )
 async def web_stream(request: Request) -> Response:
     """Open the SSE feed of the session's own conversation.
@@ -1044,7 +1110,7 @@ async def web_stream(request: Request) -> Response:
     methods=["POST"],
     summary="Answer a pending web chat question",
     tags=["channels"],
-    response_model=None,
+    response_model=AnswerResultResponse,
 )
 async def web_answer(request: Request) -> Response:
     """Forward an answer to a pending web question's interactions callback.
@@ -1138,7 +1204,7 @@ async def web_answer(request: Request) -> Response:
     methods=["POST"],
     summary="Submit an ask-less web form into the visitor's conversation",
     tags=["channels"],
-    response_model=None,
+    response_model=MessageAcceptedResponse,
 )
 async def web_form_submit(request: Request) -> Response:
     """Bridge one ask-less form submission as a guest message.
@@ -1230,7 +1296,7 @@ async def web_form_submit(request: Request) -> Response:
     methods=["POST"],
     summary="Start a fresh web chat visitor session",
     tags=["channels"],
-    response_model=None,
+    response_model=SessionRotatedResponse,
 )
 async def web_session_rotate(request: Request) -> Response:
     """Mint a fresh session for one web route and set it as the visitor's cookie.
@@ -1306,7 +1372,7 @@ def _code_view(code: EntryCode) -> dict[str, Any]:
     methods=["GET"],
     summary="Read a web route's entry-gate state and its codes",
     tags=["channels"],
-    response_model=None,
+    response_model=GateStateResponse,
     action="read",
 )
 async def web_gate_read(request: Request) -> Response:
@@ -1328,7 +1394,7 @@ async def web_gate_read(request: Request) -> Response:
     methods=["PUT"],
     summary="Turn a web route's entry gate on or off",
     tags=["channels"],
-    response_model=None,
+    response_model=GateToggledResponse,
     request_model=GateToggleBody,
     action="write",
 )
@@ -1358,7 +1424,7 @@ async def web_gate_toggle(request: Request) -> Response:
     methods=["POST"],
     summary="Mint an entry code for a web route",
     tags=["channels"],
-    response_model=None,
+    response_model=MintedCodeResponse,
     request_model=MintCodeBody,
     action="write",
 )
@@ -1389,7 +1455,7 @@ async def web_gate_mint_code(request: Request) -> Response:
     methods=["DELETE"],
     summary="Revoke a web route's entry code",
     tags=["channels"],
-    response_model=None,
+    response_model=CodeRevokedResponse,
     action="write",
 )
 async def web_gate_revoke_code(request: Request) -> Response:

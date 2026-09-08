@@ -2694,6 +2694,10 @@ def build_monitoring_stack(res: StackResources, variants: Variants) -> StackConf
             *_CORE_ROUTERS,
             "tai42_skeleton.routers.observability",
             "tai42_skeleton.routers.agents",
+            # The runs-index deep-link list: the composed e2e reads a direct/MCP preset
+            # run's ``traceId`` back off ``/api/runs`` to prove the row carries the opened
+            # trace root's id end to end.
+            "tai42_skeleton.routers.runs",
         ],
         # The probe entry attaches a proxy branch and (this profile) an e2e_echo monitor
         # branch, so proxy + prometheus + the monitor builtin must all load or extension

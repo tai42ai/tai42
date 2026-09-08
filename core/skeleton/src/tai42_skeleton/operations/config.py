@@ -26,6 +26,7 @@ from typing import Any
 from pydantic import BaseModel, RootModel
 from starlette.background import BackgroundTask
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import ApplyResponse, ProfileApplyResponse
 from tai42_contract.settings_profiles import SettingsProfileBody
 from tai42_contract.settings_profiles.errors import (
     SettingsProfileExistsError,
@@ -36,6 +37,7 @@ from tai42_kit.db import component_store_configured
 from tai42_kit.settings import registered_settings
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
+from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.epoch import _reload_driven_by_request
 from tai42_skeleton.app.graceful_exit import request_serve_graceful_exit
 from tai42_skeleton.app.reload_gate import reload_gate
@@ -46,6 +48,17 @@ from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationResponse, operation
 from tai42_skeleton.operations._broadcast import apply_response, broadcast, profile_apply_response
+from tai42_skeleton.operations.response_models_group_b import (
+    ConfigModeView,
+    EnvView,
+    OkResult,
+    ProfileDiff,
+    ProfileListResponse,
+    ProfileVersionListResponse,
+    ProfileVersionView,
+    ProfileWriteResult,
+    SettingsSchemaView,
+)
 
 # Importing this module registers ``EnvSecretMarksSettings`` (registration runs at
 # class-definition time) so the marks group appears in the settings schema, and
@@ -78,7 +91,7 @@ def _stored_env() -> dict[str, str]:
         return {}
 
 
-@operation(summary="Read the stored env config and secret-key marks", tags=["config"])
+@operation(summary="Read the stored env config and secret-key marks", tags=["config"], response_model=EnvView)
 async def read_env() -> dict:
     """Return the stored env map alongside the operator's secret-key marks.
 
@@ -95,12 +108,16 @@ async def read_env() -> dict:
     }
 
 
-@operation(summary="Read the active config backend mode", tags=["config"])
+@operation(summary="Read the active config backend mode", tags=["config"], response_model=ConfigModeView)
 async def read_mode() -> dict:
     return {"config_mode": config_mode()}
 
 
-@operation(summary="List settings groups with their resolved field values", tags=["config"])
+@operation(
+    summary="List settings groups with their resolved field values",
+    tags=["config"],
+    response_model=SettingsSchemaView,
+)
 async def read_settings_schema() -> dict:
     """Return every registered settings group with per-field current values.
 
@@ -171,6 +188,7 @@ async def read_settings_schema() -> dict:
     reload_gated=True,
     errors=[BadRequestError],
     request_model=EnvUpdate,
+    response_model=ApplyResponse,
 )
 async def write_env(env: dict[str, str]) -> dict:
     # Merge the env overrides through the pipeline: ConfigService validates the
@@ -193,6 +211,7 @@ async def write_env(env: dict[str, str]) -> dict:
     destructive=True,
     reload_gated=True,
     request_model=ReloadConfigRequest,
+    response_model=FleetResult,
 )
 async def reload_config(targets: list[str] | None = None) -> Any:
     """Soft-restart: refresh env from the config manager, reset every settings cache,
@@ -268,7 +287,7 @@ def _reload_class_by_env_var() -> dict[str, str]:
     return reload_class_by_env_var()
 
 
-@operation(summary="List settings profiles", tags=["config"])
+@operation(summary="List settings profiles", tags=["config"], response_model=ProfileListResponse)
 async def list_profiles() -> list[dict[str, Any]]:
     """One ``{name, description}`` row per active settings profile, EXCLUDING the
     reserved ``@``-prefixed snapshots (e.g. ``@previous``). A store-less deploy holds
@@ -289,7 +308,12 @@ async def list_profiles() -> list[dict[str, Any]]:
     return rows
 
 
-@operation(summary="Get a settings profile", tags=["config"], errors=[NotFoundError, NotSupportedError])
+@operation(
+    summary="Get a settings profile",
+    tags=["config"],
+    errors=[NotFoundError, NotSupportedError],
+    response_model=SettingsProfileBody,
+)
 async def get_profile(name: str) -> dict[str, Any]:
     """The profile's active body — ``{description, env, secret_keys}`` with REAL env
     values (this authed ``secret``-fenced door round-trips values through the editor;
@@ -307,6 +331,7 @@ async def get_profile(name: str) -> dict[str, Any]:
     tags=["config"],
     errors=[BadRequestError, NotSupportedError],
     request_model=SettingsProfileBody,
+    response_model=ProfileWriteResult,
 )
 async def put_profile(name: str, description: str, env: dict[str, str], secret_keys: list[str]) -> dict[str, Any]:
     """Create the profile, or append a new version when it exists (whole-body
@@ -346,7 +371,12 @@ async def put_profile(name: str, description: str, env: dict[str, str], secret_k
     return {"ok": True, "version": version.version}
 
 
-@operation(summary="Delete a settings profile", tags=["config"], errors=[NotFoundError, NotSupportedError])
+@operation(
+    summary="Delete a settings profile",
+    tags=["config"],
+    errors=[NotFoundError, NotSupportedError],
+    response_model=OkResult,
+)
 async def delete_profile(name: str) -> dict[str, Any]:
     """Soft-delete the profile, keeping its version history (audit). 404 for an
     absent name."""
@@ -362,6 +392,7 @@ async def delete_profile(name: str) -> dict[str, Any]:
     summary="Diff a settings profile against the stored env",
     tags=["config"],
     errors=[NotFoundError, NotSupportedError],
+    response_model=ProfileDiff,
 )
 async def diff_profile(name: str) -> dict[str, Any]:
     """The saved profile's env vs the CURRENT stored env, with REAL values (the UI
@@ -403,6 +434,7 @@ async def diff_profile(name: str) -> dict[str, Any]:
     summary="List a settings profile's versions",
     tags=["config"],
     errors=[NotFoundError, NotSupportedError],
+    response_model=ProfileVersionListResponse,
 )
 async def list_profile_versions(name: str) -> list[dict[str, Any]]:
     """The profile's version history as a bare array of
@@ -422,6 +454,7 @@ async def list_profile_versions(name: str) -> list[dict[str, Any]]:
     summary="Get a settings profile version",
     tags=["config"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=ProfileVersionView,
 )
 async def get_profile_version(name: str, version: str) -> dict[str, Any]:
     """One version row extended with its full ``body`` (``{description, env,
@@ -450,6 +483,7 @@ async def get_profile_version(name: str, version: str) -> dict[str, Any]:
     tags=["config"],
     errors=[NotFoundError, NotSupportedError],
     request_model=ProfileRollback,
+    response_model=ProfileWriteResult,
 )
 async def rollback_profile(name: str, version: int) -> dict[str, Any]:
     """Re-point the active version to ``version`` (no data copy), making it the
@@ -494,6 +528,7 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
     reload_gated=True,
     authority_changing=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=ProfileApplyResponse,
 )
 async def apply_profile(name: str) -> OperationResponse:
     """Apply the profile's active env as the WHOLE stored env band (a key the profile

@@ -63,3 +63,64 @@ def test_echo_stderr_writes_to_stderr(capsys: pytest.CaptureFixture[str]) -> Non
     captured = capsys.readouterr()
     assert captured.err.strip() == "heads up"
     assert captured.out == ""
+
+
+def _ctx(*, json_output: bool = False):
+    return cast("_common.AppContext", SimpleNamespace(json_output=json_output))
+
+
+def test_emit_records_derives_columns_and_items_key_from_the_route(capsys: pytest.CaptureFixture[str]) -> None:
+    # GET /api/system/kinds -> SystemKindsListing (a bare list of rows): the derived
+    # columns are the row model's fields, and the un-enveloped list is the data.
+    data = [{"kind": "backend", "state": "active", "plugin": "pg", "detail": "ok"}]
+    _common.emit_records(_ctx(), data, route=("GET", "/api/system/kinds"))
+    out = capsys.readouterr().out
+    header = out.splitlines()[0].split()
+    assert header == ["kind", "state", "plugin", "detail"]
+    assert "backend" in out
+
+
+def test_emit_records_derives_the_envelope_items_key(capsys: pytest.CaptureFixture[str]) -> None:
+    # GET /api/notifications -> NotificationListing{notifications: [...]}: the derived
+    # items_key pulls the row list out of the envelope for the table.
+    data = {"notifications": [{"id": "n1", "message": "hi", "recipient": "alice"}]}
+    _common.emit_records(_ctx(), data, route=("GET", "/api/notifications"))
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].split()[0] == "id"
+    assert "n1" in out
+
+
+def test_emit_records_wraps_a_bare_scalar_row_under_the_value_column(capsys: pytest.CaptureFixture[str]) -> None:
+    # GET /api/tools -> StringListResponse (a bare list of names): each scalar row is
+    # wrapped under the single derived ``value`` column.
+    _common.emit_records(_ctx(), ["echo", "weather"], route=("GET", "/api/tools"))
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].strip() == "value"
+    assert "echo" in out
+
+
+def test_emit_records_keeps_explicit_columns_for_a_non_derivable_route(capsys: pytest.CaptureFixture[str]) -> None:
+    data = {"providers": [{"id": "p1", "display_name": "P1", "kind": "oauth", "category": "chat"}]}
+    _common.emit_records(_ctx(), data, ["id", "display_name"], items_key="providers")
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].split() == ["id", "display_name"]
+
+
+def test_emit_records_under_json_emits_the_raw_payload(capsys: pytest.CaptureFixture[str]) -> None:
+    _common.emit_records(_ctx(json_output=True), ["echo"], route=("GET", "/api/tools"))
+    assert capsys.readouterr().out.strip() == '[\n  "echo"\n]'
+
+
+def test_emit_records_rejects_both_a_route_and_explicit_columns() -> None:
+    with pytest.raises(ValueError, match="one or the other"):
+        _common.emit_records(_ctx(), [], ["x"], route=("GET", "/api/tools"))
+
+
+def test_emit_records_requires_a_route_or_columns() -> None:
+    with pytest.raises(ValueError, match=r"route .* or an explicit columns"):
+        _common.emit_records(_ctx(), [])
+
+
+def test_emit_records_raises_on_a_route_with_no_table_entry() -> None:
+    with pytest.raises(KeyError, match="no derived shape"):
+        _common.emit_records(_ctx(), [], route=("GET", "/api/does-not-exist"))

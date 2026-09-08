@@ -44,6 +44,8 @@ def operation(
     request_model: type[BaseModel] | None = None,
     response_model: type[BaseModel] | None = None,
     query_model: type[BaseModel] | None = None,
+    no_body_reason: str | None = None,
+    enveloped: bool = True,
     registry: OperationRegistry | None = None,
 ) -> Callable[[_AsyncOpT], _AsyncOpT]:
     """Declare a function as an operation and register it.
@@ -70,6 +72,16 @@ def operation(
     documents the query it reads at the edge. Either model's field names — under their
     aliases where they differ — are the WIRE keys a generated client sends, not the
     operation's Python parameter names.
+
+    ``no_body_reason`` declares an operation that serves NO ``{"data": <model>}`` JSON
+    body (a streaming/asset/redirect response, or a raw non-enveloped body): it is
+    required when ``response_model`` is ``None`` and mutually exclusive with it — the
+    route seam raises at registration on a bare ``None`` or on both supplied.
+
+    ``enveloped`` (default ``True``) wraps ``response_model`` in the ``{"data": ...}``
+    success envelope; ``enveloped=False`` publishes the model's schema DIRECTLY at the
+    top level (a raw non-enveloped body) and REQUIRES a ``response_model`` — the route
+    seam raises at registration on ``enveloped=False`` with a bare ``None``.
     """
 
     target_registry = registry if registry is not None else operation_registry
@@ -90,6 +102,8 @@ def operation(
             request_model=request_model,
             response_model=response_model,
             query_model=query_model,
+            no_body_reason=no_body_reason,
+            enveloped=enveloped,
         )
         target_registry.register(metadata)
         setattr(func, OPERATION_ATTR, metadata)

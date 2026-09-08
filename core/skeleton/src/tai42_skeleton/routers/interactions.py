@@ -59,8 +59,9 @@ import json
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
+from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from tai42_contract.app import tai42_app
@@ -117,6 +118,9 @@ from tai42_skeleton.operations.interactions import answer_interaction as _answer
 from tai42_skeleton.operations.interactions import cancel_interaction as _cancel_interaction_op
 from tai42_skeleton.operations.interactions import list_interactions as _list_interactions_op
 from tai42_skeleton.operations.interactions import list_pending_interactions as _list_pending_interactions_op
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
 
 logger = logging.getLogger(__name__)
 
@@ -452,12 +456,53 @@ _JSON_PARSE_ERRORS = (ValueError, RecursionError)
 # -- SSE stream (route 1) ----------------------------------------------------
 
 
-def _frame(event: str, data: dict) -> str:
+def _frame(event: str, data: dict, event_id: str) -> str:
     # ``json.dumps`` of the whole payload is what stops an attacker-supplied
     # answer (with newlines / ``data:`` sequences) from injecting extra frames.
     # Frame values are JSON-native by construction (they round-trip through the
     # contract models), so a serialization failure is a server bug and raises.
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+    # ``id`` is the Redis stream message-id: the browser echoes it back as the
+    # ``Last-Event-ID`` header on reconnect so the route resumes AFTER it (SSE
+    # resume). It is a bare ``<ms>-<seq>`` token by construction, so it cannot
+    # break the frame framing.
+    return f"id: {event_id}\nevent: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _parse_stream_id(value: str) -> tuple[int, int]:
+    # A Redis stream id is ``<ms>-<seq>``; a bare ``<ms>`` implies seq 0. A value
+    # that does not parse (a Last-Event-ID the client never got from us) raises,
+    # which the caller turns into the logged tail fallback rather than a crash.
+    ms, _, seq = value.partition("-")
+    return (int(ms), int(seq) if seq else 0)
+
+
+async def _resume_cursor(r: Redis, store: InteractionStore, last_event_id: str | None) -> str:
+    """Resolve the events-stream cursor for a (re)connect.
+
+    With a ``Last-Event-ID`` that is still inside the retained stream window, resume
+    the tail AFTER it so every event during the disconnect gap (the ``answered``
+    frame included) is replayed. When the id is absent, malformed, or already trimmed
+    off the head, fall back to the tail END — the connect-time behavior the client's
+    pending-base reseed backs up — and LOG the fallback so a lost-resume is never
+    silent. Trimming only ever removes the OLDEST ids, so an id at or after the
+    smallest retained id has every later event still present and is safe to resume.
+    """
+    if last_event_id:
+        try:
+            requested = _parse_stream_id(last_event_id)
+        except ValueError:
+            logger.warning("interactions SSE resume: malformed Last-Event-ID %r; falling back to tail", last_event_id)
+        else:
+            head = await r.xrange(store.events_key, count=1)
+            if head and requested >= _parse_stream_id(as_str(head[0][0])):
+                return last_event_id
+            logger.info(
+                "interactions SSE resume: Last-Event-ID %s trimmed from the stream; "
+                "falling back to tail + pending-base reseed",
+                last_event_id,
+            )
+    tail = await r.xrevrange(store.events_key, count=1)
+    return as_str(tail[0][0]) if tail else "0-0"
 
 
 async def _stream_events(request: Request, store: InteractionStore, settings: InteractionsSettings, cursor: str):
@@ -545,7 +590,7 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
                             continue
                         if restricted and state.request.audience != restricted_id:
                             continue
-                        yield _frame(ADD_EVENT, _add_data(state.request))
+                        yield _frame(ADD_EVENT, _add_data(state.request), cursor)
                         yielded = True
                     elif event_type in (ANSWERED_EVENT, REMOVED_EVENT):
                         # Filter directly on the audience the store stamped into the
@@ -563,7 +608,7 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
                         reason = fields.get("reason")
                         if reason is not None:
                             terminal_frame["reason"] = reason
-                        yield _frame(event_type, terminal_frame)
+                        yield _frame(event_type, terminal_frame, cursor)
                         yielded = True
             # The keepalive is deadline-driven: it fires whenever the monotonic
             # deadline passes and no frame reached THIS caller this window — whether
@@ -585,6 +630,7 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
     summary="Stream the interactions inbox live tail",
     tags=["interactions"],
     response_model=None,
+    no_body_reason="Interactions inbox live tail: SSE StreamingResponse",
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,
@@ -604,14 +650,18 @@ async def stream(request: Request) -> Response:
         )
     settings = interactions_settings()
     store = InteractionStore(settings.key_prefix)
-    # Capture the tail cursor on the pooled connection BEFORE the response is returned, so
-    # a client that has received the response headers is guaranteed every later add: any
+    # SSE resume: a reconnecting client echoes the last-delivered stream id back as the
+    # ``Last-Event-ID`` header (a ``?last_event_id=`` query param is the fallback for
+    # transports that cannot set the header). With it the cursor resumes AFTER the gap;
+    # without it (or when it has been trimmed) the tail END is captured instead.
+    last_event_id = request.headers.get("last-event-id") or request.query_params.get("last_event_id")
+    # Resolve the cursor on the pooled connection BEFORE the response is returned, so a
+    # client that has received the response headers is guaranteed every later add: any
     # event published after this read has an id past the cursor. The connection is
     # released here — the never-completing tail below runs on its own dedicated
     # connection and must never pin the shared pool.
     async with client_ctx(RedisClient, settings.redis) as r:
-        tail = await r.xrevrange(store.events_key, count=1)
-        cursor = as_str(tail[0][0]) if tail else "0-0"
+        cursor = await _resume_cursor(r, store, last_event_id)
     return StreamingResponse(
         _stream_events(request, store, settings, cursor),
         media_type="text/event-stream",
@@ -632,6 +682,7 @@ _MEDIA_ID_RE = re.compile(r"[A-Za-z0-9_-]{43}")
     summary="Serve interaction media stored by reference",
     tags=["interactions"],
     response_model=None,
+    no_body_reason="Served interaction media: raw bytes by capability URL",
     authed=False,
     declared=DeclaredRouteMetadata(
         reload_gated=False,
@@ -1098,12 +1149,22 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
     return HTMLResponse(_REPLY_PAGE, headers=_HTML_HEADERS)
 
 
+class InteractionCallbackAck(BaseModel):
+    """The POST callback door's JSON body: ``answered`` (with the ``interaction_id``
+    just recorded) or the idempotent ``already_answered`` (no id — someone else's
+    answer already landed). The GET method of this route serves an HTML page, not
+    this body."""
+
+    interaction_id: str | None = None
+    status: Literal["answered", "already_answered"]
+
+
 @http_surface().custom_route(
     "/api/interactions/callback/{ticket}",
     methods=["GET", "POST"],
     summary="External interaction callback door",
     tags=["interactions"],
-    response_model=None,
+    response_model=InteractionCallbackAck,
     authed=False,
     declared=DeclaredRouteMetadata(
         reload_gated=False,

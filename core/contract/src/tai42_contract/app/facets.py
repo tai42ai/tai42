@@ -552,6 +552,8 @@ class AppHttp(Protocol):
         destructive: bool = False,
         action: RouteAction | None = None,
         declared: DeclaredRouteMetadata | None = None,
+        no_body_reason: str | None = None,
+        enveloped: bool = True,
     ) -> Callable[[Callable[[Request], Awaitable[Response]]], Callable[[Request], Awaitable[Response]]]:
         """Register a Starlette handler AND its self-describing route metadata.
 
@@ -560,10 +562,24 @@ class AppHttp(Protocol):
 
         * ``summary`` — a one-line operation summary (required, non-empty).
         * ``tags`` — at least one OpenAPI tag grouping the route (required).
-        * ``response_model`` — the pydantic model wrapped in the ``{"data": ...}``
-          success envelope, or ``None`` as the explicit opaque marker for a route
-          with no structured response. Required — there is no default, so a route
-          cannot silently omit it.
+        * ``response_model`` — the pydantic model (any ``BaseModel``, ``RootModel``
+          included) describing the success body. Required — there is no default, so a
+          route cannot silently omit it. By default the model is wrapped in the
+          ``{"data": ...}`` success envelope; a route that answers a RAW top-level body
+          passes ``enveloped=False`` (see below). ``None`` is legal ONLY together with a
+          non-blank ``no_body_reason``: the two states are mutually exclusive — a route
+          declares a typed body OR a reasoned no-body, never both and never neither.
+        * ``enveloped`` — whether the JSON success body is wrapped in the
+          ``{"data": <response_model>}`` envelope (the default, ``True``) or is the
+          model's schema DIRECTLY at the top level (``False``, a raw non-enveloped
+          body). ``enveloped=False`` REQUIRES a ``response_model``: an unwrapped body
+          still needs a real model, so a bare ``None`` under it is a registration error.
+        * ``no_body_reason`` — the required-when-``response_model`` is ``None``
+          justification for a route that serves no ``{"data": <model>}`` JSON body
+          (a redirect, a raw/streaming/asset response, a vendor webhook 200, or a
+          raw non-enveloped body the envelope emitter cannot describe). Passing it
+          alongside a ``response_model``, or omitting it when ``response_model`` is
+          ``None``, is a registration error.
         * ``request_model`` — the pydantic model of the request body; required for
           any route that reads a body, omitted (``None``) otherwise.
         * ``query_model`` — the pydantic model whose fields are published as ``in:

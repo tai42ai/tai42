@@ -20,6 +20,7 @@ import os
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import OpaqueJson
 
 
 @tai42_app.http.custom_route(
@@ -27,7 +28,7 @@ from tai42_contract.app import tai42_app
     methods=["GET"],
     summary="Epsilon fixture ping",
     tags=["e2e-epsilon"],
-    response_model=None,
+    response_model=OpaqueJson,
     action="read",
 )
 async def epsilon_ping(request: Request) -> Response:
@@ -40,7 +41,7 @@ async def epsilon_ping(request: Request) -> Response:
     methods=["GET"],
     summary="Epsilon fixture public probe",
     tags=["e2e-epsilon"],
-    response_model=None,
+    response_model=OpaqueJson,
 )
 async def epsilon_open(request: Request) -> Response:
     """Return a fixed marker payload from the fixture's declared-public route."""
@@ -52,7 +53,7 @@ async def epsilon_open(request: Request) -> Response:
     methods=["POST"],
     summary="Epsilon fixture authed sibling method",
     tags=["e2e-epsilon"],
-    response_model=None,
+    response_model=OpaqueJson,
     action="write",
 )
 async def epsilon_open_write(request: Request) -> Response:

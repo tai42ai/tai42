@@ -45,7 +45,14 @@ def test_emitter_is_deterministic():
 def test_declared_destructive_route_emits_x_destructive():
     reg = OperationRegistry()
 
-    @operation(summary="Wipe it", tags=["things"], destructive=True, request_model=_Body, registry=reg)
+    @operation(
+        summary="Wipe it",
+        tags=["things"],
+        destructive=True,
+        request_model=_Body,
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def wipe(x: int) -> dict:
         """Wipe."""
         return {}
@@ -67,7 +74,14 @@ def test_declared_metadata_drives_statuses_not_ast():
     error classes, not an AST scan of the adapter closure."""
     reg = OperationRegistry()
 
-    @operation(summary="Do", tags=["things"], errors=[ConflictError], request_model=_Body, registry=reg)
+    @operation(
+        summary="Do",
+        tags=["things"],
+        errors=[ConflictError],
+        request_model=_Body,
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def doit(x: int) -> dict:
         """Do it."""
         return {}
@@ -90,7 +104,13 @@ def test_spec_version_present():
 def test_converted_route_appears_in_api_routes():
     reg = OperationRegistry()
 
-    @operation(summary="Ping", tags=["things"], request_model=_Body, registry=reg)
+    @operation(
+        summary="Ping",
+        tags=["things"],
+        request_model=_Body,
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def ping(x: int) -> dict:
         """Ping."""
         return {}

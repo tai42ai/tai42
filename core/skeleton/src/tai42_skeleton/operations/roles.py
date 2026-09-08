@@ -33,6 +33,7 @@ from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.operations._authority import require_admin, resolve_caller
 from tai42_skeleton.operations.decorator import operation
 from tai42_skeleton.operations.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
+from tai42_skeleton.operations.response_models_group_b import RoleDeleted, RoleVersionsView
 
 # The base-tier jq a NEW role inherits from its ``base_tier`` — resolved SERVER-SIDE from
 # the seeded constants, NEVER accepted as raw jq from the operator. ``admin`` is reserved
@@ -130,6 +131,7 @@ def _resolved_create(name: str, description: str, base_tier: str, grants: Mappin
     authority_changing=True,
     errors=[BadRequestError, ForbiddenError, ConflictError],
     request_model=RoleCreate,
+    response_model=RoleDefinition,
 )
 async def create_role(name: str, description: str, base_tier: str, grants: dict[str, str]) -> dict[str, Any]:
     """Create an operator-authored role. Admin-only; validates the grant map + base tier
@@ -157,6 +159,7 @@ async def create_role(name: str, description: str, base_tier: str, grants: dict[
     authority_changing=True,
     errors=[BadRequestError, ForbiddenError, NotFoundError],
     request_model=RoleUpdate,
+    response_model=RoleDefinition,
 )
 async def update_role(name: str, grants: dict[str, str] | None, description: str | None) -> dict[str, Any]:
     """Edit a role's per-tag grant map + description (the base-tier jq is seed-fixed, not
@@ -203,6 +206,7 @@ async def update_role(name: str, grants: dict[str, str] | None, description: str
     authority_changing=True,
     errors=[BadRequestError, ForbiddenError, NotFoundError],
     request_model=RoleGrantsModify,
+    response_model=RoleDefinition,
 )
 async def modify_role_grants(
     name: str, set: dict[str, str] | None = None, remove: list[str] | None = None
@@ -258,6 +262,7 @@ async def modify_role_grants(
     authority_changing=True,
     destructive=True,
     errors=[ForbiddenError, NotFoundError, ConflictError],
+    response_model=RoleDeleted,
 )
 async def delete_role(name: str) -> dict[str, Any]:
     """Delete a role. Admin-only; the reserved ``admin`` role is undeletable; a role still
@@ -294,6 +299,7 @@ async def delete_role(name: str) -> dict[str, Any]:
     summary="A role's version history + audit trail",
     tags=["access-control"],
     errors=[ForbiddenError, NotFoundError],
+    response_model=RoleVersionsView,
 )
 async def list_role_versions(name: str) -> dict[str, Any]:
     """The role's append-only version history plus its who/when/before→after audit trail.
@@ -321,6 +327,7 @@ async def list_role_versions(name: str) -> dict[str, Any]:
     destructive=True,
     errors=[BadRequestError, ForbiddenError, NotFoundError],
     request_model=RoleRollback,
+    response_model=RoleDefinition,
 )
 async def rollback_role(name: str, version: int) -> dict[str, Any]:
     """Re-point a role's active version to a prior one (LIVE — holders follow on their

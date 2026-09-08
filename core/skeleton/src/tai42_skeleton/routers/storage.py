@@ -123,6 +123,7 @@ delete_dir = register_operation_route(
     summary="Download a storage resource",
     tags=["storage"],
     response_model=None,
+    no_body_reason="Storage resource download: raw bytes",
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,

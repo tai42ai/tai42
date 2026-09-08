@@ -288,6 +288,8 @@ def register_operation_route(
         authed=authed,
         destructive=op.destructive,
         action=action,
+        no_body_reason=op.no_body_reason,
+        enveloped=op.enveloped,
         declared=_declared_metadata(
             op, method_upper, authed=authed, success_status=success_status, request_model=route_request_model
         ),

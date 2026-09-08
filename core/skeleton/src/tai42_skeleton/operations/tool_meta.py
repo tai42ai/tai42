@@ -41,6 +41,8 @@ from tai42_contract.tool_meta import (
     FolderNameConflictError,
     FolderNotEmptyError,
     FolderNotFoundError,
+    FolderRecord,
+    ToolMetaRecord,
 )
 from tai42_kit.db import component_store_configured
 
@@ -53,6 +55,7 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     operation,
 )
+from tai42_skeleton.operations.response_models_group_b import FolderDeleted, ToolMetaDeleted, ToolMetaListView
 
 # The machine-readable code the tool-meta write OFF refusals carry when the overlay
 # store is unconfigured; the message is rendered from the live binding at raise time.
@@ -112,7 +115,7 @@ def _clean_label(value: str, field: str) -> str:
 # -- overlay -----------------------------------------------------------------
 
 
-@operation(summary="List the tool-metadata overlay", tags=["tool_meta"])
+@operation(summary="List the tool-metadata overlay", tags=["tool_meta"], response_model=ToolMetaListView)
 async def list_tool_meta() -> dict[str, Any]:
     """The whole overlay in one read: every folder (the flat tree) plus every
     per-tool row. The UI builds the tree and merges the rows against the live tool
@@ -136,6 +139,7 @@ async def list_tool_meta() -> dict[str, Any]:
     destructive=True,
     errors=[BadRequestError, NotSupportedError],
     request_model=ToolMetaUpsert,
+    response_model=ToolMetaRecord,
 )
 async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, Any]:
     """Merge-patch the overlay row for ``tool_name`` (create it if absent). ``patch``
@@ -173,7 +177,7 @@ async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, A
     return record.model_dump()
 
 
-@operation(summary="Delete a tool's overlay row", tags=["tool_meta"])
+@operation(summary="Delete a tool's overlay row", tags=["tool_meta"], response_model=ToolMetaDeleted)
 async def delete_tool_meta(tool_name: str) -> dict[str, Any]:
     """Drop the overlay row for ``tool_name``. Idempotent — deleting a tool with no
     row is a no-op, not an error (most tools never own one)."""
@@ -194,6 +198,7 @@ async def delete_tool_meta(tool_name: str) -> dict[str, Any]:
     destructive=True,
     errors=[BadRequestError, ConflictError, NotSupportedError],
     request_model=FolderCreate,
+    response_model=FolderRecord,
 )
 async def create_folder(name: str, parent_id: str | None = None) -> dict[str, Any]:
     """Create a folder under ``parent_id`` (``null`` = a root folder). A blank name
@@ -258,6 +263,7 @@ async def resolve_folder_path(path: str) -> str | None:
     destructive=True,
     errors=[BadRequestError, ConflictError, NotFoundError],
     request_model=FolderRename,
+    response_model=FolderRecord,
 )
 async def rename_folder(folder_id: str, name: str) -> dict[str, Any]:
     """Rename a folder in place. A blank name is a 400, an unknown folder a 404, and
@@ -282,6 +288,7 @@ async def rename_folder(folder_id: str, name: str) -> dict[str, Any]:
     destructive=True,
     errors=[BadRequestError, ConflictError, NotFoundError],
     request_model=FolderMove,
+    response_model=FolderRecord,
 )
 async def move_folder(folder_id: str, parent_id: str | None = None) -> dict[str, Any]:
     """Re-parent a folder (``null`` = move to root). An unknown folder or parent is a
@@ -307,6 +314,7 @@ async def move_folder(folder_id: str, parent_id: str | None = None) -> dict[str,
     summary="Delete a folder",
     tags=["tool_meta"],
     errors=[ConflictError, NotFoundError],
+    response_model=FolderDeleted,
 )
 async def delete_folder(folder_id: str) -> dict[str, Any]:
     """Delete an EMPTY folder. An unknown folder is a 404; a folder still holding

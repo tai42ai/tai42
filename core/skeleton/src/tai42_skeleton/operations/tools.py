@@ -44,8 +44,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import OpaqueJson
 from tai42_contract.secrets import unwrap_secrets
 
+from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
@@ -55,6 +57,12 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._broadcast import broadcast
+from tai42_skeleton.operations.response_models_group_b import (
+    StringListResponse,
+    ToolSchemaView,
+    ToolsSchemaMap,
+    ToolTagListResponse,
+)
 from tai42_skeleton.tools.binding import UnknownToolError
 
 if TYPE_CHECKING:
@@ -89,13 +97,17 @@ def _tool_schema(tool: Tool) -> dict[str, object]:
     }
 
 
-@operation(summary="List the registered tool names", tags=["tools"])
+@operation(summary="List the registered tool names", tags=["tools"], response_model=StringListResponse)
 async def list_tools() -> list[str]:
     tools = await tai42_app.tools.get_tools()
     return sorted(tools.keys())
 
 
-@operation(summary="List each tool's native tags, declared visibility, and badges", tags=["tools"])
+@operation(
+    summary="List each tool's native tags, declared visibility, and badges",
+    tags=["tools"],
+    response_model=ToolTagListResponse,
+)
 async def tool_tags() -> list[dict]:
     """The per-tool native-``tags`` map plus the plugin-declared visibility and
     capability badges — one ``{name, tags, hidden, badges}`` entry per registered
@@ -119,7 +131,12 @@ async def tool_tags() -> list[dict]:
     ]
 
 
-@operation(summary="Get one tool's input/output schema", tags=["tools"], errors=[NotFoundError])
+@operation(
+    summary="Get one tool's input/output schema",
+    tags=["tools"],
+    errors=[NotFoundError],
+    response_model=ToolSchemaView,
+)
 async def tool_schema(tool_name: str) -> dict:
     tools = await tai42_app.tools.get_tools()
     tool = tools.get(tool_name)
@@ -128,7 +145,7 @@ async def tool_schema(tool_name: str) -> dict:
     return _tool_schema(tool)
 
 
-@operation(summary="Get the input/output schema of every tool", tags=["tools"])
+@operation(summary="Get the input/output schema of every tool", tags=["tools"], response_model=ToolsSchemaMap)
 async def tools_schema() -> dict:
     tools = await tai42_app.tools.get_tools()
     # A schema view needs no callable body, so every registered tool's schema is served
@@ -152,6 +169,7 @@ async def tools_schema() -> dict:
     meta_executor=True,
     errors=[BadRequestError, NotFoundError, PermissionDenied, OperationFailed],
     request_model=RunToolRequest,
+    response_model=OpaqueJson,
 )
 async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
     """Execute an arbitrary registered tool with REAL side effects.
@@ -187,36 +205,48 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
     # before. An already-bound identity (an inline fire reaching this op) is never
     # clobbered. Function-local imports keep the operations→authz edge lazy,
     # matching the repo's guarded authz-edge idiom.
+    from contextlib import nullcontext
+
+    from tai42_contract.monitoring import RunAttribution
+
     from tai42_skeleton.access_control.user import request_identity
     from tai42_skeleton.authz.execution_identity import (
         get_execution_identity,
         reset_execution_identity,
         set_execution_identity,
     )
+    from tai42_skeleton.tools.attribution import run_attribution
 
+    # The caller's own principal, resolved once: it both attributes the run and (when no
+    # execution identity is bound yet) is the key rebound below.
+    caller_key, _restricted = request_identity()
     bind_token = None
-    if get_execution_identity() is None:
-        caller_key, _restricted = request_identity()
-        if caller_key is not None:
-            from tai42_skeleton.authz.execution import rebuild_execution_identity
+    if get_execution_identity() is None and caller_key is not None:
+        from tai42_skeleton.authz.execution import rebuild_execution_identity
 
-            try:
-                caller_identity = await rebuild_execution_identity(caller_key)
-            except Exception:
-                # Opportunistic bind, not this door's authz gate (the route decision
-                # already ran): a rebuild the infrastructure cannot answer degrades to
-                # the pre-bind behavior (unbound; the parking seam fail-closes loudly)
-                # instead of failing every tool call.
-                logger.warning("run-tool: could not rebuild the caller's execution identity", exc_info=True)
-                caller_identity = None
-            if caller_identity is not None:
-                bind_token = set_execution_identity(caller_identity)
+        try:
+            caller_identity = await rebuild_execution_identity(caller_key)
+        except Exception:
+            # Opportunistic bind, not this door's authz gate (the route decision
+            # already ran): a rebuild the infrastructure cannot answer degrades to
+            # the pre-bind behavior (unbound; the parking seam fail-closes loudly)
+            # instead of failing every tool call.
+            logger.warning("run-tool: could not rebuild the caller's execution identity", exc_info=True)
+            caller_identity = None
+        if caller_identity is not None:
+            bind_token = set_execution_identity(caller_identity)
     try:
+        # Deposit the caller's identity as this run's attribution so a runs-index row the
+        # dispatch registers (a preset target) is born with a ``user_id`` rather than NULL;
+        # ``run_tool``'s attribution stamp reads it. With no resolved caller the deposit is
+        # skipped and the row's identity stays unset, exactly as before.
+        attribution = run_attribution(RunAttribution(user_id=caller_key)) if caller_key is not None else nullcontext()
         # This envelope serves ONLY the live synchronous caller (a background submit
         # runs through ``submit_run``/``_supervise``, never this line), so a wrapped
         # secret in the result is revealed here for the one door that hands the caller
         # the real value; every recorder masks its own copy instead.
-        return unwrap_secrets(await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True))
+        with attribution:
+            return unwrap_secrets(await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True))
     except UnknownToolError as exc:
         # Discriminate by NAME: the requested tool vanishing between lookup and dispatch
         # (a concurrent reload) is still a 404, warned because the caller sees only a
@@ -249,6 +279,7 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
     destructive=True,
     reload_gated=True,
     request_model=ToolReloadRequest,
+    response_model=FleetResult,
 )
 async def reload_tool(kind: str, name: str, targets: list[str] | None = None) -> Any:
     """Re-register one app tool (e.g. kind "example_tool") from its current stored definition.
@@ -270,6 +301,7 @@ async def reload_tool(kind: str, name: str, targets: list[str] | None = None) ->
     destructive=True,
     reload_gated=True,
     request_model=ToolReloadRequest,
+    response_model=FleetResult,
 )
 async def remove_tool(kind: str, name: str, targets: list[str] | None = None) -> Any:
     """Remove one app tool (e.g. kind "example_tool") from the live registry.

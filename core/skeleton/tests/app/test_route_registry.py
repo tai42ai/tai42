@@ -71,6 +71,7 @@ def test_declared_metadata_populates_the_record() -> None:
         action="write",
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
         declared=DeclaredRouteMetadata(
             reload_gated=True,
             reads_body=True,
@@ -100,6 +101,7 @@ def test_undeclared_route_records_trivial_defaults() -> None:
         authed=False,
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
     )
     (meta,) = registry.routes()
     assert meta.reload_gated is False
@@ -120,6 +122,7 @@ def test_docstring_becomes_description() -> None:
         authed=False,
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
     )
     (meta,) = registry.routes()
     assert meta.description == "A plain read."
@@ -141,6 +144,7 @@ def test_streaming_media_type_derivation() -> None:
         action="read",
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
     )
     (meta,) = registry.routes()
     assert meta.success_media_types == {"GET": ("text/event-stream",)}
@@ -158,6 +162,7 @@ def test_media_type_follows_a_delegated_responder() -> None:
         authed=False,
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
     )
     (meta,) = registry.routes()
     # The handler returns no response class of its own — the ``text/html`` surface
@@ -177,6 +182,7 @@ def test_media_type_is_derived_per_method() -> None:
         authed=False,
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
     )
     (meta,) = registry.routes()
     # One registration, two methods: the GET branch serves the confirm page while
@@ -197,6 +203,7 @@ def test_a_method_serving_two_content_types_lists_both() -> None:
         action="read",
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
     )
     (meta,) = registry.routes()
     # A single method that serves either a CSV body or a JSON download documents
@@ -261,6 +268,7 @@ def test_version_moves_on_every_record() -> None:
             action="read",
             request_model=None,
             response_model=None,
+            no_body_reason="test fixture: response body not under test",
         )
     assert registry.version == start + 2
 

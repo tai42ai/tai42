@@ -53,7 +53,7 @@ def list_resources(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/storage/resources")
-    emit_records(ctx_obj, data, ["id"], items_key="resources")
+    emit_records(ctx_obj, data, route=("GET", "/api/storage/resources"))
 
 
 @app.command("stat")

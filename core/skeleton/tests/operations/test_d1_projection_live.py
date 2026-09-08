@@ -5,7 +5,7 @@ manifest that loads no management tool modules and enables projection, then
 asserts the projected surface end-to-end (checklist items 1-6):
 
 1. the projected tool surface is exactly the expected op surface — the 166
-   default-projected ops (212 total - 42 tier-2 default-excluded - 4 tier-1
+   default-projected ops (213 total - 43 tier-2 default-excluded - 4 tier-1
    hardcode-blocked);
 2. ``destructiveHint`` is present on destructive ops (a DELETE, a mutating POST)
    and absent on reads (a GET);
@@ -131,7 +131,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
             # The registered surface decomposes by projection tier (each asserted below):
-            # 212 total = 4 tier-1 (hardcode-blocked from projection) + 42 tier-2
+            # 213 total = 4 tier-1 (hardcode-blocked from projection) + 43 tier-2
             # (default-excluded, includable) + 166 tier-0 (default-projected). A destructive
             # tier-0 op is still default-projected under ``expose_destructive`` — a data write
             # or purge (``delete_*``, ``erase_*``, ``prune_runs``, ``prune_state_retention``)
@@ -141,7 +141,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # doors (module + state ``list``/``get``/``put``/``delete``, the record CRUD plus
             # ``search``/``fold``/``apply`` doors, the mount/subjects/consumers/stats
             # reads, and ``prune_state_retention``) are all tier-0 CRUD over the states service.
-            assert total == 212, total
+            assert total == 213, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -157,7 +157,8 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # modify_role_grants (authority_changing) and modify_api_key_scopes (tier-2 by the
             # ``/api/auth/`` route prefix, like the sibling api-key ops) plus bootstrap_admin_key
             # (authority_changing — the public first-key mint door, off /api/auth, that must never
-            # project) — 42 in all. ``get_me`` is tier-1 hardcode-blocked, not tier-2.
+            # project) — plus ``reencrypt_connector_tokens`` (the connector-token KEK-rotation convergence
+            # sweep, authority_changing) — 43 in all. ``get_me`` is tier-1 hardcode-blocked, not tier-2.
             assert set(tier2) == {
                 "add_scope_url",
                 "apply_profile",
@@ -190,6 +191,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
                 "modify_api_key_scopes",
                 "modify_role_grants",
                 "pin_public_route",
+                "reencrypt_connector_tokens",
                 "register_hook",
                 "remove_scope_url",
                 "revoke_api_key",

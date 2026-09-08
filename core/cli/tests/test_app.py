@@ -150,7 +150,9 @@ def test_trailing_no_json_flag_forces_table(monkeypatch: pytest.MonkeyPatch) -> 
     result = CliRunner().invoke(app_module.app, ["--json", "tools", "list", "--no-json"])
 
     assert result.exit_code == 0, result.output
-    assert "name" in result.output
+    # The tool list is a bare list of names, so the derived table column is ``value``.
+    assert "value" in result.output
+    assert "alpha" in result.output
     assert not result.output.lstrip().startswith("[")
 
 

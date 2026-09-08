@@ -452,6 +452,7 @@ def test_a_route_added_by_an_in_place_reload_is_dispatchable_without_a_restart()
                 authed=True,
                 request_model=None,
                 response_model=None,
+                no_body_reason="test fixture: response body not under test",
                 action="write",
             )
             try:
@@ -993,6 +994,7 @@ def _recorded_login_route():
         authed=False,
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
     )
     reset_route_index()
     try:

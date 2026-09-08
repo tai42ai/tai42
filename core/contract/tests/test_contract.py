@@ -643,7 +643,16 @@ def test_custom_route_carries_self_describing_metadata():
     from tai42_contract.app import AppHttp
 
     sig = inspect.signature(AppHttp.custom_route)
-    for name in ("summary", "tags", "response_model", "request_model", "query_model", "authed"):
+    for name in (
+        "summary",
+        "tags",
+        "response_model",
+        "request_model",
+        "query_model",
+        "authed",
+        "no_body_reason",
+        "enveloped",
+    ):
         assert sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY, f"{name} must be keyword-only"
     empty = inspect.Parameter.empty
     assert sig.parameters["summary"].default is empty
@@ -652,6 +661,12 @@ def test_custom_route_carries_self_describing_metadata():
     assert sig.parameters["request_model"].default is None
     assert sig.parameters["query_model"].default is None
     assert sig.parameters["authed"].default is None
+    # no_body_reason is the required-when-response_model-is-None justification (a route
+    # declares a typed body OR a reasoned no-body): keyword-only, defaulting to None.
+    assert sig.parameters["no_body_reason"].default is None
+    # enveloped selects the {"data": ...} wrapper (default) vs a raw top-level body:
+    # keyword-only, defaulting to True so an ordinary route wraps unchanged.
+    assert sig.parameters["enveloped"].default is True
 
 
 def test_mount_base_is_a_zero_arg_str_query():

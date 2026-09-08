@@ -62,7 +62,7 @@ def list_notifications(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/notifications")
-    emit_records(ctx_obj, data, ["message", "recipient", "created_at"], items_key="notifications")
+    emit_records(ctx_obj, data, route=("GET", "/api/notifications"))
 
 
 @app.command("notify")

@@ -21,6 +21,7 @@ from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.settings import llm_provider_settings
 
 from tai42_skeleton.operations import operation
+from tai42_skeleton.operations.response_models_group_c import CheckpointSweepResult
 
 # Providers with a persisted store the sweep walks; redis uses a native key TTL, memory is process-lifetime.
 _SWEEPABLE_PROVIDERS = frozenset({"postgres", "sqlite"})
@@ -31,6 +32,7 @@ _SWEEPABLE_PROVIDERS = frozenset({"postgres", "sqlite"})
     tags=["checkpoints"],
     destructive=True,
     reload_gated=True,
+    response_model=CheckpointSweepResult,
 )
 async def sweep_checkpoints() -> dict[str, Any]:
     """Delete conversation threads whose newest checkpoint is older than the

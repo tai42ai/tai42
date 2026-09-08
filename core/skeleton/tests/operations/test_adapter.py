@@ -50,7 +50,14 @@ class GreetRequest(BaseModel):
 
 
 def _register(reg, method="POST", path="/api/sample/greet", **op_kwargs):
-    @operation(summary="Greet", tags=["sample"], request_model=GreetRequest, registry=reg, **op_kwargs)
+    @operation(
+        summary="Greet",
+        tags=["sample"],
+        request_model=GreetRequest,
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+        **op_kwargs,
+    )
     async def greet(name: str) -> dict:
         """Greet by name."""
         if name == "missing":
@@ -75,7 +82,13 @@ def test_success_wraps_in_data_envelope():
 def test_success_status_defaults_to_200_and_is_overridable():
     reg = OperationRegistry()
 
-    @operation(summary="Accept", tags=["sample"], request_model=GreetRequest, registry=reg)
+    @operation(
+        summary="Accept",
+        tags=["sample"],
+        request_model=GreetRequest,
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def accept(name: str) -> dict:
         return {"queued": name}
 
@@ -169,7 +182,12 @@ def test_path_params_passed_through():
     class Empty(BaseModel):
         pass
 
-    @operation(summary="Detach", tags=["mcp"], registry=reg)
+    @operation(
+        summary="Detach",
+        tags=["mcp"],
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def detach(title: str) -> dict:
         """Detach a server."""
         return {"detached": title}
@@ -186,7 +204,12 @@ def test_path_params_passed_through():
 def test_delete_forces_destructive_and_records_route():
     reg = OperationRegistry()
 
-    @operation(summary="Remove", tags=["tools"], registry=reg)
+    @operation(
+        summary="Remove",
+        tags=["tools"],
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def remove_thing() -> dict:
         """Remove a thing."""
         return {"removed": True}
@@ -201,7 +224,13 @@ def test_delete_forces_destructive_and_records_route():
 def test_get_declaring_destructive_is_registration_error():
     reg = OperationRegistry()
 
-    @operation(summary="List", tags=["tools"], destructive=True, registry=reg)
+    @operation(
+        summary="List",
+        tags=["tools"],
+        destructive=True,
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def list_things() -> dict:
         """List things."""
         return {}
@@ -218,7 +247,7 @@ def test_basemodel_result_is_serialized():
     class Out(BaseModel):
         value: int
 
-    @operation(summary="Make", tags=["things"], registry=reg)
+    @operation(summary="Make", tags=["things"], registry=reg, response_model=Out)
     async def make_thing() -> Out:
         """Make a thing."""
         return Out(value=7)
@@ -252,7 +281,12 @@ def test_media_result_is_serialized_to_its_wire_block(media: str, wire_type: str
 
     reg = OperationRegistry()
 
-    @operation(summary="Load", tags=["things"], registry=reg)
+    @operation(
+        summary="Load",
+        tags=["things"],
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def load_media() -> object:
         """Load media."""
         return payloads[media]
@@ -268,7 +302,12 @@ def test_media_result_is_serialized_to_its_wire_block(media: str, wire_type: str
 def test_context_extractor_supplies_kwargs():
     reg = OperationRegistry()
 
-    @operation(summary="Echo", tags=["sample"], registry=reg)
+    @operation(
+        summary="Echo",
+        tags=["sample"],
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def echo(token: str) -> dict:
         """Echo a token."""
         return {"token": token}
@@ -300,7 +339,12 @@ def test_context_extractor_supplies_kwargs():
 def test_context_extractor_error_maps_to_status():
     reg = OperationRegistry()
 
-    @operation(summary="Guard", tags=["sample"], registry=reg)
+    @operation(
+        summary="Guard",
+        tags=["sample"],
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def guarded(token: str) -> dict:
         """Never reached when the extractor rejects."""
         return {"token": token}
@@ -323,7 +367,13 @@ def test_get_reads_query_params():
     class Query(BaseModel):
         limit: int = 10
 
-    @operation(summary="List", tags=["tools"], request_model=Query, registry=reg)
+    @operation(
+        summary="List",
+        tags=["tools"],
+        request_model=Query,
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+    )
     async def list_things(limit: int) -> dict:
         """List things."""
         return {"limit": limit}

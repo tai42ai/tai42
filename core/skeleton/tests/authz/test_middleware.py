@@ -251,3 +251,52 @@ async def test_authz_middleware_installed_on_sub_mcp_app(monkeypatch):
     assert any(any(isinstance(m, AuthzMiddleware) for m in inst.middleware) for inst in instances), (
         "AuthzMiddleware not installed on any sub-MCP app"
     )
+
+
+def test_dispatch_scope_middleware_installed_on_main_server():
+    # The MCP ``tools/call`` edge arms the shared run lifecycle itself; the guard is that
+    # the main server carries the scope middleware, so no MCP-invoked registered preset
+    # can slip past the runs-index row + trace root.
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
+
+    assert any(isinstance(m, DispatchScopeMiddleware) for m in app._fast_mcp.middleware)
+
+
+async def test_dispatch_scope_middleware_installed_on_sub_mcp_app(monkeypatch):
+    """Every sub-MCP FastMCP built by ``_build_sub_app`` carries ``DispatchScopeMiddleware``
+    (the main server's middleware never reaches a sub-mount), so a preset reached through
+    a mount arms the same run lifecycle."""
+    import tai42_skeleton.app.sub_mcp_app as sub_mod
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
+    from tai42_skeleton.manifest import Manifest
+    from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
+
+    instances: list = []
+    real_fastmcp = sub_mod.FastMCP
+
+    class _RecordingFastMCP(real_fastmcp):
+        def __init__(self, *a, **k) -> None:
+            super().__init__(*a, **k)
+            instances.append(self)
+
+    monkeypatch.setattr(sub_mod, "FastMCP", _RecordingFastMCP)
+
+    manifest = Manifest.model_validate(
+        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_a", "include": ["greet"]}]}
+    )
+
+    async with app.app_context(manifest):
+        from starlette.applications import Starlette
+
+        router = cast("SubMcpAppRouter", app.sub_app.mcp_sub_app_router)
+        async with router.lifespan(cast("Starlette", None)):
+            await router.register_sub_mcp_app("http_svc", ["greet"], transport="http")
+            built = await router._get_or_build_app("http_svc")
+            assert built is not None
+
+    assert instances, "no sub-MCP FastMCP was built"
+    assert any(any(isinstance(m, DispatchScopeMiddleware) for m in inst.middleware) for inst in instances), (
+        "DispatchScopeMiddleware not installed on any sub-MCP app"
+    )

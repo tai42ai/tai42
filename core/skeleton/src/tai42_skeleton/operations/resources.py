@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
+from tai42_skeleton.operations.response_models_group_c import ResourceContent
 from tai42_skeleton.template import TemplateNotFoundError
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
@@ -53,6 +54,7 @@ class ResourceGetQuery(BaseModel):
     tags=["resources"],
     errors=[BadRequestError, NotFoundError],
     request_model=ResourceGet,
+    response_model=ResourceContent,
 )
 async def get_resource_by_id(resource_id: str, template_kwargs: dict[str, Any] | None = None) -> str | MediaBlock:
     """Load a stored resource by its id, optionally rendering it as a template.

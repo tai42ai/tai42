@@ -59,7 +59,7 @@ def list_keys(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/auth/tokens-payload")
-    emit_records(ctx_obj, data, ["user_id", "description", "scopes"])
+    emit_records(ctx_obj, data, route=("GET", "/api/auth/tokens-payload"))
 
 
 @app.command("create")
@@ -330,7 +330,7 @@ def policy_versions(ctx: typer.Context, user: Annotated[str, typer.Argument(help
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get(f"/api/auth/api-keys/{seg(user)}/policy/versions")
-    emit_records(ctx_obj, data, ["version", "is_current", "created_at"])
+    emit_records(ctx_obj, data, route=("GET", "/api/auth/api-keys/{user_id}/policy/versions"))
 
 
 @app.command("policy-rollback")

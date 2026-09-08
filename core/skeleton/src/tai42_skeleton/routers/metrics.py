@@ -35,6 +35,7 @@ from tai42_skeleton.routers.prometheus import render_metrics
     summary="Prometheus metrics scrape",
     tags=["metrics"],
     response_model=None,
+    no_body_reason="Prometheus scrape: text/plain exposition format",
     authed=True,
     action="read",
 )

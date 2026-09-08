@@ -27,4 +27,4 @@ def list_extensions(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/extensions")
-    emit_records(ctx_obj, data, ["name", "kind"])
+    emit_records(ctx_obj, data, route=("GET", "/api/extensions"))

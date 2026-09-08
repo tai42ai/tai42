@@ -58,6 +58,25 @@ from tai42_skeleton.operations._authority import (
     require_owned_by_caller,
     resolve_caller,
 )
+from tai42_skeleton.operations.response_models_group_a import (
+    ApiKeyCreateResult,
+    ClaimLinkResult,
+    ConditionCheckResult,
+    DocumentVersionList,
+    MintCapabilities,
+    PolicyRollbackResult,
+    RevokeAck,
+    RoleDefinitionList,
+    RouteMappingList,
+    ScopeDeleteResult,
+    ScopesUpdateAck,
+    ScopeUrlAck,
+    ScopeUrlMap,
+    StringList,
+    TokenPayloadList,
+    UrlAck,
+    UserUpdateAck,
+)
 from tai42_skeleton.template import TemplateNotFoundError
 
 # When access control is DISABLED by choice (``ACCESS_CONTROL_ENABLE=false``) the
@@ -192,7 +211,7 @@ async def _record_policy_version(user_id: str, body: dict[str, Any]) -> None:
 # -- Scopes ------------------------------------------------------------------
 
 
-@operation(summary="List all scopes", tags=["access-control"])
+@operation(summary="List all scopes", tags=["access-control"], response_model=ScopeUrlMap)
 async def list_scopes() -> dict[str, str]:
     """Every non-public route mapping as ``{url: scope_id}``."""
     # OFF: access control disabled → the honest empty mapping, no store touched.
@@ -207,6 +226,7 @@ async def list_scopes() -> dict[str, str]:
     destructive=True,
     errors=[BadRequestError, NotSupportedError],
     request_model=ScopeUrlAdd,
+    response_model=ScopeUrlAck,
 )
 async def add_scope_url(scope_id: str, url: str, pattern: str | None) -> dict[str, str]:
     """Map ``url`` to ``scope_id`` (optionally with a dynamic match ``pattern``)."""
@@ -233,6 +253,7 @@ async def add_scope_url(scope_id: str, url: str, pattern: str | None) -> dict[st
     tags=["access-control"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=ScopeUrlRemove,
+    response_model=UrlAck,
 )
 async def remove_scope_url(url: str) -> dict[str, str]:
     """Unmap ``url`` from every scope that references it; a url that was never mapped
@@ -255,7 +276,10 @@ async def remove_scope_url(url: str) -> dict[str, str]:
 
 
 @operation(
-    summary="Delete a scope", tags=["access-control"], errors=[BadRequestError, NotFoundError, NotSupportedError]
+    summary="Delete a scope",
+    tags=["access-control"],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=ScopeDeleteResult,
 )
 async def delete_scope(scope_id: str) -> dict[str, Any]:
     """Delete a scope, cascading it out of every referencing key; an unknown scope
@@ -283,7 +307,11 @@ async def delete_scope(scope_id: str) -> dict[str, Any]:
 # -- Route catalog -----------------------------------------------------------
 
 
-@operation(summary="List the app's HTTP routes and their scope mappings", tags=["access-control"])
+@operation(
+    summary="List the app's HTTP routes and their scope mappings",
+    tags=["access-control"],
+    response_model=RouteMappingList,
+)
 async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
     """Enumerate the app's own HTTP routes with each route's current scope mapping —
     the mapper's route picker and its "unassigned routes" bucket (the ``mapped: null``
@@ -358,7 +386,7 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
 # -- Public route pins -------------------------------------------------------
 
 
-@operation(summary="List public-pinned routes", tags=["access-control"])
+@operation(summary="List public-pinned routes", tags=["access-control"], response_model=StringList)
 async def list_public_routes() -> list[str]:
     """Every route pinned to the public marker."""
     # OFF: access control disabled → no pins exist; the honest empty list.
@@ -373,6 +401,7 @@ async def list_public_routes() -> list[str]:
     destructive=True,
     errors=[BadRequestError, NotSupportedError],
     request_model=PublicRoutePin,
+    response_model=UrlAck,
 )
 async def pin_public_route(url: str, pattern: str | None) -> dict[str, str]:
     """Pin ``url`` public (optionally with a dynamic match ``pattern``)."""
@@ -396,6 +425,7 @@ async def pin_public_route(url: str, pattern: str | None) -> dict[str, str]:
     tags=["access-control"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=PublicRouteUnpin,
+    response_model=UrlAck,
 )
 async def unpin_public_route(url: str) -> dict[str, str]:
     """Unpin a public ``url``; a url that is absent or scope-mapped is a loud 404."""
@@ -412,7 +442,7 @@ async def unpin_public_route(url: str) -> dict[str, str]:
 # -- Keys --------------------------------------------------------------------
 
 
-@operation(summary="List api-key token payloads", tags=["access-control"])
+@operation(summary="List api-key token payloads", tags=["access-control"], response_model=TokenPayloadList)
 async def list_tokens_payload() -> list[dict[str, Any]]:
     """Every provisioned key's identity + policy (NEVER key material). Non-admin callers
     see ONLY the keys they own (management/listing owner home); admin sees every key."""
@@ -433,6 +463,7 @@ async def list_tokens_payload() -> list[dict[str, Any]]:
     destructive=True,
     errors=[BadRequestError, ForbiddenError, NotSupportedError],
     request_model=ApiKeyCreate,
+    response_model=ApiKeyCreateResult,
 )
 async def create_api_key(
     user_id: str,
@@ -492,6 +523,7 @@ async def create_api_key(
     destructive=True,
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=ApiKeyEdit,
+    response_model=UserUpdateAck,
 )
 async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     """A PATCH-style partial edit: only the fields present in ``updates`` are
@@ -547,6 +579,7 @@ async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     destructive=True,
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=KeyScopesModify,
+    response_model=ScopesUpdateAck,
 )
 async def modify_api_key_scopes(
     user_id: str, add: list[str] | None = None, remove: list[str] | None = None
@@ -600,6 +633,7 @@ async def modify_api_key_scopes(
     summary="Revoke an api key",
     tags=["access-control"],
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
+    response_model=RevokeAck,
 )
 async def revoke_api_key(user_id: str) -> dict[str, Any]:
     """Revoke a key (immediate: next request fails to auth). Deletes the key record, its
@@ -634,6 +668,7 @@ async def revoke_api_key(user_id: str) -> dict[str, Any]:
     destructive=True,
     errors=[BadRequestError, ForbiddenError, NotSupportedError],
     request_model=ClaimLinkCreate,
+    response_model=ClaimLinkResult,
 )
 async def create_claim_link(api_key: str, ttl_seconds: int | None) -> dict[str, Any]:
     """Mint a one-time claim link that carries ``api_key`` to another device (the QR
@@ -671,7 +706,7 @@ async def create_claim_link(api_key: str, ttl_seconds: int | None) -> dict[str, 
 # -- Mint capabilities + role templates --------------------------------------
 
 
-@operation(summary="Report key-mint capabilities", tags=["access-control"])
+@operation(summary="Report key-mint capabilities", tags=["access-control"], response_model=MintCapabilities)
 async def get_capabilities() -> dict[str, Any]:
     """Whether any configured identity provider can MINT keys, per provider. Lets the
     Studio disable mint UI with a clear message on a validator-only deployment instead
@@ -681,7 +716,7 @@ async def get_capabilities() -> dict[str, Any]:
     return {"mintable": any(m for _, m in capabilities), "providers": providers}
 
 
-@operation(summary="List roles", tags=["access-control"], errors=[ForbiddenError])
+@operation(summary="List roles", tags=["access-control"], errors=[ForbiddenError], response_model=RoleDefinitionList)
 async def list_roles() -> list[dict[str, Any]]:
     """The seeded/operator-authored roles as full ``RoleDefinition``-shaped bodies
     (``{name, description, scopes, condition, condition_id, condition_kwargs, base_tier,
@@ -746,6 +781,7 @@ async def get_me(
     tags=["access-control"],
     errors=[BadRequestError],
     request_model=ConditionValidation,
+    response_model=ConditionCheckResult,
 )
 async def validate_condition(
     condition: str | None,
@@ -815,7 +851,10 @@ async def validate_condition(
 
 
 @operation(
-    summary="List a user's policy version history", tags=["access-control"], errors=[ForbiddenError, NotFoundError]
+    summary="List a user's policy version history",
+    tags=["access-control"],
+    errors=[ForbiddenError, NotFoundError],
+    response_model=DocumentVersionList,
 )
 async def list_policy_versions(user_id: str) -> list[dict[str, Any]]:
     """The user's append-only policy version history from the durable PG store, each
@@ -851,6 +890,7 @@ async def list_policy_versions(user_id: str) -> list[dict[str, Any]]:
     destructive=True,
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=PolicyRollback,
+    response_model=PolicyRollbackResult,
 )
 async def rollback_policy(user_id: str, version: int) -> dict[str, Any]:
     """Re-point the enforced policy to a prior version. Store-first: the target version

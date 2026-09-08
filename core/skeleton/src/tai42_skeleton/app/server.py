@@ -211,22 +211,19 @@ class ServingCore:
         # Run-time tier fence for this MCP edge: an MCP ``tools/call`` reaches ``Tool.run``
         # directly, never the ``ToolBinding.run_tool`` seam that fences the in-process
         # doors, so this edge enforces the same admin fence for a ``fenced``/``secret``
-        # tool. Added before the turn budget so a fenced denial never opens a window.
+        # tool. Added before the dispatch scope so a fenced denial never opens a window.
         from tai42_skeleton.tools.tier import ToolTierFenceMiddleware
 
         self._fast_mcp.add_middleware(ToolTierFenceMiddleware(app))
-        # Synchronous turn budget for this MCP edge: an MCP ``tools/call`` dispatches to
-        # ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam, so it arms the
-        # budget itself. Added INNERMOST (after authz/reload) so a denied or rejected call
-        # never opens a window.
-        from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware
+        # The shared dispatch scope for this MCP edge: an MCP ``tools/call`` dispatches to
+        # ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam, so this edge arms
+        # the whole run lifecycle itself (invoked-tool deposit, run-attribution stamp, turn
+        # budget, and — for a registered preset — the preset stamp + runs-index row/trace
+        # root), entering the SAME ``dispatch_scope`` the in-process seam does. Added
+        # INNERMOST (after authz/reload/tier-fence) so a denied or rejected call arms no scope.
+        from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
 
-        self._fast_mcp.add_middleware(TurnBudgetMiddleware())
-        # Same reason the budget arms itself here: an MCP ``tools/call`` never reaches the
-        # ``ToolBinding.run_tool`` seam, so the ambient invoked-tool is armed at this edge too.
-        from tai42_skeleton.app.sub_mcp_app import InvocationSeamMiddleware
-
-        self._fast_mcp.add_middleware(InvocationSeamMiddleware())
+        self._fast_mcp.add_middleware(DispatchScopeMiddleware(app))
 
         # Per-feature impl collaborators — the bodies behind the facets.
         self._tool_binding = ToolBinding(app)

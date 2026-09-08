@@ -20,6 +20,7 @@ import json
 from typing import Any
 
 from pydantic import BaseModel, Field
+from tai42_contract.app.responses import ApplyResponse
 from tai42_contract.manifest import ExtensionElement, ExtensionsConfigMixin
 
 from tai42_skeleton.app import instance
@@ -29,6 +30,7 @@ from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response
+from tai42_skeleton.operations.response_models_group_b import ToolExtensionsView
 
 
 class ToolExtensionsUpdate(BaseModel):
@@ -175,7 +177,12 @@ def _apply_combos(
     return False
 
 
-@operation(summary="Get a tool's applied extension combos", tags=["extensions"], errors=[NotFoundError])
+@operation(
+    summary="Get a tool's applied extension combos",
+    tags=["extensions"],
+    errors=[NotFoundError],
+    response_model=ToolExtensionsView,
+)
 async def get_tool_extensions(name: str) -> dict:
     tools = await instance.app.tools.get_tools()
     if name not in tools:
@@ -192,6 +199,7 @@ async def get_tool_extensions(name: str) -> dict:
     reload_gated=True,
     errors=[BadRequestError, ConflictError],
     request_model=ToolExtensionsUpdate,
+    response_model=ApplyResponse,
 )
 async def set_tool_extensions(name: str, combos: list[list[ExtensionElement]]) -> object:
     """Author all of a tool's extension combos through the pipeline: persist, reload,
@@ -239,6 +247,7 @@ async def set_tool_extensions(name: str, combos: list[list[ExtensionElement]]) -
     reload_gated=True,
     errors=[BadRequestError, ConflictError, NotFoundError],
     request_model=ToolExtensionCombosModify,
+    response_model=ToolExtensionsView,
 )
 async def modify_tool_extension_combos(
     name: str,

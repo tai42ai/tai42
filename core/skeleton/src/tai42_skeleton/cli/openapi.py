@@ -212,24 +212,52 @@ def _json_envelope_schema(meta: RouteMetadata, components: dict[str, Any]) -> di
     }
 
 
+def _json_body_schema(meta: RouteMetadata, components: dict[str, Any]) -> dict[str, Any]:
+    """The ``application/json`` success body schema.
+
+    An enveloped route (the default) wraps its model in ``{"data": <model>}``. A route
+    declared ``enveloped=False`` answers a RAW top-level body, so its model is the body
+    schema DIRECTLY — a ``$ref`` with no ``data`` wrapper. An unwrapped route always
+    carries a ``response_model`` (the registration guard enforces it); a missing one
+    here is a broken registration, raised LOUDLY rather than emitting an empty body."""
+    if meta.enveloped:
+        return _json_envelope_schema(meta, components)
+    if meta.response_model is None:
+        raise ValueError(f"route {meta.path} declares enveloped=False without a response_model")
+    return {"$ref": f"#/components/schemas/{_register_model(meta.response_model, components)}"}
+
+
 def _success_response(meta: RouteMetadata, method: str, components: dict[str, Any]) -> dict[str, Any]:
     """The 200/2xx response for ``method``, documenting every content type it serves.
-    ``application/json`` carries the ``{"data": ...}`` envelope; a streaming, CSV,
-    HTML, or asset/download type answers its own media type instead. A method that
-    serves more than one type (the runs export: CSV or a JSON download) lists them
-    all under ``content``."""
+    ``application/json`` carries the ``{"data": ...}`` envelope by default, or the
+    model's schema DIRECTLY when the route is declared ``enveloped=False`` (a raw
+    top-level body); a streaming, CSV, HTML, or asset/download type answers its own
+    media type instead. A method that serves more than one type (the runs export: CSV
+    or a JSON download) lists them all under ``content``.
+
+    A route with no typed body carries a ``response_model`` of ``None`` and a
+    ``no_body_reason`` (the registration guard enforces the pairing): the reason
+    becomes the response ``description`` and rides an ``x-no-body`` extension, so the
+    absence of a ``{"data": <model>}`` schema is a declared, described exception
+    rather than a silent empty ``data``."""
     media_types = meta.success_media_types[method]
     content: dict[str, Any] = {}
     for media_type in media_types:
         if media_type == "application/json":
-            content[media_type] = {"schema": _json_envelope_schema(meta, components)}
+            content[media_type] = {"schema": _json_body_schema(meta, components)}
         else:
             content[media_type] = {"schema": {"type": "string"}}
-    if len(media_types) == 1 and media_types[0] != "application/json":
+    no_body_reason = meta.response_model is None and meta.no_body_reason
+    if no_body_reason:
+        description = no_body_reason
+    elif len(media_types) == 1 and media_types[0] != "application/json":
         description = _NON_JSON_DESCRIPTIONS.get(media_types[0], "Success.")
     else:
         description = "Success."
-    return {"description": description, "content": content}
+    response: dict[str, Any] = {"description": description, "content": content}
+    if no_body_reason:
+        response["x-no-body"] = no_body_reason
+    return response
 
 
 def _error_response(status: int) -> dict[str, Any]:

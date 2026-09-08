@@ -44,6 +44,11 @@ from tai42_skeleton.operations import (
     PayloadTooLargeError,
     operation,
 )
+from tai42_skeleton.operations.response_models_group_c import (
+    InteractionActionResult,
+    InteractionWindow,
+    PendingInteractionListing,
+)
 
 # The synthetic label recorded when access control is disabled and no caller
 # identity exists. A namespaced ``system:`` sentinel (mirroring the
@@ -208,6 +213,7 @@ async def _claim_or_serialization_error(
     destructive=True,
     errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError],
     request_model=InteractionAnswer,
+    response_model=InteractionActionResult,
 )
 async def answer_interaction(interaction_id: str, answer: Any) -> dict:
     """Answer a pending interaction through the authenticated human door.
@@ -289,6 +295,7 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
     tags=["interactions"],
     destructive=True,
     errors=[ConflictError, ForbiddenError, NotFoundError],
+    response_model=InteractionActionResult,
 )
 async def cancel_interaction(interaction_id: str) -> dict:
     """Cancel a pending interaction — WITHDRAW one specific ask without answering it and
@@ -449,6 +456,7 @@ def _next_page(page: int, limit: int, total: int) -> int | None:
     tags=["interactions"],
     errors=[BadRequestError],
     request_model=InteractionWindowQuery,
+    response_model=InteractionWindow,
 )
 async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
     """The pending questions the inbox shows, one page at a time — the initial-load
@@ -520,6 +528,7 @@ class PendingInteractionsQuery(BaseModel):
     tags=["interactions"],
     errors=[BadRequestError],
     request_model=PendingInteractionsQuery,
+    response_model=PendingInteractionListing,
 )
 async def list_pending_interactions(limit: int = DEFAULT_PENDING_INTERACTIONS_LIMIT) -> dict:
     """A read-only admin audit of the parked async asks awaiting an answer — the native

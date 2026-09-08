@@ -45,6 +45,7 @@ from tai42_contract.interactions import (
 from tai42_contract.states import StateContext
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
@@ -108,17 +109,44 @@ async def _run_continuation(
     writes complete their provenance from the SAME door the park entered through — every
     resolution door (an answer, the expiry reaper, an at-least-once redelivery) supplies
     it, so the door coverage holds on all three."""
-    # The resume tail runs UNATTRIBUTED: this out-of-band re-drive deposits no ambient
-    # ``RunAttribution``, so ``run_tool``'s ``stamp_run_attribution`` no-ops and the resume's
-    # trace carries no user/session/route. The ``StateContext`` (not the ``RunAttribution``)
-    # survives the park on ``park_context`` and is re-deposited around ``run_tool`` so the
-    # resumed run's state writes complete their provenance. ``resume_origin`` deposits the
-    # parked interaction id so the runs-index links the resume dispatch's row to the parked
-    # dispatch's row.
-    park_ctx: AbstractContextManager[Any] = state_context(park_context) if park_context is not None else nullcontext()
-    async with bind_execution_identity(identity, bound_fingerprint=fingerprint or ""):
-        with resume_origin(interaction_id), park_ctx:
-            await tai42_app.tools.run_tool(tool, {"interaction_id": interaction_id, "answer": answer})
+    # ATTRIBUTION SEAM (deliberately UNATTRIBUTED): this continuation/reaper
+    # re-drive resumes a parked run OUT OF BAND on a fresh detached task, so no ambient
+    # ``RunAttribution`` is deposited and ``run_tool``'s ``stamp_run_attribution`` no-ops
+    # — the run's trace here carries no user/session/route. The ORIGINAL turn that parked
+    # WAS attributed (the conversation door deposited it), so the parked question's own
+    # run is traced; only its resume tail is not. Attributing the resume would require the
+    # attribution to survive the park durably: the stored ``InteractionRequest`` gaining a
+    # NON-OPAQUE attribution field (the original ``RunAttribution``'s user_id/session_id/
+    # tags), re-deposited via ``run_attribution(...)`` around this ``run_tool`` call, so the
+    # resumed run rejoins its originating session. Left to a follow-up (the same known,
+    # non-regressing boundary the thread-index binding notes in ``interactions.helper``).
+    #
+    # STATE PROVENANCE: the ``StateContext`` (not the ``RunAttribution``) DOES survive the
+    # park on ``park_context`` and is re-deposited via ``park_ctx`` around ``run_tool`` so
+    # the resumed run's state writes complete their provenance.
+    #
+    # LIFECYCLE CORRELATION: the ``resume_origin`` deposit names the parked
+    # interaction this fire resumes, so the runs-index chokepoint can link the
+    # resume dispatch's row to the parked dispatch's row (both carry this id).
+    # Flow-blind — an id, never resume state — and covering every resolution door
+    # by construction: answers, the expiry reaper, and reaper redelivery all fire
+    # through this one drive.
+    # DETACHED: this resume runs out of band on a fresh task with no live caller
+    # holding a connection, so it must be flagged detached — else a set
+    # ``TAI_TURN_TIMEOUT_SECONDS`` would arm the synchronous turn budget around the
+    # resume and cancel a legitimately long resume mid-flight. The three detached
+    # classes (background submit, hook/trigger fire, backend-worker execution) flag
+    # themselves the same way; a continuation resume is a fourth.
+    detached_token = mark_detached_run()
+    try:
+        park_ctx: AbstractContextManager[Any] = (
+            state_context(park_context) if park_context is not None else nullcontext()
+        )
+        async with bind_execution_identity(identity, bound_fingerprint=fingerprint or ""):
+            with resume_origin(interaction_id), park_ctx:
+                await tai42_app.tools.run_tool(tool, {"interaction_id": interaction_id, "answer": answer})
+    finally:
+        reset_detached_run(detached_token)
 
 
 async def _run_and_clear(

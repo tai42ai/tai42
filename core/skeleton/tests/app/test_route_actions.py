@@ -54,6 +54,7 @@ def _record(registry: RouteRegistry, *, methods, action=None, authed=True) -> No
         authed=authed,
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
         action=action,
     )
 

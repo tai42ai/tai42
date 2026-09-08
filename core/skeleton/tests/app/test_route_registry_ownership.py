@@ -47,6 +47,7 @@ def _record(
         action=action,
         request_model=None,
         response_model=None,
+        no_body_reason="test fixture: response body not under test",
         owner=owner,
         public=public,
     )

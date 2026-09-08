@@ -48,6 +48,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
+from tai42_contract.app.responses import OpaqueJson
 from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
@@ -95,6 +96,15 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._broadcast import translate_orphan_env_write
+from tai42_skeleton.operations.response_models_group_a import (
+    AdvisorySnapshot,
+    InstalledInventory,
+    InstallPreview,
+    InstallResult,
+    StringList,
+    UninstallResult,
+    UpgradeAllResult,
+)
 from tai42_skeleton.plugins.quarantine import quarantined_plugins
 
 logger = logging.getLogger(__name__)
@@ -284,7 +294,11 @@ class MarketplaceSearchQuery(BaseModel):
 
 
 @operation(
-    summary="Search the marketplace", tags=["marketplace"], errors=[UpstreamError], request_model=MarketplaceSearchQuery
+    summary="Search the marketplace",
+    tags=["marketplace"],
+    errors=[UpstreamError],
+    request_model=MarketplaceSearchQuery,
+    response_model=OpaqueJson,
 )
 async def marketplace_search(
     q: str | None = None,
@@ -332,7 +346,12 @@ async def marketplace_search(
         raise _to_operation_error(exc) from exc
 
 
-@operation(summary="Get a marketplace listing's detail", tags=["marketplace"], errors=[NotFoundError, UpstreamError])
+@operation(
+    summary="Get a marketplace listing's detail",
+    tags=["marketplace"],
+    errors=[NotFoundError, UpstreamError],
+    response_model=OpaqueJson,
+)
 async def marketplace_plugin_detail(ns: str, name: str) -> dict[str, Any]:
     """One listing's detail composed with its version rows in a single body, so
     the detail view (listing + the Versions card) is one request. The registry's
@@ -348,7 +367,12 @@ async def marketplace_plugin_detail(ns: str, name: str) -> dict[str, Any]:
     return {**listing, "versions": versions}
 
 
-@operation(summary="List marketplace categories", tags=["marketplace"], errors=[UpstreamError])
+@operation(
+    summary="List marketplace categories",
+    tags=["marketplace"],
+    errors=[UpstreamError],
+    response_model=StringList,
+)
 async def marketplace_categories() -> list[str]:
     """The registry's controlled category vocabulary — a plain array Studio
     renders as facet chips."""
@@ -358,7 +382,12 @@ async def marketplace_categories() -> list[str]:
         raise _to_operation_error(exc) from exc
 
 
-@operation(summary="List marketplace item kinds", tags=["marketplace"], errors=[UpstreamError])
+@operation(
+    summary="List marketplace item kinds",
+    tags=["marketplace"],
+    errors=[UpstreamError],
+    response_model=StringList,
+)
 async def marketplace_kinds() -> list[str]:
     """The registry's controlled item-kind vocabulary — a plain array Studio
     renders as facet chips."""
@@ -368,7 +397,12 @@ async def marketplace_kinds() -> list[str]:
         raise _to_operation_error(exc) from exc
 
 
-@operation(summary="List installed marketplace plugins", tags=["marketplace"], errors=[UpstreamError, OperationFailed])
+@operation(
+    summary="List installed marketplace plugins",
+    tags=["marketplace"],
+    errors=[UpstreamError, OperationFailed],
+    response_model=InstalledInventory,
+)
 async def marketplace_installed() -> dict[str, Any]:
     """The installed inventory + the boot-quarantined plugins, in one body:
     ``{"installed": [...], "quarantined": [{"name", "reason"}, ...]}``.
@@ -452,7 +486,12 @@ async def marketplace_installed() -> dict[str, Any]:
     return {"installed": rows, "quarantined": quarantined}
 
 
-@operation(summary="Get advisories for installed plugins", tags=["marketplace"], errors=[UpstreamError])
+@operation(
+    summary="Get advisories for installed plugins",
+    tags=["marketplace"],
+    errors=[UpstreamError],
+    response_model=AdvisorySnapshot,
+)
 async def marketplace_advisories() -> dict[str, Any]:
     """The advisory snapshot for the installed plugins, no older than the
     configured poll interval (a stale snapshot is refreshed on demand, and a
@@ -485,6 +524,7 @@ async def marketplace_advisories() -> dict[str, Any]:
         OperationFailed,
     ],
     request_model=MarketplaceInstall,
+    response_model=InstallResult,
 )
 async def marketplace_install(
     ref: str,
@@ -528,6 +568,7 @@ async def marketplace_install(
     tags=["marketplace"],
     errors=[BadRequestError, NotFoundError, ConflictError, UpstreamError, NotSupportedError],
     request_model=MarketplaceInstallPreview,
+    response_model=InstallPreview,
 )
 async def marketplace_install_preview(
     ref: str,
@@ -557,6 +598,7 @@ async def marketplace_install_preview(
     authority_changing=True,
     errors=[NotFoundError, NotSupportedError, UnavailableError, OperationFailed],
     request_model=MarketplaceUninstall,
+    response_model=UninstallResult,
 )
 async def marketplace_uninstall(ref: str) -> dict[str, Any]:
     """Unpatch the manifest, reload, pip uninstall, and drop attribution —
@@ -588,6 +630,7 @@ async def marketplace_uninstall(ref: str) -> dict[str, Any]:
         OperationFailed,
     ],
     request_model=MarketplaceUpdate,
+    response_model=InstallResult,
 )
 async def marketplace_update(
     ref: str,
@@ -629,6 +672,7 @@ async def marketplace_update(
     reload_gated=True,
     authority_changing=True,
     errors=[NotSupportedError, UnavailableError],
+    response_model=UpgradeAllResult,
 )
 async def marketplace_upgrade_all() -> dict[str, Any]:
     """Move every installed plugin onto its latest COMPATIBLE version in one

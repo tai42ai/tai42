@@ -67,6 +67,7 @@ def _recorded_routes(paths: tuple[str, ...], action: RouteAction):
             authed=True,
             request_model=None,
             response_model=None,
+            no_body_reason="test fixture: response body not under test",
             action=action,
         )
     reset_route_index()

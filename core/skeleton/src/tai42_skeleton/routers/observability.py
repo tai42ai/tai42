@@ -166,6 +166,7 @@ get_run_trace = register_operation_route(
     summary="Export a run's trace as a JSON download",
     tags=["observability"],
     response_model=None,
+    no_body_reason="Trace export: raw JSON attachment download",
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,
@@ -199,6 +200,7 @@ async def export_run_trace(request: Request) -> Response:
     summary="Export runs as a CSV download",
     tags=["observability"],
     response_model=None,
+    no_body_reason="Runs export: text/csv attachment download",
     query_model=ExportRunsQuery,
     declared=DeclaredRouteMetadata(
         reload_gated=False,

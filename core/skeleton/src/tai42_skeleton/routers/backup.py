@@ -47,6 +47,20 @@ class BackupExport(BaseModel):
     sections: list[str]
 
 
+class BackupExportDocument(BaseModel):
+    """The export door's raw (non-enveloped) body — a downloadable backup document.
+
+    ``sections`` maps each successfully exported section name to its exporter's
+    payload (an arbitrary JSON value per section). ``errors`` maps a section whose
+    exporter raised to its error message — a failing section lands here and is
+    omitted from ``sections``, never a 500 and never a silent drop."""
+
+    version: int
+    created_at: str
+    sections: dict[str, Any]
+    errors: dict[str, str]
+
+
 def _error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
 
@@ -72,7 +86,8 @@ list_sections = register_operation_route(
     summary="Export the named backup sections",
     tags=["backup"],
     request_model=BackupExport,
-    response_model=None,
+    response_model=BackupExportDocument,
+    enveloped=False,
     action="fenced",
     declared=DeclaredRouteMetadata(
         reload_gated=False,

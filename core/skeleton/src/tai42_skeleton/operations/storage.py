@@ -29,6 +29,14 @@ from tai42_contract.storage import Storage
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
+from tai42_skeleton.operations.response_models_group_b import (
+    DirDeleted,
+    ResourceDeleted,
+    ResourceList,
+    ResourceStat,
+    ResourceStored,
+    StorageInfo,
+)
 
 _NO_PROVIDER_MESSAGE = "storage needs a storage-provider plugin"
 _UNSAFE_ID_MESSAGE = "must be a relative path with no '..' segment"
@@ -79,7 +87,7 @@ def _content_disposition(filename: str) -> str:
     return f'attachment; filename="{sanitized}"'
 
 
-@operation(summary="Get the storage provider identity", tags=["storage"])
+@operation(summary="Get the storage provider identity", tags=["storage"], response_model=StorageInfo)
 async def storage_info() -> dict:
     """Report the registered provider's identity, or ``present: false`` when none is
     installed (a ``200``, so the UI renders the empty state without an error)."""
@@ -93,6 +101,7 @@ async def storage_info() -> dict:
     summary="List storage resources",
     tags=["storage"],
     errors=[NotSupportedError],
+    response_model=ResourceList,
 )
 async def list_resources() -> dict:
     """List the sorted resource ids from the active storage provider."""
@@ -104,6 +113,7 @@ async def list_resources() -> dict:
     summary="Stat a storage resource",
     tags=["storage"],
     errors=[BadRequestError, NotSupportedError],
+    response_model=ResourceStat,
 )
 async def stat_resource(resource_id: str) -> dict:
     """Return the resource's inferred content type."""
@@ -123,6 +133,7 @@ async def stat_resource(resource_id: str) -> dict:
     destructive=True,
     errors=[BadRequestError, NotSupportedError],
     request_model=StorageUpload,
+    response_model=ResourceStored,
 )
 async def upload_resource(
     resource_id: str,
@@ -168,6 +179,7 @@ async def upload_resource(
     summary="Delete a storage resource",
     tags=["storage"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=ResourceDeleted,
 )
 async def delete_resource(resource_id: str) -> dict:
     """Remove one object from the store."""
@@ -187,6 +199,7 @@ async def delete_resource(resource_id: str) -> dict:
     summary="Delete a storage directory",
     tags=["storage"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=DirDeleted,
 )
 async def delete_dir(dir_path: str) -> dict:
     """Remove a directory subtree from the store."""

@@ -17,6 +17,7 @@ import logging
 import sys
 import time
 import warnings
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -27,6 +28,8 @@ from fastmcp.tools.base import Tool
 from fastmcp.tools.function_tool import FunctionTool
 from mcp.types import TextContent
 from pydantic.json_schema import PydanticJsonSchemaWarning
+from tai42_contract.access_control import reset_request_user_id, set_request_user_id
+from tai42_contract.interactions import SuspendedInteraction, read_suspended_interaction_marker
 from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
@@ -786,16 +789,19 @@ def test_turn_budget_unset_runs_unbounded():
     asyncio.run(run())
 
 
-# -- the MCP tool-call edge middleware ----------------------------------------
+# -- the retained standalone TurnBudgetMiddleware -----------------------------
+# A public middleware NOT registered by the platform (the live ``tools/call`` edge
+# budget is armed by ``DispatchScopeMiddleware``); these exercise its standalone
+# behavior and its deprecation warning.
 
 
 def test_edge_middleware_over_budget_raises_turn_timeout(set_turn_timeout):
-    # The MCP session ``tools/call`` edge arms the budget itself (it never reaches the
-    # ``run_tool`` seam): ``TurnBudgetMiddleware.on_call_tool`` wraps ``call_next`` in
-    # the budget, so a call_next slower than the limit is cancelled on expiry and raises
-    # the typed error.
+    # ``TurnBudgetMiddleware.on_call_tool`` wraps ``call_next`` in the turn budget, so a
+    # ``call_next`` slower than the limit is cancelled on expiry and raises the typed
+    # error.
     set_turn_timeout("0.05")
-    mw = TurnBudgetMiddleware()
+    with pytest.warns(DeprecationWarning, match="not registered by the platform"):
+        mw = TurnBudgetMiddleware()
 
     async def call_next(_ctx):
         await asyncio.sleep(5)
@@ -809,26 +815,34 @@ def test_edge_middleware_over_budget_raises_turn_timeout(set_turn_timeout):
 
 
 def test_edge_middleware_arms_once_nested_run_tool_sees_armed_no_rearm(set_turn_timeout):
-    # The edge middleware arms the budget BEFORE call_next runs; when call_next reaches
-    # the shared ``run_tool`` seam, the seam sees the guard already armed and opens no
-    # second window — the single edge window bounds the whole turn.
+    # ``on_call_tool`` arms the budget BEFORE ``call_next`` runs; when ``call_next``
+    # reaches the shared ``run_tool`` seam, the seam sees the guard already armed and
+    # opens no second window — the outer window bounds the whole turn.
     set_turn_timeout("5")
 
     async def run() -> None:
         async with app.app_context(_plain_tools_manifest("nested_inner")):
-            mw = TurnBudgetMiddleware()
+            with pytest.warns(DeprecationWarning, match="not registered by the platform"):
+                mw = TurnBudgetMiddleware()
 
             async def call_next(_ctx):
-                # The edge already armed the budget: the guard is set before the seam.
+                # The middleware already armed the budget: the guard is set before the seam.
                 assert _turn_budget_armed.get() is True
                 return await app.tools.run_tool("nested_inner", {"seconds": 0.0})
 
             assert await mw.on_call_tool(cast("MiddlewareContext[Any]", object()), call_next) == "inner-done"
 
     asyncio.run(run())
-    # The seam ran under the guard the edge armed, so it opened no window of its own.
+    # The seam ran under the guard the middleware armed, so it opened no window of its own.
     assert _budget_flag("nested_inner_saw_armed") is True
     assert _budget_flag("nested_inner_completed") is True
+
+
+def test_turn_budget_middleware_instantiation_warns_it_is_not_registered():
+    # The class is a retained standalone component the platform does not register (the
+    # live edge budget is DispatchScopeMiddleware's); instantiation warns.
+    with pytest.warns(DeprecationWarning, match="not registered by the platform"):
+        TurnBudgetMiddleware()
 
 
 # -- the MCP tool-call edge secret reveal -------------------------------------
@@ -879,6 +893,147 @@ def test_mcp_edge_reveals_wrapped_secret_of_a_preset_to_the_client():
             assert result.structured_content == {"account": "acme", "token": "tok-acme"}
 
     asyncio.run(run())
+
+
+def test_mcp_call_of_a_registered_preset_registers_a_run_row_and_trace_root(monkeypatch):
+    # An MCP ``tools/call`` of a registered preset registers exactly one run row carrying
+    # the opened trace root's id — the same runs-index deep link the in-process door
+    # produces — because the edge enters the shared ``dispatch_scope`` rather than
+    # dispatching straight to ``Tool.run`` past the run-index chokepoint.
+    import tai42_skeleton.runs.chokepoint as chokepoint
+    from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
+
+    from .._fakes.recording_monitoring import RecordingMonitoring
+
+    starts: list[dict[str, Any]] = []
+    terminals: list[dict[str, Any]] = []
+
+    class _SpyStore:
+        async def insert_start(
+            self, run_id, preset_name, preset_version, *, trace_id, user_id, session_id, interaction_id, started_at
+        ):
+            starts.append({"preset_name": preset_name, "trace_id": trace_id})
+
+        async def update_outcome(self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None):
+            terminals.append({"outcome": outcome})
+
+    monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
+    monkeypatch.setattr(chokepoint, "get_run_index_store", lambda: _SpyStore())
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def echo(value: str) -> dict:
+                """Echo the value back."""
+                return {"value": value}
+
+            await app.preset_manager.register("echo_preset", "echo", {"value": "x"}, [], "Echo preset")
+            init_monitoring(RecordingMonitoring())
+            try:
+                async with Client(app._fast_mcp) as client:
+                    result = await client.call_tool("echo_preset", {})
+            finally:
+                reset_monitoring()
+                await app.preset_manager.remove("echo_preset")
+            assert result.structured_content == {"value": "x"}
+
+    asyncio.run(run())
+    assert [s["preset_name"] for s in starts] == ["echo_preset"]
+    assert starts[0]["trace_id"] == "trace-root"
+    assert [t["outcome"] for t in terminals] == ["success"]
+
+
+def test_mcp_call_of_a_parking_preset_records_parked_not_success(monkeypatch):
+    # A registered preset whose dispatch async-parks (its body returns a
+    # ``SuspendedInteraction``) records the ``parked`` terminal — carrying the park's
+    # interaction id — when invoked over the MCP ``tools/call`` edge, the same outcome
+    # the in-process door records. The edge reads the park off the reserved marker the
+    # serialized tool result carries; a park whose sentinel fields were flattened onto
+    # the wire would default to ``success``, silently losing the park.
+    import tai42_skeleton.runs.chokepoint as chokepoint
+
+    terminals: list[dict[str, Any]] = []
+
+    class _SpyStore:
+        async def insert_start(
+            self, run_id, preset_name, preset_version, *, trace_id, user_id, session_id, interaction_id, started_at
+        ):
+            pass
+
+        async def update_outcome(self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None):
+            terminals.append({"outcome": outcome, "interaction_id": interaction_id})
+
+    monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
+    monkeypatch.setattr(chokepoint, "get_run_index_store", lambda: _SpyStore())
+
+    expiry = datetime(2030, 1, 1, tzinfo=UTC)
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            # No declared output_schema: FastMCP would otherwise flatten the sentinel's
+            # fields into structured_content, dropping the reserved marker key the edge
+            # reads a park by. The edge must recognize the park regardless.
+            @app.tools.tool(force=True)
+            async def parker():
+                """Park the caller and return the suspend sentinel."""
+                return SuspendedInteraction(interaction_id="park-42", expiry_at=expiry, resume_owner="resume_tool")
+
+            await app.preset_manager.register("parker_preset", "parker", {}, [], "Parker preset")
+            try:
+                async with Client(app._fast_mcp) as client:
+                    result = await client.call_tool("parker_preset", {})
+            finally:
+                await app.preset_manager.remove("parker_preset")
+            # The park rides the wire as the reserved marker, not flattened sentinel fields.
+            marker = read_suspended_interaction_marker(result.structured_content)
+            assert marker is not None
+            assert marker["interaction_id"] == "park-42"
+
+    asyncio.run(run())
+    assert [t["outcome"] for t in terminals] == ["parked"]
+    assert terminals[0]["interaction_id"] == "park-42"
+
+
+def test_mcp_call_run_row_is_born_with_the_callers_user_id(monkeypatch):
+    # An MCP-edge run row is born carrying the door's caller user_id (never NULL): the
+    # edge deposits the run attribution from ``request_identity()`` before the scope, so
+    # the START row records the caller rather than an unattributed row.
+    import tai42_skeleton.runs.chokepoint as chokepoint
+
+    starts: list[dict[str, Any]] = []
+
+    class _SpyStore:
+        async def insert_start(
+            self, run_id, preset_name, preset_version, *, trace_id, user_id, session_id, interaction_id, started_at
+        ):
+            starts.append({"preset_name": preset_name, "user_id": user_id})
+
+        async def update_outcome(self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None):
+            pass
+
+    monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
+    monkeypatch.setattr(chokepoint, "get_run_index_store", lambda: _SpyStore())
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def echo(value: str) -> dict:
+                """Echo the value back."""
+                return {"value": value}
+
+            await app.preset_manager.register("echo_preset", "echo", {"value": "x"}, [], "Echo preset")
+            token = set_request_user_id("caller-9")
+            try:
+                async with Client(app._fast_mcp) as client:
+                    await client.call_tool("echo_preset", {})
+            finally:
+                reset_request_user_id(token)
+                await app.preset_manager.remove("echo_preset")
+
+    asyncio.run(run())
+    assert [s["user_id"] for s in starts] == ["caller-9"]
 
 
 class _LogCapture(logging.Handler):

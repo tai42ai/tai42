@@ -31,6 +31,7 @@ class _FixtureChannel(DeliverOnlyChannel):
     summary="Fixture channel inbound door",
     tags=["channels"],
     response_model=None,
+    no_body_reason="fixture channel webhook returns a raw provider ack, not a JSON body",
     authed=False,
 )
 async def fixture_inbound(request: Request) -> Response:

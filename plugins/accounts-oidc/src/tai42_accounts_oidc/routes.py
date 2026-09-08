@@ -128,6 +128,7 @@ def _flow_cookie_secure() -> bool:
     summary="Begin an OIDC/OAuth2 login",
     tags=["login"],
     response_model=None,
+    no_body_reason="OAuth authorize: 302 redirect to the identity provider",
 )
 async def oidc_authorize(request: Request) -> Response:
     """Mint state + PKCE + nonce and 302 to the configured provider's issuer.
@@ -203,6 +204,7 @@ async def oidc_authorize(request: Request) -> Response:
     summary="Complete an OIDC/OAuth2 login",
     tags=["login"],
     response_model=None,
+    no_body_reason="OAuth callback: 302 redirect to the app after code exchange",
 )
 async def oidc_callback(request: Request) -> Response:
     """Verify state, exchange the code, verify the id_token, mint a session, and

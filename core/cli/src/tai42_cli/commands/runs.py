@@ -80,12 +80,7 @@ def list_runs(
         params["pageSize"] = str(page_size)
     with ctx_obj.client() as client:
         data = client.get("/api/runs", params=params or None)
-    emit_records(
-        ctx_obj,
-        data,
-        ["runId", "preset", "version", "outcome", "startedAt", "interactionId", "traceId"],
-        items_key="items",
-    )
+    emit_records(ctx_obj, data, route=("GET", "/api/runs"))
 
 
 @app.command("prune")

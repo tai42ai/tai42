@@ -131,6 +131,35 @@ async def test_run_tool_delegates_and_returns(monkeypatch: pytest.MonkeyPatch) -
     assert tools.run_calls == [("calc", {"a": 1}, True)]
 
 
+async def test_run_tool_deposits_caller_identity_as_run_attribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The sync door deposits the caller's identity as the run attribution, so a runs-index
+    # row the dispatch registers is born with a ``user_id`` rather than NULL. Read the
+    # ambient attribution at dispatch time to prove it is in scope for the chokepoint.
+    from tai42_skeleton.access_control import user as user_mod
+    from tai42_skeleton.authz import execution_identity as exec_id_mod
+    from tai42_skeleton.tools.attribution import get_run_attribution
+
+    monkeypatch.setattr(user_mod, "request_identity", lambda: ("person-9", None))
+    # A bound identity skips the opportunistic rebuild branch, keeping the test hermetic;
+    # the attribution deposit is independent of it.
+    monkeypatch.setattr(exec_id_mod, "get_execution_identity", lambda: object())
+
+    seen: dict[str, str | None] = {}
+
+    class _AttrTools(_Tools):
+        async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False) -> object:
+            attribution = get_run_attribution()
+            seen["user_id"] = attribution.user_id if attribution is not None else None
+            return await super().run_tool(key, arguments, offload_sync=offload_sync)
+
+    tools = _AttrTools({"calc"}, run_result={"ok": True})
+    _install(monkeypatch, tools=tools)
+
+    await tools_ops.run_tool("calc", {})
+
+    assert seen["user_id"] == "person-9"
+
+
 async def test_run_tool_reveals_wrapped_secrets_for_the_live_caller(monkeypatch: pytest.MonkeyPatch) -> None:
     # The sync run-tool door is the ONE live-caller handoff: a wrapped secret in the
     # tool's result is revealed here so the caller receives the real value.

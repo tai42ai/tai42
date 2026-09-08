@@ -29,6 +29,7 @@ from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.backup.registry import BackupMode, import_mode
 from tai42_skeleton.operations import BadRequestError, operation
 from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
+from tai42_skeleton.operations.response_models_group_c import BackupImportResult, BackupSectionListing
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ def _import_order(requested: list[str]) -> list[str]:
     return [name for name in registered if name in selected] + [name for name in selected if name not in known]
 
 
-@operation(summary="List backup sections", tags=["backup"])
+@operation(summary="List backup sections", tags=["backup"], response_model=BackupSectionListing)
 async def list_sections() -> list:
     return [{"name": info.name, "secret": info.secret} for info in tai42_app.backup.sections()]
 
@@ -90,6 +91,7 @@ async def list_sections() -> list:
     reload_gated=True,
     errors=[BadRequestError],
     request_model=BackupImport,
+    response_model=BackupImportResult,
 )
 async def import_backup(document: dict[str, Any], sections: list[str], mode: BackupMode = "skip") -> dict:
     # The envelope shape is validated at the HTTP edge; the document CONTENT (version,

@@ -228,6 +228,21 @@ async def test_door_retry_kept_keeps_correlation_and_acks_rejected(fake_redis, c
     assert _CORR_KEY in fake_redis.store  # the human can reply again
 
 
+async def test_door_bridged_kept_keeps_correlation_and_acks_bridged(fake_redis, channels):
+    # The ladder's BRIDGED_KEPT outcome (a bridge-policy ask rejected the reply: the
+    # correlation is KEPT and the reply was bridged as a digression turn) acks 200 with
+    # the same "bridged" wire a released BRIDGE returns. Without the ack-map entry this
+    # reachable outcome raised KeyError -> 500 -> Slack redelivery loop.
+    _seed_correlation(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED_KEPT
+
+    response = await slack_inbound(_signed(_event_body(event=_reply_event())))
+
+    assert response.status_code == 200
+    assert body_json(response) == {"status": "bridged"}
+    assert _CORR_KEY in fake_redis.store  # the ask stays parked
+
+
 async def test_ladder_forward_error_releases_claim_then_retry_recovers(fake_redis, channels):
     _seed_correlation(fake_redis)
     channels.inbound_error = AnswerForwardError("callback forward failed: HTTP 500 from the interactions door")

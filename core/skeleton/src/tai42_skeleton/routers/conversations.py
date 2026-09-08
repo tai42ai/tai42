@@ -86,11 +86,12 @@ from __future__ import annotations
 import logging
 
 from fastapi import Request
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from starlette.responses import JSONResponse, Response
 from tai42_contract.access_control import get_current_user_id
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import (
+    ConversationAnswer,
     ConversationEventSubmission,
     ConversationMessage,
     ConversationRouteCreate,
@@ -382,12 +383,12 @@ set_conversation_person_locale = register_operation_route(
 
 async def _extract_thread_message(request: Request) -> dict:
     """The operator-send body ``{thread_id, text, address, media?, template?, options?,
-    schema?}`` as
+    schema?, location?, sections?, header?, footer?}`` as
     the operation's flat fields. A non-object body, a missing/blank ``thread_id``, a
-    non-string ``text``/``address``, a non-list ``media``/``options`` or a non-object
-    ``template``/``schema`` is a loud 400 here; the operation owns the blank-text,
-    thread-belongs and
-    media/template/options/schema CONTENT guards (item shape, caps, exclusivity).
+    non-string ``text``/``address``/``footer``, a non-list ``media``/``options``/``sections``
+    or a non-object ``template``/``schema``/``location``/``header`` is a loud 400 here; the
+    operation owns the blank-text, thread-belongs and
+    rich-field CONTENT guards (item shape, caps, exclusivity, the composition matrix).
 
     ``thread_id`` rides the body, not the path: it carries the api door's percent-encoded
     ``{principal}/{end user}`` address, which no path spelling round-trips."""
@@ -397,7 +398,8 @@ async def _extract_thread_message(request: Request) -> dict:
         raise BadRequestError("invalid JSON body") from exc
     if not isinstance(body, dict):
         raise BadRequestError(
-            "body must be a JSON object of {thread_id, text, address, media?, template?, options?, schema?}"
+            "body must be a JSON object of {thread_id, text, address, media?, template?, options?, "
+            "schema?, location?, sections?, header?, footer?}"
         ) from None
     thread_id = body.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id.strip():
@@ -408,8 +410,8 @@ async def _extract_thread_message(request: Request) -> dict:
     address = body.get("address")
     if address is not None and not isinstance(address, str):
         raise BadRequestError("address must be a string or absent") from None
-    # Shape-only checks here; the operation coerces each media item through ``MediaItem`` and
-    # applies the contract caps/exclusivity, mapping a violation to a 400.
+    # Shape-only checks here; the operation coerces each rich field through its typed model and
+    # applies the contract caps/exclusivity/composition matrix, mapping a violation to a 400.
     media = body.get("media")
     if media is not None and not isinstance(media, list):
         raise BadRequestError("media must be a list of media items or absent") from None
@@ -422,6 +424,18 @@ async def _extract_thread_message(request: Request) -> dict:
     schema = body.get("schema")
     if schema is not None and not isinstance(schema, dict):
         raise BadRequestError("schema must be a form answer-schema object or absent") from None
+    location = body.get("location")
+    if location is not None and not isinstance(location, dict):
+        raise BadRequestError("location must be a map-pin object or absent") from None
+    sections = body.get("sections")
+    if sections is not None and not isinstance(sections, list):
+        raise BadRequestError("sections must be a list of option sections or absent") from None
+    header = body.get("header")
+    if header is not None and not isinstance(header, dict):
+        raise BadRequestError("header must be a media-header object or absent") from None
+    footer = body.get("footer")
+    if footer is not None and not isinstance(footer, str):
+        raise BadRequestError("footer must be a string or absent") from None
     return {
         "thread_id": thread_id,
         "text": text,
@@ -430,6 +444,10 @@ async def _extract_thread_message(request: Request) -> dict:
         "template": template,
         "options": options,
         "schema": schema,
+        "location": location,
+        "sections": sections,
+        "header": header,
+        "footer": footer,
     }
 
 
@@ -578,13 +596,25 @@ def _door_caller_principal() -> str | None:
     return None
 
 
+class ConversationTurnAck(BaseModel):
+    """The ack a message/event submission returns: the accepted turn's ``message_id``
+    and its ``thread_id``. ``answer`` is present on every inline-waited turn that finished
+    in time (a 200) — including a silent one, which carries the silent marker (status
+    ``silent``, no answer text, dumped ``exclude_none``); it is absent only on the default
+    deferred 202, whose turn produced no outcome yet."""
+
+    message_id: str
+    thread_id: str
+    answer: ConversationAnswer | None = None
+
+
 @http_surface().custom_route(
     "/api/conversations/{route_name}/messages",
     methods=["POST"],
     summary="Send a message to a conversation route",
     tags=["conversations"],
     request_model=ConversationMessage,
-    response_model=None,
+    response_model=ConversationTurnAck,
     declared=DeclaredRouteMetadata(
         reload_gated=True,
         reads_body=True,
@@ -658,8 +688,10 @@ async def send_conversation_message(request: Request) -> Response:
 
     payload: dict[str, object] = {"message_id": result.message_id, "thread_id": result.thread_id}
     if result.answer is not None:
-        # ``exclude_none`` drops the ``answer`` field for a silent outcome, so a silent turn
-        # answers 200 with ``{message_id, thread_id, status: "silent"}`` and no answer key.
+        # ``exclude_none`` drops the ANSWER's own null fields (its ``answer``/``parts``),
+        # never the outer ``answer`` key: a silent turn answers 200 with
+        # ``answer: {message_id, thread_id, status: "silent"}``. Only the no-outcome 202
+        # below carries no answer key.
         payload["answer"] = result.answer.model_dump(mode="json", exclude_none=True)
         return JSONResponse({"data": payload}, status_code=200)
     return JSONResponse({"data": payload}, status_code=202)
@@ -671,7 +703,7 @@ async def send_conversation_message(request: Request) -> Response:
     summary="Deliver a structured event to a conversation thread as a turn",
     tags=["conversations"],
     request_model=ConversationEventSubmission,
-    response_model=None,
+    response_model=ConversationTurnAck,
     declared=DeclaredRouteMetadata(
         reload_gated=True,
         reads_body=True,

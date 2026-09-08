@@ -25,6 +25,7 @@ from urllib.parse import quote
 import typer
 from tai42_contract.manifest import ExtensionElement
 
+from tai42_cli.commands._route_columns import ROUTE_TABLE_SHAPES
 from tai42_cli.context import AppContext
 from tai42_cli.render import print_json, print_records, print_result, strip_control
 
@@ -293,16 +294,39 @@ def load_json_object_arg(
 def emit_records(
     ctx_obj: AppContext,
     data: Any,
-    columns: Sequence[str],
+    columns: Sequence[str] | None = None,
     *,
     items_key: str | None = None,
+    route: tuple[str, str] | None = None,
 ) -> None:
     """Render a list result as a table, or the raw payload under ``--json``.
 
+    The table ``columns`` and the envelope ``items_key`` are DERIVED from the route's
+    declared response model: pass ``route=(METHOD, PATH)`` (the command's ``@covers``
+    route) and the shape is read from the generated :data:`ROUTE_TABLE_SHAPES`. A
+    command whose route has no single-list model to tabulate — a bare/opaque body, a
+    multi-list envelope, or a locally reshaped payload — passes ``columns`` (and any
+    ``items_key``) explicitly instead; the two forms are mutually exclusive.
+
     ``items_key`` pulls the row list out of an ``{items, total}``-style envelope for
     the table while the ``--json`` form still emits the whole payload. A row that is
-    a bare scalar (a list of tool names) is wrapped under the first column.
+    a bare scalar (a list of names) is wrapped under the first column.
     """
+    if route is not None:
+        if columns is not None or items_key is not None:
+            raise ValueError(
+                f"emit_records for {route} was given both a route (derived shape) and an explicit "
+                "columns/items_key — pass one or the other, never both"
+            )
+        shape = ROUTE_TABLE_SHAPES.get(route)
+        if shape is None:
+            raise KeyError(
+                f"emit_records route {route} has no derived shape: its response model yields no "
+                "single-list table. Pass explicit columns, or fix the @covers route."
+            )
+        columns, items_key = shape.columns, shape.items_key
+    elif columns is None:
+        raise ValueError("emit_records needs a route (derived shape) or an explicit columns list")
     if ctx_obj.json_output:
         print_json(data)
         return

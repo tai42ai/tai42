@@ -25,6 +25,7 @@ from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.operations import BadRequestError, operation
+from tai42_skeleton.operations.response_models_group_c import RunsPage, RunsPruneResult
 from tai42_skeleton.runs.models import RunIndexFilter, RunOutcome, RunRow
 from tai42_skeleton.runs.settings import run_index_settings
 from tai42_skeleton.runs.store import get_run_index_store
@@ -84,6 +85,7 @@ def _row_view(row: RunRow) -> dict[str, Any]:
     tags=["runs"],
     errors=[BadRequestError],
     request_model=RunsListQuery,
+    response_model=RunsPage,
 )
 async def list_runs(
     preset: str | None,
@@ -127,6 +129,7 @@ async def list_runs(
     tags=["runs"],
     destructive=True,
     reload_gated=True,
+    response_model=RunsPruneResult,
 )
 async def prune_runs() -> dict:
     """Delete runs-index rows older than the configured retention window; return the

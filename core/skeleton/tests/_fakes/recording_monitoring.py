@@ -60,6 +60,11 @@ class RecordingWriter(NoOpWriter):
     def __init__(self) -> None:
         self.active_trace_id: str | None = None
         self.next_span_id = "span-1"
+        # The trace id a ROOT span establishes: opening a span when no trace is active
+        # makes that span a new trace root, so ``current_trace_id`` reports this id for
+        # the span's duration (mirroring a real backend). When a trace is already active
+        # the open nests and the active id is unchanged.
+        self.root_trace_id = "trace-root"
         self.spans: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []
 
@@ -80,7 +85,14 @@ class RecordingWriter(NoOpWriter):
     ) -> Iterator[RecordingSpan]:
         span = RecordingSpan(self.next_span_id)
         self.spans.append({"name": name, "kind": kind, "input": input, "metadata": metadata, "span": span})
-        yield span
+        opened_root = self.active_trace_id is None
+        if opened_root:
+            self.active_trace_id = self.root_trace_id
+        try:
+            yield span
+        finally:
+            if opened_root:
+                self.active_trace_id = None
 
     def create_event(
         self,

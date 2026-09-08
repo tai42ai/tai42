@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import threading
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import CancelledError, Future
 from contextlib import asynccontextmanager, suppress
@@ -55,12 +56,28 @@ def validate_registration(slug: str, transport: str) -> None:
 
 
 class InvocationSeamMiddleware(McpMiddleware):
-    """Deposit the ambient invoked-tool seam at the MCP session tool-call edge.
+    """A retained, standalone FastMCP middleware that deposits the ambient invoked-tool
+    seam around a ``tools/call``. NOT registered by the platform.
 
-    An MCP ``tools/call`` reaches ``Tool.run`` through the FastMCP middleware chain,
-    never the ``ToolBinding.run_tool`` seam, so this door deposits the called tool's
-    name itself. Reset in ``finally`` under token discipline so a nested in-process
-    re-dispatch restores the outer name and the deposit never leaks across calls."""
+    The live MCP ``tools/call`` edge deposits the invoked-tool seam — and arms the rest
+    of the run lifecycle — through ``DispatchScopeMiddleware``
+    (:mod:`tai42_skeleton.tools.dispatch_scope`). This class remains a public component
+    that performs the deposit on its own, but nothing in the platform wires it into a
+    server. Scheduled for removal in the next skeleton major.
+
+    ``on_call_tool`` deposits the called tool's name and resets it in ``finally`` under
+    token discipline, so a nested in-process re-dispatch restores the outer name and the
+    deposit never leaks across calls."""
+
+    def __init__(self) -> None:
+        warnings.warn(
+            "InvocationSeamMiddleware is not registered by the platform; the MCP "
+            "tools/call edge lifecycle is handled by DispatchScopeMiddleware "
+            "(tai42_skeleton.tools.dispatch_scope). Scheduled for removal in the next "
+            "skeleton major.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     async def on_call_tool(
         self,
@@ -408,17 +425,15 @@ class SubMcpAppRouter:
         from tai42_skeleton.tools.tier import ToolTierFenceMiddleware
 
         mcp.add_middleware(ToolTierFenceMiddleware(self._app))
-        # Synchronous turn budget for this sub-MCP edge, armed for the same reason and in
-        # the same innermost position as the main server (a sub-MCP ``tools/call`` reaches
-        # ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam).
-        from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware
+        # The shared dispatch scope for this sub-MCP edge, armed in the same innermost
+        # position as the main server: a sub-MCP ``tools/call`` reaches ``Tool.run``
+        # directly, never the ``ToolBinding.run_tool`` seam, so this edge enters the SAME
+        # ``dispatch_scope`` — arming the run lifecycle (invoked-tool deposit,
+        # run-attribution stamp, turn budget, and, for a registered preset, the preset
+        # stamp + runs-index row/trace root) for a tool reached through the mount.
+        from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
 
-        mcp.add_middleware(TurnBudgetMiddleware())
-        # Ambient invoked-tool seam for this sub-MCP edge, deposited in the same
-        # innermost position as the main server: a sub-MCP ``tools/call`` reaches
-        # ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam, so this door
-        # deposits the called tool's name for the span of its run.
-        mcp.add_middleware(InvocationSeamMiddleware())
+        mcp.add_middleware(DispatchScopeMiddleware(self._app))
 
         if config.transport == "stdio":
             return None, None

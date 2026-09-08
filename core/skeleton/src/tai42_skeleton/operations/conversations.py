@@ -16,15 +16,17 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.conversations import (
     CONVERSATION_MODES,
     ROUTE_NAME_RE,
     AnswerPart,
+    ConversationMode,
     ConversationRoute,
     ConversationRouteCreate,
     ConversationTargetKind,
+    Person,
     TargetConversationConfig,
 )
 from tai42_contract.interactions import LocationElement, MediaItem
@@ -54,10 +56,27 @@ from tai42_skeleton.operations.errors import (
     UnavailableError,
     ValidationRejected,
 )
+from tai42_skeleton.operations.response_models_group_a import (
+    ConversationConfigDeleteResult,
+    ConversationConfigListEnvelope,
+    ConversationConfigSetResult,
+    ConversationRecordView,
+    ConversationRouteCreateResult,
+    ConversationRouteListEnvelope,
+    ConversationRouteView,
+    FailedConversationsEnvelope,
+    MessageSearchEnvelope,
+    PersonDeleteResult,
+    RouteRemoveResult,
+    ThreadDeleteResult,
+    ThreadMessageAck,
+    ThreadModeSetResult,
+    ThreadModeView,
+    ThreadSummaryEnvelope,
+    TranscriptEnvelope,
+)
 
 if TYPE_CHECKING:
-    from tai42_contract.conversations import Person
-
     from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager as _Manager
     from tai42_skeleton.conversations.mode import ConversationModeStore
     from tai42_skeleton.conversations.persons import ConversationPersonStore
@@ -181,7 +200,12 @@ async def _unclaimed_channel_identity(
     return identity
 
 
-@operation(summary="List conversation routes", tags=["conversations"], errors=[NotSupportedError])
+@operation(
+    summary="List conversation routes",
+    tags=["conversations"],
+    errors=[NotSupportedError],
+    response_model=ConversationRouteListEnvelope,
+)
 async def list_conversation_routes() -> dict[str, Any]:
     """Every stored conversation route, each with its ``callback_secret`` withheld.
     Returns ``{"items", "total"}``.
@@ -196,6 +220,7 @@ async def list_conversation_routes() -> dict[str, Any]:
     summary="Get a conversation route",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=ConversationRouteView,
 )
 async def get_conversation_route(route_name: str) -> dict[str, Any]:
     """One conversation route by name, with its ``callback_secret`` withheld. An
@@ -215,6 +240,7 @@ async def get_conversation_route(route_name: str) -> dict[str, Any]:
     authority_changing=True,
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError, ValidationRejected],
     request_model=ConversationRouteCreate,
+    response_model=ConversationRouteCreateResult,
 )
 async def create_conversation_route(
     route_name: str,
@@ -317,6 +343,7 @@ async def create_conversation_route(
     summary="Read one conversation answer record",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=ConversationRecordView,
 )
 async def get_conversation_message(route_name: str, message_id: str) -> dict[str, Any]:
     """One conversation answer record by ``message_id`` under ``route_name``.
@@ -427,6 +454,63 @@ class ThreadDeleteQuery(BaseModel):
     )
 
 
+class ThreadMessageSend(BaseModel):
+    """The operator-send door's JSON body. ``thread_id`` and ``text`` are required and hold at
+    least one non-whitespace character; the remaining fields are optional richer-send forms
+    delivered alongside ``text``. The ``schema`` attribute is suffixed to avoid shadowing a
+    ``BaseModel`` member; the wire key stays ``schema`` via the alias.
+
+    Spec metadata only — the door parses this body at the HTTP edge."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    thread_id: str = Field(
+        min_length=1, pattern=r"\S", description="The thread to send into, as the send door returned it."
+    )
+    text: str = Field(min_length=1, pattern=r"\S", description="The message text to send.")
+    address: str | None = Field(
+        default=None,
+        description="On a linked person's aggregated thread, the person address to target; "
+        "omitted, the target is the thread's newest record.",
+    )
+    media: list[dict[str, JsonValue]] | None = Field(
+        default=None, description="Display media items delivered alongside the text."
+    )
+    template: dict[str, JsonValue] | None = Field(
+        default=None, description="A pre-approved out-of-window template to deliver."
+    )
+    options: list[dict[str, JsonValue]] | None = Field(
+        default=None, description="Flat tappable option objects — reply or link actions."
+    )
+    schema_: dict[str, JsonValue] | None = Field(
+        default=None,
+        alias="schema",
+        description="An ask-less form's answer schema; the channel renders ``text`` as the prompt.",
+    )
+    location: dict[str, JsonValue] | None = Field(
+        default=None, description="A shared map pin ``{latitude, longitude, name?, address?}``."
+    )
+    sections: list[dict[str, JsonValue]] | None = Field(
+        default=None, description="Titled groups of tappable reply rows — the sectioned options alternative."
+    )
+    header: dict[str, JsonValue] | None = Field(
+        default=None, description="A media header composing an interactive message."
+    )
+    footer: str | None = Field(default=None, description="A trailing line composing an interactive message.")
+
+
+class ThreadModeSet(BaseModel):
+    """The mode-set door's JSON body ``{thread_id, mode}``. ``thread_id`` holds at least one
+    non-whitespace character and ``mode`` is one of the control-mode vocabulary.
+
+    Spec metadata only — the door parses this body at the HTTP edge."""
+
+    thread_id: str = Field(
+        min_length=1, pattern=r"\S", description="The thread whose mode override to set, as the send door returned it."
+    )
+    mode: ConversationMode = Field(description="The control mode to set: ``agent`` or ``manual``.")
+
+
 def _page_bounds(page: int, page_size: int) -> tuple[int, int]:
     """The ``(offset, limit)`` a page/pageSize pair names. Both must be at least 1 and
     ``page`` at most :data:`MAX_THREAD_PAGE`; a page size above the cap is capped, never
@@ -504,6 +588,7 @@ def _parse_address_filter(address: str | None) -> str | None:
     tags=["conversations"],
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=ThreadListQuery,
+    response_model=ThreadSummaryEnvelope,
 )
 async def list_conversation_threads(
     route_name: str,
@@ -576,6 +661,7 @@ async def list_conversation_threads(
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=TranscriptQuery,
+    response_model=TranscriptEnvelope,
 )
 async def get_conversation_thread(
     route_name: str, thread_id: str, page: int = 1, page_size: int = 50, order: str = "asc", q: str | None = None
@@ -696,6 +782,7 @@ async def _read_person_thread(
     tags=["conversations"],
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=MessageSearchQuery,
+    response_model=MessageSearchEnvelope,
 )
 async def search_conversation_messages(route_name: str, q: str, page: int = 1, page_size: int = 50) -> dict[str, Any]:
     """Every record on ``route_name`` whose inbound text or answer contains ``q``, across ALL
@@ -739,6 +826,7 @@ async def search_conversation_messages(route_name: str, q: str, page: int = 1, p
     summary="List failed conversation deliveries",
     tags=["conversations"],
     errors=[ForbiddenError, NotSupportedError],
+    response_model=FailedConversationsEnvelope,
 )
 async def list_failed_conversations() -> dict[str, Any]:
     """Every answer record whose delivery ended ``failed``. The listing spans every route and
@@ -758,6 +846,7 @@ async def list_failed_conversations() -> dict[str, Any]:
     summary="Delete a conversation route",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=RouteRemoveResult,
 )
 async def delete_conversation_route(route_name: str) -> dict[str, Any]:
     """Delete a conversation route by name, along with the thread indexes it owned.
@@ -852,6 +941,7 @@ async def _delete_thread_checkpoint(thread_id: str) -> None:
     tags=["conversations"],
     errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError, UnavailableError],
     query_model=ThreadDeleteQuery,
+    response_model=ThreadDeleteResult,
 )
 async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[str, Any]:
     """Forget ONE conversation thread: its agent checkpoint, its answer records and its thread
@@ -934,6 +1024,7 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
     summary="Delete a conversation person",
     tags=["conversations"],
     errors=[BadRequestError, ConflictError, NotSupportedError, UnavailableError],
+    response_model=PersonDeleteResult,
 )
 async def delete_conversation_person(person_id: str) -> dict[str, Any]:
     """Erase a LINKED person ENTIRELY, forgetting every store that names it:
@@ -1045,6 +1136,7 @@ def _mode_store() -> ConversationModeStore:
     summary="Read a conversation person",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=Person,
 )
 async def get_conversation_person(person_id: str) -> dict[str, Any]:
     """The person row named by ``person_id`` — its identity, folded addresses and stored
@@ -1064,6 +1156,7 @@ async def get_conversation_person(person_id: str) -> dict[str, Any]:
     summary="Set a conversation person's locale",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=Person,
 )
 async def set_conversation_person_locale(person_id: str, locale: str | None) -> dict[str, Any]:
     """Set (or clear) a person's stored ``locale`` — the operator override the rendering layer
@@ -1169,6 +1262,8 @@ async def _resolve_operator_target(
     tags=["conversations"],
     destructive=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError, OperationFailed, UnavailableError],
+    request_model=ThreadMessageSend,
+    response_model=ThreadMessageAck,
 )
 async def send_conversation_thread_message(
     route_name: str,
@@ -1328,6 +1423,7 @@ async def send_conversation_thread_message(
     summary="Read a conversation thread's control mode",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=ThreadModeView,
 )
 async def get_conversation_thread_mode(route_name: str, thread_id: str) -> dict[str, Any]:
     """The mode in force for ``thread_id`` on ``route_name`` and where it comes from:
@@ -1358,6 +1454,8 @@ async def get_conversation_thread_mode(route_name: str, thread_id: str) -> dict[
     tags=["conversations"],
     destructive=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    request_model=ThreadModeSet,
+    response_model=ThreadModeSetResult,
 )
 async def set_conversation_thread_mode(route_name: str, thread_id: str, mode: str) -> dict[str, Any]:
     """Set the per-thread mode override for ``thread_id`` on ``route_name`` to ``mode`` (one
@@ -1412,7 +1510,12 @@ def _config_store() -> ConversationTargetConfigStore:
     return ConversationTargetConfigStore(ConversationsSettings())
 
 
-@operation(summary="List conversation target configs", tags=["conversations"], errors=[NotSupportedError])
+@operation(
+    summary="List conversation target configs",
+    tags=["conversations"],
+    errors=[NotSupportedError],
+    response_model=ConversationConfigListEnvelope,
+)
 async def list_conversation_configs() -> dict[str, Any]:
     """Every stored per-target conversation config. Returns ``{"items", "total"}``."""
     _require_backend()
@@ -1425,6 +1528,7 @@ async def list_conversation_configs() -> dict[str, Any]:
     summary="Get a conversation target config",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=TargetConversationConfig,
 )
 async def get_conversation_config(target_kind: str, target_name: str) -> dict[str, Any]:
     """One per-target config by ``(target_kind, target_name)``. An unknown key is a loud
@@ -1444,6 +1548,7 @@ async def get_conversation_config(target_kind: str, target_name: str) -> dict[st
     destructive=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=TargetConversationConfig,
+    response_model=ConversationConfigSetResult,
 )
 async def set_conversation_config(
     target_kind: str,
@@ -1487,6 +1592,7 @@ async def set_conversation_config(
     summary="Delete a conversation target config",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=ConversationConfigDeleteResult,
 )
 async def delete_conversation_config(target_kind: str, target_name: str) -> dict[str, Any]:
     """Delete the per-target config for ``(target_kind, target_name)``. An unknown key is a

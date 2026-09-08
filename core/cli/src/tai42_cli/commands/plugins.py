@@ -96,6 +96,8 @@ def search(
         params["page_size"] = page_size
     with ctx_obj.client() as client:
         data = client.get("/api/marketplace/search", params=params)
+    # /api/marketplace/search returns an opaque passthrough body (OpaqueJson), so
+    # there is no response model to derive columns from.
     emit_records(
         ctx_obj,
         data,
@@ -128,7 +130,7 @@ def categories(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/marketplace/categories")
-    emit_records(ctx_obj, data, ["category"])
+    emit_records(ctx_obj, data, route=("GET", "/api/marketplace/categories"))
 
 
 @app.command("kinds")
@@ -141,7 +143,7 @@ def kinds(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/marketplace/kinds")
-    emit_records(ctx_obj, data, ["kind"])
+    emit_records(ctx_obj, data, route=("GET", "/api/marketplace/kinds"))
 
 
 @app.command("installed")
@@ -155,6 +157,9 @@ def installed(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/marketplace/installed")
+    # /api/marketplace/installed returns two lists (installed + quarantined) and each
+    # row is reshaped locally (compat flattened to its status), so the columns are not
+    # model-derivable.
     if not ctx_obj.json_output and isinstance(data, dict):
         # The table shows the compat STATUS in its own column (the reason is in
         # the JSON form), and quarantined plugins are printed after the table so
@@ -430,7 +435,7 @@ def upgrade(
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.post("/api/marketplace/upgrade-all", json={})
-    emit_records(ctx_obj, data, ["ref", "outcome", "detail"], items_key="results")
+    emit_records(ctx_obj, data, route=("POST", "/api/marketplace/upgrade-all"))
 
 
 @app.command("advisories")
@@ -443,6 +448,8 @@ def advisories(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/marketplace/advisories")
+    # /api/marketplace/advisories items are open JSON objects (dict[str, JsonValue]),
+    # so these are documented advisory keys, not model-derivable columns.
     emit_records(
         ctx_obj,
         data,

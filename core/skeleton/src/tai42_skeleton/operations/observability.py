@@ -34,6 +34,11 @@ from tai42_contract.monitoring import (
 
 from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
+from tai42_skeleton.operations.response_models_group_c import (
+    MetricsResult,
+    ObservabilityRunsPage,
+    RunTraceView,
+)
 from tai42_skeleton.routers.observability_support import (
     PAGE_CHUNK,
     ExportFormat,
@@ -144,6 +149,7 @@ class ExportRunsQuery(RunFilterQuery):
     tags=["observability"],
     errors=[BadRequestError, NotSupportedError],
     request_model=MetricsQuery,
+    response_model=MetricsResult,
 )
 async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
     """Aggregate metrics over the time range via the contract's ``query_metrics``.
@@ -193,6 +199,7 @@ async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
     tags=["observability"],
     errors=[BadRequestError, NotSupportedError],
     request_model=RunsListQuery,
+    response_model=ObservabilityRunsPage,
 )
 async def list_observability_runs(
     t0: datetime,
@@ -230,6 +237,7 @@ async def list_observability_runs(
     summary="Get a run's trace",
     tags=["observability"],
     errors=[NotFoundError, NotSupportedError],
+    response_model=RunTraceView,
 )
 async def get_run_trace(trace_id: str) -> dict:
     """Full detailed trace for one run via the contract's ``get_trace``.

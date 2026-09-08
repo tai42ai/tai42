@@ -105,7 +105,10 @@ class _StubHttp:
         request_model: Any = None,
         query_model: Any = None,
         authed: bool | None = None,
+        destructive: bool = False,
         action: str | None = None,
+        declared: Any = None,
+        no_body_reason: str | None = None,
     ):
         def decorator(handler):
             self.routes.append(

@@ -18,7 +18,9 @@ from tai42_contract.agent.base import PresetSpec
 import tai42_skeleton.runs.chokepoint as chokepoint
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 
+from .._fakes.recording_monitoring import RecordingMonitoring
 from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
@@ -44,6 +46,8 @@ class _SpyStore:
                 "preset_name": preset_name,
                 "preset_version": preset_version,
                 "interaction_id": interaction_id,
+                "trace_id": trace_id,
+                "user_id": user_id,
             }
         )
 
@@ -122,3 +126,26 @@ def test_resume_origin_deposit_reaches_the_start_row_through_run_tool(pg: FakeVe
 
     asyncio.run(run())
     assert [s["interaction_id"] for s in spy_store.starts] == ["i-park-7", None]
+
+
+def test_direct_dispatch_opens_a_root_and_populates_the_row_trace_id(pg: FakeVersioningPg, monkeypatch):
+    # A DIRECT (no-ambient) preset dispatch through the real run_tool opens a trace ROOT
+    # and the START row carries its trace id. No ``_safe_trace_id`` stub: the real ambient
+    # probe reads the recording backend, so the root-open runs. This is the completeness
+    # invariant at the in-process entrance — with a tracing backend active, the row is
+    # born with a non-null trace_id (no linkless row).
+    store = _SpyStore()
+    monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
+    monkeypatch.setattr(chokepoint, "get_run_index_store", lambda: store)
+
+    async def run():
+        async with app.app_context(_manifest()):
+            init_monitoring(RecordingMonitoring())
+            try:
+                await _register("inner", "leaf", {"city": "paris"})
+                assert await app.tools.run_tool("inner", {}) == {"city": "paris"}
+            finally:
+                reset_monitoring()
+
+    asyncio.run(run())
+    assert store.starts[0]["trace_id"] == "trace-root"

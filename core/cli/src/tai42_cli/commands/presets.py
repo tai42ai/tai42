@@ -26,8 +26,6 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_LIST_COLUMNS = ["name", "base_tool", "active_version", "conflicted"]
-
 _EXTENSIONS_HELP = (
     "Extension combos as a JSON array of combos. Each combo is a non-empty array of elements, and an "
     'element is an extension name (\'"chain"\') or a {"name","config"} object binding config to it '
@@ -51,7 +49,7 @@ def list_presets(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/presets")
-    emit_records(ctx_obj, data, _LIST_COLUMNS)
+    emit_records(ctx_obj, data, route=("GET", "/api/presets"))
 
 
 @app.command("get")
@@ -122,7 +120,7 @@ def list_versions(ctx: typer.Context, name: Annotated[str, typer.Argument(help="
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get(f"/api/presets/{seg(name)}/versions")
-    emit_records(ctx_obj, data, ["version", "created_at"])
+    emit_records(ctx_obj, data, route=("GET", "/api/presets/{name}/versions"))
 
 
 @app.command("get-version")

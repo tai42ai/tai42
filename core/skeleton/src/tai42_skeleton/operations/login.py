@@ -28,6 +28,11 @@ from tai42_contract.accounts import AccountsProvider
 from tai42_skeleton.access_control.claim_links import ClaimLinkError
 from tai42_skeleton.access_control.claim_links import exchange_claim_token as _exchange_claim_token
 from tai42_skeleton.operations import NotFoundError, operation
+from tai42_skeleton.operations.response_models_group_c import (
+    ClaimExchangeResult,
+    LoginMethodsListing,
+    LogoutResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +54,7 @@ class ClaimExchange(BaseModel):
     token: str = Field(min_length=1)
 
 
-@operation(summary="List available login methods", tags=["login"])
+@operation(summary="List available login methods", tags=["login"], response_model=LoginMethodsListing)
 async def login_methods() -> dict:
     """Aggregate every registered accounts provider's login methods + bootstrap flag.
 
@@ -75,6 +80,7 @@ async def login_methods() -> dict:
     authority_changing=True,
     errors=[NotFoundError],
     request_model=ClaimExchange,
+    response_model=ClaimExchangeResult,
 )
 async def exchange_claim_token(token: str) -> dict:
     """Burn a one-time claim token and return the raw API key it carried — the public
@@ -102,6 +108,7 @@ async def exchange_claim_token(token: str) -> dict:
     tags=["access-control"],
     destructive=True,
     errors=[NotFoundError],
+    response_model=LogoutResult,
 )
 async def logout(candidates: list[str]) -> dict:
     """Revoke the caller's session by fanning ``revoke_session`` out over every

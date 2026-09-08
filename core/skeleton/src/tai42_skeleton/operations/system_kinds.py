@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from tai42_skeleton.app.kind_status import collect_kind_status
 from tai42_skeleton.operations import operation
+from tai42_skeleton.operations.response_models_group_c import SystemKindsListing
 
 
-@operation(summary="List pluggable-kind status", tags=["system"])
+@operation(summary="List pluggable-kind status", tags=["system"], response_model=SystemKindsListing)
 async def list_system_kinds() -> list[dict]:
     return [row.model_dump() for row in collect_kind_status()]

@@ -168,7 +168,7 @@ def settings_schema(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/config/settings-schema")
-    emit_records(ctx_obj, data, ["name", "module"], items_key="groups")
+    emit_records(ctx_obj, data, route=("GET", "/api/config/settings-schema"))
 
 
 # -- settings profiles --------------------------------------------------------
@@ -189,7 +189,7 @@ def list_profiles(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/config/profiles")
-    emit_records(ctx_obj, data, ["name", "description"])
+    emit_records(ctx_obj, data, route=("GET", "/api/config/profiles"))
 
 
 @profile_app.command("show")
@@ -351,7 +351,7 @@ def profile_versions(
     if version is None:
         with ctx_obj.client() as client:
             data = client.get(f"/api/config/profiles/{seg(name)}/versions")
-        emit_records(ctx_obj, data, ["version", "created_at", "is_current"])
+        emit_records(ctx_obj, data, route=("GET", "/api/config/profiles/{name}/versions"))
         return
     with ctx_obj.client() as client:
         data = client.get(f"/api/config/profiles/{seg(name)}/versions/{seg(version)}")

@@ -423,7 +423,7 @@ async def test_view_submission_retry_kept_shows_door_reason_keeps_record(fake_re
 
 async def test_view_submission_retry_kept_pins_door_named_field_block(fake_redis, channels):
     # The door names the SECOND field: the error pins under its block_id, not the first
-    # field's, so the human sees it on the control that failed (restored fidelity).
+    # field's, so the human sees it on the control that failed.
     await _seed_form(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
     channels.inbound_retry_reason = "answer does not match schema at count: ..."
@@ -474,6 +474,22 @@ async def test_view_submission_bridged_shows_expired_drops_record(fake_redis, ch
 
     assert body_json(response) == {"response_action": "errors", "errors": {"full_name": _EXPIRED_TEXT}}
     assert _FORM_KEY not in fake_redis.store  # released by the ladder (mirrored)
+
+
+async def test_view_submission_bridged_kept_closes_without_expired_notice(fake_redis, channels):
+    # BRIDGED_KEPT: a bridge-policy ask KEPT the correlation (still parked) and bridged the
+    # submission as a fresh turn — a digression, not the answer. The modal closes with an
+    # empty body (the reply was consumed as a turn) and is NEVER told it expired; the parked
+    # ask stays answerable.
+    await _seed_form(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED_KEPT
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert response.status_code == 200
+    assert body_json(response) == {}  # empty body closes the modal — no expired notice
+    assert _EXPIRED_TEXT not in json.dumps(body_json(response))
+    assert fake_redis.store[_FORM_KEY]  # the ask stays parked (KEPT), still answerable
 
 
 async def test_view_submission_no_correlation_shows_expired(fake_redis, channels):

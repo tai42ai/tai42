@@ -93,6 +93,8 @@ class HttpSurface:
         destructive: bool = False,
         action: "RouteAction | None" = None,
         declared: "DeclaredRouteMetadata | None" = None,
+        no_body_reason: str | None = None,
+        enveloped: bool = True,
     ) -> Callable[[Callable[[Request], Awaitable[Response]]], Callable[[Request], Awaitable[Response]]]:
         """Register the handler with FastMCP AND record its OpenAPI metadata.
 
@@ -163,6 +165,8 @@ class HttpSurface:
                 declared=declared,
                 owner=owner,
                 public=resolved_public,
+                no_body_reason=no_body_reason,
+                enveloped=enveloped,
             )
             return fastmcp_route(fn)
 

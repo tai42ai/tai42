@@ -75,6 +75,7 @@ _EVENTS_ACK = {
     InboundAnswerOutcome.FORWARDED: "forwarded",
     InboundAnswerOutcome.RETRY_KEPT: "rejected",
     InboundAnswerOutcome.BRIDGED: "bridged",
+    InboundAnswerOutcome.BRIDGED_KEPT: "bridged",
 }
 
 # The generic guest-facing line rendered inline in the modal on a retryable rejection
@@ -166,6 +167,7 @@ def _verify_signature(raw: bytes, headers: Mapping[str, str], secret: str) -> No
     summary="Slack Events API inbound door (signature-authenticated)",
     tags=["channels"],
     response_model=None,
+    no_body_reason="Slack Events API webhook: url_verification challenge / vendor ack",
 )
 async def slack_inbound(request: Request) -> Response:
     """Receive a Slack Events API delivery, verify it, and route it: a correlated
@@ -446,6 +448,7 @@ def _render_form_answer_for_bridge(answer: dict[str, Any], schema: dict[str, Any
     summary="Slack interactivity door (Block Kit form modals, signature-authenticated)",
     tags=["channels"],
     response_model=None,
+    no_body_reason="Slack interactivity webhook: vendor ack",
 )
 async def slack_interactive(request: Request) -> Response:
     """Receive a Slack interactivity POST, verify it, and act on it.
@@ -600,10 +603,12 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     channel OWNS the guest correction (the ladder sends no separate notice, avoiding a
     double message) and renders it as the modal's inline Block-Kit error on RETRY_KEPT
     (the modal stays open). Outcome -> modal ack: FORWARDED closes the modal (the ladder
-    released the record); RETRY_KEPT shows the inline error under the first field (record
-    kept); NO_CORRELATION / BRIDGED (the ask is gone — the ladder released it and, on a
-    404, bridged the submission so it is never lost) show the expired notice; an
-    AnswerForwardError (5xx) propagates (loud 500, record kept).
+    released the record); BRIDGED_KEPT also closes it (the reply was bridged as a fresh
+    turn and the ask stays parked — no expired notice, which would be a lie); RETRY_KEPT
+    shows the inline error under the first field (record kept); NO_CORRELATION / BRIDGED
+    (the ask is gone — the ladder released it and, on a 404, bridged the submission so it
+    is never lost) show the expired notice; an AnswerForwardError (5xx) propagates (loud
+    500, record kept).
     """
     view = payload.get("view")
     if not isinstance(view, dict) or view.get("callback_id") != FORM_SUBMIT_CALLBACK_ID:
@@ -645,11 +650,19 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     if result.outcome is InboundAnswerOutcome.FORWARDED:
         # An empty body closes the modal.
         return JSONResponse({})
+    if result.outcome is InboundAnswerOutcome.BRIDGED_KEPT:
+        # A bridge-policy ask KEPT the correlation (still parked) and bridged this
+        # submission as a fresh turn — a digression, not the answer, carrying no guest
+        # notice. Closing the modal with an empty body is the accurate ack: the reply was
+        # consumed as a turn (the flow replies in-thread) and the parked ask stays
+        # answerable via its original message. The expired notice would be a lie — the ask
+        # is not gone.
+        logger.info("slack interactive: form %s reply bridged as a fresh turn; ask kept parked", interaction_id)
+        return JSONResponse({})
     if result.outcome is InboundAnswerOutcome.RETRY_KEPT:
         # The channel owns the correction: the modal stays open with an inline error
         # carrying the door's OWN reason, pinned under the door-named field's block when
-        # it is a declared schema property (restoring the pre-migration fidelity), else
-        # the first field.
+        # it is a declared schema property, else the first field.
         logger.warning("slack interactive: door rejected form %s (retry-in-place); record kept", interaction_id)
         error_text = result.retry_reason or _MODAL_RETRY_TEXT
         block = result.retry_field if _field_has_block(schema, result.retry_field) else first_block

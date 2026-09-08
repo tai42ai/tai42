@@ -13,7 +13,7 @@ from tai42_kit.settings import reset_all_settings
 from tai42_skeleton.connectors.oauth import crypto
 from tai42_skeleton.connectors.oauth.crypto import ConnectorEncryptionConfigError
 
-from .conftest import CID, CID2
+from .conftest import CID, CID2, TEST_KEK_B64
 
 
 def test_encrypt_decrypt_round_trip():
@@ -77,15 +77,44 @@ def test_decrypt_rejects_unknown_version_byte():
         crypto.decrypt(bytes(blob), connection_id=CID)
 
 
-def test_decrypt_fails_under_a_different_kek(monkeypatch):
-    # A blob written under key A cannot be read once CONNECTORS_KEK holds an
-    # unrelated key — it is dead, surfacing as InvalidTag (not silently readable).
-    blob = crypto.encrypt(b"payload", connection_id=CID)
-    other = base64.b64encode(bytes(range(96, 128))).decode("ascii")
-    monkeypatch.setenv("CONNECTORS_KEK", other)
+def test_decrypt_uses_a_previous_key_from_the_ring(monkeypatch):
+    # A blob written under key A still decrypts after CONNECTORS_KEK rotates to B,
+    # because A is retained in CONNECTORS_KEK_PREVIOUS — the decrypt ring tries it.
+    blob = crypto.encrypt(b"payload", connection_id=CID)  # under A (crypto_env default)
+    key_b = base64.b64encode(bytes(range(96, 128))).decode("ascii")
+    monkeypatch.setenv("CONNECTORS_KEK", key_b)
+    monkeypatch.setenv("CONNECTORS_KEK_PREVIOUS", TEST_KEK_B64)
+    reset_all_settings()
+    assert crypto.decrypt(blob, connection_id=CID) == b"payload"
+
+
+def test_decrypt_fails_when_no_ring_key_matches(monkeypatch):
+    # Once the old key is dropped from the ring (rotation converged, previous retired),
+    # a blob still under it is dead — surfacing as InvalidTag, never silently readable.
+    blob = crypto.encrypt(b"payload", connection_id=CID)  # under A
+    key_b = base64.b64encode(bytes(range(96, 128))).decode("ascii")
+    monkeypatch.setenv("CONNECTORS_KEK", key_b)
+    monkeypatch.delenv("CONNECTORS_KEK_PREVIOUS", raising=False)
     reset_all_settings()
     with pytest.raises(InvalidTag):
         crypto.decrypt(blob, connection_id=CID)
+
+
+def test_decrypt_reporting_key_flags_current_vs_previous(monkeypatch):
+    # The sweep helper reports whether the CURRENT key opened the blob: True under the
+    # current key, False once the blob is only openable by a retained previous key.
+    blob = crypto.encrypt(b"payload", connection_id=CID)  # under A (current)
+    plaintext, under_current = crypto.decrypt_reporting_key(blob, connection_id=CID)
+    assert plaintext == b"payload"
+    assert under_current is True
+
+    key_b = base64.b64encode(bytes(range(96, 128))).decode("ascii")
+    monkeypatch.setenv("CONNECTORS_KEK", key_b)
+    monkeypatch.setenv("CONNECTORS_KEK_PREVIOUS", TEST_KEK_B64)
+    reset_all_settings()
+    plaintext, under_current = crypto.decrypt_reporting_key(blob, connection_id=CID)
+    assert plaintext == b"payload"
+    assert under_current is False
 
 
 def test_encrypt_accepts_bytearray():
