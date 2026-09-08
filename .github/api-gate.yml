@@ -1,4 +1,4 @@
-# Release API-diff gate. Single mode switch, read by scripts/api_gate.py.
+# Release API-diff gate. Single mode switch, read by the tai42-api-gate tool.
 # The allowed bump for a breaking change depends on mode AND the new version's
 # major component (never version-blind):
 #   label-honesty: >=1.0 -> only a major may carry a breaking change; 0.x -> a

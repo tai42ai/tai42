@@ -181,7 +181,7 @@ jobs:
           read -r -d '' TABLE <<'EOF' || true
           contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov
           kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres|arq,celery,rq|cov
-          cli|core/cli|tai42-cli||--extra dev|arq,celery,rq|cov
+          cli|core/cli|tai42-cli||--extra dev --extra api-gate|arq,celery,rq|cov
           skeleton|core/skeleton|tai42-skeleton||--extra dev|arq,celery,rq|cov
           accounts-oidc|plugins/accounts-oidc|tai42-accounts-oidc|tai42_accounts_oidc|--extra dev|arq|cov
           accounts-postgres|plugins/accounts-postgres|tai42-accounts-postgres|tai42_accounts_postgres|--extra dev|arq|cov
@@ -875,8 +875,173 @@ jobs:
 
   # Single required check. Fails if any needed job failed or was cancelled;
   # skipped members do not fail it.
+  # Behavioural gate for the release train: boot the PREVIOUSLY PUBLISHED consumer
+  # distributions against the candidate tree and fail a non-major release that
+  # breaks any consumer's boot — the class the textual API-diff gate cannot see (a
+  # startup route/lifecycle refusal that removes no public symbol). Runs on the
+  # release-please train branch — the tree that gets tagged and published on merge —
+  # where the download token and consumer coordinates are configured; a fork, or a
+  # branch or fork without them, self-skips.
+  consumer-boot-gate:
+    needs: [reuse, changes]
+    if: >-
+      needs.reuse.outputs.should_skip != 'true' &&
+      (startsWith(github.head_ref, 'release-please--') || startsWith(github.ref_name, 'release-please--'))
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+    env:
+      # The consumer distributions and the private release they come from are
+      # configuration, never hard-coded here: the repo names the source via
+      # variables and reuses the existing cross-repo read token, so the public tree
+      # carries no private identifier and a fork without the variables self-skips.
+      CONSUMER_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+      CONSUMER_REPO: ${{ vars.CONSUMER_BOOT_GATE_REPO }}
+      CONSUMER_TAG_REGEX: ${{ vars.CONSUMER_BOOT_GATE_TAG_REGEX }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Full history + tags: the gate reads the governing package's bump against
+        # its previous released tag, the way the API-diff gate does.
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Download the previously published consumer wheel(s)
+        id: consumers
+        if: env.CONSUMER_REPO != '' && env.CONSUMER_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p consumer-wheels
+          regex="${CONSUMER_TAG_REGEX:-.}"
+          tag="$(gh release list -R "$CONSUMER_REPO" --limit 200 --json tagName,createdAt \
+            --jq "[.[] | select(.tagName | test(\"$regex\"))] | sort_by(.createdAt) | last | .tagName")"
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::error::no release in $CONSUMER_REPO matches /$regex/"; exit 1
+          fi
+          echo "resolved latest consumer release: $tag"
+          gh release download "$tag" -R "$CONSUMER_REPO" --pattern '*.whl' --dir consumer-wheels
+          args=""
+          for whl in consumer-wheels/*.whl; do
+            args="$args --consumer-wheel $whl"
+          done
+          if [ -z "$args" ]; then
+            echo "::error::consumer release $tag carries no wheel asset"; exit 1
+          fi
+          echo "wheels=$args" >> "$GITHUB_OUTPUT"
+      - name: Boot the published consumers against the candidate tree
+        if: steps.consumers.outputs.wheels != ''
+        env:
+          CONSUMER_BOOT_REDIS_URL: redis://localhost:6379
+          CONSUMER_BOOT_PG_HOST: localhost
+          CONSUMER_BOOT_PG_PASSWORD: postgres
+          WHEELS: ${{ steps.consumers.outputs.wheels }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # WHEELS is a deliberate multi-flag string.
+          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py \
+            --package tai42-skeleton --dir core/skeleton $WHEELS
+
+  # Enumerate the first-party plugins to boot: each at its latest published PyPI
+  # version that is NOT in this train's bump set (a plugin being released now boots
+  # its unpublished candidate code through its own lanes, not here). Emits a matrix
+  # so the boot job below runs one job per consumer.
+  consumer-boot-gate-plan:
+    needs: [reuse, changes]
+    if: >-
+      needs.reuse.outputs.should_skip != 'true' &&
+      (startsWith(github.head_ref, 'release-please--') || startsWith(github.ref_name, 'release-please--'))
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - id: plan
+        run: |
+          set -euo pipefail
+          matrix="$(uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py --emit-matrix)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  # Boot each first-party consumer ALONE against the candidate core — one job per
+  # consumer, so mutually exclusive infra plugins never share a manifest. A non-major
+  # release that breaks any consumer's boot fails here; the failing consumer, its
+  # version, routes and handlers are named.
+  consumer-boot-gate-first-party:
+    needs: [reuse, changes, consumer-boot-gate-plan]
+    if: >-
+      needs.reuse.outputs.should_skip != 'true' &&
+      needs.consumer-boot-gate-plan.result == 'success' &&
+      needs.consumer-boot-gate-plan.outputs.matrix != '' &&
+      fromJSON(needs.consumer-boot-gate-plan.outputs.matrix).include[0] != null
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.consumer-boot-gate-plan.outputs.matrix) }}
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Boot ${{ matrix.label }} against the candidate tree
+        env:
+          CONSUMER_BOOT_REDIS_URL: redis://localhost:6379
+          CONSUMER_BOOT_PG_HOST: localhost
+          CONSUMER_BOOT_PG_PASSWORD: postgres
+          REQ: ${{ matrix.req }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py \
+            --package tai42-skeleton --dir core/skeleton --consumer-req "$REQ"
+
   ci-ok:
-    needs: [reuse, changes, check, plugin-frontend, fleet, stable-resolution, e2e, ui-e2e]
+    needs: [reuse, changes, check, plugin-frontend, fleet, stable-resolution, e2e, ui-e2e, consumer-boot-gate, consumer-boot-gate-plan, consumer-boot-gate-first-party]
     if: always()
     runs-on: ubuntu-latest
     steps:

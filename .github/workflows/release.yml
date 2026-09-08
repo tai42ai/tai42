@@ -17,6 +17,34 @@ jobs:
     environment: pypi
     permissions:
       contents: read
+    services:
+      # Backing services for the consumer boot gate below: a skeleton release boots
+      # the previously published consumers against the candidate tree, which needs a
+      # Postgres and a Redis. Idle for every non-skeleton release (the gate step
+      # self-skips), and empty on each run.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+    env:
+      # Consumer coordinates are configuration, not hard-coded: the source repo is a
+      # variable and the read token is the existing cross-repo one, so the public
+      # tree names no private consumer and a fork without the variables self-skips.
+      CONSUMER_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+      CONSUMER_REPO: ${{ vars.CONSUMER_BOOT_GATE_REPO }}
+      CONSUMER_TAG_REGEX: ${{ vars.CONSUMER_BOOT_GATE_TAG_REGEX }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # Full history + tags: the API-diff gate loads the package at its previous
@@ -85,10 +113,56 @@ jobs:
         # step below are gated off for them.
         if: steps.resolve.outputs.descriptor != 'true'
         run: |
-          uv run --locked --only-group api-gate python scripts/api_gate.py \
+          uv run --locked --package tai42-cli --extra api-gate tai42-api-gate \
             --package "${{ steps.resolve.outputs.component }}" \
             --dir "${{ steps.resolve.outputs.dir }}" \
             --version "${{ steps.resolve.outputs.version }}"
+      - name: Download the previously published consumer wheel(s)
+        # The consumer boot gate applies to a skeleton release (the boot contract the
+        # startup route/lifecycle guards live in). Self-skips when the consumer
+        # coordinates are unset.
+        id: consumers
+        if: >-
+          steps.resolve.outputs.dir == 'core/skeleton' &&
+          env.CONSUMER_REPO != '' && env.CONSUMER_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p consumer-wheels
+          regex="${CONSUMER_TAG_REGEX:-.}"
+          tag="$(gh release list -R "$CONSUMER_REPO" --limit 200 --json tagName,createdAt \
+            --jq "[.[] | select(.tagName | test(\"$regex\"))] | sort_by(.createdAt) | last | .tagName")"
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::error::no release in $CONSUMER_REPO matches /$regex/"; exit 1
+          fi
+          echo "resolved latest consumer release: $tag"
+          gh release download "$tag" -R "$CONSUMER_REPO" --pattern '*.whl' --dir consumer-wheels
+          args=""
+          for whl in consumer-wheels/*.whl; do
+            args="$args --consumer-wheel $whl"
+          done
+          if [ -z "$args" ]; then
+            echo "::error::consumer release $tag carries no wheel asset"; exit 1
+          fi
+          echo "wheels=$args" >> "$GITHUB_OUTPUT"
+      - name: Consumer boot gate
+        # Boot the published consumers against the candidate tree before build: a
+        # non-major skeleton release that breaks any consumer's boot fails here,
+        # never reaching PyPI.
+        if: steps.consumers.outputs.wheels != ''
+        env:
+          CONSUMER_BOOT_REDIS_URL: redis://localhost:6379
+          CONSUMER_BOOT_PG_HOST: localhost
+          CONSUMER_BOOT_PG_PASSWORD: postgres
+          WHEELS: ${{ steps.consumers.outputs.wheels }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # WHEELS is a deliberate multi-flag string.
+          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py \
+            --package "${{ steps.resolve.outputs.component }}" \
+            --dir "${{ steps.resolve.outputs.dir }}" \
+            --version "${{ steps.resolve.outputs.version }}" $WHEELS
       - if: steps.resolve.outputs.descriptor != 'true'
         run: uv build --package "${{ steps.resolve.outputs.component }}" --out-dir dist
       - if: steps.resolve.outputs.descriptor != 'true'

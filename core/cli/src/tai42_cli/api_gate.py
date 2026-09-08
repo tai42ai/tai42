@@ -40,9 +40,13 @@ default into ``Field(default=<same>, …)``. Any tooling failure — an unreadab
 config, a mode the config does not name, a module that cannot be loaded — raises
 loudly; the gate never passes a release on a classification it could not compute.
 
-CLI::
+The tool is the ``tai42-api-gate`` console script (the ``api-gate`` extra of
+``tai42-cli`` carries its ``griffe`` and ``pyyaml`` dependencies). It runs against
+any repo laid out as this workspace is — ``--repo-root`` locates the tree (default:
+the working directory) and ``--config`` the mode file (default
+``<repo-root>/.github/api-gate.yml``)::
 
-    api_gate.py --package tai42-kit --dir core/kit --version 1.8.0
+    tai42-api-gate --package tai42-kit --dir core/kit --version 1.8.0
 """
 
 from __future__ import annotations
@@ -101,8 +105,7 @@ def _allowed_bumps(mode: str, new_major: int) -> frozenset[str]:
     _fail(f"api-gate config mode {mode!r} not one of {_MODES}")
 
 
-def _read_mode(repo_root: Path) -> str:
-    config_path = repo_root / ".github" / "api-gate.yml"
+def _read_mode(config_path: Path) -> str:
     if not config_path.is_file():
         _fail(f"api-gate config not found at {config_path}")
     mode = yaml.safe_load(config_path.read_text()).get("mode")
@@ -432,14 +435,18 @@ def _is_logger_binding(value: str | None) -> bool:
     return value is not None and _LOGGER_BINDING.match(value.strip()) is not None
 
 
-def _breakages(module: str, ref: str, search: str) -> list[str]:
-    # griffe is the heavy release-only dependency (api-gate group); import it
+def _breakages(module: str, ref: str, src_rel: str, repo_root: Path) -> list[str]:
+    # griffe is the heavy release-only dependency (api-gate extra); import it
     # lazily so the pure decision helpers can be imported and unit-tested in an
     # environment that does not carry it.
     import griffe
 
-    old = griffe.load_git(module, ref=ref, search_paths=[search])
-    new = griffe.load(module, search_paths=[search])
+    # The ref side loads from a worktree griffe checks out of ``repo_root`` (a
+    # repo-relative search path); the worktree side loads the current tree at the
+    # same path made absolute, so both sides are anchored to ``repo_root`` and
+    # never to the process's working directory.
+    old = griffe.load_git(module, ref=ref, repo=repo_root, search_paths=[src_rel])
+    new = griffe.load(module, search_paths=[repo_root / src_rel])
     explained: list[str] = []
     for b in griffe.find_breaking_changes(old, new):
         if isinstance(b.obj, griffe.Attribute) and _is_logger_binding(str(b.obj.value)):
@@ -479,10 +486,23 @@ def main() -> None:
     parser.add_argument("--package", required=True, help="release-please package-name")
     parser.add_argument("--dir", required=True, help="member dir under the repo root")
     parser.add_argument("--version", required=True, help="version being released")
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help="root of the tree to gate (default: the working directory)",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="api-gate mode file (default: <repo-root>/.github/api-gate.yml)",
+    )
     args = parser.parse_args()
 
-    repo_root = Path(__file__).resolve().parent.parent
-    mode = _read_mode(repo_root)
+    repo_root = args.repo_root.resolve()
+    config_path = args.config if args.config is not None else repo_root / ".github" / "api-gate.yml"
+    mode = _read_mode(config_path)
     src_rel = f"{args.dir}/src"
     src = repo_root / src_rel
 
@@ -500,7 +520,7 @@ def main() -> None:
     for module in sorted(old_modules - new_modules):
         findings.append(f"{module}: shipped top-level module was removed")
     for module in sorted(old_modules & new_modules):
-        findings.extend(_breakages(module, previous, src_rel))
+        findings.extend(_breakages(module, previous, src_rel, repo_root))
 
     header = f"{args.package}: {old_version} -> {args.version} ({bump} bump, mode={mode})"
     passes, reason = _gate_passes(mode, old_version, args.version, bool(findings))
