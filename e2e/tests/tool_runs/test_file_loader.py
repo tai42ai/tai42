@@ -1,4 +1,4 @@
-"""C7 — the ``file_loader`` builtin tool loads a resource from a storage id and
+"""The ``file_loader`` builtin tool loads a resource from a storage id and
 from an http(s) url and returns its extracted text.
 
 Drives the real tool through the real MCP door on ``core_stack`` (which mounts the

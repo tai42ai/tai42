@@ -1,4 +1,4 @@
-"""C7 — the real ``tai42-monitoring-langfuse`` plugin against the compose-provided
+"""The real ``tai42-monitoring-langfuse`` plugin against the compose-provided
 self-hosted Langfuse. Opt-in: collects only with ``TAI_E2E_MONITORING=1`` (the
 compose ``monitoring`` profile up); skipped at collection otherwise."""
 

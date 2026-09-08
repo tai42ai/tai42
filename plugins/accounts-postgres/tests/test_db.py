@@ -3,7 +3,7 @@
 The baseline is loaded through the kit runner's own discovery (the same path
 production uses) and asserted schema-equal to the accounts store the plugin
 reads and writes: the three tables, their unique constraints, and the two
-per-user indexes — with no ``ALTER ... ADD COLUMN`` backfill (greenfield: the
+per-user indexes — with no ``ALTER ... ADD COLUMN`` backfill (the
 baseline IS the schema). The gate is exercised with a faked ``migration_status``
 so the refusal RENDERING and WIRING are pinned without a live Postgres.
 """
@@ -105,7 +105,7 @@ def test_invites_table_hash_uniqueness_and_index():
 
 
 def test_baseline_folds_schema_into_create_table_with_no_alter_backfill():
-    # Greenfield migration model: the baseline IS the schema — no in-place upgrade
+    # The baseline IS the schema — no in-place upgrade
     # ALTER survives into it. A re-introduced backfill fails here without a live DB.
     assert "ADD COLUMN" not in _baseline_sql()
 

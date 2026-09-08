@@ -1,4 +1,4 @@
-"""§3b — the ``claude_code`` ask/park boundary and the turn-budget door.
+"""The ``claude_code`` ask/park boundary and the turn-budget door.
 
 The reachable, engine-agnostic legs over the identity-less ephemeral doors:
 
@@ -38,7 +38,7 @@ pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("claude_agent"),
-        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the §5 smoke",
+        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
 ]
 

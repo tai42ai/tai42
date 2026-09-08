@@ -197,8 +197,8 @@ async def test_route_create_seam_binds_extractor_to_the_operation(wired):
     param broke: the extractor's ``model_dump()`` always emits the key, so an operation
     signature missing it TypeErrors -> 500 on EVERY route create.
 
-    Once WITHOUT the key in the body (the default path that used to 500) and once WITH a
-    positive override (proving it now persists to the stored row)."""
+    Once WITHOUT the key in the body (the default path) and once WITH a
+    positive override (proving it persists to the stored row)."""
     from tai42_contract.app import tai42_app
 
     from tai42_skeleton.app import instance
@@ -1586,7 +1586,7 @@ async def test_delete_route_cascade_cancels_every_thread_park(wired, record_redi
     await _assert_park_cancelled(store, fake, interaction_id="ib", thread_id=thread_b)
 
 
-# -- the registered target bind validator (D-8: warn-then-error at bind) --------
+# -- the registered target bind validator (warn-then-error at bind) --------
 
 
 async def test_create_consults_the_registered_target_validator_and_refuses_on_messages(wired):

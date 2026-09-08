@@ -1,4 +1,4 @@
-"""C4 / G3 — a tool-extension applied on replica A. The manifest gains the mapping and
+"""A tool-extension applied on replica A. The manifest gains the mapping and
 A serves the branch locally; the apply's ``reload_config`` fan-out reaches every worker
 over the bus, so the backend runtime AND the sibling HTTP replica rebind the branch too.
 The test verifies that fan-out rebind and the ApplyResult report shape."""

@@ -1,4 +1,4 @@
-"""C6 + C7 — a human-in-the-loop ``ask_user`` blocks its caller on replica A, the
+"""A human-in-the-loop ``ask_user`` blocks its caller on replica A, the
 pending interaction is observed and answered via replica B, and the waiter wakes
 across workers (Redis blpop/rpush). The first flow raises the ask INSIDE a background
 tool run, so its add frame carries the submitting run id as ``origin`` (no

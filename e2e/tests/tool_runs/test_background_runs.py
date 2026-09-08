@@ -1,4 +1,4 @@
-"""C7 (P1) — a background tool-run started on replica A reaches its terminal
+"""A background tool-run started on replica A reaches its terminal
 state observable on replica B (run state lives in Redis; per-worker supervisors
 are an implementation detail the test must not see)."""
 

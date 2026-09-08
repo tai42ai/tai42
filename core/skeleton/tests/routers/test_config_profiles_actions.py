@@ -16,7 +16,7 @@ import pytest
 from tai42_skeleton.app.route_registry import load_all_routes
 
 # The pinned (method, path) → action-class for every profile door. The apply door is
-# a separate later wave and is intentionally absent.
+# covered separately and is intentionally absent here.
 _EXPECTED_ACTIONS: dict[tuple[str, str], str] = {
     ("GET", "/api/config/profiles"): "read",
     ("GET", "/api/config/profiles/{name}"): "secret",

@@ -504,7 +504,7 @@ async def test_update_api_tools_route_non_list_of_str_field_400(fake):
     assert fake.cm.written is None
 
 
-# -- the new mcp-status / manifest routes (C4 domain work) -------------------
+# -- the mcp-status / manifest routes -------------------
 
 
 def _query_req(query: str = "", **path_params) -> Request:

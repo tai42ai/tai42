@@ -129,7 +129,7 @@ def test_validation_error_is_422():
 
 
 def test_validation_error_422_omits_input_values():
-    # N4: the 422 lists the failing field path + error type, but never the rejected
+    # The 422 lists the failing field path + error type, but never the rejected
     # input value (a pydantic error entry carries it, and it could hold a secret).
     reg = OperationRegistry()
     _, handler = _register(reg)

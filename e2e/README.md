@@ -67,24 +67,24 @@ the URL points at an image without the modules.
 docker compose --profile agents-redis up -d
 ```
 
-## Seam classes
+## Bug classes
 
-| # | Bug class | Test dir |
-|---|-----------|----------|
-| C1 | Multiproc-metrics writer/reader split across processes | `tests/metrics/` |
-| C2 | Import-order / module-freeze of `prometheus_client` | `tests/metrics/` |
-| C3 | Cross-entrypoint lifecycle on the shared mmap dir | `tests/metrics/` |
-| C4 | Cross-worker registry divergence (sub-MCP, presets, tool-extensions) | `tests/crossworker/` |
-| C5 | Cross-process lost-update on shared config files | `tests/crossworker/` |
-| C6 | Real-Redis / real-Postgres semantics (rate limit, AC, interactions, connectors) | `tests/redis_semantics/`, `tests/interactions/`, `tests/connectors/` |
-| C7 | Cross-repo running-service contract (agents, webhooks, tool-runs, storage, monitoring) | `tests/agents/`, `tests/webhooks/`, ... |
-| C8 | Process-global socket-state bleed (proxy extension) | `tests/proxy/` |
-| C9 | Reload / control-plane fan-out divergence | `tests/reload/` |
-| P1 | Plugin-seam switch (backend / identity / storage variants, broker isolation) | `tests/backend/`, `tests/storage/` |
-| P2 | Infra failure injection (worker crash, Redis/Postgres outage) | `tests/failures/` |
-| P3 | Scheduling across backends (`schedule_task`, the scheduler process) | `tests/scheduling/` |
-| P4 | Correctness under width (4 uvicorn workers, ≥32 in-flight) | `tests/scale/` |
-| P5 | Tool extensions through the stack (cache, chain, monitor, ask_external, output_schema) | `tests/extensions/` |
+| Bug class | Test dir |
+|-----------|----------|
+| Multiproc-metrics writer/reader split across processes | `tests/metrics/` |
+| Import-order / module-freeze of `prometheus_client` | `tests/metrics/` |
+| Cross-entrypoint lifecycle on the shared mmap dir | `tests/metrics/` |
+| Cross-worker registry divergence (sub-MCP, presets, tool-extensions) | `tests/crossworker/` |
+| Cross-process lost-update on shared config files | `tests/crossworker/` |
+| Real-Redis / real-Postgres semantics (rate limit, AC, interactions, connectors) | `tests/redis_semantics/`, `tests/interactions/`, `tests/connectors/` |
+| Cross-repo running-service contract (agents, webhooks, tool-runs, storage, monitoring) | `tests/agents/`, `tests/webhooks/`, ... |
+| Process-global socket-state bleed (proxy extension) | `tests/proxy/` |
+| Reload / control-plane fan-out divergence | `tests/reload/` |
+| Plugin-switch (backend / identity / storage variants, broker isolation) | `tests/backend/`, `tests/storage/` |
+| Infra failure injection (worker crash, Redis/Postgres outage) | `tests/failures/` |
+| Scheduling across backends (`schedule_task`, the scheduler process) | `tests/scheduling/` |
+| Correctness under width (4 uvicorn workers, ≥32 in-flight) | `tests/scale/` |
+| Tool extensions through the stack (cache, chain, monitor, ask_external, output_schema) | `tests/extensions/` |
 
 ## Layout
 
@@ -98,18 +98,18 @@ docker compose --profile agents-redis up -d
 - `src/tai42_e2e_fixtures/` — SUT-SIDE modules the spawned server imports via its
   manifest: the probe tools (`tools.py`), the managed MCP server the fixture
   connector descriptors launch (`managed_mcp_server.py`), and the second value on
-  each pluggable axis — the PG-backed identity provider (`identity_provider.py`),
+  each pluggable variant — the PG-backed identity provider (`identity_provider.py`),
   the storage backend (`storage.py`), and the monitoring backend
   (`monitor_backend.py`). The fixture connector descriptors themselves ride the
   manifest `connectors` field (built in `tai42_e2e.manifests`).
-- `tests/` — the suites by seam class, plus `tests/harness/` self-tests.
+- `tests/` — the suites by bug class, plus `tests/harness/` self-tests.
 - `docs/adding-a-test.md` — the 6-step recipe for a new feature's e2e test.
 
-## Metrics-dir isolation (the C2 hard rule)
+## Metrics-dir isolation (the hard rule)
 
 The harness NEVER sets `PROMETHEUS_MULTIPROC_DIR` in a child env — stamping it
 is the entrypoint's own job (`activate_multiproc_env`) and is exactly what the
-C2 import-order tests verify. Per-stack (and per-replica) metrics dirs are
+import-order tests verify. Per-stack (and per-replica) metrics dirs are
 controlled entirely via `TMPDIR`: `MetricsSettings.prometheus_multiproc_dir`
 defaults to `<tempfile.gettempdir()>/tai42_prometheus`, so pointing a process's
 `TMPDIR` at a per-run-family dir gives that family its own multiproc dir with

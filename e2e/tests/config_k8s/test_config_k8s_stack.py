@@ -1,4 +1,4 @@
-"""B2 — config load + reload through the config-k8s provider against a fake apiserver.
+"""Config load + reload through the config-k8s provider against a fake apiserver.
 
 Replaces the boot-refusal-only coverage (``tests/fleet/test_boot_rules.py``, which
 only asserts a busless k8s boot is refused) with the positive path: a stack that BOOTS

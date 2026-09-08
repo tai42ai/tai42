@@ -11,13 +11,13 @@ Two more park-door invariants (asserted FIRST, before the async-resume leg, so t
 resume the resume leg spawns never drains the shared llm_stub from under them):
 
 * RETENTION BOUND — a park lives only as long as EVERY backing store: its checkpoint AND its
-  sandbox WORKSPACE volume. The bound is ``min(checkpoint, workspace)`` (§B3.1), so an ask
+  sandbox WORKSPACE volume. The bound is ``min(checkpoint, workspace)``, so an ask
   deadline beyond the workspace horizon (``now + session_ttl``) is refused LOUDLY at
   park-persist, zero index state written.
 * ``resume_checkpoint_id`` is UNHONORED on the durable deep agent — the durable WORKSPACE volume
-  cannot be forked alongside the checkpoint (§B3.3), so the run door rejects it loudly.
+  cannot be forked alongside the checkpoint, so the run door rejects it loudly.
 
-(The HARD sandbox dependency §B3.7 — a run with no provider raising ``SandboxUnavailableError`` —
+(The HARD sandbox dependency — a run with no provider raising ``SandboxUnavailableError`` —
 rides its own module, ``test_deep_agent_sandbox_required``, to keep the single checkpoint logical
 DB free of a second concurrent stack.)
 """
@@ -75,7 +75,7 @@ async def test_park_deadline_beyond_workspace_retention_is_refused(
 ) -> None:
     """A parked ask whose expiry outlives the run's retention horizon — bounded by the sandbox
     WORKSPACE volume (``now + session_ttl``, the default 86400s) — is refused LOUDLY at
-    park-persist, since a backing store would be swept before the ask resolves (§B3.1)."""
+    park-persist, since a backing store would be swept before the ask resolves."""
     stack = deep_agent_durable_stack
     thread_id = uniq("thread")
     question = uniq("question")
@@ -95,7 +95,7 @@ async def test_resume_checkpoint_id_is_unhonored(
     deep_agent_durable_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
     """``resume_checkpoint_id`` is unhonored on the durable deep agent (the workspace volume cannot
-    be forked alongside the checkpoint, §B3.3) — the run door rejects it loudly rather than
+    be forked alongside the checkpoint) — the run door rejects it loudly rather than
     silently forking."""
     stack = deep_agent_durable_stack
     llm_stub.reset()

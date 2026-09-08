@@ -13,7 +13,7 @@ a missing cookie, an unregistered token, and another visitor's registered sessio
 
 The web message door (the other half of a web conversation) bridges through
 ``conversations.accept``, which this backendless stack carries no backend for: that round
-trip is the bridge suite's ``test_l12_web_public_chat``.
+trip is the bridge suite's ``test_web_public_chat``.
 """
 
 from __future__ import annotations
@@ -385,7 +385,7 @@ async def test_notify_list_over_web_carries_tappable_options_on_the_card(
 
     # The tappable option list is durable: a reconnect replay carries it unchanged (a tap
     # sends the option text through the message door — the cross-worker round trip of that
-    # send is the bridge suite's ``test_l25_web_notify_options``).
+    # send is the bridge suite's ``test_web_notify_options``).
     replayed = await case.web.frames()
     assert any(
         event == "chat.media" and data["text"] == message and data["options"] == options for event, data in replayed

@@ -1,4 +1,4 @@
-"""C3 / M2 — cross-entrypoint lifecycle on the shared mmap dir. A metrics-server
+"""Cross-entrypoint lifecycle on the shared mmap dir. A metrics-server
 (reader) restart must lose nothing; a full run-family restart wipes exactly once
 before workers spawn."""
 

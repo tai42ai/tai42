@@ -1,4 +1,4 @@
-"""B6 — the resources-router behavioral profile.
+"""The resources-router behavioral profile.
 
 The route-coverage guard only proves ``/api/resources/get`` is MOUNTED
 (``tests/routing/test_default_router_coverage.py``); this profile boots a stack

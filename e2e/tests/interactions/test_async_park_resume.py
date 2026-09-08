@@ -1,4 +1,4 @@
-"""C6 + C7 — the async ``ask_user`` park lifecycle end to end, across a worker
+"""The async ``ask_user`` park lifecycle end to end, across a worker
 boundary.
 
 A flow driver (the ``e2e_async_park_flow`` probe) binds a resume continuation tool

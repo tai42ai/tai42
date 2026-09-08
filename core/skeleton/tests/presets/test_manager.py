@@ -887,8 +887,8 @@ def test_plain_preset_over_sandbox_exec_authors(pg: FakeVersioningPg):
         async with app.app_context(_sandbox_manifest()):
             mgr = app.preset_manager
             # A plain preset bakes the required ``argv``/``image`` as fixed constants. Authoring
-            # must SUCCEED through the branch-bind output-schema derivation (previously a
-            # ``NameError: name 'ExecResult' is not defined``).
+            # must SUCCEED through the branch-bind output-schema derivation, which resolves
+            # ``ExecResult`` in scope.
             await mgr.register("sbx_plain", "sandbox_exec", _SANDBOX_FIXED_KWARGS, [], "run a fixed command")
             assert "sbx_plain" in await app.tools.get_tools()
             # The preset inherits the base tool's ``ExecResult`` output schema.

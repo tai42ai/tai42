@@ -1,6 +1,6 @@
-"""C1 / M1 — the writer/reader split across processes: a tool call increments a
+"""The writer/reader split across processes: a tool call increments a
 counter in a real worker process; the separate metrics-server process scrapes it
-from the shared mmap dir. This single test is the one that catches M1 at its
+from the shared mmap dir. This single test is the one that catches that cross-process counter split at its
 root."""
 
 from __future__ import annotations

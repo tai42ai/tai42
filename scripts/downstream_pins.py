@@ -2,11 +2,11 @@
 """Check the fleet's downstream repos for a ``tai42-<core>`` pin that EXCLUDES a
 just-released CORE member version, and open a tracking issue on this repo when
 one does — so a downstream never goes red (or latent-stale) unnoticed after a
-core major/minor, the way it used to until a hand-audit caught it.
+core major/minor.
 
 The audited downstreams and the manifests to read are supplied by CONFIG
 (``DOWNSTREAM_PINS_MANIFESTS`` JSON, or a ``DOWNSTREAM_PINS_FILE`` path to the
-same) so this source names no specific private downstream; the CI workflow
+same) so this source names no specific dependent; the CI workflow
 injects the map from a repository variable. For each
 manifest we fetch it over the GitHub contents API, parse every requirement out
 of ``[project].dependencies`` / ``[project.optional-dependencies]`` /
@@ -25,7 +25,7 @@ Targets (which ``pkg==version`` pairs to test):
 
 On a violation we open — or, deduped by exact title, update — an issue titled
 ``downstream pin excludes <pkg> <ver>`` listing every offending repo/file/line/
-range. We NEVER edit a downstream repo: widening a downstream pin is that
+range. This never edits a downstream repo: widening a downstream pin is that
 downstream maintainer's call. Pure Python standard library + ``packaging``; the
 only side effects are HTTPS reads and the issue write.
 """
@@ -58,7 +58,7 @@ DRY_RUN = os.environ.get("DOWNSTREAM_PINS_DRY_RUN") == "1"
 
 def downstream_manifests() -> dict[str, list[str]]:
     """The downstream ``repo -> [manifest paths]`` map to audit, read from CONFIG so this
-    source names no specific private downstream. ``DOWNSTREAM_PINS_MANIFESTS`` carries the JSON
+    source names no specific dependent. ``DOWNSTREAM_PINS_MANIFESTS`` carries the JSON
     map inline; ``DOWNSTREAM_PINS_FILE`` points at a JSON file holding it (the inline var
     wins). Explicit, not discovered: the map is a reviewed configuration value, never scanned
     from a repo we were not told to read. Absent both, the map is empty and the sweep is a
@@ -250,12 +250,12 @@ def main() -> int:
         return 0
     downstream = downstream_manifests()
     if not downstream:
-        # We are past the ``no targets`` guard, so a release wave actually fired and a
+        # We are past the ``no targets`` guard, so a release actually fired and a
         # downstream pin audit IS expected — an empty/unset manifest map here is a
         # misconfiguration, not a benign no-op. Fail LOUD (::error:: + nonzero) rather than
         # silently skipping the audit and letting a stale downstream pin slip through green.
         print(
-            "::error::a release wave fired but no downstream manifests are configured "
+            "::error::a release fired but no downstream manifests are configured "
             "(set DOWNSTREAM_PINS_MANIFESTS or DOWNSTREAM_PINS_FILE); refusing to skip the pin audit."
         )
         return 1
@@ -267,8 +267,8 @@ def main() -> int:
     existing = {} if DRY_RUN else open_open_issues(token)
     for title, rows in sorted(violations.items()):
         upsert_issue(title, rows, token, existing)
-    # The issue is the durable signal; the run itself stays green so a release
-    # wave is never blocked by a downstream's own stale pin.
+    # The issue is the durable signal; the check itself stays green so a release
+    # is never blocked by a downstream's own stale pin.
     print(f"::warning::{len(violations)} stale downstream pin group(s); issue(s) opened/updated.")
     return 0
 

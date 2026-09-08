@@ -179,17 +179,15 @@ export async function seedCredential(page: Page, key: string = API_KEY): Promise
  * seconds before they answer; this reproduces that precondition deterministically instead
  * of racing it.
  *
- * ENGINE PARITY (why this used to be Firefox-only, and why it no longer is): Firefox's
- * Fetch resolves a streamed response's promise only once the FIRST body byte arrives
- * (Chromium resolves it on the headers). The interactions stream (`GET
- * /api/interactions/stream`) is a TAIL-ONLY SSE with no backlog, so on a freshly opened
- * inbox — whose question was already parked BEFORE the connect — it had nothing live to
- * send and its first body byte USED to be the periodic `: keepalive` comment (~15s). That
- * deferred Firefox's stream fetch, and the connect-time refetch it triggers, by a full
- * keepalive interval. The skeleton's interactions router now flushes an immediate
+ * ENGINE PARITY (Firefox vs Chromium): Firefox's Fetch resolves a streamed response's
+ * promise only once the FIRST body byte arrives (Chromium resolves it on the headers). The
+ * interactions stream (`GET /api/interactions/stream`) is a TAIL-ONLY SSE with no backlog,
+ * so on a freshly opened inbox — whose question was already parked BEFORE the connect — it
+ * has nothing live to send. The skeleton's interactions router flushes an immediate
  * `: connected` SSE comment at connect (see `_CONNECT_FRAME` there), so the first body byte
- * arrives in ~0.1s and BOTH engines resolve the stream fetch and land the resync promptly —
- * Firefox no longer waits for the keepalive.
+ * arrives in ~0.1s and BOTH engines resolve the stream fetch and land the resync promptly.
+ * Without it, Firefox would wait a full keepalive interval (~15s) for the periodic
+ * `: keepalive` comment.
  *
  * MECHANISM (correct on BOTH engines, and regardless of connect latency): the base GET and
  * the stream share `/api/interactions` (the stream is its `/stream` child). We track base

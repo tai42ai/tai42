@@ -1,4 +1,4 @@
-"""C7 — descriptor-only (``source='spec'``) connector install lifecycle. Opt-in:
+"""Descriptor-only (``source='spec'``) connector install lifecycle. Opt-in:
 collects only with ``TAI_E2E_MARKETPLACE=1``.
 
 iota is a yml-only OAuth connector and kappa a yml-only no-auth (``kind: none``)

@@ -420,7 +420,7 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
                 # the stalled-delivery sweep / a post-restart re-drive), where the turn's trace
                 # has closed — a ``current_trace_id()``-gated span would silently no-op. Carrying
                 # the turn's trace explicitly would need it stamped onto ``ConversationRecord``
-                # by the turn engine (``conversations/turn.py``), which the send-outcome wave
+                # by the turn engine (``conversations/turn.py``), which the send-outcome path
                 # does not own. So bridge sends get RECEIPTS-tier coverage only: the record's own
                 # ledger + ``record_delivery_status`` receipt path is the authoritative
                 # delivered-vs-accepted signal for bridge messages (a ConversationRecord flow

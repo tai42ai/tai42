@@ -38,7 +38,7 @@ class StaticCred(BaseModel):
 
     Baked into the CLEAN session env at create and a session-lifetime constant (no refresh
     path — a rotated value reaches the session only after it is recreated). For the coding
-    agent the model credential (§A1) is the canonical static entry.
+    agent the model credential is the canonical static entry.
     """
 
     model_config = ConfigDict(extra="forbid")

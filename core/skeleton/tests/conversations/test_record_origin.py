@@ -35,7 +35,7 @@ def _record(**overrides) -> ConversationRecord:
 
 
 def test_origin_is_required():
-    # Clean-break: origin carries no default, so a construction omitting it fails loudly and a
+    # Origin carries no default, so a construction omitting it fails loudly and a
     # stored blob missing it is rejected the same way.
     fields = {k: v for k, v in _record().model_dump().items() if k != "origin"}
     with pytest.raises(ValueError, match="origin"):

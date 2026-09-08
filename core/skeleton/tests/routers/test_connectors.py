@@ -115,7 +115,7 @@ async def test_providers_view(wiring, monkeypatch):
     assert "scopes_summary" not in p["sub_services"][0]
     assert "connections" not in p
     assert p["config_fields"][0]["key"] == "host"
-    # N3: the category groupings are served alongside the providers.
+    # The category groupings are served alongside the providers.
     assert body["categories"] == [{"id": "productivity", "display_name": "Productivity", "sort_order": 2}]
 
 
@@ -187,7 +187,7 @@ async def test_start_connect_validation_400(wiring):
 
 
 async def test_start_connect_validation_400_never_echoes_input_values(wiring):
-    # N4: a body that fails the schema on a field carrying a secret (config_values)
+    # A body that fails the schema on a field carrying a secret (config_values)
     # must answer 400 WITHOUT the rejected value — only the field path + error type.
     secret = "SUPER-SECRET-abc123"
     resp = await router.start_connect(

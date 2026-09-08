@@ -3,10 +3,10 @@
 A new feature's e2e test is ~30 lines on top of this fixed 6-step pattern. The
 design act is step 1; the rest is mechanical.
 
-## 1. Pick the seam class
+## 1. Pick the bug class
 
 Which cross-process invariant does the feature touch? Match it to a class in the
-README's seam table (C1-C9). If the feature introduces a NEW class of shared
+README's bug-class table. If the feature introduces a NEW class of shared
 state (a new thing mutated on one worker and read on another), add a row to that
 table first — that is the design decision; everything else follows.
 
@@ -45,10 +45,10 @@ count is the speed budget. The profiles:
 
 Only add a `build_*_stack` in `manifests.py` when the feature needs a manifest /
 env shape no profile has — and add it to `_ALL_BUILDERS` in
-`tests/harness/test_stack_lifecycle.py`, which sweeps EVERY profile for the C2
+`tests/harness/test_stack_lifecycle.py`, which sweeps EVERY profile for the metrics-dir
 rule.
 
-## 2b. Respect the variant axes
+## 2b. Respect the variant dimensions
 
 A stack is rendered through a plugin-variant triple (`TAI_E2E_BACKEND` /
 `TAI_E2E_IDENTITY` / `TAI_E2E_STORAGE`; see the README). A spec must never

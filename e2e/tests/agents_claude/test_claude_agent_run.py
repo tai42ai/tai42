@@ -1,4 +1,4 @@
-"""§3b — a full ``claude_code`` turn over the identity-less ephemeral doors.
+"""A full ``claude_code`` turn over the identity-less ephemeral doors.
 
 Each leg boots a fresh stack wired to a scripted runner (the fake sandbox runs
 ``python -m tai_runner`` as a real subprocess, so the whole exec path — framing, the
@@ -37,12 +37,12 @@ from tai42_e2e.stack import TaiStack
 from ._claude_support import CLAUDE_RUN_PATH, claude_stack, error_text, frames_of_type, run_sse
 
 # The stack runs no backend worker; the scripted runner is the ``claude_agent`` MOCK leg, so
-# this module steps aside when that seam is real (the real turn is the §5 smoke).
+# this module steps aside when that seam is real (the real turn is the real-vendor smoke).
 pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("claude_agent"),
-        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the §5 smoke",
+        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
 ]
 

@@ -1,4 +1,4 @@
-"""C3 / M3 + M4 — the three process kinds resolve ONE absolute multiproc dir
+"""The three process kinds resolve ONE absolute multiproc dir
 regardless of the working directory each launched from, and backend-executed
 increments carry ``runtime="backend"``."""
 

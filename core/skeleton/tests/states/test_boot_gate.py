@@ -3,7 +3,7 @@
 The ``states`` component auto-binds ``default`` (like ``skeleton``), so a deployment with
 no Postgres must NOT have the boot-time schema gate raise and abort startup — the gate is a
 no-op while the component is unconfigured, and every door refuses 501
-``states-not-configured`` (D-13 / §4.3)."""
+``states-not-configured``."""
 
 from __future__ import annotations
 

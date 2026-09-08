@@ -1,13 +1,13 @@
-"""F3 — the settings-profile polish doors over the REAL versioned store.
+"""The settings-profile polish doors over the REAL versioned store.
 
 Runs against the agents stack (auth OFF), which carries the skeleton component store the
 profile documents persist in — the same store the preset doors exercise. The apply
-pipeline itself is certified by ``test_flip``; this suite drives the CRUD / versioning /
+pipeline itself is verified by ``test_flip``; this suite drives the CRUD / versioning /
 diff / refusal contracts the doors declare, plus the resolved-manifest no-leak posture
 (``GET /api/manifest`` serves the PRESERVED view).
 
 The action-class fence each profile route declares (list ``read``; get/version/diff
-``secret``; put/delete/rollback/apply ``fenced``) is certified over an auth-ON stack by
+``secret``; put/delete/rollback/apply ``fenced``) is verified over an auth-ON stack by
 ``access_control/test_action_class_surface.py`` — the sanctioned action-class surface.
 """
 
@@ -144,7 +144,7 @@ async def test_key_material_key_refused(agents_stack: TaiStack, uniq: Callable[[
     """A profile that CHANGES a ``key_material`` field is refused DISTINCTLY from the X-band
     rule — a key_material field may be ``hot`` (not X-band) yet its VALUE must never be
     rotated through a profile; the refusal names the key and points at out-of-band rotation.
-    (An UNCHANGED carry is allowed — certified at the unit level; here we drive the CHANGE
+    (An UNCHANGED carry is allowed — verified at the unit level; here we drive the CHANGE
     case.) The probe fixture registers ``E2E_PROBE_SECRET_KEY_MATERIAL`` on every leg so this
     always has a target."""
     api = agents_stack.api()

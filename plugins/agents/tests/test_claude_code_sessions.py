@@ -225,7 +225,7 @@ def test_held_lease_busy_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.usefixtures("fake_redis")
 def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    # R4: a proxied tool that async-parks returns the generic SuspendedInteraction sentinel;
+    # A proxied tool that async-parks returns the generic SuspendedInteraction sentinel;
     # _on_tool_call recognizes it by TYPE and drives the SAME park tail the agent's own ask
     # takes — persist the durable index, stop the runner, surface one SuspendedFinal.
     _settings(monkeypatch)
@@ -362,7 +362,7 @@ def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> Non
 
 @pytest.mark.usefixtures("fake_redis")
 def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch: pytest.MonkeyPatch) -> None:
-    # R4 END-TO-END: a REAL async ask — one that ENFORCES the resume-continuation contract, NOT a
+    # END-TO-END: a REAL async ask — one that ENFORCES the resume-continuation contract, NOT a
     # stub that unconditionally returns a sentinel — parks ONLY because the threaded drive now
     # binds the resume continuation; ``agent_resume`` then rebuilds the parked turn and drives it
     # to a clean terminal. Without the drive's continuation binding the ask would refuse loudly
@@ -439,7 +439,7 @@ def test_park_persists_a_resumable_index_entry(monkeypatch: pytest.MonkeyPatch, 
     assert entry["thread_id"] == "t9"
 
 
-# ---- §A3.8 crash-after-terminal idempotence record ----------------------------------------
+# ---- crash-after-terminal idempotence record ----------------------------------------
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -448,7 +448,7 @@ def test_resume_terminal_record_dedups_a_redelivery(monkeypatch: pytest.MonkeyPa
     ``.runner/terminal/<superstep_id>.json`` record; a redelivered resume (the winner crashed
     between the terminal and the index finalize) reads that record and re-produces the SAME
     output WITHOUT re-driving the SDK session — proven by swapping in a stub that would return a
-    DIFFERENT terminal if it ran, and asserting the recorded output is returned instead (§A3.8)."""
+    DIFFERENT terminal if it ran, and asserting the recorded output is returned instead."""
     _settings(monkeypatch)
     app = build_local_app()
     rebuild = {"thread_id": "tr", "options_snapshot": _RESUME_SNAPSHOT}
@@ -475,7 +475,7 @@ def test_resume_terminal_record_dedups_a_redelivery(monkeypatch: pytest.MonkeyPa
     assert b"done-once" in raw
 
 
-# ---- §A3.9(iii) transcript-content redaction ----------------------------------------------
+# ---- transcript-content redaction ----------------------------------------------
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -516,7 +516,7 @@ def test_transcript_redaction_failure_raises_loudly(monkeypatch: pytest.MonkeyPa
         _run(app, user_message="hi", thread_id="tfail")
 
 
-# ---- resume session-id gate + malformed persisted session id (§A4) ------------------------
+# ---- resume session-id gate + malformed persisted session id ------------------------
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -558,7 +558,7 @@ def test_malformed_persisted_session_id_raises(monkeypatch: pytest.MonkeyPatch, 
         asyncio.run(_turn_then_corrupt())
 
 
-# ---- §A3.8 forged / mismatched terminal record is treated as absent -----------------------
+# ---- forged / mismatched terminal record is treated as absent -----------------------
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -572,7 +572,7 @@ def test_malformed_persisted_session_id_raises(monkeypatch: pytest.MonkeyPatch, 
     ],
 )
 def test_forged_terminal_record_is_ignored_and_redrives(monkeypatch: pytest.MonkeyPatch, forge: bytes) -> None:
-    """A resume reads the durable §A3.8 record only when it schema-validates AND its
+    """A resume reads the durable record only when it schema-validates AND its
     ``superstep_id`` matches; a forged or mismatched record is treated as ABSENT, so the resume
     RE-DRIVES rather than returning garbage (agent.py ~741-744)."""
     _settings(monkeypatch)

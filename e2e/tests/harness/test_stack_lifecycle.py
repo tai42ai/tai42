@@ -1,6 +1,6 @@
 """Harness self-tests — keep the harness honest: a stack boots and tears down
 leak-free, and no profile's env ever carries ``PROMETHEUS_MULTIPROC_DIR`` (the
-C2 hard rule)."""
+metrics-dir hard rule)."""
 
 from __future__ import annotations
 

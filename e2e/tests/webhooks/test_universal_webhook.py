@@ -1,4 +1,4 @@
-"""C7 (P1) — a hook bound on replica A fires its tool from a universal-webhook
+"""A hook bound on replica A fires its tool from a universal-webhook
 delivery on replica B; and the real github verifier locks a topic to signed
 deliveries."""
 

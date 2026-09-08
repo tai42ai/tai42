@@ -489,7 +489,7 @@ class ConfigService:
         if set(final) != set(stored_marks):
             changes[_SECRET_MARKS_VAR] = ",".join(final)
 
-    # -- Profile apply (C5) ----------------------------------------------------
+    # -- Profile apply ----------------------------------------------------
 
     async def apply_replace_env(
         self,
@@ -501,7 +501,7 @@ class ConfigService:
         orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
         release_llm_pools: Callable[[], Awaitable[None]] = _release_llm_pools,
     ) -> ProfileApplyOutcome:
-        """Apply a settings profile: the C5 env-write-LAST reload pipeline.
+        """Apply a settings profile: the env-write-LAST reload pipeline.
 
         Ordered so a failed build leaves the STORE untouched and the old surface serving
         (``os.environ`` restored exactly by :func:`build_and_swap_epoch`):
@@ -697,7 +697,7 @@ class ConfigService:
 
     def _validate_replace(self, profile_env: dict[str, str]) -> None:
         """Validate a whole-env REPLACE (a settings-profile apply) before it persists —
-        the C5 apply's validate-before-persist entry, mirroring :meth:`apply_replace`.
+        the apply's validate-before-persist entry, mirroring :meth:`apply_replace`.
 
         Refuses any X-band key in the profile's DECLARED payload (NEVER the post-carry
         effective env — the applier legitimately CARRIES the whole X band across

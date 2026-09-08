@@ -2,7 +2,7 @@
 
 The direct/host provider gives NO isolation, so it accepts EXACTLY isolation ``none``
 and REJECTS anything stronger LOUDLY — never a silent downgrade of a ``container`` / ``vm``
-request to a bare host process (PLAN_9; the ``none|container|vm`` Literal).
+request to a bare host process (the ``none|container|vm`` Literal).
 
 The kit create chokepoint bakes the operator ISOLATION FLOOR into every spec's effective
 isolation before the provider primitive runs, so the effective tier the provider must honor

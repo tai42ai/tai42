@@ -1,4 +1,4 @@
-"""§3e — the ``claude_code`` model-cost emission (the billing enabler's claude half).
+"""The ``claude_code`` model-cost emission (the billing enabler's claude half).
 
 ``claude_code`` drives the Claude Agent SDK INSIDE the sandbox, so its model calls bypass the
 platform ``get_llm_async`` meter entirely. To stay billable it emits the SDK-reported
@@ -30,7 +30,7 @@ pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("claude_agent"),
-        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the §5 smoke",
+        reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
 ]
 

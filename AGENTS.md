@@ -53,7 +53,7 @@ per-kind duplicate test.
 
 ## Rules
 
-- No `CHANGELOG.md` edits: notes are generated onto the GitHub Release.
+- Release notes are generated onto the GitHub Release.
 - Loud errors: a failure fails the run. No silent fallbacks, no `|| true`, no
   swallowed exceptions, no compatibility shims.
 - The workflows under `.github/workflows/` are the source of truth for commands;

@@ -714,7 +714,7 @@ _UNHONORED_CASES = [
     ("strategy", "vote"),
     ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
     # The durable sandbox WORKSPACE cannot be forked alongside the checkpoint, so a set
-    # resume_checkpoint_id is unhonored (loud reject) on the durable deep agent (§B3.3).
+    # resume_checkpoint_id is unhonored (loud reject) on the durable deep agent.
     ("resume_checkpoint_id", "cp-7"),
 ]
 
@@ -778,7 +778,7 @@ def test_reject_unhonored_permits_empty_collection_param(param: str, empty: obje
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is now unhonored (B3.3), not a memory key
+@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is not a memory key (unhonored)
 def test_run_rejects_blank_memory_key(key: str, blank: str) -> None:
     """A present-but-blank memory key is malformed — it would silently share a
     checkpoint namespace across runs — so run raises rather than minting/overlaying it."""
@@ -788,7 +788,7 @@ def test_run_rejects_blank_memory_key(key: str, blank: str) -> None:
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is now unhonored (B3.3), not a memory key
+@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is not a memory key (unhonored)
 def test_astream_rejects_blank_memory_key(key: str, blank: str) -> None:
     """Parity with run: astream rejects a present-but-blank memory key loudly."""
     with pytest.raises(ValueError, match=rf"langchain_deep_agent\.astream: {key} must be a non-empty string"):
@@ -797,7 +797,7 @@ def test_astream_rejects_blank_memory_key(key: str, blank: str) -> None:
 
 
 @pytest.mark.parametrize("value", [123, ["x"]])
-@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is now unhonored (B3.3), not a memory key
+@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is not a memory key (unhonored)
 def test_run_rejects_non_string_memory_key(key: str, value: Any) -> None:
     """A non-string memory key is a type violation — it cannot name a checkpoint
     namespace — so run raises TypeError naming the offending param and the received
@@ -810,7 +810,7 @@ def test_run_rejects_non_string_memory_key(key: str, value: Any) -> None:
 
 
 @pytest.mark.parametrize("value", [123, ["x"]])
-@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is now unhonored (B3.3), not a memory key
+@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is not a memory key (unhonored)
 def test_astream_rejects_non_string_memory_key(key: str, value: Any) -> None:
     """Parity with run: astream rejects a non-string memory key with a TypeError naming
     the offending param and the received type."""

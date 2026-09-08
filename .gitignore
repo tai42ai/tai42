@@ -25,7 +25,7 @@ tai-e2e-studio-*/
 .env
 .env.*
 !.env.example
-# filled real-vendor e2e credentials live only on the creds host, never tracked
+# filled real-vendor e2e credentials, never tracked
 REAL_E2E_CREDENTIALS.env
 !REAL_E2E_CREDENTIALS.env.example
 
@@ -36,6 +36,3 @@ site/
 
 # pytest --basetemp scratch of the e2e suites (CI and host runs)
 .stacks-tmp*/
-
-# Local untracked banned-terms list for the naming guards (never committed).
-banned-terms.txt

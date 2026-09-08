@@ -1,4 +1,4 @@
-"""C6 — access control across replicas: a key provisioned on A authorizes on B
+"""Access control across replicas: a key provisioned on A authorizes on B
 immediately (the selected identity provider reads its records fresh per call, from
 whatever store it owns), and revocation propagates; concurrent disjoint-field policy
 edits are both atomic against the Postgres policy store."""

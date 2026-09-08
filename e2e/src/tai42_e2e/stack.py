@@ -541,7 +541,7 @@ class TaiStack:
         if "PROMETHEUS_MULTIPROC_DIR" in env:
             raise RuntimeError(
                 "the harness must never set PROMETHEUS_MULTIPROC_DIR in a child env; "
-                "the metrics dir is controlled via TMPDIR so the entrypoint stamps it (C2)"
+                "the metrics dir is controlled via TMPDIR so the entrypoint stamps it"
             )
         # A per-process CWD override still needs load_dotenv to find .env, so the env
         # carries the config dir explicitly.

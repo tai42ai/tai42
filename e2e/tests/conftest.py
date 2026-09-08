@@ -222,7 +222,7 @@ def default_router_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory)
 @pytest.fixture(scope="module")
 def api_router_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
     """A stack booted HEADLESS (``default_routers="api"`` with no ``routers_modules``)
-    — the loader mounts the default API routers but NOT the SPA catch-all. The Q2
+    — the loader mounts the default API routers but NOT the SPA catch-all. The router-modes
     boot test asserts ``/api/*`` answers while ``/`` has no SPA shell."""
     yield from _boot(infra, tmp_path_factory.mktemp("api-router"), build_api_router_stack)
 
@@ -230,7 +230,7 @@ def api_router_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> 
 @pytest.fixture(scope="module")
 def minimal_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
     """The smallest bootable stack (``default_routers="none"`` with an explicit
-    four-router list) — the Q2 boot test uses it as the opt-out archetype: a listed
+    four-router list) — the router-modes boot test uses it as the opt-out archetype: a listed
     router mounts, a defaulted-but-unlisted router (e.g. ``/api/backup``) stays 404."""
     yield from _boot(infra, tmp_path_factory.mktemp("minimal"), build_minimal_stack)
 

@@ -1,4 +1,4 @@
-"""C7 — backend identity plus the bus-backed fleet doors: identity, the live worker
+"""Backend identity plus the bus-backed fleet doors: identity, the live worker
 census, the fleet reload-config op (all workers + a bogus target), the admin fence on
 the reload door, and the honest busless answers on a stack that registers no backend.
 

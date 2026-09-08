@@ -1,4 +1,4 @@
-"""C2 / M1 mechanism — the multiproc env must be frozen before the first
+"""The multiproc env must be frozen before the first
 ``prometheus_client`` import in EVERY entrypoint. The probe returns the frozen
 value class from inside each real process; ``MutexValue`` anywhere is the
 regression, caught by name."""

@@ -1,4 +1,4 @@
-"""§3d — configurable crash-resume for a detached ``claude_code`` run (claude side).
+"""Configurable crash-resume for a detached ``claude_code`` run (claude side).
 
 Crash-resume (the ``crash_resume`` setting) re-invokes a recycled DETACHED run at-least-once:
 a detached run enters via the TRIGGER door (which binds an execution identity and keeps its

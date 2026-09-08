@@ -1,4 +1,4 @@
-"""B3 — the four SHIPPED connector descriptors register from the manifest and mount.
+"""The four SHIPPED connector descriptors register from the manifest and mount.
 
 The connectors legs otherwise register only the fixture providers (built in
 ``tai42_e2e.manifests`` on the manifest ``connectors`` field). This leg carries the four

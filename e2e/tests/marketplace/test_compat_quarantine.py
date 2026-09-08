@@ -1,4 +1,4 @@
-"""C7 — skeleton ↔ tai42-marketplace registry over HTTP. Opt-in: collects only with
+"""Skeleton ↔ tai42-marketplace registry over HTTP. Opt-in: collects only with
 ``TAI_E2E_MARKETPLACE=1``.
 
 Boot quarantine: a skeleton booted with an INSTALLED plugin whose declared

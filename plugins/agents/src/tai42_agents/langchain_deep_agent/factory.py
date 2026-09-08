@@ -348,7 +348,7 @@ async def build_langchain_deep_agent(
 
     ``session`` is the acquired durable sandbox session for a run/astream drive: when set the
     scratch backend is a :class:`~tai42_agents.langchain_deep_agent.sandbox_backend.SandboxSessionBackend`
-    over the workspace VOLUME (§B2); when ``None`` (the append path) it stays the non-sandbox
+    over the workspace VOLUME; when ``None`` (the append path) it stays the non-sandbox
     ``StateBackend`` — the hard sandbox dependency lives at the run/astream door, not here.
     """
     subagent_specs = list(subagents or [])

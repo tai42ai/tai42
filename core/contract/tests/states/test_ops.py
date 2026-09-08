@@ -103,7 +103,7 @@ def test_non_dict_op_is_refused():
 
 
 # --------------------------------------------------------------------------- #
-# resource caps (cold-review L4)                                               #
+# resource caps                                                                #
 # --------------------------------------------------------------------------- #
 def test_path_longer_than_the_segment_cap_is_refused():
     # 128 segments is far beyond any real document; past it the only effect is
@@ -172,7 +172,7 @@ def test_validate_op_accepts_a_guarded_op_and_validates_its_shape():
         validate_op({"op": "set", "path": ["x"], "value": 1, "guard": {"path": ["writer"]}})
 
 
-# -- keyed validate_op refusals (C2 / C3 / key-type / "-") -------------------
+# -- keyed validate_op refusals (value shape / key field / key type / "-") ----
 def test_validate_op_accepts_well_formed_keyed_ops():
     s = _set_by_key(["items"], "id", {"id": "a", "v": 1})
     r = _remove_by_key(["items"], "id", "a")

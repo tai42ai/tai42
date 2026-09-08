@@ -1,4 +1,4 @@
-"""C6 + C7 (P1) — OAuth connect started on replica A, completed on replica B,
+"""OAuth connect started on replica A, completed on replica B,
 against the stub IdP; the stored token is encrypted at rest; a concurrent refresh
 takes the Redis lock exactly once.
 

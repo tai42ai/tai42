@@ -28,7 +28,7 @@ on:
 permissions:
   contents: read
 
-# One re-pin at a time; a release wave's burst of tags collapses to a single
+# One re-pin at a time; a burst of release tags collapses to a single
 # convergent re-pin. Never cancel an in-flight re-pin PR mid-open (matches
 # release-please.yml's release concurrency posture).
 concurrency:
@@ -97,7 +97,7 @@ jobs:
           git commit -m "$title" -m "$body"
           git push --force origin "$branch"
           # Open the PR only if one is not already open for this branch (a prior
-          # run in the same wave may have opened it), then enable auto-merge so the
+          # run may have opened it), then enable auto-merge so the
           # range-only re-pin lands the moment required checks pass. This is a
           # deps-fix PR, not a version release train, so it carries no draft gate;
           # merging it later cuts patch releases through the drafted release train.

@@ -1,4 +1,4 @@
-"""Item B — the channel cross-worker loop, per medium (telegram/slack/twilio).
+"""The channel cross-worker loop, per medium (telegram/slack/twilio).
 
 ``ask_user(channel=...)`` blocks a tool call on replica A; the channel plugin
 delivers ONE outbound send through its provider stub; a GENUINELY-signed inbound

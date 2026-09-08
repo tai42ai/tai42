@@ -70,7 +70,7 @@ class ScriptedChatModel(BaseChatModel):
 
 # A park deadline comfortably WITHIN the durable-workspace retention horizon (session_ttl,
 # 24h by default): the deep agent's run now acquires a persistent workspace whose idle-reap TTL
-# bounds the park's retention to min(checkpoint, workspace) (§B3.1), so a full-run park must
+# bounds the park's retention to min(checkpoint, workspace), so a full-run park must
 # carry an ask deadline within it — a None-deadline ("wait forever") park is now correctly
 # refused because the workspace would reap first.
 _WITHIN_HORIZON = datetime.now(UTC) + timedelta(hours=1)

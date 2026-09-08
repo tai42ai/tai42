@@ -161,7 +161,7 @@ def test_reset_registry_clears_only_the_accounts_map():
     with pytest.raises(KeyError):
         get_accounts_provider_factory("fake")
     assert iter_accounts_provider_factories() == []
-    # decision 5b: the accounts reset touches ONLY the accounts map — the identity
+    # The accounts reset touches ONLY the accounts map — the identity
     # registry is reset separately by the application's start(), so the dual
     # registration survives an accounts-only reset.
     assert get_identity_provider_factory("fake") is _fake_factory

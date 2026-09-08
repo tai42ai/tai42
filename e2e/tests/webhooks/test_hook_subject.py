@@ -12,7 +12,7 @@ Over ``replicas_stack`` (the webhook home, backend ON, access control OFF): a ho
   the key fails the fire loudly and writes no record.
 - ``test_hook_keyed_write_under_a_traced_mount_stamps_trace`` — the same fire, but the op
   writes under a mount whose module traces, so each written item carries the platform's
-  ``_trace`` stamp (meta / run / at), the same stamp any consumer's write gets (D-3: the platform
+  ``_trace`` stamp (meta / run / at), the same stamp any consumer's write gets (the platform
   stamps ``_trace`` under a traced mount for EVERY door, not only one consumer's).
 """
 
@@ -130,7 +130,7 @@ async def test_hook_keyed_write_under_a_traced_mount_stamps_trace(
     module = uniq("trace-mod").replace("_", "-")
     await _declare_state(api, state)
     # A traced module lands ``a.items`` (each item admits ``_trace``); a write under the
-    # mount is ``_trace``-stamped by the platform for EVERY door (D-3).
+    # mount is ``_trace``-stamped by the platform for EVERY door.
     await api.put(
         f"/api/state-modules/{module}",
         json={

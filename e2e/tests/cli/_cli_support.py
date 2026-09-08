@@ -1,4 +1,4 @@
-"""B7 support — the CLI stack builder and the subprocess runner.
+"""The CLI stack builder and the subprocess runner.
 
 A bare-name sibling module (the suite's convention). The stack mounts a broad
 router surface with access control ON and a backend + scheduler running, so one

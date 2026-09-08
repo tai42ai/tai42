@@ -1,4 +1,4 @@
-"""B7 — the CLI-coverage stack fixture.
+"""The CLI-coverage stack fixture.
 
 Boots the broad access-controlled stack (``_cli_support.build_cli_stack``) once,
 seeded with a root key so the CLI authenticates over ``TAI_API_KEY``. The spec runs

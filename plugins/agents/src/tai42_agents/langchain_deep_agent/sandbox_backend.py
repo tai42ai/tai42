@@ -231,7 +231,7 @@ def build_sandbox_backend(session: SandboxSession, inline_skills: dict[str, str]
     workspace volume, skills read-only over the template store.
 
     ``default`` (everything except skills) is a :class:`SandboxSessionBackend` over ``session``
-    — the ``StateBackend``→``SandboxSessionBackend`` swap (§B2), which makes deepagents' built-in
+    — the ``StateBackend``→``SandboxSessionBackend`` swap, which makes deepagents' built-in
     ``execute`` tool a LIVE durable shell and moves scratch out of graph state onto the volume.
     ``routes={SKILLS_ROOT: skills_backend}`` is unchanged from the non-sandbox
     :func:`~tai42_agents.langchain_deep_agent.backend.build_backend`: skills stay read-only over
