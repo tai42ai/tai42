@@ -87,10 +87,11 @@ EXPECTED_FACADE = {
     # extensions (2)
     "extension",
     "available_extensions",
-    # http (3)
+    # http (4)
     "middleware",
     "custom_route",
     "mount_base",
+    "use_raw_path_key",
     # clients (2)
     "client_ctx",
     "shutdown_clients",
@@ -271,11 +272,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 113 (sub-protocol, member) pairs over 109 distinct names — ``store`` is exposed
+    # 114 (sub-protocol, member) pairs over 110 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 109, f"union={len(union)}"
-    assert total == 113 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 110, f"union={len(union)}"
+    assert total == 114 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_four_namespaces():
