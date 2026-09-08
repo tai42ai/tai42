@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from tai42_contract.app.responses import OpaqueJson
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
@@ -69,7 +70,7 @@ def _record(
         authed=not public,
         action=action,
         request_model=None,
-        response_model=None,
+        response_model=OpaqueJson,
         owner=CORE_OWNER,
         public=public,
     )

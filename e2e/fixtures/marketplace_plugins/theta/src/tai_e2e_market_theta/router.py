@@ -16,6 +16,7 @@ import os
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import OpaqueJson
 
 
 @tai42_app.http.custom_route(
@@ -23,7 +24,7 @@ from tai42_contract.app import tai42_app
     methods=["GET"],
     summary="Theta fixture catch route",
     tags=["e2e-theta"],
-    response_model=None,
+    response_model=OpaqueJson,
 )
 async def theta_catch(request: Request) -> Response:
     """Return a fixed marker payload identifying the theta fixture router."""
