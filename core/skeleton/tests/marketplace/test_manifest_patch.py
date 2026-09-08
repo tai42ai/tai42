@@ -133,19 +133,40 @@ def test_apply_studio_plugin_appends_the_package_name_not_the_module() -> None:
     assert manifest["studio_plugins"] == ["tai-studio-ext"]
 
 
-def test_apply_scalar_backend_sets_the_slot() -> None:
-    spec = make_spec(provides=[_item("backend", "be", "pkg.backend")])
+def test_apply_scalar_backend_sets_the_slot_to_the_package_root() -> None:
+    # The descriptor names the impl submodule where the Backend class lives; the
+    # slot must hold the top-level import package, whose __init__ registers the
+    # provider and its sibling tool/extension modules that the skeleton whitelists
+    # under that root. Naming the submodule leaves the siblings un-whitelisted and
+    # aborts boot with CorePluginBootError.
+    spec = make_spec(provides=[_item("backend", "rq", "tai42_backend_rq.backend")])
     manifest: dict = {}
     apply_provides(manifest, spec)
-    assert manifest["backend_module"] == "pkg.backend"
+    assert manifest["backend_module"] == "tai42_backend_rq"
 
 
-@pytest.mark.parametrize(("kind", "field"), [("storage", "storage_module"), ("monitoring", "monitoring_module")])
-def test_apply_scalar_storage_and_monitoring(kind: str, field: str) -> None:
-    spec = make_spec(provides=[_item(kind, "x", "pkg.mod")])
+@pytest.mark.parametrize(
+    ("kind", "field", "module", "root"),
+    [
+        ("storage", "storage_module", "tai42_storage_s3.storage", "tai42_storage_s3"),
+        ("monitoring", "monitoring_module", "tai42_monitoring_langfuse.register", "tai42_monitoring_langfuse"),
+        ("sandbox", "sandbox_module", "tai42_sandbox_docker.provider", "tai42_sandbox_docker"),
+    ],
+)
+def test_apply_scalar_slot_holds_the_package_root(kind: str, field: str, module: str, root: str) -> None:
+    spec = make_spec(provides=[_item(kind, "x", module)])
     manifest: dict = {}
     apply_provides(manifest, spec)
-    assert manifest[field] == "pkg.mod"
+    assert manifest[field] == root
+
+
+def test_apply_scalar_module_already_a_root_is_unchanged() -> None:
+    # A descriptor whose module IS the package root (no impl submodule) is written
+    # verbatim: the top-level derivation is idempotent.
+    spec = make_spec(provides=[_item("storage", "local", "tai42_storage_local")])
+    manifest: dict = {}
+    apply_provides(manifest, spec)
+    assert manifest["storage_module"] == "tai42_storage_local"
 
 
 # -- router/middleware ordering-aware module_list ----------------------------
@@ -238,9 +259,9 @@ def test_module_list_collides_on_exact_string() -> None:
 
 def test_scalar_collides_when_slot_is_truthy() -> None:
     spec = make_spec(provides=[_item("backend", "be", "pkg.backend")])
-    manifest = {"backend_module": "existing.backend"}
+    manifest = {"backend_module": "existing_pkg"}
     found = collisions(manifest, spec)
-    assert found == ["backend_module is already set to 'existing.backend' (cannot install 'pkg.backend')"]
+    assert found == ["backend_module is already set to 'existing_pkg' (cannot install 'pkg')"]
 
 
 def test_empty_scalar_slot_is_not_a_collision() -> None:
@@ -249,24 +270,26 @@ def test_empty_scalar_slot_is_not_a_collision() -> None:
     assert collisions({"backend_module": ""}, spec) == []
 
 
-def test_scalar_self_conflict_two_distinct_modules_one_slot_is_a_collision() -> None:
-    # One spec providing two distinct backend modules for the single backend slot
-    # is a self-conflict: a last-write-wins apply would silently drop the first.
+def test_scalar_self_conflict_two_distinct_roots_one_slot_is_a_collision() -> None:
+    # One spec providing two backend items whose top-level packages differ is a
+    # self-conflict for the single backend slot: a last-write-wins apply would
+    # silently drop the first root. (Two items sharing one root collapse to that
+    # root — the package import registers both, so the slot names it once.)
     spec = make_spec(
         provides=[
-            _item("backend", "be-a", "pkg.backend.a"),
-            _item("backend", "be-b", "pkg.backend.b"),
+            _item("backend", "be-a", "pkg_a.backend"),
+            _item("backend", "be-b", "pkg_b.backend"),
         ]
     )
     found = collisions({}, spec)
-    assert found == ["backend_module is a single-module slot but this plugin provides 'pkg.backend.a', 'pkg.backend.b'"]
+    assert found == ["backend_module is a single-module slot but this plugin provides 'pkg_a', 'pkg_b'"]
 
 
 def test_scalar_self_conflict_blocks_apply() -> None:
     spec = make_spec(
         provides=[
-            _item("backend", "be-a", "pkg.backend.a"),
-            _item("backend", "be-b", "pkg.backend.b"),
+            _item("backend", "be-a", "pkg_a.backend"),
+            _item("backend", "be-b", "pkg_b.backend"),
         ]
     )
     manifest: dict = {}
@@ -319,15 +342,17 @@ def test_remove_drops_a_tools_entry_by_module_even_when_title_was_edited() -> No
 
 def test_remove_leaves_a_foreign_scalar_value_alone() -> None:
     spec = make_spec(provides=[_item("backend", "be", "pkg.backend")])
-    # The operator replaced the slot with a different module; removal must not clear it.
-    manifest = {"backend_module": "operator.replacement"}
+    # The operator replaced the slot with a different package; removal must not clear it.
+    manifest = {"backend_module": "operator_replacement"}
     assert remove_provides(manifest, spec) is False
-    assert manifest["backend_module"] == "operator.replacement"
+    assert manifest["backend_module"] == "operator_replacement"
 
 
-def test_remove_clears_a_scalar_still_holding_the_specs_module() -> None:
+def test_remove_clears_a_scalar_still_holding_the_specs_package_root() -> None:
+    # Uninstall matches the package root that apply wrote, not the descriptor's
+    # impl submodule.
     spec = make_spec(provides=[_item("backend", "be", "pkg.backend")])
-    manifest = {"backend_module": "pkg.backend"}
+    manifest = {"backend_module": "pkg"}
     assert remove_provides(manifest, spec) is True
     assert manifest["backend_module"] is None
 
@@ -372,3 +397,35 @@ def test_patched_manifest_validates() -> None:
     apply_provides(manifest, spec)
     # A malformed compose would raise here; the patched dict must be a valid Manifest.
     Manifest.model_validate(manifest)
+
+
+# -- composed: the installed scalar slot boots the skeleton loader -----------
+
+
+@pytest.mark.parametrize(
+    ("kind", "field", "impl_module", "sibling_module"),
+    [
+        ("backend", "backend_module", "tai42_backend_rq.backend", "tai42_backend_rq.tools"),
+        ("monitoring", "monitoring_module", "tai42_monitoring_x.register", "tai42_monitoring_x.tools"),
+        ("storage", "storage_module", "tai42_storage_x.storage", "tai42_storage_x.tools"),
+        ("sandbox", "sandbox_module", "tai42_sandbox_x.provider", "tai42_sandbox_x.tools"),
+    ],
+)
+def test_installed_scalar_slot_whitelists_the_plugins_sibling_modules(
+    kind: str, field: str, impl_module: str, sibling_module: str
+) -> None:
+    # The composed consumer path: the marketplace write (apply_provides) feeds the
+    # skeleton manifest loader. Importing a scalar plugin runs its package __init__,
+    # which imports sibling tool/extension modules; each @app.tool call there consults
+    # should_include_tool with the SIBLING module path. The loader whitelists every
+    # module under the slot's package root (_is_plugin_module), so the sibling passes.
+    # On the unfixed write the slot names the impl SUBMODULE, the sibling falls outside
+    # the whitelist, and should_include_tool raises "not found in manifest" — the exact
+    # ImportError the boot wraps as CorePluginBootError, aborting a marketplace-installed
+    # backend/monitoring/storage/sandbox plugin.
+    spec = make_spec(provides=[_item(kind, "x", impl_module)])
+    manifest_dict: dict = {}
+    apply_provides(manifest_dict, spec)
+    assert manifest_dict[field] == impl_module.partition(".")[0]
+    manifest = Manifest.model_validate(manifest_dict)
+    assert manifest.should_include_tool("x_probe", sibling_module) is True
