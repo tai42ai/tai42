@@ -31,9 +31,10 @@ from typing import Any
 from jinja2 import TemplateError
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
+from tai42_contract.storage import StoragePathConflictError
 
 from tai42_skeleton.app.bus import FleetResult
-from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
+from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
 from tai42_skeleton.operations.response_models_group_b import (
     CacheClearResult,
@@ -143,7 +144,7 @@ async def get_template(template_id: str) -> dict:
     summary="Upload a template",
     tags=["templates"],
     destructive=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, ConflictError],
     request_model=TemplateUpload,
     response_model=TemplateUploadResult,
 )
@@ -151,6 +152,10 @@ async def upload_template(path: str, content: str) -> dict:
     """Write ``content`` to the template store under ``path`` (create or overwrite).
 
     The write target is guarded against a root escape before it reaches the store.
+
+    A template id cannot also name a directory that still holds templates: an
+    upload whose ``path`` collides with such a directory is refused with a ``409``
+    naming the templates in the way, so the caller deletes them first.
 
     The store write is a single durable act, but the compiled template is held in a
     per-worker cache, so the write is followed by a fleet ``evict_template`` broadcast:
@@ -163,13 +168,19 @@ async def upload_template(path: str, content: str) -> dict:
     if not isinstance(content, str):
         raise BadRequestError("content must be a string")
     manager = tai42_app.storage.resource_manager
-    fleet = FleetResult.model_validate(
-        await broadcast(
-            {"op": "evict_template", "path": key},
-            None,
-            lambda: manager.upload_template(path=key, content=content),
+    try:
+        fleet = FleetResult.model_validate(
+            await broadcast(
+                {"op": "evict_template", "path": key},
+                None,
+                lambda: manager.upload_template(path=key, content=content),
+            )
         )
-    )
+    except StoragePathConflictError as exc:
+        raise ConflictError(
+            f"cannot upload template {key!r}: templates exist under that path: "
+            f"{exc.conflicts_summary()}; delete them first"
+        ) from exc
     return {"path": key, "uploaded": True, "fanout": fleet_fanout(fleet)}
 
 

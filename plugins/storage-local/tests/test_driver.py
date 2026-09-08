@@ -198,3 +198,89 @@ async def test_list_recursive_returns_relative_paths(tmp_path):
 async def test_list_recursive_missing_root_returns_empty(tmp_path):
     driver = AsyncLocalDriver(root_path=str(tmp_path / "absent"), create_dirs=True)
     assert await driver.list_recursive() == []
+
+
+# --- file/directory id collisions + empty-parent pruning --------------------
+
+
+async def test_delete_file_prunes_empty_parents(tmp_path):
+    driver = _driver(tmp_path)
+    await driver.write_file("a/b/c.txt", "x")
+    await driver.delete_file("a/b/c.txt")
+    # The file and every now-empty ancestor up to the root are gone; the root stays.
+    assert not (tmp_path / "a" / "b").exists()
+    assert not (tmp_path / "a").exists()
+    assert tmp_path.exists()
+
+
+async def test_delete_file_keeps_non_empty_parent(tmp_path):
+    driver = _driver(tmp_path)
+    await driver.write_file("a/b/c.txt", "x")
+    await driver.write_file("a/keep.txt", "y")
+    await driver.delete_file("a/b/c.txt")
+    # "a/b" empties and is pruned, but "a" still holds a sibling and stays.
+    assert not (tmp_path / "a" / "b").exists()
+    assert (tmp_path / "a" / "keep.txt").read_text() == "y"
+
+
+async def test_delete_dir_prunes_empty_parents(tmp_path):
+    driver = _driver(tmp_path)
+    await driver.write_file("x/y/z.txt", "x")
+    await driver.delete_dir("x/y")
+    # The deleted subtree AND the now-empty ancestor "x" are gone.
+    assert not (tmp_path / "x" / "y").exists()
+    assert not (tmp_path / "x").exists()
+
+
+async def test_upload_over_empty_leftover_directory_succeeds(tmp_path):
+    driver = _driver(tmp_path)
+    # An id left as an empty directory tree is free to become a file.
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    await driver.write_file("a/b", "now a file")
+    assert (tmp_path / "a" / "b").read_text() == "now a file"
+
+
+async def test_upload_over_non_empty_directory_refused_with_ids(tmp_path):
+    driver = _driver(tmp_path)
+    await driver.write_file("a/b/c.txt", "c")
+    await driver.write_file("a/b/d.txt", "d")
+    with pytest.raises(driver_module.StoragePathConflictError) as exc:
+        await driver.write_file("a/b", "cannot")
+    assert exc.value.path == "a/b"
+    assert exc.value.conflicts == ["a/b/c.txt", "a/b/d.txt"]
+
+
+async def test_upload_under_existing_file_id_refused(tmp_path):
+    driver = _driver(tmp_path)
+    await driver.write_file("a/b", "a file")
+    with pytest.raises(driver_module.StoragePathConflictError) as exc:
+        await driver.write_file("a/b/c.txt", "nested")
+    assert exc.value.conflicts == ["a/b"]
+
+
+async def test_upload_over_empty_dir_refuses_file_racing_in(tmp_path):
+    driver = _driver(tmp_path)
+    empty = tmp_path / "a" / "b"
+    empty.mkdir(parents=True)
+
+    def _plant_after_scan() -> None:
+        # A write lands under the id between the emptiness scan and the removal.
+        (empty / "raced.txt").write_text("survivor")
+
+    driver._before_empty_dir_removal = _plant_after_scan
+
+    with pytest.raises(driver_module.StoragePathConflictError) as exc:
+        await driver.write_file("a/b", "would clobber the racer")
+
+    # rmdir refuses the now-non-empty directory, so the raced-in file is intact.
+    assert exc.value.conflicts == ["a/b/raced.txt"]
+    assert (empty / "raced.txt").read_text() == "survivor"
+    assert not (empty / "b").exists()  # nothing turned "a/b" into a file
+
+
+async def test_upload_resolving_to_root_refused(tmp_path):
+    driver = _driver(tmp_path)
+    # An id resolving to the store root must never trigger a root removal.
+    with pytest.raises(ValueError, match="storage root"):
+        await driver.write_file(".", "x")
+    assert tmp_path.exists()

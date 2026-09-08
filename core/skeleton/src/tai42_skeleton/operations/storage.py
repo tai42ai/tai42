@@ -25,10 +25,16 @@ from __future__ import annotations
 import base64
 
 from pydantic import BaseModel
-from tai42_contract.storage import Storage
+from tai42_contract.storage import Storage, StoragePathConflictError
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
+from tai42_skeleton.operations import (
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+    NotSupportedError,
+    operation,
+)
 from tai42_skeleton.operations.response_models_group_b import (
     DirDeleted,
     ResourceDeleted,
@@ -131,7 +137,7 @@ async def stat_resource(resource_id: str) -> dict:
     summary="Upload a storage resource",
     tags=["storage"],
     destructive=True,
-    errors=[BadRequestError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, NotSupportedError],
     request_model=StorageUpload,
     response_model=ResourceStored,
 )
@@ -168,6 +174,12 @@ async def upload_resource(
             except ValueError as exc:
                 raise BadRequestError(f"'content_base64' is not valid base64: {exc}") from exc
             await provider.upload_bytes(resource_id, data)
+    except StoragePathConflictError as exc:
+        # An id cannot be both a file and a directory that still holds objects; the
+        # provider names the objects in the way. Surfaced as a 409, not a 500.
+        raise ConflictError(
+            f"cannot store {resource_id!r}: objects exist under that path: {exc.conflicts_summary()}; delete them first"
+        ) from exc
     except ValueError as exc:
         # A provider-reported boundary/validation error (e.g. content a text-only
         # provider cannot store) is a client error, surfaced as 400 rather than 500.

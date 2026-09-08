@@ -483,6 +483,8 @@ async def _export_templates() -> dict[str, str]:
 
 
 async def _import_templates(payload: dict[str, str]) -> _SectionReport:
+    from tai42_contract.storage import StoragePathConflictError
+
     from tai42_skeleton.template.path_guard import UnsafeTemplatePathError, safe_template_path
 
     resource_manager = tai42_app.storage.resource_manager
@@ -504,7 +506,16 @@ async def _import_templates(payload: dict[str, str]) -> _SectionReport:
             # Existing template (keyed by path) left untouched.
             report["skipped_existing"] += 1
             continue
-        await resource_manager.upload_template(path, content)
+        try:
+            await resource_manager.upload_template(path, content)
+        except StoragePathConflictError as exc:
+            # A key colliding with a directory that still holds templates is a
+            # per-path rejection recorded loudly, never a silently dropped or
+            # whole-restore-aborting failure.
+            report["errors"].append(f"template {path!r}: {exc}")
+            report["skipped"] += 1
+            logger.warning("backup restore skipped conflicting template path %r: %s", path, exc)
+            continue
         if path in existing:
             report["updated"] += 1
         else:

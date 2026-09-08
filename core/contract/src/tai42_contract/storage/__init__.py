@@ -18,6 +18,43 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict
 
+from tai42_contract.errors import ErrorKind
+
+# Cap on how many conflicting ids a human message spells out; the full set stays
+# on ``conflicts`` so a caller never loses ids to the summary.
+_MESSAGE_CONFLICT_CAP = 20
+
+
+class StoragePathConflictError(Exception):
+    """An upload id collides with the store's existing shape.
+
+    A single id space is shared by files and directories, so one id can name only
+    one of them: an id that still names a directory holding objects cannot also
+    become a file, and an object cannot be stored beneath an id already held as a
+    file. A backend raises this instead of leaking a backend-specific error, so a
+    surface maps it to a 409 conflict. ``path`` is the rejected id; ``conflicts``
+    names the stored ids it collides with.
+    """
+
+    __tai_error_kind__ = ErrorKind.CONFLICT
+
+    def __init__(self, path: str, conflicts: list[str]) -> None:
+        self.path = path
+        self.conflicts = list(conflicts)
+        super().__init__(f"storage path {path!r} collides with existing objects: {self.conflicts_summary()}")
+
+    def conflicts_summary(self) -> str:
+        """The conflicting ids as a human string, capped at
+        :data:`_MESSAGE_CONFLICT_CAP` with a ``… and N more`` tail; the full list
+        stays on :attr:`conflicts`."""
+        ids = self.conflicts
+        if not ids:
+            return "(none listed)"
+        if len(ids) > _MESSAGE_CONFLICT_CAP:
+            shown = ", ".join(repr(c) for c in ids[:_MESSAGE_CONFLICT_CAP])
+            return f"{shown}, … and {len(ids) - _MESSAGE_CONFLICT_CAP} more"
+        return ", ".join(repr(c) for c in ids)
+
 
 class ObjectStat(BaseModel):
     """Metadata for a stored object, returned by :meth:`Storage.stat`.
@@ -68,10 +105,21 @@ class Storage(ABC):
 
     @abstractmethod
     async def upload(self, path: str, content: str) -> None:
+        """Store ``content`` at ``path`` (create or overwrite).
+
+        Files and directories share one id space, so an upload whose ``path``
+        collides with the store's existing shape — an id that still names a
+        non-empty directory, or an id nested beneath an id already held as a file
+        — raises :class:`StoragePathConflictError`. An id naming an empty leftover
+        directory is free to hold a file.
+        """
         raise NotImplementedError
 
     @abstractmethod
     async def delete(self, path: str) -> None:
+        """Delete the object at ``path``, raising ``FileNotFoundError`` when it
+        does not exist (a caller wanting idempotent semantics maps that to a
+        no-op)."""
         raise NotImplementedError
 
     @abstractmethod
@@ -118,4 +166,4 @@ class Storage(ABC):
         return ObjectStat(content_type=content_type)
 
 
-__all__ = ["ObjectStat", "Storage", "assert_not_root"]
+__all__ = ["ObjectStat", "Storage", "StoragePathConflictError", "assert_not_root"]

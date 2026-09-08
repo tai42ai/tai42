@@ -149,6 +149,9 @@ async def test_list_empty_bucket_returns_empty(s3_client: Any) -> None:
 
 
 async def test_upload_stores_jinja2_content_type(s3_client: Any) -> None:
+    # Every upload lists its ``id + "/"`` prefix first to refuse a file/dir collision.
+    s3_client.get_paginator.return_value = FakePaginator([{}])
+
     await S3Storage().upload("t.j2", "{{ name }}")
 
     s3_client.put_object.assert_awaited_once_with(
@@ -157,12 +160,16 @@ async def test_upload_stores_jinja2_content_type(s3_client: Any) -> None:
 
 
 async def test_upload_bytes_passes_parametrized_content_type(s3_client: Any) -> None:
+    s3_client.get_paginator.return_value = FakePaginator([{}])
+
     await S3Storage().upload_bytes("pic.png", b"\x89PNG", content_type="image/png")
 
     s3_client.put_object.assert_awaited_once_with(Bucket="b", Key="pic.png", Body=b"\x89PNG", ContentType="image/png")
 
 
 async def test_upload_bytes_omits_content_type_when_none(s3_client: Any) -> None:
+    s3_client.get_paginator.return_value = FakePaginator([{}])
+
     await S3Storage().upload_bytes("blob.bin", b"\x00\x01")
 
     s3_client.put_object.assert_awaited_once_with(Bucket="b", Key="blob.bin", Body=b"\x00\x01")
@@ -179,12 +186,51 @@ async def test_upload_bytes_load_bytes_roundtrip_is_identical(s3_client: Any) ->
 
     s3_client.put_object.side_effect = _put
     s3_client.get_object.side_effect = _get
+    s3_client.get_paginator.return_value = FakePaginator([{}])
 
     payload = bytes(range(256))
     storage = S3Storage()
     await storage.upload_bytes("full.bin", payload, content_type="application/octet-stream")
 
     assert await storage.load_bytes("full.bin") == payload
+
+
+# --- upload path-conflict guard ----------------------------------------------
+
+
+async def test_upload_prefix_collision_refused(s3_client: Any) -> None:
+    from tai42_contract.storage import StoragePathConflictError
+
+    # Keys already live under "a/b/", so "a/b" can't also become a file.
+    paginator = FakePaginator([{"Contents": [{"Key": "a/b/c.j2"}, {"Key": "a/b/d.j2"}]}])
+    s3_client.get_paginator.return_value = paginator
+
+    with pytest.raises(StoragePathConflictError) as exc:
+        await S3Storage().upload("a/b", "cannot")
+
+    assert paginator.paginate_kwargs == {"Bucket": "b", "Prefix": "a/b/"}
+    assert exc.value.conflicts == ["a/b/c.j2", "a/b/d.j2"]
+    s3_client.put_object.assert_not_called()
+
+
+async def test_upload_under_existing_file_key_refused(s3_client: Any) -> None:
+    from tai42_contract.storage import StoragePathConflictError
+
+    # No keys under "a/b/c/", but the ancestor "a/b" is itself a stored file key.
+    s3_client.get_paginator.return_value = FakePaginator([{}])
+
+    async def _head(**kwargs: Any) -> dict[str, Any]:
+        if kwargs["Key"] == "a/b":
+            return {}
+        raise not_found_error("HeadObject")
+
+    s3_client.head_object.side_effect = _head
+
+    with pytest.raises(StoragePathConflictError) as exc:
+        await S3Storage().upload("a/b/c.j2", "nested")
+
+    assert exc.value.conflicts == ["a/b"]
+    s3_client.put_object.assert_not_called()
 
 
 # --- delete ------------------------------------------------------------------

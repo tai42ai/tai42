@@ -11,7 +11,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import ObjectStat, Storage, assert_not_root
+from tai42_contract.storage import ObjectStat, Storage, StoragePathConflictError, assert_not_root
 
 from tai42_storage_s3.client import S3Client
 from tai42_storage_s3.settings import s3_settings
@@ -30,6 +30,16 @@ _TEMPLATE_CONTENT_TYPE = "application/jinja2"
 
 def _is_not_found(error: ClientError) -> bool:
     return error.response.get("Error", {}).get("Code") in _NOT_FOUND_CODES
+
+
+def _ancestor_keys(path: str) -> list[str]:
+    """The ancestor id prefixes of ``path`` — ``"a/b/c"`` -> ``["a", "a/b"]``.
+
+    Each names an id that, if stored as a file, would sit where ``path`` needs a
+    directory, so an upload of ``path`` beneath it is a collision.
+    """
+    segments = [s for s in path.split("/") if s]
+    return ["/".join(segments[:i]) for i in range(1, len(segments))]
 
 
 def _bucket() -> str:
@@ -73,12 +83,40 @@ class S3Storage(Storage):
         await self.upload_bytes(path, content.encode("utf-8"), content_type=_TEMPLATE_CONTENT_TYPE)
 
     async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
-        put_kwargs: dict[str, Any] = {"Bucket": _bucket(), "Key": path, "Body": data}
+        bucket = _bucket()
+        put_kwargs: dict[str, Any] = {"Bucket": bucket, "Key": path, "Body": data}
         if content_type is not None:
             put_kwargs["ContentType"] = content_type
         async with tai42_app.clients.client_ctx(S3Client) as client:
+            await self._assert_no_path_conflict(client, bucket, path)
             await client.put_object(**put_kwargs)
         logger.info("Uploaded object to %s", path)
+
+    @staticmethod
+    async def _assert_no_path_conflict(client: Any, bucket: str, path: str) -> None:
+        """Refuse an upload whose ``path`` collides with the flat key space.
+
+        Flat keys let ``a/b`` and ``a/b/c`` coexist silently, so one id ends up
+        both a file and a directory. This refuses ``path`` when keys already live
+        under its ``path + "/"`` prefix (``path`` would be a directory too) and when
+        an ancestor id is itself a stored key (``path`` would be nested under a
+        file), naming the conflicting ids.
+        """
+        paginator = client.get_paginator("list_objects_v2")
+        under: list[str] = []
+        async for page in paginator.paginate(Bucket=bucket, Prefix=f"{path}/"):
+            for obj in page.get("Contents", []):
+                under.append(obj["Key"])
+        if under:
+            raise StoragePathConflictError(path, sorted(under))
+        for ancestor in _ancestor_keys(path):
+            try:
+                await client.head_object(Bucket=bucket, Key=ancestor)
+            except ClientError as e:
+                if _is_not_found(e):
+                    continue
+                raise
+            raise StoragePathConflictError(path, [ancestor])
 
     async def delete(self, path: str) -> None:
         bucket = _bucket()

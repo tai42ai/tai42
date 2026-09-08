@@ -656,13 +656,21 @@ class ResourceManager:
         return await self.provider.list()
 
     async def delete_template(self, path: str) -> None:
-        """Delete the stored template at ``path`` and evict its compiled entry."""
-        result = await self.provider.delete(path)
+        """Delete the stored template at ``path`` and evict its compiled entry.
+
+        Idempotent: an already-absent template is a no-op. This is the one seam
+        every backend flows through, so the backends' ``FileNotFoundError`` for a
+        missing object is mapped to the documented no-op here rather than in each
+        backend.
+        """
+        try:
+            await self.provider.delete(path)
+        except FileNotFoundError:
+            logger.info("delete_template: %s already absent; delete is a no-op", path)
         # The compiled cache retains an entry per path until TTL; evict only the
         # deleted key so its stale compilation is dropped while other templates
         # stay cached.
         self.evict_compiled(path)
-        return result
 
     async def delete_template_dir(self, path: str) -> None:
         """Delete every stored template under ``path/`` and evict their compiled
