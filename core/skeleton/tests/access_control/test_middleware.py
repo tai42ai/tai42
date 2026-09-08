@@ -582,7 +582,7 @@ async def test_websocket_deeplink_never_shell_public(monkeypatch):
     assert sent == [{"type": "websocket.close", "code": 1008}]
 
 
-async def test_h5_unauthenticated_route_walk(monkeypatch):
+async def test_h5_unauthenticated_route_walk(monkeypatch, bound_app):
     # H5 (MUST): walk EVERY registered route + a hostile-path corpus with NO credentials.
     # Backstop invariant — the control plane never leaks unauthenticated, hostile
     # /api-canonicalizing forms never reach data, genuine deep links reach the shell.

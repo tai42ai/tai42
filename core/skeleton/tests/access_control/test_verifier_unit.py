@@ -773,7 +773,7 @@ async def test_plugin_studio_asset_is_public(monkeypatch):
         assert await v.resolve_resource_ids(path, method="GET") == [settings.public_resource_id]
 
 
-async def test_plugin_list_not_public_and_bare_studio_publics_harmlessly(monkeypatch):
+async def test_plugin_list_not_public_and_bare_studio_publics_harmlessly(monkeypatch, bound_app):
     # The authed /api/plugins LIST is genuinely non-public and stays []: it carries no
     # ``public`` declaration, matches no always-public pattern, and the declared-public
     # tier's ``route_registry.match`` resolves it to the authed LIST route (not public).

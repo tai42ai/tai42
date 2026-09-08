@@ -56,15 +56,19 @@ class _StubProvider(IdentityProvider):
 
 @pytest.fixture(autouse=True)
 def _clear_active_providers():
-    """The adapter resolves the CURRENT epoch's recorded providers, so each test
-    records into (and is isolated on) the serving core's ``active_auth_providers``."""
+    """The adapter resolves the CURRENT epoch's recorded providers through
+    ``tai42_app.accounts``, so bind the forwarding handle to the serving app and record
+    into (and isolate on) its ``active_auth_providers`` for each test."""
+    from tai42_contract.app import tai42_app
+
     from tai42_skeleton.app.instance import app
 
     core = app._serving_core
     saved = dict(core.active_auth_providers)
     core.active_auth_providers.clear()
     try:
-        yield
+        with tai42_app.bound(app):
+            yield
     finally:
         core.active_auth_providers.clear()
         core.active_auth_providers.update(saved)

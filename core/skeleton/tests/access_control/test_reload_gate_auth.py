@@ -113,7 +113,7 @@ async def test_invalid_key_during_reload_still_401():
     assert response.status_code == 401
 
 
-async def test_real_adapter_empty_registry_during_reload_is_retriable():
+async def test_real_adapter_empty_registry_during_reload_is_retriable(bound_app):
     # End-to-end through the REAL AuthAdapter: clearing the registry models the
     # reset->reimport window, the adapter's factory wraps the registry-miss KeyError
     # into IdentityProviderUnavailableError, the verifier propagates it, and the
