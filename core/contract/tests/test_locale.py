@@ -35,16 +35,20 @@ def _address() -> PersonAddress:
     return PersonAddress(door="api", routes=["r"], address="x", linked_at=datetime.now(UTC))
 
 
+def _person(locale: str | None) -> Person:
+    return Person(
+        person_id="p",
+        target_kind="tool",
+        target_name="t",
+        created_at=datetime.now(UTC),
+        addresses=[_address()],
+        locale=locale,
+    )
+
+
 def test_person_stores_locale_canonically_or_absent() -> None:
-    base = {
-        "person_id": "p",
-        "target_kind": "tool",
-        "target_name": "t",
-        "created_at": datetime.now(UTC),
-        "addresses": [_address()],
-    }
-    assert Person(**base, locale="He-il").locale == "he-IL"
-    assert Person(**base).locale is None
+    assert _person(locale="He-il").locale == "he-IL"
+    assert _person(locale=None).locale is None
 
 
 def test_subject_candidates_stores_locale_canonically_or_absent() -> None:

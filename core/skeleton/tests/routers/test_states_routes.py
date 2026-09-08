@@ -356,6 +356,8 @@ def test_get_mount_absent_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(NotFoundError) as excinfo:
         asyncio.run(ops.get_state_mount("alerts", "nope"))
     assert excinfo.value.status == 404
+
+
 class _RecordingMountStates:
     """Records the mount options the door threads through."""
 

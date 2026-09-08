@@ -62,9 +62,7 @@ class _Engine:
         location=None,
         locale=None,
     ):
-        self.calls.append(
-            (route_name, external_user_id, text, caller_principal, wait_seconds, params, form, locale)
-        )
+        self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds, params, form, locale))
         if self._raises is not None:
             raise self._raises
         return self._result or ApiSubmitResult(message_id="m-1", thread_id="t-1", answer=None)

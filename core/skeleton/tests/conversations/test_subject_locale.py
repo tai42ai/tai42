@@ -78,7 +78,9 @@ def test_resolved_locale_prefers_person_over_channel_over_none() -> None:
 
 def test_turn_block_subject_carries_locale() -> None:
     block = _turn_block(_record("he"), _route(), person=_person(None), thread_id="th")
-    assert block["subject"]["locale"] == "he"
+    subject = block["subject"]
+    assert isinstance(subject, dict)
+    assert subject["locale"] == "he"
 
 
 def test_state_context_candidates_carry_locale() -> None:

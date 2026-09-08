@@ -62,7 +62,7 @@ class _FakeStore:
     async def list_mounts_for_state(self, state: str) -> list[dict[str, Any]]:
         return [row for (mounted_state, _module), row in self.mounts.items() if mounted_state == state]
 
-    async def read_record_view(self, state: str, subject: StateSubject) -> dict[str, Any] | None:
+    async def read_record_view(self, state: str, subject: StateSubject, *, conn: Any = None) -> dict[str, Any] | None:
         row = self.records.get(self._key(state, subject))
         if row is None:
             return None
@@ -73,7 +73,7 @@ class _FakeStore:
         self.records[self._key(state, subject)] = {"data": dict(data), "seq": self._seq}
         self._append_write(state, subject, origin, [[]])
 
-    async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, retention_days):
+    async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, retention_days, conn=None):
         self._seq += 1
         key = self._key(state, subject)
         doc = dict(self.records.get(key, {"data": {}})["data"])

@@ -582,9 +582,7 @@ async def test_messages_map_the_top_accept_language_to_the_turn_locale(
     assert stub_app.conversations.accept_calls[0]["locale"] == "he-IL"
 
 
-async def test_messages_without_accept_language_carry_no_locale(
-    web_env, stub_app, registered_session: FakeRedis
-):
+async def test_messages_without_accept_language_carry_no_locale(web_env, stub_app, registered_session: FakeRedis):
     stub_app.conversations.accept_result = "turn-42"
     handler = _handler(stub_app, _MESSAGES)
 
