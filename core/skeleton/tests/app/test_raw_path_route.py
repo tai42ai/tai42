@@ -98,6 +98,15 @@ def test_missing_raw_path_falls_back_to_the_decoded_match() -> None:
     assert match is Match.NONE
 
 
+def test_a_non_ascii_raw_target_matches_no_raw_path_door() -> None:
+    route = RawPathRoute(_RECORD, endpoint=_endpoint, methods=["GET"])
+    scope = _scope("/api/states/s/records/agent/a/thread/k")
+    scope["raw_path"] = "/api/states/s/records/agent/a/thread/caf\u00e9".encode()
+    match, child = route.matches(scope)
+    assert match is Match.NONE
+    assert child == {}
+
+
 def test_record_doors_are_marked_raw_path_matched() -> None:
     # ``use_raw_path_key`` marks the record-door metadata raw-path-matched at the SAME seam
     # it upgrades the served routes to ``RawPathRoute``, so this deterministic registry

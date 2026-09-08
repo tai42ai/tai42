@@ -41,7 +41,12 @@ class RawPathRoute(Route):
             # every parameter that carries no encoded slash.
             return super().matches(scope)
 
-        route_path = _raw_route_path(raw_path, scope.get("root_path", ""))
+        try:
+            route_path = _raw_route_path(raw_path, scope.get("root_path", ""))
+        except UnicodeDecodeError:
+            # A raw target outside ASCII is not a well-formed request path; it matches no
+            # raw-path door (access control refuses it as malformed on the same ground).
+            return Match.NONE, {}
         match = self.path_regex.match(route_path)
         if not match:
             return Match.NONE, {}
