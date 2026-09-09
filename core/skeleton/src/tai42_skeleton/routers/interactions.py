@@ -74,6 +74,7 @@ from tai42_contract.interactions import (
 from tai42_contract.webhooks import WebhookVerificationError
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
 
 from tai42_skeleton.access_control.user import request_identity
 from tai42_skeleton.app.epoch import mark_current_request_drain_exempt
@@ -435,10 +436,6 @@ _POST_ONLY_EMPTY_BODY_DENY = "verified callback requires a signed request body"
 _CALLBACK_GET_NOT_FOUND = "Not Found"
 
 
-class _PayloadTooLarge(Exception):
-    """Raised when a request body or query string exceeds the configured cap."""
-
-
 # -- shared helpers ----------------------------------------------------------
 
 
@@ -781,9 +778,10 @@ async def _extract_answer(request: Request) -> dict:
     adapter's plain parse would yield 422)."""
     settings = interactions_settings()
     try:
-        raw = await _read_bounded_body(request, settings.callback_max_body_bytes)
-    except _PayloadTooLarge as exc:
+        raw = await read_bounded_body(request, settings.callback_max_body_bytes)
+    except PayloadTooLarge as exc:
         raise PayloadTooLargeError("payload too large") from exc
+    request._body = raw
     try:
         body = json.loads(raw)
     except _JSON_PARSE_ERRORS as exc:
@@ -823,26 +821,6 @@ cancel = register_operation_route(
 # -- callback doors ----------------------------------------------------------
 
 
-async def _read_bounded_body(request: Request, cap: int) -> bytes:
-    """Read the request body on ACTUAL bytes, never a client ``Content-Length``.
-    Raise ``_PayloadTooLarge`` past ``cap`` before parsing — loud, never truncated.
-
-    Idempotent: the fully-read body is cached on the request (Starlette's own
-    ``_body`` slot) so a later re-read replays it instead of re-consuming the stream —
-    the size guard and the callback handler can each read it once without a
-    "stream consumed" error."""
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > cap:
-            raise _PayloadTooLarge("request body exceeds the configured cap")
-        chunks.append(chunk)
-    body = b"".join(chunks)
-    request._body = body
-    return body
-
-
 async def _callback_post_size_guard(request: Request, settings: InteractionsSettings) -> Response | None:
     """Enforce ``callback_max_body_bytes`` on BOTH the raw query string (the
     confirm-flow answer rides the URL) and the actual body bytes. Return the 413
@@ -854,9 +832,12 @@ async def _callback_post_size_guard(request: Request, settings: InteractionsSett
     if len(request.url.query.encode()) > settings.callback_max_body_bytes:
         return _callback_json({"error": "payload too large"}, 413)
     try:
-        await _read_bounded_body(request, settings.callback_max_body_bytes)
-    except _PayloadTooLarge:
+        body = await read_bounded_body(request, settings.callback_max_body_bytes)
+    except PayloadTooLarge:
         return _callback_json({"error": "payload too large"}, 413)
+    # Cache the read bytes on the request (Starlette's own ``_body`` slot) so
+    # ``_callback_post`` replays them instead of re-consuming the drained stream.
+    request._body = body
     return None
 
 
@@ -1000,7 +981,9 @@ async def _callback_post(request: Request, r: Any, store: InteractionStore, sett
     oversized = await _callback_post_size_guard(request, settings)
     if oversized is not None:
         return oversized
-    raw = await _read_bounded_body(request, settings.callback_max_body_bytes)
+    # The size guard cached the bounded bytes on the request, so this replays them
+    # (never a re-consumed stream) and stays within the same cap.
+    raw = await read_bounded_body(request, settings.callback_max_body_bytes)
 
     interaction_id = await store.resolve_ticket(r, ticket)
     if interaction_id is None:
