@@ -23,6 +23,17 @@ selected before the manifest and backed by e.g. the Kubernetes API) is INSTALLED
 reported ``install-only``, never booted — the summary line distinguishes the two, so a
 consumer the gate cannot boot is never a silent pass.
 
+A consumer that declares ``permissions.network`` (it reaches an external messaging API
+or identity provider at startup) is given the deployment config it needs with every
+outbound endpoint pointed at a closed loopback port. Its boot then runs through install,
+import, registration and lifecycle and either becomes health-ready (its startup contacts
+nothing, e.g. a config-guard-only channel) or fails ONLY with a connection-class error at
+that endpoint. The latter is reported ``install-only (external service: <handler>)`` — the
+plugin needs a live external service the gate cannot provide, distinct from a candidate
+break (a missing symbol, a refused route, a guard). The
+install-only-vs-broken decision reads only the declared network permission and the runtime
+error class, never a distribution name.
+
 Rule: a boot failure of a previously published consumer against the candidate is
 a BREAKING change. The gate fails unless the governing release is a MAJOR bump —
 the bump read the same way ``tai42_cli.api_gate`` reads it, the governing package's
@@ -298,6 +309,12 @@ class Provides:
     # lifecycle needs a live external service), each ``(kind, reason)`` — reported
     # ``install-only`` so the pass is never silent.
     install_only: list[tuple[str, str]] = field(default_factory=list)
+    # The plugin's declared ``permissions.network``: it reaches an external endpoint.
+    # A startup handler of such a plugin that fails ONLY by not reaching a configured
+    # external endpoint (a connection-class error) is the plugin needing an external
+    # service the gate cannot stand in for, not a candidate-core break — see
+    # :func:`is_external_service_only`.
+    network: bool = False
 
     def has_boot_surface(self) -> bool:
         """True when the descriptor declares a surface the gate can MOUNT into a
@@ -394,6 +411,8 @@ def read_provides(plugin_yaml: dict) -> Provides:
         provides.lifecycle.append(module)
     if plugin_yaml.get("migrations"):
         provides.db_component = plugin_yaml.get("migrations_component") or plugin_yaml.get("package")
+    permissions = plugin_yaml.get("permissions")
+    provides.network = bool(isinstance(permissions, dict) and permissions.get("network"))
     return provides
 
 
@@ -498,17 +517,111 @@ def _channel_env(provides: Provides, redis_url: str) -> dict[str, str]:
     return {f"CHANNEL_{name.upper()}_REDIS_URL": redis_url for name, _module in provides.channels if name}
 
 
+def _external_service_env(dist_name: str, blackhole_url: str) -> dict[str, str]:
+    """The deployment config a network-declaring consumer needs to boot far enough to
+    reach its external service, with every OUTBOUND endpoint pointed at ``blackhole_url``
+    (a closed loopback port the gate allocates).
+
+    A deployment supplies these credentials; the gate has no live messaging API or
+    identity provider to point them at, so the endpoint is a black hole by design. The
+    boot then exercises install -> import -> registration -> lifecycle up to the external
+    boundary and surfaces a connection-class error there — the signal (see
+    :func:`is_external_service_only`) that the plugin's startup needs an external service
+    the gate cannot stand in for, distinct from a candidate-core break. This provisions
+    config the same way :data:`_BOOT_PLACEHOLDER_ENV` and :func:`_slot_env` do; the
+    install-only-vs-broken classification never keys on the distribution name, only on the
+    declared network permission and the runtime error class. An OIDC issuer URL must be a
+    loopback ``http`` origin or the discovery client refuses it before ever connecting, so
+    the black hole is a loopback port.
+    """
+    import secrets
+
+    if dist_name == "tai42-channel-telegram":
+        return {
+            "CHANNEL_TELEGRAM_BOT_TOKEN": "9900000000:consumer-boot-gate",
+            "CHANNEL_TELEGRAM_WEBHOOK_SECRET": secrets.token_hex(16),
+            "CHANNEL_TELEGRAM_PUBLIC_BASE_URL": blackhole_url,
+            "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT": "1",
+            "CHANNEL_TELEGRAM_API_BASE_URL": blackhole_url,
+        }
+    if dist_name == "tai42-channel-slack":
+        return {
+            "CHANNEL_SLACK_BOT_USER_ID": "U0BOOTGATE",
+            "CHANNEL_SLACK_BOT_TOKEN": "xoxb-consumer-boot-gate",
+            "CHANNEL_SLACK_SIGNING_SECRET": secrets.token_hex(16),
+            "CHANNEL_SLACK_API_BASE_URL": blackhole_url,
+        }
+    if dist_name == "tai42-identity-oidc":
+        return {
+            "TAI_IDENTITY_OIDC_ISSUER": blackhole_url,
+            "TAI_IDENTITY_OIDC_AUDIENCE": "consumer-boot-gate",
+        }
+    if dist_name == "tai42-accounts-oidc":
+        return {
+            "TAI_ACCOUNTS_OIDC_STATE_KEY": secrets.token_hex(16),
+            "TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL": blackhole_url,
+            "TAI_ACCOUNTS_OIDC_PROVIDERS": json.dumps(
+                [
+                    {
+                        "name": "boot",
+                        "issuer": blackhole_url,
+                        "client_id": "boot",
+                        "client_secret": "boot",
+                        "claim": "sub",
+                    }
+                ]
+            ),
+        }
+    return {}
+
+
 # ------------------------------------------------------------- failure parsing
+
+
+# Substrings that identify a connection-class failure — the transport could not reach
+# a host (a refused/timed-out/unresolved endpoint), as opposed to the endpoint answering
+# with a rejection. These are the exception class names httpx/urllib raise and the
+# transport-error wording the kit's discovery fetcher wraps them in. A boot whose only
+# startup failures carry one of these, against the black-hole endpoint the gate configured
+# for a network-declaring consumer, is the plugin needing an external service (never a
+# candidate-core break, which surfaces as a missing symbol, a refused route, or a guard).
+_CONNECTION_ERROR_MARKERS = (
+    "ConnectError",
+    "ConnectTimeout",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "ReadTimeout",
+    "ReadError",
+    "PoolTimeout",
+    "Transport error fetching",
+    "Connection refused",
+    "Connection reset",
+    "All connection attempts failed",
+    "Failed to establish a new connection",
+    "Name or service not known",
+    "Temporary failure in name resolution",
+    "Network is unreachable",
+    "No route to host",
+    "[Errno 111]",
+    "[Errno -2]",
+    "[Errno -3]",
+)
+
+
+def _is_connection_error(text: str) -> bool:
+    return any(marker in text for marker in _CONNECTION_ERROR_MARKERS)
 
 
 @dataclass(frozen=True)
 class BootFailure:
-    """What a failed boot surfaced: the lifecycle handlers that raised and the
-    routes named in their errors, so the report says exactly what broke."""
+    """What a failed boot surfaced: the lifecycle handlers that raised, the per-handler
+    error text, and the routes named in their errors, so the report says exactly what
+    broke and the classification can read each handler's failure class."""
 
     handlers: tuple[str, ...]
     routes: tuple[str, ...]
     detail: str
+    handler_errors: tuple[tuple[str, str], ...] = ()
 
     def summary(self) -> str:
         parts = []
@@ -520,15 +633,17 @@ class BootFailure:
 
 
 def parse_boot_failure(log_text: str) -> BootFailure:
-    """The lifecycle handlers and routes named in a boot's failure log.
+    """The lifecycle handlers, their error text, and routes named in a boot's failure log.
 
-    The skeleton raises ``lifecycle handlers failed: <name>: <Exc>(...), ...`` when
-    a startup handler raises; the handler names and any ``METHOD /path`` tokens in
-    the message are extracted. When no structured line is present the last error
-    line is kept as the detail, so a non-lifecycle boot failure still reports."""
+    The skeleton raises ``lifecycle handlers failed: <name>: <Exc>(...), ...`` when a
+    startup handler raises; each handler name, the exception text that follows it (sliced
+    up to the next handler), and any ``METHOD /path`` tokens are extracted. When no
+    structured line is present the last error line is kept as the detail, so a
+    non-lifecycle boot failure still reports."""
     marker = "lifecycle handlers failed:"
     handlers: list[str] = []
     routes: list[str] = []
+    handler_errors: list[tuple[str, str]] = []
     detail = ""
     idx = log_text.rfind(marker)
     if idx != -1:
@@ -536,10 +651,31 @@ def parse_boot_failure(log_text: str) -> BootFailure:
         detail = f"{marker}{tail}".strip()
         handlers = list(dict.fromkeys(m.group(1) for m in _HANDLER_RE.finditer(tail)))
         routes = list(dict.fromkeys(f"{m.group(1)} {m.group(2)}" for m in _ROUTE_RE.finditer(tail)))
+        spans = list(_HANDLER_RE.finditer(tail))
+        for pos, match in enumerate(spans):
+            end = spans[pos + 1].start() if pos + 1 < len(spans) else len(tail)
+            handler_errors.append((match.group(1), tail[match.start() : end]))
     if not detail:
         error_lines = [line.strip() for line in log_text.splitlines() if re.search(r"Error|Exception|Traceback", line)]
         detail = error_lines[-1] if error_lines else "boot failed with no error line captured"
-    return BootFailure(handlers=tuple(handlers), routes=tuple(routes), detail=detail)
+    return BootFailure(
+        handlers=tuple(handlers), routes=tuple(routes), detail=detail, handler_errors=tuple(handler_errors)
+    )
+
+
+def external_service_handlers(failure: BootFailure) -> tuple[str, ...]:
+    """The failing startup handlers whose error is a connection-class failure reaching an
+    external endpoint (de-duplicated, in first-seen order)."""
+    return tuple(dict.fromkeys(name for name, text in failure.handler_errors if _is_connection_error(text)))
+
+
+def is_external_service_only(failure: BootFailure) -> bool:
+    """True when EVERY startup handler that failed did so with a connection-class error
+    (and at least one did) — the boot got all the way to an external boundary and only the
+    external round-trip, which the gate cannot complete, was unreachable. A single
+    non-connection failure (a missing symbol, a refused route, a guard) makes this False,
+    so a real candidate-core break is never reclassified."""
+    return bool(failure.handler_errors) and all(_is_connection_error(text) for _name, text in failure.handler_errors)
 
 
 # ---------------------------------------------------------------- boot runtime
@@ -691,11 +827,13 @@ def boot_consumer(
     manifest_path.write_text(yaml.safe_dump(build_manifest(provides), sort_keys=False))
 
     db_name = _create_database(venv_bin, infra)
+    blackhole_url = f"http://127.0.0.1:{_allocate_port()}"
     env = {
         **_boot_env(config_dir, manifest_path, venv_bin, db_name, infra, auth_providers(provides)),
         **_channel_env(provides, infra.redis_url),
         **_db_binding_env(provides),
         **_slot_env(provides, consumer.dist_name, infra),
+        **(_external_service_env(consumer.dist_name, blackhole_url) if provides.network else {}),
     }
 
     migrate = subprocess.run([str(tai), "db", "migrate"], env=env, capture_output=True, text=True)
@@ -865,6 +1003,7 @@ def main() -> None:
     print(f"{header}: booting {len(consumers)} consumer(s) against the candidate core.")
     booted = 0
     install_only = 0
+    external_only = 0
     failures: list[tuple[Consumer, BootFailure]] = []
     for index, consumer in enumerate(consumers):
         plugin_yaml = _load_plugin_yaml(venv_bin, consumer.dist_name)
@@ -895,6 +1034,14 @@ def main() -> None:
         if failure is None:
             print(f"  - {consumer.label}: booted, health ready.")
             booted += 1
+        elif provides.network and is_external_service_only(failure):
+            # The boot ran through install, import, registration and lifecycle and then
+            # could not reach the external endpoint the gate black-holed for it — the
+            # plugin's startup needs an external service the gate cannot stand in for, not
+            # a candidate-core break. Reported, never a silent pass and never a failure.
+            reached = ", ".join(external_service_handlers(failure))
+            print(f"  - {consumer.label}: install-only (external service: {reached}).")
+            external_only += 1
         else:
             print(f"  - {consumer.label}: BOOT FAILED — {failure.summary()}")
             failures.append((consumer, failure))
@@ -904,7 +1051,7 @@ def main() -> None:
 
         shutil.rmtree(workdir, ignore_errors=True)
 
-    tally = f"{booted} booted, {install_only} install-only"
+    tally = f"{booted} booted, {install_only} install-only, {external_only} install-only (external service)"
     if not failures:
         print(f"{header}: every supplied consumer accounted for ({tally}) — gate passes.")
         return
