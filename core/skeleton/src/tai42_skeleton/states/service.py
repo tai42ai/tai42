@@ -1217,10 +1217,17 @@ class StatesService:
     async def _validate_mount_values(
         self, module: StateModule, parameters: dict[str, Any], declarations: dict[str, Any]
     ) -> None:
-        """Validate a mount's parameter values against each parameter's schema (every
-        no-default parameter supplied) and its declarations against the module's
-        declarations schema and optional ``check`` predicate. Loud on the first failure."""
-        for name, value in parameters.items():
+        """Validate a mount's effective parameter values against each parameter's schema
+        (every no-default parameter supplied) and its declarations against the module's
+        declarations schema and optional ``check`` predicate. Loud on the first failure.
+
+        The ``check`` runs over the declarations with the mount's EFFECTIVE parameters
+        (module defaults overlaid by supplied values — the map the runtime sees) bound as
+        the named jq variable ``$parameters``, so a check may constrain a declaration
+        against a parameter (e.g. against a parameter-declared enum) at the earliest point
+        both are known."""
+        effective = self._effective_parameters(module, parameters)
+        for name, value in effective.items():
             param = module.parameters.get(name)
             if param is None:
                 raise ModuleValidationError(f"mount supplies unknown parameter {name!r} for module {module.name!r}")
@@ -1229,7 +1236,7 @@ class StatesService:
             except jsonschema.ValidationError as exc:
                 raise ModuleValidationError(f"mount parameter {name!r} is invalid: {exc.message}") from exc
         for name, param in module.parameters.items():
-            if not param.has_default and name not in parameters:
+            if not param.has_default and name not in effective:
                 raise ModuleValidationError(
                     f"mount of module {module.name!r} must supply parameter {name!r} (it has no default)"
                 )
@@ -1247,7 +1254,9 @@ class StatesService:
             ) from exc
         if module.declarations.check is not None:
             try:
-                result = await run_jq_first(module.declarations.check, declarations)
+                result = await run_jq_first(
+                    module.declarations.check, declarations, variables={"parameters": effective}
+                )
             except Exception as exc:
                 raise ModuleValidationError(
                     f"module {module.name!r} declarations check failed to evaluate: {exc}"
