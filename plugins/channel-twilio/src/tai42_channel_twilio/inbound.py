@@ -31,6 +31,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
+from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
 from tai42_kit.settings import require_secret
 
 from tai42_channel_twilio.correlation import (
@@ -59,23 +60,6 @@ _DELIVERY_RECEIPTS = {
 
 class SignatureRejectedError(Exception):
     """The request failed Twilio signature authentication (mapped to 401)."""
-
-
-class PayloadTooLargeError(Exception):
-    """The inbound body exceeded the unauthenticated door's byte cap (mapped to 413)."""
-
-
-async def _read_bounded_body(request: Request, cap: int) -> bytes:
-    """Read the body counting ACTUAL bytes, never a client ``Content-Length``.
-    Raises ``PayloadTooLargeError`` past ``cap`` before any signature work."""
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > cap:
-            raise PayloadTooLargeError("request body exceeds the configured cap")
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 def _reconstruct_public_url(request: Request) -> str:
@@ -124,9 +108,9 @@ async def _authenticated_form_pairs(request: Request) -> list[tuple[str, str]]:
     """Bounded-read and Twilio-signature-validate the request; return the RAW form
     pairs (duplicates kept). Nothing in the body is trusted until the signature
     validates. Raises ``ValueError`` (auth token unset → logged 500),
-    ``PayloadTooLargeError`` (→ 413), or ``SignatureRejectedError`` (→ 401)."""
+    ``PayloadTooLarge`` (→ 413), or ``SignatureRejectedError`` (→ 401)."""
     auth_token = require_secret(twilio_settings().auth_token, "Twilio channel", "CHANNEL_TWILIO_AUTH_TOKEN")
-    raw = await _read_bounded_body(request, _MAX_BODY_BYTES)
+    raw = await read_bounded_body(request, _MAX_BODY_BYTES)
     try:
         body_text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -138,11 +122,11 @@ async def _authenticated_form_pairs(request: Request) -> list[tuple[str, str]]:
     return form_pairs
 
 
-def _auth_error_response(exc: ValueError | PayloadTooLargeError | SignatureRejectedError, route: str) -> Response:
+def _auth_error_response(exc: ValueError | PayloadTooLarge | SignatureRejectedError, route: str) -> Response:
     """Map an ``_authenticated_form_pairs`` failure to its response: 413 oversize,
     401 bad signature, 500 for an unset auth token (operator misconfig, never a
     401 that reads like an ordinary bad signature)."""
-    if isinstance(exc, PayloadTooLargeError):
+    if isinstance(exc, PayloadTooLarge):
         return PlainTextResponse("payload too large", status_code=413)
     if isinstance(exc, SignatureRejectedError):
         logger.warning("rejected Twilio %s: %s", route, exc)
@@ -174,7 +158,7 @@ async def twilio_inbound(request: Request) -> Response:
     """
     try:
         form_pairs = await _authenticated_form_pairs(request)
-    except (ValueError, PayloadTooLargeError, SignatureRejectedError) as exc:
+    except (ValueError, PayloadTooLarge, SignatureRejectedError) as exc:
         return _auth_error_response(exc, "inbound")
 
     # Collapse to single values only now, after the signature validated the raw pairs.
@@ -262,7 +246,7 @@ async def twilio_status(request: Request) -> Response:
     """
     try:
         form_pairs = await _authenticated_form_pairs(request)
-    except (ValueError, PayloadTooLargeError, SignatureRejectedError) as exc:
+    except (ValueError, PayloadTooLarge, SignatureRejectedError) as exc:
         return _auth_error_response(exc, "status")
 
     form = dict(form_pairs)
