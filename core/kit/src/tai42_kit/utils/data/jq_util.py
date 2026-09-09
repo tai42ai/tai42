@@ -1,6 +1,7 @@
 import asyncio
 import itertools
 import re
+from collections.abc import Iterable
 from functools import lru_cache
 from typing import Any
 
@@ -24,8 +25,7 @@ _GUARD_PREAMBLE = (
 )
 
 
-@lru_cache(maxsize=512)
-def get_compiled_jq(expression: str, prelude: str = ""):
+def _compile_jq(expression: str, prelude: str, args: dict[str, Any] | None):
     # Opt-in dependency (the "jq" extra) — imported at call time so the module
     # (and the utils.data namespace re-exporting it) stays importable without it.
     import jq
@@ -38,12 +38,14 @@ def get_compiled_jq(expression: str, prelude: str = ""):
     if prelude and not prelude.endswith("\n"):
         prelude += "\n"
     prelude_lines = prelude.count("\n")
+    # ``args`` predeclares named ``$name`` variables (the ``--argjson`` equivalent),
+    # bound to their supplied values at compile time. ``None`` binds none.
     # Raw compile first so a syntax error reports the author's own line/column.
     # A bare ``expression`` calling a prelude def does not compile alone, so the
     # raw compile runs over ``prelude + expression``; a prelude shifts the line
     # numbers, so on error re-raise with the prelude's line count subtracted.
     try:
-        jq.compile(prelude + expression)
+        jq.compile(prelude + expression, args=args)
     except ValueError as exc:
         if not prelude:
             raise
@@ -54,7 +56,23 @@ def get_compiled_jq(expression: str, prelude: str = ""):
 
         raise ValueError(re.sub(r"(, line )(\d+)", _shift, message)) from exc
     # The ``\n)`` closes the preamble paren past any trailing line comment.
-    return jq.compile(_GUARD_PREAMBLE + prelude + expression + "\n)")
+    return jq.compile(_GUARD_PREAMBLE + prelude + expression + "\n)", args=args)
+
+
+@lru_cache(maxsize=512)
+def get_compiled_jq(expression: str, prelude: str = ""):
+    return _compile_jq(expression, prelude, None)
+
+
+def compile_check(expression: str, *, variables: Iterable[str] = ()) -> None:
+    """Prove ``expression`` is a valid jq program, with ``variables`` predeclared as
+    available named ``$name`` bindings. jq resolves variable references at compile time, so
+    an expression that will read a ``$name`` bound only at evaluation must have that name
+    declared here or it fails to compile; the bound VALUES are irrelevant to a compile
+    check (bound to null). Raises ``ValueError`` on a syntax error or a reference to a
+    variable outside ``variables``. Discards the program — a caller wanting to run it
+    compiles (cached) through :func:`run_jq_first`."""
+    _compile_jq(expression, "", dict.fromkeys(variables))
 
 
 class JqSettings(TaiBaseSettings):
@@ -75,9 +93,23 @@ def jq_settings() -> JqSettings:
 _NO_DEFAULT = object()
 
 
-async def run_jq_first(expression: str, payload: Any, *, default: Any = _NO_DEFAULT, prelude: str = "") -> Any:
+async def run_jq_first(
+    expression: str,
+    payload: Any,
+    *,
+    default: Any = _NO_DEFAULT,
+    prelude: str = "",
+    variables: dict[str, Any] | None = None,
+) -> Any:
     """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker
     thread, bounded by ``JQ_TIMEOUT_SECONDS``; returns ``.first()``.
+
+    ``variables`` predeclares named jq variables (the ``--argjson`` equivalent): each
+    key ``k`` is readable as ``$k`` in the expression, bound to its value. An expression
+    referencing an undeclared ``$name`` fails loudly (jq: undefined variable), so a
+    caller that omits a variable the expression needs never silently degrades. The
+    values are supplied per call and cannot be hashed for the compile cache, so a call
+    with ``variables`` compiles fresh; the variable-free path stays cached for hot callers.
 
     On an empty pipeline (``.first()`` raises ``StopIteration``, which cannot cross
     the ``to_thread`` future boundary so it is converted in the worker thread):
@@ -90,7 +122,9 @@ async def run_jq_first(expression: str, payload: Any, *, default: Any = _NO_DEFA
     finishes on its own; the budget only protects the event loop and the
     caller's latency, and the timeout is raised loudly.
     """
-    program = get_compiled_jq(expression, prelude)
+    program = (
+        get_compiled_jq(expression, prelude) if variables is None else _compile_jq(expression, prelude, dict(variables))
+    )
     timeout = jq_settings().timeout_seconds
 
     def _run() -> Any:
