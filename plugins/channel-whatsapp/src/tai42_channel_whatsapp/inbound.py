@@ -48,6 +48,7 @@ from tai42_contract.conversations import (
     validate_entry_params,
 )
 from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
 from tai42_kit.settings import require_secret
 
 from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX
@@ -197,23 +198,6 @@ class SignatureRejectedError(Exception):
     """The request failed X-Hub-Signature-256 authentication (mapped to 401)."""
 
 
-class PayloadTooLargeError(Exception):
-    """The inbound body exceeded the unauthenticated door's byte cap (mapped to 413)."""
-
-
-async def _read_bounded_body(request: Request, cap: int) -> bytes:
-    """Read the body counting ACTUAL bytes, never a client ``Content-Length``.
-    Raises ``PayloadTooLargeError`` past ``cap`` before any signature work."""
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > cap:
-            raise PayloadTooLargeError("request body exceeds the configured cap")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
 def _validate_signature(app_secret: str, body: bytes, provided: str | None) -> None:
     """Validate ``X-Hub-Signature-256`` over the raw body or raise
     ``SignatureRejectedError``. Header form ``sha256=<hex>``; compared
@@ -236,19 +220,19 @@ def _validate_signature(app_secret: str, body: bytes, provided: str | None) -> N
 async def _authenticated_body(request: Request) -> bytes:
     """Bounded-read and signature-validate the POST body; return the RAW bytes.
     Nothing in the body is trusted until the signature validates. Raises
-    ``ValueError`` (app secret unset → logged 500), ``PayloadTooLargeError``
+    ``ValueError`` (app secret unset → logged 500), ``PayloadTooLarge``
     (→ 413), or ``SignatureRejectedError`` (→ 401)."""
     app_secret = require_secret(whatsapp_settings().app_secret, "WhatsApp channel", "CHANNEL_WHATSAPP_APP_SECRET")
-    raw = await _read_bounded_body(request, _MAX_BODY_BYTES)
+    raw = await read_bounded_body(request, _MAX_BODY_BYTES)
     _validate_signature(app_secret, raw, request.headers.get(_SIGNATURE_HEADER))
     return raw
 
 
-def _auth_error_response(exc: ValueError | PayloadTooLargeError | SignatureRejectedError) -> Response:
+def _auth_error_response(exc: ValueError | PayloadTooLarge | SignatureRejectedError) -> Response:
     """Map an ``_authenticated_body`` failure to its response: 413 oversize, 401
     bad signature, 500 for an unset app secret (operator misconfig, never a 401
     that reads like an ordinary bad signature)."""
-    if isinstance(exc, PayloadTooLargeError):
+    if isinstance(exc, PayloadTooLarge):
         return PlainTextResponse("payload too large", status_code=413)
     if isinstance(exc, SignatureRejectedError):
         logger.warning("rejected whatsapp inbound: %s", exc)
@@ -340,7 +324,7 @@ async def whatsapp_inbound(request: Request) -> Response:
 
     try:
         raw = await _authenticated_body(request)
-    except (ValueError, PayloadTooLargeError, SignatureRejectedError) as exc:
+    except (ValueError, PayloadTooLarge, SignatureRejectedError) as exc:
         return _auth_error_response(exc)
 
     try:

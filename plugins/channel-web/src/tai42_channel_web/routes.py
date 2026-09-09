@@ -96,6 +96,7 @@ from tai42_contract.channels import OPTION_ID_MAX_CHARS
 from tai42_contract.conversations import BlankInboundTextError, validate_entry_params
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
 from tai42_kit.clients.impl.http import HttpxClient
+from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
 from tai42_kit.utils.client_address import XFF_HEADER, client_bucket
 
 from tai42_channel_web.page import (
@@ -286,10 +287,6 @@ def _clean_identity(value: str) -> str | None:
     if not identity or len(identity) > _MAX_IDENTITY_CHARS or ":" in identity:
         return None
     return identity
-
-
-class PayloadTooLargeError(Exception):
-    """The visitor's request body exceeded the door's cap (mapped to 413)."""
 
 
 class IdentityBody(BaseModel):
@@ -519,26 +516,12 @@ def _store_off() -> JSONResponse | None:
     return _error(_STORE_OFF, 501, _STORE_OFF_CODE)
 
 
-async def _read_bounded_body(request: Request, cap: int) -> bytes:
-    """Read the body counting ACTUAL bytes, never a client ``Content-Length``.
-    Raises ``PayloadTooLargeError`` past ``cap`` — the read stops there, and nothing
-    is ever truncated into a shorter valid body."""
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > cap:
-            raise PayloadTooLargeError(f"request body exceeds the {cap}-byte cap")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
 async def _json_body(request: Request, settings: WebSettings) -> tuple[Any, JSONResponse | None]:
     """The parsed JSON body, or ``(None, <refusal>)`` for an over-cap or unparseable
     one."""
     try:
-        raw = await _read_bounded_body(request, settings.max_body_bytes)
-    except PayloadTooLargeError as exc:
+        raw = await read_bounded_body(request, settings.max_body_bytes)
+    except PayloadTooLarge as exc:
         logger.warning("web chat door refused an oversized body: %s", exc)
         return None, _error("request body is too large", 413)
     try:
@@ -813,11 +796,17 @@ def _render_form_text(schema: dict[str, Any], values: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def _forward_answer(callback_url: str, answer: Any) -> httpx.Response:
-    """POST ``{"answer": <value>}`` to the interaction's callback door and return its
-    response; the caller applies the status policy."""
+async def _forward_answer(callback_url: str, answer: Any, params: dict[str, str] | None = None) -> httpx.Response:
+    """POST ``{"answer": <value>}`` (plus ``"params"`` when the session carried link
+    enrichment) to the interaction's callback door and return its response; the caller
+    applies the status policy. Mirrors the skeleton seam's body shape, so a web answer
+    delivers the same enrichment beside its answer that a MESSAGE turn does; absent
+    params keep the body byte-identical to a plain forward."""
+    body: dict[str, Any] = {"answer": answer}
+    if params:
+        body["params"] = params
     async with tai42_app.clients.client_ctx(HttpxClient, timeout=web_settings().http_timeout_seconds) as client:
-        return await client.post(callback_url, json={"answer": answer})
+        return await client.post(callback_url, json=body)
 
 
 @tai42_app.http.custom_route(
@@ -1155,6 +1144,16 @@ async def web_answer(request: Request) -> Response:
     bad_answer = _answer_refusal(answer)
     if bad_answer is not None:
         return _error(bad_answer, 422)
+    # The session's captured link params ride the answer as enrichment beside it, the
+    # SAME params a MESSAGE turn from this session carries — re-bounded by the shared
+    # entry-param validator so an over-count/over-size set is a clean 422 rather than
+    # an opaque callback error. No reply_id is invented here: on web an option tap
+    # flows through the message door, so the answer body is the raw scalar/object plus
+    # these params only.
+    try:
+        params = validate_entry_params(dict(registration.params))
+    except ValueError as exc:
+        return _error(str(exc), 422)
 
     pending = await peek_question(interaction_id)
     if pending is None or not _serves(registration, pending.identity) or pending.address != registration.visitor_id:
@@ -1165,7 +1164,7 @@ async def web_answer(request: Request) -> Response:
 
     restores = settings.max_answer_restores
     try:
-        forwarded = await _forward_answer(record.callback_url, answer)
+        forwarded = await _forward_answer(record.callback_url, answer, params)
     except httpx.HTTPError:
         # Transport failure — restore so the visitor's retry still resolves it.
         await restore_question(interaction_id, record, restores)

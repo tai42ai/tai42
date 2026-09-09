@@ -1162,6 +1162,41 @@ async def test_answer_forwards_and_appends_answered(
     assert answered["answer"] == "staging"
 
 
+async def test_answer_forwards_the_session_link_params_beside_the_answer(
+    web_env, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The reporter's path: a session created with link params (a ``GET /chat?ref=spring&n=3``
+    # captured on the registration) answers a pending ask through the ANSWER door. The
+    # forwarded body must carry those params BESIDE ``answer`` — the same enrichment a
+    # MESSAGE turn from this session delivers — so a flow reading ``InteractionResponse.params``
+    # sees them on an answer too, not only on messages.
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "spring", "n": "3"})
+    await _seed_question()
+    fake_httpx.responses.append(response(200, json={"data": {"status": "answered"}}))
+
+    resp = await _handler(stub_app, _ANSWER)(_answer_request(answer="staging"))
+
+    assert resp.status_code == 200
+    assert fake_httpx.calls[0]["json"] == {"answer": "staging", "params": {"ref": "spring", "n": "3"}}
+
+
+async def test_answer_with_over_limit_session_params_is_a_422_and_keeps_the_record(
+    web_env, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # An over-count captured param set is re-bounded here (the same validator the message
+    # door applies), so a bad set is a clean 422 rather than an opaque callback error — and
+    # the refusal happens BEFORE the claim, so nothing is forwarded and the record survives
+    # for a corrected retry.
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, {f"k{i}": "v" for i in range(17)})
+    await _seed_question()
+
+    resp = await _handler(stub_app, _ANSWER)(_answer_request(answer="x"))
+
+    assert resp.status_code == 422
+    assert fake_httpx.calls == []
+    assert "channel:web:question:int-1" in fake_redis.store
+
+
 async def test_answer_without_a_session_cookie_is_401(web_env, stub_app, fake_redis: FakeRedis):
     resp = await _handler(stub_app, _ANSWER)(_answer_request(answer="x", token=None))
     assert resp.status_code == 401
