@@ -28,7 +28,7 @@ dependencies = [
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=8.2,<9",
     # Leaf helpers: the settings base class and the settings-cache decorator.
-    "tai42-kit>=3.10,<4",
+    "tai42-kit>=3.11,<4",
     # Async file I/O for the driver's non-blocking reads/writes.
     "aiofiles>=24",
     # The settings config type used by the backend's settings class.
