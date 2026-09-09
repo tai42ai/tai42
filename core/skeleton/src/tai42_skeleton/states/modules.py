@@ -29,10 +29,16 @@ from typing import Any
 
 from tai42_contract.states.errors import ModuleValidationError, MountConflictError
 from tai42_contract.states.models import MODULE_NAME_RE
-from tai42_kit.utils.data.jq_util import get_compiled_jq
+from tai42_kit.utils.data.jq_util import compile_check
 
 MODULE_KIND = "state-module"
 REGIMES = frozenset({"single", "composing", "free"})
+
+# The named jq variables a declarations ``check`` may reference: ``$parameters`` — the
+# mount's effective parameters (defaults overlaid by supplied values), bound at the mount
+# seam that evaluates the check. Declared here so an author's check compiles at upload and
+# every evaluator binds the same set.
+DECLARATIONS_CHECK_VARIABLES: tuple[str, ...] = ("parameters",)
 
 # The five trace fields the effective schema admits on every object under a tracing
 # mount; the platform ``apply`` chokepoint stamps them. ``at`` is always present;
@@ -83,7 +89,12 @@ class ModuleDeclarations:
     """The declarations section: the ``schema`` of the static values a mount stores, and
     an OPTIONAL ``check`` (a jq predicate over those values returning ``true`` or a
     message). The check stays platform — it is evaluated at mount over the declaration
-    values."""
+    values, which are its input, with the mount's EFFECTIVE parameters (module defaults
+    overlaid by supplied values) bound as the named jq variable ``$parameters``. A check
+    may therefore constrain a declaration against a parameter (e.g. against a
+    parameter-declared enum) at mount, the earliest point both are known. Every evaluator
+    of a check MUST supply ``$parameters``; a check referencing it without the binding
+    fails loudly (jq: undefined variable ``$parameters``)."""
 
     schema: dict[str, Any]
     check: str | None = None
@@ -393,10 +404,12 @@ def _reject_extra_keys(doc: dict[str, Any], *, where: str) -> None:
         )
 
 
-def _compile_jq(expr: str, *, where: str) -> None:
-    """Compile-check one jq expression on its own; a failure is a loud module error."""
+def _compile_check_jq(expr: str, *, where: str) -> None:
+    """Compile-check the declarations ``check`` predicate, declaring the named variables
+    the mount seam binds at evaluation (``$parameters`` — the effective mount parameters)
+    so an author may reference them; a failure is a loud module error."""
     try:
-        get_compiled_jq(expr)
+        compile_check(expr, variables=DECLARATIONS_CHECK_VARIABLES)
     except Exception as exc:
         raise ModuleValidationError(f"{where} is not a valid jq expression: {exc}") from exc
 
@@ -449,7 +462,7 @@ def _parse_declarations(raw: Any) -> ModuleDeclarations:
         _require_type(check, str, where="declarations check")
         if not check.strip():
             raise ModuleValidationError("declarations check must be a non-empty jq predicate or omitted")
-        _compile_jq(check, where="declarations check")
+        _compile_check_jq(check, where="declarations check")
     return ModuleDeclarations(schema=schema, check=check)
 
 

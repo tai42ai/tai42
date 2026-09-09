@@ -394,6 +394,41 @@ async def test_mount_missing_module_raises(svc: StatesService) -> None:
         await svc.mount("alerts", "absent", MountBody(path=["sub"]))
 
 
+def _capped_module(name: str = "capped"):
+    """A module whose declarations ``check`` constrains a declared ``count`` against the
+    mount's effective ``limit`` parameter, read as ``$parameters.limit``."""
+    return _module_doc(
+        name,
+        schema={"type": "object", "properties": {"box": {"type": "object"}}},
+        parameters={"limit": {"schema": {"type": "integer"}, "default": 5}},
+        declarations={
+            "schema": {"type": "object", "properties": {"count": {"type": "integer"}}},
+            "check": 'if .count <= $parameters.limit then true else "count exceeds the mount limit" end',
+        },
+    )
+
+
+async def test_mount_check_reads_effective_parameters(svc: StatesService) -> None:
+    """A declarations check reads the mount's supplied parameters as ``$parameters``: a
+    declaration within the supplied ``limit`` mounts, one exceeding it is refused with the
+    check's message."""
+    await svc.put_declaration(_STATE)
+    await svc.put_module(_capped_module(), replace=False)
+    with pytest.raises(ModuleValidationError, match="count exceeds the mount limit"):
+        await svc.mount("alerts", "capped", MountBody(path=["a"], parameters={"limit": 8}, declarations={"count": 9}))
+    await svc.mount("alerts", "capped", MountBody(path=["a"], parameters={"limit": 8}, declarations={"count": 7}))
+
+
+async def test_mount_check_sees_the_parameter_default(svc: StatesService) -> None:
+    """A mount supplying no ``limit`` sees the module default (5) in the check, so the check
+    constrains against the same value the runtime persists."""
+    await svc.put_declaration(_STATE)
+    await svc.put_module(_capped_module(), replace=False)
+    with pytest.raises(ModuleValidationError, match="count exceeds the mount limit"):
+        await svc.mount("alerts", "capped", MountBody(path=["a"], declarations={"count": 6}))
+    await svc.mount("alerts", "capped", MountBody(path=["a"], declarations={"count": 4}))
+
+
 async def test_effective_schema_for_undeclared_raises(svc: StatesService) -> None:
     with pytest.raises(StateNotFoundError, match="no state declared"):
         await svc.effective_schema_for("absent")

@@ -159,6 +159,57 @@ async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: 
     assert folded["canonical_subject"]["key"] == "t2"
 
 
+async def test_core_stack_mount_check_reads_effective_parameters(
+    core_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """Over the real mount door, a module's declarations ``check`` reads the mount's
+    effective parameters as ``$parameters``: a declaration exceeding the supplied ``limit``
+    is refused 422 with the check's message, and one within it mounts."""
+    api = core_stack.api()
+    state = uniq("status")
+    module = uniq("capped-mod").replace("_", "-")
+
+    await api.put(
+        f"/api/states/{state}",
+        json={
+            "description": "e2e capped",
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+    )
+    await api.put(
+        f"/api/state-modules/{module}",
+        json={
+            "kind": "state-module",
+            "name": module,
+            "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
+            "parameters": {"limit": {"schema": {"type": "integer"}, "default": 5}},
+            "declarations": {
+                "schema": {"type": "object", "properties": {"count": {"type": "integer"}}},
+                "check": 'if .count <= $parameters.limit then true else "count exceeds the mount limit" end',
+            },
+        },
+    )
+
+    # A declaration exceeding the supplied limit is refused at the mount door.
+    resp = await api.request_raw(
+        "PUT",
+        f"/api/states/{state}/mounts/{module}",
+        json={"path": ["box"], "parameters": {"limit": 8}, "declarations": {"count": 9}},
+    )
+    assert resp.status_code == 422, resp.text
+    assert "count exceeds the mount limit" in resp.text
+
+    # Within the limit, the mount is accepted and served.
+    await api.put(
+        f"/api/states/{state}/mounts/{module}",
+        json={"path": ["box"], "parameters": {"limit": 8}, "declarations": {"count": 7}},
+    )
+    served = await api.get(f"/api/states/{state}")
+    assert [m["module"] for m in served["mounts"]] == [module]
+
+
 async def test_core_stack_record_key_with_slash_round_trips_by_url(
     core_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

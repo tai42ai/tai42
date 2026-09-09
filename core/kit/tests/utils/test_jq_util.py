@@ -6,7 +6,7 @@ pytest.importorskip("jq")
 
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import jq_util
-from tai42_kit.utils.data.jq_util import get_compiled_jq, run_jq_bounded, run_jq_first
+from tai42_kit.utils.data.jq_util import compile_check, get_compiled_jq, run_jq_bounded, run_jq_first
 
 
 class TestGetCompiledJq:
@@ -233,6 +233,26 @@ class TestPrelude:
         # bare call (the guard wrapper alone, no extra defs).
         assert await run_jq_first(".a", {"a": 42}, prelude="") == 42
         assert get_compiled_jq(".a", prelude="").input(text='{"a": 5}').first() == 5
+
+
+class TestNamedVariables:
+    async def test_run_jq_first_binds_named_variables(self):
+        assert await run_jq_first(".a + $extra.b", {"a": 1}, variables={"extra": {"b": 4}}) == 5
+
+    async def test_run_jq_first_without_the_variable_fails_loudly(self):
+        # An expression referencing an undeclared variable never silently degrades: jq
+        # resolves the reference at compile time and refuses loudly.
+        with pytest.raises(ValueError, match=r"\$extra is not defined"):
+            await run_jq_first(".a + $extra.b", {"a": 1})
+
+    def test_compile_check_declares_variables(self):
+        compile_check(".a <= $limit", variables=("limit",))
+        with pytest.raises(ValueError, match=r"\$limit is not defined"):
+            compile_check(".a <= $limit")
+
+    def test_compile_check_still_refuses_a_syntax_error(self):
+        with pytest.raises(ValueError, match="syntax error"):
+            compile_check(".a <=", variables=("limit",))
 
 
 class TestPreludePassthrough:
