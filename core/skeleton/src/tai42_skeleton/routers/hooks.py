@@ -71,6 +71,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookRegister
 from tai42_contract.webhooks import FreshnessWindow, SeenSetClaim, WebhookVerificationError
+from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.authz.execution import bind_execution_identity
@@ -112,10 +113,6 @@ _VERIFY_FAILED = "webhook verification failed"
 _API_KEY_REQUIRED = "this trigger link requires an authenticated api key"
 
 
-class _PayloadTooLarge(Exception):
-    """Raised when the request body or query string exceeds the configured cap."""
-
-
 def _error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code, headers=dict(_INGRESS_HEADERS))
 
@@ -129,19 +126,6 @@ def _sanitize_topic_for_log(topic: str) -> str:
     (log injection). Both are removed — a lone carriage return can rewrite a line
     on many terminals, not only a newline."""
     return topic.replace("\r", "").replace("\n", "")
-
-
-async def _read_bounded_body(request: Request, cap: int) -> bytes:
-    """Read the request body on ACTUAL bytes, never a client ``Content-Length``.
-    Raise ``_PayloadTooLarge`` past ``cap`` before parsing — loud, never truncated."""
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > cap:
-            raise _PayloadTooLarge("request body exceeds the configured cap")
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 # -- Inbound event ingress (PUBLIC, native) ----------------------------------
@@ -175,8 +159,8 @@ async def universal_webhook(request: Request) -> Response:
     if len(request.url.query.encode()) > cap:
         return _error("payload too large", 413)
     try:
-        raw = await _read_bounded_body(request, cap)
-    except _PayloadTooLarge:
+        raw = await read_bounded_body(request, cap)
+    except PayloadTooLarge:
         return _error("payload too large", 413)
     # Cache the bounded bytes on the request so ``parse_any_payload`` re-reads them
     # (json/xml/form) without re-consuming the already-drained stream. The verifier
@@ -253,8 +237,8 @@ async def trigger_link(request: Request) -> Response:
     if len(request.url.query.encode()) > cap:
         return _error("payload too large", 413)
     try:
-        raw = await _read_bounded_body(request, cap)
-    except _PayloadTooLarge:
+        raw = await read_bounded_body(request, cap)
+    except PayloadTooLarge:
         return _error("payload too large", 413)
     request._body = raw
 

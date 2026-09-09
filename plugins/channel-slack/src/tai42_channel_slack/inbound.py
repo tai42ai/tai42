@@ -48,6 +48,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import BlankInboundTextError
+from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
 
 from tai42_channel_slack.blocks import decode_reply_value, is_option_tap, is_reply_action
 from tai42_channel_slack.channel import open_modal_view
@@ -97,10 +98,6 @@ _MAX_TIMESTAMP_SKEW_SECONDS = 300
 _MAX_BODY_BYTES = 1 * 1024 * 1024
 
 
-class _PayloadTooLarge(Exception):
-    """The inbound body exceeded ``_MAX_BODY_BYTES`` -> 413."""
-
-
 class _SignatureRejected(Exception):
     """An ordinary request-side verification failure -> uniform 401."""
 
@@ -109,19 +106,6 @@ def _misconfigured(env_name: str) -> JSONResponse:
     """Fail CLOSED on operator misconfiguration: one logged, constant JSON 500."""
     logger.error("slack inbound: %s is unset or empty; failing closed", env_name)
     return JSONResponse({"error": "channel misconfigured"}, status_code=500)
-
-
-async def _read_bounded_body(request: Request, cap: int) -> bytes:
-    """Read the body on ACTUAL bytes, never a client ``Content-Length``. Raise
-    ``_PayloadTooLarge`` past ``cap`` before any HMAC or parse work."""
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > cap:
-            raise _PayloadTooLarge("request body exceeds the configured cap")
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 def _verify_signature(raw: bytes, headers: Mapping[str, str], secret: str) -> None:
@@ -179,8 +163,8 @@ async def slack_inbound(request: Request) -> Response:
     disables the subscription).
     """
     try:
-        raw = await _read_bounded_body(request, _MAX_BODY_BYTES)
-    except _PayloadTooLarge:
+        raw = await read_bounded_body(request, _MAX_BODY_BYTES)
+    except PayloadTooLarge:
         # Bounded BEFORE any HMAC work — a loud 413, never a truncated read.
         return JSONResponse({"error": "payload too large"}, status_code=413)
     # Resolve the signing secret first. Unset or empty fails CLOSED — an empty key
@@ -462,8 +446,8 @@ async def slack_interactive(request: Request) -> Response:
     payload is acked 200 and ignored (Slack needs a 2xx).
     """
     try:
-        raw = await _read_bounded_body(request, _MAX_BODY_BYTES)
-    except _PayloadTooLarge:
+        raw = await read_bounded_body(request, _MAX_BODY_BYTES)
+    except PayloadTooLarge:
         return JSONResponse({"error": "payload too large"}, status_code=413)
     signing_secret = slack_settings().signing_secret
     secret = signing_secret.get_secret_value() if signing_secret is not None else ""

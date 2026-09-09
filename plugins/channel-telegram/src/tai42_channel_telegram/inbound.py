@@ -36,6 +36,7 @@ from tai42_contract.conversations import (
     validate_entry_params,
 )
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
+from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
 from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.client import answer_callback_query, send_chat_action
@@ -88,23 +89,6 @@ class StatusAck(BaseModel):
     """The webhook's ack status naming which branch handled the update."""
 
     status: Literal["accepted", "forwarded", "ignored", "rejected"]
-
-
-class _PayloadTooLarge(Exception):
-    """The inbound body exceeded ``_MAX_BODY_BYTES`` -> 413."""
-
-
-async def _read_bounded_body(request: Request, cap: int) -> bytes:
-    """Read the body on ACTUAL bytes, never a client ``Content-Length``. Raise
-    ``_PayloadTooLarge`` the moment the stream crosses ``cap``."""
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > cap:
-            raise _PayloadTooLarge("request body exceeds the configured cap")
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 def _misconfigured(env_name: str) -> JSONResponse:
@@ -396,8 +380,8 @@ async def inbound(request: Request) -> Response:
         return _denied()
 
     try:
-        body = await _read_bounded_body(request, _MAX_BODY_BYTES)
-    except _PayloadTooLarge:
+        body = await read_bounded_body(request, _MAX_BODY_BYTES)
+    except PayloadTooLarge:
         return JSONResponse({"error": "payload too large"}, status_code=413)
     try:
         update = json.loads(body)
