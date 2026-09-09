@@ -369,3 +369,116 @@ def test_parse_boot_failure_without_lifecycle_line_keeps_error_detail():
 def test_boot_failure_summary_lists_routes_then_handlers():
     summary = gate.BootFailure(handlers=("h1", "h2"), routes=("GET /x",), detail="d").summary()
     assert summary == "route(s): GET /x; failing handler(s): h1, h2"
+
+
+# ------------------------------------------ external-service classification
+
+
+def test_read_provides_reads_network_permission():
+    assert gate.read_provides({"permissions": {"network": True}}).network is True
+    assert gate.read_provides({"permissions": {"network": False}}).network is False
+    assert gate.read_provides({}).network is False
+
+
+@pytest.mark.parametrize(
+    ("dist", "expected_keys", "endpoint_keys"),
+    [
+        (
+            "tai42-channel-telegram",
+            {
+                "CHANNEL_TELEGRAM_BOT_TOKEN",
+                "CHANNEL_TELEGRAM_WEBHOOK_SECRET",
+                "CHANNEL_TELEGRAM_PUBLIC_BASE_URL",
+                "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT",
+                "CHANNEL_TELEGRAM_API_BASE_URL",
+            },
+            {"CHANNEL_TELEGRAM_API_BASE_URL", "CHANNEL_TELEGRAM_PUBLIC_BASE_URL"},
+        ),
+        (
+            "tai42-channel-slack",
+            {
+                "CHANNEL_SLACK_BOT_USER_ID",
+                "CHANNEL_SLACK_BOT_TOKEN",
+                "CHANNEL_SLACK_SIGNING_SECRET",
+                "CHANNEL_SLACK_API_BASE_URL",
+            },
+            {"CHANNEL_SLACK_API_BASE_URL"},
+        ),
+        (
+            "tai42-identity-oidc",
+            {"TAI_IDENTITY_OIDC_ISSUER", "TAI_IDENTITY_OIDC_AUDIENCE"},
+            {"TAI_IDENTITY_OIDC_ISSUER"},
+        ),
+        (
+            "tai42-accounts-oidc",
+            {"TAI_ACCOUNTS_OIDC_STATE_KEY", "TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL", "TAI_ACCOUNTS_OIDC_PROVIDERS"},
+            {"TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL"},
+        ),
+    ],
+)
+def test_external_service_env_black_holes_endpoints(dist: str, expected_keys: set[str], endpoint_keys: set[str]):
+    blackhole = "http://127.0.0.1:54321"
+    env = gate._external_service_env(dist, blackhole)
+    assert set(env) == expected_keys
+    # Every outbound endpoint the config carries points at the black hole (loopback so an
+    # OIDC discovery client attempts the connection rather than refusing a non-https URL).
+    for key in endpoint_keys:
+        assert blackhole in env[key]
+
+
+def test_external_service_env_empty_for_an_unknown_distribution():
+    assert gate._external_service_env("tai42-some-other-plugin", "http://127.0.0.1:1") == {}
+
+
+def test_parse_boot_failure_captures_per_handler_error_text():
+    log = (
+        'RuntimeError: lifecycle handlers failed: probe_identity_provider: JwksFetchError("Transport error '
+        "fetching 'http://127.0.0.1:45097/.well-known/openid-configuration': All connection attempts failed\")\n"
+    )
+    failure = gate.parse_boot_failure(log)
+    assert failure.handlers == ("probe_identity_provider",)
+    assert len(failure.handler_errors) == 1
+    name, text = failure.handler_errors[0]
+    assert name == "probe_identity_provider"
+    assert "Transport error fetching" in text
+
+
+def test_connection_error_only_boot_is_external_service():
+    # A network-declaring consumer whose sole startup failure is a connection-class error
+    # reaching the configured (black-holed) endpoint: it needs an external service.
+    log = (
+        "RuntimeError: lifecycle handlers failed: "
+        "_register_telegram_webhook: ConnectError('All connection attempts failed')\n"
+    )
+    failure = gate.parse_boot_failure(log)
+    assert gate.is_external_service_only(failure) is True
+    assert gate.external_service_handlers(failure) == ("_register_telegram_webhook",)
+
+
+def test_guard_error_boot_is_not_external_service():
+    # A response-model guard raised at startup is a candidate-core break, never an
+    # external-service miss — it must stay a BOOT FAILED.
+    log = (
+        "RuntimeError: lifecycle handlers failed: seed_roles: ValueError('route PUT /users/me/password declares "
+        "no response_model and no no_body_reason')\n"
+    )
+    failure = gate.parse_boot_failure(log)
+    assert gate.is_external_service_only(failure) is False
+    assert gate.external_service_handlers(failure) == ()
+
+
+def test_mixed_connection_and_guard_failure_is_not_external_service():
+    # One connection-class error next to one guard error: a real break rides alongside the
+    # external miss, so the boot must not be reclassified as install-only.
+    log = (
+        "RuntimeError: lifecycle handlers failed: probe_identity_provider: ConnectError('All connection attempts "
+        "failed'), check_route_actions: ValueError('gated route failed the action-class audit')\n"
+    )
+    failure = gate.parse_boot_failure(log)
+    assert gate.is_external_service_only(failure) is False
+
+
+def test_non_lifecycle_failure_is_not_external_service():
+    # No structured lifecycle line (an import/migrate failure): never install-only.
+    failure = gate.parse_boot_failure("RuntimeError: the flow payload store is not configured\n")
+    assert gate.is_external_service_only(failure) is False
