@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from tai42_e2e.marketplace import (
+    RUNNING_CONTRACT_MAJOR,
     ZETA_COMPAT_VERSION,
     ZETA_INCOMPAT_VERSION,
     ZETA_NARROW_CONTRACT_RANGE,
@@ -50,9 +51,10 @@ async def test_resolve_pins_newest_contract_compatible_version(
     assert resolved["contract_range"] == ZETA_WIDE_CONTRACT_RANGE
     assert resolved["package"] == ZETA_PACKAGE
 
-    # A core inside the narrow future range pins the newest version — the same
-    # listing resolves differently per caller contract, which is the mechanism.
-    resolved = await api.post(resolve_path(ZETA_REF, contract="9.5.0"))
+    # A core inside the narrow future range (one major above the running
+    # contract) pins the newest version — the same listing resolves differently
+    # per caller contract, which is the mechanism.
+    resolved = await api.post(resolve_path(ZETA_REF, contract=f"{RUNNING_CONTRACT_MAJOR + 1}.5.0"))
     assert resolved["version"] == ZETA_INCOMPAT_VERSION
     assert resolved["contract_range"] == ZETA_NARROW_CONTRACT_RANGE
 
@@ -60,11 +62,14 @@ async def test_resolve_pins_newest_contract_compatible_version(
 async def test_resolve_refuses_when_no_version_is_compatible(
     marketplace_service: MarketplaceService, zeta_catalog: tuple[BuiltWheel, BuiltWheel]
 ) -> None:
-    # A contract version beyond every declared range: the refusal is a typed
-    # 409 (the listing and its versions exist; every declared range refuses this
-    # pin) whose message names the newest published version and its range, so a
-    # caller can see exactly how far ahead (or behind) its core is.
-    response = await marketplace_service.api.request_raw("POST", resolve_path(ZETA_REF, contract="12.0.0"))
+    # A contract version beyond every declared range (two majors above the
+    # narrow future range): the refusal is a typed 409 (the listing and its
+    # versions exist; every declared range refuses this pin) whose message names
+    # the newest published version and its range, so a caller can see exactly how
+    # far ahead (or behind) its core is.
+    response = await marketplace_service.api.request_raw(
+        "POST", resolve_path(ZETA_REF, contract=f"{RUNNING_CONTRACT_MAJOR + 3}.0.0")
+    )
     assert response.status_code == 409, f"expected a 409 refusal, got {response.status_code}: {response.text}"
     body = response.json()
     message = body["error"]
