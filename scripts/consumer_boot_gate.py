@@ -42,9 +42,15 @@ reported as an ACCEPTED break (a printed notice) rather than a gate failure.
 
 A consumer whose declared dependency range excludes the candidate cannot even be
 installed into the boot venv; the resolver's ``No solution found`` is the most
-explicit form of the same break and is classified identically — accepted under a
-major bump, a gate failure otherwise. Any other install failure (network, a bad
-wheel, a build error) is always a hard failure, never reclassified.
+explicit form of a consumer break. Whether it is a break of THIS candidate is decided
+against the same baseline the bump uses — the previous released tag. Under a major
+bump the conflict is an accepted break (a notice, the gate passes). Under a non-major
+bump the same install set is re-resolved against the previous released tag's tree: if
+it resolves there, the candidate introduced the conflict and the gate fails; if it
+also finds no solution there, the incompatibility predates the candidate (it is
+carried from the previous release) and is not a new break, so a notice names the
+consumers and the gate passes. Any other install failure (network, a bad wheel, a
+build error), here or in the re-resolve, is always a hard failure, never reclassified.
 
 Consumers come from two sources. Supplied ones are wheels (``--consumer-wheel``)
 or requirement specs (``--consumer-req``); the gate names no specific consumer, so
@@ -948,20 +954,111 @@ def _install_venv(
     return venv_bin
 
 
-def _report_unresolvable_consumers(header: str, bump: str, consumers: list[Consumer], resolver_stderr: str) -> None:
-    """Classify a boot-venv resolution conflict by the governing bump: under a major bump
-    report every supplied consumer as an accepted break (a notice quoting the resolver's
-    conclusion, the gate passes); otherwise fail with the resolver output, as any
-    unresolved install does."""
-    if not break_is_accepted(bump):
+def _reresolve_against_previous_tag(
+    previous_tag: str,
+    repo_root: Path,
+    core_dirs: list[str],
+    identity_package: str,
+    consumers: list[Consumer],
+    venv: Path,
+) -> str | None:
+    """Re-resolve the same boot install set against the previous released tag's tree in a
+    throwaway git worktree, to tell a conflict the candidate INTRODUCED from one that
+    predates it. Returns the resolver output when the previous tree ALSO finds no solution
+    (a pre-existing incompatibility); returns ``None`` when it resolves (the candidate
+    introduced the conflict). Any other failure of the re-resolve raises loudly — a
+    pre-existing verdict is only ever reached through the resolver's own no-solution
+    conclusion, never a swallowed error."""
+    parent = Path(tempfile.mkdtemp(prefix="consumer-boot-prev-"))
+    worktree = parent / "tree"
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), previous_tag],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        install_args = ["uv", "pip", "install", "--dry-run", "--python", str(venv / "bin" / "python")]
+        for core_dir in core_dirs:
+            extras = f"[{_KIT_EXTRAS}]" if core_dir.endswith("/kit") else ""
+            install_args += ["-e", f"{worktree / core_dir}{extras}"]
+        install_args.append(identity_package)
+        install_args += [consumer.install_arg for consumer in consumers]
+        result = subprocess.run(install_args, cwd=worktree, capture_output=True, text=True)
+        if result.returncode == 0:
+            return None
+        stderr = result.stderr.strip()[-800:]
+        if _is_resolution_conflict(stderr):
+            return stderr
+        _fail(
+            f"re-resolving the boot install set against the previous release {previous_tag} failed for a reason "
+            f"other than a dependency conflict, so the conflict cannot be classified: {stderr}"
+        )
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        import shutil
+
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def _report_unresolvable_consumers(
+    header: str,
+    bump: str,
+    consumers: list[Consumer],
+    resolver_stderr: str,
+    *,
+    package: str,
+    version: str,
+    repo_root: Path,
+    core_dirs: list[str],
+    identity_package: str,
+    venv: Path,
+) -> None:
+    """Classify a boot-venv resolution conflict. Under a major bump every supplied consumer
+    is an accepted break (a notice quoting the resolver's conclusion, the gate passes).
+    Under a non-major bump the conflict is a break only if THIS candidate introduced it:
+    the same install set is re-resolved against the previous released tag's tree — if it
+    resolves there the candidate introduced the conflict and the gate fails, and if it also
+    finds no solution the incompatibility predates the candidate (carried from the previous
+    release) and a notice passes it. This is the single accept/fail decision point for an
+    unresolvable install set."""
+    if break_is_accepted(bump):
+        names = ", ".join(consumer.label for consumer in consumers)
+        print(
+            f"::notice::{header}: {len(consumers)} consumer(s) cannot resolve against the candidate, "
+            f"ACCEPTED as a major-bump break: {names}"
+        )
+        print(f"  - {_resolver_conclusion(resolver_stderr)}")
+        print(f"{header}: accepted break under a major bump ({len(consumers)} unresolvable) — gate passes.")
+        return
+
+    previous_tag = api_gate._previous_tag(package, version, repo_root)
+    if previous_tag is None:
         _fail(f"boot venv install failed: {resolver_stderr}")
+    prior_stderr = _reresolve_against_previous_tag(
+        previous_tag, repo_root, core_dirs, identity_package, consumers, venv
+    )
+    if prior_stderr is None:
+        _fail(f"boot venv install failed: {resolver_stderr}")
+
     names = ", ".join(consumer.label for consumer in consumers)
     print(
-        f"::notice::{header}: {len(consumers)} consumer(s) cannot resolve against the candidate, "
-        f"ACCEPTED as a major-bump break: {names}"
+        f"::notice::{header}: {len(consumers)} consumer(s) cannot resolve against the candidate, but neither can "
+        f"they against the previous release ({previous_tag}) — a pre-existing incompatibility, not a new break: "
+        f"{names}"
     )
-    print(f"  - {_resolver_conclusion(resolver_stderr)}")
-    print(f"{header}: accepted break under a major bump ({len(consumers)} unresolvable) — gate passes.")
+    print(f"  - candidate: {_resolver_conclusion(resolver_stderr)}")
+    print(f"  - previous release {previous_tag}: {_resolver_conclusion(prior_stderr)}")
+    print(
+        f"{header}: {len(consumers)} unresolvable consumer(s) carry a pre-existing incompatibility from "
+        f"{previous_tag}, not introduced by this candidate — gate passes."
+    )
 
 
 def _load_plugin_yaml(venv_bin: Path, dist_name: str) -> dict:
@@ -1054,10 +1151,22 @@ def main() -> None:
     workdir = args.workdir.resolve() if args.workdir else Path(tempfile.mkdtemp(prefix="consumer-boot-"))
     workdir.mkdir(parents=True, exist_ok=True)
     infra = _infra_from_args(args)
+    venv = workdir / "venv"
     try:
-        venv_bin = _install_venv(repo_root, core_dirs, args.identity_package, consumers, workdir / "venv")
+        venv_bin = _install_venv(repo_root, core_dirs, args.identity_package, consumers, venv)
     except _ResolutionConflict as conflict:
-        _report_unresolvable_consumers(header, bump, consumers, conflict.resolver_stderr)
+        _report_unresolvable_consumers(
+            header,
+            bump,
+            consumers,
+            conflict.resolver_stderr,
+            package=args.package,
+            version=version,
+            repo_root=repo_root,
+            core_dirs=core_dirs,
+            identity_package=args.identity_package,
+            venv=venv,
+        )
         return
 
     print(f"{header}: booting {len(consumers)} consumer(s) against the candidate core.")
