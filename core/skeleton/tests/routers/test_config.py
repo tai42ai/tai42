@@ -409,7 +409,7 @@ async def test_write_env_manager_value_error_maps_to_400(install):
 
 async def test_read_mode(install, monkeypatch):
     install({})
-    monkeypatch.setattr(config_ops, "config_mode", lambda: "k8s")
+    monkeypatch.setattr(config_ops, "config_mode", lambda: "external")
     resp = await router.read_mode(_req())
     assert resp.status_code == 200
-    assert _json(resp) == {"data": {"config_mode": "k8s"}}
+    assert _json(resp) == {"data": {"config_mode": "external"}}

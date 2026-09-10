@@ -7,7 +7,7 @@ A thin skin over the config facets (``tai42_app.config``), the admin reload seam
 * ``write_env`` — merge a ``{key: value}`` env map (all values strings) through the
   :class:`~tai42_skeleton.config.service.ConfigService` pipeline: validate the effective
   config, write the env, hot-reload the process, and broadcast the reload to the fleet.
-* ``read_mode`` — the active config backend mode (``file`` / ``k8s``).
+* ``read_mode`` — the active config backend mode (``file`` or an external provider's mode).
 * ``read_settings_schema`` — every registered settings group with per-field current
   resolved values.
 * ``reload_config`` — a soft-restart (refresh env, reset settings caches,
@@ -123,7 +123,7 @@ async def read_settings_schema() -> dict:
 
     Each group carries the settings class' field metadata plus a ``value`` per
     field, resolved with pydantic-settings precedence: ``os.environ`` wins (in
-    k8s config mode the cluster injects vars the dotenv store never sees), then
+    a non-file config mode an external provider injects vars the dotenv store never sees), then
     the stored env override, then the shared ``TAI_DEFAULT_*`` namespace, then the
     field default. Nested-group reference fields (``env_var == ""``) are non-editable
     and report ``value: null``. Secret fields report their real value — this authed

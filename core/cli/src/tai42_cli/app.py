@@ -23,6 +23,7 @@ client), :class:`~tai42_cli.client.ApiClient`, and the
 """
 
 import os
+import re
 from importlib.metadata import entry_points
 from typing import Any, cast
 
@@ -203,18 +204,19 @@ def main(
 ) -> None:
     # Bootstrap a local ``.env`` once for the whole CLI so every subcommand — the
     # remote client and any contributed launcher alike — sees it. ``TAI_CONFIG_MODE``
-    # is read straight from the environment (default ``file``), normalized and
-    # validated here so this client needs no server settings module. Under ``k8s`` the
-    # platform injects env directly and a local ``.env`` must not shadow it, so the
-    # load is skipped.
-    raw_mode = os.environ.get("TAI_CONFIG_MODE", "file")
-    config_mode = raw_mode.strip().lower()
-    if config_mode not in ("file", "k8s"):
+    # is read straight from the environment (default ``file``) and validated here, so
+    # this client needs no server settings module. It is used verbatim (no
+    # normalization) to stay in step with the server's provider-naming convention.
+    # Only the built-in ``file`` mode reads a local ``.env``; any external provider
+    # injects env directly and a local ``.env`` must not shadow it, so the load is skipped.
+    config_mode = os.environ.get("TAI_CONFIG_MODE", "file")
+    if re.fullmatch(r"[a-z][a-z0-9_]*", config_mode) is None:
         raise typer.BadParameter(
-            f"Invalid TAI_CONFIG_MODE={raw_mode!r}. Must be one of: file, k8s",
+            f"Invalid TAI_CONFIG_MODE={config_mode!r}: expected 'file' (built-in) or a "
+            "config-provider mode name matching [a-z][a-z0-9_]*.",
             param_hint="TAI_CONFIG_MODE",
         )
-    if config_mode != "k8s":
+    if config_mode == "file":
         load_dotenv()
     ctx.obj = AppContext(
         json_output=json_output,

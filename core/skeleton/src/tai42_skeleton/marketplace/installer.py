@@ -1538,13 +1538,13 @@ def _env_manifest_pointer(spec: PluginSpec) -> str:
 
 def _install_notes(spec: PluginSpec) -> list[str]:
     """Activation notes: one per env-selected item (installed but inactive until
-    ``TAI_CONFIG_MODE`` selects it, and only providers the skeleton's fixed
-    mode→module map covers can be selected), plus one per mcp-server item naming
-    the mounted server title."""
+    ``TAI_CONFIG_MODE`` selects it — ``file`` is built in, every other mode resolves
+    by convention to the installed provider's module), plus one per mcp-server item
+    naming the mounted server title."""
     notes = [
-        f"{item.name!r} is installed but inactive: TAI_CONFIG_MODE selects config providers from the "
-        "skeleton's fixed mode->module map, so activation needs the mode to exist there "
-        "(tai42-config-k8s is the one provider covered today; a new provider needs a skeleton-side map entry)"
+        f"{item.name!r} is installed but inactive: TAI_CONFIG_MODE selects the config provider — "
+        "'file' is built in, every other mode resolves by convention to the "
+        "'tai42_config_<mode>.manager' the installed provider ships"
         for item in _env_selected_items(spec)
     ]
     notes.extend(

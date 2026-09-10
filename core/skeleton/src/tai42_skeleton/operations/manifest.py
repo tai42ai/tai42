@@ -613,7 +613,7 @@ def _set_marker_at_pointer(document: dict[str, Any], segments: list[str], marker
     A numeric segment indexes a list (in range, else a loud ``ValueError``); a non-numeric
     segment keys a mapping — a missing mapping key is created (as a list when the next
     segment is numeric, else a mapping) so a NEW leaf under an existing MCP entry can be
-    written. Pure / re-runnable: it only edits ``document`` (the k8s 409-replay contract).
+    written. Pure / re-runnable: it only edits ``document`` (the external-store 409-replay contract).
     A path that traverses a non-container, or a numeric segment out of range, is a
     ``ValueError`` the door maps to a 400."""
     node: Any = document

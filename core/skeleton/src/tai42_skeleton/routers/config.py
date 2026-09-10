@@ -7,7 +7,7 @@ AUTHED thin adapters over operations in ``tai42_skeleton.operations.config``:
   bulk read.
 * ``POST /api/config/env`` — merge a ``{key: value}`` env map (all values strings),
   then hot-reload the process config; returns the reload result.
-* ``GET /api/config/mode`` — the active config backend mode (``file`` / ``k8s``).
+* ``GET /api/config/mode`` — the active config backend mode (``file`` or an external provider's mode).
 * ``GET /api/config/settings-schema`` — every registered settings group with its
   field metadata and each field's current resolved value; admin-only
   (``action=secret``), the same admin-owned bulk read.

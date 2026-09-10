@@ -270,7 +270,7 @@ def test_main_falls_back_to_asyncio_when_uvloop_missing(monkeypatch: pytest.Monk
     assert len(runs) == 1
 
 
-def test_main_bootstraps_env_when_not_k8s(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_bootstraps_env_in_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[bool] = []
     monkeypatch.setattr(backend, "config_mode", lambda: "file")
     monkeypatch.setattr(backend, "load_dotenv", lambda: called.append(True))
@@ -286,9 +286,9 @@ def test_main_bootstraps_env_when_not_k8s(monkeypatch: pytest.MonkeyPatch) -> No
     assert called == [True]
 
 
-def test_main_skips_env_bootstrap_in_k8s(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_skips_env_bootstrap_in_a_non_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[bool] = []
-    monkeypatch.setattr(backend, "config_mode", lambda: "k8s")
+    monkeypatch.setattr(backend, "config_mode", lambda: "external")
     monkeypatch.setattr(backend, "load_dotenv", lambda: called.append(True))
     monkeypatch.setattr(backend, "run_backend", lambda args: _noop_coro())
 

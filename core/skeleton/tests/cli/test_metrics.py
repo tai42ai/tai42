@@ -94,7 +94,7 @@ def test_main_launches_uvicorn_with_overridden_bind(monkeypatch: pytest.MonkeyPa
     assert calls[0]["port"] == 9999
 
 
-def test_main_bootstraps_env_when_not_k8s(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_bootstraps_env_in_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[bool] = []
     monkeypatch.setattr(metrics, "config_mode", lambda: "file")
     monkeypatch.setattr(metrics, "load_dotenv", lambda: called.append(True))
@@ -107,9 +107,9 @@ def test_main_bootstraps_env_when_not_k8s(monkeypatch: pytest.MonkeyPatch) -> No
     assert called == [True]
 
 
-def test_main_skips_env_bootstrap_in_k8s(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_skips_env_bootstrap_in_a_non_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[bool] = []
-    monkeypatch.setattr(metrics, "config_mode", lambda: "k8s")
+    monkeypatch.setattr(metrics, "config_mode", lambda: "external")
     monkeypatch.setattr(metrics, "load_dotenv", lambda: called.append(True))
     monkeypatch.setattr(metrics, "create_app", lambda: object())
     monkeypatch.setattr(metrics.uvicorn, "run", lambda app, **kw: None)
