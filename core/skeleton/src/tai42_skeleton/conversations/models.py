@@ -96,18 +96,18 @@ class ConversationRecord(BaseModel):
     inbound_text: str
     # The structured submission that rode WITH the inbound text (an ask-less form's
     # answers), bounded by the door's transport checks (``validate_inbound_form``) and
-    # stored beside the text as opaque, untrusted guest data — never schema-conformant by
+    # stored beside the text as opaque, untrusted participant data — never schema-conformant by
     # promise. ``None`` for a text-only inbound and for every ``operator`` record (an
     # operator send answers, it does not submit).
     inbound_form: dict[str, Any] | None = None
-    # Structured media the guest sent WITH the inbound text (image/document/video/audio) and a
-    # geographic point the guest shared — the inbound counterparts of an answer's media/location,
+    # Structured media the participant sent WITH the inbound text (image/document/video/audio) and a
+    # geographic point the participant shared — the inbound counterparts of an answer's media/location,
     # stored beside the text as machine-consumable content. Both surface to a tool target's payload
     # under the stable ``attachments``/``location`` keys. ``None`` when the inbound carried none;
     # an ``operator`` record carries neither (it answers, it does not submit).
     inbound_attachments: list[MediaItem] | None = None
     inbound_location: LocationElement | None = None
-    # The guest's BCP 47 locale the channel resolved from its native inbound (a
+    # The participant's BCP 47 locale the channel resolved from its native inbound (a
     # per-message language hint), stored beside the text so the scheduled turn resolves
     # the subject's locale for the rendering layer. ``None`` when the door supplied none
     # (channel with no native hint, api caller that set none, every operator/event record).

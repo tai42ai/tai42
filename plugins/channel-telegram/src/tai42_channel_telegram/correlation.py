@@ -45,7 +45,7 @@ class StoredOption(BaseModel):
     ``callback_data`` is the token that rides the wire on the button — an author-set id
     echoed verbatim when it fits Telegram's 64-byte cap, else a channel-minted token — and
     is what the inbound tap reports; the reader matches it against this field. ``text`` is
-    the option label, submitted verbatim as the guest's turn (an answer, or a bridged
+    the option label, submitted verbatim as the participant's turn (an answer, or a bridged
     message). ``id`` is the author-set stable :class:`~tai42_contract.channels.ReplyOption`
     id — kept independently of ``callback_data`` (the wire token may be minted even when an
     id was set) and surfaced as ``params.reply_id`` on a bridged tap; ``None`` when the

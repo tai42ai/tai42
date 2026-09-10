@@ -242,7 +242,7 @@ class WebChannel:
     supports_location_notifications: ClassVar[bool] = True
     # notify also carries an ask-less form (a schema notification): the page renders
     # the same schema-driven widget as a fillable card, and the submission enters the
-    # conversation as a guest message through this plugin's own form door.
+    # conversation as a participant message through this plugin's own form door.
     supports_form_notifications: ClassVar[bool] = True
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
@@ -352,7 +352,7 @@ class WebChannel:
         already filled in. The token's record (the transcript pair, the schema, the
         message) is stored for the transcript TTL, so the card is submittable exactly as
         long as it can replay; the submission door reads it, renders the ``label: value``
-        text from the STORED schema, and bridges the values as a guest message.
+        text from the STORED schema, and bridges the values as a participant message.
         """
         if notification.template is not None:
             raise NotImplementedError("web channel sends no vendor templates; template notifications are not supported")

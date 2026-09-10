@@ -107,19 +107,19 @@ class AskUser(Protocol):
         when ``channel`` is ``None`` (an address is meaningless without a
         channel to send on).
 
-        ``on_mismatch`` is the digression policy for a guest reply the answer
+        ``on_mismatch`` is the digression policy for a participant reply the answer
         door REJECTS on a LIVE channel-delivered ask (a 400 — the reply did not
         fit the question's format). ``AnswerMismatchPolicy.RETRY`` (the default,
-        today's behavior) keeps the ask parked and tells the guest what is
+        today's behavior) keeps the ask parked and tells the participant what is
         expected so they answer again in place; ``AnswerMismatchPolicy.BRIDGE``
         treats an unmatched reply as a DIGRESSION — it keeps the ask parked with
-        NO guest notice and hands the reply to the conversation as a fresh routed
+        NO participant notice and hands the reply to the conversation as a fresh routed
         turn, so the ask ends only by a real answer or its timeout, never by
         unmatched input. It takes effect only on a channel-delivered ask (the
         shared inbound-answer ladder reads it); an inbox-only ask records it but
         never reaches the ladder.
 
-        ``mismatch_notice`` is an OPTIONAL custom guest-facing rejection notice
+        ``mismatch_notice`` is an OPTIONAL custom participant-facing rejection notice
         used ONLY under the ``RETRY`` policy: when set it REPLACES the platform's
         built-in retry notice. A literal ``{reason}`` token, if present, is filled
         with the door's rejection reason by a plain substitution (a notice without
@@ -127,7 +127,7 @@ class AskUser(Protocol):
         the ``BRIDGE`` policy (a digression never notifies) and by a channel that
         owns its own correction surface (which renders its own text off the door's
         reason). ``None`` (the default) uses the built-in notice; a set value is a
-        non-blank string within the guest-reply cap.
+        non-blank string within the participant-reply cap.
 
         ``sensitive`` marks the answer body as not-to-be-persisted AND wraps the
         returned answer in a ``SecretValue``: the caller reaches the real answer

@@ -179,7 +179,7 @@ class AccessControlAuthBackend(AuthenticationBackend):
             return AuthCredentials(["unauthenticated"]), UnauthenticatedUser()
 
         # 1. Resolve Identity
-        # This will either return a token, return None (guest), or raise AuthenticationError (bad token)
+        # This will either return a token, return None (participant), or raise AuthenticationError (bad token)
         access_token = await self._get_access_token(conn)
 
         if not access_token:

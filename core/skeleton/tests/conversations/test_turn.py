@@ -544,7 +544,7 @@ async def test_tool_target_result_naming_a_non_success_terminal_is_an_error(env,
     # The status is VISIBLE in the recorded detail, so the failure is diagnosable...
     assert record.error is not None
     assert status in record.error
-    # ...and the partial payload never reached the guest.
+    # ...and the partial payload never reached the participant.
     assert record.answer == turn_module._ERROR_ANSWER_TEXT
     assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
 
@@ -695,7 +695,7 @@ async def test_tool_target_partial_run_envelope_fails_the_turn(env, monkeypatch)
 
 async def test_tool_target_non_success_uses_the_route_error_reply_text(env, monkeypatch):
     # A non-success terminal is surfaced exactly as any other failed tool run: the route's own
-    # guest-facing wording when it carries one.
+    # participant-facing wording when it carries one.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     channel = FakeChannel()
     route = _tool_channel_route(reply_expr=".result.reply // null", error_reply_text=spanish)
@@ -929,7 +929,7 @@ async def test_tool_target_interrupt_envelope_fails_the_turn_loudly(env, monkeyp
     # LOUD — the error path, not the silent one.
     assert record.delivery_status is not DeliveryStatus.SILENT
     assert record.answer_status == "error"
-    # The guest gets the route's client-safe error reply, never silence.
+    # The participant gets the route's client-safe error reply, never silence.
     assert record.answer == turn_module._ERROR_ANSWER_TEXT
     assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
     # The record's error names the real cause — the misconfiguration — and the paused status.
@@ -942,7 +942,7 @@ async def test_tool_target_paused_envelope_never_maps_the_authored_reply_guard(e
     # The LIVE shape: the flow's reply chain guards its flagged surface (compose_messages) and
     # RAISES when it is empty. On the paused envelope that surface is not present yet. Were the
     # paused envelope mapped as a terminal, reply_expr would run this guard and the turn would
-    # FAULT (mapping-failure error path) — the guest getting a "something went wrong" notice for a
+    # FAULT (mapping-failure error path) — the participant getting a "something went wrong" notice for a
     # reply that simply has not committed. The turn must divert BEFORE the mapping and stay silent.
     guard = (
         ".result.outputs.compose_messages as $c "
@@ -962,7 +962,7 @@ async def test_tool_target_paused_envelope_never_maps_the_authored_reply_guard(e
     assert record is not None
     assert record.delivery_status is DeliveryStatus.SILENT
     assert channel.sends == []
-    # The guard never ran: the record carries no reply_expr fault and no guest-facing error.
+    # The guard never ran: the record carries no reply_expr fault and no participant-facing error.
     assert record.answer_status is None
     assert record.error is not None
     assert "reply_expr" not in record.error
@@ -983,7 +983,7 @@ async def test_tool_target_mapping_failure_logs_value_free_result_shape(env, mon
     # `result.outputs` level) mapped by a reply_expr reading a stale `.result.outputs.*` path:
     # the guard raises and the turn takes the mapping-failure arm. The diagnostic must name the
     # shape mismatch (which keys exist, which level does not) while NEVER logging a
-    # guest-content value.
+    # participant-content value.
     guard = (
         ".result.outputs.compose_messages as $c "
         "| if (($c // []) | length) == 0 "
@@ -994,8 +994,8 @@ async def test_tool_target_mapping_failure_logs_value_free_result_shape(env, mon
     route = _tool_channel_route(reply_expr=guard)
     _wire(monkeypatch, FakeManager(route), channel)
     # The real captured envelope: a success terminal, flagged nodes directly under `result`, and a
-    # guest reply VALUE that must NEVER reach the log — the value-free proof.
-    secret = "GUESTSECRET-zulu-must-not-be-logged"
+    # participant reply VALUE that must NEVER reach the log — the value-free proof.
+    secret = "PARTICIPANTSECRET-zulu-must-not-be-logged"
     envelope = {
         "status": "success",
         "result": {"compose_messages": {"messages": [{"text": secret}]}, "extract_todo": {"items": []}},
@@ -1007,7 +1007,7 @@ async def test_tool_target_mapping_failure_logs_value_free_result_shape(env, mon
         message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
         await _settle()
 
-    # The turn took the correct disposition: a guest-safe error, the guard's cause recorded.
+    # The turn took the correct disposition: a participant-safe error, the guard's cause recorded.
     record = await _store().get_record(message_id)
     assert record is not None
     assert record.answer_status == "error"
@@ -1037,7 +1037,7 @@ async def test_tool_target_mapping_failure_logs_value_free_result_shape(env, mon
 
 async def test_result_shape_is_value_free_and_structural():
     # Unit-pins the descriptor directly: it renders NAMES, the status token, surface SIZES and the
-    # missing_results names — never a guest VALUE, and never crashes on odd inputs.
+    # missing_results names — never a participant VALUE, and never crashes on odd inputs.
     secret = "PLAINTEXT-should-never-appear"
     shape = turn_module._result_shape(
         {
@@ -1205,8 +1205,8 @@ def _completion_warnings(caplog, completion_id: str) -> list[str]:
 async def test_deliver_tool_completion_non_success_delivers_error_notice(env, monkeypatch, caplog):
     # A non-success terminal (the route carries no error mapping) delivers the uniform
     # client-safe notice — the DELIVERY route's ``error_reply_text`` when set, never the raw
-    # internal detail, never a silent drop. The guest-facing notice resolves through the
-    # delivery route (where the record is filed and the guest is conversing), NOT the pinned
+    # internal detail, never a silent drop. The participant-facing notice resolves through the
+    # delivery route (where the record is filed and the participant is conversing), NOT the pinned
     # originating route — so an originating route carrying a DIFFERENT error_reply_text does
     # not win here (pinning the deliberate choice at turn.py:1608).
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
@@ -1588,7 +1588,7 @@ async def test_tool_target_that_raises_is_an_error(env, monkeypatch):
 
 
 async def test_a_channel_tool_error_uses_the_route_error_reply_text_when_set(env, monkeypatch):
-    # A route carrying ``error_reply_text`` sends THAT guest-facing reply on a failed turn,
+    # A route carrying ``error_reply_text`` sends THAT participant-facing reply on a failed turn,
     # while the record's internal ``error`` detail keeps the diagnosable wording unchanged.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     channel = FakeChannel()
@@ -1605,10 +1605,10 @@ async def test_a_channel_tool_error_uses_the_route_error_reply_text_when_set(env
     record = await _store().get_record(message_id)
     assert record is not None
     assert record.answer_status == "error"
-    # The guest sees the route's custom reply, not the built-in default.
+    # The participant sees the route's custom reply, not the built-in default.
     assert record.answer == spanish
     assert [n.message for n in channel.sends] == [spanish]
-    # The internal detail is untouched — only the guest-facing answer resolves through the route.
+    # The internal detail is untouched — only the participant-facing answer resolves through the route.
     assert record.error is not None
     assert "tool blew up" in record.error
 
@@ -3312,7 +3312,7 @@ async def test_redrive_of_a_record_stranded_mid_turn_fails_it_and_never_reruns_t
 
 
 async def test_a_stranded_turn_uses_the_route_error_reply_text_when_set(env, monkeypatch):
-    # The stranded-turn repair resolves the record's route best-effort, so the guest sees the
+    # The stranded-turn repair resolves the record's route best-effort, so the participant sees the
     # route's own ``error_reply_text`` — the same custom reply a live failed turn would send.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     agent = EchoAgent()
@@ -3329,7 +3329,7 @@ async def test_a_stranded_turn_uses_the_route_error_reply_text_when_set(env, mon
     record = await store.get_record("stranded")
     assert record is not None
     assert record.answer_status == "error"
-    # The guest sees the route's custom reply; the internal detail keeps the built-in wording.
+    # The participant sees the route's custom reply; the internal detail keeps the built-in wording.
     assert record.answer == spanish
     assert record.error is not None
     assert [n.message for n in channel.sends] == [spanish]
@@ -3755,7 +3755,7 @@ _FORM = {"name": "Alice", "size": 42}
 
 
 async def test_accept_with_form_stamps_the_record_and_the_tool_payload(env, monkeypatch):
-    # A channel door hands the turn the guest's structured submission WITH its rendered
+    # A channel door hands the turn the participant's structured submission WITH its rendered
     # text: the record stores it beside inbound_text, both read doors publish it, and a
     # tool target's jq payload gains a "form" key the route's payload_expr can map.
     channel = FakeChannel()
@@ -3891,7 +3891,7 @@ _LOCATION = LocationElement(latitude=51.5, longitude=-0.12, name="HQ")
 
 
 async def test_accept_with_attachments_and_location_stamps_record_and_the_tool_payload(env, monkeypatch):
-    # A channel door hands the turn the guest's structured media and shared location WITH the
+    # A channel door hands the turn the participant's structured media and shared location WITH the
     # rendered text: the record stores them beside inbound_text, both read doors publish them,
     # and a tool target's payload gains stable "attachments"/"location" keys.
     channel = FakeChannel()
@@ -4847,7 +4847,7 @@ async def test_event_with_no_caller_principal_is_refused(env, monkeypatch):
 
 
 async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(env, monkeypatch):
-    """The composed guest path: a channel accepts a message with the guest's locale, the turn
+    """The composed participant path: a channel accepts a message with the participant's locale, the turn
     carries it onto the subject block AND the ambient state context, and the rendering layer
     resolves the per-locale template variant off that same locale — the flow selects no
     language. Without a variant (and no default) the render refuses loudly."""
@@ -4873,7 +4873,7 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
     await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", locale="he-IL")
     await _settle()
 
-    # Channel -> turn -> subject: the guest's locale reached both the payload subject block
+    # Channel -> turn -> subject: the participant's locale reached both the payload subject block
     # and the ambient context the renderer reads.
     assert seen["subject_block_locale"] == "he-IL"
     assert seen["ambient_locale"] == "he-IL"

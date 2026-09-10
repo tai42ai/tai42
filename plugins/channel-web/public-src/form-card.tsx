@@ -1,17 +1,17 @@
 /**
  * The inline widget for one agent-sent ask-less form card: markdown prompt text,
  * any images/links, and the schema-driven form whose submission enters the
- * conversation as a regular guest message.
+ * conversation as a regular participant message.
  *
  * The form is the SAME paged, prefill-aware component the ask path renders
  * (`SchemaFormAnswer`): the card opens with any per-send `data.values` filled in,
  * `data.options` replacing a property's choices, and `pages` shown as steps — a
  * reply-part form thus opens already filled in, exactly as a `form` question does.
- * The terminal button reads "Send": a submission is a guest message, not an answer.
+ * The terminal button reads "Send": a submission is a participant message, not an answer.
  *
  * Unlike a question there is no deadline and no answered state: the card follows
  * the option-chips precedent. Settle is LOCAL — a "Sent" badge for this page
- * session only, with the form still fillable (every submission is its own guest
+ * session only, with the form still fillable (every submission is its own participant
  * message), so a backlog replay after a reload renders the card fillable again.
  * The submit button is disabled only while a send is in flight (the double-click
  * guard). A `locked` page (an ended session) hides the controls behind a badge,

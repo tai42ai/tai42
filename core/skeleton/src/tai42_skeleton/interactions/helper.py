@@ -446,26 +446,26 @@ async def ask_user(
     without a channel to send on).
 
     ``on_mismatch`` is the per-ask digression policy the shared inbound-answer
-    ladder reads when the answer door REJECTS a guest reply on a LIVE
+    ladder reads when the answer door REJECTS a participant reply on a LIVE
     channel-delivered ask (a 400 — the reply did not fit the format).
     ``AnswerMismatchPolicy.RETRY`` (the default, today's behavior) keeps the ask
-    parked and tells the guest what is expected so they answer again in place;
+    parked and tells the participant what is expected so they answer again in place;
     ``AnswerMismatchPolicy.BRIDGE`` treats an unmatched reply as a DIGRESSION —
-    keep the ask parked with NO guest notice and hand the reply to the
+    keep the ask parked with NO participant notice and hand the reply to the
     conversation as a fresh routed turn, so the ask ends only by a real answer or
     its timeout. It rides both the durable ``InteractionRequest`` (attribution) and
     the ``ChannelDelivery`` the channel copies onto the ``Correlation`` it parks
     (the ladder's authoritative read). It takes effect only on a channel-delivered
     ask; an inbox-only ask records it but never reaches the ladder.
 
-    ``mismatch_notice`` is an OPTIONAL custom guest-facing rejection notice used
+    ``mismatch_notice`` is an OPTIONAL custom participant-facing rejection notice used
     ONLY under the ``RETRY`` policy: when set it REPLACES the platform's built-in
     retry notice (a literal ``{reason}`` token is filled with the door's reason by
     a plain substitution; a notice without it is sent verbatim). It is IGNORED
     under ``BRIDGE`` (a digression never notifies) and by a channel that owns its
     correction surface. It rides the same two frames as ``on_mismatch``. ``None``
     (the default) uses the built-in notice; a set value is a non-blank string
-    within the guest-reply cap (the models enforce it).
+    within the participant-reply cap (the models enforce it).
 
     ``audience`` is the identity (a user_id) the question is addressed to:
     a restricted identity sees and answers ONLY questions addressed to it, while an

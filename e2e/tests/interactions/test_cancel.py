@@ -74,7 +74,7 @@ async def test_cancel_withdraws_a_pending_ask_and_a_later_reply_bridges_fresh(
     question = uniq("question")
 
     async def ask() -> object:
-        # An EXTERNAL ask mints the callback ticket the guest-reply forward targets; the
+        # An EXTERNAL ask mints the callback ticket the participant-reply forward targets; the
         # caller blocks on the callback exactly as a text ask blocks on POST /answer.
         async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
             result = await mcp.call_tool(

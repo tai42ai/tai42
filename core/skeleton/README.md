@@ -268,7 +268,7 @@ target must itself have `multichannel` on.
 
 `reply_expr` maps a SUCCESSFUL result: a result whose own `status` names a
 non-success terminal (`aborted`, `stopped`, `error`) fails the turn regardless of
-the mapping — its result is partial by construction, so the guest gets the route's
+the mapping — its result is partial by construction, so the participant gets the route's
 error reply and the status rides the record's `error` detail. A status naming a
 PAUSED run (`suspended`, `interrupt`) is neither mapped nor failed: the turn ends
 silently and the reply delivers out of band when the run resumes past the pause.

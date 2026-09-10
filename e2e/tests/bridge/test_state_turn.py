@@ -5,13 +5,13 @@ the platform resolving the subject from the ambient conversation context.
 Two composed paths run over ``bridge_stack`` (access control ON, the redis conversations
 backend, the web + twilio channels):
 
-- a WEB guest on a normal (single-channel) tool target: the state's
+- a WEB participant on a normal (single-channel) tool target: the state's
   ``default_subject_kind`` is ``thread``, so the turn's ``state_merge`` — carrying no
-  subject — lands the record under the guest's thread, and the write ledger records the
+  subject — lands the record under the participant's thread, and the write ledger records the
   ``conversation`` door with the turn id and the actor (the route's execution key). A
-  SECOND guest on the same route writes its OWN record under a different thread.
-- a twilio guest on a MULTICHANNEL tool target: the state's ``default_subject_kind`` is
-  ``person``, so the same door resolves the record onto the guest's person id (the
+  SECOND participant on the same route writes its OWN record under a different thread.
+- a twilio participant on a MULTICHANNEL tool target: the state's ``default_subject_kind`` is
+  ``person``, so the same door resolves the record onto the participant's person id (the
   candidate a multichannel target carries) rather than the thread.
 
 The record and its ledger are read back through the platform's own ``/api/states`` doors,
@@ -86,7 +86,7 @@ def _record_path(state: str, subject: dict[str, Any]) -> str:
     )
 
 
-async def test_web_guest_turn_keys_state_on_thread_and_ledgers_the_conversation_door(
+async def test_web_participant_turn_keys_state_on_thread_and_ledgers_the_conversation_door(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
     api = bridge.api()  # root client on replica B
@@ -110,10 +110,10 @@ async def test_web_guest_turn_keys_state_on_thread_and_ledgers_the_conversation_
     )
 
     base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
-    guest_a, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
+    participant_a, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
     marker_a = uniq("web-a")
-    sent = await guest_a.send(marker_a)
+    sent = await participant_a.send(marker_a)
     assert sent.status_code == 200, sent.text
 
     subjects = await _wait_subjects(api, state, 1)
@@ -132,7 +132,7 @@ async def test_web_guest_turn_keys_state_on_thread_and_ledgers_the_conversation_
     assert writes, "the conversation turn wrote no ledger row"
     origin = writes[0]["origin"]
     assert origin["door"] == "conversation"
-    # The actor is the turn's accountable principal (the guest's caller identity the
+    # The actor is the turn's accountable principal (the participant's caller identity the
     # attribution stamped), never the route's static execution key — the platform stamps
     # it, so the tool cannot forge who wrote.
     assert origin["actor"], origin
@@ -142,16 +142,18 @@ async def test_web_guest_turn_keys_state_on_thread_and_ledgers_the_conversation_
     # base ``state_merge`` when the preset dispatches under the base's identity).
     assert origin["consumer"] in {_MERGE_TOOL, preset}, origin
 
-    # A SECOND guest on the same route writes its OWN record under a different thread.
-    guest_b, page_b = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
+    # A SECOND participant on the same route writes its OWN record under a different thread.
+    participant_b, page_b = await WebChatClient.open_page(
+        base_url, identity, store_url=bridge.stack.resources.redis_url
+    )
     assert page_b.status_code == 200, page_b.text
-    assert guest_b.visitor_id != guest_a.visitor_id
+    assert participant_b.visitor_id != participant_a.visitor_id
     marker_b = uniq("web-b")
-    assert (await guest_b.send(marker_b)).status_code == 200
+    assert (await participant_b.send(marker_b)).status_code == 200
 
     two = await _wait_subjects(api, state, 2)
     keys = {s["subject"]["key"] for s in two}
-    assert len(keys) == 2, f"the second guest did not get its own thread record: {two!r}"
+    assert len(keys) == 2, f"the second participant did not get its own thread record: {two!r}"
 
 
 async def test_multichannel_target_turn_keys_state_on_person(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:

@@ -235,7 +235,7 @@ def test_validate_inbound_form_accepts_nesting_at_the_depth_bound():
 
 
 def test_validate_inbound_form_error_never_carries_a_value():
-    # Form contents are opaque guest data: no refusal message may quote a submitted value.
+    # Form contents are opaque participant data: no refusal message may quote a submitted value.
     from tai42_contract.conversations import validate_inbound_form
 
     marker = "secret-answer-material"
@@ -557,7 +557,7 @@ def _part_form_schema() -> dict[str, Any]:
 
 def test_answer_part_carries_a_form_schema():
     # An ask-less form part: the message is the form's prompt, the schema the fillable
-    # form; the guest's submission enters the conversation as a guest message.
+    # form; the participant's submission enters the conversation as a participant message.
     from tai42_contract.conversations import AnswerPart
 
     part = AnswerPart(message="tell us your size", schema=_part_form_schema())
@@ -970,7 +970,7 @@ def test_error_reply_text_defaults_to_none_and_must_be_non_blank_and_bounded():
     # A whitespace-only reply is refused as blank by the non-blank validator.
     with pytest.raises(ValidationError, match="non-blank"):
         ConversationRouteCreate(**_route_kwargs(error_reply_text="   "))
-    # The reply is length-bounded so a single guest-facing message cannot be unbounded.
+    # The reply is length-bounded so a single participant-facing message cannot be unbounded.
     # Exactly at the 2000-char bound is accepted; one past it is refused.
     assert ConversationRouteCreate(**_route_kwargs(error_reply_text="x" * 2000)).error_reply_text == "x" * 2000
     with pytest.raises(ValidationError):

@@ -419,7 +419,7 @@ async def test_ladder_bridged_outcome_acks_and_marks_seen(handler, channels, fak
 
 async def test_ladder_retry_kept_outcome_acks_and_marks_seen(handler, channels, fake_redis: FakeRedis):
     # A RETRY_KEPT outcome (the door rejected a re-answerable ask; the ladder kept the
-    # correlation and told the guest what's expected) acks 204 and marks the sid seen —
+    # correlation and told the participant what's expected) acks 204 and marks the sid seen —
     # redelivering the same body would be rejected again.
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
 

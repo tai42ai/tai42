@@ -242,7 +242,7 @@ async def test_route_create_seam_binds_extractor_to_the_operation(wired):
 
 async def test_route_create_seam_persists_error_reply_text(wired):
     """The same extractor -> operation -> store seam carries ``error_reply_text``: a body that
-    sets it lands the custom guest-facing reply on the stored row, and a body that omits it
+    sets it lands the custom participant-facing reply on the stored row, and a body that omits it
     stores ``None`` (the built-in default applies at turn time)."""
     from tai42_contract.app import tai42_app
 

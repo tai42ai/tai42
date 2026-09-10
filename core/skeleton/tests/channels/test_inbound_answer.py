@@ -1,16 +1,16 @@
 """The shared inbound-answer ladder ``handle_inbound_answer``.
 
-The one ladder every correlated channel will share: a guest reply on a
+The one ladder every correlated channel will share: a participant reply on a
 correlation key is forwarded to the interaction answer door, and the door's
 2xx/404/400/other status drives forward / bridge / retry-in-place / raise — over
 the minimal :class:`~tai42_contract.channels.CorrelationStore` port, with the
-guest notice, the operator alert and the conversation bridge as the observable
+participant notice, the operator alert and the conversation bridge as the observable
 side effects.
 
 The handler's seams are faked at the module boundary (the router-test pattern):
 ``_forward_answer`` returns a real ``httpx.Response`` so the door-body parse runs
 for real, the conversation bridge is captured on the app's ``_conversation_accept``
-seam, the guest channel is a registered recording fake, and the operator alert is
+seam, the participant channel is a registered recording fake, and the operator alert is
 a PLATFORM EVENT captured on the hooks manager's ``on_event``.
 """
 
@@ -59,7 +59,7 @@ class FakeStore:
 
 
 class RecordingChannel:
-    """A registered channel that records every guest notice handed to ``notify``."""
+    """A registered channel that records every participant notice handed to ``notify``."""
 
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
@@ -120,7 +120,7 @@ def _bridge(*, owns_retry_notice: bool = False) -> InboundBridge:
 
 @pytest.fixture
 def wired(monkeypatch):
-    """Register a recording guest channel and capture the conversation-bridge and
+    """Register a recording participant channel and capture the conversation-bridge and
     operator-event seams. Yields a namespace of the captured side effects."""
     app._channel_registry.reset()
     channel = RecordingChannel()
@@ -250,12 +250,12 @@ async def test_404_releases_and_bridges(wired, monkeypatch):
     assert call.cap_key == "+15550001111"
     assert call.text == "hello there"
     assert call.provider_message_id == "prov-msg-1"
-    # A gone ask needs no guest notice or operator event — it is a normal bridge.
+    # A gone ask needs no participant notice or operator event — it is a normal bridge.
     assert wired.channel.notifications == []
     assert wired.events == []
 
 
-# -- 4. 400 retryable: KEPT + guest notice + one alert ---------------------------
+# -- 4. 400 retryable: KEPT + participant notice + one alert ---------------------------
 
 
 async def test_400_retryable_keeps_correlation_notifies_and_alerts_once(wired, monkeypatch):
@@ -273,11 +273,11 @@ async def test_400_retryable_keeps_correlation_notifies_and_alerts_once(wired, m
     # The door's reason/field ride back on the result for a channel that owns its notice.
     assert result.retry_reason == "Please answer with yes or no."
     assert result.retry_field == "reply"
-    # The correlation is KEPT so the guest's next reply resolves the same ask.
+    # The correlation is KEPT so the participant's next reply resolves the same ask.
     assert store.released == []
     assert wired.accept_calls == []
-    # The guest is told what's expected: the notice carries the door's reason and
-    # is sent from the ask's identity to the guest address.
+    # The participant is told what's expected: the notice carries the door's reason and
+    # is sent from the ask's identity to the participant address.
     assert len(wired.channel.notifications) == 1
     notice = wired.channel.notifications[0]
     assert "Please answer with yes or no." in notice.message
@@ -308,7 +308,7 @@ async def test_400_retryable_keeps_correlation_notifies_and_alerts_once(wired, m
 
 async def test_400_retryable_owns_retry_notice_skips_core_notice_keeps_and_alerts(wired, monkeypatch):
     # A channel that owns its correction surface (owns_retry_notice=True) must NOT be
-    # double-messaged: core SKIPS its guest notice, but still keeps the correlation and
+    # double-messaged: core SKIPS its participant notice, but still keeps the correlation and
     # still emits the operator event tagged notice_owner="channel".
     store = FakeStore(_entry())
     _stub_forward(
@@ -330,7 +330,7 @@ async def test_400_retryable_owns_retry_notice_skips_core_notice_keeps_and_alert
     assert result.retry_field == "choice"
     # Correlation KEPT so the channel's re-ask resolves the same ask.
     assert store.released == []
-    # Core sent NO guest notice — the channel owns it.
+    # Core sent NO participant notice — the channel owns it.
     assert wired.channel.notifications == []
     # The operator event still fires, tagged with the channel as the notice owner.
     assert len(wired.events) == 1
@@ -379,7 +379,7 @@ async def test_400_non_retryable_releases_notifies_alerts_and_bridges(wired, mon
     # A hard-mismatch BRIDGED still carries the door's reason (the ask judged the answer).
     assert result.retry_reason == "That question no longer accepts this answer."
     assert result.retry_field is None
-    # The hard-mismatch seam: released, guest told the question is closed, operator
+    # The hard-mismatch seam: released, participant told the question is closed, operator
     # alerted, and the reply bridged as a fresh turn.
     assert store.released == ["k"]
     assert len(wired.channel.notifications) == 1
@@ -406,7 +406,7 @@ async def test_5xx_raises_and_keeps_correlation(wired, monkeypatch):
             channel_id="fakechan", correlation_key="k", answer="x", store=store, bridge=_bridge()
         )
 
-    # Kept for the webhook redelivery to re-run the ladder; no guest/operator noise.
+    # Kept for the webhook redelivery to re-run the ladder; no participant/operator noise.
     assert store.released == []
     assert wired.channel.notifications == []
     assert wired.events == []
@@ -433,7 +433,7 @@ async def test_transport_fault_raises_and_keeps_correlation(wired, monkeypatch):
 
 
 async def test_400_retryable_notify_failure_is_swallowed(monkeypatch):
-    # A guest-notice failure must never turn a handled rejection into a lost
+    # A participant-notice failure must never turn a handled rejection into a lost
     # webhook: the event still fires and RETRY_KEPT still returns.
     app._channel_registry.reset()
     failing = FailingNotifyChannel()
@@ -482,7 +482,7 @@ async def test_callback_host_mismatch_releases_and_treats_as_no_correlation(wire
     )
 
     assert result.outcome is InboundAnswerOutcome.NO_CORRELATION
-    assert forward_calls == []  # the guest's answer was never shipped to the wrong host
+    assert forward_calls == []  # the participant's answer was never shipped to the wrong host
     assert store.released == ["k"]  # the poisoned reservation is dropped
     assert wired.channel.notifications == []
     assert wired.accept_calls == []
@@ -579,7 +579,7 @@ async def test_404_bridge_tolerates_blank_or_unrouted_reply(wired, monkeypatch, 
 
 
 async def test_400_reason_is_truncated_in_notice_and_event(wired, monkeypatch):
-    # A pathological door reason must not blow up the guest notice or the persisted
+    # A pathological door reason must not blow up the participant notice or the persisted
     # event: the reason is bounded to 300 chars before either use.
     long_reason = "x" * 1000
     store = FakeStore(_entry())
@@ -674,7 +674,7 @@ async def test_400_bridge_policy_keeps_correlation_bridges_and_sends_no_notice(w
     from tai42_contract.interactions.models import AnswerMismatchPolicy
 
     # A bridge-policy ask treats an unmatched reply as a DIGRESSION: the correlation is KEPT
-    # (the ask stays parked), NO guest notice is sent, and the reply is handed to the
+    # (the ask stays parked), NO participant notice is sent, and the reply is handed to the
     # conversation as a fresh routed turn through the STANDARD target-agnostic accept door
     # (a tool route and an agent route are dispatched identically — accept's tool-route
     # dispatch is covered in test_turn.py). The operator event still fires, tagged bridge.
@@ -691,12 +691,12 @@ async def test_400_bridge_policy_keeps_correlation_bridges_and_sends_no_notice(w
 
     assert result.outcome is InboundAnswerOutcome.BRIDGED_KEPT
     assert store.released == []  # the ask stays parked — only a real answer or timeout ends it
-    assert wired.channel.notifications == []  # no guest notice on the digression
+    assert wired.channel.notifications == []  # no participant notice on the digression
     # The reply entered through the standard accept door, carrying its enrichment params.
     assert len(wired.accept_calls) == 1
     assert wired.accept_calls[0].client_address == "+15550001111"
     assert wired.accept_calls[0].params == {"reply_id": "wamid.X", "referral": "ad-42"}
-    # One operator event, tagged with the bridge policy and no guest notice owner.
+    # One operator event, tagged with the bridge policy and no participant notice owner.
     assert len(wired.events) == 1
     assert wired.events[0].payload["policy"] == "bridge"
     assert wired.events[0].payload["notice_owner"] == "none"
@@ -705,7 +705,7 @@ async def test_400_bridge_policy_keeps_correlation_bridges_and_sends_no_notice(w
 async def test_400_retry_policy_is_the_default_and_tags_the_event(wired, monkeypatch):
     from tai42_contract.channels import InboundAnswerOutcome
 
-    # A default (retry) ask keeps today's behavior exactly: correlation kept, guest notified,
+    # A default (retry) ask keeps today's behavior exactly: correlation kept, participant notified,
     # reply NOT bridged, and the operator event carries policy="retry".
     store = FakeStore(_entry())  # default on_mismatch == retry
     _stub_forward(monkeypatch, httpx.Response(400, json={"error": "not a valid choice", "retry_in_place": True}))

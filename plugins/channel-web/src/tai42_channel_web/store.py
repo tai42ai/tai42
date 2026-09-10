@@ -39,7 +39,7 @@ and refused again once the record has already been restored ``max_restores`` tim
 An ask-less form's submission record is the string key ``channel:web:form:{token}``
 holding the transcript pair its card was appended to, the form's answer schema, and
 the prompt message. Unlike a question record it is READ, never claimed: a form may
-be submitted again and again (each submission is its own guest message), and its
+be submitted again and again (each submission is its own participant message), and its
 TTL is the transcript TTL — the card ages out of the replay buffer and its
 answerability with it.
 """
@@ -118,7 +118,7 @@ class FormRecord:
     Stored under ``channel:web:form:{token}`` with a TTL of the transcript TTL: the
     card lives in the replay buffer, so its answerability ages out with it. The
     record is only ever READ — a form is submittable again and again (each
-    submission is its own guest message), unlike a question's one-shot claim."""
+    submission is its own participant message), unlike a question's one-shot claim."""
 
     identity: str
     address: str

@@ -579,9 +579,9 @@ _MintedCode = tuple[str, datetime]
 
 
 def _error_answer_text(route: ConversationRoute | None) -> str:
-    """The guest-facing text for a failed turn: the route's configured ``error_reply_text``
+    """The participant-facing text for a failed turn: the route's configured ``error_reply_text``
     when it carries one, else the built-in English default. A ``None`` route (no route in
-    scope) falls back to the default. Only the guest-facing ``answer`` resolves through the
+    scope) falls back to the default. Only the participant-facing ``answer`` resolves through the
     route — the record's ``error`` detail and the logs keep the built-in wording."""
     return (route.error_reply_text if route is not None else None) or _ERROR_ANSWER_TEXT
 
@@ -739,7 +739,7 @@ _RESULT_SHAPE_KEY_CAP = 40
 def _shape_key_names(mapping: dict[Any, Any]) -> list[str]:
     """The mapping's string keys, sorted and capped — NAMES only. An envelope key, a
     ``result`` key, or a ``return_result`` surface id is a protocol/authoring identifier, never
-    guest content, so its NAME is client-safe to log; its VALUE is not and never reaches here."""
+    participant content, so its NAME is client-safe to log; its VALUE is not and never reaches here."""
     return sorted(key for key in mapping if isinstance(key, str))[:_RESULT_SHAPE_KEY_CAP]
 
 
@@ -747,7 +747,7 @@ def _shape_surface_sizes(outputs: dict[Any, Any]) -> dict[str, int]:
     """Each ``result.outputs`` surface's NAME mapped to the approximate serialized SIZE of its
     value — never the value itself. The size is the one datum that separates an ABSENT surface
     (not here at all) from a PRESENT-BUT-EMPTY one (a size of ~2, an empty list/object), decided
-    without a guest byte reaching the log. An unserializable value records ``-1`` rather than
+    without a participant byte reaching the log. An unserializable value records ``-1`` rather than
     rendering it."""
     sizes: dict[str, int] = {}
     for name in _shape_key_names(outputs):
@@ -764,10 +764,10 @@ def _result_shape(result: object) -> str:
     is ABSENT vs PRESENT-BUT-EMPTY — instead of an inference from the guard's error text.
 
     Client-safe by construction: it emits only STRUCTURE — the type, the envelope's own key NAMES
-    (protocol/authoring identifiers, never guest content), the ``status`` token, the
+    (protocol/authoring identifiers, never participant content), the ``status`` token, the
     ``return_result`` surface NAMES present under ``result.outputs`` with their approximate
     serialized SIZES, and the ``missing_results`` surface NAMES the run reported unproduced. A
-    guest's message text lives in the VALUES under those surfaces, which this NEVER renders — only
+    participant's message text lives in the VALUES under those surfaces, which this NEVER renders — only
     names, counts, and sizes cross into the log."""
     if not isinstance(result, dict):
         length = len(result) if isinstance(result, (str, bytes, list, tuple, dict, set)) else None
@@ -898,7 +898,7 @@ async def _run_tool_turn(
     ``form`` key ONLY when the inbound carried one, so an existing ``payload_expr`` over a
     form-less inbound sees a byte-identical payload; the default no-``payload_expr`` kwargs
     stay the fixed ``{message, sender, turn}`` either way — a route maps the form deliberately or
-    not at all. Structured inbound ``attachments`` (the guest's media, as JSON ``MediaItem``
+    not at all. Structured inbound ``attachments`` (the participant's media, as JSON ``MediaItem``
     objects) and a ``location`` (a JSON ``LocationElement``) ride the payload under those stable
     keys under the SAME rule — present ONLY when the inbound carried them, so a media-/location-
     unaware route sees a byte-identical payload and still reads the whole turn as ``message``.
@@ -1027,7 +1027,7 @@ async def _run_tool_turn(
         # reaching a conversation turn has NO delivery leg — the turn cannot drive the run, so the
         # reply would never arrive. That is a permanent route misconfiguration, and silencing it
         # would convert a noticed failure into quiet data loss. It is surfaced as the SAME failed
-        # turn a non-success terminal is — the route's client-safe error reply to the guest, the
+        # turn a non-success terminal is — the route's client-safe error reply to the participant, the
         # cause named in the recorded detail — so the misconfiguration is loud. Logged at WARNING,
         # not info: this is a fault, not a routine pause.
         logger.warning("conversations: tool turn for route %r interrupted: %s", route.route_name, interrupt_detail)
@@ -1044,7 +1044,7 @@ async def _run_tool_turn(
         reply = await _tool_reply(route, result)
     except Exception as exc:
         logger.error("conversations: mapping the tool result for route %r failed", route.route_name, exc_info=exc)
-        # VALUE-FREE ground truth: the mapped envelope's SHAPE — never its guest-content values —
+        # VALUE-FREE ground truth: the mapped envelope's SHAPE — never its participant-content values —
         # so a mapping fault is diagnosed from the structure the run actually returned (which
         # flagged surface is absent vs present-but-empty) instead of inferred from the guard text.
         try:
@@ -1191,7 +1191,7 @@ def _new_record(
     verbatim, durable from here so the record reads as a turn of a conversation and not
     only as its answer; ``inbound_form`` is the structured submission that rode WITH it
     (an ask-less form's answers), and ``inbound_attachments``/``inbound_location`` are the media
-    and location the guest sent with it — all stored beside the text, ``None`` for an ordinary
+    and location the participant sent with it — all stored beside the text, ``None`` for an ordinary
     text-only inbound. A ``client`` api-door record MUST name the authenticated caller its
     thread and rate bucket are keyed by, and a ``client`` channel-door record names none; an
     ``operator`` record names the operator that sent it on EITHER door — it rides no rate
@@ -1323,7 +1323,7 @@ async def _target_outcome(
     """The route's TARGET turn as an outcome: a tool dispatch (which may be silent) or an
     agent run (always answered/error). The single dispatch both the plain and the
     multichannel paths route ordinary text to. ``person``, ``params``, ``form`` (the structured
-    inbound submission), ``attachments`` (the guest's media) and ``location`` reach only the tool
+    inbound submission), ``attachments`` (the participant's media) and ``location`` reach only the tool
     payload; the agent branch ignores them all — an agent target reads the rendered TEXT
     only, so a form-/media-unaware agent still sees the whole turn.
 
@@ -1808,7 +1808,7 @@ async def accept(
     leave the turn byte-identical to today. The door validates their bounds before accept;
     this seam runs only a cheap isinstance sweep against its in-process caller.
 
-    ``form`` is a structured guest submission (an ask-less form's answers) riding WITH the
+    ``form`` is a structured participant submission (an ask-less form's answers) riding WITH the
     required rendered ``text`` — the text stays the turn every consumer sees, while a tool
     route's ``payload_expr`` may map the structured copy from the payload's ``form`` key.
     It is validated here against the contract's transport bounds
@@ -1816,7 +1816,7 @@ async def accept(
     untrusted) BEFORE any state is written, and stored on the record's ``inbound_form``
     beside the text (shed records included).
 
-    ``attachments`` (the guest's structured media) and ``location`` (a geographic point the guest
+    ``attachments`` (the participant's structured media) and ``location`` (a geographic point the participant
     shared) ride WITH the text the same way — validated here (the shared media list-level caps; a
     ``LocationElement`` is self-validating) BEFORE any state is written, stored on the record's
     ``inbound_attachments``/``inbound_location`` (shed records included), and surfaced to a tool
@@ -2016,7 +2016,7 @@ async def submit_api_message(
     leave the turn byte-identical to today. The door validates their bounds before submit;
     this seam runs only a cheap isinstance sweep against its in-process caller.
 
-    ``form`` is the structured guest submission riding WITH ``text``
+    ``form`` is the structured participant submission riding WITH ``text``
     (``ConversationMessage.form``), carried with the same record + payload semantics the
     channel door has: transport-bounds-checked here (defensively — the door's body model
     already validated it), stored on the record's ``inbound_form``, and surfaced to a tool
@@ -2330,7 +2330,7 @@ async def operator_send(
 
     ``media``, ``template``, ``options``, ``location``, ``sections``, ``header``, ``footer``
     and ``schema`` (an ask-less form's answer schema —
-    the guest's submission enters the conversation as an ordinary inbound message) are
+    the participant's submission enters the conversation as an ordinary inbound message) are
     OPTIONAL richer-send forms — FULL parity with the flow answer path's :class:`AnswerPart`
     vocabulary: when any is set
     the reply is stored as a single rich :class:`AnswerPart` (``message=text`` carrying the
@@ -2591,7 +2591,7 @@ async def deliver_agent_completion(
         # there is no client turn to mark ``error`` against.
         if result is None:
             # A success fire carrying NO result: serializing it would render the literal "null",
-            # which is not blank and would sail past the check below straight into the guest's
+            # which is not blank and would sail past the check below straight into the participant's
             # thread. It is the same malformed-payload class the status guards catch, so it takes
             # the same client-safe notice and is announced for the same reason.
             logger.warning(
@@ -2731,8 +2731,8 @@ async def deliver_tool_completion(
                 mapping_route.route_name,
                 exc_info=exc,
             )
-            # The guest-facing notice resolves through the DELIVERY route (where the record is
-            # filed and the guest is conversing), so its own ``error_reply_text`` applies.
+            # The participant-facing notice resolves through the DELIVERY route (where the record is
+            # filed and the participant is conversing), so its own ``error_reply_text`` applies.
             parts: list[AnswerPart] | None = [_text_part(_error_answer_text(route))]
         else:
             # A resumed tool reply carries the same ordered-parts shape a live tool turn does
@@ -3010,12 +3010,12 @@ async def _fail_stranded_turn(store: ConversationRecordStore, record: Conversati
     spawn its delivery — the one resolution both the in-process watcher and the periodic
     re-drive apply. Losing the guarded transition leaves the existing outcome standing.
 
-    The intake record carries its ``route_name``, so the guest-facing text resolves the
+    The intake record carries its ``route_name``, so the participant-facing text resolves the
     route's ``error_reply_text`` best-effort: the route is looked up through the conversations
     manager and ANY failure (manager unavailable, route gone, exception) falls back to the
     built-in default. This is an interrupted-turn/lease-lapse repair path, so it must never be
     less robust than a bare default — the lookup only ever upgrades the text, never blocks the
-    outcome. Only the guest-facing ``answer`` resolves through the route; the record's ``error``
+    outcome. Only the participant-facing ``answer`` resolves through the route; the record's ``error``
     detail and the logs keep the built-in wording."""
     try:
         route = await get_conversations_manager().get_route(record.route_name)

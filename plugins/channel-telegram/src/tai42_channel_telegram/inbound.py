@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # All values are transport-bounded by the contract (:func:`validate_entry_params`); a value
 # over ``ENTRY_PARAM_VALUE_MAX_CHARS`` is dropped (never truncated), and in the rare event
 # the aggregate still overflows a bound the whole set is dropped and the turn bridges without
-# it — a guest message is never lost to a params bound.
+# it — a participant message is never lost to a params bound.
 
 _SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 # Bound what an unauthenticated door reads into memory — loud 413, never truncation.
@@ -133,7 +133,7 @@ def _sanitize_params(params: dict[str, str] | None) -> dict[str, str] | None:
     """``params`` validated against the contract's transport bounds, or ``None`` when empty or
     a bound is violated. A violation drops the WHOLE set (which would otherwise 5xx and have
     Telegram redeliver the same poison update forever) and lets the turn proceed without
-    params — the guest's message is never lost to a params bound; the refusal names the
+    params — the participant's message is never lost to a params bound; the refusal names the
     bound/key, never an opaque value."""
     if not params:
         return None
@@ -146,7 +146,7 @@ def _sanitize_params(params: dict[str, str] | None) -> dict[str, str] | None:
 
 
 def _inbound_locale(update: dict[str, object]) -> str | None:
-    """The guest's BCP 47 locale off a Telegram update — the sender's ``language_code``
+    """The participant's BCP 47 locale off a Telegram update — the sender's ``language_code``
     (the IETF tag Telegram attaches to every ``from``), read off the message or the
     callback_query. Canonicalized defensively: a malformed value is dropped to ``None``
     (never a 5xx that would have Telegram redeliver the poison update), so the turn still

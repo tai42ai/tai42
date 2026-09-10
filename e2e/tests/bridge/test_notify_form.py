@@ -1,13 +1,13 @@
 """Ask-less form notifications, end to end over both delivery surfaces.
 
-``notify_user(schema=...)`` sends a fillable form with NO pending ask: the guest's
-submission enters the conversation as an ordinary structured guest message — rendered
+``notify_user(schema=...)`` sends a fillable form with NO pending ask: the participant's
+submission enters the conversation as an ordinary structured participant message — rendered
 ``label: value`` text every consumer sees, plus the structured values under the tool
 payload's ``form`` key — never as an answer to anything.
 
 The web leg drives the channel's own public doors (the SSE stream carries the ONE
 ``chat.form`` card; ``POST /forms/{token}`` is the submission door): resubmission is a
-second guest turn, a foreign or unknown token is ONE uniform 404, and the door never
+second participant turn, a foreign or unknown token is ONE uniform 404, and the door never
 validates the values against the schema — schema-violating values bridge verbatim (the
 pinned no-validation transport contract). The whatsapp legs drive the Flow rendering on
 the FakeWhatsApp stub: the flow token rides the ``tai42-nf:`` namespace with NO pending
@@ -213,7 +213,7 @@ async def test_web_form_card_submit_resubmit_foreign_404_and_no_schema_validatio
     replay = await web.frames()
     assert [data["text"] for event, data in replay if event == "chat.form"] == [prompt]
 
-    # A submission bridges as ONE guest turn: the tool payload's ``form`` is the values
+    # A submission bridges as ONE participant turn: the tool payload's ``form`` is the values
     # verbatim and its ``message`` is the ``label: value`` text rendered from the STORED
     # schema's titles.
     first_marker = uniq("l27-web-a")
@@ -225,7 +225,7 @@ async def test_web_form_card_submit_resubmit_foreign_404_and_no_schema_validatio
     assert first_turn["message"] == f"Topic: {first_marker}\nCount: 4"
 
     # RESUBMIT: the record is read, never claimed — the second submission is its own
-    # second guest turn.
+    # second participant turn.
     second_marker = uniq("l27-web-b")
     resubmitted = await _post_form(bridge, token, {"topic": second_marker, "count": 5}, cookies=web.cookies)
     assert resubmitted.status_code == 200, resubmitted.text
@@ -258,7 +258,7 @@ async def test_web_form_reply_part_opens_the_card_prefilled(bridge: BridgeHarnes
     # A flow's reply part IS a form: a tool route replies with a form AnswerPart carrying
     # per-send ``data`` (prefill values + option lists) and ``pages``, and the whole seam —
     # AnswerPart -> delivery -> ChannelNotification -> web notify -> chat.form card — forwards
-    # them, so the guest's card opens ALREADY FILLED IN.
+    # them, so the participant's card opens ALREADY FILLED IN.
     identity = uniq("l27-reply-site").replace("_", "-")
     prompt = uniq("l27-reply-prompt")
     reply_part = {
@@ -336,7 +336,7 @@ async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coer
     assert _stack_redis_get(bridge, _whatsapp_pending_key(BRIDGE_WHATSAPP_PHONE_ID, wa_id)) is None
 
     # The signed completed-Flow reply carrying that token enters the conversation as a
-    # structured guest turn: values coerced to the schema's types (Flow inputs arrive as
+    # structured participant turn: values coerced to the schema's types (Flow inputs arrive as
     # strings), the token dropped, the text rendered from the schema's titles.
     marker = uniq("l27-wa-a")
     reply = bridge.whatsapp_nfm_reply(

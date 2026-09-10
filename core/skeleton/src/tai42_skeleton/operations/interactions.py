@@ -318,7 +318,7 @@ async def cancel_interaction(interaction_id: str) -> dict:
     EXTERNAL ask is a pending ask an operator may withdraw, so it is cancellable too.
 
     Channel-blind by construction: a channel-side pending correlation is NOT proactively
-    torn down. A later guest reply forwarded to the callback door finds the state gone and
+    torn down. A later participant reply forwarded to the callback door finds the state gone and
     the door answers ``404``, which the inbound ladder maps to a fresh bridged turn — the
     identical path a timeout/expiry removal already takes.
 

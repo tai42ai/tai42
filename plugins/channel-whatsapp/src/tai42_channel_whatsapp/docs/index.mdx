@@ -102,7 +102,7 @@ keys it understands:
 - `reaction_emoji` / `reaction_message_id` — an inbound emoji **reaction**.
 - `contacts_count` / `contacts` — shared **contact** card(s).
 
-Guest **media**, **location**, **contacts**, and **reactions** now bridge as
+Participant **media**, **location**, **contacts**, and **reactions** now bridge as
 turns. An inbound **location** additionally lands as a typed `LocationElement` on
 the turn (not a param). Inbound media carries **no typed `attachments`** entry:
 the Graph media id is not a durable media source and no served-media ingestion
@@ -111,7 +111,7 @@ with operator credentials (a flagged platform gap — see the plugin README).
 
 Params ride only on the bridge path — a tap or quick-reply that **answers** a
 pending question surfaces none (the answer path carries no params). Meta inbound
-error notices (`errors[]`, e.g. an unsupported guest message type) are logged at
+error notices (`errors[]`, e.g. an unsupported participant message type) are logged at
 warning, never bridged.
 
 ## The 24-hour window and templates

@@ -803,7 +803,7 @@ async def test_delivery_failure_after_recorded_answer_falls_through(wired, monke
     # call errored). ``prune_pending`` then reports already-answered — the
     # recorded answer is returned, never discarded, and nothing raises. And the
     # answered/gone fall-through emits NO delivery_failed event: the human WAS
-    # reached, so there is no guest-impacting failure fact to state.
+    # reached, so there is no participant-impacting failure fact to state.
     from tai42_skeleton.hooks import cache as hooks_cache
 
     hooks = RecordingHooks()

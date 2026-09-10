@@ -239,7 +239,7 @@ export function isFormGone(error: unknown): boolean {
 
 /** Submit one ask-less form card's values through its token door. The door renders
  * the transcript text from the schema it stored server-side; only the values
- * travel. Resubmission is allowed — every call is its own guest message. */
+ * travel. Resubmission is allowed — every call is its own participant message. */
 export async function submitForm(token: string, values: Record<string, unknown>): Promise<void> {
   const response = await fetch(`${apiBase()}/forms/${encodeURIComponent(token)}`, {
     method: 'POST',

@@ -4,7 +4,7 @@ The park-completion binding (``set_park_completion``) is the deferred-response D
 of one interaction, bound by the party that owns answering it — the conversation door binds it
 around the turn it will answer. It rides a contextvar, so everything the turn dispatches inherits
 it, and any OTHER driver that parks inside the turn captures the SAME address as its own: a flow
-preset invoked as a tool inside an agent turn would post its own raw envelope into the guest's
+preset invoked as a tool inside an agent turn would post its own raw envelope into the participant's
 thread while the agent's answer is orphaned, both fires racing for one delivery address.
 
 THE OWNER OF THE INTERACTION OWNS DELIVERY. An agent that dispatches a tool is that owner: the
@@ -14,7 +14,7 @@ agent dispatches never runs under the door's binding, while the agent's OWN park
 the binding the door set for it.
 
 What that achieves is bounded, and the bound is worth stating. It stops the HIJACK: no nested
-driver can address the guest thread this agent's answer is owed to. It does NOT make the nested
+driver can address the participant thread this agent's answer is owed to. It does NOT make the nested
 park the agent's. A nested driver that binds its own resume continuation — a flow preset is the
 live example — owns that park end to end: it resumes on its own continuation and hands the
 outcome wherever its own face delivers.

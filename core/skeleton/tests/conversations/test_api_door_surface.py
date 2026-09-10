@@ -218,7 +218,7 @@ def test_an_unfinished_turn_answers_202_without_an_answer(monkeypatch):
 
 
 def test_a_form_body_field_threads_through_to_the_engine(monkeypatch):
-    # ConversationMessage.form (the structured guest submission) rides the body beside the
+    # ConversationMessage.form (the structured participant submission) rides the body beside the
     # required text and reaches the engine as the ``form`` argument.
     engine = _Engine()
     client = _client(monkeypatch, engine)

@@ -2122,7 +2122,7 @@ async def test_notify_form_prefill_and_pages_reach_send_flow(waba_env, fake_redi
     # An ask-less form's per-send prefill/options and step layout ride the send exactly as a
     # form ask's do: the notify Flow is the dynamic per-send Flow (keyed on the
     # (schema, pages, option_fields) triple), and the send navigates to the entry screen
-    # injecting the values/options — so the guest's form opens already filled in.
+    # injecting the values/options — so the participant's form opens already filled in.
     from tai42_contract.interactions.models import FormData, FormOption, FormPage
 
     schema = {

@@ -187,7 +187,7 @@ with warnings.catch_warnings():
         @classmethod
         def _check_mismatch_notice(cls, value: str | None) -> str | None:
             # None uses the built-in default; a set notice is re-validated to the SAME
-            # non-blank + guest-reply cap the ask REQUEST (``InteractionRequest``) enforces,
+            # non-blank + participant-reply cap the ask REQUEST (``InteractionRequest``) enforces,
             # so the delivery frame is bounded exactly as the ask that produced it — the
             # symmetric defensive re-check the ``media`` re-validation above applies.
             if value is not None:
@@ -396,13 +396,13 @@ OPTION_ID_MAX_CHARS = 256
 
 
 class ReplyOption(BaseModel):
-    """A tappable suggested reply. Tapping SUBMITS ``text`` as the guest's next inbound message —
+    """A tappable suggested reply. Tapping SUBMITS ``text`` as the participant's next inbound message —
     the quick-reply / list-row case, where the option's own text becomes the turn. ``description``
     is an OPTIONAL secondary line a sectioned-list row renders under its ``text``; a channel that
     renders flat buttons (no descriptions) ignores it.
 
     ``id`` is an OPTIONAL author-set stable identifier for the button/list row. When set, a channel
-    sends it verbatim on the wire and the guest's tap echoes it back (a channel surfaces the echoed
+    sends it verbatim on the wire and the participant's tap echoes it back (a channel surfaces the echoed
     id to the inbound turn as opaque enrichment — e.g. Slack forwards it as ``params.reply_id``);
     when ``None`` the channel mints its own id as today. Bounded by ``OPTION_ID_MAX_CHARS`` and a
     single-line non-blank label — the strictest carrier's rule. Frozen.
@@ -696,7 +696,7 @@ with warnings.catch_warnings():
 
         ``schema`` is the form answer schema for an ASK-LESS FORM: the channel renders
         ``message`` as the form's prompt and ``schema`` as the fillable form, and the
-        guest's submission enters the conversation as a guest message — no interaction,
+        participant's submission enters the conversation as a participant message — no interaction,
         no ticket, no callback, the same inbound path a tapped option takes. A present
         ``schema`` is a non-empty dict; its deep shape is the sender's shared
         channel-deliverable subset walk (the same split :class:`ChannelDelivery` keeps),
@@ -725,7 +725,7 @@ with warnings.catch_warnings():
         header: MediaItem | None = None  # single media header above an interactive message; None -> none
         footer: str | None = None  # short trailing line under an interactive message; None -> none
         # The form answer schema for an ask-less form; the submission enters the conversation as
-        # a guest message. Intentionally named ``schema`` (matches the payload it carries);
+        # a participant message. Intentionally named ``schema`` (matches the payload it carries);
         # shadows the deprecated ``BaseModel.schema()`` alias, which this model never uses.
         schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
         # Per-send prefill/options over ``schema`` (the same :class:`ChannelDelivery` keeps),
@@ -997,11 +997,11 @@ async def notify_in_order(
 
 class Correlation(BaseModel):
     """The per-address record a channel keeps while ONE parked ask awaits the
-    guest's next inbound reply.
+    participant's next inbound reply.
 
     When ``ask_user`` is delivered on a medium whose reply arrives as a fresh
     inbound message (not a tap on a signed link), the channel stores this record
-    against a channel-computed correlation key and, when the guest's next reply
+    against a channel-computed correlation key and, when the participant's next reply
     lands on that key, forwards it to ``callback_url`` (the delivery's public
     answer sink). ``interaction_id`` identifies the parked ask (carried into
     operator alerts, never re-derived); ``ttl_deadline`` is the tz-aware instant
@@ -1042,7 +1042,7 @@ class CorrelationStore(Protocol):
 
     A channel that delivers ``ask_user`` questions whose replies arrive as fresh
     inbound messages keeps a :class:`Correlation` per waiting address so the
-    guest's next reply resolves the right parked ask. This port is the minimal
+    participant's next reply resolves the right parked ask. This port is the minimal
     set/get/release surface over that store; the LADDER that interprets a
     forwarded answer's outcome (forward, retry-in-place, bridge) lives in core and
     reads this port — it is not the store's concern.
@@ -1104,10 +1104,10 @@ class InboundAnswerOutcome(StrEnum):
 
     NO_CORRELATION = "no_correlation"  # no pending ask on this key — the CALLER bridges it as a normal turn
     FORWARDED = "forwarded"  # the door accepted the answer; the correlation was released
-    RETRY_KEPT = "retry_kept"  # the door rejected a re-answerable ask; correlation KEPT, guest told what's expected
+    RETRY_KEPT = "retry_kept"  # the door rejected a re-answerable ask; correlation KEPT, participant re-prompted
     BRIDGED = "bridged"  # the ask is gone or the mismatch is hard; correlation released and the reply bridged
     # A ``bridge``-policy ask rejected a reply: the correlation is KEPT (the ask stays parked) and
-    # the reply is bridged as a fresh turn with NO guest notice — the reply was a digression.
+    # the reply is bridged as a fresh turn with NO participant notice — the reply was a digression.
     BRIDGED_KEPT = "bridged_kept"
 
 
@@ -1117,13 +1117,13 @@ class InboundBridge(BaseModel):
     A channel hands one of these to :meth:`AppChannels.handle_inbound_answer` alongside
     the correlation key and answer value. ``channel_id`` is the registered channel
     name; ``our_identity`` and ``client_address`` are the conversation's two addresses
-    (the operator identity the turn answers from, and the guest's attested address /
+    (the operator identity the turn answers from, and the participant's attested address /
     thread); ``cap_key`` is the party the per-address turn cap holds accountable;
     ``provider_message_id`` dedupes a provider redelivery at the conversation seam;
-    ``bridge_text`` is the channel's faithful rendering of the guest's message for a
+    ``bridge_text`` is the channel's faithful rendering of the participant's message for a
     bridged turn.
 
-    ``owns_retry_notice`` lets a channel OWN the guest-facing correction message on a
+    ``owns_retry_notice`` lets a channel OWN the participant-facing correction message on a
     retryable rejection. The default (False) is that the ladder sends the generic
     "that didn't match, try again" notice on :attr:`InboundAnswerOutcome.RETRY_KEPT`.
     When True, the channel's correction surface IS a re-ask the channel renders off
@@ -1136,7 +1136,7 @@ class InboundBridge(BaseModel):
 
     ``params`` is the OPTIONAL opaque channel enrichment this inbound reply carries — the
     ANSWER-path counterpart of a conversation entry's ``params``: a tapped reply id, a template
-    button payload, a referral, the reply-to context the guest quoted. The ladder threads it BOTH
+    button payload, a referral, the reply-to context the participant quoted. The ladder threads it BOTH
     ways with the same seam symmetry — forwarded to the ask's callback door alongside the answer
     (landing on :class:`~tai42_contract.interactions.models.InteractionResponse.params`, read by
     the asking flow beside ``answer``) AND, when the reply is instead BRIDGED as a fresh turn,

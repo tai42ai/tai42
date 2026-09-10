@@ -541,7 +541,7 @@ async def _refuse_unrenderable_parts(
     channel):
     the record fails loudly and terminally so it is never re-driven, and no half-rendered send
     goes out. No client-safe reply is sent — the missing capability is an operator's business,
-    not a guest-facing size hint."""
+    not a participant-facing size hint."""
     logger.error(
         "conversations: record %s carries a part needing %s, which channel %r does not advertise support for; "
         "failing the record (a media/template/options/schema part cannot be routed to a text-only channel)",

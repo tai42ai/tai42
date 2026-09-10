@@ -391,11 +391,11 @@ unknown token.
   caller's own conversation; a foreign, expired and never-minted token all answer
   ONE uniform `404` (no oracle). `values` must be a non-empty JSON object passing
   the same transport bound as a form answer (finite numbers, at most 32 KiB
-  serialized) and is **never validated against the form's schema** — guest-shaped
+  serialized) and is **never validated against the form's schema** — participant-shaped
   data, bridged verbatim as the turn's structured `form` while the door renders the
   `label: value` text every consumer sees from the STORED schema's titles
   (server-trusted labels; client values are untrusted data). The record is READ,
-  never claimed: a form may be submitted repeatedly, each submission its own guest
+  never claimed: a form may be submitted repeatedly, each submission its own participant
   message — the same settle model as the option chips. `client_message_id` is the
   messages door's retry key, same derivation, same echo. Refusals map as the
   messages door's: `401` no/foreign session, `400` unparseable JSON, `413` over the
@@ -457,7 +457,7 @@ carries a server-minted submission token —
 the form door the submission posts back through. Unlike a question the card has no
 deadline and no answered state: it settles like the option chips — a local "Sent" badge
 for the page session, fillable again on a backlog replay, resubmittable at will (each
-submission is its own guest message), inert on a locked session, and an expired token's
+submission is its own participant message), inert on a locked session, and an expired token's
 `404` renders as an inline "no longer available" line. A `data:` image is refused loudly
 (the page renders an image only from an absolute `https` source), and a template
 notification is refused loudly — a template is a vendor construct this channel does not send.

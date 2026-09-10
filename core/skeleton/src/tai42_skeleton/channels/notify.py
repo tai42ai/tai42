@@ -142,7 +142,7 @@ async def notify_user(
     stores rich content unconditionally — there is no channel to advertise a capability.)
 
     ``schema`` is the ask-less form's answer schema: the channel renders ``message`` as the
-    form's prompt and ``schema`` as the fillable form, and the guest's submission enters the
+    form's prompt and ``schema`` as the fillable form, and the participant's submission enters the
     conversation as an ordinary inbound message — no ticket, no callback, no wait. It is
     CHANNEL-ONLY: a sink notification (``channel=None``) has no delivery vehicle and no
     submission door, so a schema there is refused loudly (a ``ValueError`` → 400) before any

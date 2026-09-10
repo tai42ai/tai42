@@ -89,7 +89,7 @@ AnswerStatus = Literal["answered", "error", "silent"]
 # vocabulary must exclude ``:``.
 ROUTE_NAME_RE = re.compile(r"^[a-z0-9-]+$")
 
-# Inbound-form transport bounds. The platform carries a guest's structured submission (an
+# Inbound-form transport bounds. The platform carries a participant's structured submission (an
 # ask-less form's answers) to the turn as opaque, untrusted data; these bounds cap the
 # transport alone (JSON-object shape, string keys, finite numbers, nesting depth, total
 # serialized size) — never the submission's meaning or its conformance to any schema.
@@ -144,9 +144,9 @@ def validate_bounded_object(value: object, *, what: str) -> dict[str, Any]:
 
 
 def validate_inbound_form(form: object) -> dict[str, Any]:
-    """Refuse (``ValueError``) or return the guest submission dict unchanged — the ask-less
+    """Refuse (``ValueError``) or return the participant submission dict unchanged — the ask-less
     form's answers bounded as pure transport by :func:`validate_bounded_object` (``what="form"``);
-    the contents stay opaque, untrusted guest data, never schema-conformant."""
+    the contents stay opaque, untrusted participant data, never schema-conformant."""
     return validate_bounded_object(form, what="form")
 
 
@@ -204,12 +204,12 @@ class ConversationMessage(BaseModel):
     form: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "A structured guest submission (an ask-less form's answers) riding WITH the "
+            "A structured participant submission (an ask-less form's answers) riding WITH the "
             "text. ``text`` stays required and non-blank — it is the CARRIER every reader "
             "consumes: a channel submits a faithful text form of the submission alongside "
             "the structured data, so a form-unaware consumer still sees the whole turn, "
             "and the ``attachments``/``location`` siblings ride the same pattern. The "
-            "platform attaches no meaning and NO TRUST to the contents: guest-shaped "
+            "platform attaches no meaning and NO TRUST to the contents: participant-shaped "
             "data, never schema-conformant — a target that reads it validates it itself."
         ),
     )
@@ -405,7 +405,7 @@ with warnings.catch_warnings():
         header: MediaItem | None = None  # single media header above an interactive message; None -> none
         footer: str | None = None  # short trailing line under an interactive message; None -> none
         # The form answer schema for an ask-less form; the submission enters the conversation as
-        # a guest message. Intentionally named ``schema`` (matches the payload it carries);
+        # a participant message. Intentionally named ``schema`` (matches the payload it carries);
         # shadows the deprecated ``BaseModel.schema()`` alias, which this model never uses.
         schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
         # Per-send prefill/options layered over ``schema`` for THIS part's form, so a reply
@@ -642,8 +642,14 @@ class ConversationRouteCreate(BaseModel):
                         ("person_addresses", "multichannel only: the person's known addresses"),
                         ("params", "non-empty entry params, nested under this key"),
                         ("form", "a structured form submission, present only when the inbound carried one"),
-                        ("attachments", "inbound media the guest sent, present only when the inbound carried some"),
-                        ("location", "a geographic point the guest shared, present only when the inbound carried one"),
+                        (
+                            "attachments",
+                            "inbound media the participant sent, present only when the inbound carried some",
+                        ),
+                        (
+                            "location",
+                            "a geographic point the participant shared, present only when the inbound carried one",
+                        ),
                         ("turn", "the turn ids: {id, inbound: {id, kind, source}}"),
                         ("event", "an event turn's structured payload {id, kind, payload}; absent on a message turn"),
                     ],
@@ -658,7 +664,7 @@ class ConversationRouteCreate(BaseModel):
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
                     label="reply expression",
-                    blurb="the tool/flow result (the SUCCESS shape) the route maps to the guest reply",
+                    blurb="the tool/flow result (the SUCCESS shape) the route maps to the participant reply",
                     returns="the reply: null (silent), a string, or a list of answer parts",
                 )
             }
@@ -681,10 +687,10 @@ class ConversationRouteCreate(BaseModel):
     # per-hour turn rate this route's per-address buckets run at, or ``None`` to run at the
     # global rate.
     turns_per_hour_override: int | None = Field(default=None, gt=0)
-    # The guest-facing reply sent when a conversational turn on this route fails; ``None`` uses
+    # The participant-facing reply sent when a conversational turn on this route fails; ``None`` uses
     # the built-in English default. LITERAL text — no placeholders/templating. Non-blank when
     # set. (No other text field in this file carries a max_length; 2000 is a defensible bound
-    # for a single guest-facing reply.)
+    # for a single participant-facing reply.)
     error_reply_text: str | None = Field(default=None, min_length=1, max_length=2000)
     # The operator-declared default locale for templated reply parts when the turn states none;
     # the last fallback under a per-turn or stored-contact locale, canonicalized through the one
@@ -703,7 +709,7 @@ class ConversationRouteCreate(BaseModel):
     @classmethod
     def _check_error_reply_text(cls, value: str | None) -> str | None:
         # A set override must be non-blank: a whitespace-only reply would deliver an empty
-        # guest-facing message where the built-in default was intended.
+        # participant-facing message where the built-in default was intended.
         if value is not None and not value.strip():
             raise ValueError("error_reply_text must be non-blank when set")
         return value

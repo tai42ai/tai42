@@ -135,7 +135,7 @@ def _select_tap(
         action["value"] = value
     return {
         "type": "block_actions",
-        "user": {"id": "U0GUEST"},
+        "user": {"id": "U0PARTICIPANT"},
         "container": {"type": "message", "message_ts": message_ts, "channel_id": channel_id},
         "channel": {"id": channel_id, "name": "chan"},
         "actions": [action],
@@ -206,7 +206,7 @@ def _reply_tap(
     }
     return {
         "type": "block_actions",
-        "user": {"id": "U0GUEST"},
+        "user": {"id": "U0PARTICIPANT"},
         "container": {"type": "message", "message_ts": message_ts, "channel_id": channel_id},
         "channel": {"id": channel_id, "name": "chan"},
         "actions": [action],
@@ -405,9 +405,9 @@ async def test_view_submission_forwards_coerced_answer_and_closes(fake_redis, ch
 
 
 async def test_view_submission_retry_kept_shows_door_reason_keeps_record(fake_redis, channels):
-    # RETRY_KEPT: the ladder kept the record and sent NO guest notice (owns_retry_notice
+    # RETRY_KEPT: the ladder kept the record and sent NO participant notice (owns_retry_notice
     # =True), so the channel renders its own inline Block-Kit error carrying the DOOR'S
-    # specific reason and the modal stays open — one guest surface, no double message.
+    # specific reason and the modal stays open — one participant surface, no double message.
     await _seed_form(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
     channels.inbound_retry_reason = "full_name is required"

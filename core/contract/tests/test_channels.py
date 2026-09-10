@@ -614,7 +614,7 @@ def _form_schema() -> dict[str, Any]:
 
 def test_notification_accepts_a_form_schema():
     # An ask-less form: the message is the form's prompt, the schema the fillable form;
-    # the submission enters the conversation as a guest message.
+    # the submission enters the conversation as a participant message.
     from tai42_contract.channels import ChannelNotification
 
     notification = ChannelNotification(message="tell us your size", schema=_form_schema())

@@ -27,9 +27,9 @@ are AUTHED — they carry the platform api key and declare an explicit action-cl
   names a ``chat.form`` card's stored record, which must belong to the caller's own
   conversation (a foreign or expired token answers ONE uniform 404 — no oracle). The
   values are bounded as pure transport (a non-empty JSON object of finite numbers,
-  size-capped) and NEVER validated against the form's schema — guest-shaped data;
+  size-capped) and NEVER validated against the form's schema — participant-shaped data;
   the door renders ``label: value`` text from the STORED schema (server-trusted
-  labels) and bridges text + values through ``conversations.accept`` as one guest
+  labels) and bridges text + values through ``conversations.accept`` as one participant
   message. The record is read, never claimed: every submission is its own message.
 * ``POST /api/channels/web/session/rotate`` — body ``{identity}``; mint a fresh
   session for that web route (the visitor's "new conversation"); the next message
@@ -1206,18 +1206,18 @@ async def web_answer(request: Request) -> Response:
     response_model=MessageAcceptedResponse,
 )
 async def web_form_submit(request: Request) -> Response:
-    """Bridge one ask-less form submission as a guest message.
+    """Bridge one ask-less form submission as a participant message.
 
     The token names a ``chat.form`` card's stored record. The record must exist AND
     its conversation — both the web route identity and the address — must be the
     caller's own session's: a foreign, expired, and never-minted token all answer
     the ONE uniform 404, so the refusal is never a token or ownership oracle. The
     record is READ, never claimed — a form is submittable again and again, each
-    submission its own guest message (the option-chips precedent).
+    submission its own participant message (the option-chips precedent).
 
     The values pass the same transport bound the answer door's form branch applies
     (a JSON object of finite numbers, size-capped) and are NEVER validated against
-    the stored schema: guest-shaped data the platform re-bounds (size/depth) at
+    the stored schema: participant-shaped data the platform re-bounds (size/depth) at
     ``accept`` and no consumer may trust as schema-conformant. The text every
     consumer sees is rendered HERE from the STORED schema's labels — the client
     contributes values only. ``accept`` and the visitor's own ``chat.message`` frame
