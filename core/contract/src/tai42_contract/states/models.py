@@ -40,8 +40,14 @@ SUBJECT_KIND_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 #: ``:``, so a name carrying one would let two ledger keys collide.
 STATE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
-#: The state-module ``name`` charset: a lowercase identifier of at most 63 chars.
-MODULE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+#: The state-template ``name`` charset: a lowercase SLUG of at most 63 chars — a leading
+#: letter, then letters/digits/single hyphens, with NO leading, trailing, or consecutive
+#: hyphen. The slug rule is load-bearing for the qualified template-jq handle
+#: ``tjq_<template with '-'→'_'>__<jq>``: a name with ``--`` would encode to ``__`` and let
+#: (template ``a--b``, jq ``c``) collide with (template ``a``, jq ``b__c``); forbidding
+#: ``--`` (and a trailing ``-``) means the encoded template part never contains ``__`` nor
+#: ends in ``_``, so the FIRST ``__`` is an unambiguous template/jq boundary.
+TEMPLATE_NAME_RE = re.compile(r"^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,62}$")
 
 #: The one platform-validated kind: its key is a person id resolved against the
 #: identity store, and the person's target must equal the subject's target.
@@ -192,9 +198,9 @@ class StateDeclaration(BaseModel):
     a door's ambient subject resolves to (one of ``subject_kinds``), and an optional
     ``retention_days`` (a positive INT4, or unset to keep records forever).
 
-    ``effective_schema`` is the base ``schema`` composed with every mounted module's
+    ``effective_schema`` is the base ``schema`` composed with every attached template's
     fragment, and ``regimes`` are the absolute write-regime rules composed over the
-    mounts (each ``{path, regime}``, the mount path prefixed onto the module's regime
+    attachments (each ``{path, regime}``, the attachment path prefixed onto the template's regime
     paths). ``updated_at`` is the row's last-write timestamp. The platform computes all
     three and serves them on every read; a client that supplies a non-``None`` value for
     any of them on a write is refused (``… is set/computed by the platform``), so none can
@@ -238,19 +244,24 @@ class StateDeclaration(BaseModel):
         return self
 
 
-class StateModuleDocument(BaseModel):
-    """A state-module document: the reusable schema fragment plus the parameters, write
-    regimes, mount-time ``declarations`` and ``trace`` switch the platform owns.
-    ``extra="forbid"`` refuses any key outside these — a consumer keeps its own documents
-    (its views, predicates, or whatever it needs) beside the module under its own kind,
-    validated through its registered mount validator, never folded into this shape.
+class StateTemplateDocument(BaseModel):
+    """A state-template document: the reusable schema fragment plus the parameters, write
+    regimes, attach-time ``declarations`` and ``trace`` switch the platform owns, plus
+    ``template_jq`` (named jq programs — ``input``-purpose reads and ``update``-purpose
+    record operations) and ``reconcile`` (how a declarations edit settles open records)
+    that give the record its meaning. A template is data end to end: the states API serves
+    an input-purpose result for a subject and applies an update-purpose program to a subject
+    generically, so a template is usable through the API with no other engine.
+    ``extra="forbid"`` refuses any key outside these.
 
-    The wire key ``schema`` is the attribute ``schema_`` (alias). Structural
-    validation of the fragment, regime paths and declarations lives at the store."""
+    The wire key ``schema`` is the attribute ``schema_`` (alias). Structural validation of
+    the fragment, regime paths, declarations, template_jq and reconcile lives at the store
+    — ``template_jq``/``reconcile`` travel as free ``dict`` objects here (matching
+    ``declarations``/``regimes``) and are parsed and checked in the skeleton."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, serialize_by_alias=True)
 
-    kind: Literal["state-module"] = "state-module"
+    kind: Literal["state-template"] = "state-template"
     name: str
     description: str = ""
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -258,21 +269,27 @@ class StateModuleDocument(BaseModel):
     regimes: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
     declarations: dict[str, Any] | None = None
     trace: dict[str, Any] = Field(default_factory=dict)
+    #: ``name -> {description, purpose, ...}`` — each a named jq program. An ``input``-purpose
+    #: entry (with ``params``) reads the record → a value; an ``update``-purpose entry (with
+    #: ``reads``/``writes``) maps ``{record, input}`` → a template-relative op batch.
+    template_jq: dict[str, Any] | None = None
+    #: ``{view, close, resolutions}`` — how a declarations edit settles open records.
+    reconcile: dict[str, Any] | None = None
 
     @field_validator("name")
     @classmethod
     def _check_name(cls, value: str) -> str:
-        if not MODULE_NAME_RE.fullmatch(value):
-            raise ValueError(f"module name {value!r} must match {MODULE_NAME_RE.pattern}")
+        if not TEMPLATE_NAME_RE.fullmatch(value):
+            raise ValueError(f"template name {value!r} must match {TEMPLATE_NAME_RE.pattern}")
         return value
 
 
-class MountBody(BaseModel):
-    """A mount request: the ``path`` in the state's document where the module's
-    fragment lands, the mount's parameter values, its static ``declarations``, and
-    ``options`` — a free-form, per-operation directive bag a registered mount reconciler
+class AttachBody(BaseModel):
+    """An attach request: the ``path`` in the state's document where the template's
+    fragment lands, the attachment's parameter values, its static ``declarations``, and
+    ``options`` — a free-form, per-operation directive bag a registered attach reconciler
     reads (how to reconcile OPEN records against the new declarations). ``options`` is
-    passed to the reconcilers for THIS mount only, never stored or served back; every
+    passed to the reconcilers for THIS attach only, never stored or served back; every
     other key is refused."""
 
     model_config = ConfigDict(extra="forbid")
@@ -283,7 +300,7 @@ class MountBody(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
-class RecordView(BaseModel):
+class StateRecord(BaseModel):
     """A read record: the ``state``, its ``subject``, the ``data`` document and its
     monotonic ``seq``, plus the ``canonical_subject`` a fold resolved the subject to
     and every subject ``folded_from`` into it. Frozen."""
@@ -306,6 +323,35 @@ class ApplyResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    applied: bool
+    data: dict[str, Any] | None = None
+    seq: float | None = None
+    skipped: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
+
+
+class TemplateJqResult(BaseModel):
+    """The result of evaluating an ``input``-purpose ``template_jq`` program for a subject:
+    the resolved ``name``, its ``purpose`` (always ``"input"`` here), and the ``value`` (any
+    JSON — the program's jq output over the subject's record). A read; no write is
+    recorded."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    purpose: Literal["input"] = "input"
+    value: Any = None
+
+
+class TemplateJqApplyResult(BaseModel):
+    """The outcome of applying an ``update``-purpose ``template_jq`` program to a subject:
+    its ``name`` and the :class:`ApplyResult` outcome of the op batch its jq returned, run
+    through the same ``apply`` chokepoint as a delta — ``applied`` (a replayed ``op_id`` or
+    an empty batch is ``False``), the resulting ``data`` and ``seq`` when it applied, and the
+    guard-``skipped`` ops."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
     applied: bool
     data: dict[str, Any] | None = None
     seq: float | None = None
@@ -366,60 +412,60 @@ class ConsumerRow(BaseModel):
     unavailable: str | None = None
 
 
-#: A data-dependent mount validator a consumer registers on the states facet: given
-#: the module document, the mount's declaration VALUES, and the state's effective
-#: schema, it RAISES loudly (a ``ModuleValidationError`` naming the offending item)
-#: to refuse the door — consulted before every mount / declarations write. A pass
+#: A data-dependent attach validator a consumer registers on the states facet: given
+#: the template document, the attachment's declaration VALUES, and the state's effective
+#: schema, it RAISES loudly (a ``TemplateValidationError`` naming the offending item)
+#: to refuse the door — consulted before every attach / declarations write. A pass
 #: returns ``None``.
-MountValidator = Callable[["StateModuleDocument", dict[str, Any], dict[str, Any]], Awaitable[None]]
+AttachValidator = Callable[["StateTemplateDocument", dict[str, Any], dict[str, Any]], Awaitable[None]]
 
 
 @runtime_checkable
-class MountReconcileRecords(Protocol):
-    """The narrow record door a mount reconciler reads and writes the (re)mounted state's
+class AttachReconcileRecords(Protocol):
+    """The narrow record door an attach reconciler reads and writes the (re)attached state's
     records through — a subset of the states facet bound to the one state: read a subject,
     page its subjects, ``merge`` a shallow resolution, or ``apply`` a full op batch (the
-    same keyed ops as a module fill, so a record under a ``composing`` write regime can be
-    closed too). Every write runs on the mount transaction and is completed and audited at
-    the platform chokepoint exactly like a facet write."""
+    same keyed ops as an update-purpose program, so a record under a ``composing`` write
+    regime can be closed too). Every write runs on the attach transaction and is completed
+    and audited at the platform chokepoint exactly like a facet write."""
 
-    async def read(self, subject: StateSubject) -> RecordView | None: ...
+    async def read(self, subject: StateSubject) -> StateRecord | None: ...
 
     async def list_subjects(
         self, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
     ) -> dict[str, Any]: ...
 
-    async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> RecordView: ...
+    async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> StateRecord: ...
 
     async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult: ...
 
 
 @dataclass(frozen=True, kw_only=True)
-class MountReconcileContext:
-    """What a mount reconciler receives before a mount write commits: the ``state`` name,
-    the ``module`` document, the ``operation`` replacing declarations, the
-    ``previous_declarations`` (``None`` on a first mount), the ``new_declarations``, the
-    mount ``options``, and the ``records`` door bound to the state. A reconciler RAISES a
-    :class:`~tai42_contract.states.errors.ModuleValidationError` to refuse the mount
+class AttachReconcileContext:
+    """What an attach reconciler receives before an attach write commits: the ``state`` name,
+    the ``template`` document, the ``operation`` replacing declarations, the
+    ``previous_declarations`` (``None`` on a first attach), the ``new_declarations``, the
+    attachment ``options``, and the ``records`` door bound to the state. A reconciler RAISES a
+    :class:`~tai42_contract.states.errors.TemplateValidationError` to refuse the attach
     (naming the offending records) or writes resolutions through ``records`` and returns,
-    letting the mount commit with those writes."""
+    letting the attach commit with those writes."""
 
     state: str
-    module: StateModuleDocument
-    operation: Literal["mount", "update_declarations"]
+    template: StateTemplateDocument
+    operation: Literal["attach", "update_declarations"]
     previous_declarations: dict[str, Any] | None
     new_declarations: dict[str, Any]
     options: dict[str, Any] = field(default_factory=dict[str, Any])
-    records: MountReconcileRecords
+    records: AttachReconcileRecords
 
 
-#: A pre-write mount reconciler a consumer registers on the states facet: given a
-#: :class:`MountReconcileContext`, it reconciles the state's OPEN records against the new
-#: declarations — RAISING (a ``ModuleValidationError`` naming the records) to refuse the
-#: mount, or writing resolutions through the context's record door and returning to let
-#: the mount commit. Run inside every mount / declarations write, after the validators and
+#: A pre-write attach reconciler a consumer registers on the states facet: given a
+#: :class:`AttachReconcileContext`, it reconciles the state's OPEN records against the new
+#: declarations — RAISING (a ``TemplateValidationError`` naming the records) to refuse the
+#: attach, or writing resolutions through the context's record door and returning to let
+#: the attach commit. Run inside every attach / declarations write, after the validators and
 #: before the write.
-MountReconciler = Callable[["MountReconcileContext"], Awaitable[None]]
+AttachReconciler = Callable[["AttachReconcileContext"], Awaitable[None]]
 
 #: A consumer lister a plugin registers per consumer ``kind``: given a state name,
 #: returns the :class:`ConsumerRow` rows for that kind. The facet's ``consumers``

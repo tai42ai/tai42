@@ -50,6 +50,7 @@ from tai42_contract.interactions.models import (
     check_media_list,
 )
 from tai42_contract.locale import normalize_optional_locale
+from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
 
 #: Which door a route is reached through: ``api`` delivers by signed callback,
@@ -956,6 +957,10 @@ class TargetConversationConfig(BaseModel):
     target_name: str = Field(min_length=1)
     multichannel: bool = False
     greeting_template: str | None = None
+    #: The OPTIONAL door-layer state binding a tool-target route applies around each tool
+    #: turn; deposited on the ambient dispatch context before the turn's ``run_tool``. The
+    #: route read serves it back so an editor round-trips it.
+    state_binding: StateBinding | None = None
 
     @field_validator("target_name")
     @classmethod
@@ -974,6 +979,15 @@ class TargetConversationConfig(BaseModel):
             raise ValueError("greeting_template must be non-blank (use null for no greeting)")
         _check_greeting_placeholders(value)
         return value
+
+    @model_validator(mode="after")
+    def _state_binding_is_tool_only(self) -> TargetConversationConfig:
+        # A door binding applies around a tool DISPATCH; an agent turn deposits none, so a
+        # binding on an agent config would never apply. Refuse it here so no door or store
+        # read ever carries one on an agent target.
+        if self.target_kind != "tool" and self.state_binding is not None:
+            raise ValueError("state_binding is valid only for a tool target (target_kind='tool')")
+        return self
 
 
 __all__ = [

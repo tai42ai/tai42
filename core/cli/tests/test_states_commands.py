@@ -99,70 +99,70 @@ def test_stats_reads_the_counts(monkeypatch: pytest.MonkeyPatch) -> None:
 # -- mounts -------------------------------------------------------------------
 
 
-def test_mounts_lists_the_modules(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_attachments_lists_the_templates(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        assert request.url.path == "/api/states/status/mounts"
-        return data_response([{"module": "counters", "path": "/c"}])
+        assert request.url.path == "/api/states/status/attachments"
+        return data_response([{"template": "counters", "path": "/c"}])
 
-    result = run_cli(monkeypatch, handler, ["states", "mounts", "status"], json_output=True)
+    result = run_cli(monkeypatch, handler, ["states", "attachments", "status"], json_output=True)
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == [{"module": "counters", "path": "/c"}]
+    assert json.loads(result.output) == [{"template": "counters", "path": "/c"}]
 
 
-def test_get_mount_reads_one_mount(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_attachment_reads_one_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        assert request.url.path == "/api/states/status/mounts/counters"
-        return data_response({"module": "counters", "path": "/c", "parameters": {}, "declarations": {}})
+        assert request.url.path == "/api/states/status/attachments/counters"
+        return data_response({"template": "counters", "path": "/c", "parameters": {}, "declarations": {}})
 
-    result = run_cli(monkeypatch, handler, ["states", "get-mount", "status", "counters"], json_output=True)
+    result = run_cli(monkeypatch, handler, ["states", "get-attachment", "status", "counters"], json_output=True)
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == {"module": "counters", "path": "/c", "parameters": {}, "declarations": {}}
+    assert json.loads(result.output) == {"template": "counters", "path": "/c", "parameters": {}, "declarations": {}}
 
 
-def test_mount_puts_the_body_from_a_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_attach_puts_the_body_from_a_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     body = tmp_path / "mount.json"
     body.write_text('{"path": "/c", "parameters": {}}')
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "PUT"
-        assert request.url.path == "/api/states/status/mounts/counters"
+        assert request.url.path == "/api/states/status/attachments/counters"
         assert json.loads(request.content) == {"path": "/c", "parameters": {}}
-        return data_response({"module": "counters"})
+        return data_response({"template": "counters"})
 
-    result = run_cli(monkeypatch, handler, ["states", "mount", "status", "counters", "--file", str(body)])
+    result = run_cli(monkeypatch, handler, ["states", "attach", "status", "counters", "--file", str(body)])
     assert result.exit_code == 0, result.output
 
 
-def test_update_mount_patches_the_declarations(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_attachment_patches_the_declarations(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "PATCH"
-        assert request.url.path == "/api/states/status/mounts/counters"
+        assert request.url.path == "/api/states/status/attachments/counters"
         assert json.loads(request.content) == {"declarations": {"cap": 10}}
-        return data_response({"module": "counters"})
+        return data_response({"template": "counters"})
 
     result = run_cli(
         monkeypatch,
         handler,
-        ["states", "update-mount", "status", "counters", "--declarations", '{"cap": 10}'],
+        ["states", "update-attachment", "status", "counters", "--declarations", '{"cap": 10}'],
     )
     assert result.exit_code == 0, result.output
 
 
-def test_update_mount_sends_options_when_given(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_attachment_sends_options_when_given(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "PATCH"
-        assert request.url.path == "/api/states/status/mounts/counters"
+        assert request.url.path == "/api/states/status/attachments/counters"
         assert json.loads(request.content) == {"declarations": {"cap": 10}, "options": {"on_orphan": "close"}}
-        return data_response({"module": "counters"})
+        return data_response({"template": "counters"})
 
     result = run_cli(
         monkeypatch,
         handler,
         [
             "states",
-            "update-mount",
+            "update-attachment",
             "status",
             "counters",
             "--declarations",
@@ -174,13 +174,13 @@ def test_update_mount_sends_options_when_given(monkeypatch: pytest.MonkeyPatch) 
     assert result.exit_code == 0, result.output
 
 
-def test_unmount_deletes_the_mount(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_detach_deletes_the_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"
-        assert request.url.path == "/api/states/status/mounts/counters"
-        return data_response({"unmounted": True})
+        assert request.url.path == "/api/states/status/attachments/counters"
+        return data_response({"detached": True})
 
-    result = run_cli(monkeypatch, handler, ["states", "unmount", "status", "counters"])
+    result = run_cli(monkeypatch, handler, ["states", "detach", "status", "counters"])
     assert result.exit_code == 0, result.output
 
 
@@ -379,6 +379,134 @@ def test_apply_honors_an_envelope_op_id(monkeypatch: pytest.MonkeyPatch) -> None
             '{"ops": [{"op": "inc"}], "op_id": "inner"}',
             "--op-id",
             "outer",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_template_jq_eval_gets_the_result_with_json_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == f"{_RECORD_PATH}/template-jq/due_set"
+        # Each --param travels as a query param carrying its JSON value verbatim.
+        assert request.url.params.get("run") == '"r1"'
+        return data_response({"name": "due_set", "purpose": "input", "value": [{"id": "a"}]})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "states",
+            "template-jq",
+            "eval",
+            "status",
+            "--target-kind",
+            "agent",
+            "--target-name",
+            "relay",
+            "--kind",
+            "person",
+            "--key",
+            "alice",
+            "due_set",
+            "--param",
+            'run="r1"',
+        ],
+        json_output=True,
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"name": "due_set", "purpose": "input", "value": [{"id": "a"}]}
+
+
+def test_template_jq_eval_rejects_a_malformed_param(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        return data_response({})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "states",
+            "template-jq",
+            "eval",
+            "status",
+            "--target-kind",
+            "agent",
+            "--target-name",
+            "relay",
+            "--kind",
+            "person",
+            "--key",
+            "alice",
+            "due_set",
+            "--param",
+            "bare",
+        ],
+    )
+    assert result.exit_code != 0
+
+
+def test_template_jq_apply_posts_input_and_op_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == f"{_RECORD_PATH}/template-jq/outcome"
+        assert json.loads(request.content) == {"input": {"chip": "note"}, "op_id": "r1"}
+        return data_response({"name": "outcome", "applied": True, "data": {"ledger": []}})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "states",
+            "template-jq",
+            "apply",
+            "status",
+            "--target-kind",
+            "agent",
+            "--target-name",
+            "relay",
+            "--kind",
+            "person",
+            "--key",
+            "alice",
+            "outcome",
+            "--input",
+            '{"chip": "note"}',
+            "--op-id",
+            "r1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_template_jq_apply_reads_input_from_a_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    body_file = tmp_path / "input.json"
+    body_file.write_text('{"chip": "ask"}')
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"{_RECORD_PATH}/template-jq/outcome"
+        assert json.loads(request.content) == {"input": {"chip": "ask"}}
+        return data_response({"name": "outcome", "applied": False, "data": None, "skipped": []})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "states",
+            "template-jq",
+            "apply",
+            "status",
+            "--target-kind",
+            "agent",
+            "--target-name",
+            "relay",
+            "--kind",
+            "person",
+            "--key",
+            "alice",
+            "outcome",
+            "--input",
+            f"@{body_file}",
         ],
     )
     assert result.exit_code == 0, result.output

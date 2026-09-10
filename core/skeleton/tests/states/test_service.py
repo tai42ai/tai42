@@ -15,20 +15,20 @@ from pydantic import ValidationError
 from tai42_contract.conversations import ConversationTargetKind
 from tai42_contract.states.errors import (
     DeclarationInUseError,
-    ModuleValidationError,
     NonAdditiveRedeclareError,
     StateNotFoundError,
     StatesNotConfiguredError,
     SubjectRefusedError,
+    TemplateValidationError,
     ValueValidationError,
 )
 from tai42_contract.states.models import (
+    AttachBody,
     ConsumerRow,
-    MountBody,
     StateContext,
     StateDeclaration,
-    StateModuleDocument,
     StateSubject,
+    StateTemplateDocument,
     SubjectCandidates,
     WriteOrigin,
     WritesPage,
@@ -113,13 +113,13 @@ class FakeStatesStore:
         return sum(per_kind.values()), {}, per_kind
 
     # modules
-    async def get_module(self, name):
+    async def get_template(self, name):
         return self.modules.get(name)
 
-    async def list_modules(self):
+    async def list_templates(self):
         return list(self.modules.values())
 
-    async def mounted_module_counts(self):
+    async def attached_template_counts(self):
         counts: dict[str, int] = {}
         for _s, module in self.mounts:
             counts[module] = counts.get(module, 0) + 1
@@ -132,31 +132,31 @@ class FakeStatesStore:
         start = 0 if cursor is None else next((i for i, r in enumerate(rows) if r["id"] < int(cursor)), len(rows))
         return rows[start : start + limit]
 
-    async def upsert_module(self, name, body, shipped_hash):
+    async def upsert_template(self, name, body, shipped_hash):
         self.upsert_module_calls += 1
         self.modules[name] = {"name": name, "body": body, "shipped_hash": shipped_hash, "updated_at": 1}
 
-    async def delete_module(self, name):
+    async def delete_template(self, name):
         return self.modules.pop(name, None) is not None
 
     # mounts
-    async def get_mount(self, state, module):
+    async def get_attachment(self, state, module):
         return self.mounts.get((state, module))
 
-    async def list_mounts_for_state(self, state):
+    async def list_attachments_for_state(self, state):
         return [v for (s, _m), v in self.mounts.items() if s == state]
 
-    async def list_mounts_of_module(self, module):
+    async def list_attachments_of_template(self, module):
         return [v for (_s, m), v in self.mounts.items() if m == module]
 
-    async def list_all_mounts(self):
+    async def list_all_attachments(self):
         return list(self.mounts.values())
 
-    async def upsert_mount(self, state, module, path, parameters, declarations, *, effective_schema, conn=None):
+    async def upsert_attachment(self, state, module, path, parameters, declarations, *, effective_schema, conn=None):
         self.upsert_mount_calls += 1
         self.mounts[(state, module)] = {
             "state": state,
-            "module": module,
+            "template": module,
             "path": path,
             "parameters": parameters,
             "declarations": declarations,
@@ -164,18 +164,18 @@ class FakeStatesStore:
         }
         self.declarations[state]["effective_schema"] = effective_schema
 
-    async def update_mount_declarations(self, state, module, declarations, *, effective_schema, conn=None):
+    async def update_attachment_declarations(self, state, module, declarations, *, effective_schema, conn=None):
         self.update_decl_calls += 1
         self.mounts[(state, module)]["declarations"] = declarations
         self.declarations[state]["effective_schema"] = effective_schema
         return True
 
-    async def update_mount_parameters(self, state, module, parameters, *, effective_schema):
+    async def update_attachment_parameters(self, state, module, parameters, *, effective_schema):
         self.mounts[(state, module)]["parameters"] = parameters
         self.declarations[state]["effective_schema"] = effective_schema
         return True
 
-    async def delete_mount(self, state, module, *, effective_schema):
+    async def delete_attachment(self, state, module, *, effective_schema):
         self.mounts.pop((state, module), None)
         self.declarations[state]["effective_schema"] = effective_schema
         return True
@@ -194,9 +194,9 @@ class FakeStatesStore:
         # ``_trace`` from the COMPLETED origin (the stamping mechanics themselves are pinned
         # in test_store.py). A state with no traced mount leaves the ops untouched.
         mount_rows = [
-            {"module": m["module"], "path": m["path"], "body": self.modules[m["module"]]["body"]}
+            {"template": m["template"], "path": m["path"], "body": self.modules[m["template"]]["body"]}
             for (s, _module), m in self.mounts.items()
-            if s == state and m["module"] in self.modules
+            if s == state and m["template"] in self.modules
         ]
         traced = _traced_paths(mount_rows)
         if traced:
@@ -390,19 +390,23 @@ async def test_delete_allowed_when_only_an_unavailable_family_is_listed(svc: Sta
 
 async def test_mount_validator_runs_before_write(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    module_doc = StateModuleDocument.model_validate(
-        {"kind": "state-module", "name": "mod", "schema": {"type": "object", "properties": {"y": {"type": "integer"}}}}
+    module_doc = StateTemplateDocument.model_validate(
+        {
+            "kind": "state-template",
+            "name": "mod",
+            "schema": {"type": "object", "properties": {"y": {"type": "integer"}}},
+        }
     )
-    await svc.put_module(module_doc, replace=False)
+    await svc.put_template(module_doc, replace=False)
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
 
     async def refusing(doc, declarations, effective) -> None:
-        raise ModuleValidationError("consumer says no")
+        raise TemplateValidationError("consumer says no")
 
-    svc.register_mount_validator(refusing)
+    svc.register_attach_validator(refusing)
     before = store.upsert_mount_calls
-    with pytest.raises(ModuleValidationError, match="consumer says no"):
-        await svc.mount("alerts", "mod", MountBody(path=["sub"]))
+    with pytest.raises(TemplateValidationError, match="consumer says no"):
+        await svc.attach("alerts", "mod", AttachBody(path=["sub"]))
     # the validator ran BEFORE the write — no mount row was stored
     assert store.upsert_mount_calls == before
     assert ("alerts", "mod") not in store.mounts
@@ -410,14 +414,18 @@ async def test_mount_validator_runs_before_write(svc: StatesService) -> None:
 
 async def test_mount_and_unmount_recompose_effective(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    module_doc = StateModuleDocument.model_validate(
-        {"kind": "state-module", "name": "mod", "schema": {"type": "object", "properties": {"y": {"type": "integer"}}}}
+    module_doc = StateTemplateDocument.model_validate(
+        {
+            "kind": "state-template",
+            "name": "mod",
+            "schema": {"type": "object", "properties": {"y": {"type": "integer"}}},
+        }
     )
-    await svc.put_module(module_doc, replace=False)
-    await svc.mount("alerts", "mod", MountBody(path=["sub"]))
+    await svc.put_template(module_doc, replace=False)
+    await svc.attach("alerts", "mod", AttachBody(path=["sub"]))
     eff = await svc.effective_schema_for("alerts")
     assert "sub" in eff["properties"]
-    await svc.unmount("alerts", "mod")
+    await svc.detach("alerts", "mod")
     eff2 = await svc.effective_schema_for("alerts")
     assert "sub" not in eff2["properties"]
 
@@ -548,13 +556,18 @@ async def _mount_traced(svc: StatesService, store: FakeStatesStore) -> None:
     await svc.put_declaration(_STATE)
     store.modules["traced_m"] = {
         "name": "traced_m",
-        "body": {"kind": "state-module", "name": "traced_m", "schema": {"type": "object"}, "trace": {"enabled": True}},
+        "body": {
+            "kind": "state-template",
+            "name": "traced_m",
+            "schema": {"type": "object"},
+            "trace": {"enabled": True},
+        },
         "shipped_hash": None,
         "updated_at": 1,
     }
     store.mounts[("alerts", "traced_m")] = {
         "state": "alerts",
-        "module": "traced_m",
+        "template": "traced_m",
         "path": ["a"],
         "parameters": {},
         "declarations": {},
@@ -617,7 +630,7 @@ def test_consumer_supplied_door_refused_at_model() -> None:
 # served regimes                                                              #
 # --------------------------------------------------------------------------- #
 _REGIME_MODULE = {
-    "kind": "state-module",
+    "kind": "state-template",
     "name": "tagmod",
     "schema": {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}},
     "regimes": [{"path": ["tags"], "regime": "composing"}],
@@ -632,8 +645,8 @@ async def test_get_declaration_serves_regimes_for_a_mount_and_empty_for_none(svc
     assert unmounted.regimes == []
     # mount a module declaring a composing regime; the served regime is ABSOLUTE (mount
     # path prefixed onto the module's regime path) and matches served_declaration
-    await svc.put_module(StateModuleDocument.model_validate(_REGIME_MODULE), replace=False)
-    await svc.mount("alerts", "tagmod", MountBody(path=["sub"]))
+    await svc.put_template(StateTemplateDocument.model_validate(_REGIME_MODULE), replace=False)
+    await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
     mounted = await svc.get_declaration("alerts")
     assert mounted is not None
     assert mounted.regimes == [{"path": ["sub", "tags"], "regime": "composing"}]
@@ -643,8 +656,8 @@ async def test_get_declaration_serves_regimes_for_a_mount_and_empty_for_none(svc
 
 async def test_list_declarations_serves_composed_regimes(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    await svc.put_module(StateModuleDocument.model_validate(_REGIME_MODULE), replace=False)
-    await svc.mount("alerts", "tagmod", MountBody(path=["sub"]))
+    await svc.put_template(StateTemplateDocument.model_validate(_REGIME_MODULE), replace=False)
+    await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
     decls = await svc.list_declarations()
     assert [d.regimes for d in decls] == [[{"path": ["sub", "tags"], "regime": "composing"}]]
 
@@ -747,24 +760,24 @@ async def test_writes_refuses_a_malformed_cursor_with_a_value_error(svc: StatesS
         await svc.writes("alerts", _subject(), limit=2, cursor="not-a-row-id")
 
 
-async def test_list_modules_catalog_adds_mounted_on_and_shipped_default(svc: StatesService) -> None:
+async def test_list_templates_catalog_adds_attached_to_and_shipped_default(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    await svc.put_module(StateModuleDocument.model_validate(_REGIME_MODULE), replace=False)
-    await svc.mount("alerts", "tagmod", MountBody(path=["sub"]))
+    await svc.put_template(StateTemplateDocument.model_validate(_REGIME_MODULE), replace=False)
+    await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
     # A second, operator-uploaded module (no shipped_hash) that is mounted nowhere.
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
     store.modules["loose"] = {
         "name": "loose",
-        "body": {"kind": "state-module", "name": "loose", "schema": {"type": "object"}},
+        "body": {"kind": "state-template", "name": "loose", "schema": {"type": "object"}},
         "shipped_hash": None,
         "updated_at": 1,
     }
     # Mark the mounted module as an unedited shipped default.
     store.modules["tagmod"]["shipped_hash"] = "abc123"
-    catalog = {row["name"]: row for row in await svc.list_modules_catalog()}
-    assert catalog["tagmod"]["mounted_on"] == 1
+    catalog = {row["name"]: row for row in await svc.list_templates_catalog()}
+    assert catalog["tagmod"]["attached_to"] == 1
     assert catalog["tagmod"]["shipped_default"] is True
-    assert catalog["loose"]["mounted_on"] == 0
+    assert catalog["loose"]["attached_to"] == 0
     assert catalog["loose"]["shipped_default"] is False
 
 

@@ -141,8 +141,8 @@ def test_fresh_install_replay_matches_template(
     # The skeleton-owned state store's tables are present (the states chain really ran).
     assert {
         "state_declarations",
-        "state_modules",
-        "state_mounts",
+        "state_templates",
+        "state_attachments",
         "state_records",
         "state_writes",
         "state_applied_ops",

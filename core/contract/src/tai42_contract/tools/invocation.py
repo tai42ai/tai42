@@ -21,15 +21,25 @@ from contextvars import ContextVar, Token
 
 from pydantic import BaseModel, ConfigDict
 
+from tai42_contract.states.binding import StateBinding
+
 
 class ToolInvocation(BaseModel):
     """The tool execution currently in flight: ``tool_name`` is the invoked
     tool's registered name. Frozen — a deposited invocation is a fact of the
-    active execution, never mutated in place."""
+    active execution, never mutated in place.
+
+    ``state_binding`` is the OPTIONAL door-layer binding a door deposits when it
+    initiates a run (a channel route, a schedule fire, a hook, or none for a bare
+    run-tool call): it rides the ambient context to the shared dispatch chokepoint,
+    which carries it forward across its own re-deposit and merges it with the
+    dispatched preset's own binding before applying it around the run. The contract
+    interprets nothing about it — a logic-free carrier."""
 
     model_config = ConfigDict(frozen=True)
 
     tool_name: str
+    state_binding: StateBinding | None = None
 
 
 _current_tool_invocation: ContextVar[ToolInvocation | None] = ContextVar("tai42_current_tool_invocation", default=None)

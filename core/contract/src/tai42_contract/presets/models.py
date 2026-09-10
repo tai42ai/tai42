@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from tai42_contract.manifest import ExtensionElement
+from tai42_contract.states.binding import StateBinding
 
 
 class PresetBody(BaseModel):
@@ -51,6 +52,11 @@ class PresetBody(BaseModel):
     extensions: list[list[ExtensionElement]] = Field(default_factory=list[list[ExtensionElement]])
     output_schema: dict[str, Any] | None = None
     input_schema: dict[str, Any] | None = None
+    #: The OPTIONAL door-layer state binding this preset carries; the dispatch chokepoint
+    #: resolves it from the active version stamp and merges it with any door binding. Like
+    #: every other body field it must survive version carry-forward (dropping it would
+    #: silently un-bind the preset's state injections/updates).
+    state_binding: StateBinding | None = None
 
 
 class PresetInputSchemaSupport(BaseModel):
@@ -99,6 +105,8 @@ class PresetSeed(BaseModel):
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     tool_meta: PresetSeedToolMeta | None = None
+    #: The OPTIONAL door-layer state binding the seed installs onto the preset it creates.
+    state_binding: StateBinding | None = None
 
 
 class CarryForward:

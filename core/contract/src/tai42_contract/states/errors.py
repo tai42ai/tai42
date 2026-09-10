@@ -9,14 +9,25 @@ store has no silent no-op.
 
 from __future__ import annotations
 
+from typing import Any
+
 from tai42_contract.errors import ErrorKind
 
 
 class StatesError(Exception):
-    """Base class for every state-store error."""
+    """Base class for every state-store error.
+
+    ``extra`` is an OPTIONAL structured payload a raiser attaches for the door to surface
+    on the error body beside the message (e.g. the orphan list of a reconcile refusal), so
+    a UI keys its follow-up on the data, not on the prose. The message stays authoritative;
+    ``extra`` never replaces it."""
 
     # A bare store fault carries no more specific classification.
     __tai_error_kind__ = ErrorKind.UPSTREAM_ERROR
+
+    def __init__(self, *args: object, extra: dict[str, Any] | None = None) -> None:
+        super().__init__(*args)
+        self.extra: dict[str, Any] | None = extra
 
 
 class StatesNotConfiguredError(StatesError):
@@ -82,7 +93,7 @@ class ValueValidationError(StatesError):
 
 
 class RegimeViolationError(StatesError):
-    """A write's SHAPE violates a mounted path's regime (422) — a whole-path
+    """A write's SHAPE violates an attached path's regime (422) — a whole-path
     ``set``/``remove`` over a ``composing`` path. The message names the path."""
 
     __tai_error_kind__ = ErrorKind.BAD_INPUT
@@ -95,30 +106,30 @@ class SubjectFoldError(StatesError):
     __tai_error_kind__ = ErrorKind.CONFLICT
 
 
-class ModuleValidationError(StatesError):
-    """A state-module document, or a mount's declaration values against it, violates a
-    structural rule (422). The message names the offending rule and path."""
+class TemplateValidationError(StatesError):
+    """A state-template document, or an attachment's declaration values against it, violates
+    a structural rule (422). The message names the offending rule and path."""
 
     __tai_error_kind__ = ErrorKind.BAD_INPUT
 
 
-class ModuleExistsError(StatesError):
-    """A module upload named an existing module without ``replace`` (409). The existing
+class TemplateExistsError(StatesError):
+    """A template upload named an existing template without ``replace`` (409). The existing
     name rides on the message so the caller can offer an overwrite."""
 
     __tai_error_kind__ = ErrorKind.CONFLICT
 
 
-class ModuleInUseError(StatesError):
-    """A module delete was refused because it is still mounted, or a module replace no
-    longer validates against one of its live mounts (409)."""
+class TemplateInUseError(StatesError):
+    """A template delete was refused because it is still attached, or a template replace no
+    longer validates against one of its live attachments (409)."""
 
     __tai_error_kind__ = ErrorKind.CONFLICT
 
 
-class MountConflictError(StatesError):
-    """Composing the effective schema placed two mount fragments at overlapping paths,
-    or a mount where the base schema already carries the property (409). The message
+class AttachConflictError(StatesError):
+    """Composing the effective schema placed two attachment fragments at overlapping paths,
+    or an attachment where the base schema already carries the property (409). The message
     names the colliding path."""
 
     __tai_error_kind__ = ErrorKind.CONFLICT

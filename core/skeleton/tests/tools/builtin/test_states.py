@@ -59,7 +59,7 @@ class _FakeStore:
     async def get_declaration(self, name: str) -> dict[str, Any] | None:
         return self.declarations.get(name)
 
-    async def list_mounts_for_state(self, state: str) -> list[dict[str, Any]]:
+    async def list_attachments_for_state(self, state: str) -> list[dict[str, Any]]:
         return [row for (mounted_state, _module), row in self.mounts.items() if mounted_state == state]
 
     async def read_record_view(self, state: str, subject: StateSubject, *, conn: Any = None) -> dict[str, Any] | None:

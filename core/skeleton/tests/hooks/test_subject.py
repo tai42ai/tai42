@@ -74,5 +74,44 @@ async def test_key_expr_that_is_not_a_nonempty_string_fails_the_fire(make_app, p
     assert seen == []
 
 
+def _capture_invocation(app) -> list:
+    """Wrap the fake tool runner so each dispatch records the ambient ToolInvocation seen at
+    the moment the tool runs — the deposit the hook fire actually establishes."""
+    from tai42_contract.tools import current_tool_invocation
+
+    seen: list = []
+    original = app.tools.run_tool
+
+    async def recording_run_tool(name, tool_input, *, offload_sync=False):
+        seen.append(current_tool_invocation())
+        return await original(name, tool_input, offload_sync=offload_sync)
+
+    app.tools.run_tool = recording_run_tool
+    return seen
+
+
+async def test_hook_deposits_its_state_binding_on_the_ambient_invocation(make_app) -> None:
+    # The real ``_run_hook`` seam deposits the hook's door binding on ToolInvocation before
+    # reaching run_tool, so the dispatch chokepoint carries it forward and applies it.
+    from tai42_contract.states import StateAttach, StateBinding
+
+    app = make_app()
+    seen = _capture_invocation(app)
+    binding = StateBinding(states=[StateAttach(state="status", subject_expr=".actor")])
+    hook = HookParams(
+        name="h",
+        topic="t",
+        tool="noop",
+        execution_key="svc-key",
+        execution_key_fingerprint="fp",
+        state_binding=binding,
+    )
+    await InMemoryHooksManager._run_hook(hook, {"actor": "p-42"})
+    assert len(seen) == 1
+    inv = seen[0]
+    assert inv is not None
+    assert inv.state_binding == binding
+
+
 def _manager() -> InMemoryHooksManager:
     return InMemoryHooksManager(HooksSettings())

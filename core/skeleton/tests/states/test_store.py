@@ -27,7 +27,7 @@ _STAMP = {"meta": {"node": "n1"}, "run": "r1", "turn": "t1", "inbound": "i1", "a
 def _mounts() -> list[dict]:
     return [
         {
-            "module": "traced",
+            "template": "traced",
             "path": ["a"],
             "body": {
                 "regimes": [{"path": ["items"], "regime": "composing"}],
@@ -35,7 +35,7 @@ def _mounts() -> list[dict]:
                 "name": "traced",
             },
         },
-        {"module": "plain", "path": ["b"], "body": {"name": "plain"}},
+        {"template": "plain", "path": ["b"], "body": {"name": "plain"}},
     ]
 
 

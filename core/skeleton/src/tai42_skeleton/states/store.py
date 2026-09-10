@@ -4,7 +4,7 @@ ALL SQL lives here; service and route code never write SQL. The subject-keyed re
 substrate: ``state_declarations`` (base ``schema`` + composed ``effective_schema`` +
 the ``subject_kinds`` and ``default_subject_kind`` it serves), ``state_records``,
 ``state_applied_ops`` (the idempotency ledger), ``state_subject_aliases``,
-``state_modules``, ``state_mounts``, and ``state_writes`` (the write provenance
+``state_templates``, ``state_attachments``, and ``state_writes`` (the write provenance
 ledger). Connection settings resolve FRESH per operation (``component_store_settings``)
 so a config reload re-targets the store.
 
@@ -57,9 +57,9 @@ from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.states.db import STATES_COMPONENT, states_settings
-from tai42_skeleton.states.modules import path_overlaps
 from tai42_skeleton.states.paths import APPEND, KEYED_OPS, guard_passes
 from tai42_skeleton.states.paths import apply_ops as apply_path_ops
+from tai42_skeleton.states.templates import path_overlaps
 
 
 def _settings() -> Any:
@@ -80,26 +80,26 @@ def _iso_now() -> str:
 # --------------------------------------------------------------------------- #
 # Regime shape refusal + trace stamping (pure)                                  #
 # --------------------------------------------------------------------------- #
-def _abs_regime_paths(mount_rows: list[dict[str, Any]]) -> list[tuple[list[Any], str, str]]:
-    """The absolute regime paths every mount on a state declares, from the stored module
-    bodies: for each mount ``(module at base_path)`` and each of the module's regime
-    rules, ``base_path + rule.path`` (wildcards preserved), its regime, and the module
+def _abs_regime_paths(attachment_rows: list[dict[str, Any]]) -> list[tuple[list[Any], str, str]]:
+    """The absolute regime paths every attach on a state declares, from the stored template
+    bodies: for each attach ``(template at base_path)`` and each of the template's regime
+    rules, ``base_path + rule.path`` (wildcards preserved), its regime, and the template
     name — the input the composing shape refusal walks. Reads the stored body directly
-    (validated at store time), so the hot write path never re-validates a module."""
+    (validated at store time), so the hot write path never re-validates a template."""
     out: list[tuple[list[Any], str, str]] = []
-    for row in mount_rows:
+    for row in attachment_rows:
         base_path = list(row["path"] or [])
         body = row["body"] or {}
         for rule in body.get("regimes", []) or []:
-            out.append(([*base_path, *rule.get("path", [])], rule.get("regime"), body.get("name", row["module"])))
+            out.append(([*base_path, *rule.get("path", [])], rule.get("regime"), body.get("name", row["template"])))
     return out
 
 
-def _traced_paths(mount_rows: list[dict[str, Any]]) -> tuple[tuple[str | int, ...], ...]:
-    """The mount paths whose module traces (``trace.enabled``) — the prefixes under which
+def _traced_paths(attachment_rows: list[dict[str, Any]]) -> tuple[tuple[str | int, ...], ...]:
+    """The attach paths whose template traces (``trace.enabled``) — the prefixes under which
     a write stamps ``_trace``."""
     paths: list[tuple[str | int, ...]] = []
-    for row in mount_rows:
+    for row in attachment_rows:
         body = row["body"] or {}
         if bool((body.get("trace") or {}).get("enabled")):
             paths.append(tuple(row["path"] or []))
@@ -121,19 +121,19 @@ def _refuse_composing_shape(ops: list[dict[str, Any]], regime_paths: list[tuple[
             continue
         if kind not in ("set", "remove"):
             continue
-        for abs_pattern, regime, module_name in regime_paths:
+        for abs_pattern, regime, template_name in regime_paths:
             if regime == "composing" and path_overlaps(path, abs_pattern):
                 raise RegimeViolationError(
-                    f"composing path {abs_pattern} of module {module_name!r} admits only keyed ops or an append "
+                    f"composing path {abs_pattern} of template {template_name!r} admits only keyed ops or an append "
                     f"set (path ending '-'); this write uses {kind!r} at {path}"
                 )
 
 
 def _under_traced_path(path: list[Any], traced_paths: tuple[tuple[str | int, ...], ...]) -> bool:
-    """Whether ``path`` lies at or under any tracing mount path (the mount path is a
-    prefix of the op path — the op writes into the mounted subtree)."""
-    for mount_path in traced_paths:
-        if len(mount_path) <= len(path) and all(mount_path[i] == path[i] for i in range(len(mount_path))):
+    """Whether ``path`` lies at or under any tracing attach path (the attach path is a
+    prefix of the op path — the op writes into the attached subtree)."""
+    for attach_path in traced_paths:
+        if len(attach_path) <= len(path) and all(attach_path[i] == path[i] for i in range(len(attach_path))):
             return True
     return False
 
@@ -153,7 +153,7 @@ def stamp_trace(
     ops: list[dict[str, Any]], traced_paths: tuple[tuple[str | int, ...], ...], stamp: dict[str, Any]
 ) -> None:
     """Stamp ``_trace`` into every object an op WRITES, for each op whose absolute path
-    lies under a tracing mount path. Mutates the ops in place before the apply, so the
+    lies under a tracing attach path. Mutates the ops in place before the apply, so the
     effective schema's ``_trace`` property admits the stamped field. Keyed ops carry an
     item object or a list of them; ``set_by_key_each`` carries a ``{key: [items…]}``
     fan-out; a ``set`` (including a ``"-"`` append) carries the object value. Non-object
@@ -268,8 +268,8 @@ class PostgresStatesStore:
         """The bare declaration upsert — no guard. Service-level writes go through
         :meth:`upsert_declaration_guarded`; this raw op backs tests only.
 
-        ``effective_schema`` defaults to ``schema`` (an unmounted state's effective
-        schema IS its base), so a caller that never touches modules stays correct."""
+        ``effective_schema`` defaults to ``schema`` (an unattached state's effective
+        schema IS its base), so a caller that never touches templates stays correct."""
         effective = schema if effective_schema is None else effective_schema
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
@@ -353,7 +353,7 @@ class PostgresStatesStore:
             )
 
     async def delete_declaration(self, name: str) -> bool:
-        """Delete a state with its records, mounts, aliases and write ledger in ONE txn
+        """Delete a state with its records, attachments, aliases and write ledger in ONE txn
         under the declaration lock. ``False`` when no declaration exists (nothing
         deleted). The consumer-binding refusal is the service's (it consults the
         registered consumer listers before calling this)."""
@@ -369,7 +369,7 @@ class PostgresStatesStore:
             await cur.execute("DELETE FROM state_writes WHERE state = %s", (name,))
             await cur.execute("DELETE FROM state_subject_aliases WHERE state = %s", (name,))
             await cur.execute("DELETE FROM state_records WHERE state = %s", (name,))
-            await cur.execute("DELETE FROM state_mounts WHERE state = %s", (name,))
+            await cur.execute("DELETE FROM state_attachments WHERE state = %s", (name,))
             await cur.execute("DELETE FROM state_declarations WHERE name = %s", (name,))
             return True
 
@@ -425,123 +425,123 @@ class PostgresStatesStore:
             per_kind = {row["subject_kind"]: int(row["n"]) for row in await cur.fetchall()}
             return records, per_field, per_kind
 
-    # -- modules -----------------------------------------------------------------
+    # -- templates -----------------------------------------------------------------
 
-    async def get_module(self, name: str) -> dict[str, Any] | None:
+    async def get_template(self, name: str) -> dict[str, Any] | None:
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT name, body, shipped_hash, updated_at FROM state_modules WHERE name = %s",
+                "SELECT name, body, shipped_hash, updated_at FROM state_templates WHERE name = %s",
                 (name,),
             )
             return await cur.fetchone()
 
-    async def list_modules(self) -> list[dict[str, Any]]:
+    async def list_templates(self) -> list[dict[str, Any]]:
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
-            await cur.execute("SELECT name, body, shipped_hash, updated_at FROM state_modules ORDER BY name")
+            await cur.execute("SELECT name, body, shipped_hash, updated_at FROM state_templates ORDER BY name")
             return list(await cur.fetchall())
 
-    async def mounted_module_counts(self) -> dict[str, int]:
-        """The number of states each module is mounted on, keyed by module name — one
-        aggregate over the mounts table for the whole catalog. A module with no mount is
+    async def attached_template_counts(self) -> dict[str, int]:
+        """The number of states each template is attached on, keyed by template name — one
+        aggregate over the attachments table for the whole catalog. A template with no attach is
         absent from the map (the caller reads a missing key as zero)."""
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
-            await cur.execute("SELECT module, count(*) AS n FROM state_mounts GROUP BY module")
-            return {row["module"]: int(row["n"]) for row in await cur.fetchall()}
+            await cur.execute("SELECT template, count(*) AS n FROM state_attachments GROUP BY template")
+            return {row["template"]: int(row["n"]) for row in await cur.fetchall()}
 
-    async def upsert_module(self, name: str, body: dict[str, Any], shipped_hash: str | None) -> None:
-        """Write a module document. ``shipped_hash`` is the seed applier's canonical-body
+    async def upsert_template(self, name: str, body: dict[str, Any], shipped_hash: str | None) -> None:
+        """Write a template document. ``shipped_hash`` is the seed applier's canonical-body
         hash on a shipped default (NULL for an operator upload); it is the only field the
-        applier uses to tell an unedited shipped module from an operator-owned one."""
+        applier uses to tell an unedited shipped template from an operator-owned one."""
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
-                "INSERT INTO state_modules (name, body, shipped_hash, updated_at) VALUES (%s, %s, %s, now()) "
+                "INSERT INTO state_templates (name, body, shipped_hash, updated_at) VALUES (%s, %s, %s, now()) "
                 "ON CONFLICT (name) DO UPDATE SET body = EXCLUDED.body, "
                 "shipped_hash = EXCLUDED.shipped_hash, updated_at = now()",
                 (name, Jsonb(body), shipped_hash),
             )
 
-    async def delete_module(self, name: str) -> bool:
+    async def delete_template(self, name: str) -> bool:
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
-            await cur.execute("DELETE FROM state_modules WHERE name = %s", (name,))
+            await cur.execute("DELETE FROM state_templates WHERE name = %s", (name,))
             return cur.rowcount > 0
 
-    # -- mounts ------------------------------------------------------------------
+    # -- attachments ------------------------------------------------------------------
 
-    async def get_mount(self, state: str, module: str) -> dict[str, Any] | None:
+    async def get_attachment(self, state: str, template: str) -> dict[str, Any] | None:
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT state, module, path, parameters, declarations, updated_at "
-                "FROM state_mounts WHERE state = %s AND module = %s",
-                (state, module),
+                "SELECT state, template, path, parameters, declarations, updated_at "
+                "FROM state_attachments WHERE state = %s AND template = %s",
+                (state, template),
             )
             return await cur.fetchone()
 
-    async def list_mounts_for_state(self, state: str) -> list[dict[str, Any]]:
+    async def list_attachments_for_state(self, state: str) -> list[dict[str, Any]]:
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT state, module, path, parameters, declarations, updated_at "
-                "FROM state_mounts WHERE state = %s ORDER BY module",
+                "SELECT state, template, path, parameters, declarations, updated_at "
+                "FROM state_attachments WHERE state = %s ORDER BY template",
                 (state,),
             )
             return list(await cur.fetchall())
 
-    async def list_mounts_of_module(self, module: str) -> list[dict[str, Any]]:
+    async def list_attachments_of_template(self, template: str) -> list[dict[str, Any]]:
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT state, module, path, parameters, declarations, updated_at "
-                "FROM state_mounts WHERE module = %s ORDER BY state",
-                (module,),
+                "SELECT state, template, path, parameters, declarations, updated_at "
+                "FROM state_attachments WHERE template = %s ORDER BY state",
+                (template,),
             )
             return list(await cur.fetchall())
 
-    async def list_all_mounts(self) -> list[dict[str, Any]]:
+    async def list_all_attachments(self) -> list[dict[str, Any]]:
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT state, module, path, parameters, declarations, updated_at "
-                "FROM state_mounts ORDER BY state, module"
+                "SELECT state, template, path, parameters, declarations, updated_at "
+                "FROM state_attachments ORDER BY state, template"
             )
             return list(await cur.fetchall())
 
-    async def upsert_mount(
+    async def upsert_attachment(
         self,
         state: str,
-        module: str,
+        template: str,
         path: list[str],
         parameters: dict[str, Any],
         declarations: dict[str, Any],
@@ -549,46 +549,46 @@ class PostgresStatesStore:
         effective_schema: dict[str, Any],
         conn: AsyncConnection[Any] | None = None,
     ) -> None:
-        """Write a mount row and the state's recomposed effective schema in ONE txn, under
+        """Write a attach row and the state's recomposed effective schema in ONE txn, under
         the declaration lock (serializing against every schema change, so the effective
         schema a concurrent write validates against is never half-composed). Refuses loudly
         when the state is not declared. With ``conn`` the write joins the caller's
-        transaction (a reconciler's writes commit or roll back with the mount)."""
+        transaction (a reconciler's writes commit or roll back with the attach)."""
         async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT name FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
             if await cur.fetchone() is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
             await cur.execute(
-                "INSERT INTO state_mounts (state, module, path, parameters, declarations, updated_at) "
+                "INSERT INTO state_attachments (state, template, path, parameters, declarations, updated_at) "
                 "VALUES (%s, %s, %s, %s, %s, now()) "
-                "ON CONFLICT (state, module) DO UPDATE SET path = EXCLUDED.path, "
+                "ON CONFLICT (state, template) DO UPDATE SET path = EXCLUDED.path, "
                 "parameters = EXCLUDED.parameters, declarations = EXCLUDED.declarations, updated_at = now()",
-                (state, module, Jsonb(path), Jsonb(parameters), Jsonb(declarations)),
+                (state, template, Jsonb(path), Jsonb(parameters), Jsonb(declarations)),
             )
             await cur.execute(
                 "UPDATE state_declarations SET effective_schema = %s, updated_at = now() WHERE name = %s",
                 (Jsonb(effective_schema), state),
             )
 
-    async def update_mount_declarations(
+    async def update_attachment_declarations(
         self,
         state: str,
-        module: str,
+        template: str,
         declarations: dict[str, Any],
         *,
         effective_schema: dict[str, Any],
         conn: AsyncConnection[Any] | None = None,
     ) -> bool:
-        """Rewrite a mount's declarations (values only) and the state's effective schema in
-        ONE txn under the declaration lock. ``False`` when no such mount exists. With
+        """Rewrite a attach's declarations (values only) and the state's effective schema in
+        ONE txn under the declaration lock. ``False`` when no such attach exists. With
         ``conn`` the write joins the caller's transaction."""
         async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT name FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
             if await cur.fetchone() is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
             await cur.execute(
-                "UPDATE state_mounts SET declarations = %s, updated_at = now() WHERE state = %s AND module = %s",
-                (Jsonb(declarations), state, module),
+                "UPDATE state_attachments SET declarations = %s, updated_at = now() WHERE state = %s AND template = %s",
+                (Jsonb(declarations), state, template),
             )
             if cur.rowcount == 0:
                 return False
@@ -598,12 +598,12 @@ class PostgresStatesStore:
             )
             return True
 
-    async def update_mount_parameters(
-        self, state: str, module: str, parameters: dict[str, Any], *, effective_schema: dict[str, Any]
+    async def update_attachment_parameters(
+        self, state: str, template: str, parameters: dict[str, Any], *, effective_schema: dict[str, Any]
     ) -> bool:
-        """Rewrite a mount's stored (effective) parameters and the state's effective schema
-        in ONE txn under the declaration lock — used by a module replace to backfill a
-        newly defaulted parameter into a live mount. ``False`` when no such mount exists."""
+        """Rewrite a attach's stored (effective) parameters and the state's effective schema
+        in ONE txn under the declaration lock — used by a template replace to backfill a
+        newly defaulted parameter into a live attach. ``False`` when no such attach exists."""
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
@@ -614,8 +614,8 @@ class PostgresStatesStore:
             if await cur.fetchone() is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
             await cur.execute(
-                "UPDATE state_mounts SET parameters = %s, updated_at = now() WHERE state = %s AND module = %s",
-                (Jsonb(parameters), state, module),
+                "UPDATE state_attachments SET parameters = %s, updated_at = now() WHERE state = %s AND template = %s",
+                (Jsonb(parameters), state, template),
             )
             if cur.rowcount == 0:
                 return False
@@ -625,10 +625,10 @@ class PostgresStatesStore:
             )
             return True
 
-    async def delete_mount(self, state: str, module: str, *, effective_schema: dict[str, Any]) -> bool:
-        """Delete a mount row and rewrite the state's effective schema — in ONE txn under
-        the declaration lock. ``False`` when no such mount exists. A consumer's bindings
-        are DERIVED (never stored), so a mount delete cleans up nothing else."""
+    async def delete_attachment(self, state: str, template: str, *, effective_schema: dict[str, Any]) -> bool:
+        """Delete a attach row and rewrite the state's effective schema — in ONE txn under
+        the declaration lock. ``False`` when no such attach exists. A consumer's bindings
+        are DERIVED (never stored), so a attach delete cleans up nothing else."""
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
@@ -638,7 +638,7 @@ class PostgresStatesStore:
             await cur.execute("SELECT name FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
             if await cur.fetchone() is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
-            await cur.execute("DELETE FROM state_mounts WHERE state = %s AND module = %s", (state, module))
+            await cur.execute("DELETE FROM state_attachments WHERE state = %s AND template = %s", (state, template))
             if cur.rowcount == 0:
                 return False
             await cur.execute(
@@ -686,7 +686,7 @@ class PostgresStatesStore:
     ) -> dict[str, Any] | None:
         """The read door's view: ``{data, seq, canonical_subject, folded_from}`` —
         ``folded_from`` is every alias pointing at the canonical — or ``None`` when no
-        record exists. With ``conn`` the read joins the caller's transaction (a mount
+        record exists. With ``conn`` the read joins the caller's transaction (a attach
         reconciler reading its own in-flight merges)."""
         async with self._read_cursor(conn) as cur:
             kind, key = await self._resolve_subject(cur, state, subject)
@@ -844,14 +844,14 @@ class PostgresStatesStore:
 
         Order (pinned): declaration row ``FOR SHARE`` (the schema-change serialization pin
         AND the effective-schema read); compose the state's regime + traced paths from its
-        mounts under the lock; refuse a ``composing`` shape violation BEFORE the op-ledger
+        attachments under the lock; refuse a ``composing`` shape violation BEFORE the op-ledger
         insert; the op-ledger ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is
         set (replay ⇒ return without touching the record); the ATOMIC UPSERT-LOCK on the
         record row; the COMPARE-AND-SET GUARD filter; the ``_trace`` stamp under a traced
-        mount; the SHARED pure ops apply; the whole-document validation; the UPDATE;
+        attach; the SHARED pure ops apply; the whole-document validation; the UPDATE;
         the ``state_writes`` row; opportunistic ledger prune. With ``conn`` the write joins
         the caller's transaction (a reconciler's record write commits or rolls back with
-        the mount).
+        the attach).
         """
         async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT effective_schema FROM state_declarations WHERE name = %s FOR SHARE", (state,))
@@ -859,16 +859,16 @@ class PostgresStatesStore:
             if decl is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
 
-            # Compose the regime + traced paths from the state's mounts under the lock, so
-            # the shape refusal and the trace stamp read the mounts committed at write time.
+            # Compose the regime + traced paths from the state's attachments under the lock, so
+            # the shape refusal and the trace stamp read the attachments committed at write time.
             await cur.execute(
-                "SELECT m.module, m.path, mo.body FROM state_mounts m "
-                "JOIN state_modules mo ON mo.name = m.module WHERE m.state = %s",
+                "SELECT m.template, m.path, mo.body FROM state_attachments m "
+                "JOIN state_templates mo ON mo.name = m.template WHERE m.state = %s",
                 (state,),
             )
-            mount_rows = list(await cur.fetchall())
-            regime_paths = _abs_regime_paths(mount_rows)
-            traced_paths = _traced_paths(mount_rows)
+            attachment_rows = list(await cur.fetchall())
+            regime_paths = _abs_regime_paths(attachment_rows)
+            traced_paths = _traced_paths(attachment_rows)
 
             # (i) refuse a composing shape violation BEFORE the ledger insert.
             _refuse_composing_shape(ops, regime_paths)
@@ -922,7 +922,7 @@ class PostgresStatesStore:
                 )
                 return (True, merged, seq, guarded_skipped)
 
-            # (ii) stamp ``_trace`` under a traced mount, before the apply + validation.
+            # (ii) stamp ``_trace`` under a traced attach, before the apply + validation.
             if traced_paths:
                 stamp = {
                     "meta": origin.meta,

@@ -408,7 +408,12 @@ async def _extract_hook_params(request: Request) -> dict:
         params = HookRegister.model_validate(body)
     except ValidationError as exc:
         raise BadRequestError(f"invalid hook params: {exc}") from exc
-    return params.model_dump()
+    flat = params.model_dump()
+    # ``model_dump`` lowers the binding to a plain dict, but the operation's
+    # ``state_binding`` parameter (and its mount-on-use) needs the parsed model — pass the
+    # instance so a body binding is not dropped/mishandled at the route edge.
+    flat["state_binding"] = params.state_binding
+    return flat
 
 
 async def _extract_trigger_link_params(request: Request) -> dict:

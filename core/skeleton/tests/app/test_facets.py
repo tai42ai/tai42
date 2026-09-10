@@ -607,14 +607,14 @@ async def test_states_facet_forwarding():
         "put_declaration",
         "delete_declaration",
         "stats",
-        "list_modules",
-        "get_module",
-        "put_module",
-        "delete_module",
-        "list_mounts",
-        "mount",
-        "update_mount_declarations",
-        "unmount",
+        "list_templates",
+        "get_template",
+        "put_template",
+        "delete_template",
+        "list_attachments",
+        "attach",
+        "update_attachment_declarations",
+        "detach",
         "read",
         "replace",
         "merge",
@@ -638,20 +638,25 @@ async def test_states_facet_forwarding():
     svc.read.assert_awaited_once_with("s", "subj")
     assert await f.apply("s", "subj", [], op_id="o", origin="orig") == "apply-result"  # type: ignore[arg-type]
     svc.apply.assert_awaited_once_with("s", "subj", [], op_id="o", origin="orig")
-    assert await f.mount("s", "m", "body") == "mount-result"  # type: ignore[arg-type]
-    svc.mount.assert_awaited_once_with("s", "m", "body", skip_reconcilers=False)
+    assert await f.attach("s", "m", "body") == "attach-result"  # type: ignore[arg-type]
+    svc.attach.assert_awaited_once_with("s", "m", "body", skip_reconcilers=False)
 
-    assert await f.update_mount_declarations("s", "m", {"n": 1}, options={"x": 2}) == "update_mount_declarations-result"  # type: ignore[arg-type]
-    svc.update_mount_declarations.assert_awaited_once_with("s", "m", {"n": 1}, options={"x": 2}, skip_reconcilers=False)
+    assert (
+        await f.update_attachment_declarations("s", "m", {"n": 1}, options={"x": 2})
+        == "update_attachment_declarations-result"
+    )  # type: ignore[arg-type]
+    svc.update_attachment_declarations.assert_awaited_once_with(
+        "s", "m", {"n": 1}, options={"x": 2}, skip_reconcilers=False
+    )
 
     # the register/context seams are sync forwards
-    f.register_mount_validator("v")  # type: ignore[arg-type]
-    svc.register_mount_validator.assert_called_once_with("v")
-    f.register_mount_reconciler("r")  # type: ignore[arg-type]
-    svc.register_mount_reconciler.assert_called_once_with("r")
+    f.register_attach_validator("v")  # type: ignore[arg-type]
+    svc.register_attach_validator.assert_called_once_with("v")
+    f.register_attach_reconciler("r")  # type: ignore[arg-type]
+    svc.register_attach_reconciler.assert_called_once_with("r")
     f.register_consumer_lister("consumer", "lister")  # type: ignore[arg-type]
     svc.register_consumer_lister.assert_called_once_with("consumer", "lister")
-    f.register_module_seed("doc")  # type: ignore[arg-type]
-    svc.register_module_seed.assert_called_once_with("doc")
+    f.register_template_seed("doc")  # type: ignore[arg-type]
+    svc.register_template_seed.assert_called_once_with("doc")
     svc.context.return_value = "ctx"
     assert f.context() == "ctx"

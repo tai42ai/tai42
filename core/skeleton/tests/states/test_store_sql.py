@@ -141,7 +141,7 @@ async def test_delete_declaration_cascades_and_reports(pg: FakeStatesPg, store: 
     pg.seed_record("alerts", "agent", "a", "thread", "t1", {"n": 1})
     pg.mounts[("alerts", "m")] = {
         "state": "alerts",
-        "module": "m",
+        "template": "m",
         "path": ["a"],
         "parameters": {},
         "declarations": {},
@@ -221,49 +221,49 @@ async def test_field_stats(pg: FakeStatesPg, store: PostgresStatesStore) -> None
 # modules + mounts                                                              #
 # --------------------------------------------------------------------------- #
 async def test_module_upsert_get_list_delete(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
-    assert await store.get_module("m") is None
-    await store.upsert_module("m", {"name": "m"}, "hash-1")
-    row = await store.get_module("m")
+    assert await store.get_template("m") is None
+    await store.upsert_template("m", {"name": "m"}, "hash-1")
+    row = await store.get_template("m")
     assert row is not None
     assert row["shipped_hash"] == "hash-1"
-    await store.upsert_module("m", {"name": "m", "v": 2}, None)  # operator upload clears the hash
-    updated = await store.get_module("m")
+    await store.upsert_template("m", {"name": "m", "v": 2}, None)  # operator upload clears the hash
+    updated = await store.get_template("m")
     assert updated is not None
     assert updated["shipped_hash"] is None
-    await store.upsert_module("a", {"name": "a"}, None)
-    assert [r["name"] for r in await store.list_modules()] == ["a", "m"]
-    assert await store.delete_module("m") is True
-    assert await store.delete_module("m") is False
+    await store.upsert_template("a", {"name": "a"}, None)
+    assert [r["name"] for r in await store.list_templates()] == ["a", "m"]
+    assert await store.delete_template("m") is True
+    assert await store.delete_template("m") is False
 
 
 async def test_mounted_module_counts(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     for state, module in (("s1", "m1"), ("s2", "m1"), ("s1", "m2")):
         pg.mounts[(state, module)] = {
             "state": state,
-            "module": module,
+            "template": module,
             "path": [],
             "parameters": {},
             "declarations": {},
             "updated_at": pg.tick(),
         }
-    assert await store.mounted_module_counts() == {"m1": 2, "m2": 1}
+    assert await store.attached_template_counts() == {"m1": 2, "m2": 1}
 
 
 async def test_mount_reads(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     for state, module in (("s1", "m2"), ("s1", "m1"), ("s2", "m1")):
         pg.mounts[(state, module)] = {
             "state": state,
-            "module": module,
+            "template": module,
             "path": ["p"],
             "parameters": {"k": 1},
             "declarations": {},
             "updated_at": pg.tick(),
         }
-    assert await store.get_mount("s1", "m1") is not None
-    assert await store.get_mount("s1", "nope") is None
-    assert [r["module"] for r in await store.list_mounts_for_state("s1")] == ["m1", "m2"]
-    assert [r["state"] for r in await store.list_mounts_of_module("m1")] == ["s1", "s2"]
-    assert [(r["state"], r["module"]) for r in await store.list_all_mounts()] == [
+    assert await store.get_attachment("s1", "m1") is not None
+    assert await store.get_attachment("s1", "nope") is None
+    assert [r["template"] for r in await store.list_attachments_for_state("s1")] == ["m1", "m2"]
+    assert [r["state"] for r in await store.list_attachments_of_template("m1")] == ["s1", "s2"]
+    assert [(r["state"], r["template"]) for r in await store.list_all_attachments()] == [
         ("s1", "m1"),
         ("s1", "m2"),
         ("s2", "m1"),
@@ -273,83 +273,83 @@ async def test_mount_reads(pg: FakeStatesPg, store: PostgresStatesStore) -> None
 async def test_upsert_mount_writes_row_and_effective_schema(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     pg.seed_declaration("alerts")
     eff = {"type": "object", "properties": {"a": {"type": "object"}}}
-    await store.upsert_mount("alerts", "m", ["a"], {"k": 1}, {"d": 2}, effective_schema=eff)
+    await store.upsert_attachment("alerts", "m", ["a"], {"k": 1}, {"d": 2}, effective_schema=eff)
     assert pg.mounts[("alerts", "m")]["path"] == ["a"]
     assert pg.declarations["alerts"]["effective_schema"] == eff
     # a second upsert on the same (state, module) updates in place
-    await store.upsert_mount("alerts", "m", ["b"], {}, {}, effective_schema=eff)
+    await store.upsert_attachment("alerts", "m", ["b"], {}, {}, effective_schema=eff)
     assert pg.mounts[("alerts", "m")]["path"] == ["b"]
 
 
 async def test_upsert_mount_undeclared_raises(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     with pytest.raises(StateNotFoundError):
-        await store.upsert_mount("nope", "m", ["a"], {}, {}, effective_schema={})
+        await store.upsert_attachment("nope", "m", ["a"], {}, {}, effective_schema={})
 
 
 async def test_update_mount_declarations(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     pg.seed_declaration("alerts")
     pg.mounts[("alerts", "m")] = {
         "state": "alerts",
-        "module": "m",
+        "template": "m",
         "path": ["a"],
         "parameters": {},
         "declarations": {"old": 1},
         "updated_at": pg.tick(),
     }
     eff = {"type": "object", "properties": {"a": {"type": "object"}}}
-    assert await store.update_mount_declarations("alerts", "m", {"new": 2}, effective_schema=eff) is True
+    assert await store.update_attachment_declarations("alerts", "m", {"new": 2}, effective_schema=eff) is True
     assert pg.mounts[("alerts", "m")]["declarations"] == {"new": 2}
     assert pg.declarations["alerts"]["effective_schema"] == eff
     # no such mount → False (and the declaration lock passed since the state exists)
-    assert await store.update_mount_declarations("alerts", "absent", {}, effective_schema=eff) is False
+    assert await store.update_attachment_declarations("alerts", "absent", {}, effective_schema=eff) is False
 
 
 async def test_update_mount_declarations_undeclared_raises(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     with pytest.raises(StateNotFoundError):
-        await store.update_mount_declarations("nope", "m", {}, effective_schema={})
+        await store.update_attachment_declarations("nope", "m", {}, effective_schema={})
 
 
 async def test_update_mount_parameters(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     pg.seed_declaration("alerts")
     pg.mounts[("alerts", "m")] = {
         "state": "alerts",
-        "module": "m",
+        "template": "m",
         "path": ["a"],
         "parameters": {"k": 1},
         "declarations": {},
         "updated_at": pg.tick(),
     }
     eff = {"type": "object", "properties": {"a": {"type": "object"}}}
-    assert await store.update_mount_parameters("alerts", "m", {"k": 2}, effective_schema=eff) is True
+    assert await store.update_attachment_parameters("alerts", "m", {"k": 2}, effective_schema=eff) is True
     assert pg.mounts[("alerts", "m")]["parameters"] == {"k": 2}
-    assert await store.update_mount_parameters("alerts", "absent", {}, effective_schema=eff) is False
+    assert await store.update_attachment_parameters("alerts", "absent", {}, effective_schema=eff) is False
 
 
 async def test_update_mount_parameters_undeclared_raises(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     with pytest.raises(StateNotFoundError):
-        await store.update_mount_parameters("nope", "m", {}, effective_schema={})
+        await store.update_attachment_parameters("nope", "m", {}, effective_schema={})
 
 
 async def test_delete_mount(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     pg.seed_declaration("alerts")
     pg.mounts[("alerts", "m")] = {
         "state": "alerts",
-        "module": "m",
+        "template": "m",
         "path": ["a"],
         "parameters": {},
         "declarations": {},
         "updated_at": pg.tick(),
     }
     eff = {"type": "object", "properties": {}}
-    assert await store.delete_mount("alerts", "m", effective_schema=eff) is True
+    assert await store.delete_attachment("alerts", "m", effective_schema=eff) is True
     assert ("alerts", "m") not in pg.mounts
     assert pg.declarations["alerts"]["effective_schema"] == eff
-    assert await store.delete_mount("alerts", "m", effective_schema=eff) is False
+    assert await store.delete_attachment("alerts", "m", effective_schema=eff) is False
 
 
 async def test_delete_mount_undeclared_raises(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     with pytest.raises(StateNotFoundError):
-        await store.delete_mount("nope", "m", effective_schema={})
+        await store.delete_attachment("nope", "m", effective_schema={})
 
 
 # --------------------------------------------------------------------------- #
@@ -535,13 +535,13 @@ async def test_apply_ops_stamps_trace_under_traced_mount(pg: FakeStatesPg, store
     pg.seed_declaration("alerts")
     pg.modules["m"] = {
         "name": "m",
-        "body": {"kind": "state-module", "name": "m", "schema": {"type": "object"}, "trace": {"enabled": True}},
+        "body": {"kind": "state-template", "name": "m", "schema": {"type": "object"}, "trace": {"enabled": True}},
         "shipped_hash": None,
         "updated_at": pg.tick(),
     }
     pg.mounts[("alerts", "m")] = {
         "state": "alerts",
-        "module": "m",
+        "template": "m",
         "path": ["a"],
         "parameters": {},
         "declarations": {},
@@ -570,7 +570,7 @@ async def test_apply_ops_refuses_composing_shape_before_ledger(pg: FakeStatesPg,
     pg.modules["m"] = {
         "name": "m",
         "body": {
-            "kind": "state-module",
+            "kind": "state-template",
             "name": "m",
             "schema": {"type": "object"},
             "regimes": [{"path": ["items"], "regime": "composing"}],
@@ -580,7 +580,7 @@ async def test_apply_ops_refuses_composing_shape_before_ledger(pg: FakeStatesPg,
     }
     pg.mounts[("alerts", "m")] = {
         "state": "alerts",
-        "module": "m",
+        "template": "m",
         "path": ["a"],
         "parameters": {},
         "declarations": {},

@@ -468,3 +468,39 @@ async def test_create_refuses_a_malformed_subject_before_dispatch(install) -> No
     install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
     with pytest.raises(BadRequestError, match="invalid schedule subject"):
         await schedules_ops.create_schedule("send", {"subject": {"kind": "person"}}, {"cron": "* * * * *"})
+
+
+async def test_run_once_schedule_deposits_binding_and_does_not_inject_it(install, monkeypatch) -> None:
+    # M1: the run-once shape dispatches the BASE tool immediately, so the door binding must NOT
+    # be injected into its arguments (nothing pops it) — it is deposited on the ambient
+    # invocation around the immediate run_tool, like every other door.
+    from tai42_contract.states import StateAttach, StateBinding
+    from tai42_contract.tools import current_tool_invocation
+
+    binding = StateBinding(states=[StateAttach(state="status", subject_expr=".x")])
+    seen: dict = {}
+
+    class _Tools(_FakeTools):
+        async def run_tool(self, key: str, arguments: dict) -> object:
+            inv = current_tool_invocation()
+            seen["binding"] = inv.state_binding if inv is not None else None
+            seen["args"] = dict(arguments)
+            return "ok"
+
+    install(_Tools(set(_MARKERS) | {"mytool"}))
+
+    import tai42_skeleton.tools.state_binding as sb_mod
+
+    async def _noop_mount(app, b) -> None:
+        return None
+
+    monkeypatch.setattr(sb_mod, "validate_and_mount_binding", _noop_mount)
+
+    async def _noop_authz(name, args) -> None:
+        return None
+
+    monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _noop_authz)
+
+    await schedules_ops.create_schedule("mytool", {}, {}, state_binding=binding)
+    assert "state_binding" not in seen["args"]  # NOT leaked into the base tool's arguments
+    assert seen["binding"] == binding  # deposited on the ambient invocation for the chokepoint

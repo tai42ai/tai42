@@ -93,7 +93,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         ),
     ),
     ("GET", "/api/conversation-configs"): RouteShape(
-        items_key="items", columns=("target_kind", "target_name", "multichannel", "greeting_template")
+        items_key="items", columns=("target_kind", "target_name", "multichannel", "greeting_template", "state_binding")
     ),
     ("GET", "/api/conversations"): RouteShape(
         items_key="items",
@@ -241,6 +241,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "execution_key",
             "tool_kwargs",
             "subject",
+            "state_binding",
             "execution_key_fingerprint",
         ),
     ),
@@ -376,7 +377,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "endedAt",
         ),
     ),
-    ("GET", "/api/state-modules"): RouteShape(
+    ("GET", "/api/state-templates"): RouteShape(
         items_key=None,
         columns=(
             "kind",
@@ -387,7 +388,9 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "regimes",
             "declarations",
             "trace",
-            "mounted_on",
+            "template_jq",
+            "reconcile",
+            "attached_to",
             "shipped_default",
         ),
     ),
@@ -405,14 +408,14 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "updated_at",
         ),
     ),
+    ("GET", "/api/states/{name}/attachments"): RouteShape(
+        items_key=None, columns=("template", "path", "parameters", "declarations", "state")
+    ),
+    ("GET", "/api/states/{name}/attachments/{template}"): RouteShape(
+        items_key=None, columns=("template", "path", "parameters", "declarations", "state")
+    ),
     ("GET", "/api/states/{name}/consumers"): RouteShape(
         items_key=None, columns=("kind", "name", "detail", "link", "unavailable")
-    ),
-    ("GET", "/api/states/{name}/mounts"): RouteShape(
-        items_key=None, columns=("module", "path", "parameters", "declarations", "state")
-    ),
-    ("GET", "/api/states/{name}/mounts/{module}"): RouteShape(
-        items_key=None, columns=("module", "path", "parameters", "declarations", "state")
     ),
     ("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/writes"): RouteShape(
         items_key="items", columns=("seq", "at", "origin", "paths")

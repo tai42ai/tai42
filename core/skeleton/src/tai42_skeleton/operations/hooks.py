@@ -45,6 +45,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookParams, HookRegister, HookSubject
+from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
 
 from tai42_skeleton.hooks import trigger_links
@@ -230,6 +231,7 @@ async def register_hook(
     expr_kwargs: dict[str, Any] | None = None,
     *,
     subject: HookSubject | None = None,
+    state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """Register a hook from its flat parameters — an UPSERT, so this is the create
     path AND the edit path for a hook of that name.
@@ -252,6 +254,7 @@ async def register_hook(
             execution_key_fingerprint=execution_key_fingerprint,
             tool_kwargs=tool_kwargs or {},
             subject=subject,
+            state_binding=state_binding,
             condition=condition,
             condition_id=condition_id,
             condition_kwargs=condition_kwargs or {},
@@ -259,6 +262,13 @@ async def register_hook(
             expr_id=expr_id,
             expr_kwargs=expr_kwargs or {},
         )
+        if state_binding is not None:
+            from tai42_skeleton.app import instance
+            from tai42_skeleton.tools.state_binding import validate_and_mount_binding
+
+            # Mount-on-use + validate the binding at SAVE (the hook upsert) — a bad binding
+            # is a 400 that stores no hook.
+            await validate_and_mount_binding(instance.app, state_binding)
         registered = await get_hooks_manager().register(params)
     except ValueError as exc:
         # The manager compiles the condition/expr jq at registration; a bad

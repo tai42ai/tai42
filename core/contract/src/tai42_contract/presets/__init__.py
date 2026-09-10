@@ -33,6 +33,7 @@ from tai42_contract.presets.models import (
     PresetSeed,
     PresetSeedToolMeta,
 )
+from tai42_contract.states.binding import StateBinding
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
 #: A per-base-tool write validator: given the FULL body about to persist, returns
@@ -59,6 +60,7 @@ class PresetStore(Protocol):
         output_schema: dict[str, Any] | None = None,
         input_schema: dict[str, Any] | None = None,
         *,
+        state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
     ) -> DocumentRecord:
         """Create a versioned preset. ``spec`` carries ``name``/``description``/
@@ -80,6 +82,7 @@ class PresetStore(Protocol):
         description: str | None = None,
         *,
         input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
         tags: list[str] | None = None,
     ) -> DocumentVersion:
         """Append a new version from the editable body fields.

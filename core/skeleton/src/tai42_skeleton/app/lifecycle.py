@@ -68,16 +68,18 @@ if TYPE_CHECKING:
     from tai42_skeleton.presets.seeds import PresetSeedRegistry
     from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
     from tai42_skeleton.sandbox import SandboxHolder
-    from tai42_skeleton.states.seeds import StateModuleSeedRegistry
+    from tai42_skeleton.states.seeds import StateTemplateSeedRegistry
     from tai42_skeleton.states.service import (
+        StatesAttachReconcilerRegistry,
+        StatesAttachValidatorRegistry,
         StatesConsumerListerRegistry,
-        StatesMountReconcilerRegistry,
-        StatesMountValidatorRegistry,
         StatesService,
     )
     from tai42_skeleton.template import ResourceManager
     from tai42_skeleton.tools import ToolRefsRegistry, ToolRetryRegistry, ToolTierRegistry
     from tai42_skeleton.tools.binding import ToolBinding
+    from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
+    from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
     from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
     from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
@@ -338,6 +340,14 @@ class TaiMCPLifecycleMixin(ABC):
         return self._serving_core._rename_referee_registry
 
     @property
+    def _delete_referee_registry(self) -> "ToolDeleteRefereeRegistry":
+        return self._serving_core._delete_referee_registry
+
+    @property
+    def _detach_referee_registry(self) -> "StateTemplateDetachRefereeRegistry":
+        return self._serving_core._detach_referee_registry
+
+    @property
     def _seed_registry(self) -> "PresetSeedRegistry":
         return self._serving_core._seed_registry
 
@@ -350,20 +360,20 @@ class TaiMCPLifecycleMixin(ABC):
         return self._serving_core._states_service
 
     @property
-    def _states_mount_validators(self) -> "StatesMountValidatorRegistry":
-        return self._serving_core._states_mount_validators
+    def _states_attach_validators(self) -> "StatesAttachValidatorRegistry":
+        return self._serving_core._states_attach_validators
 
     @property
-    def _states_mount_reconcilers(self) -> "StatesMountReconcilerRegistry":
-        return self._serving_core._states_mount_reconcilers
+    def _states_attach_reconcilers(self) -> "StatesAttachReconcilerRegistry":
+        return self._serving_core._states_attach_reconcilers
 
     @property
     def _states_consumer_listers(self) -> "StatesConsumerListerRegistry":
         return self._serving_core._states_consumer_listers
 
     @property
-    def _states_module_seeds(self) -> "StateModuleSeedRegistry":
-        return self._serving_core._states_module_seeds
+    def _states_template_seeds(self) -> "StateTemplateSeedRegistry":
+        return self._serving_core._states_template_seeds
 
     @property
     def _preset_manager(self) -> "PresetManager":
@@ -908,17 +918,19 @@ class TaiMCPLifecycleMixin(ABC):
         # platform-internal referees re-arm through their startup/reload handler, so a
         # stale referee or a dropped seed never lingers across update()/reload.
         self._rename_referee_registry.reset()
+        self._delete_referee_registry.reset()
+        self._detach_referee_registry.reset()
         self._seed_registry.reset()
 
-        # Reset the state store's consumer-owned registries (mount validators, mount
-        # reconcilers, consumer listers, module seeds) alongside the registries above: a
-        # reload re-imports the plugin modules (which re-run their register_mount_validator/
-        # register_mount_reconciler/register_consumer_lister/register_module_seed calls), so a
+        # Reset the state store's consumer-owned registries (attach validators, attach
+        # reconcilers, consumer listers, template seeds) alongside the registries above: a
+        # reload re-imports the plugin modules (which re-run their register_attach_validator/
+        # register_attach_reconciler/register_consumer_lister/register_template_seed calls), so a
         # stale validator, reconciler, lister or seed never lingers.
-        self._states_mount_validators.reset()
-        self._states_mount_reconcilers.reset()
+        self._states_attach_validators.reset()
+        self._states_attach_reconcilers.reset()
         self._states_consumer_listers.reset()
-        self._states_module_seeds.reset()
+        self._states_template_seeds.reset()
 
         # Drop the cached resource manager: a reload re-imports the storage
         # module and rebuilds the storage provider, so a stale cache would keep

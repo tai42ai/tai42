@@ -2242,6 +2242,68 @@ def test_validate_create_missing_base_tool_400(pg, emit):
     asyncio.run(run())
 
 
+def test_validate_create_good_state_binding_is_clean(pg, emit):
+    # The validate door must not IGNORE ``state_binding``: a well-formed binding validates
+    # clean, and the dry run writes nothing (no attach).
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            data = _data(
+                await _validate(
+                    {
+                        "name": "newp",
+                        "base_tool": "weather",
+                        "fixed_kwargs": {"units": "x"},
+                        "state_binding": {"states": [{"state": "status", "subject_expr": ".x"}]},
+                    }
+                )
+            )
+            assert data == {"valid": True, "error": None}
+            assert _non_role_documents(pg) == []
+            assert emit == []
+
+    asyncio.run(run())
+
+
+def test_validate_create_bad_state_binding_is_an_invalid_verdict(pg, emit):
+    # A binding the create/save door would refuse (here an un-compilable subject jq) is an
+    # invalid verdict at the validate door too — not a silently-passed check.
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            data = _data(
+                await _validate(
+                    {
+                        "name": "newp",
+                        "base_tool": "weather",
+                        "state_binding": {"states": [{"state": "status", "subject_expr": "this is not ) jq"}]},
+                    }
+                )
+            )
+            assert data["valid"] is False
+            assert "state_binding" in data["error"]
+            assert _non_role_documents(pg) == []
+
+    asyncio.run(run())
+
+
+def test_validate_version_bad_state_binding_is_an_invalid_verdict(pg, emit):
+    # VERSION mode threads ``state_binding`` through the same check.
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("ver", fixed_kwargs={"units": "v"})
+            data = _data(
+                await _validate(
+                    {
+                        "name": "ver",
+                        "state_binding": {"states": [{"state": "status", "subject_expr": "broken ( jq"}]},
+                    }
+                )
+            )
+            assert data["valid"] is False
+            assert "state_binding" in data["error"]
+
+    asyncio.run(run())
+
+
 # -- validate door: version mode ---------------------------------------------
 
 
@@ -2631,5 +2693,154 @@ def test_rename_keeps_the_pre_rename_generation_for_a_worker_owed_it_from_the_st
 
             assert resp.status_code == 200, _err(resp)
             assert backend.expected_at_start_calls == [{"serve-2": 1}, {"serve-2": 1}]
+
+    asyncio.run(run())
+
+
+_ROUTE_BINDING = {"states": [{"state": "status", "subject_expr": ".x"}]}
+_ROUTE_BINDING2 = {"states": [{"state": "alerts", "subject_expr": ".y"}]}
+
+
+def test_create_and_save_version_thread_the_state_binding_over_http(pg, emit):
+    # The HTTP extractors must not drop ``state_binding``: create stores it, save-version
+    # replaces it, an omitted key carries forward, and an explicit ``null`` clears it.
+    from tai42_contract.states import StateBinding
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            resp = await router.create_preset(
+                _request("POST", "/api/presets", body=_create_body("wv", state_binding=_ROUTE_BINDING))
+            )
+            assert resp.status_code == 200, _err(resp)
+            # The active spec (what the preset read + every dispatch serve) carries it — the
+            # extractor threaded the body binding through the op, store write and register.
+            spec = instance.app.preset_manager.get_spec("wv")
+            assert spec.state_binding == StateBinding.model_validate(_ROUTE_BINDING)
+
+            r2 = await router.save_version(
+                _request("POST", "/api/presets/wv/versions", name="wv", body={"state_binding": _ROUTE_BINDING2})
+            )
+            assert r2.status_code == 200, _err(r2)
+            assert instance.app.preset_manager.get_spec("wv").state_binding == StateBinding.model_validate(
+                _ROUTE_BINDING2
+            )
+
+            # No ``state_binding`` key → carry-forward (still the second binding).
+            r3 = await router.save_version(
+                _request("POST", "/api/presets/wv/versions", name="wv", body={"description": "d2"})
+            )
+            assert r3.status_code == 200, _err(r3)
+            assert instance.app.preset_manager.get_spec("wv").state_binding == StateBinding.model_validate(
+                _ROUTE_BINDING2
+            )
+
+            # Explicit ``null`` with the key present → clears the binding.
+            r4 = await router.save_version(
+                _request("POST", "/api/presets/wv/versions", name="wv", body={"state_binding": None})
+            )
+            assert r4.status_code == 200, _err(r4)
+            assert instance.app.preset_manager.get_spec("wv").state_binding is None
+
+    asyncio.run(run())
+
+
+# -- rollback mounts the target version's state binding ----------------------
+
+
+_TEMPLATED_BINDING = {"states": [{"state": "status", "subject_expr": ".x", "templates": ["t1"]}]}
+
+
+def _patch_fake_states(monkeypatch, *, existing: set[str], attached: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Patch the live states facet with a minimal fake the binding mount seam drives: it
+    tracks attached ``(state, template)`` pairs and which template DEFINITIONS ``existing``,
+    so a rollback's re-mount either re-attaches a detached template or refuses loudly when the
+    definition is gone. Returns the list of attach calls the test asserts against."""
+    from tai42_contract.states.errors import StateNotFoundError
+
+    calls: list[tuple[str, str]] = []
+
+    async def list_attachments(state=None, *, template=None):
+        return [
+            {"state": s, "template": t}
+            for (s, t) in attached
+            if (state is None or s == state) and (template is None or t == template)
+        ]
+
+    async def attach(state, template, body, *, skip_reconcilers=False):
+        if template not in existing:
+            raise StateNotFoundError(f"template {template!r} does not exist")
+        attached.add((state, template))
+        calls.append((state, template))
+
+    monkeypatch.setattr(instance.app._states_facet, "list_attachments", list_attachments)
+    monkeypatch.setattr(instance.app._states_facet, "attach", attach)
+    return calls
+
+
+def test_rollback_remounts_the_target_version_binding(pg, emit, monkeypatch) -> None:
+    # A rollback ACTIVATES the target version's binding, so it re-mounts (re-attaches) the
+    # binding's templates exactly as create/save do — a template detached since the version
+    # was authored is restored, so the rolled-back binding is live again rather than faulting
+    # at every run.
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            attached: set[tuple[str, str]] = set()
+            calls = _patch_fake_states(monkeypatch, existing={"t1"}, attached=attached)
+
+            await _create_versioned("wv", base_tool="echo", fixed_kwargs={}, state_binding=_TEMPLATED_BINDING)
+            assert ("status", "t1") in attached  # create mounted it
+            r2 = await router.save_version(
+                _request("POST", "/api/presets/wv/versions", name="wv", body={"state_binding": None})
+            )
+            assert r2.status_code == 200, _err(r2)  # v2 clears the binding, becomes active
+
+            # The template is detached out from under the historical version.
+            attached.discard(("status", "t1"))
+            calls.clear()
+            emit.clear()
+
+            resp = await router.rollback_preset(
+                _request("POST", "/api/presets/wv/rollback", name="wv", body={"version": 1})
+            )
+            assert resp.status_code == 200, _err(resp)
+            # The rollback re-mounted the detached template.
+            assert ("status", "t1") in attached
+            assert ("status", "t1") in calls
+            record = await instance.app.presets.store.get_preset("wv")
+            assert record.active_version == 1
+
+    asyncio.run(run())
+
+
+def test_rollback_refuses_when_target_binding_template_is_gone(pg, emit, monkeypatch) -> None:
+    # A rollback to a version whose binding names a template whose DEFINITION is gone cannot
+    # re-mount it — a loud 400 that re-points nothing, never a bricked preset that faults at
+    # every run.
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            attached: set[tuple[str, str]] = set()
+            existing = {"t1"}
+            _patch_fake_states(monkeypatch, existing=existing, attached=attached)
+
+            await _create_versioned("wv", base_tool="echo", fixed_kwargs={}, state_binding=_TEMPLATED_BINDING)
+            r2 = await router.save_version(
+                _request("POST", "/api/presets/wv/versions", name="wv", body={"state_binding": None})
+            )
+            assert r2.status_code == 200, _err(r2)
+
+            # The template definition is deleted (and its attachment gone) after v2.
+            attached.discard(("status", "t1"))
+            existing.discard("t1")
+            emit.clear()
+
+            resp = await router.rollback_preset(
+                _request("POST", "/api/presets/wv/rollback", name="wv", body={"version": 1})
+            )
+            assert resp.status_code == 400, _err(resp)
+            assert "state_binding" in _err(resp)
+            # Nothing committed: the active version is unchanged and no emit fired.
+            record = await instance.app.presets.store.get_preset("wv")
+            assert record.active_version == 2
+            assert emit == []
 
     asyncio.run(run())

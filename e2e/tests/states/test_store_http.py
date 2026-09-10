@@ -2,7 +2,7 @@
 the operator/API door a Studio States page and the ``tai states`` CLI travel.
 
 One composed path on ``core_stack`` walks the whole ledger a real declaration takes:
-declare a state with its subject kinds, upload a module and mount it (so a path is
+declare a state with its subject kinds, upload a template and attach it (so a path is
 governed by a ``composing`` regime), then drive the record doors — a whole-path
 ``set`` over the composing path is refused (422), the keyed ``set_by_key`` op is
 accepted, the write ledger records the ``api`` door with the touched paths, a
@@ -39,7 +39,7 @@ def _record_path(state: str, target_kind: str, target_name: str, kind: str, key:
 async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     state = uniq("status")
-    module = uniq("box-mod").replace("_", "-")
+    template = uniq("box-mod").replace("_", "-")
 
     # -- declare a state with its subject kinds --------------------------------
     declaration = {
@@ -59,24 +59,24 @@ async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: 
 
     served = await api.get(f"/api/states/{state}")
     assert served["subject_kinds"] == ["thread"]
-    assert served["mounts"] == []
+    assert served["attachments"] == []
 
-    # -- upload a module and mount it (a ``composing`` regime on box.items) -----
+    # -- upload a template and attach it (a ``composing`` regime on box.items) -----
     await api.put(
-        f"/api/state-modules/{module}",
+        f"/api/state-templates/{template}",
         json={
-            "kind": "state-module",
-            "name": module,
+            "kind": "state-template",
+            "name": template,
             "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
             "regimes": [{"path": ["items"], "regime": "composing"}],
         },
     )
     await api.put(
-        f"/api/states/{state}/mounts/{module}",
+        f"/api/states/{state}/attachments/{template}",
         json={"path": ["box"], "parameters": {}, "declarations": {}},
     )
     served = await api.get(f"/api/states/{state}")
-    assert [m["module"] for m in served["mounts"]] == [module]
+    assert [m["template"] for m in served["attachments"]] == [template]
     assert {"path": ["box", "items"], "regime": "composing"} in served["regimes"]
     # The single read serves ``updated_at`` as a parseable ISO string through the real JSON
     # encoder (a raw datetime would 500 here) — the same field the list serves.
@@ -87,21 +87,21 @@ async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: 
     row = next(d for d in listed if d["name"] == state)
     datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00"))
 
-    # -- the module catalog serves ``mounted_on`` + ``shipped_default`` ----------
-    modules = await api.get("/api/state-modules")
-    module_row = next(m for m in modules if m["name"] == module)
-    assert module_row["mounted_on"] == 1
-    # An operator-uploaded module is not a shipped default.
-    assert module_row["shipped_default"] is False
+    # -- the template catalog serves ``attached_to`` + ``shipped_default`` ----------
+    templates = await api.get("/api/state-templates")
+    template_row = next(m for m in templates if m["name"] == template)
+    assert template_row["attached_to"] == 1
+    # An operator-uploaded template is not a shipped default.
+    assert template_row["shipped_default"] is False
 
-    # -- the mount read door serves the same envelope row the list serves -------
-    mount_rows = await api.get(f"/api/states/{state}/mounts")
-    assert [m["module"] for m in mount_rows] == [module]
-    one_mount = await api.get(f"/api/states/{state}/mounts/{module}")
-    assert one_mount == mount_rows[0]
-    # A module not mounted on the state is a 404 at the read door (never an empty 200).
+    # -- the attach read door serves the same envelope row the list serves -------
+    attachment_rows = await api.get(f"/api/states/{state}/attachments")
+    assert [m["template"] for m in attachment_rows] == [template]
+    one_attachment = await api.get(f"/api/states/{state}/attachments/{template}")
+    assert one_attachment == attachment_rows[0]
+    # A template not attached on the state is a 404 at the read door (never an empty 200).
     absent = uniq("absent-mod").replace("_", "-")
-    resp = await api.request_raw("GET", f"/api/states/{state}/mounts/{absent}")
+    resp = await api.request_raw("GET", f"/api/states/{state}/attachments/{absent}")
     assert resp.status_code == 404, resp.text
 
     record = _record_path(state, "agent", "a-42", "thread", "t1")
@@ -162,12 +162,12 @@ async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: 
 async def test_core_stack_mount_check_reads_effective_parameters(
     core_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
-    """Over the real mount door, a module's declarations ``check`` reads the mount's
+    """Over the real attach door, a template's declarations ``check`` reads the attach's
     effective parameters as ``$parameters``: a declaration exceeding the supplied ``limit``
-    is refused 422 with the check's message, and one within it mounts."""
+    is refused 422 with the check's message, and one within it attachments."""
     api = core_stack.api()
     state = uniq("status")
-    module = uniq("capped-mod").replace("_", "-")
+    template = uniq("capped-mod").replace("_", "-")
 
     await api.put(
         f"/api/states/{state}",
@@ -179,35 +179,112 @@ async def test_core_stack_mount_check_reads_effective_parameters(
         },
     )
     await api.put(
-        f"/api/state-modules/{module}",
+        f"/api/state-templates/{template}",
         json={
-            "kind": "state-module",
-            "name": module,
+            "kind": "state-template",
+            "name": template,
             "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
             "parameters": {"limit": {"schema": {"type": "integer"}, "default": 5}},
             "declarations": {
                 "schema": {"type": "object", "properties": {"count": {"type": "integer"}}},
-                "check": 'if .count <= $parameters.limit then true else "count exceeds the mount limit" end',
+                "check": 'if .count <= $parameters.limit then true else "count exceeds the attach limit" end',
             },
         },
     )
 
-    # A declaration exceeding the supplied limit is refused at the mount door.
+    # A declaration exceeding the supplied limit is refused at the attach door.
     resp = await api.request_raw(
         "PUT",
-        f"/api/states/{state}/mounts/{module}",
+        f"/api/states/{state}/attachments/{template}",
         json={"path": ["box"], "parameters": {"limit": 8}, "declarations": {"count": 9}},
     )
     assert resp.status_code == 422, resp.text
-    assert "count exceeds the mount limit" in resp.text
+    assert "count exceeds the attach limit" in resp.text
 
-    # Within the limit, the mount is accepted and served.
+    # Within the limit, the attach is accepted and served.
     await api.put(
-        f"/api/states/{state}/mounts/{module}",
+        f"/api/states/{state}/attachments/{template}",
         json={"path": ["box"], "parameters": {"limit": 8}, "declarations": {"count": 7}},
     )
     served = await api.get(f"/api/states/{state}")
-    assert [m["module"] for m in served["mounts"]] == [module]
+    assert [m["template"] for m in served["attachments"]] == [template]
+
+
+async def test_core_stack_template_jq_input_and_update(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
+    """The ``template_jq`` record sub-actions, end to end over the API door: a template
+    declares input programs (named reads) and update programs (record operations) on a
+    composing path; a GET evaluates an input program for a subject, and a POST applies an
+    update program through the same ``apply`` chokepoint as a delta (so the composing regime
+    holds). An input program reads the record and returns a value, writing nothing."""
+    api = core_stack.api()
+    state = uniq("status")
+    template = uniq("planner-tmpl").replace("_", "-")
+
+    await api.put(
+        f"/api/states/{state}",
+        json={
+            "description": "e2e template_jq",
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+    )
+    await api.put(
+        f"/api/state-templates/{template}",
+        json={
+            "kind": "state-template",
+            "name": template,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "items": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}}}}
+                },
+            },
+            "regimes": [{"path": ["items"], "regime": "composing"}],
+            "template_jq": {
+                "ids": {"purpose": "input", "description": "the item ids", "jq": "[(.items // [])[] | .id]"},
+                "at_least": {"purpose": "input", "params": ["min"], "jq": "((.items // []) | length) >= $params.min"},
+                "size": {"purpose": "input", "description": "the item count", "jq": "(.items // []) | length"},
+                "add": {
+                    "purpose": "update",
+                    "description": "add an item",
+                    "writes": [["items"]],
+                    "jq": '[{op: "set_by_key", path: ["items"], key_field: "id", value: .input}]',
+                },
+            },
+        },
+    )
+    await api.put(
+        f"/api/states/{state}/attachments/{template}",
+        json={"path": ["box"], "parameters": {}, "declarations": {}},
+    )
+
+    record = _record_path(state, "agent", "a-42", "thread", "t1")
+
+    # -- POST an update program: it applies through the composing regime --------
+    applied = await api.post(f"{record}/template-jq/add", json={"input": {"id": "a-42", "label": "status"}})
+    assert applied["name"] == "add"
+    assert applied["applied"] is True
+    assert applied["data"]["box"]["items"] == [{"id": "a-42", "label": "status"}]
+
+    # -- GET an input program's result for the subject -------------------------
+    ids = await api.get(f"{record}/template-jq/ids")
+    assert ids == {"name": "ids", "purpose": "input", "value": ["a-42"]}
+    # An input program with a declared param reads it from the query string (JSON-encoded).
+    at_least = await api.get(f"{record}/template-jq/at_least?min=1")
+    assert at_least["value"] is True
+
+    # -- GET an input program returns its value, writes nothing ----------------
+    size = await api.get(f"{record}/template-jq/size")
+    assert size["value"] == 1
+    # The write ledger still shows exactly one write (the update program), not the input read.
+    writes = await api.get(f"{record}/writes")
+    assert len(writes["items"]) == 1
+    assert writes["items"][0]["origin"]["meta"] == {"template_jq": "add"}
+
+    # -- an unknown program is a 404 (never an empty 200) ----------------------
+    resp = await api.request_raw("GET", f"{record}/template-jq/nope")
+    assert resp.status_code == 404, resp.text
 
 
 async def test_core_stack_record_key_with_slash_round_trips_by_url(
@@ -334,7 +411,7 @@ async def _assert_states_off(off_stack: TaiStack, method: str, path: str, *, jso
 async def test_off_stack_state_doors_refuse_501(off_stack: TaiStack) -> None:
     # A read door — no empty-degrade for the record store; it refuses loudly.
     await _assert_states_off(off_stack, "GET", "/api/states")
-    await _assert_states_off(off_stack, "GET", "/api/state-modules")
+    await _assert_states_off(off_stack, "GET", "/api/state-templates")
     # A write door.
     await _assert_states_off(
         off_stack,
@@ -348,4 +425,12 @@ async def test_off_stack_state_doors_refuse_501(off_stack: TaiStack) -> None:
         "POST",
         "/api/states/status-off/records/agent/a-42/thread/t1/deltas",
         json={"ops": [{"op": "set", "path": ["k"], "value": 1}]},
+    )
+    # A view read door and a rule write door.
+    await _assert_states_off(off_stack, "GET", "/api/states/status-off/records/agent/a-42/thread/t1/template-jq/ids")
+    await _assert_states_off(
+        off_stack,
+        "POST",
+        "/api/states/status-off/records/agent/a-42/thread/t1/template-jq/add",
+        json={"input": {"id": "x"}},
     )

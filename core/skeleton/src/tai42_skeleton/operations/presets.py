@@ -35,6 +35,7 @@ from tai42_contract.presets.errors import (
     PresetNotFoundError,
     PresetVersionNotFoundError,
 )
+from tai42_contract.states.binding import StateBinding
 from tai42_contract.versioning.errors import DocumentVersionNotFoundError
 from tai42_contract.versioning.models import DocumentVersion
 from tai42_kit.db import component_store_configured
@@ -104,6 +105,7 @@ class PresetCreate(BaseModel):
     extensions: list[list[ExtensionElement]] = []
     output_schema: dict[str, Any] | None = None
     input_schema: dict[str, Any] | None = None
+    state_binding: StateBinding | None = None
 
 
 class PresetVersionSave(BaseModel):
@@ -121,6 +123,10 @@ class PresetVersionSave(BaseModel):
     output_schema: dict[str, Any] | None = None
     input_schema: dict[str, Any] | None = None
     description: str | None = None
+    #: Omitted carries the active binding forward; an explicit ``null`` clears it; a
+    #: binding sets it — the presence flag (``state_binding_provided``) tells absent from
+    #: an explicit ``null``, mirroring ``input_schema``.
+    state_binding: StateBinding | None = None
 
 
 class PresetRollback(BaseModel):
@@ -149,6 +155,7 @@ class PresetValidate(BaseModel):
     extensions: list[list[ExtensionElement]] | None = None
     output_schema: dict[str, Any] | None = None
     input_schema: dict[str, Any] | None = None
+    state_binding: StateBinding | None = None
 
 
 class PresetVersionTags(BaseModel):
@@ -247,6 +254,18 @@ def read_input_schema(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         raise BadRequestError("'input_schema' must be a JSON object (a JSON Schema)")
     return value
+
+
+def read_state_binding(value: Any) -> StateBinding | None:
+    """The optional door-layer state binding from a request value: ``null`` → ``None``; a
+    binding object → the parsed :class:`StateBinding`; a malformed shape → a loud 400. The
+    HTTP-edge extractor uses this so a body binding is not silently dropped before the op."""
+    if value is None:
+        return None
+    try:
+        return StateBinding.model_validate(value)
+    except ValidationError as exc:
+        raise BadRequestError(f"invalid 'state_binding': {exc.errors(include_url=False)}") from exc
 
 
 # -- agent-authoring validation ----------------------------------------------
@@ -405,6 +424,18 @@ async def _rename_referees(name: str) -> list[str]:
     return holders
 
 
+async def _delete_referees(name: str) -> list[str]:
+    """Every VETO a delete of preset ``name`` draws from the registered delete referees
+    (plugin providers holding resources keyed on the name — e.g. per-node state bindings
+    referencing the preset). Each referee either CASCADES its own cleanup and returns empty
+    (allow) or returns non-empty descriptions to block; a referee RAISING propagates loudly
+    — a delete never proceeds past an unreadable holder store (no silent bypass)."""
+    blockers: list[str] = []
+    for referee in instance.app.tools.delete_referees():
+        blockers.extend(await referee(name))
+    return blockers
+
+
 async def _agent_authoring_error(base_tool: str, fixed_kwargs: dict[str, Any]) -> str | None:
     """When ``base_tool`` names a registered agent, the first authoring violation, or
     ``None`` if the spec is valid. Returns ``None`` for a NON-agent base — a plain
@@ -549,6 +580,43 @@ async def _write_validator_error(body: PresetBody) -> str | None:
     if issues:
         return "\n".join(issues)
     return None
+
+
+async def _state_binding_error(state_binding: StateBinding | None) -> str | None:
+    """The binding's dry-run verdict: the SAME shape/state/template/jq/adapter checks create
+    and save-version run through ``validate_and_mount_binding``, but WITHOUT the mount — the
+    validate door performs no attach. A rejection is a message (the write door would 4xx it);
+    ``None`` when there is no binding or it validates."""
+    if state_binding is None:
+        return None
+    from tai42_contract.states.errors import StatesError
+
+    from tai42_skeleton.tools.state_binding import validate_binding
+
+    try:
+        await validate_binding(instance.app, state_binding)
+    except (StatesError, ValueError) as exc:
+        return f"invalid state_binding: {exc}"
+    return None
+
+
+async def _mount_body_binding(state_binding: StateBinding | CarryForward | None) -> None:
+    """Validate + mount-on-use a NEWLY provided door binding at the write that activates it —
+    the shared seam create, save-version and rollback all call so their binding handling never
+    drifts. Its named templates attach idempotently (shared by every door/node that binds the
+    state) and its expressions/adapters compile, so a bad binding is a loud 400 that commits or
+    re-points nothing. A carry-forward (already vetted at its own save) and an absent binding
+    mount nothing."""
+    if not isinstance(state_binding, StateBinding):
+        return
+    from tai42_contract.states.errors import StatesError
+
+    from tai42_skeleton.tools.state_binding import validate_and_mount_binding
+
+    try:
+        await validate_and_mount_binding(instance.app, state_binding)
+    except (StatesError, ValueError) as exc:
+        raise BadRequestError(f"invalid state_binding: {exc}") from exc
 
 
 async def _enforce_registration_tier(base_tool: str) -> None:
@@ -880,6 +948,7 @@ async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None
                 extensions=body.extensions,
                 output_schema=body.output_schema,
                 input_schema=body.input_schema,
+                state_binding=body.state_binding,
                 tags=tags,
             )
         except PresetNameConflictError as exc:
@@ -895,6 +964,7 @@ async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None
                 body.description,
                 body.output_schema,
                 body.input_schema,
+                state_binding=body.state_binding,
                 version=record.active_version,
             )
         except Exception as register_exc:
@@ -923,6 +993,7 @@ async def _create_preset_core(
     output_schema: dict[str, Any] | None,
     input_schema: dict[str, Any] | None = None,
     *,
+    state_binding: StateBinding | None = None,
     tags: list[str] | None = None,
     enforce_tier: bool = True,
 ) -> tuple[Any, FleetResult]:
@@ -1006,6 +1077,7 @@ async def _create_preset_core(
         extensions=extensions,
         output_schema=output_schema,
         input_schema=input_schema,
+        state_binding=state_binding,
     )
     # An ``input_schema`` over a base tool with no registered support is a loud 400 that
     # never persists a row (never a silently-ignored schema).
@@ -1029,6 +1101,11 @@ async def _create_preset_core(
     # and fail with an opaque 500.
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
+
+    # Mount-on-use + validate the door binding at SAVE (the write of the runnable
+    # definition carrying it): its named templates are attached idempotently and its
+    # expressions/adapters compiled, so a bad binding fails the create before any row.
+    await _mount_body_binding(state_binding)
 
     record, census = await _claim_preset_name(name, body, tags)
     await instance.app.emit_list_changed("tool")
@@ -1057,6 +1134,7 @@ async def create_preset(
     extensions: list[list[ExtensionElement]],
     output_schema: dict[str, Any] | None,
     input_schema: dict[str, Any] | None = None,
+    state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """Create a preset, ATOMIC: the shared :func:`_create_preset_core` runs the ordered
     name pre-checks, validation, store write THEN register (rolling the row fully back on
@@ -1066,7 +1144,14 @@ async def create_preset(
     A preset's NAME is its identity everywhere — it IS the live tool binding, and every
     reference keys on it deliberately; there are no surrogate ids."""
     record, report = await _create_preset_core(
-        name, base_tool, description, fixed_kwargs, extensions, output_schema, input_schema
+        name,
+        base_tool,
+        description,
+        fixed_kwargs,
+        extensions,
+        output_schema,
+        input_schema,
+        state_binding=state_binding,
     )
     return await _create_response(
         name,
@@ -1189,6 +1274,7 @@ async def _save_version_core(
     output_schema_provided: bool,
     description: str | None,
     input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+    state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
     tags: list[str] | None = None,
     enforce_tier: bool = True,
 ) -> tuple[Any, FleetResult]:
@@ -1272,6 +1358,11 @@ async def _save_version_core(
     write_validator_error = await _write_validator_error(new_body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
+    # A NEWLY provided binding is mount-validated at SAVE, exactly as create does — its
+    # named templates mount idempotently and its expressions/adapters compile, so a bad
+    # edit is a 400 that persists nothing. A carried-forward binding was vetted at its
+    # own save; an explicit ``null`` clears and mounts nothing.
+    await _mount_body_binding(state_binding)
     # Registration-tier fence: the tier is the CURRENT preset's base tool,
     # so editing a fenced base tool's preset is admin-fenced too. Skipped for a platform
     # seed (``enforce_tier=False``) — no caller to fence.
@@ -1296,6 +1387,7 @@ async def _save_version_core(
             output_schema=output_schema if output_schema_provided else CARRY_FORWARD,
             description=description,
             input_schema=input_schema,
+            state_binding=state_binding,
             tags=tags,
         )
     except ValueError as exc:
@@ -1342,6 +1434,8 @@ async def save_version(
     description: str | None,
     input_schema: dict[str, Any] | None = None,
     input_schema_provided: bool = False,
+    state_binding: StateBinding | None = None,
+    state_binding_provided: bool = False,
 ) -> dict[str, Any]:
     """Save a new version (carry-forward sentinels on omitted fields) then reload and
     fan out; 409 if the record is conflicted, 404 for an absent name. The
@@ -1360,6 +1454,7 @@ async def save_version(
         output_schema_provided=output_schema_provided,
         description=description,
         input_schema=input_schema if input_schema_provided else CARRY_FORWARD,
+        state_binding=state_binding if state_binding_provided else CARRY_FORWARD,
     )
     return _save_version_response(row, report)
 
@@ -1430,6 +1525,11 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
         raise BadRequestError(write_validator_error)
     # Registration-tier fence: the tier is the target body's base tool.
     await _enforce_registration_tier(target_body.base_tool)
+    # A rollback ACTIVATES the target version's own door binding, so it is mount-validated
+    # here exactly as create and save-version do (templates detached since the version was
+    # authored are re-attached idempotently); a binding whose templates are gone is a loud
+    # 400 that re-points nothing.
+    await _mount_body_binding(target_body.state_binding)
 
     prior_active = prior_record.active_version
     # Pinned before the rollback+reload local apply — see :func:`_census_at_start`.
@@ -1619,7 +1719,7 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     tags=["presets"],
     destructive=True,
     reload_gated=True,
-    errors=[NotFoundError],
+    errors=[ConflictError, NotFoundError],
     response_model=PresetDeleteResult,
 )
 async def delete_preset(name: str) -> dict[str, Any]:
@@ -1629,6 +1729,13 @@ async def delete_preset(name: str) -> dict[str, Any]:
     firing no emit. Both branches fan the removal out on the bus and embed the
     per-worker fleet report under ``fanout``."""
     mgr = instance.app.preset_manager
+
+    # Consult the delete referees FIRST (before any teardown): a referee cascades its own
+    # cleanup and returns empty, or vetoes with the references it will not let the delete
+    # strand. Any non-empty answer blocks the delete — nothing is torn down.
+    blockers = await _delete_referees(name)
+    if blockers:
+        raise ConflictError(f"preset {name!r} cannot be deleted — held by: {'; '.join(blockers)}")
 
     if mgr.is_quarantined(name):
         # A conflicted record was never registered — remove ONLY the stored
@@ -1726,6 +1833,7 @@ async def _validate_create(
     extensions: list[list[ExtensionElement]],
     output_schema: dict[str, Any] | None,
     input_schema: dict[str, Any] | None = None,
+    state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """The create route's full pre-store verdict for a brand-new preset — the exact
     ordered checks create runs before its store write (name safety → description
@@ -1763,6 +1871,7 @@ async def _validate_create(
         output_schema=output_schema,
         input_schema=input_schema,
         extensions=extensions,
+        state_binding=state_binding,
     )
 
 
@@ -1775,12 +1884,14 @@ async def _verdict_bind_chain(
     output_schema: dict[str, Any] | None,
     input_schema: dict[str, Any] | None = None,
     extensions: list[list[ExtensionElement]] | None = None,
+    state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """The shared tail both modes run: combo registry → output schema → dry-run
-    bake → input-schema support → write validator, as a verdict — the SAME chain the
-    real create/save doors run, so the dry run never reports valid on a draft the
-    write door would 400. ``extensions`` defaults to no combos for the bind chain's
-    combo/schema checks."""
+    bake → input-schema support → write validator → state binding, as a verdict — the
+    SAME chain the real create/save doors run, so the dry run never reports valid on a
+    draft the write door would 400. ``extensions`` defaults to no combos for the bind
+    chain's combo/schema checks; ``state_binding`` is validated (WITHOUT mounting) exactly
+    as create/save validate-and-mount it."""
     combos: list[list[ExtensionElement]] = extensions or []
     combo_error = _combo_registry_error(combos)
     if combo_error is not None:
@@ -1815,6 +1926,9 @@ async def _verdict_bind_chain(
     write_validator_error = await _write_validator_error(body)
     if write_validator_error is not None:
         return _verdict(write_validator_error)
+    state_binding_error = await _state_binding_error(state_binding)
+    if state_binding_error is not None:
+        return _verdict(state_binding_error)
     return _verdict(None)
 
 
@@ -1836,6 +1950,8 @@ async def validate_preset(
     output_schema_value: Any = None,
     input_schema_present: bool = False,
     input_schema_value: Any = None,
+    state_binding_present: bool = False,
+    state_binding_value: Any = None,
 ) -> dict[str, Any]:
     """Report whether a preset draft would be accepted, running the SAME pre-store
     verdict the corresponding write route would — CREATE mode when no preset named
@@ -1861,6 +1977,7 @@ async def validate_preset(
         extensions = read_create_extensions(extensions_present, extensions_value)
         output_schema = read_output_schema(output_schema_value) if output_schema_present else None
         input_schema = read_input_schema(input_schema_value) if input_schema_present else None
+        state_binding = read_state_binding(state_binding_value) if state_binding_present else None
         return await _validate_create(
             name,
             base_tool,
@@ -1869,6 +1986,7 @@ async def validate_preset(
             extensions,
             output_schema,
             input_schema,
+            state_binding,
         )
 
     # VERSION mode. The corresponding write route is save_version, whose FIRST
@@ -1894,6 +2012,10 @@ async def validate_preset(
     # output_schema: PRESENT (even ``null``) is the deliberate value, ABSENT carries the
     # active value forward — mirroring the save-version door exactly.
     new_input_schema = read_input_schema(input_schema_value) if input_schema_present else active.input_schema
+    # ``state_binding`` is a version field under the SAME presence-flag carry-forward:
+    # PRESENT (even ``null``) is the deliberate value (``null`` clears the binding), ABSENT
+    # carries the active binding forward — mirroring the save-version door exactly.
+    new_state_binding = read_state_binding(state_binding_value) if state_binding_present else active.state_binding
 
     new_fixed_kwargs = active.fixed_kwargs if fixed_kwargs is None else fixed_kwargs
     # An authored-agent (``fixed_kwargs``) edit runs the full authoring validation
@@ -1911,6 +2033,7 @@ async def validate_preset(
         output_schema=new_output_schema,
         input_schema=new_input_schema,
         extensions=new_extensions,
+        state_binding=new_state_binding,
     )
 
 
@@ -1989,6 +2112,7 @@ async def _seed_create(seed: PresetSeed) -> None:
         [],
         seed.output_schema,
         seed.input_schema,
+        state_binding=seed.state_binding,
         enforce_tier=False,
     )
     await _apply_seed_tool_meta(seed)

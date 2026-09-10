@@ -50,6 +50,24 @@ ToolRefsExtractor = Callable[[dict[str, Any]], Iterable[str]]
 #: referee's answers and blocks the rename when any is non-empty.
 ToolRenameReferee = Callable[[str], Awaitable[list[str]]]
 
+#: A delete referee: given the preset/tool name about to be DELETED, either performs
+#: its own CASCADE cleanup of the resources it holds against that name and returns an
+#: empty list (allow), or VETOES by returning human-readable descriptions of the live
+#: references it will not let the delete strand (non-empty = block). A referee raising is
+#: a hard failure of the delete — never a silent bypass. The platform gathers every
+#: registered referee's answers and blocks the delete when any is non-empty; a referee
+#: that intends to cascade must run its own veto check first, since the platform does not
+#: order referees.
+ToolDeleteReferee = Callable[[str], Awaitable[list[str]]]
+
+#: A state-template detach referee: given the ``(state name, template name)`` about to be
+#: DETACHED, returns human-readable descriptions of every live door binding (a preset
+#: version, a conversation config, a hook, a schedule) whose ``state_binding`` still names
+#: that template on that state (empty = no objection). A referee raising is a hard failure
+#: of the detach — never a silent bypass. The platform gathers every registered referee's
+#: answers and blocks the detach when any is non-empty.
+StateTemplateDetachReferee = Callable[[str, str], Awaitable[list[str]]]
+
 
 class ToolInfo(BaseModel):
     """Descriptor for a registered tool.
@@ -136,6 +154,31 @@ class AppTools(Protocol):
         duplicate consult."""
         ...
 
+    def register_delete_referee(self, provider: ToolDeleteReferee) -> None:
+        """Register a :data:`ToolDeleteReferee` consulted before a preset delete.
+
+        A plugin holding resources keyed on a preset/tool name (e.g. per-node state
+        bindings that reference a preset) calls this through the ``tai42_app`` handle when
+        its module loads. Every registered referee is asked for the name on a delete; a
+        referee cascades its own cleanup and returns empty to allow, or returns non-empty
+        descriptions to VETO — any non-empty answer blocks the delete and names the
+        holders. Registering the same provider object twice raises loudly — a double
+        registration is a plugin bug, never a silent duplicate consult."""
+        ...
+
+    def register_detach_referee(self, provider: StateTemplateDetachReferee) -> None:
+        """Register a :data:`StateTemplateDetachReferee` consulted before a state-template
+        detach.
+
+        A holder of door bindings that name templates (e.g. per-node state bindings, or the
+        platform's own preset/route/hook/schedule bindings) calls this through the
+        ``tai42_app`` handle when its module loads. Every registered referee is asked for the
+        ``(state, template)`` on a detach; any non-empty answer blocks the detach and its
+        descriptions name the referencing bindings. Registering the same provider object
+        twice raises loudly — a double registration is a bug, never a silent duplicate
+        consult."""
+        ...
+
     def register_tier(self, base_tool: str, tier: RouteAction) -> None:
         """Declare ``base_tool``'s registration tier — the authorization character
         (a :data:`RouteAction`) enforced everywhere the tier is consulted.
@@ -160,6 +203,8 @@ __all__ = [
     "MAX_ATTEMPTS_CEILING",
     "NEVER_RETRYABLE_KINDS",
     "AppTools",
+    "StateTemplateDetachReferee",
+    "ToolDeleteReferee",
     "ToolInfo",
     "ToolInvocation",
     "ToolRefsExtractor",

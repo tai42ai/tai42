@@ -53,18 +53,21 @@ from tai42_contract.presets import (
     PresetWriteValidator,
 )
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
+from tai42_contract.states.binding import StateBinding
 from tai42_contract.states.models import (
     ApplyResult,
+    AttachBody,
+    AttachReconciler,
+    AttachValidator,
     ConsumerLister,
     ConsumerRow,
-    MountBody,
-    MountReconciler,
-    MountValidator,
-    RecordView,
     StateContext,
     StateDeclaration,
-    StateModuleDocument,
+    StateRecord,
     StateSubject,
+    StateTemplateDocument,
+    TemplateJqApplyResult,
+    TemplateJqResult,
     WriteOrigin,
     WritesPage,
 )
@@ -449,7 +452,7 @@ class AppConversations(Protocol):
         ``locale`` is the guest's BCP 47 language tag the channel resolved from its native
         inbound (a per-message language hint), captured onto the turn's subject so the
         rendering layer resolves every text template and list format against it — flows and
-        state modules never select a language. It seeds a first-contact person's stored
+        state templates never select a language. It seeds a first-contact person's stored
         locale and, absent a stored operator override, is the turn's resolved locale;
         ``None`` means the channel supplied none (no silent default to any language).
         """
@@ -815,6 +818,7 @@ class AppPresets(Protocol):
         input_schema: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         extensions: list[list[ExtensionElement]] | None = None,
+        state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a versioned preset in-process and return its record view.
@@ -841,6 +845,7 @@ class AppPresets(Protocol):
         output_schema_provided: bool = False,
         description: str | None = None,
         extensions: list[list[ExtensionElement]] | None = None,
+        state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Save a new version of an existing preset in-process and return the version row.
@@ -974,7 +979,7 @@ class AppStates(Protocol):
         ...
 
     async def delete_declaration(self, name: str) -> None:
-        """Delete a state with its records and mounts; raise
+        """Delete a state with its records and attachments; raise
         :class:`~tai42_contract.states.DeclarationInUseError` when a consumer still
         binds it."""
         ...
@@ -983,63 +988,63 @@ class AppStates(Protocol):
         """Counts for a state — records, subjects by kind, consumers — for the listing."""
         ...
 
-    # --- Modules ---
-    async def list_modules(self) -> list[StateModuleDocument]:
-        """Every stored platform module document."""
+    # --- Templates ---
+    async def list_templates(self) -> list[StateTemplateDocument]:
+        """Every stored platform template document."""
         ...
 
-    async def get_module(self, name: str) -> StateModuleDocument | None:
-        """The module document named ``name``, or ``None`` when none is stored — the
+    async def get_template(self, name: str) -> StateTemplateDocument | None:
+        """The template document named ``name``, or ``None`` when none is stored — the
         read a consumer's own sibling document validates against."""
         ...
 
-    async def put_module(self, doc: StateModuleDocument, *, replace: bool) -> StateModuleDocument:
-        """Store a module document (``replace`` required to overwrite an existing name)
+    async def put_template(self, doc: StateTemplateDocument, *, replace: bool) -> StateTemplateDocument:
+        """Store a template document (``replace`` required to overwrite an existing name)
         and return it.
 
-        Runs every registered mount validator over each live mount before the write, so
-        a consumer's data-dependent check still fires here; a raise leaves the stored
+        Runs every registered attach validator over each live attachment before the write,
+        so a consumer's data-dependent check still fires here; a raise leaves the stored
         document untouched. Overwriting an existing name without ``replace`` raises
-        :class:`~tai42_contract.states.ModuleExistsError`."""
+        :class:`~tai42_contract.states.TemplateExistsError`."""
         ...
 
-    async def delete_module(self, name: str) -> None:
-        """Delete a module document; raise
-        :class:`~tai42_contract.states.ModuleInUseError` while it is still mounted."""
+    async def delete_template(self, name: str) -> None:
+        """Delete a template document; raise
+        :class:`~tai42_contract.states.TemplateInUseError` while it is still attached."""
         ...
 
-    # --- Mounts ---
-    async def list_mounts(self, state: str | None = None, *, module: str | None = None) -> list[dict[str, Any]]:
-        """Mount rows filtered by ``state``, by ``module``, or every mount when both are
-        ``None`` — the listing derived bindings and the Consumers tab read. Each row
-        carries ``state``, ``module``, ``path``, ``parameters`` and ``declarations``."""
+    # --- Attachments ---
+    async def list_attachments(self, state: str | None = None, *, template: str | None = None) -> list[dict[str, Any]]:
+        """Attachment rows filtered by ``state``, by ``template``, or every attachment when
+        both are ``None`` — what the attachments listing and the Consumers tab read. Each row
+        carries ``state``, ``template``, ``path``, ``parameters`` and ``declarations``."""
         ...
 
-    async def mount(self, state: str, module: str, body: MountBody) -> None:
-        """Mount ``module`` on ``state`` at ``body.path``, storing the resolved
+    async def attach(self, state: str, template: str, body: AttachBody) -> None:
+        """Attach ``template`` on ``state`` at ``body.path``, storing the resolved
         parameters and declarations and recomposing the effective schema in one
         transaction.
 
-        Runs every registered mount validator before the write; a raise refuses the
+        Runs every registered attach validator before the write; a raise refuses the
         door with the validator's message. Overlapping fragments raise
-        :class:`~tai42_contract.states.MountConflictError`."""
+        :class:`~tai42_contract.states.AttachConflictError`."""
         ...
 
-    async def update_mount_declarations(
-        self, state: str, module: str, declarations: dict[str, Any], *, options: dict[str, Any] | None = None
+    async def update_attachment_declarations(
+        self, state: str, template: str, declarations: dict[str, Any], *, options: dict[str, Any] | None = None
     ) -> None:
-        """Replace a mount's declaration values, re-running every registered mount
+        """Replace an attachment's declaration values, re-running every registered attach
         validator and reconciler and recomposing the effective schema before the write.
         ``options`` is a per-operation directive bag passed to the reconcilers for THIS
         operation only, never stored or served back (``None`` is an empty bag)."""
         ...
 
-    async def unmount(self, state: str, module: str) -> None:
-        """Remove a mount and recompose the state's effective schema."""
+    async def detach(self, state: str, template: str) -> None:
+        """Remove an attachment and recompose the state's effective schema."""
         ...
 
     # --- Records ---
-    async def read(self, state: str, subject: StateSubject) -> RecordView | None:
+    async def read(self, state: str, subject: StateSubject) -> StateRecord | None:
         """The record for ``subject`` (resolving a fold to its canonical subject), or
         ``None`` when none exists. An unknown person or a target mismatch is a refusal,
         never an empty document."""
@@ -1047,13 +1052,13 @@ class AppStates(Protocol):
 
     async def replace(
         self, state: str, subject: StateSubject, data: dict[str, Any], *, origin: WriteOrigin
-    ) -> RecordView:
+    ) -> StateRecord:
         """Replace ``subject``'s whole document with ``data`` and return the new record."""
         ...
 
     async def merge(
         self, state: str, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin
-    ) -> RecordView:
+    ) -> StateRecord:
         """Shallow top-level merge ``patch`` into ``subject``'s document and return the
         new record."""
         ...
@@ -1071,9 +1076,42 @@ class AppStates(Protocol):
 
         Refuses a whole-path write over a ``composing`` path
         (:class:`~tai42_contract.states.RegimeViolationError`) before the ledger insert,
-        stamps ``_trace`` under a traced mount, and records one ``state_writes`` row with
+        stamps ``_trace`` under a traced attachment, and records one ``state_writes`` row with
         the touched paths and the completed origin. A replayed ``op_id`` returns
         ``applied=False`` without re-writing; guarded ops land in ``skipped``."""
+        ...
+
+    async def eval_template_jq(
+        self, state: str, subject: StateSubject, name: str, params: dict[str, Any]
+    ) -> TemplateJqResult:
+        """Evaluate an ``input``-purpose ``template_jq`` program ``name`` for ``subject`` and
+        return its value — the program's jq over the subject's record, ``params`` supplying
+        its declared parameters. ``name`` resolves across the state's attached templates
+        (unqualified → the declaring template; ``<attachment>.<name>`` → that attachment's
+        template). An unknown name is a :class:`~tai42_contract.states.StateNotFoundError`; an
+        ambiguous unqualified name, an ``update``-purpose name, an undeclared param or an
+        evaluation failure is a :class:`~tai42_contract.states.ValueValidationError`. A read;
+        no write is recorded."""
+        ...
+
+    async def apply_template_jq(
+        self,
+        state: str,
+        subject: StateSubject,
+        name: str,
+        input: Any,
+        *,
+        op_id: str | None,
+        origin: WriteOrigin,
+    ) -> TemplateJqApplyResult:
+        """Apply an ``update``-purpose ``template_jq`` program ``name`` to ``subject``. Its jq
+        maps ``{record, input}`` to a template-relative op batch, rebased under the attachment
+        path and applied through the same chokepoint as :meth:`apply` — so regimes, the
+        composing-shape guard, trace stamping and ``op_id`` idempotency all hold. ``name``
+        resolves as for :meth:`eval_template_jq`. An unknown name is a
+        :class:`~tai42_contract.states.StateNotFoundError`; an ambiguous unqualified name, an
+        ``input``-purpose name, an evaluation failure or a wrong-shaped return is a
+        :class:`~tai42_contract.states.ValueValidationError`."""
         ...
 
     async def erase(self, state: str, subject: StateSubject, *, origin: WriteOrigin) -> None:
@@ -1141,35 +1179,35 @@ class AppStates(Protocol):
         ...
 
     # --- Seeds ---
-    def register_module_seed(self, doc: StateModuleDocument) -> None:
-        """Declare a platform module document the platform seeds at import time.
+    def register_template_seed(self, doc: StateTemplateDocument) -> None:
+        """Declare a platform template document the platform seeds at import time.
 
         A plugin calls this through the ``tai42_app`` handle when its module loads. The
-        startup/reload seed applier creates it when absent and leaves a module already
+        startup/reload seed applier creates it when absent and leaves a template already
         present untouched. Declaring two seeds under one name raises loudly."""
         ...
 
-    # --- Mount validation ---
-    def register_mount_validator(self, validator: MountValidator) -> None:
-        """Register a data-dependent mount validator.
+    # --- Attach validation ---
+    def register_attach_validator(self, validator: AttachValidator) -> None:
+        """Register a data-dependent attach validator.
 
         A plugin calls this through the ``tai42_app`` handle when its module loads. The
-        validator receives the module document, a mount's declaration values, and the
-        state's effective schema, and RAISES to refuse; it runs before every ``mount``,
-        ``update_mount_declarations`` and ``put_module(replace=True)`` write, so a
+        validator receives the template document, an attachment's declaration values, and the
+        state's effective schema, and RAISES to refuse; it runs before every ``attach``,
+        ``update_attachment_declarations`` and ``put_template(replace=True)`` write, so a
         consumer's checks fire at the platform's declarations doors, the States page
         included."""
         ...
 
-    def register_mount_reconciler(self, reconciler: MountReconciler) -> None:
-        """Register a pre-write mount reconciler.
+    def register_attach_reconciler(self, reconciler: AttachReconciler) -> None:
+        """Register a pre-write attach reconciler.
 
         A plugin calls this through the ``tai42_app`` handle when its module loads. The
-        reconciler receives a :class:`~tai42_contract.states.MountReconcileContext` — the
-        module, the operation, the previous and new declarations, the mount options, and a
-        record door bound to the state — inside every ``mount`` and
-        ``update_mount_declarations`` write, after the validators and before the write. It
-        RAISES to refuse the mount (naming the records the new declarations orphan) or
-        writes resolutions through the context's record door and returns, letting the mount
+        reconciler receives a :class:`~tai42_contract.states.AttachReconcileContext` — the
+        template, the operation, the previous and new declarations, the attach options, and a
+        record door bound to the state — inside every ``attach`` and
+        ``update_attachment_declarations`` write, after the validators and before the write. It
+        RAISES to refuse the attach (naming the records the new declarations orphan) or
+        writes resolutions through the context's record door and returns, letting the attach
         commit with those writes."""
         ...

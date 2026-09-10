@@ -4909,3 +4909,42 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
     assert await manager.render_by_id("welcome", locale=cast(str, seen["ambient_locale"])) == "shalom"
     with pytest.raises(TemplateLocaleNotFoundError):
         await manager.render_by_id("missing", locale=cast(str, seen["ambient_locale"]))
+
+
+async def test_tool_turn_deposits_the_route_state_binding_on_the_ambient_invocation(env, monkeypatch) -> None:
+    # The real ``_run_tool_turn`` seam reads the target config's binding and deposits it on the
+    # ambient ToolInvocation around the tool dispatch, so the chokepoint carries it forward.
+    from tai42_contract.states import StateAttach, StateBinding
+    from tai42_contract.tools import current_tool_invocation
+
+    binding = StateBinding(states=[StateAttach(state="status", subject_expr=".thread_id")])
+    route = _tool_channel_route(payload_expr=".")
+
+    class _Cfg:
+        async def get(self, target_kind, target_name):
+            return TargetConversationConfig(target_kind=target_kind, target_name=target_name, state_binding=binding)
+
+    monkeypatch.setattr(turn_module, "_config_store", lambda: _Cfg())
+
+    seen: dict = {}
+
+    class _RecordingTools:
+        async def run_tool(self, key, arguments, *, offload_sync=False):
+            inv = current_tool_invocation()
+            seen["binding"] = inv.state_binding if inv is not None else None
+            return "ok"
+
+    monkeypatch.setattr(turn_module, "_tools", lambda: _RecordingTools())
+
+    record = turn_module._new_record(
+        route=route,
+        message_id="m-x",
+        thread_id="bridge:tool-line:+15550002222",
+        client_address="+15550002222",
+        caller_principal=None,
+        provider_message_id="PID1",
+        inbound_text="hello",
+        delivery_status=DeliveryStatus.ACCEPTED,
+    )
+    await turn_module._run_tool_turn(route, "hello", "bridge:tool-line:+15550002222", "+15550002222", record=record)
+    assert seen["binding"] == binding

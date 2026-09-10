@@ -65,17 +65,19 @@ from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
 from tai42_skeleton.sandbox import SandboxHolder
 from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.states.backup import register_states_backup_section
-from tai42_skeleton.states.seeds import StateModuleSeedRegistry
+from tai42_skeleton.states.seeds import StateTemplateSeedRegistry
 from tai42_skeleton.states.service import (
+    StatesAttachReconcilerRegistry,
+    StatesAttachValidatorRegistry,
     StatesConsumerListerRegistry,
-    StatesMountReconcilerRegistry,
-    StatesMountValidatorRegistry,
     StatesService,
 )
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.tools import ToolRefsRegistry, ToolRegistry, ToolRetryRegistry, ToolTierRegistry
 from tai42_skeleton.tools.binding import ToolBinding
+from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
+from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
 from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
 from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
@@ -279,6 +281,8 @@ class ServingCore:
         # modules (and re-arms the platform-internal referees) cleanly. The referee
         # collection gates every rename; the seeds drive the startup/reload applier.
         self._rename_referee_registry = ToolRenameRefereeRegistry()
+        self._delete_referee_registry = ToolDeleteRefereeRegistry()
+        self._detach_referee_registry = StateTemplateDetachRefereeRegistry()
         self._seed_registry = PresetSeedRegistry()
 
         # The backup registry is the host's first consumer of its own AppBackup facet:
@@ -288,19 +292,19 @@ class ServingCore:
         register_core_sections(self._backup_registry)
 
         # The subject-keyed state store: one shared service over the record substrate,
-        # plus the consumer-owned registries (mount validators, consumer listers, module
+        # plus the consumer-owned registries (attach validators, consumer listers, template
         # seeds) reset each start() so a reload re-imports the plugin modules and
         # re-registers cleanly. The service holds refs to the SAME registry objects, so a
         # reset+re-register is visible to it without rebuilding the service.
-        self._states_mount_validators = StatesMountValidatorRegistry()
-        self._states_mount_reconcilers = StatesMountReconcilerRegistry()
+        self._states_attach_validators = StatesAttachValidatorRegistry()
+        self._states_attach_reconcilers = StatesAttachReconcilerRegistry()
         self._states_consumer_listers = StatesConsumerListerRegistry()
-        self._states_module_seeds = StateModuleSeedRegistry()
+        self._states_template_seeds = StateTemplateSeedRegistry()
         self._states_service = StatesService(
-            mount_validators=self._states_mount_validators,
-            mount_reconcilers=self._states_mount_reconcilers,
+            attach_validators=self._states_attach_validators,
+            attach_reconcilers=self._states_attach_reconcilers,
             consumer_listers=self._states_consumer_listers,
-            seeds=self._states_module_seeds,
+            seeds=self._states_template_seeds,
         )
         register_states_backup_section(self._backup_registry)
 
