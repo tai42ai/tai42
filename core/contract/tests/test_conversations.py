@@ -977,6 +977,27 @@ def test_error_reply_text_defaults_to_none_and_must_be_non_blank_and_bounded():
         ConversationRouteCreate(**_route_kwargs(error_reply_text="x" * 2001))
 
 
+def test_route_locale_defaults_to_none_round_trips_and_canonicalizes():
+    from tai42_contract.conversations import ConversationRoute, ConversationRouteCreate
+
+    # Absent by default: the route declares no default language.
+    assert ConversationRouteCreate(**_route_kwargs()).locale is None
+    # A supplied tag is stored through the one locale seam, canonicalized like every carrier.
+    assert ConversationRouteCreate(**_route_kwargs(locale="he-il")).locale == "he-IL"
+    # It round-trips onto the stored row and survives a JSON persist cycle unchanged.
+    stored = ConversationRoute(**_route_kwargs(locale="fr"), execution_key_fingerprint="fp")
+    assert stored.locale == "fr"
+    assert ConversationRoute.model_validate_json(stored.model_dump_json()).locale == "fr"
+
+
+def test_route_locale_rejects_a_malformed_tag_loudly():
+    from tai42_contract.conversations import ConversationRouteCreate
+
+    # A malformed tag is rejected at the boundary — never silently dropped or guessed.
+    with pytest.raises(ValidationError):
+        ConversationRouteCreate(**_route_kwargs(locale="not a locale"))
+
+
 def test_blank_inbound_text_error_is_a_value_error():
     from tai42_contract.conversations import BlankInboundTextError
 

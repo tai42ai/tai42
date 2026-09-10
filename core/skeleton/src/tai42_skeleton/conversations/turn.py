@@ -803,14 +803,17 @@ def _inbound_id_and_source(record: ConversationRecord, route: ConversationRoute)
     return record.message_id, "api"
 
 
-def _resolved_locale(person: Person | None, record: ConversationRecord) -> str | None:
+def _resolved_locale(person: Person | None, record: ConversationRecord, route: ConversationRoute) -> str | None:
     """The subject's locale for the rendering layer, by precedence: a person's STORED locale
     (an operator override or a first-contact seed) wins, else the channel's per-message hint
-    on this record, else ``None`` — the explicit "no locale known" the renderer never
-    silently defaults away. Both stored forms are already canonical, so no reparse here."""
+    on this record, else the route's operator-declared default, else ``None`` — the explicit
+    "no locale known" the renderer never silently defaults away. Every stored form is already
+    canonical, so no reparse here."""
     if person is not None and person.locale is not None:
         return person.locale
-    return record.inbound_locale
+    if record.inbound_locale is not None:
+        return record.inbound_locale
+    return route.locale
 
 
 def _turn_block(
@@ -831,7 +834,7 @@ def _turn_block(
             "target_name": route.target_name,
             "person": person.person_id if person is not None else None,
             "thread": thread_id,
-            "locale": _resolved_locale(person, record),
+            "locale": _resolved_locale(person, record, route),
         },
     }
 
@@ -856,7 +859,7 @@ def _conversation_state_context(
             target_kind=route.target_kind,
             target_name=route.target_name,
             by_kind=by_kind,
-            locale=_resolved_locale(person, intake),
+            locale=_resolved_locale(person, intake, route),
         ),
         actor=actor,
         turn_id=intake.message_id,

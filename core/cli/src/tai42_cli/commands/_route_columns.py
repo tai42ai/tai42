@@ -111,6 +111,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "callback_url",
             "turns_per_hour_override",
             "error_reply_text",
+            "locale",
             "execution_key_fingerprint",
         ),
     ),

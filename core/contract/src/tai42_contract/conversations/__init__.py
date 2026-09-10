@@ -685,6 +685,11 @@ class ConversationRouteCreate(BaseModel):
     # set. (No other text field in this file carries a max_length; 2000 is a defensible bound
     # for a single guest-facing reply.)
     error_reply_text: str | None = Field(default=None, min_length=1, max_length=2000)
+    # The operator-declared default locale for templated reply parts when the turn states none;
+    # the last fallback under a per-turn or stored-contact locale, canonicalized through the one
+    # locale seam (a malformed tag is rejected loudly, never guessed). ``None`` declares no
+    # route default.
+    locale: str | None = None
 
     @field_validator("route_name")
     @classmethod
@@ -701,6 +706,11 @@ class ConversationRouteCreate(BaseModel):
         if value is not None and not value.strip():
             raise ValueError("error_reply_text must be non-blank when set")
         return value
+
+    @field_validator("locale")
+    @classmethod
+    def _canonical_locale(cls, value: str | None) -> str | None:
+        return normalize_optional_locale(value)
 
     @model_validator(mode="after")
     def _check_target_fields(self) -> ConversationRouteCreate:

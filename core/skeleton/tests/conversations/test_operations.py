@@ -281,6 +281,45 @@ async def test_route_create_seam_persists_error_reply_text(wired):
     assert stored.error_reply_text == text
 
 
+async def test_route_create_seam_persists_locale(wired):
+    """The same extractor -> operation -> store seam carries the route's default ``locale``: a
+    body that sets it lands the canonicalized default on the stored row (and the public view),
+    and a body that omits it stores ``None`` (no route default)."""
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.operations.decorator import operation_metadata_of
+
+    with tai42_app.bound(instance.build_app()):
+        from tai42_skeleton.routers.conversations import _extract_route_create
+
+    op = operation_metadata_of(ops.create_conversation_route)
+    base = {
+        "door": "api",
+        "target_kind": "agent",
+        "target_name": "relay",
+        "execution_key": "svc",
+        "callback_url": "https://example.com/cb",
+    }
+
+    # Default path: body omits the locale; the stored row carries ``None``.
+    kwargs = await _extract_route_create(cast(Any, _FakeRouteRequest(dict(base), "chat")))
+    result = await op.func(**kwargs)
+    assert isinstance(result, dict)
+    assert result["created"] is True
+    assert wired.rows["chat"].locale is None
+
+    # Default path: a locale rides the body through the seam, is canonicalized, and persists.
+    kwargs_locale = await _extract_route_create(cast(Any, _FakeRouteRequest({**base, "locale": "he-il"}, "hebrew")))
+    result_locale = await op.func(**kwargs_locale)
+    assert isinstance(result_locale, dict)
+    assert result_locale["created"] is True
+    stored = await wired.get_route("hebrew")
+    assert stored is not None
+    assert stored.locale == "he-IL"
+    assert result_locale["route"]["locale"] == "he-IL"
+
+
 async def test_create_defaults_initial_mode_to_agent_and_surfaces_it(wired):
     result = await ops.create_conversation_route(
         route_name="chat",
