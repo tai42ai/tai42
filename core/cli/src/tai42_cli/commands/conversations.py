@@ -105,6 +105,13 @@ def create_route(
             help="Guest-facing reply sent when a turn on this route fails; unset uses the built-in default.",
         ),
     ] = None,
+    locale: Annotated[
+        str | None,
+        typer.Option(
+            "--locale",
+            help="Default BCP 47 locale for templated reply parts when a turn states none; unset means no default.",
+        ),
+    ] = None,
 ) -> None:
     """Create or replace a conversation route.
 
@@ -141,6 +148,8 @@ def create_route(
         body["turns_per_hour_override"] = turns_per_hour_override
     if error_reply_text is not None:
         body["error_reply_text"] = error_reply_text
+    if locale is not None:
+        body["locale"] = locale
     with ctx_obj.client() as client:
         data = client.post(f"/api/conversations/{seg(route_name)}", json=body)
     emit_result(ctx_obj, data)
