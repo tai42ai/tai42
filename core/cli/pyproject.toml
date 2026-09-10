@@ -34,7 +34,7 @@ dependencies = [
     "httpx>=0.28",
     # The notifications command adapts channel/interaction payloads through pydantic.
     "pydantic>=2.12",
-    # Bootstraps a local ``.env`` for the CLI (skipped under k8s config).
+    # Bootstraps a local ``.env`` for the CLI (skipped under a non-file config mode).
     "python-dotenv>=1.2",
 ]
 
