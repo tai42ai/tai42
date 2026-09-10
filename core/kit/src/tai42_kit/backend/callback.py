@@ -20,7 +20,7 @@ from tai42_contract.states import StateSubject
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.lc.signature_util import exclude_fastmcp_ctx_from_kwargs
-from tai42_kit.utils.schedule_subject import SCHEDULE_SUBJECT_ARG
+from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG, SCHEDULE_SUBJECT_ARG
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
 
@@ -58,7 +58,12 @@ async def prepare_backend_kwargs(
     can re-establish a ``schedule`` state context the anonymous/system fire otherwise loses;
     a submit wrapper passes ``scheduled=False`` and stamps nothing. The ``subject`` argument
     stays in ``kwargs`` (a flow reads ``.subject``, a state tool takes it as an explicit
-    override) — the stamp is the door signal, not a replacement."""
+    override) — the stamp is the door signal, not a replacement.
+
+    Also with ``scheduled=True``, a reserved top-level ``state_binding`` argument (the door
+    binding the create door injected) is re-stamped under :data:`SCHEDULE_STATE_BINDING_ARG`
+    and the raw key is POPPED — UNLIKE the subject, the binding must never reach the base
+    tool, so the worker fire is its only reader (tools stay pure)."""
     kwargs = exclude_fastmcp_ctx_from_kwargs(func, kwargs)
     kwargs[tool_name_arg] = tool_name
     kwargs[WORKER_SECRET_CAPABILITY_ARG] = caller_may_read_secrets()
@@ -66,6 +71,9 @@ async def prepare_backend_kwargs(
         subject = _parse_schedule_subject(kwargs.get("subject"))
         if subject is not None:
             kwargs[SCHEDULE_SUBJECT_ARG] = subject.model_dump()
+        state_binding = kwargs.pop("state_binding", None)
+        if state_binding is not None:
+            kwargs[SCHEDULE_STATE_BINDING_ARG] = state_binding
     return kwargs
 
 
