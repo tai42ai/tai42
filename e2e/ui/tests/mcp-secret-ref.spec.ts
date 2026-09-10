@@ -25,7 +25,7 @@
  *    masked key-reference chip. The honest observable of a paste is the generated key
  *    (asserted through the API) and the masked chip.
  */
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page, type Request } from '@playwright/test';
 import {
   apiHeaders,
   awaitMutation,
@@ -85,12 +85,71 @@ async function seedEntry(request: APIRequestContext, title: string, key: string)
   await seedEntryEnv(request, title, { [ENV_ENTRY]: key });
 }
 
+/**
+ * Settle once the studio shell's plugin load pass has finished. After the capability
+ * projection resolves, the shell's post-render effect lists `/api/plugins` and
+ * dynamic-imports each installed plugin's studio bundle
+ * (`/api/plugins/<name>/studio/<file>`); the pass completing pushes the plugins'
+ * contributions into the host store, and the connectors route re-renders off them —
+ * which REMOUNTS the seeded entry's SecretRefField and resets its local reveal state to
+ * hidden. A `Show value` click that lands against the pre-pass field is therefore
+ * dropped by that remount, and the field-visible check alone races it: the field paints
+ * from the manifest read BEFORE the pass runs. Track the plugin namespace's request
+ * lifecycle and settle once the listing has answered, no plugin request is in flight,
+ * and a grace has elapsed with none new — the imports have all landed and the route has
+ * taken its final shape. ARM before navigating; await after the page is up and before
+ * interacting with the field.
+ */
+function armPluginsLoaded(page: Page): () => Promise<void> {
+  const GRACE_MS = 1_000;
+  // The loader lists `/api/plugins` then imports `/api/plugins/<name>/studio/<file>`; the
+  // trailing `(?:$|[/?])` keeps the match to that namespace (never a `/api/plugins-x` sibling).
+  const isPluginReq = (url: string): boolean => /\/api\/plugins(?:$|[/?])/.test(url);
+  const isListing = (url: string): boolean => /\/api\/plugins(?:$|\?)/.test(url);
+  let listed = false;
+  let lastResponseAt = 0;
+  const inFlight = new Set<Request>();
+  const onRequest = (request: Request): void => {
+    if (isPluginReq(request.url())) inFlight.add(request);
+  };
+  // requestfinished fires when the body fully lands; requestfailed fires for a
+  // navigation-aborted/superseded fetch — both only clear the in-flight tracker.
+  const onSettled = (request: Request): void => {
+    if (!inFlight.delete(request)) return;
+    lastResponseAt = Date.now();
+    if (isListing(request.url())) listed = true;
+  };
+  page.on('request', onRequest);
+  page.on('requestfinished', onSettled);
+  page.on('requestfailed', onSettled);
+  return async () => {
+    // `finally` detaches the listeners even when the poll times out (throws), so a
+    // failing settle never leaks page listeners into the rest of the test.
+    try {
+      await expect
+        .poll(() => listed && inFlight.size === 0 && Date.now() - lastResponseAt >= GRACE_MS, {
+          timeout: 30_000,
+        })
+        .toBe(true);
+    } finally {
+      page.off('request', onRequest);
+      page.off('requestfinished', onSettled);
+      page.off('requestfailed', onSettled);
+    }
+  };
+}
+
 /** Open the Connectors page (the MCP config surface's new home) and wait for the entry's
  *  `leaf` SecretRefField. The nav refit folded the former Manifest → MCP tab into the
  *  Connectors page's inline "Configuration" section (default form view), so no tab click:
  *  the seeded entry's SecretRefField mounts directly once the page loads. */
 async function openMcpField(page: Page, leaf: string = ENV_ENTRY): Promise<void> {
+  const pluginsLoaded = armPluginsLoaded(page);
   await page.goto('/connectors');
+  // The field paints from the manifest read, but the studio's plugin load pass runs just
+  // after and remounts it (see armPluginsLoaded); wait that pass out before returning so
+  // the caller's interactions land on a field that will not remount underneath them.
+  await pluginsLoaded();
   await expect(page.getByTestId(`mcp-secret-0-${leaf}`)).toBeVisible();
 }
 
