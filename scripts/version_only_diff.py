@@ -79,9 +79,7 @@ def _path_is_version_only(path: str, diff: str) -> bool:
     if name == "tai-plugin.yml":
         lines = _changed_lines(diff)
         return bool(lines) and all(_DESCRIPTOR_VERSION.match(line) for line in lines)
-    if name == "CHANGELOG.md":
-        return True
-    return False
+    return name == "CHANGELOG.md"
 
 
 def is_version_only(changed: dict[str, str]) -> bool:
