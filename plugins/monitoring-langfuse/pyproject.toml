@@ -26,9 +26,9 @@ dependencies = [
     # The pure interface contract the plugin registers through — the Monitoring
     # protocols, the neutral data models, and the tai42_app handle.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=8.2,<9",
+    "tai42-contract>=9.0,<10",
     # TaiBaseSettings + the settings cache registry.
-    "tai42-kit>=3.12,<4",
+    "tai42-kit>=3.13,<4",
     # The Langfuse SDK. Pinned to a minor: sdk_internals.py reaches into private
     # SDK members that have no public equivalent, verified against this version.
     "langfuse~=4.0.6",
