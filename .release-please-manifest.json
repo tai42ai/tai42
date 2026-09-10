@@ -14,7 +14,6 @@
   "plugins/channel-twilio": "4.0.0",
   "plugins/channel-web": "5.0.0",
   "plugins/channel-whatsapp": "4.0.0",
-  "plugins/config-k8s": "1.1.3",
   "plugins/connector-atlassian": "2.0.3",
   "plugins/connector-github": "1.0.3",
   "plugins/connector-google": "2.0.3",
