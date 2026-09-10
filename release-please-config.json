@@ -211,23 +211,6 @@
         }
       ]
     },
-    "plugins/config-k8s": {
-      "package-name": "tai42-config-k8s",
-      "component": "tai42-config-k8s",
-      "skip-changelog": true,
-      "extra-files": [
-        {
-          "type": "yaml",
-          "path": "tai-plugin.yml",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "yaml",
-          "path": "src/tai42_config_k8s/tai-plugin.yml",
-          "jsonpath": "$.version"
-        }
-      ]
-    },
     "plugins/connector-atlassian": {
       "package-name": "tai42-connector-atlassian",
       "component": "tai42-connector-atlassian",

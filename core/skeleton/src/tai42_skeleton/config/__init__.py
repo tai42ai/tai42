@@ -2,10 +2,11 @@
 
 This package implements :class:`~tai42_contract.config.manager.ConfigManager` as a
 pluggable-provider feature. It ships the selection seam (``ConfigMode`` +
-``ConfigModeSettings`` + the ``ConfigManagerFactory`` mode-to-module map) and the
-default :class:`FileConfigManager`. Other providers (k8s, future vault) ship as
-separately-installed plugins exposing the same ``build_config_manager()``
-convention; the factory loads the selected one by dynamic import.
+``ConfigModeSettings`` + the ``ConfigManagerFactory`` naming convention) and the
+default :class:`FileConfigManager`. Other providers ship as separately-installed
+plugins exposing the same ``build_config_manager()`` convention; the factory
+resolves ``TAI_CONFIG_MODE`` to ``tai42_config_<mode>.manager`` and loads it by
+dynamic import.
 
 Usage::
 

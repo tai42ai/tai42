@@ -228,7 +228,7 @@ def test_read_provides_agent_entries_kept_name_and_module():
 def test_read_provides_config_kind_is_install_only_not_bootable():
     # A config provider is selected before the manifest loads; it cannot be mounted
     # into a boot, so it is recorded install-only and has no boot surface.
-    provides = gate.read_provides({"provides": [{"kind": "config", "name": "k8s", "module": "pkg_config.manager"}]})
+    provides = gate.read_provides({"provides": [{"kind": "config", "name": "vault", "module": "pkg_config.manager"}]})
     assert [kind for kind, _reason in provides.install_only] == ["config"]
     assert provides.install_only[0][1]  # a non-empty reason accompanies it
     assert provides.backend_module is None

@@ -7,16 +7,17 @@ reload, so three shapes require ``TAI_BUS_REDIS_URL``:
 * more than one server worker (siblings would diverge on a reload),
 * a task backend registered in the manifest (the backend-runtime and server
   processes must converge), and
-* ``TAI_CONFIG_MODE=k8s`` (multi-pod shared config — the replica count is
-  undetectable from inside one pod).
+* any non-``file`` config mode (an external provider serves shared config to
+  every instance, which must converge on a reload, and one instance cannot see
+  how many siblings share it).
 
 A single-worker, file-mode process with no backend is the supported busless shape
 and runs on :meth:`WorkerBus.local`.
 
-The k8s and workers checks read only boot-fixed env / args, so they run at the CLI
-BEFORE the config manager is constructed — a busless k8s boot then refuses naming
-``TAI_BUS_REDIS_URL`` rather than failing first on a kubeconfig connection. The
-backend check needs the manifest, so it also runs at the ``app_context`` seam that
+The shared-config and workers checks read only boot-fixed env / args, so they run
+at the CLI BEFORE the config manager is constructed — a busless shared-config boot
+then refuses naming ``TAI_BUS_REDIS_URL`` rather than failing first on the external
+provider's connection. The backend check needs the manifest, so it also runs at the ``app_context`` seam that
 both ``tai serve`` and ``tai backend`` cross, and re-runs there on every reload.
 """
 
@@ -25,7 +26,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from tai42_skeleton.app.bus_settings import bus_settings
-from tai42_skeleton.config.config_mode import config_mode
+from tai42_skeleton.config.config_mode import ConfigMode, config_mode
 
 if TYPE_CHECKING:
     from tai42_skeleton.manifest import Manifest
@@ -74,13 +75,15 @@ def require_bus_for_workers(workers: int) -> None:
         )
 
 
-def require_bus_for_k8s() -> None:
-    """Refuse a k8s-mode boot with no bus: k8s config mode exists for multi-pod
-    shared config, and a pod cannot see its own replica count."""
-    if config_mode() == "k8s" and not _bus_configured():
+def require_bus_for_shared_config() -> None:
+    """Refuse a shared-config boot with no bus: any non-``file`` config mode serves
+    shared config from an external provider, so instances must converge on a reload
+    and one instance cannot see how many siblings share the config."""
+    if config_mode() != ConfigMode.file and not _bus_configured():
         raise RuntimeError(
-            f"Refusing to start in k8s config mode without the worker bus: k8s mode exists for multi-pod "
-            f"shared config and the replica count is undetectable from inside one pod. Set {_BUS_VAR}."
+            f"Refusing to start in {config_mode()!r} config mode without the worker bus: an external "
+            f"config provider serves shared config that every instance must converge on after a reload, "
+            f"and the instance count is undetectable from inside one instance. Set {_BUS_VAR}."
         )
 
 

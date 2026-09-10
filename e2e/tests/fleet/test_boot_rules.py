@@ -130,12 +130,12 @@ def test_backend_manifest_without_bus_refuses(tmp_path: Path, argv_tail: list[st
     assert _UNREACHED_BACKEND in stderr, stderr
 
 
-def test_k8s_mode_without_bus_refuses_naming_the_setting(tmp_path: Path) -> None:
-    """A3: a ``TAI_CONFIG_MODE=k8s`` boot with no bus refuses naming the setting. The
-    check runs BEFORE the config manager is constructed, so the stderr carries the
-    bus-setting refusal and NO kubeconfig / ConfigMap connection error precedes it."""
+def test_shared_config_mode_without_bus_refuses_naming_the_setting(tmp_path: Path) -> None:
+    """A3: a non-file ``TAI_CONFIG_MODE`` (external provider) boot with no bus refuses
+    naming the setting. The check runs BEFORE the config manager is constructed, so the
+    stderr carries the bus-setting refusal and NO provider connection error precedes it."""
     config_dir, manifest = _seed_config(tmp_path, backend=False)
-    env = _busless_env(tmp_path, config_dir, manifest, config_mode="k8s")
+    env = _busless_env(tmp_path, config_dir, manifest, config_mode="external")
     argv = [
         tai_bin(),
         "serve",
@@ -149,12 +149,11 @@ def test_k8s_mode_without_bus_refuses_naming_the_setting(tmp_path: Path) -> None
         str(manifest),
     ]
     stderr = spawn_expect_refusal(argv, env, config_dir)
+    # The refusal names the bus var and the active mode, and — since it precedes
+    # config-manager construction — is a clean boot-rule refusal, not a provider
+    # import/connection error.
     assert _BUS_VAR in stderr, stderr
-    assert "k8s config mode" in stderr, stderr
-    # The check preceded config-manager construction: no kube/ConfigMap error leaked.
-    lowered = stderr.lower()
-    assert "configmap" not in lowered, stderr
-    assert "kubeconfig" not in lowered, stderr
+    assert "external" in stderr, stderr
 
 
 def test_factory_string_backend_without_bus_refuses(tmp_path: Path) -> None:

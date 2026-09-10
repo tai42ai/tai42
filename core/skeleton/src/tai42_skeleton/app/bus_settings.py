@@ -12,8 +12,8 @@ the ``TAI_BUS_REDIS_*`` env; feature values from ``TAI_BUS_*``.
 
 ``TAI_BUS_REDIS_URL`` unset means the bus is OFF — the single-worker/file-mode
 process runs on :meth:`WorkerBus.local`, and the boot rules name this var when they
-refuse a deployment that requires a bus (multi-worker, a registered backend, or
-``TAI_CONFIG_MODE=k8s``).
+refuse a deployment that requires a bus (multi-worker, a registered backend, or a
+non-file ``TAI_CONFIG_MODE``).
 
 Namespacing (``TAI_BUS_NAMESPACE``, default ``tai``) prefixes the control channel,
 every ephemeral reply channel, and every presence key. Redis pub/sub is

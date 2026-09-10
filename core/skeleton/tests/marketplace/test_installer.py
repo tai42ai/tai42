@@ -370,7 +370,7 @@ async def test_install_happy_step_order_manifest_response(monkeypatch: pytest.Mo
 async def test_install_config_item_contributes_a_note(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
-    spec = make_spec(provides=[{"kind": "config", "name": "k8s", "module": "pkg.config.k8s", "description": "d"}])
+    spec = make_spec(provides=[{"kind": "config", "name": "vault", "module": "pkg.config.vault", "description": "d"}])
     h.registry.resolved = make_resolved(spec)
     result = await h.installer().install("tai42/toolbox")
     assert any("TAI_CONFIG_MODE" in note for note in result["notes"])
@@ -795,7 +795,7 @@ async def test_uninstall_reloads_to_convergence_when_manifest_already_clean() ->
 
 async def test_uninstall_env_selected_only_plugin_takes_skip_path() -> None:
     h = Harness(manifest={})
-    spec = make_spec(provides=[{"kind": "config", "name": "k8s", "module": "pkg.config.k8s", "description": "d"}])
+    spec = make_spec(provides=[{"kind": "config", "name": "vault", "module": "pkg.config.vault", "description": "d"}])
     h.store.preload(spec, version="1.0.0")
     result = await h.installer().uninstall("tai42/toolbox")
     assert result["reload"] is None

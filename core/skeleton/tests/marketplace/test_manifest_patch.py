@@ -361,7 +361,7 @@ def test_remove_clears_a_scalar_still_holding_the_specs_package_root() -> None:
 
 
 def test_config_kind_is_a_no_op_everywhere() -> None:
-    spec = make_spec(provides=[_item("config", "k8s", "pkg.config.k8s")])
+    spec = make_spec(provides=[_item("config", "vault", "pkg.config.vault")])
     manifest: dict = {}
     assert collisions(manifest, spec) == []
     apply_provides(manifest, spec)

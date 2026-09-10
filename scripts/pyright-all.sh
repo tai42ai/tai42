@@ -37,7 +37,6 @@ plugins/channel-telegram|tai42-channel-telegram|
 plugins/channel-twilio|tai42-channel-twilio|
 plugins/channel-web|tai42-channel-web|
 plugins/channel-whatsapp|tai42-channel-whatsapp|
-plugins/config-k8s|tai42-config-k8s|
 plugins/identity-oidc|tai42-identity-oidc|--extra dev
 plugins/identity-redis|tai42-identity-redis|--extra dev
 plugins/monitoring-langfuse|tai42-monitoring-langfuse|

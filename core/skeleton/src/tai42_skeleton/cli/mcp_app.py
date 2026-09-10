@@ -15,8 +15,8 @@ from tai42_kit.utils.runtime.uvicorn_util import parse_and_validate_uvicorn_args
 
 from tai42_skeleton import asgi
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.boot_rules import require_bus_for_k8s, require_bus_for_workers
-from tai42_skeleton.config.config_mode import config_mode
+from tai42_skeleton.app.boot_rules import require_bus_for_shared_config, require_bus_for_workers
+from tai42_skeleton.config.config_mode import ConfigMode, config_mode
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.settings.cache import app_args_settings
@@ -228,12 +228,12 @@ def run_mcp_app(
             )
 
     # Worker-bus boot rules (fail loud, naming TAI_BUS_REDIS_URL). Run BEFORE any
-    # config-manager construction below, so a k8s-mode busless boot refuses on the
-    # bus var rather than failing first on a kubeconfig connection. The workers rule
+    # config-manager construction below, so a shared-config busless boot refuses on the
+    # bus var rather than failing first on the provider connection. The workers rule
     # lives only here in our CLI — an external process manager driving the ASGI
-    # factory with its own --workers bypasses it (a documented limitation); the k8s
-    # and backend rules also run at the app_context seam.
-    require_bus_for_k8s()
+    # factory with its own --workers bypasses it (a documented limitation); the
+    # shared-config and backend rules also run at the app_context seam.
+    require_bus_for_shared_config()
     require_bus_for_workers(workers)
 
     os.environ["TAI_MANIFEST_PATH"] = manifest_path
@@ -388,8 +388,8 @@ def cli(
     Worker-bus boot rules (set TAI_BUS_REDIS_URL to enable the bus):
       - more than one worker is refused without the bus — sibling workers would
         serve stale config after a reload with no channel to converge on;
-      - TAI_CONFIG_MODE=k8s is refused without the bus — a pod cannot see its own
-        replica count;
+      - a non-file TAI_CONFIG_MODE is refused without the bus — an external config
+        provider serves shared config and one instance cannot see its sibling count;
       - a manifest that registers a task backend is refused without the bus — the
         backend-runtime and server processes must converge on reloads.
     The workers rule lives in this CLI only: an external process manager driving
@@ -430,15 +430,15 @@ def cli(
 
 
 def main() -> None:
-    if config_mode() != "k8s":
+    if config_mode() == ConfigMode.file:
         load_dotenv()
 
     # Configure the root logger at process start, right after the env bootstrap, so
     # ``TAI_LOG_LEVEL`` from a local ``.env`` takes effect. Covers the master process,
     # the ``stdio`` path (``run_stdio``), and the debug path (``run_debug``);
     # ``basicConfig``'s default handler writes to stderr, never the stdout protocol
-    # stream. In k8s config mode ``load_dotenv`` is skipped but this still runs — the
-    # settings read the environment directly.
+    # stream. In a non-file config mode ``load_dotenv`` is skipped but this still runs
+    # — the settings read the environment directly.
     setup_logging(logging_settings())
 
     cli()

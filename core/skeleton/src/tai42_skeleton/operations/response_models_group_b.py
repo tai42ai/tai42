@@ -10,8 +10,6 @@ imported by the operations directly; this module holds the models local to group
 
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel
 from tai42_contract.app.responses import FanoutSummary
 from tai42_contract.connectors.models import StartConnectNoAuthResponse, StartConnectResponse
@@ -36,9 +34,10 @@ class EnvView(BaseModel):
 
 
 class ConfigModeView(BaseModel):
-    """The active config backend mode."""
+    """The active config backend mode: ``file`` (built in) or an external provider's
+    mode name."""
 
-    config_mode: Literal["file", "k8s"]
+    config_mode: str
 
 
 class SettingsGroupView(BaseModel):

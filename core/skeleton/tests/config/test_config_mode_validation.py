@@ -1,6 +1,7 @@
-"""ConfigModeSettings validation: a non-string or an unknown mode is rejected
-loudly, never coerced to a silent default. Also the cached ``config_mode``
-accessor for the k8s value."""
+"""ConfigModeSettings validation: the mode is used verbatim to resolve the provider
+module, so a non-string or an out-of-shape value is rejected loudly and a valid
+value is never normalized. An open (non-``file``) mode is accepted here and resolved
+to a plugin by the factory, not restricted to a fixed set."""
 
 from __future__ import annotations
 
@@ -14,21 +15,34 @@ def test_non_string_mode_raises() -> None:
         ConfigModeSettings(config_mode=123)  # type: ignore[arg-type]
 
 
-def test_unknown_string_mode_raises() -> None:
-    with pytest.raises(ValueError, match="Invalid TAI_CONFIG_MODE"):
-        ConfigModeSettings(config_mode="vault")  # pyright: ignore[reportArgumentType]
+def test_open_mode_is_accepted_verbatim() -> None:
+    # Any [a-z][a-z0-9_]* name is a valid mode; the factory resolves it to the
+    # tai42-config-<mode> plugin, so validation does not restrict it to a fixed set.
+    settings = ConfigModeSettings(config_mode="external")
+    assert settings.config_mode == "external"
 
 
-def test_known_mode_is_normalized() -> None:
-    # Stripped + lowercased before matching.
-    settings = ConfigModeSettings(config_mode="  K8S ")  # pyright: ignore[reportArgumentType]
-    assert settings.config_mode == ConfigMode.k8s
+def test_out_of_shape_mode_raises_not_normalized() -> None:
+    # Uppercase / surrounding whitespace is rejected loudly rather than silently
+    # lowered or stripped — the value must already be a usable module segment.
+    for bad in ("  external ", "Vault", "has-hyphen", ""):
+        with pytest.raises(ValueError, match="Invalid TAI_CONFIG_MODE"):
+            ConfigModeSettings(config_mode=bad)  # pyright: ignore[reportArgumentType]
 
 
-def test_config_mode_accessor_returns_k8s_string(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TAI_CONFIG_MODE", "k8s")
+def test_config_mode_accessor_returns_the_mode_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_CONFIG_MODE", "external")
     config_mode.cache_clear()
     try:
-        assert config_mode() == "k8s"
+        assert config_mode() == "external"
+    finally:
+        config_mode.cache_clear()
+
+
+def test_config_mode_default_is_the_builtin_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TAI_CONFIG_MODE", raising=False)
+    config_mode.cache_clear()
+    try:
+        assert config_mode() == ConfigMode.file == "file"
     finally:
         config_mode.cache_clear()

@@ -44,8 +44,9 @@ The six patch shapes:
   collision, as is one spec providing two distinct modules for the same slot.
 - ``env_selected`` (``config``) — no manifest field. A DECIDED no-op in all three
   functions: pip install/uninstall IS the whole registration, and activation goes
-  through the skeleton's fixed ``TAI_CONFIG_MODE`` → module map (a new config
-  provider needs a skeleton-side enum/map entry before any env var can select it).
+  through the skeleton's ``TAI_CONFIG_MODE`` naming convention (``file`` is built in;
+  any other mode resolves to the installed ``tai42-config-<mode>`` provider, so no
+  skeleton-side change is needed to select a newly installed one).
 
 An unknown item kind — contract drift past this repo's bindings — raises
 :class:`ManifestBindingError` naming it (a server-side 500), never a silently

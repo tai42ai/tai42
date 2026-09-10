@@ -379,7 +379,7 @@ class ConfigService:
            a persisted ``!ENV`` marker referencing an env key that is not yet stored (a
            marker that would silently resolve to ``"N/A"``); the reverse ordering would.
         3. Persist the manifest with the PURE ``mutator`` — it only edits the passed
-           document, so the k8s optimistic-concurrency REPLAY (re-read + re-run on a
+           document, so an external store's optimistic-concurrency REPLAY (re-read + re-run on a
            409) is side-effect-free and never double-writes the env, which is not
            inside the replayed span. Partial-failure contract: a manifest-persist
            failure (retries exhausted) performs **NO rollback** — the env write STANDS
@@ -410,7 +410,7 @@ class ConfigService:
             # STEP 1 — validate the combined change against the post-change effective env
             # (mutated manifest, X-band payload, dangling markers, backend-needs-bus). The
             # candidate is built OUTSIDE the store so the effective-env-dependent checks run
-            # BEFORE anything persists (the k8s transaction cannot resolve markers against the
+            # BEFORE anything persists (an external store's transaction cannot resolve markers against the
             # not-yet-live env, so validation cannot move inside it).
             preserved = self._read_preserved_manifest()
             candidate = copy.deepcopy(preserved)
@@ -429,7 +429,7 @@ class ConfigService:
             # STEP 3 — persist the manifest with a guarded, PURE, re-runnable mutator: it seals
             # the mutated document against its pre-mutation snapshot before persist (parity with
             # ``apply_change`` — a mutator can never bake a resolved secret to disk), and it edits
-            # only the passed document, so the k8s optimistic-concurrency REPLAY (re-read + re-run
+            # only the passed document, so an external store's optimistic-concurrency REPLAY (re-read + re-run
             # on a 409) is side-effect-free and never double-writes the env, which is outside the
             # replayed span. A persist failure performs NO rollback — the env write STANDS as
             # an inert, re-runnable orphan — and raises loudly naming the orphan key(s) + pointer.
@@ -437,7 +437,7 @@ class ConfigService:
                 current = copy.deepcopy(document)
                 mutator(document)
                 # Parity with ``apply_change.guarded``: re-validate the mutated document
-                # inside the transaction so a k8s optimistic-concurrency REPLAY against a
+                # inside the transaction so an external store's optimistic-concurrency REPLAY against a
                 # concurrently-changed manifest never persists an unvalidated result. ONE
                 # validator for every caller — the env-aware ``_validate_env_and_manifest``
                 # (``_validate_manifest`` would wrongly reject the just-written store key its

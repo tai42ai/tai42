@@ -1056,14 +1056,14 @@ def test_cli_known_error_becomes_click_exception(monkeypatch: pytest.MonkeyPatch
 def test_main_invokes_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list = []
     monkeypatch.setattr(mcp_app, "cli", lambda: called.append(True))
-    monkeypatch.setattr(mcp_app, "config_mode", lambda: "k8s")
+    monkeypatch.setattr(mcp_app, "config_mode", lambda: "external")
 
     mcp_app.main()
 
     assert called == [True]
 
 
-def test_main_bootstraps_env_when_not_k8s(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_bootstraps_env_in_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[bool] = []
     monkeypatch.setattr(mcp_app, "cli", lambda: None)
     monkeypatch.setattr(mcp_app, "config_mode", lambda: "file")
@@ -1074,10 +1074,10 @@ def test_main_bootstraps_env_when_not_k8s(monkeypatch: pytest.MonkeyPatch) -> No
     assert called == [True]
 
 
-def test_main_skips_env_bootstrap_in_k8s(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_skips_env_bootstrap_in_a_non_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[bool] = []
     monkeypatch.setattr(mcp_app, "cli", lambda: None)
-    monkeypatch.setattr(mcp_app, "config_mode", lambda: "k8s")
+    monkeypatch.setattr(mcp_app, "config_mode", lambda: "external")
     monkeypatch.setattr(mcp_app, "load_dotenv", lambda: called.append(True))
 
     mcp_app.main()
