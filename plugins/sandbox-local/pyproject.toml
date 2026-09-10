@@ -27,12 +27,12 @@ dependencies = [
     # the session/stream models, SandboxPolicy, the error family, PluginItemKind.SANDBOX,
     # and the tai42_app.sandboxes facet.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=8.2,<9",
+    "tai42-contract>=9.0,<10",
     # ManagedSandbox / ManagedSandboxSession (the ledger, TTL, reap, orphan-recovery
     # and the session-create policy chokepoint), SandboxDispatchSettings, and the
     # importable conformance suite. The floor names the first release carrying
     # `tai42_kit.sandbox`, which this provider builds on.
-    "tai42-kit>=3.12,<4",
+    "tai42-kit>=3.13,<4",
     # SettingsConfigDict / SecretStr for the settings model and the env credential
     # channel; imported directly, so declared directly rather than leaned on as a
     # transitive.

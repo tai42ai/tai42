@@ -26,9 +26,9 @@ dependencies = [
     # The pure interface contract — the Storage ABC, ObjectStat, assert_not_root,
     # and the tai42_app handle the backend registers through.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=8.2,<9",
+    "tai42-contract>=9.0,<10",
     # PooledClient + TaiBaseSettings + the settings cache registry.
-    "tai42-kit>=3.12,<4",
+    "tai42-kit>=3.13,<4",
     # The async S3 driver and its config/exception types (imported directly).
     "aioboto3>=15,<16",
     "botocore>=1.40,<1.41",
