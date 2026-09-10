@@ -40,6 +40,12 @@ the bump read the same way ``tai42_cli.api_gate`` reads it, the governing packag
 version against its previous released tag. Under a major bump the same failure is
 reported as an ACCEPTED break (a printed notice) rather than a gate failure.
 
+A consumer whose declared dependency range excludes the candidate cannot even be
+installed into the boot venv; the resolver's ``No solution found`` is the most
+explicit form of the same break and is classified identically — accepted under a
+major bump, a gate failure otherwise. Any other install failure (network, a bad
+wheel, a build error) is always a hard failure, never reclassified.
+
 Consumers come from two sources. Supplied ones are wheels (``--consumer-wheel``)
 or requirement specs (``--consumer-req``); the gate names no specific consumer, so
 it is agnostic to which distributions a deployment layers on the platform. The
@@ -889,11 +895,42 @@ def boot_consumer(
     return parse_boot_failure(log_path.read_text())
 
 
+# uv prints this exact line when a consumer's declared dependency range excludes the
+# candidate core, so the boot venv cannot be assembled — the most explicit form of a
+# consumer break, classified by the governing bump like a boot failure.
+_NO_SOLUTION_MARKER = "No solution found when resolving dependencies"
+
+
+class _ResolutionConflict(Exception):
+    """The boot venv install failed because uv found no dependency solution: a consumer's
+    requirement range excludes the candidate core. Carries the resolver output so the
+    caller classifies it by the governing bump."""
+
+    def __init__(self, resolver_stderr: str) -> None:
+        super().__init__(resolver_stderr)
+        self.resolver_stderr = resolver_stderr
+
+
+def _is_resolution_conflict(install_stderr: str) -> bool:
+    """True when an install failure is uv reporting no dependency solution (a consumer
+    range excluding the candidate), not a network, build or bad-wheel failure."""
+    return _NO_SOLUTION_MARKER in install_stderr
+
+
+def _resolver_conclusion(resolver_stderr: str) -> str:
+    """The resolver's own conclusion, from the ``No solution found`` line onward, quoted
+    verbatim in the accepted-break notice."""
+    idx = resolver_stderr.find(_NO_SOLUTION_MARKER)
+    return resolver_stderr[idx:].strip() if idx != -1 else resolver_stderr.strip()
+
+
 def _install_venv(
     repo_root: Path, core_dirs: list[str], identity_package: str, consumers: list[Consumer], venv: Path
 ) -> Path:
     """Create the boot venv and install the editable candidate core, the identity
-    provider, and every consumer into it. Returns the venv's ``bin`` dir."""
+    provider, and every consumer into it. Returns the venv's ``bin`` dir. A no-solution
+    resolution failure raises :class:`_ResolutionConflict` for the caller to classify by
+    the bump; any other install failure is a hard failure here."""
     subprocess.run(["uv", "venv", "--python", "3.13", str(venv)], cwd=repo_root, check=True, capture_output=True)
     venv_bin = venv / "bin"
     install_args = ["uv", "pip", "install", "--python", str(venv_bin / "python")]
@@ -904,8 +941,27 @@ def _install_venv(
     install_args += [consumer.install_arg for consumer in consumers]
     result = subprocess.run(install_args, cwd=repo_root, capture_output=True, text=True)
     if result.returncode != 0:
-        _fail(f"boot venv install failed: {result.stderr.strip()[-800:]}")
+        stderr = result.stderr.strip()[-800:]
+        if _is_resolution_conflict(stderr):
+            raise _ResolutionConflict(stderr)
+        _fail(f"boot venv install failed: {stderr}")
     return venv_bin
+
+
+def _report_unresolvable_consumers(header: str, bump: str, consumers: list[Consumer], resolver_stderr: str) -> None:
+    """Classify a boot-venv resolution conflict by the governing bump: under a major bump
+    report every supplied consumer as an accepted break (a notice quoting the resolver's
+    conclusion, the gate passes); otherwise fail with the resolver output, as any
+    unresolved install does."""
+    if not break_is_accepted(bump):
+        _fail(f"boot venv install failed: {resolver_stderr}")
+    names = ", ".join(consumer.label for consumer in consumers)
+    print(
+        f"::notice::{header}: {len(consumers)} consumer(s) cannot resolve against the candidate, "
+        f"ACCEPTED as a major-bump break: {names}"
+    )
+    print(f"  - {_resolver_conclusion(resolver_stderr)}")
+    print(f"{header}: accepted break under a major bump ({len(consumers)} unresolvable) — gate passes.")
 
 
 def _load_plugin_yaml(venv_bin: Path, dist_name: str) -> dict:
@@ -998,7 +1054,11 @@ def main() -> None:
     workdir = args.workdir.resolve() if args.workdir else Path(tempfile.mkdtemp(prefix="consumer-boot-"))
     workdir.mkdir(parents=True, exist_ok=True)
     infra = _infra_from_args(args)
-    venv_bin = _install_venv(repo_root, core_dirs, args.identity_package, consumers, workdir / "venv")
+    try:
+        venv_bin = _install_venv(repo_root, core_dirs, args.identity_package, consumers, workdir / "venv")
+    except _ResolutionConflict as conflict:
+        _report_unresolvable_consumers(header, bump, consumers, conflict.resolver_stderr)
+        return
 
     print(f"{header}: booting {len(consumers)} consumer(s) against the candidate core.")
     booted = 0

@@ -482,3 +482,76 @@ def test_non_lifecycle_failure_is_not_external_service():
     # No structured lifecycle line (an import/migrate failure): never install-only.
     failure = gate.parse_boot_failure("RuntimeError: the flow payload store is not configured\n")
     assert gate.is_external_service_only(failure) is False
+
+
+# ---------------------------------------------------- unresolvable-install verdict
+
+
+_NO_SOLUTION_STDERR = (
+    "No solution found when resolving dependencies:\n"
+    "  Because only some-consumer==0.44.0 is available and some-consumer==0.44.0 depends on\n"
+    "  tai42-contract>=8.1,<9, we can conclude that your requirements are unsatisfiable.\n"
+)
+
+
+def _fake_run_factory(install_returncode: int, install_stderr: str):
+    def _run(args, **kwargs):
+        if args[:2] == ["uv", "venv"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, install_returncode, "", install_stderr)
+
+    return _run
+
+
+def test_install_venv_raises_conflict_on_no_solution(tmp_path: Path, monkeypatch):
+    # uv's no-solution failure is a consumer range excluding the candidate: surfaced as a
+    # classifiable conflict, not a hard failure, so the caller can accept it under a major bump.
+    monkeypatch.setattr(gate.subprocess, "run", _fake_run_factory(1, _NO_SOLUTION_STDERR))
+    consumers = [
+        gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
+    ]
+    with pytest.raises(gate._ResolutionConflict) as excinfo:
+        gate._install_venv(tmp_path, ["core/contract"], "id-pkg", consumers, tmp_path / "venv")
+    assert "No solution found when resolving dependencies" in excinfo.value.resolver_stderr
+
+
+def test_install_venv_fails_on_non_resolution_error(tmp_path: Path, monkeypatch):
+    # A build/network error is a hard failure regardless of the bump — the bump is never
+    # consulted here, so a non-resolution failure can never be accepted as a major break.
+    monkeypatch.setattr(gate.subprocess, "run", _fake_run_factory(1, "error: failed to build wheel for some-consumer"))
+    consumers = [
+        gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
+    ]
+    with pytest.raises(SystemExit):
+        gate._install_venv(tmp_path, ["core/contract"], "id-pkg", consumers, tmp_path / "venv")
+
+
+def test_is_resolution_conflict_distinguishes_no_solution_from_other_errors():
+    assert gate._is_resolution_conflict(_NO_SOLUTION_STDERR) is True
+    assert gate._is_resolution_conflict("error: failed to build wheel for some-consumer") is False
+
+
+def test_report_unresolvable_major_bump_passes(capsys):
+    # A resolution conflict under a major bump: every supplied consumer is an accepted
+    # break, the resolver's conclusion is quoted, and the gate passes (no raise).
+    consumers = [
+        gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
+    ]
+    gate._report_unresolvable_consumers("gate: pkg 12.0.0 (major bump)", "major", consumers, _NO_SOLUTION_STDERR)
+    out = capsys.readouterr().out
+    assert "ACCEPTED as a major-bump break: some-consumer 0.44.0" in out
+    assert "accepted break under a major bump" in out
+    assert "gate passes" in out
+    assert "your requirements are unsatisfiable" in out
+
+
+def test_report_unresolvable_minor_bump_fails(capsys):
+    # The same conflict under a non-major bump fails, with the resolver output in the message.
+    consumers = [
+        gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
+    ]
+    with pytest.raises(SystemExit):
+        gate._report_unresolvable_consumers("gate: pkg 11.5.0 (minor bump)", "minor", consumers, _NO_SOLUTION_STDERR)
+    err = capsys.readouterr().err
+    assert "boot venv install failed" in err
+    assert "No solution found when resolving dependencies" in err
