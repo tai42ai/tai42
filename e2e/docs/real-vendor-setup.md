@@ -34,9 +34,6 @@ the dedicated e2e creds host, not in CI. The seams that step aside:
   the fixture `client_id`.
 - `oidc` — the `OAuthIdp`-stub login / issuer-JWT legs (`github-login` has **no
   mock leg to step aside**: it is a real-only additive OIDC provider).
-- `k8s` — the fake-apiserver ConfigMap/Secret round-trip (`test_config_k8s_stack.py`)
-  steps aside; its real leg (`test_config_k8s_real_branch.py`) proves the real-cluster
-  wiring is READY without needing a live cluster in CI.
 - `marketplace-pypi` — steps the **entire** marketplace suite aside (opt-in behind
   `TAI_E2E_MARKETPLACE=1`): the shared `marketplace_service` fixture seeds a forged
   fixture catalog through the real seed+ingest pipeline, which can't resolve those
@@ -194,7 +191,6 @@ dashboard registration and no inbound webhook. Set the vars and run.
 | `langfuse` | `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` |
 | `storage-s3` | `STORAGE_S3_BUCKET`, `_REGION`, `_ACCESS_KEY`, `_SECRET_KEY`, `_ENDPOINT`, `_ADDRESSING_STYLE`, `_REQUEST_CHECKSUM_CALCULATION` — **also set `TAI_E2E_STORAGE=s3-real`** |
 | `storage-github` | `STORAGE_GITHUB_USERNAME`, `_REPO`, `_BRANCH`, `_TOKEN` — **also set `TAI_E2E_STORAGE=github-real`** |
-| `k8s` | `KUBECONFIG`, `TAI_K8S_NAMESPACE` — before the run, seed that namespace with a ConfigMap `tai-manifest` (its `manifest.yml` key holds the stack manifest) and a Secret `tai-env`; the real leg reads/patches those exact names there, not the fake leg's `e2e` |
 | `marketplace-pypi` | none — reads real pypi.org anonymously (toggles independently of `marketplace-github`) |
 | `stripe` (outbound-only) | `STRIPE_SECRET_KEY` — create/list + reconciler recover without the webhook |
 

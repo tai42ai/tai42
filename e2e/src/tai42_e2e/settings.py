@@ -187,11 +187,6 @@ REAL_SERVICES: dict[str, RealService] = {
         required_env=("GITHUB_LOGIN_CLIENT_ID", "GITHUB_LOGIN_CLIENT_SECRET"),
         inbound=True,
     ),
-    # The real leg runs against the operator's managed cluster: KUBECONFIG addresses
-    # it and TAI_K8S_NAMESPACE names the namespace the operator seeded the
-    # ConfigMap/Secret in (the hermetic fake-apiserver leg pins its own ``e2e``
-    # namespace and needs neither).
-    "k8s": RealService(required_env=("KUBECONFIG", "TAI_K8S_NAMESPACE"), inbound=False),
     "langfuse": RealService(
         required_env=("LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"),
         inbound=False,

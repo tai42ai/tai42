@@ -17,9 +17,9 @@ same real component store the profile/preset doors exercise:
 
 The remaining combined-op items are authoritative at skeleton-unit level, where the
 required fault injection lives (not reproducible over the live file-mode store):
-NO-ROLLBACK orphan+report (b) and k8s-409 replay purity (g) need a forced manifest-persist
-failure / a fake-K8s 409 harness — ``core/skeleton/tests/config/test_service.py``
-(``..._manifest_failure_leaves_orphan_no_rollback``, ``..._k8s_409_replay_writes_env_once``);
+NO-ROLLBACK orphan+report (b) and external-store-409 replay purity (g) need a forced
+manifest-persist failure / a fake external-store 409 harness — ``core/skeleton/tests/config/test_service.py``
+(``..._manifest_failure_leaves_orphan_no_rollback``, ``..._external_store_409_replay_writes_env_once``);
 dangling-``!ENV`` refusal (e) and the generated-key REGISTERED-shadow avoidance —
 ``core/skeleton/tests/routers/test_manifest.py`` and ``tests/config/test_boundary.py``.
 """
