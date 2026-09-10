@@ -298,11 +298,13 @@ def test_dotenv_loads_when_config_mode_file_or_unset(monkeypatch: pytest.MonkeyP
     assert calls == [1, 1]
 
 
-def test_dotenv_skipped_under_k8s_after_normalization(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dotenv_skipped_under_a_non_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
     group = _probe_group(monkeypatch, calls)
 
-    for value in ("k8s", "K8S", " k8s "):
+    # Any valid non-file mode names an external provider that injects env directly, so
+    # the local .env load is skipped. The value is used verbatim — never normalized.
+    for value in ("external", "vault"):
         monkeypatch.setenv("TAI_CONFIG_MODE", value)
         result = CliRunner().invoke(group, ["probe"])
         assert result.exit_code == 0, result.output
@@ -310,14 +312,16 @@ def test_dotenv_skipped_under_k8s_after_normalization(monkeypatch: pytest.Monkey
     assert calls == []
 
 
-def test_invalid_config_mode_raises_naming_var_and_values(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_out_of_shape_config_mode_raises_naming_the_var(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
     group = _probe_group(monkeypatch, calls)
 
-    monkeypatch.setenv("TAI_CONFIG_MODE", "bogus")
-    result = CliRunner().invoke(group, ["probe"])
+    # Uppercase / surrounding whitespace / a non-segment value is rejected loudly
+    # rather than silently normalized — the mode must already be a usable module segment.
+    for value in ("VAULT", " file ", "has-hyphen"):
+        monkeypatch.setenv("TAI_CONFIG_MODE", value)
+        result = CliRunner().invoke(group, ["probe"])
+        assert result.exit_code != 0, result.output
+        assert "TAI_CONFIG_MODE" in result.output
 
-    assert result.exit_code != 0
-    assert "TAI_CONFIG_MODE" in result.output
-    assert "file, k8s" in result.output
     assert calls == []

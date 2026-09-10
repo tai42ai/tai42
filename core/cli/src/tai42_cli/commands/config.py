@@ -148,7 +148,7 @@ def reload_config(
 @app.command("mode")
 @covers(("GET", "/api/config/mode"))
 def config_mode(ctx: typer.Context) -> None:
-    """Read the active config backend mode (file / k8s).
+    """Read the active config backend mode (``file`` or an external provider's mode).
 
     Example: ``tai config mode``
     """
