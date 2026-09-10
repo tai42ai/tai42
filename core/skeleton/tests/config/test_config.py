@@ -1,8 +1,8 @@
 """Tests for the config provider seam.
 
-Covers the factory's mode-to-module map and dynamic-import dispatch, the
-string-literal (no static import) k8s entry, and the file provider's contract
-conformance.
+Covers the factory's built-in/convention provider resolution and dynamic-import
+dispatch, that importing the factory pulls in no provider plugin, and the file
+provider's contract conformance.
 """
 
 import importlib
@@ -44,22 +44,24 @@ def test_file_provider_module_exposes_build_config_manager() -> None:
     assert isinstance(manager, FileConfigManager)
 
 
-def test_mode_module_map_holds_k8s_as_string_literal() -> None:
-    """The k8s entry is a string module name, never a statically imported module."""
-    k8s_entry = factory_mod._PROVIDER_MODULES["k8s"]
-    assert isinstance(k8s_entry, str)
-    assert k8s_entry.startswith("tai42_config_k8s")
+def test_provider_module_resolves_builtins_and_convention() -> None:
+    """``file`` is built into the skeleton; every other mode resolves by convention
+    to ``tai42_config_<mode>.manager``, naming no plugin in the factory."""
+    assert factory_mod._provider_module("file") == "tai42_skeleton.config.file_manager"
+    assert factory_mod._provider_module("external") == "tai42_config_external.manager"
+    assert factory_mod._provider_module("vault") == "tai42_config_vault.manager"
 
 
-def test_factory_does_not_statically_import_k8s_plugin() -> None:
-    """Importing the factory must not transitively pull in the k8s plugin — proven
-    in a clean interpreter so the check is independent of ambient imports (under a
-    shared venv another package may already have imported the plugin in-process)."""
+def test_factory_imports_no_provider_plugin() -> None:
+    """Importing the factory pulls in no config provider plugin — proven in a clean
+    interpreter so the check is independent of ambient imports (under a shared venv
+    another package may already have imported a provider in-process)."""
     result = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import sys, tai42_skeleton.config.factory\nassert 'tai42_config_k8s' not in sys.modules\n",
+            "import sys, tai42_skeleton.config.factory\n"
+            "assert not [m for m in sys.modules if m.startswith('tai42_config_')]\n",
         ],
         capture_output=True,
         text=True,
@@ -67,25 +69,11 @@ def test_factory_does_not_statically_import_k8s_plugin() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_unknown_mode_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unmapped mode raises ValueError rather than silently defaulting."""
-    monkeypatch.setitem(factory_mod._PROVIDER_MODULES, "file", "tai42_skeleton.config.file_manager")
+def test_absent_provider_mode_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mode whose provider plugin is not installed raises ImportError loudly rather
+    than degrading to a default provider."""
     monkeypatch.setattr(factory_mod, "config_mode", lambda: "vault")
-    with pytest.raises(ValueError, match="Unknown config mode 'vault'"):
-        ConfigManagerFactory.create()
-
-
-def test_k8s_mode_raises_import_error_when_plugin_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Selecting ``k8s`` without the ``tai42-config-k8s`` plugin installed raises
-    ImportError loudly rather than degrading to a default provider.
-
-    Absence is simulated deterministically by masking the plugin's modules in
-    ``sys.modules``, so the ImportError path is exercised whether or not the plugin
-    happens to be installed in the ambient venv."""
-    monkeypatch.setattr(factory_mod, "config_mode", lambda: "k8s")
-    for name in ("tai42_config_k8s", "tai42_config_k8s.manager"):
-        monkeypatch.setitem(sys.modules, name, None)
-    with pytest.raises(ImportError):
+    with pytest.raises(ImportError, match="config mode 'vault'"):
         ConfigManagerFactory.create()
 
 

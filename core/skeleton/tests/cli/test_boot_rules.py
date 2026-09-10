@@ -3,12 +3,13 @@
 * more than one server worker (siblings would serve stale config after a reload),
 * a task backend registered in the manifest (server + backend-runtime must
   converge), and
-* ``TAI_CONFIG_MODE=k8s`` (multi-pod shared config).
+* any non-``file`` config mode (an external provider serves shared config).
 
 Every refusal names ``TAI_BUS_REDIS_URL`` so the operator knows the fix, and the
-k8s check runs BEFORE any config-manager construction so a busless k8s boot fails
-on the bus var rather than first on a kubeconfig connection. The single-worker,
-file-mode, no-backend, no-bus shape is supported and runs on ``WorkerBus.local``.
+shared-config check runs BEFORE any config-manager construction so a busless
+shared-config boot fails on the bus var rather than first on the provider's
+connection. The single-worker, file-mode, no-backend, no-bus shape is supported and
+runs on ``WorkerBus.local``.
 """
 
 from __future__ import annotations
@@ -99,38 +100,38 @@ def test_no_backend_busless_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     boot_rules.require_bus_for_backend(cast("Manifest", _Manifest("")))
 
 
-# -- k8s rule (fails on the bus var, BEFORE any kubeconfig connection) --------
+# -- shared-config rule (any non-file mode; fails on the bus var, BEFORE the
+#    external provider is ever contacted) ---------------------------------------
 
 
-def test_k8s_mode_busless_refuses_on_the_bus_var_not_kubeconfig(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TAI_CONFIG_MODE", "k8s")
+def test_shared_config_mode_busless_refuses_on_the_bus_var_not_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_CONFIG_MODE", "external")
     _busless(monkeypatch)
     with pytest.raises(RuntimeError) as exc:
-        boot_rules.require_bus_for_k8s()
+        boot_rules.require_bus_for_shared_config()
     message = str(exc.value)
-    # The refusal names the bus var and never mentions kubeconfig — the check runs
-    # before the config manager is ever constructed.
+    # The refusal names the bus var and the active mode, and runs before the config
+    # manager is ever constructed — so it never reflects a provider connection error.
     assert "TAI_BUS_REDIS_URL" in message
-    assert "kubeconfig" not in message.lower()
-    assert "configmap" not in message.lower()
+    assert "external" in message
 
 
-def test_k8s_mode_with_bus_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TAI_CONFIG_MODE", "k8s")
+def test_shared_config_mode_with_bus_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_CONFIG_MODE", "external")
     _with_bus(monkeypatch)
-    boot_rules.require_bus_for_k8s()
+    boot_rules.require_bus_for_shared_config()
 
 
 def test_file_mode_busless_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TAI_CONFIG_MODE", "file")
     _busless(monkeypatch)
-    boot_rules.require_bus_for_k8s()
+    boot_rules.require_bus_for_shared_config()
 
 
-def test_run_mcp_app_k8s_busless_raises_on_the_bus_var_before_kubeconfig(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A busless k8s-mode `tai serve` boot refuses naming TAI_BUS_REDIS_URL, never a
-    # kubeconfig/connection error — the check precedes config-manager construction.
-    monkeypatch.setenv("TAI_CONFIG_MODE", "k8s")
+def test_run_mcp_app_shared_config_busless_raises_on_the_bus_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A busless shared-config `tai serve` boot refuses naming TAI_BUS_REDIS_URL — the
+    # check precedes config-manager construction, so no provider is contacted first.
+    monkeypatch.setenv("TAI_CONFIG_MODE", "external")
     _busless(monkeypatch)
     with pytest.raises(RuntimeError) as exc:
         mcp_app.run_mcp_app(

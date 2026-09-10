@@ -10,10 +10,10 @@ from tai42_kit.logging import logging_settings, setup_logging
 from tai42_kit.signals import signal_chain
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_k8s
+from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_shared_config
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.backend.settings import base_backend_settings
-from tai42_skeleton.config.config_mode import config_mode
+from tai42_skeleton.config.config_mode import ConfigMode, config_mode
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
 
 logger = logging.getLogger(__name__)
@@ -36,9 +36,9 @@ async def run_backend(extra_args):
     signal_chain.add(signal.SIGTERM, main_task.cancel, name="backend-main-task-cancel")
 
     # Worker-bus boot rule (fail loud, naming TAI_BUS_REDIS_URL). Run BEFORE the app
-    # (and its config manager) is built, so a k8s-mode busless backend refuses on the
-    # bus var rather than failing first on a kubeconfig connection.
-    require_bus_for_k8s()
+    # (and its config manager) is built, so a shared-config busless backend refuses on
+    # the bus var rather than failing first on the external provider's connection.
+    require_bus_for_shared_config()
 
     # Obtained after ``main``'s env bootstrap so access-control settings reflect
     # a local ``.env`` rather than a pre-bootstrap default.
@@ -92,7 +92,7 @@ async def run_backend(extra_args):
 @click.command("backend", context_settings={"ignore_unknown_options": True})
 @click.option(
     "--manifest-path",
-    help="Path to a YAML manifest file (file mode only; ignored in K8s mode).",
+    help="Path to a YAML manifest file (file mode only; ignored under a non-file config mode).",
     default=None,
     show_default=True,
 )
@@ -105,10 +105,10 @@ def main(ctx, manifest_path, extra_args):
     A backend runtime always registers a task backend, so it requires the worker
     bus — set TAI_BUS_REDIS_URL. The backend-runtime and server processes must
     converge on config reloads, so a busless backend is refused at boot (and again
-    on any reload that would leave a backend without the bus). TAI_CONFIG_MODE=k8s
-    is likewise refused without the bus.
+    on any reload that would leave a backend without the bus). A non-file
+    TAI_CONFIG_MODE is likewise refused without the bus.
     """
-    if config_mode() != "k8s":
+    if config_mode() == ConfigMode.file:
         load_dotenv()
 
     # Configure the root logger at process start, right after the env bootstrap, so

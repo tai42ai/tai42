@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 from tai42_kit.logging import logging_settings, setup_logging
 
-from tai42_skeleton.config.config_mode import config_mode
+from tai42_skeleton.config.config_mode import ConfigMode, config_mode
 from tai42_skeleton.routers.metrics_settings import activate_multiproc_env, metrics_settings
 
 
@@ -46,7 +46,7 @@ def create_app() -> FastAPI:
 @click.option("--port", default=None, type=int, help="Port to run the server on")
 def main(host: str | None, port: int | None):
     """Serve the Prometheus metrics endpoint."""
-    if config_mode() != "k8s":
+    if config_mode() == ConfigMode.file:
         load_dotenv()
 
     # Configure the root logger at process start, right after the env bootstrap, so

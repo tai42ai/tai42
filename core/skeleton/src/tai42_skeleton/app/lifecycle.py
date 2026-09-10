@@ -24,7 +24,7 @@ from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.store.store_registry import store_registry
 from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
-from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_k8s
+from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_shared_config
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.bus_settings import bus_settings
 from tai42_skeleton.app.epoch import current_epoch, current_epoch_or_none, is_epoch_rebuild_in_progress
@@ -511,10 +511,10 @@ class TaiMCPLifecycleMixin(ABC):
     @asynccontextmanager
     async def app_context(self, manifest: Manifest, *, kind: WorkerKind = WorkerKind.serve):
         # Bus/boot invariant at the one seam both `tai serve` and `tai backend`
-        # cross: a process with a registered backend, or a k8s-mode deployment, must
-        # have the worker bus configured — otherwise sibling workers or sibling pods
+        # cross: a process with a registered backend, or a shared-config deployment,
+        # must have the worker bus configured — otherwise sibling workers or instances
         # serve stale config after a reload. Refuse loudly before the app starts.
-        require_bus_for_k8s()
+        require_bus_for_shared_config()
         require_bus_for_backend(manifest)
         from tai42_skeleton.app.epoch import clear_epoch, current_epoch_or_none, install_boot_core
 
@@ -1038,7 +1038,7 @@ class TaiMCPLifecycleMixin(ABC):
         # Reload-time re-check of the backend-needs-bus invariant, BEFORE the
         # registries rebuild: a reload whose new manifest registers a backend while
         # the bus is unconfigured is refused here (an env-materialized backend or an
-        # out-of-band manifest edit). The k8s rule is boot-fixed env, no reload twin.
+        # out-of-band manifest edit). The shared-config rule is boot-fixed env, no reload twin.
         require_bus_for_backend(manifest)
         self.start(manifest)
         self._run_blocking(lambda: self._run_handlers(self._epoch_handlers(), raise_on_error=True))

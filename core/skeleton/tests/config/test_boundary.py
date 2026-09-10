@@ -22,10 +22,10 @@ Three refusals guard every env / manifest writer:
 
 The union-covers-inventory oracle imports the core settings groups so half (a)
 is populated, then asserts ``x_band_env_keys()`` covers every design-listed X
-row. The K8s provider's ``TAI_K8S_*`` group registers only where the (separately
-installed) ``tai42-config-k8s`` plugin is imported, so its coverage is pinned in
-that plugin's own suite (``plugins/config-k8s/tests/test_settings.py``); the
-registry-driven mechanism test here proves any ``excluded`` field is folded in.
+row. An externally-installed config provider's ``excluded`` group registers only
+where that plugin is imported, so its coverage is pinned in that plugin's own
+suite; the registry-driven mechanism test here proves any ``excluded`` field is
+folded in the moment its settings module is imported.
 """
 
 from __future__ import annotations
@@ -328,8 +328,8 @@ def test_registered_env_var_names_covers_x_band_and_a_known_hot_var() -> None:
 # ---------------------------------------------------------------------------
 
 # Half (a) on the booted core (registry ``excluded`` fields), verified by symbol
-# against the current checkout. TAI_K8S_* is intentionally NOT here — its group
-# registers only where the config-k8s plugin is imported (pinned in that suite).
+# against the current checkout. An externally-installed provider's group is NOT
+# here — it registers only where that plugin is imported (pinned in its own suite).
 _CORE_EXCLUDED_INVENTORY = frozenset(
     {
         "TAI_CONFIG_MODE",
@@ -363,8 +363,8 @@ def test_core_excluded_fields_are_registered_after_boot() -> None:
 def test_every_registered_excluded_field_is_in_the_union() -> None:
     # The registry-driven guarantee: any field whose reload_class resolves to
     # ``excluded`` (with a non-empty env_var) is folded into the X band. This is the
-    # mechanism that picks up a provider group (e.g. the k8s TAI_K8S_* fields) the
-    # moment its settings module is imported.
+    # mechanism that picks up an externally-installed provider's group the moment its
+    # settings module is imported.
     for info in registered_settings():
         for field in info.fields:
             if field.reload_class == "excluded" and field.env_var:

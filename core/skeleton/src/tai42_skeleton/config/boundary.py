@@ -78,8 +78,8 @@ def excluded_env_var_names() -> frozenset[str]:
 
     Sourced from :func:`~tai42_kit.settings.registered_settings`, so it reflects
     only the settings classes IMPORTED into the process — a caller that needs the
-    full set (e.g. the K8s provider's ``TAI_K8S_*`` group) must boot / import the
-    settings modules first."""
+    full set (including an externally-installed provider's ``excluded`` group) must
+    boot / import the settings modules first."""
     return frozenset(
         field.env_var
         for info in registered_settings()

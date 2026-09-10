@@ -122,8 +122,8 @@ plugin.** Nothing about it is registrable, swappable, or user-selectable; there 
 exactly one bus and no manifest field chooses an implementation. It is configured
 only by environment: set `TAI_BUS_REDIS_URL` (plus the optional `TAI_BUS_*` knobs)
 to turn it on. A single-worker, file-mode, no-backend deployment needs no bus and
-runs on a no-op local variant; a multi-worker, backend-bearing, or `k8s`-mode boot
-refuses to start without one, naming `TAI_BUS_REDIS_URL`. On a shared Redis,
+runs on a no-op local variant; a multi-worker, backend-bearing, or non-file
+config-mode boot refuses to start without one, naming `TAI_BUS_REDIS_URL`. On a shared Redis,
 `TAI_BUS_NAMESPACE` must diverge per stack — Redis pub/sub is server-global, so
 co-tenant deployments would otherwise cross-talk.
 

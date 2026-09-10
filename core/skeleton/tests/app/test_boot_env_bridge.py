@@ -14,7 +14,6 @@ paths' precedence is bit-identical.
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import os
 
@@ -91,41 +90,6 @@ def test_bridged_var_survives_into_app_context(monkeypatch):
             assert "BOOT_ONLY" in epoch_mod._loaded_env_keys
 
     asyncio.run(run())
-
-
-def test_k8s_secret_env_is_bridged_at_boot(monkeypatch):
-    """The k8s-mode config manager path: a var stored in the K8s Secret is decoded,
-    bridged into ``os.environ``, and its manifest marker resolves — the boot bridge is
-    polymorphic over the active config manager."""
-    # The k8s client is the plugin's optional ``k8s`` extra, absent from the
-    # skeleton dev closure; skip rather than error when it is not installed.
-    pytest.importorskip("kubernetes")
-    from pathlib import Path
-
-    from kubernetes import client  # pyright: ignore[reportMissingImports]
-    from tai42_config_k8s import settings as settings_mod  # pyright: ignore[reportMissingImports]
-    from tai42_config_k8s.manager import K8sConfigManager  # pyright: ignore[reportMissingImports]
-
-    monkeypatch.delenv("MYTOKEN", raising=False)
-    # No service-account file -> the settings resolve the default namespace.
-    monkeypatch.setattr(settings_mod, "_SA_NAMESPACE_PATH", Path("/nonexistent/tai-sa-namespace"))
-    reset_all_settings()
-
-    class _FakeCoreApi:
-        def read_namespaced_secret(self, name: str, namespace: str) -> client.V1Secret:
-            data = {"MYTOKEN": base64.b64encode(b"k8s-real").decode("utf-8")}
-            return client.V1Secret(data=data, metadata=client.V1ObjectMeta(name=name))
-
-    manager = K8sConfigManager()
-    manager._core_api = _FakeCoreApi()  # type: ignore[attr-defined]
-    monkeypatch.setattr(manager, "read_manifest", lambda: parse_config(data=_MCP_MARKER_MANIFEST))
-    monkeypatch.setattr(manager, "read_manifest_preserved", lambda: load_manifest(_MCP_MARKER_MANIFEST))
-    monkeypatch.setattr(app, "_config_manager", manager)
-
-    manifest = app.lifecycle.read_boot_manifest()
-
-    assert os.environ["MYTOKEN"] == "k8s-real"
-    assert manifest.mcp_map["svc"].config.headers["Authorization"] == "k8s-real"
 
 
 def test_marker_dangling_nowhere_warns_and_boot_proceeds(monkeypatch, caplog):

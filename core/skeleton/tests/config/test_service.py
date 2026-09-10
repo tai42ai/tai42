@@ -88,7 +88,7 @@ class FakeConfigStore:
 
 
 class RetryingConfigStore(FakeConfigStore):
-    """A store that re-runs the mutator (as the k8s optimistic-concurrency retry does)
+    """A store that re-runs the mutator (as an external store's optimistic-concurrency retry does)
     before persisting, so a test can prove the guarded mutator is re-runnable."""
 
     def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
@@ -473,7 +473,7 @@ async def test_apply_env_change_writes_reloads_broadcasts(monkeypatch: pytest.Mo
 
 def _secret_marker_mutator(var: str) -> Callable[[dict[str, Any]], None]:
     """A pure mutator that writes an ``!ENV ${var}`` marker into a fresh MCP entry —
-    the shape ``set_mcp_secret_env`` produces (re-runnable, k8s-409-replay-safe)."""
+    the shape ``set_mcp_secret_env`` produces (re-runnable, external-store-409-replay-safe)."""
 
     def mutator(document: dict[str, Any]) -> None:
         document["mcp"] = [
@@ -552,8 +552,8 @@ async def test_apply_env_and_change_manifest_failure_leaves_orphan_no_rollback(
     assert admin.calls == 0
 
 
-async def test_apply_env_and_change_k8s_409_replay_writes_env_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The k8s optimistic-concurrency retry re-runs the manifest mutator (RetryingConfigStore
+async def test_apply_env_and_change_external_store_409_replay_writes_env_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An external store's optimistic-concurrency retry re-runs the manifest mutator (RetryingConfigStore
     # discards a first attempt). The env write is OUTSIDE that replayed span, so it happens
     # exactly once — env + manifest stay consistent on a 409 replay, no double env write.
     _no_bus(monkeypatch)

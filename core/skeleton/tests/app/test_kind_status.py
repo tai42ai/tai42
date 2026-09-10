@@ -330,10 +330,10 @@ def test_config_default_for_file_mode(bound_app, monkeypatch: pytest.MonkeyPatch
 
 
 def test_config_active_for_non_file_mode(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "config_mode", lambda: "k8s")
+    monkeypatch.setattr(ks, "config_mode", lambda: "external")
     row = _row("config")
     assert row.state == "active"
-    assert row.detail == "mode: k8s"
+    assert row.detail == "mode: external"
 
 
 # -- studio plugins ------------------------------------------------------------
