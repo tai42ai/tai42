@@ -68,7 +68,7 @@ cannot express rather than downgrading it.
   another worker still references it.
 
 The persistent store is backed by REAL block storage provisioned at the
-tai-distribution layer (a PVC on the chart, a named docker volume on compose). If
+tai-distribution layer (a named docker volume on compose). If
 that layer does not present durable, node-independent volume storage, a persistent
 session's data does not actually survive a node move. See the tai-docs operate page
 for the deployment topology.
