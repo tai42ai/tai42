@@ -4,7 +4,7 @@ half of the state feature.
 Holds a :class:`~tai42_skeleton.states.store.PostgresStatesStore`; every door refuses
 loudly (:class:`~tai42_contract.states.errors.StatesNotConfiguredError`, 501) while the
 ``states`` component's database is unbound. The service owns subject validation (the
-``person`` kind against the identity store), the effective-schema composer, the module
+``person`` kind against the identity store), the effective-schema composer, the template
 lifecycle, and the WRITE-PROVENANCE CHOKEPOINT: it completes a consumer's
 :class:`~tai42_contract.states.WriteOrigin` into a
 :class:`~tai42_contract.states.CompletedOrigin` — stamping ``door``/``actor``/``turn_id``
@@ -27,43 +27,45 @@ from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import unquote
 
 if TYPE_CHECKING:
-    from tai42_skeleton.states.seeds import StateModuleSeedRegistry
+    from tai42_skeleton.states.seeds import StateTemplateSeedRegistry
 
 import jsonschema
 import referencing.exceptions
 from jsonschema import Draft202012Validator
 from psycopg import AsyncConnection
 from tai42_contract.states.errors import (
+    AttachConflictError,
     DeclarationInUseError,
     InvalidPathError,
-    ModuleExistsError,
-    ModuleInUseError,
-    ModuleValidationError,
-    MountConflictError,
     NonAdditiveRedeclareError,
     SchemaValidationError,
     StateNotFoundError,
     StatesNotConfiguredError,
     SubjectFoldError,
     SubjectRefusedError,
+    TemplateExistsError,
+    TemplateInUseError,
+    TemplateValidationError,
     ValueValidationError,
 )
 from tai42_contract.states.models import (
     MAX_RETENTION_DAYS,
     PERSON_KIND,
     ApplyResult,
+    AttachBody,
+    AttachReconcileContext,
+    AttachReconciler,
+    AttachValidator,
     CompletedOrigin,
     ConsumerLister,
     ConsumerRow,
-    MountBody,
-    MountReconcileContext,
-    MountReconciler,
-    MountValidator,
-    RecordView,
     StateContext,
     StateDeclaration,
-    StateModuleDocument,
+    StateRecord,
     StateSubject,
+    StateTemplateDocument,
+    TemplateJqApplyResult,
+    TemplateJqResult,
     WriteEntry,
     WriteOrigin,
     WritesPage,
@@ -72,13 +74,20 @@ from tai42_kit.utils.data.jq_util import run_jq_first
 
 from tai42_skeleton.states.context import current_state_context, state_context
 from tai42_skeleton.states.db import states_store_configured
-from tai42_skeleton.states.modules import StateModule, compose_effective_schema, regime_for, validate_module
 from tai42_skeleton.states.paths import validate_op
 from tai42_skeleton.states.store import (
     PostgresStatesStore,
     make_cursor,
     store_settings_default_retention,
     store_settings_retention,
+)
+from tai42_skeleton.states.templates import (
+    StateTemplate,
+    TemplateReconcile,
+    compose_effective_schema,
+    regime_for,
+    template_jq_prelude,
+    validate_template,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,39 +99,39 @@ _MAX_PAGE = 500
 # --------------------------------------------------------------------------- #
 # Consumer-owned registries (per-app, reset each start() by the server)          #
 # --------------------------------------------------------------------------- #
-class StatesMountValidatorRegistry:
-    """The process-wide mount-validator registry — the body behind
-    ``app.states.register_mount_validator``. A consumer registers a data-dependent
-    validator when its module loads; the mount doors consult every registered validator
+class StatesAttachValidatorRegistry:
+    """The process-wide attach-validator registry — the body behind
+    ``app.states.register_attach_validator``. A consumer registers a data-dependent
+    validator when its module loads; the attach doors consult every registered validator
     before any write. Reset each ``start()`` so a reload re-registers cleanly."""
 
     def __init__(self) -> None:
-        self._validators: list[MountValidator] = []
+        self._validators: list[AttachValidator] = []
 
-    def register(self, validator: MountValidator) -> None:
+    def register(self, validator: AttachValidator) -> None:
         self._validators.append(validator)
 
-    def all(self) -> list[MountValidator]:
+    def all(self) -> list[AttachValidator]:
         return list(self._validators)
 
     def reset(self) -> None:
         self._validators.clear()
 
 
-class StatesMountReconcilerRegistry:
-    """The process-wide mount-reconciler registry — the body behind
-    ``app.states.register_mount_reconciler``. A consumer registers a pre-write reconciler
-    when its module loads; the mount doors run every registered reconciler after the
+class StatesAttachReconcilerRegistry:
+    """The process-wide attach-reconciler registry — the body behind
+    ``app.states.register_attach_reconciler``. A consumer registers a pre-write reconciler
+    when its module loads; the attach doors run every registered reconciler after the
     validators and before the write. Reset each ``start()`` so a reload re-registers
     cleanly."""
 
     def __init__(self) -> None:
-        self._reconcilers: list[MountReconciler] = []
+        self._reconcilers: list[AttachReconciler] = []
 
-    def register(self, reconciler: MountReconciler) -> None:
+    def register(self, reconciler: AttachReconciler) -> None:
         self._reconcilers.append(reconciler)
 
-    def all(self) -> list[MountReconciler]:
+    def all(self) -> list[AttachReconciler]:
         return list(self._reconcilers)
 
     def reset(self) -> None:
@@ -296,11 +305,11 @@ def _row_to_declaration(row: dict[str, Any]) -> StateDeclaration:
     )
 
 
-class _MountReconcileRecords:
-    """The narrow record door a mount reconciler reads and writes through — the
-    :class:`~tai42_contract.states.MountReconcileRecords` handle bound to one state and the
-    mount's transaction ``conn``. Every call runs on that transaction: ``merge`` and the
-    keyed ``apply`` write on it (so a reconciler's resolution commits with the mount or
+class _AttachReconcileRecords:
+    """The narrow record door an attach reconciler reads and writes through — the
+    :class:`~tai42_contract.states.AttachReconcileRecords` handle bound to one state and the
+    attach's transaction ``conn``. Every call runs on that transaction: ``merge`` and the
+    keyed ``apply`` write on it (so a reconciler's resolution commits with the attach or
     rolls back with a refusal),
     and ``read``/``list_subjects`` read on it too, so a reconciler sees its own in-flight
     merges. Writes are completed and audited through the service chokepoint exactly like any
@@ -311,7 +320,7 @@ class _MountReconcileRecords:
         self._state = state
         self._conn = conn
 
-    async def read(self, subject: StateSubject) -> RecordView | None:
+    async def read(self, subject: StateSubject) -> StateRecord | None:
         return await self._service.read(self._state, subject, conn=self._conn)
 
     async def list_subjects(
@@ -319,48 +328,114 @@ class _MountReconcileRecords:
     ) -> dict[str, Any]:
         return await self._service.list_subjects(self._state, kind=kind, limit=limit, cursor=cursor, conn=self._conn)
 
-    async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> RecordView:
-        """Shallow top-level merge ``patch`` into ``subject`` on the mount transaction."""
+    async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> StateRecord:
+        """Shallow top-level merge ``patch`` into ``subject`` on the attach transaction."""
         if not isinstance(patch, dict):
             raise ValueValidationError("a merge patch must be a JSON object")
         ops = [{"op": "set", "path": [k], "value": v} for k, v in patch.items()]
         result = await self._service.apply(self._state, subject, ops, op_id=None, origin=origin, conn=self._conn)
         data = result.data if result.data is not None else {}
         seq = result.seq if result.seq is not None else 0.0
-        return RecordView(state=self._state, subject=subject, data=data, seq=seq, canonical_subject=subject)
+        return StateRecord(state=self._state, subject=subject, data=data, seq=seq, canonical_subject=subject)
 
     async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult:
-        """Apply an op batch (the same keyed ops as a module fill) to ``subject`` on the
-        mount transaction — so a record under a ``composing`` write regime can be closed
-        with a keyed op that ``merge``'s whole-path set would refuse."""
+        """Apply an op batch (the same keyed ops as an update-purpose program) to ``subject``
+        on the attach transaction — so a record under a ``composing`` write regime can be
+        closed with a keyed op that ``merge``'s whole-path set would refuse."""
         return await self._service.apply(self._state, subject, ops, op_id=None, origin=origin, conn=self._conn)
+
+
+def _record_subtree(data: dict[str, Any], path: list[str]) -> dict[str, Any]:
+    """The record document at an attachment's ``path`` — the subtree a template's jq programs
+    operate over (``.`` at the seam). An absent or non-object node reads as ``{}``."""
+    node: Any = data
+    for seg in path:
+        if not isinstance(node, dict):
+            return {}
+        node = node.get(seg)
+    return node if isinstance(node, dict) else {}
+
+
+def _rebase_op(op: Any, path: list[str]) -> dict[str, Any]:
+    """One template-relative op with its ``path`` rebased under the attachment ``path``, so an
+    update program (like a fill) authors its ops in its own coordinates. A malformed op is a
+    loud refusal."""
+    if not isinstance(op, dict) or not isinstance(op.get("path"), list):
+        raise ValueValidationError(f"an update-program op must be an object carrying a list path, got {op!r}")
+    return {**op, "path": [*path, *op["path"]]}
+
+
+# One record page and the orphan-listing cap keep the reconcile refusal message and its read
+# loop bounded on a state with many subjects.
+_RECONCILE_PAGE = 200
+_RECONCILE_LIST_CAP = 20
+# Every reconcile close write carries this generic origin — a consumer name, never a template.
+_RECONCILE_ORIGIN = WriteOrigin(consumer="attach-reconcile", meta={"origin": "reconcile"})
+
+
+def _reconcile_refusal(context: AttachReconcileContext, orphans: list[tuple[StateSubject, dict[str, Any]]]) -> str:
+    shown = orphans[:_RECONCILE_LIST_CAP]
+    listed = "; ".join(
+        f"[{subject.kind}:{subject.key}] {item.get('label', item.get('id'))} (id {item.get('id')})"
+        for subject, item in shown
+    )
+    more = len(orphans) - len(shown)
+    if more > 0:
+        listed = f"{listed}; … and {more} more"
+    return (
+        f"re-attaching template {context.template.name!r} on state {context.state!r} would orphan "
+        f"{len(orphans)} open record item(s) the new declarations no longer cover: {listed}. "
+        'Re-attach with options {"orphans": "close", "resolution": "<not-done resolution>"} to close them.'
+    )
+
+
+def _reconcile_orphans_extra(orphans: list[tuple[StateSubject, dict[str, Any]]]) -> dict[str, Any]:
+    """The reconcile refusal's STRUCTURED payload: the orphaned records (subject key/kind +
+    the orphan item's id/label) so a UI keys its resolve step on the data, not the prose.
+    ``reconcile`` flags the one refusal that has the close-with-resolution follow-up."""
+    return {
+        "reconcile": True,
+        "orphans": [
+            {
+                "subject": subject.key,
+                "kind": subject.kind,
+                "id": item.get("id"),
+                "label": item.get("label", item.get("id")),
+            }
+            for subject, item in orphans
+        ],
+    }
 
 
 class StatesService:
     """The one validate + apply layer. Holds a store and the consumer-owned registries;
     every method refuses loudly while the feature is off."""
 
-    _MODULE_CACHE_MAX = 256
+    _TEMPLATE_CACHE_MAX = 256
 
     def __init__(
         self,
         store: PostgresStatesStore | None = None,
         *,
-        mount_validators: StatesMountValidatorRegistry | None = None,
-        mount_reconcilers: StatesMountReconcilerRegistry | None = None,
+        attach_validators: StatesAttachValidatorRegistry | None = None,
+        attach_reconcilers: StatesAttachReconcilerRegistry | None = None,
         consumer_listers: StatesConsumerListerRegistry | None = None,
-        seeds: StateModuleSeedRegistry | None = None,
+        seeds: StateTemplateSeedRegistry | None = None,
     ) -> None:
-        from tai42_skeleton.states.seeds import StateModuleSeedRegistry
+        from tai42_skeleton.states.seeds import StateTemplateSeedRegistry
 
         self._store = store or PostgresStatesStore()
-        self._mount_validators = mount_validators or StatesMountValidatorRegistry()
-        self._mount_reconcilers = mount_reconcilers or StatesMountReconcilerRegistry()
+        self._attach_validators = attach_validators or StatesAttachValidatorRegistry()
+        self._attach_reconcilers = attach_reconcilers or StatesAttachReconcilerRegistry()
         self._consumer_listers = consumer_listers or StatesConsumerListerRegistry()
-        self._seeds = seeds or StateModuleSeedRegistry()
-        self._module_cache: OrderedDict[tuple[str, Any], StateModule] = OrderedDict()
+        self._seeds = seeds or StateTemplateSeedRegistry()
+        self._template_cache: OrderedDict[tuple[str, Any], StateTemplate] = OrderedDict()
+        # The platform's own template-document reconciler: it settles a state's open records
+        # against a declarations edit through the template's ``reconcile`` contract. A no-op
+        # for a first attach or a template that declares no ``reconcile``, so it is always on.
+        self._attach_reconcilers.register(self._reconcile_template_records)
 
-    # -- gate + module cache -----------------------------------------------------
+    # -- gate + template cache ---------------------------------------------------
 
     @staticmethod
     def _ensure_available() -> None:
@@ -370,20 +445,20 @@ class StatesService:
                 "default database) to enable it"
             )
 
-    def _validated_module(self, row: dict[str, Any]) -> StateModule:
-        """Validate a module row into a :class:`StateModule`, memoized on ``(name,
+    def _validated_template(self, row: dict[str, Any]) -> StateTemplate:
+        """Validate a template row into a :class:`StateTemplate`, memoized on ``(name,
         updated_at)`` — an unchanged row is served from a bounded LRU."""
         key = (row["name"], row["updated_at"])
-        cached = self._module_cache.get(key)
+        cached = self._template_cache.get(key)
         if cached is not None:
-            self._module_cache.move_to_end(key)
+            self._template_cache.move_to_end(key)
             return cached
-        module = validate_module(row["body"])
-        self._module_cache[key] = module
-        self._module_cache.move_to_end(key)
-        if len(self._module_cache) > self._MODULE_CACHE_MAX:
-            self._module_cache.popitem(last=False)
-        return module
+        template = validate_template(row["body"])
+        self._template_cache[key] = template
+        self._template_cache.move_to_end(key)
+        if len(self._template_cache) > self._TEMPLATE_CACHE_MAX:
+            self._template_cache.popitem(last=False)
+        return template
 
     # -- subject validation ------------------------------------------------------
 
@@ -458,7 +533,7 @@ class StatesService:
         out: list[StateDeclaration] = []
         for row in await self._store.list_declarations():
             decl = _row_to_declaration(row)
-            regimes = self._compose_regimes(await self._load_state_mounts(decl.name))
+            regimes = self._compose_regimes(await self._load_state_attachments(decl.name))
             out.append(decl.model_copy(update={"regimes": regimes}))
         return out
 
@@ -468,7 +543,7 @@ class StatesService:
         if row is None:
             return None
         decl = _row_to_declaration(row)
-        regimes = self._compose_regimes(await self._load_state_mounts(decl.name))
+        regimes = self._compose_regimes(await self._load_state_attachments(decl.name))
         return decl.model_copy(update={"regimes": regimes})
 
     async def put_declaration(self, decl: StateDeclaration) -> StateDeclaration:
@@ -519,7 +594,7 @@ class StatesService:
         return decl
 
     async def delete_declaration(self, name: str) -> None:
-        """Delete a state with its records, mounts and aliases; refuses while a registered
+        """Delete a state with its records, attachments and aliases; refuses while a registered
         consumer still binds it (:class:`DeclarationInUseError`)."""
         self._ensure_available()
         if await self._store.get_declaration(name) is None:
@@ -553,10 +628,10 @@ class StatesService:
 
     async def read(
         self, state: str, subject: StateSubject, *, conn: AsyncConnection[Any] | None = None
-    ) -> RecordView | None:
+    ) -> StateRecord | None:
         """The record for ``subject`` (resolving a fold), or ``None`` when none exists. An
         unknown person or a target mismatch is a refusal, never an empty document. With
-        ``conn`` the read joins the caller's transaction (a mount reconciler reading its own
+        ``conn`` the read joins the caller's transaction (a attach reconciler reading its own
         in-flight merges)."""
         self._ensure_available()
         decl = await self._require_declaration_decl(state)
@@ -564,7 +639,7 @@ class StatesService:
         view = await self._store.read_record_view(state, subject, conn=conn)
         if view is None:
             return None
-        return RecordView(
+        return StateRecord(
             state=state,
             subject=subject,
             data=view["data"],
@@ -575,7 +650,7 @@ class StatesService:
 
     async def replace(
         self, state: str, subject: StateSubject, data: dict[str, Any], *, origin: WriteOrigin
-    ) -> RecordView:
+    ) -> StateRecord:
         """Replace ``subject``'s whole document with ``data`` and return the new record."""
         self._ensure_available()
         if not isinstance(data, dict):
@@ -590,7 +665,7 @@ class StatesService:
 
     async def merge(
         self, state: str, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin
-    ) -> RecordView:
+    ) -> StateRecord:
         """Shallow top-level merge ``patch`` into ``subject``'s document — one ``set`` op
         per top-level key, applied atomically under the record lock — and return the new
         record."""
@@ -603,7 +678,7 @@ class StatesService:
         if view is None:
             # An empty patch touched nothing and no record exists — represent the still-empty
             # document rather than inventing a write.
-            return RecordView(state=state, subject=subject, data={}, seq=0.0, canonical_subject=subject)
+            return StateRecord(state=state, subject=subject, data={}, seq=0.0, canonical_subject=subject)
         return view
 
     async def apply(
@@ -618,9 +693,9 @@ class StatesService:
     ) -> ApplyResult:
         """Apply an op batch to ``subject``'s document under the effective schema. Refuses a
         composing-path shape violation before the ledger insert, stamps ``_trace`` under a
-        traced mount, and records one write row. A replayed ``op_id`` returns
+        traced attach, and records one write row. A replayed ``op_id`` returns
         ``applied=False``; guarded ops land in ``skipped``. With ``conn`` the write joins
-        the caller's transaction (a mount reconciler's resolution)."""
+        the caller's transaction (a attach reconciler's resolution)."""
         self._ensure_available()
         if not isinstance(ops, list):
             raise InvalidPathError("ops must be a list of operations")
@@ -646,6 +721,163 @@ class StatesService:
             data=data,
             seq=seq,
             skipped=[{"op": op.get("op"), "path": op.get("path"), "reason": "guard"} for op in skipped],
+        )
+
+    # -- template_jq -------------------------------------------------------------
+
+    async def _resolve_template_jq(
+        self, state: str, name: str
+    ) -> tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any], str]:
+        """Resolve a ``template_jq`` program ``name`` across ``state``'s attachments to
+        ``(template, path, parameters, declarations, program_name)``. An UNQUALIFIED name
+        resolves to the one attachment whose template declares it — a name two attached
+        templates both declare is a loud :class:`ValueValidationError` (the caller qualifies
+        it). A QUALIFIED ``<template>.<name>`` resolves to that attachment's template — a
+        template not attached on the state is a loud :class:`StateNotFoundError`. An unknown
+        program is a :class:`StateNotFoundError`."""
+        attachments = await self._load_state_attachments(state)
+        if "." in name:
+            template_name, program_name = name.split(".", 1)
+            for template, path, parameters, declarations in attachments:
+                if template.name == template_name:
+                    if program_name not in template.template_jq:
+                        raise StateNotFoundError(
+                            f"template {template_name!r} attached on state {state!r} declares no "
+                            f"template_jq {program_name!r}"
+                        )
+                    return template, path, parameters, declarations, program_name
+            raise StateNotFoundError(f"template {template_name!r} is not attached on state {state!r}")
+        matches = [
+            (template, path, parameters, declarations)
+            for template, path, parameters, declarations in attachments
+            if name in template.template_jq
+        ]
+        if not matches:
+            raise StateNotFoundError(f"no template_jq {name!r} on any template attached on state {state!r}")
+        if len(matches) > 1:
+            templates = ", ".join(sorted(t.name for t, _p, _pa, _d in matches))
+            raise ValueValidationError(
+                f"template_jq {name!r} is declared by more than one template attached on state {state!r} "
+                f"({templates}); qualify it as <template>.{name}"
+            )
+        template, path, parameters, declarations = matches[0]
+        return template, path, parameters, declarations, name
+
+    async def eval_template_jq(
+        self,
+        state: str,
+        subject: StateSubject,
+        name: str,
+        args: dict[str, Any],
+        *,
+        conn: AsyncConnection[Any] | None = None,
+    ) -> TemplateJqResult:
+        """Evaluate an ``input``-purpose ``template_jq`` program ``name`` over ``subject``'s
+        record and return its value. ``args`` supplies the program's declared ``params`` as
+        the single ``$params`` object (every declared key must be present — value may be
+        null — and an undeclared key is a loud refusal); the jq runs over the record's
+        attached subtree with the attachment's ``$parameters``/``$declarations`` bound and the
+        sibling ``tjq_<name>`` input-program prelude. Read-only. An ``update``-purpose name is
+        a :class:`ValueValidationError`."""
+        self._ensure_available()
+        decl = await self._require_declaration_decl(state)
+        await self.validate_subject(decl, subject)
+        template, path, parameters, declarations, program_name = await self._resolve_template_jq(state, name)
+        program = template.template_jq[program_name]
+        if program.purpose != "input":
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} has purpose {program.purpose!r}; "
+                f"eval needs an 'input'-purpose program (apply an 'update' one instead)"
+            )
+        missing = sorted(set(program.params) - set(args))
+        unknown = sorted(set(args) - set(program.params))
+        if missing or unknown:
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} takes params {program.params}"
+                + (f", missing {missing}" if missing else "")
+                + (f", got unknown {unknown}" if unknown else "")
+            )
+        record = await self._store.read_record_view(state, subject, conn=conn)
+        subtree = _record_subtree(record["data"], path) if record is not None else {}
+        variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations, "params": dict(args)}
+        try:
+            value = await run_jq_first(program.jq, subtree, prelude=template_jq_prelude(template), variables=variables)
+        except Exception as exc:
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} failed to evaluate: {exc}"
+            ) from exc
+        return TemplateJqResult(name=name, value=value)
+
+    async def apply_template_jq(
+        self,
+        state: str,
+        subject: StateSubject,
+        name: str,
+        input: Any,
+        *,
+        op_id: str | None,
+        origin: WriteOrigin,
+        conn: AsyncConnection[Any] | None = None,
+    ) -> TemplateJqApplyResult:
+        """Apply an ``update``-purpose ``template_jq`` program ``name`` to ``subject``. Its jq
+        runs over ``{record, input}`` (the record's attached subtree and the adapter's
+        ``input``) with the attachment's ``$parameters``/``$declarations`` bound and the
+        sibling ``tjq_<name>`` input-program prelude, returning a template-relative op batch
+        rebased under the attachment path and applied through the SAME ``apply`` chokepoint as
+        a delta — so regimes, the composing-shape guard, retention, trace stamping and
+        ``op_id`` idempotency all hold identically. When the program DECLARES ``params`` they
+        are the contract for its ``.input`` object: ``input`` must be an object carrying
+        exactly those keys (a value may be null) — a missing or undeclared key is a loud
+        :class:`ValueValidationError`; a program that declares none accepts any ``input``. An
+        ``input``-purpose name, or a jq that does not return an op batch, is a
+        :class:`ValueValidationError`."""
+        self._ensure_available()
+        decl = await self._require_declaration_decl(state)
+        await self.validate_subject(decl, subject)
+        template, path, parameters, declarations, program_name = await self._resolve_template_jq(state, name)
+        program = template.template_jq[program_name]
+        if program.purpose != "update":
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} has purpose {program.purpose!r}; "
+                f"apply needs an 'update'-purpose program (eval an 'input' one instead)"
+            )
+        if program.params:
+            if not isinstance(input, dict):
+                raise ValueValidationError(
+                    f"template_jq {program_name!r} on template {template.name!r} declares params "
+                    f"{program.params}, so its input must be an object, got {type(input).__name__}"
+                )
+            missing = sorted(set(program.params) - set(input))
+            unknown = sorted(set(input) - set(program.params))
+            if missing or unknown:
+                raise ValueValidationError(
+                    f"template_jq {program_name!r} on template {template.name!r} declares params {program.params}"
+                    + (f", input missing {missing}" if missing else "")
+                    + (f", input has undeclared {unknown}" if unknown else "")
+                )
+        record = await self._store.read_record_view(state, subject, conn=conn)
+        subtree = _record_subtree(record["data"], path) if record is not None else {}
+        variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations}
+        try:
+            result = await run_jq_first(
+                program.jq,
+                {"record": subtree, "input": input},
+                prelude=template_jq_prelude(template),
+                variables=variables,
+            )
+        except Exception as exc:
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} failed to evaluate: {exc}"
+            ) from exc
+        if not isinstance(result, list):
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} is an update program, so its jq must "
+                f"return an op batch (a list of ops), got {type(result).__name__}"
+            )
+        ops = [_rebase_op(op, path) for op in result]
+        applied = await self.apply(state, subject, ops, op_id=op_id, origin=origin, conn=conn)
+        return TemplateJqApplyResult(
+            name=name, applied=applied.applied, data=applied.data, seq=applied.seq, skipped=applied.skipped
         )
 
     async def erase(self, state: str, subject: StateSubject, *, origin: WriteOrigin) -> None:
@@ -683,7 +915,7 @@ class StatesService:
     ) -> dict[str, Any]:
         """One keyset page of a state's subjects, ordered by the full subject identity
         ``(target_kind, target_name, kind, key)``. With ``conn`` the read joins the caller's
-        transaction (a mount reconciler paging its own in-flight merges)."""
+        transaction (a attach reconciler paging its own in-flight merges)."""
         self._ensure_available()
         page = _page_limit(limit)
         if await self._store.get_declaration(state) is None:
@@ -815,103 +1047,109 @@ class StatesService:
         self._ensure_available()
         await self._store.restore_aliases(state, list(rows))
 
-    # -- modules -----------------------------------------------------------------
+    # -- templates -----------------------------------------------------------------
 
-    async def list_modules(self) -> list[StateModuleDocument]:
+    async def list_templates(self) -> list[StateTemplateDocument]:
         self._ensure_available()
-        return [StateModuleDocument.model_validate(row["body"]) for row in await self._store.list_modules()]
+        return [StateTemplateDocument.model_validate(row["body"]) for row in await self._store.list_templates()]
 
-    async def list_modules_catalog(self) -> list[dict[str, Any]]:
-        """The module-catalog projection the ``GET /api/state-modules`` list serves: each
-        stored document plus ``mounted_on`` (the number of states the module is mounted on)
-        and ``shipped_default`` (true when the module carries a seed ``shipped_hash`` — an
-        unedited shipped default). The mount counts are one query over every module."""
+    async def list_templates_catalog(self) -> list[dict[str, Any]]:
+        """The template-catalog projection the ``GET /api/state-templates`` list serves: each
+        stored document plus ``attached_to`` (the number of states the template is attached on)
+        and ``shipped_default`` (true when the template carries a seed ``shipped_hash`` — an
+        unedited shipped default). The attach counts are one query over every template."""
         self._ensure_available()
-        counts = await self._store.mounted_module_counts()
+        counts = await self._store.attached_template_counts()
         catalog: list[dict[str, Any]] = []
-        for row in await self._store.list_modules():
-            document = StateModuleDocument.model_validate(row["body"]).model_dump()
-            document["mounted_on"] = counts.get(row["name"], 0)
+        for row in await self._store.list_templates():
+            document = StateTemplateDocument.model_validate(row["body"]).model_dump()
+            document["attached_to"] = counts.get(row["name"], 0)
             document["shipped_default"] = row["shipped_hash"] is not None
             catalog.append(document)
         return catalog
 
-    async def get_module(self, name: str) -> StateModuleDocument | None:
+    async def get_template(self, name: str) -> StateTemplateDocument | None:
         self._ensure_available()
-        row = await self._store.get_module(name)
+        row = await self._store.get_template(name)
         if row is None:
             return None
-        self._validated_module(row)  # loud on a corrupt stored body
-        return StateModuleDocument.model_validate(row["body"])
+        self._validated_template(row)  # loud on a corrupt stored body
+        return StateTemplateDocument.model_validate(row["body"])
 
-    async def put_module(self, doc: StateModuleDocument, *, replace: bool) -> StateModuleDocument:
-        """Store a module document, running every registered mount validator over each live
-        mount before the write (a raise leaves the stored document untouched); overwriting
-        an existing name without ``replace`` raises :class:`ModuleExistsError`."""
+    async def put_template(self, doc: StateTemplateDocument, *, replace: bool) -> StateTemplateDocument:
+        """Store a template document, running every registered attach validator over each live
+        attach before the write (a raise leaves the stored document untouched); overwriting
+        an existing name without ``replace`` raises :class:`TemplateExistsError`."""
         self._ensure_available()
         # ``exclude_none`` drops an unset ``declarations`` (None) so the deep validator
         # sees the same absent-key shape ``to_document`` emits, never a null section.
         body = doc.model_dump(by_alias=True, exclude_none=True)
-        module = validate_module(body)
-        existing = await self._store.get_module(module.name)
+        template = validate_template(body)
+        existing = await self._store.get_template(template.name)
         if existing is not None and not replace:
-            raise ModuleExistsError(f"module {module.name!r} already exists — upload with replace=true to overwrite it")
-        module_doc = StateModuleDocument.model_validate(module.to_document())
-        mount_rows = await self._store.list_mounts_of_module(module.name)
-        for row in mount_rows:
-            mount_declarations = dict(row["declarations"] or {})
-            resolved = self._effective_parameters(module, dict(row["parameters"] or {}))
+            raise TemplateExistsError(
+                f"template {template.name!r} already exists — upload with replace=true to overwrite it"
+            )
+        template_doc = StateTemplateDocument.model_validate(template.to_document())
+        attachment_rows = await self._store.list_attachments_of_template(template.name)
+        for row in attachment_rows:
+            attachment_declarations = dict(row["declarations"] or {})
+            resolved = self._effective_parameters(template, dict(row["parameters"] or {}))
             try:
-                await self._validate_mount_values(module, resolved, mount_declarations)
+                await self._validate_attach_values(template, resolved, attachment_declarations)
                 effective = compose_effective_schema(
                     (await self._require_declaration(row["state"]))["schema"],
                     [
                         (m, p, pa)
-                        for m, p, pa, _d in await self._load_state_mounts(row["state"], override={module.name: module})
+                        for m, p, pa, _d in await self._load_state_attachments(
+                            row["state"], override={template.name: template}
+                        )
                     ],
                 )
-                await self._run_mount_validators(module_doc, mount_declarations, effective)
-            except ModuleValidationError as exc:
-                raise ModuleInUseError(
-                    f"module {module.name!r} cannot be replaced: its mount on state {row['state']!r} no longer "
+                await self._run_attach_validators(template_doc, attachment_declarations, effective)
+            except TemplateValidationError as exc:
+                raise TemplateInUseError(
+                    f"template {template.name!r} cannot be replaced: its attach on state {row['state']!r} no longer "
                     f"validates: {exc}"
                 ) from exc
-        await self._store.upsert_module(module.name, module.to_document(), None)
-        for row in mount_rows:
-            resolved = self._effective_parameters(module, dict(row["parameters"] or {}))
+        await self._store.upsert_template(template.name, template.to_document(), None)
+        for row in attachment_rows:
+            resolved = self._effective_parameters(template, dict(row["parameters"] or {}))
             base_schema = (await self._require_declaration(row["state"]))["schema"]
             effective = await self._compose_effective(row["state"], base_schema)
-            await self._store.update_mount_parameters(row["state"], module.name, resolved, effective_schema=effective)
-        return module_doc
+            await self._store.update_attachment_parameters(
+                row["state"], template.name, resolved, effective_schema=effective
+            )
+        return template_doc
 
-    async def delete_module(self, name: str) -> None:
-        """Delete a module document; refused while it is mounted."""
+    async def delete_template(self, name: str) -> None:
+        """Delete a template document; refused while it is attached."""
         self._ensure_available()
-        if await self._store.get_module(name) is None:
-            raise StateNotFoundError(f"no module {name!r}")
-        mounts = await self._store.list_mounts_of_module(name)
-        if mounts:
-            states = ", ".join(sorted(m["state"] for m in mounts))
-            raise ModuleInUseError(f"module {name!r} is mounted on state(s) {states} — unmount it first")
-        await self._store.delete_module(name)
+        if await self._store.get_template(name) is None:
+            raise StateNotFoundError(f"no template {name!r}")
+        attachments = await self._store.list_attachments_of_template(name)
+        if attachments:
+            states = ", ".join(sorted(m["state"] for m in attachments))
+            raise TemplateInUseError(f"template {name!r} is attached on state(s) {states} — detach it first")
+        await self._store.delete_template(name)
 
-    # -- mounts ------------------------------------------------------------------
+    # -- attachments ------------------------------------------------------------------
 
-    async def list_mounts(self, state: str | None = None, *, module: str | None = None) -> list[dict[str, Any]]:
+    async def list_attachments(self, state: str | None = None, *, template: str | None = None) -> list[dict[str, Any]]:
         self._ensure_available()
-        if state is not None and module is not None:
-            row = await self._store.get_mount(state, module)
+        if state is not None and template is not None:
+            row = await self._store.get_attachment(state, template)
             rows = [] if row is None else [row]
         elif state is not None:
-            rows = await self._store.list_mounts_for_state(state)
-        elif module is not None:
-            rows = await self._store.list_mounts_of_module(module)
+            rows = await self._store.list_attachments_for_state(state)
+        elif template is not None:
+            rows = await self._store.list_attachments_of_template(template)
         else:
-            rows = await self._store.list_all_mounts()
+            rows = await self._store.list_all_attachments()
         return [
             {
                 "state": r["state"],
-                "module": r["module"],
+                "template": r["template"],
                 "path": list(r["path"]),
                 "parameters": dict(r["parameters"] or {}),
                 "declarations": dict(r["declarations"] or {}),
@@ -919,66 +1157,69 @@ class StatesService:
             for r in rows
         ]
 
-    async def mount(self, state: str, module_name: str, body: MountBody, *, skip_reconcilers: bool = False) -> None:
-        """Mount a module on a state: validate path/parameters/declarations (+ check), run
-        every registered mount validator over the composed effective schema, run every
+    async def attach(self, state: str, template_name: str, body: AttachBody, *, skip_reconcilers: bool = False) -> None:
+        """Attach a template on a state: validate path/parameters/declarations (+ check), run
+        every registered attach validator over the composed effective schema, run every
         registered reconciler, then store the resolved parameters and the recomposed
         effective schema in one transaction (nothing derived is materialized). The
-        reconcilers and the mount write share ONE transaction, so a reconciler's record
-        writes commit with the mount or roll back together with a refusal. ``body.options``
+        reconcilers and the attach write share ONE transaction, so a reconciler's record
+        writes commit with the attach or roll back together with a refusal. ``body.options``
         is a per-operation directive passed to the reconcilers, never stored.
         ``skip_reconcilers`` (backup restore only) runs the validators but not the
-        reconcilers — a restored mount is a snapshot, not a re-mount."""
+        reconcilers — a restored attachment is a snapshot, not a re-attach."""
         self._ensure_available()
         path = list(body.path)
         parameters = dict(body.parameters or {})
         declarations = dict(body.declarations or {})
         options = dict(body.options or {})
         decl = await self._require_declaration(state)
-        module = await self._get_module_or_raise(module_name)
-        self._validate_mount_path(path)
-        if await self._store.get_mount(state, module_name) is not None:
-            raise MountConflictError(
-                f"module {module_name!r} is already mounted on state {state!r} — unmount it to change path/parameters"
+        template = await self._get_template_or_raise(template_name)
+        self._validate_attach_path(path)
+        if await self._store.get_attachment(state, template_name) is not None:
+            raise AttachConflictError(
+                f"template {template_name!r} is already attached on state {state!r} — detach it to change "
+                f"path/parameters"
             )
-        await self._validate_mount_values(module, parameters, declarations)
-        resolved = self._effective_parameters(module, parameters)
-        existing = await self._load_state_mounts(state)
+        await self._validate_attach_values(template, parameters, declarations)
+        resolved = self._effective_parameters(template, parameters)
+        existing = await self._load_state_attachments(state)
         effective = compose_effective_schema(
-            decl["schema"], [*[(m, p, pa) for m, p, pa, _d in existing], (module, list(path), resolved)]
+            decl["schema"], [*[(m, p, pa) for m, p, pa, _d in existing], (template, list(path), resolved)]
         )
         _validate_schema(effective)
-        module_doc = StateModuleDocument.model_validate(module.to_document())
-        await self._run_mount_validators(module_doc, declarations, effective)
-        reconcilers = [] if skip_reconcilers else self._mount_reconcilers.all()
+        template_doc = StateTemplateDocument.model_validate(template.to_document())
+        await self._run_attach_validators(template_doc, declarations, effective)
+        reconcilers = [] if skip_reconcilers else self._attach_reconcilers.all()
         if reconcilers:
             async with self._store.begin() as conn:
-                await self._run_mount_reconcilers(
+                await self._run_attach_reconcilers(
                     reconcilers,
                     state,
-                    module_doc,
-                    "mount",
+                    template_doc,
+                    "attach",
                     previous_declarations=None,
                     new_declarations=declarations,
                     options=options,
                     conn=conn,
                 )
-                await self._store.upsert_mount(
-                    state, module_name, path, resolved, declarations, effective_schema=effective, conn=conn
+                await self._store.upsert_attachment(
+                    state, template_name, path, resolved, declarations, effective_schema=effective, conn=conn
                 )
         else:
-            await self._store.upsert_mount(state, module_name, path, resolved, declarations, effective_schema=effective)
+            await self._store.upsert_attachment(
+                state, template_name, path, resolved, declarations, effective_schema=effective
+            )
 
-    async def update_mount_declarations(
+    async def update_attachment_declarations(
         self,
         state: str,
-        module_name: str,
+        template_name: str,
         declarations: dict[str, Any],
         *,
         options: dict[str, Any] | None = None,
         skip_reconcilers: bool = False,
     ) -> None:
-        """Rewrite a mount's declarations, re-running every registered mount validator and
+        """Rewrite an attachment's declarations, re-running every registered attach validator and
         reconciler and recomposing the effective schema before the write. The reconcilers
         and the write share ONE transaction. ``options`` is a per-operation directive
         passed to the reconcilers, never stored. ``skip_reconcilers`` (backup restore only)
@@ -986,45 +1227,49 @@ class StatesService:
         self._ensure_available()
         declarations = dict(declarations or {})
         options = dict(options or {})
-        row = await self._store.get_mount(state, module_name)
+        row = await self._store.get_attachment(state, template_name)
         if row is None:
-            raise StateNotFoundError(f"module {module_name!r} is not mounted on state {state!r}")
-        module = await self._get_module_or_raise(module_name)
-        await self._validate_mount_values(module, dict(row["parameters"] or {}), declarations)
+            raise StateNotFoundError(f"template {template_name!r} is not attached on state {state!r}")
+        template = await self._get_template_or_raise(template_name)
+        await self._validate_attach_values(template, dict(row["parameters"] or {}), declarations)
         effective = await self._compose_effective(state, (await self._require_declaration(state))["schema"])
-        module_doc = StateModuleDocument.model_validate(module.to_document())
-        await self._run_mount_validators(module_doc, declarations, effective)
-        reconcilers = [] if skip_reconcilers else self._mount_reconcilers.all()
+        template_doc = StateTemplateDocument.model_validate(template.to_document())
+        await self._run_attach_validators(template_doc, declarations, effective)
+        reconcilers = [] if skip_reconcilers else self._attach_reconcilers.all()
         if reconcilers:
             async with self._store.begin() as conn:
-                await self._run_mount_reconcilers(
+                await self._run_attach_reconcilers(
                     reconcilers,
                     state,
-                    module_doc,
+                    template_doc,
                     "update_declarations",
                     previous_declarations=dict(row["declarations"] or {}),
                     new_declarations=declarations,
                     options=options,
                     conn=conn,
                 )
-                await self._store.update_mount_declarations(
-                    state, module_name, declarations, effective_schema=effective, conn=conn
+                await self._store.update_attachment_declarations(
+                    state, template_name, declarations, effective_schema=effective, conn=conn
                 )
         else:
-            await self._store.update_mount_declarations(state, module_name, declarations, effective_schema=effective)
+            await self._store.update_attachment_declarations(
+                state, template_name, declarations, effective_schema=effective
+            )
 
-    async def unmount(self, state: str, module_name: str) -> None:
-        """Remove a mount and recompose the state's effective schema (nothing else)."""
+    async def detach(self, state: str, template_name: str) -> None:
+        """Remove an attachment and recompose the state's effective schema (nothing else)."""
         self._ensure_available()
-        if await self._store.get_mount(state, module_name) is None:
-            raise StateNotFoundError(f"module {module_name!r} is not mounted on state {state!r}")
+        if await self._store.get_attachment(state, template_name) is None:
+            raise StateNotFoundError(f"template {template_name!r} is not attached on state {state!r}")
         decl = await self._require_declaration(state)
-        remaining = [(m, p, pa) for m, p, pa, _d in await self._load_state_mounts(state) if m.name != module_name]
+        remaining = [
+            (m, p, pa) for m, p, pa, _d in await self._load_state_attachments(state) if m.name != template_name
+        ]
         effective = compose_effective_schema(decl["schema"], remaining)
-        await self._store.delete_mount(state, module_name, effective_schema=effective)
+        await self._store.delete_attachment(state, template_name, effective_schema=effective)
 
     async def effective_schema_for(self, state: str) -> dict[str, Any]:
-        """The stored effective schema (base + every mount's fragment) for a declared
+        """The stored effective schema (base + every attachment's fragment) for a declared
         state — the schema every document validation reads."""
         self._ensure_available()
         return (await self._require_declaration(state))["effective_schema"]
@@ -1032,15 +1277,15 @@ class StatesService:
     async def served_declaration(self, name: str) -> dict[str, Any]:
         """The full served declaration read: ``schema`` (base), ``effective_schema``,
         ``subject_kinds``, ``default_subject_kind``, ``retention_days`` (``None`` when the
-        state keeps records forever), ``mounts[]``, ``regimes[]`` (the absolute regime paths
-        every mount declares) and ``updated_at`` (the ISO timestamp of the last write) — the
+        state keeps records forever), ``attachments[]``, ``regimes[]`` (the absolute regime paths
+        every attachment declares) and ``updated_at`` (the ISO timestamp of the last write) — the
         one read a consumer's bind-time checks and the Studio's fields view consume. Carries
         the same fields the list read dumps, so an edit form round-trips a declaration
         (``retention_days`` included) without dropping any."""
         self._ensure_available()
         decl = await self._require_declaration(name)
-        mounts = await self._load_state_mounts(name)
-        regimes = self._compose_regimes(mounts)
+        attachments = await self._load_state_attachments(name)
+        regimes = self._compose_regimes(attachments)
         # Serialize ``updated_at`` through the same model dump the list read uses, so both
         # reads render the timestamp identically (pydantic's ISO ``…Z``), never two formats.
         updated_at = _row_to_declaration(decl).model_dump(mode="json")["updated_at"]
@@ -1052,18 +1297,18 @@ class StatesService:
             "subject_kinds": list(decl["subject_kinds"]),
             "default_subject_kind": decl["default_subject_kind"],
             "retention_days": decl["retention_days"],
-            "mounts": [
-                {"module": m.name, "path": list(p), "parameters": dict(pa), "declarations": dict(d)}
-                for m, p, pa, d in mounts
+            "attachments": [
+                {"template": m.name, "path": list(p), "parameters": dict(pa), "declarations": dict(d)}
+                for m, p, pa, d in attachments
             ],
             "regimes": regimes,
             "updated_at": updated_at,
         }
 
-    def regime_for_path(self, module: StateModule, relative_path: list[Any]) -> str:
-        """The regime governing ``relative_path`` in ``module`` — exposed for a consumer's
+    def regime_for_path(self, template: StateTemplate, relative_path: list[Any]) -> str:
+        """The regime governing ``relative_path`` in ``template`` — exposed for a consumer's
         bind-time single-writer check."""
-        return regime_for(module, relative_path)
+        return regime_for(template, relative_path)
 
     # -- consumers ---------------------------------------------------------------
 
@@ -1079,78 +1324,187 @@ class StatesService:
             rows.extend(await lister(state))
         return rows
 
-    # -- mount validators --------------------------------------------------------
+    # -- attach validators --------------------------------------------------------
 
-    def register_mount_validator(self, validator: MountValidator) -> None:
-        self._mount_validators.register(validator)
+    def register_attach_validator(self, validator: AttachValidator) -> None:
+        self._attach_validators.register(validator)
 
-    async def _run_mount_validators(
-        self, module_doc: StateModuleDocument, declarations: dict[str, Any], effective: dict[str, Any]
+    async def _run_attach_validators(
+        self, template_doc: StateTemplateDocument, declarations: dict[str, Any], effective: dict[str, Any]
     ) -> None:
-        """Run every registered mount validator with the module document, the mount's
+        """Run every registered attach validator with the template document, the attach's
         declaration values, and the state's effective schema — BEFORE any write. A validator
-        raises loudly (a :class:`ModuleValidationError`) to refuse the door."""
-        for validator in self._mount_validators.all():
-            await validator(module_doc, declarations, effective)
+        raises loudly (a :class:`TemplateValidationError`) to refuse the door."""
+        for validator in self._attach_validators.all():
+            await validator(template_doc, declarations, effective)
 
-    # -- mount reconcilers -------------------------------------------------------
+    # -- attach reconcilers -------------------------------------------------------
 
-    def register_mount_reconciler(self, reconciler: MountReconciler) -> None:
-        self._mount_reconcilers.register(reconciler)
+    def register_attach_reconciler(self, reconciler: AttachReconciler) -> None:
+        self._attach_reconcilers.register(reconciler)
 
-    async def _run_mount_reconcilers(
+    async def _run_attach_reconcilers(
         self,
-        reconcilers: list[MountReconciler],
+        reconcilers: list[AttachReconciler],
         state: str,
-        module_doc: StateModuleDocument,
-        operation: Literal["mount", "update_declarations"],
+        template_doc: StateTemplateDocument,
+        operation: Literal["attach", "update_declarations"],
         *,
         previous_declarations: dict[str, Any] | None,
         new_declarations: dict[str, Any],
         options: dict[str, Any],
         conn: AsyncConnection[Any],
     ) -> None:
-        """Run each mount reconciler AFTER the validators and BEFORE the write, each with a
-        :class:`MountReconcileContext` whose record door writes on the caller's transaction
-        ``conn`` — so a reconciler's writes commit with the mount or roll back together with
-        a refusal. A reconciler raises (a :class:`ModuleValidationError`, named with the
-        module and state) to refuse the mount, or writes resolutions through the record door
-        and returns so the mount commits with them. Any other exception propagates with the
-        module and state named — never swallowed."""
-        context = MountReconcileContext(
+        """Run each attach reconciler AFTER the validators and BEFORE the write, each with a
+        :class:`AttachReconcileContext` whose record door writes on the caller's transaction
+        ``conn`` — so a reconciler's writes commit with the attach or roll back together with
+        a refusal. A reconciler raises (a :class:`TemplateValidationError`, named with the
+        template and state) to refuse the attach, or writes resolutions through the record door
+        and returns so the attach commits with them. Any other exception propagates with the
+        template and state named — never swallowed."""
+        context = AttachReconcileContext(
             state=state,
-            module=module_doc,
+            template=template_doc,
             operation=operation,
             previous_declarations=previous_declarations,
             new_declarations=new_declarations,
             options=options,
-            records=_MountReconcileRecords(self, state, conn),
+            records=_AttachReconcileRecords(self, state, conn),
         )
         for reconciler in reconcilers:
             try:
                 await reconciler(context)
-            except ModuleValidationError:
+            except TemplateValidationError:
                 raise
             except Exception as exc:
                 raise RuntimeError(
-                    f"mount reconciler for module {module_doc.name!r} on state {state!r} failed: {exc}"
+                    f"attach reconciler for template {template_doc.name!r} on state {state!r} failed: {exc}"
                 ) from exc
+
+    # -- the built-in template-document reconciler ---------------------------------
+
+    async def _reconcile_template_records(self, context: AttachReconcileContext) -> None:
+        """The platform's own attach reconciler (always registered). On a declarations edit of
+        a template that declares ``reconcile``, it settles the state's open records against the
+        new declarations through the template's ``reconcile`` contract — a no-op on a first
+        attach (no previous declarations) or a template without ``reconcile``. No template concept
+        enters this body: the template's own jq decides what a declarations edit orphans and how
+        to close it."""
+        if context.previous_declarations is None:
+            return
+        template = validate_template(context.template.model_dump(by_alias=True, exclude_none=True))
+        if template.reconcile is None:
+            return
+        path = await self._reconcile_attach_path(context.state, context.template.name)
+        await self._run_reconcile(context, template.reconcile, path)
+
+    async def _reconcile_attach_path(self, state: str, template_name: str) -> list[str]:
+        """The path at which ``template_name`` is attached on ``state`` — the subtree the
+        template's records live under. The attachment exists at reconcile time (a re-attach /
+        declarations edit)."""
+        for template, attach_path, _params, _decls in await self._load_state_attachments(state):
+            if template.name == template_name:
+                return list(attach_path)
+        raise RuntimeError(f"reconcile: template {template_name!r} is not attached on state {state!r}")
+
+    async def _run_reconcile(
+        self, context: AttachReconcileContext, reconcile: TemplateReconcile, path: list[str]
+    ) -> None:
+        previous = context.previous_declarations or {}
+        new = context.new_declarations
+        orphans: list[tuple[StateSubject, dict[str, Any]]] = []
+        cursor: str | None = None
+        while True:
+            page = await context.records.list_subjects(limit=_RECONCILE_PAGE, cursor=cursor)
+            for entry in page["subjects"]:
+                subject = StateSubject(**entry["subject"])
+                view = await context.records.read(subject)
+                if view is None:
+                    continue
+                for item in await self._reconcile_orphans(
+                    reconcile, _record_subtree(view.data, path), previous=previous, new=new
+                ):
+                    orphans.append((subject, item))
+            cursor = page.get("next_cursor")
+            if cursor is None:
+                break
+
+        if not orphans:
+            return
+
+        directive = context.options.get("orphans")
+        if directive is None:
+            raise TemplateValidationError(_reconcile_refusal(context, orphans), extra=_reconcile_orphans_extra(orphans))
+        if directive != "close":
+            raise TemplateValidationError(
+                f"re-attaching template {context.template.name!r} on state {context.state!r}: unknown reconcile "
+                f'directive options.orphans={directive!r}; the only directive is "close"'
+            )
+        resolution = context.options.get("resolution")
+        await self._reconcile_guard_resolution(context, reconcile, new, resolution)
+        for subject, item in orphans:
+            current = await context.records.read(subject)
+            subtree = _record_subtree(current.data, path) if current is not None else {}
+            ops = await self._run_reconcile_jq(
+                "close", reconcile.close, {"data": subtree, "id": item["id"], "resolution": resolution}
+            )
+            if not isinstance(ops, list):
+                raise TemplateValidationError(f"reconcile close must return a list of ops, got {type(ops).__name__}")
+            await context.records.apply(subject, [_rebase_op(op, path) for op in ops], origin=_RECONCILE_ORIGIN)
+
+    async def _reconcile_orphans(
+        self, reconcile: TemplateReconcile, subtree: dict[str, Any], *, previous: dict[str, Any], new: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        result = await self._run_reconcile_jq(
+            "view", reconcile.view, {"previous": previous, "new": new, "data": subtree}
+        )
+        if not isinstance(result, list):
+            raise TemplateValidationError(
+                f"reconcile view must return a list of {{id, label}}, got {type(result).__name__}"
+            )
+        return result
+
+    async def _reconcile_guard_resolution(
+        self, context: AttachReconcileContext, reconcile: TemplateReconcile, new: dict[str, Any], resolution: Any
+    ) -> None:
+        if not isinstance(resolution, str) or not resolution.strip():
+            raise TemplateValidationError(
+                f"re-attaching template {context.template.name!r} on state {context.state!r}: "
+                'options.orphans="close" needs options.resolution naming a not-done resolution'
+            )
+        declared = await self._run_reconcile_jq("resolutions", reconcile.resolutions, {"new": new})
+        names = declared if isinstance(declared, list) else []
+        if resolution not in names:
+            raise TemplateValidationError(
+                f"re-attaching template {context.template.name!r} on state {context.state!r}: resolution "
+                f"{resolution!r} is not a not-done resolution the new declarations declare "
+                f"(declared: {sorted(str(n) for n in names)})"
+            )
+
+    @staticmethod
+    async def _run_reconcile_jq(label: str, expr: str, payload: Any) -> Any:
+        """One reconcile jq program over its input payload — loud on an evaluation failure,
+        carrying the program's own ``error(...)`` message out."""
+        try:
+            return await run_jq_first(expr, payload)
+        except Exception as exc:
+            raise TemplateValidationError(f"reconcile {label} failed to evaluate: {exc}") from exc
 
     # -- seeds -------------------------------------------------------------------
 
-    def register_module_seed(self, doc: StateModuleDocument) -> None:
+    def register_template_seed(self, doc: StateTemplateDocument) -> None:
         self._seeds.register(doc)
 
-    async def apply_module_seeds(self) -> None:
-        """Create each shipped module seed that is absent from the store (a no-op while the
+    async def apply_template_seeds(self) -> None:
+        """Create each shipped template seed that is absent from the store (a no-op while the
         feature is off)."""
         if not states_store_configured():
             return
-        from tai42_skeleton.states.seeds import apply_module_seeds
+        from tai42_skeleton.states.seeds import apply_template_seeds
 
-        await apply_module_seeds(self._store, seeds=self._seeds.seeds())
+        await apply_template_seeds(self._store, seeds=self._seeds.seeds())
 
-    # -- module/mount helpers ----------------------------------------------------
+    # -- template/attach helpers ----------------------------------------------------
 
     async def _require_declaration(self, state: str) -> dict[str, Any]:
         decl = await self._store.get_declaration(state)
@@ -1161,115 +1515,117 @@ class StatesService:
     async def _require_declaration_decl(self, state: str) -> StateDeclaration:
         return _row_to_declaration(await self._require_declaration(state))
 
-    async def _get_module_or_raise(self, name: str) -> StateModule:
-        row = await self._store.get_module(name)
+    async def _get_template_or_raise(self, name: str) -> StateTemplate:
+        row = await self._store.get_template(name)
         if row is None:
-            raise StateNotFoundError(f"no module {name!r}")
-        return self._validated_module(row)
+            raise StateNotFoundError(f"no template {name!r}")
+        return self._validated_template(row)
 
-    async def _load_state_mounts(
-        self, state: str, *, override: dict[str, StateModule] | None = None
-    ) -> list[tuple[StateModule, list[str], dict[str, Any], dict[str, Any]]]:
-        """Every mount on the state as ``(module, path, parameters, declarations)``.
-        ``override`` supplies a not-yet-stored module body (a module replace composes
+    async def _load_state_attachments(
+        self, state: str, *, override: dict[str, StateTemplate] | None = None
+    ) -> list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]]:
+        """Every attachment on the state as ``(template, path, parameters, declarations)``.
+        ``override`` supplies a not-yet-stored template body (a template replace composes
         against the candidate)."""
         override = override or {}
-        out: list[tuple[StateModule, list[str], dict[str, Any], dict[str, Any]]] = []
-        for row in await self._store.list_mounts_for_state(state):
-            module = override.get(row["module"]) or await self._get_module_or_raise(row["module"])
-            out.append((module, list(row["path"]), dict(row["parameters"] or {}), dict(row["declarations"] or {})))
+        out: list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]] = []
+        for row in await self._store.list_attachments_for_state(state):
+            template = override.get(row["template"]) or await self._get_template_or_raise(row["template"])
+            out.append((template, list(row["path"]), dict(row["parameters"] or {}), dict(row["declarations"] or {})))
         return out
 
     async def _compose_effective(self, state: str, base_schema: dict[str, Any]) -> dict[str, Any]:
-        """The effective schema for ``base_schema`` over the state's CURRENT mounts."""
-        mounts = await self._load_state_mounts(state)
-        return compose_effective_schema(base_schema, [(m, p, pa) for m, p, pa, _d in mounts])
+        """The effective schema for ``base_schema`` over the state's CURRENT attachments."""
+        attachments = await self._load_state_attachments(state)
+        return compose_effective_schema(base_schema, [(m, p, pa) for m, p, pa, _d in attachments])
 
     @staticmethod
     def _compose_regimes(
-        mounts: list[tuple[StateModule, list[str], dict[str, Any], dict[str, Any]]],
+        attachments: list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]],
     ) -> list[dict[str, Any]]:
-        """The absolute write-regime rules over already-loaded ``mounts``: each mounted
-        module's regime paths prefixed by the mount path. The ONE composition every
+        """The absolute write-regime rules over already-loaded ``attachments``: each attached
+        template's regime paths prefixed by the attach path. The ONE composition every
         declaration read (``get_declaration``/``list_declarations``) and
         ``served_declaration`` share, so a served regime is identical across doors."""
         regimes: list[dict[str, Any]] = []
-        for module, base_path, _params, _decls in mounts:
-            for rule in module.regimes:
+        for template, base_path, _params, _decls in attachments:
+            for rule in template.regimes:
                 regimes.append({"path": [*base_path, *rule.path], "regime": rule.regime})
         return regimes
 
-    def _validate_mount_path(self, path: Any) -> None:
+    def _validate_attach_path(self, path: Any) -> None:
         if not isinstance(path, list):
-            raise MountConflictError("mount path must be a list of object keys")
+            raise AttachConflictError("attach path must be a list of object keys")
         for seg in path:
             if not isinstance(seg, str) or not seg:
-                raise MountConflictError(
-                    f"mount path segment {seg!r} must be a non-empty object key (a mount never sits on a list index)"
+                raise AttachConflictError(
+                    f"attach path segment {seg!r} must be a non-empty object key (an attach never sits on a list index)"
                 )
 
     @staticmethod
-    def _effective_parameters(module: StateModule, parameters: dict[str, Any]) -> dict[str, Any]:
-        """The parameter map a mount PERSISTS: the module's defaults overlaid by the
+    def _effective_parameters(template: StateTemplate, parameters: dict[str, Any]) -> dict[str, Any]:
+        """The parameter map an attach PERSISTS: the template's defaults overlaid by the
         client's supplied values."""
-        return {**module.defaults(), **dict(parameters or {})}
+        return {**template.defaults(), **dict(parameters or {})}
 
-    async def _validate_mount_values(
-        self, module: StateModule, parameters: dict[str, Any], declarations: dict[str, Any]
+    async def _validate_attach_values(
+        self, template: StateTemplate, parameters: dict[str, Any], declarations: dict[str, Any]
     ) -> None:
-        """Validate a mount's effective parameter values against each parameter's schema
-        (every no-default parameter supplied) and its declarations against the module's
+        """Validate an attach's effective parameter values against each parameter's schema
+        (every no-default parameter supplied) and its declarations against the template's
         declarations schema and optional ``check`` predicate. Loud on the first failure.
 
-        The ``check`` runs over the declarations with the mount's EFFECTIVE parameters
-        (module defaults overlaid by supplied values — the map the runtime sees) bound as
+        The ``check`` runs over the declarations with the attach's EFFECTIVE parameters
+        (template defaults overlaid by supplied values — the map the runtime sees) bound as
         the named jq variable ``$parameters``, so a check may constrain a declaration
         against a parameter (e.g. against a parameter-declared enum) at the earliest point
         both are known."""
-        effective = self._effective_parameters(module, parameters)
+        effective = self._effective_parameters(template, parameters)
         for name, value in effective.items():
-            param = module.parameters.get(name)
+            param = template.parameters.get(name)
             if param is None:
-                raise ModuleValidationError(f"mount supplies unknown parameter {name!r} for module {module.name!r}")
+                raise TemplateValidationError(
+                    f"attach supplies unknown parameter {name!r} for template {template.name!r}"
+                )
             try:
                 Draft202012Validator(param.schema).validate(value)
             except jsonschema.ValidationError as exc:
-                raise ModuleValidationError(f"mount parameter {name!r} is invalid: {exc.message}") from exc
-        for name, param in module.parameters.items():
+                raise TemplateValidationError(f"attach parameter {name!r} is invalid: {exc.message}") from exc
+        for name, param in template.parameters.items():
             if not param.has_default and name not in effective:
-                raise ModuleValidationError(
-                    f"mount of module {module.name!r} must supply parameter {name!r} (it has no default)"
+                raise TemplateValidationError(
+                    f"attach of template {template.name!r} must supply parameter {name!r} (it has no default)"
                 )
-        if module.declarations is None:
+        if template.declarations is None:
             if declarations:
-                raise ModuleValidationError(
-                    f"module {module.name!r} declares no declarations section, so none may be supplied"
+                raise TemplateValidationError(
+                    f"template {template.name!r} declares no declarations section, so none may be supplied"
                 )
             return
         try:
-            Draft202012Validator(module.declarations.schema).validate(declarations)
+            Draft202012Validator(template.declarations.schema).validate(declarations)
         except jsonschema.ValidationError as exc:
-            raise ModuleValidationError(
-                f"mount declarations are invalid under module {module.name!r}: {exc.message}"
+            raise TemplateValidationError(
+                f"attach declarations are invalid under template {template.name!r}: {exc.message}"
             ) from exc
-        if module.declarations.check is not None:
+        if template.declarations.check is not None:
             try:
                 result = await run_jq_first(
-                    module.declarations.check, declarations, variables={"parameters": effective}
+                    template.declarations.check, declarations, variables={"parameters": effective}
                 )
             except Exception as exc:
-                raise ModuleValidationError(
-                    f"module {module.name!r} declarations check failed to evaluate: {exc}"
+                raise TemplateValidationError(
+                    f"template {template.name!r} declarations check failed to evaluate: {exc}"
                 ) from exc
             if result is not True:
-                message = result if isinstance(result, str) else "the declarations violate the module's check rule"
-                raise ModuleValidationError(f"mount declarations rejected by module {module.name!r}: {message}")
+                message = result if isinstance(result, str) else "the declarations violate the template's check rule"
+                raise TemplateValidationError(f"attach declarations rejected by template {template.name!r}: {message}")
 
 
 __all__ = [
+    "StatesAttachReconcilerRegistry",
+    "StatesAttachValidatorRegistry",
     "StatesConsumerListerRegistry",
-    "StatesMountReconcilerRegistry",
-    "StatesMountValidatorRegistry",
     "StatesService",
     "current_state_context",
     "state_context",

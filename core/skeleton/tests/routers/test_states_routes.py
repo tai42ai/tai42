@@ -2,9 +2,9 @@
 
 Full record CRUD runs against a live Postgres in the e2e suite; here the unit surface pins
 what needs no database: every route is registered at its expected ``(method, path)``, the
-``/api/state-modules`` sibling keeps the modules OFF the ``/api/states/{name}`` template
+``/api/state-templates`` sibling keeps the modules OFF the ``/api/states/{name}`` template
 position (a state literally named ``modules`` stays reachable at ``GET /api/states/modules``
-while ``GET /api/state-modules`` lists modules), and every door refuses 501
+while ``GET /api/state-templates`` lists modules), and every door refuses 501
 ``states-not-configured`` while the store is unbound.
 """
 
@@ -20,8 +20,8 @@ import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import (
-    ModuleValidationError,
     StatesError,
+    TemplateValidationError,
 )
 from tai42_contract.states.models import (
     CompletedOrigin,
@@ -68,11 +68,11 @@ _EXPECTED: set[tuple[str, str]] = {
     ("PUT", "/api/states/{name}"),
     ("DELETE", "/api/states/{name}"),
     ("GET", "/api/states/{name}/stats"),
-    ("GET", "/api/states/{name}/mounts"),
-    ("GET", "/api/states/{name}/mounts/{module}"),
-    ("PUT", "/api/states/{name}/mounts/{module}"),
-    ("PATCH", "/api/states/{name}/mounts/{module}"),
-    ("DELETE", "/api/states/{name}/mounts/{module}"),
+    ("GET", "/api/states/{name}/attachments"),
+    ("GET", "/api/states/{name}/attachments/{template}"),
+    ("PUT", "/api/states/{name}/attachments/{template}"),
+    ("PATCH", "/api/states/{name}/attachments/{template}"),
+    ("DELETE", "/api/states/{name}/attachments/{template}"),
     ("GET", "/api/states/{name}/subjects"),
     ("POST", "/api/states/{name}/records/search"),
     ("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
@@ -83,10 +83,10 @@ _EXPECTED: set[tuple[str, str]] = {
     ("POST", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/fold"),
     ("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/writes"),
     ("GET", "/api/states/{name}/consumers"),
-    ("GET", "/api/state-modules"),
-    ("GET", "/api/state-modules/{name}"),
-    ("PUT", "/api/state-modules/{name}"),
-    ("DELETE", "/api/state-modules/{name}"),
+    ("GET", "/api/state-templates"),
+    ("GET", "/api/state-templates/{name}"),
+    ("PUT", "/api/state-templates/{name}"),
+    ("DELETE", "/api/state-templates/{name}"),
     ("POST", "/api/state-retention/prune"),
 }
 
@@ -105,7 +105,7 @@ def test_modules_sibling_keeps_the_state_name_reachable() -> None:
         for method in meta.methods:
             by_path[(method, meta.path)] = meta.name
     assert by_path[("GET", "/api/states/{name}")] == "get_state"
-    assert by_path[("GET", "/api/state-modules")] == "list_state_modules"
+    assert by_path[("GET", "/api/state-templates")] == "list_state_templates"
     # No route sits literally at /api/states/modules — a state so named hits the template.
     assert ("GET", "/api/states/modules") not in by_path
 
@@ -150,7 +150,7 @@ def test_route_answers_501_body_with_the_stable_code_when_unbound() -> None:
 # --------------------------------------------------------------------------- #
 # The message a consumer-registered mount validator raises with; the door must relay it verbatim.
 _VALIDATOR_REFUSAL = (
-    "module 'agenda' compiled view 'standing' reads a bare `.data`, but its input is the flow "
+    "module 'planner' compiled view 'standing' reads a bare `.data`, but its input is the flow "
     "root; read the mounted subtree as `$mount.data`"
 )
 
@@ -182,20 +182,20 @@ class _FakeStates:
             next_cursor="17",
         )
 
-    async def list_modules_catalog(self):
+    async def list_templates_catalog(self):
         return [
-            {"kind": "state-module", "name": "tagmod", "schema": {}, "mounted_on": 2, "shipped_default": True},
-            {"kind": "state-module", "name": "loose", "schema": {}, "mounted_on": 0, "shipped_default": False},
+            {"kind": "state-template", "name": "tagmod", "schema": {}, "attached_to": 2, "shipped_default": True},
+            {"kind": "state-template", "name": "loose", "schema": {}, "attached_to": 0, "shipped_default": False},
         ]
 
-    async def mount(self, state, module, body):
-        raise ModuleValidationError(_VALIDATOR_REFUSAL)
+    async def attach(self, state, template, body):
+        raise TemplateValidationError(_VALIDATOR_REFUSAL)
 
-    async def update_mount_declarations(self, state, module, declarations, *, options=None):
-        raise ModuleValidationError(_VALIDATOR_REFUSAL)
+    async def update_attachment_declarations(self, state, template, declarations, *, options=None):
+        raise TemplateValidationError(_VALIDATOR_REFUSAL)
 
-    async def put_module(self, doc, *, replace):
-        raise ModuleValidationError(_VALIDATOR_REFUSAL)
+    async def put_template(self, doc, *, replace):
+        raise TemplateValidationError(_VALIDATOR_REFUSAL)
 
     async def list_declarations(self):
         raise _UnmappedStatesError("a brand-new store error class the map does not know")
@@ -268,7 +268,7 @@ class _ServingStates:
             "effective_schema": {"type": "object"},
             "subject_kinds": ["thread"],
             "default_subject_kind": "thread",
-            "mounts": [],
+            "attachments": [],
             "regimes": [],
             "updated_at": "2026-09-06T12:00:00Z",
         }
@@ -294,28 +294,28 @@ def test_declaration_reads_serve_updated_at_as_an_iso_string_through_the_encoder
 
 def test_module_listing_serves_the_catalog_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_states(monkeypatch)
-    out = asyncio.run(ops.list_state_modules())
+    out = asyncio.run(ops.list_state_templates())
     # Each document carries the catalog columns the module screen reads.
     by_name = {row["name"]: row for row in out}
-    assert by_name["tagmod"]["mounted_on"] == 2
+    assert by_name["tagmod"]["attached_to"] == 2
     assert by_name["tagmod"]["shipped_default"] is True
-    assert by_name["loose"]["mounted_on"] == 0
+    assert by_name["loose"]["attached_to"] == 0
     assert by_name["loose"]["shipped_default"] is False
 
 
 @pytest.mark.parametrize(
     "door",
     [
-        lambda: ops.mount_state_module("alerts", "agenda", {"path": ["sub"]}),
-        lambda: ops.update_state_mount("alerts", "agenda", {"intents": []}),
-        lambda: ops.put_state_module("agenda", {"kind": "state-module", "schema": {}}, replace=True),
+        lambda: ops.attach_state_template("alerts", "planner", {"path": ["sub"]}),
+        lambda: ops.update_state_attachment("alerts", "planner", {"intents": []}),
+        lambda: ops.put_state_template("planner", {"kind": "state-template", "schema": {}}, replace=True),
     ],
-    ids=["mount", "update_mount_declarations", "put_module"],
+    ids=["attach", "update_attachment_declarations", "put_template"],
 )
 def test_mount_validator_refusal_is_422_on_every_door(monkeypatch: pytest.MonkeyPatch, door) -> None:
-    # Every door that runs the registered mount validators (mount / update_mount_declarations /
-    # put_module) funnels through ``_states_door``; a consumer validator's contract
-    # ``ModuleValidationError`` maps to a 422 with the validator's message verbatim, never a 500.
+    # Every door that runs the registered mount validators (mount / update_attachment_declarations /
+    # put_template) funnels through ``_states_door``; a consumer validator's contract
+    # ``TemplateValidationError`` maps to a 422 with the validator's message verbatim, never a 500.
     _install_fake_states(monkeypatch)
     with pytest.raises(ValidationRejected) as excinfo:
         asyncio.run(door())
@@ -325,7 +325,7 @@ def test_mount_validator_refusal_is_422_on_every_door(monkeypatch: pytest.Monkey
 
 _MOUNT_ROW: dict[str, Any] = {
     "state": "alerts",
-    "module": "tagmod",
+    "template": "tagmod",
     "path": ["sub"],
     "parameters": {"cap": 5},
     "declarations": {"intents": []},
@@ -333,19 +333,19 @@ _MOUNT_ROW: dict[str, Any] = {
 
 
 class _MountReads:
-    """A facet stand-in whose ``list_mounts`` serves one known mount, so the single read and
+    """A facet stand-in whose ``list_attachments`` serves one known mount, so the single read and
     the collection read draw from the same row."""
 
-    async def list_mounts(self, name: str, *, module: str | None = None) -> list[dict[str, Any]]:
-        if module is None:
+    async def list_attachments(self, name: str, *, template: str | None = None) -> list[dict[str, Any]]:
+        if template is None:
             return [_MOUNT_ROW]
-        return [_MOUNT_ROW] if module == _MOUNT_ROW["module"] else []
+        return [_MOUNT_ROW] if template == _MOUNT_ROW["template"] else []
 
 
 def test_get_mount_serves_the_envelope_and_agrees_with_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ops, "_states", _MountReads)
-    single = asyncio.run(ops.get_state_mount("alerts", "tagmod"))
-    listed = asyncio.run(ops.list_state_mounts("alerts"))
+    single = asyncio.run(ops.get_state_attachment("alerts", "tagmod"))
+    listed = asyncio.run(ops.list_state_attachments("alerts"))
     # The single GET returns the same envelope row the list serves — same shape, same values.
     assert single == _MOUNT_ROW
     assert single == listed[0]
@@ -354,7 +354,7 @@ def test_get_mount_serves_the_envelope_and_agrees_with_the_list(monkeypatch: pyt
 def test_get_mount_absent_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ops, "_states", _MountReads)
     with pytest.raises(NotFoundError) as excinfo:
-        asyncio.run(ops.get_state_mount("alerts", "nope"))
+        asyncio.run(ops.get_state_attachment("alerts", "nope"))
     assert excinfo.value.status == 404
 
 
@@ -365,24 +365,24 @@ class _RecordingMountStates:
         self.mount_options: dict | None = None
         self.update_options: dict | None = None
 
-    async def mount(self, state, module, body):
+    async def attach(self, state, template, body):
         self.mount_options = dict(body.options)
 
-    async def update_mount_declarations(self, state, module, declarations, *, options=None):
+    async def update_attachment_declarations(self, state, template, declarations, *, options=None):
         self.update_options = options
 
 
 def test_mount_operation_threads_options_into_the_mount_body(monkeypatch: pytest.MonkeyPatch) -> None:
     facet = _RecordingMountStates()
     monkeypatch.setattr(ops, "_states", lambda: facet)
-    asyncio.run(ops.mount_state_module("alerts", "m", {"path": ["sub"], "options": {"on_orphan": "close"}}))
+    asyncio.run(ops.attach_state_template("alerts", "m", {"path": ["sub"], "options": {"on_orphan": "close"}}))
     assert facet.mount_options == {"on_orphan": "close"}
 
 
 def test_update_mount_operation_threads_options(monkeypatch: pytest.MonkeyPatch) -> None:
     facet = _RecordingMountStates()
     monkeypatch.setattr(ops, "_states", lambda: facet)
-    asyncio.run(ops.update_state_mount("alerts", "m", {"n": 2}, {"on_orphan": "refuse"}))
+    asyncio.run(ops.update_state_attachment("alerts", "m", {"n": 2}, {"on_orphan": "refuse"}))
     assert facet.update_options == {"on_orphan": "refuse"}
 
 
@@ -403,16 +403,18 @@ def _request_with_body(method: str, path: str, body: dict[str, Any], **path_para
     return Request(scope, receive)
 
 
-def test_extract_mount_declarations_carries_options_only_when_present() -> None:
+def test_extract_attach_declarations_carries_options_only_when_present() -> None:
     with_opts = asyncio.run(
-        router._extract_mount_declarations(
-            _request_with_body("PATCH", "/api/states/alerts/mounts/m", {"declarations": {"n": 1}, "options": {"x": 2}})
+        router._extract_attach_declarations(
+            _request_with_body(
+                "PATCH", "/api/states/alerts/attachments/m", {"declarations": {"n": 1}, "options": {"x": 2}}
+            )
         )
     )
     assert with_opts == {"declarations": {"n": 1}, "options": {"x": 2}}
     without = asyncio.run(
-        router._extract_mount_declarations(
-            _request_with_body("PATCH", "/api/states/alerts/mounts/m", {"declarations": {"n": 1}})
+        router._extract_attach_declarations(
+            _request_with_body("PATCH", "/api/states/alerts/attachments/m", {"declarations": {"n": 1}})
         )
     )
     assert without == {"declarations": {"n": 1}}

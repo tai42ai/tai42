@@ -115,7 +115,7 @@ def test_record_doors_are_marked_raw_path_matched() -> None:
 
     load_all_routes()  # imports the router universe, so states registered + the family marked
     record = [m for m in route_registry.routes() if m.path.startswith("/api/states/{name}/records/{target_kind}")]
-    assert len(record) == 7
+    assert len(record) == 9
     assert all(m.raw_path_matched for m in record)
 
 

@@ -1,7 +1,7 @@
 """``tai states`` — manage the subject-keyed state store (``/api/states*`` and
 ``/api/state-retention/prune``).
 
-Thin wrappers over the platform state routes: declare and inspect states, mount modules,
+Thin wrappers over the platform state routes: declare and inspect states, attach templates,
 read/write/erase/fold a subject's record, page a subject's write audit trail, list a
 state's consumers, and prune expired records. A record is addressed by its subject —
 ``--target-kind``/``--target-name``/``--kind``/``--key`` — and a document/patch/op batch is
@@ -71,7 +71,7 @@ def list_states(ctx: typer.Context) -> None:
 @app.command("get")
 @covers(("GET", "/api/states/{name}"))
 def get_state(ctx: typer.Context, name: Annotated[str, typer.Argument(help="The state name.")]) -> None:
-    """Show a state's declaration, effective schema, mounts and regimes."""
+    """Show a state's declaration, effective schema, attachments and regimes."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}"))
@@ -95,7 +95,7 @@ def put_state(
 @app.command("delete")
 @covers(("DELETE", "/api/states/{name}"))
 def delete_state(ctx: typer.Context, name: Annotated[str, typer.Argument(help="The state name.")]) -> None:
-    """Delete a state with its records, mounts and aliases."""
+    """Delete a state with its records, attachments and aliases."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         emit_result(ctx_obj, client.delete(f"/api/states/{seg(name)}"))
@@ -110,81 +110,81 @@ def state_stats(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Th
         emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/stats"))
 
 
-# -- mounts -------------------------------------------------------------------
+# -- attachments --------------------------------------------------------------
 
 
-@app.command("mounts")
-@covers(("GET", "/api/states/{name}/mounts"))
-def list_state_mounts(ctx: typer.Context, name: Annotated[str, typer.Argument(help="The state name.")]) -> None:
-    """List the modules mounted on a state."""
+@app.command("attachments")
+@covers(("GET", "/api/states/{name}/attachments"))
+def list_state_attachments(ctx: typer.Context, name: Annotated[str, typer.Argument(help="The state name.")]) -> None:
+    """List the templates attached on a state."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/mounts"))
+        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/attachments"))
 
 
-@app.command("get-mount")
-@covers(("GET", "/api/states/{name}/mounts/{module}"))
-def get_state_mount(
+@app.command("get-attachment")
+@covers(("GET", "/api/states/{name}/attachments/{template}"))
+def get_state_attachment(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="The state name.")],
-    module: Annotated[str, typer.Argument(help="The module name.")],
+    template: Annotated[str, typer.Argument(help="The template name.")],
 ) -> None:
-    """Read one module's mount on a state (404 when it is not mounted)."""
+    """Read one template's attachment on a state (404 when it is not attached)."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/mounts/{seg(module)}"))
+        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/attachments/{seg(template)}"))
 
 
-@app.command("mount")
-@covers(("PUT", "/api/states/{name}/mounts/{module}"))
-def mount_state_module(
+@app.command("attach")
+@covers(("PUT", "/api/states/{name}/attachments/{template}"))
+def attach_state_template(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="The state name.")],
-    module: Annotated[str, typer.Argument(help="The module name.")],
+    template: Annotated[str, typer.Argument(help="The template name.")],
     data: Annotated[
-        str | None, typer.Option("--data", help="The mount body JSON (path/parameters/declarations).")
+        str | None, typer.Option("--data", help="The attach body JSON (path/parameters/declarations).")
     ] = None,
-    file: Annotated[Path | None, typer.Option("--file", help="A file holding the mount body JSON.")] = None,
+    file: Annotated[Path | None, typer.Option("--file", help="A file holding the attach body JSON.")] = None,
 ) -> None:
-    """Mount a module on a state at a path with its parameters and declarations."""
+    """Attach a template on a state at a path with its parameters and declarations."""
     ctx_obj = app_context(ctx)
     body = _read_document(data, file)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.put(f"/api/states/{seg(name)}/mounts/{seg(module)}", json=body))
+        emit_result(ctx_obj, client.put(f"/api/states/{seg(name)}/attachments/{seg(template)}", json=body))
 
 
-@app.command("update-mount")
-@covers(("PATCH", "/api/states/{name}/mounts/{module}"))
-def update_state_mount(
+@app.command("update-attachment")
+@covers(("PATCH", "/api/states/{name}/attachments/{template}"))
+def update_state_attachment(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="The state name.")],
-    module: Annotated[str, typer.Argument(help="The module name.")],
-    declarations: Annotated[str, typer.Option("--declarations", help="The mount declaration values JSON object.")],
+    template: Annotated[str, typer.Argument(help="The template name.")],
+    declarations: Annotated[str, typer.Option("--declarations", help="The attachment declaration values JSON object.")],
     options: Annotated[
         str | None,
-        typer.Option("--options", help="The reconcile options JSON object passed to mount reconcilers."),
+        typer.Option("--options", help="The reconcile options JSON object passed to attach reconcilers."),
     ] = None,
 ) -> None:
-    """Replace a mount's static declaration values, with optional reconcile options."""
+    """Replace an attachment's static declaration values, with optional reconcile options."""
     ctx_obj = app_context(ctx)
     body: dict[str, Any] = {"declarations": parse_json_object(declarations, param_hint="--declarations")}
     if options is not None:
         body["options"] = parse_json_object(options, param_hint="--options")
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.patch(f"/api/states/{seg(name)}/mounts/{seg(module)}", json=body))
+        emit_result(ctx_obj, client.patch(f"/api/states/{seg(name)}/attachments/{seg(template)}", json=body))
 
 
-@app.command("unmount")
-@covers(("DELETE", "/api/states/{name}/mounts/{module}"))
-def unmount_state_module(
+@app.command("detach")
+@covers(("DELETE", "/api/states/{name}/attachments/{template}"))
+def detach_state_template(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="The state name.")],
-    module: Annotated[str, typer.Argument(help="The module name.")],
+    template: Annotated[str, typer.Argument(help="The template name.")],
 ) -> None:
-    """Unmount a module from a state."""
+    """Detach a template from a state."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        emit_result(ctx_obj, client.delete(f"/api/states/{seg(name)}/mounts/{seg(module)}"))
+        emit_result(ctx_obj, client.delete(f"/api/states/{seg(name)}/attachments/{seg(template)}"))
 
 
 # -- subjects + records -------------------------------------------------------
@@ -304,6 +304,76 @@ def apply_state_record(
         emit_result(
             ctx_obj, client.post(f"{_record_path(name, target_kind, target_name, kind, key)}/deltas", json=body)
         )
+
+
+# -- template_jq --------------------------------------------------------------
+# ``tai states template-jq`` — the record-level jq programs a state's attached templates
+# declare. ``eval`` runs an input-purpose program (GET, read-only); ``apply`` runs an
+# update-purpose program (POST). ``<program>`` is unqualified or ``<template>.<name>``.
+template_jq_app = typer.Typer(
+    name="template-jq", help="Evaluate/apply a state's template_jq programs.", no_args_is_help=True
+)
+app.add_typer(template_jq_app)
+
+
+@template_jq_app.command("eval")
+@covers(("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/template-jq/{program}"))
+def eval_state_template_jq(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="The state name.")],
+    target_kind: _TARGET_KIND,
+    target_name: _TARGET_NAME,
+    kind: _KIND,
+    key: _KEY,
+    program: Annotated[str, typer.Argument(help="The template_jq program name (or <template>.<name>).")],
+    param: Annotated[
+        list[str] | None,
+        typer.Option("--param", help="An input-program parameter as key=<json> (repeatable)."),
+    ] = None,
+) -> None:
+    """Evaluate an input-purpose template_jq program for a subject."""
+    ctx_obj = app_context(ctx)
+    params: dict[str, str] = {}
+    for item in param or []:
+        if "=" not in item:
+            raise typer.BadParameter(f"--param must be key=<json>, got {item!r}")
+        pkey, raw = item.split("=", 1)
+        parse_json_value(raw, param_hint=f"--param {pkey}")  # fail early on non-JSON
+        params[pkey] = raw
+    path = f"{_record_path(name, target_kind, target_name, kind, key)}/template-jq/{seg(program)}"
+    with ctx_obj.client() as client:
+        emit_result(ctx_obj, client.get(path, params=params or None))
+
+
+@template_jq_app.command("apply")
+@covers(("POST", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/template-jq/{program}"))
+def apply_state_template_jq(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="The state name.")],
+    target_kind: _TARGET_KIND,
+    target_name: _TARGET_NAME,
+    kind: _KIND,
+    key: _KEY,
+    program: Annotated[str, typer.Argument(help="The template_jq program name (or <template>.<name>).")],
+    input: Annotated[
+        str | None,
+        typer.Option("--input", help="The program's input as JSON, or @<file> to read it from a file."),
+    ] = None,
+    op_id: Annotated[str | None, typer.Option("--op-id", help="An idempotency key for the apply.")] = None,
+) -> None:
+    """Apply an update-purpose template_jq program to a subject's record."""
+    ctx_obj = app_context(ctx)
+    body: dict[str, Any] = {}
+    if input is not None:
+        if input.startswith("@"):
+            body["input"] = parse_json_value(Path(input[1:]).read_text(), param_hint=input)
+        else:
+            body["input"] = parse_json_value(input, param_hint="--input")
+    if op_id is not None:
+        body["op_id"] = op_id
+    path = f"{_record_path(name, target_kind, target_name, kind, key)}/template-jq/{seg(program)}"
+    with ctx_obj.client() as client:
+        emit_result(ctx_obj, client.post(path, json=body))
 
 
 @app.command("erase")

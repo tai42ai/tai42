@@ -23,8 +23,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_contract.states import StateBinding
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.schedules import create_schedule as _create_schedule_op
@@ -54,7 +56,21 @@ async def _extract_create(request: Request) -> dict[str, Any]:
     schedule_kwargs = body.get("schedule_kwargs", {})
     if not isinstance(schedule_kwargs, dict):
         raise BadRequestError("'schedule_kwargs' must be a JSON object")
-    return {"tool_name": tool_name, "tool_kwargs": tool_kwargs, "schedule_kwargs": schedule_kwargs}
+    # The optional door binding — parsed to the model so it is not dropped at the route edge.
+    raw_binding = body.get("state_binding")
+    if raw_binding is None:
+        state_binding: StateBinding | None = None
+    else:
+        try:
+            state_binding = StateBinding.model_validate(raw_binding)
+        except ValidationError as exc:
+            raise BadRequestError(f"invalid 'state_binding': {exc.errors(include_url=False)}") from exc
+    return {
+        "tool_name": tool_name,
+        "tool_kwargs": tool_kwargs,
+        "schedule_kwargs": schedule_kwargs,
+        "state_binding": state_binding,
+    }
 
 
 list_schedules = register_operation_route(

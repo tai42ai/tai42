@@ -62,6 +62,7 @@ from tai42_contract.interactions import (
 from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.monitoring import RunAttribution
 from tai42_contract.states import StateContext, SubjectCandidates
+from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 from tai42_kit.utils.data import run_jq_bounded
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
@@ -963,6 +964,11 @@ async def _run_tool_turn(
             type(exc).__name__,
         )
         return _tool_error(f"payload_expr error ({type(exc).__name__})", route)
+    # The route's optional door binding, read from the target config; deposited on the
+    # ambient dispatch context so the chokepoint carries it forward and applies it around the
+    # tool turn. A route with no binding deposits nothing.
+    target_config = await _config_store().get(route.target_kind, route.target_name)
+    route_state_binding = target_config.state_binding if target_config is not None else None
     try:
         async with bind_execution_identity(route.execution_key, bound_fingerprint=route.execution_key_fingerprint):
             # Bind the generic tool-route completion for the dispatch: a parking tool captures
@@ -976,12 +982,21 @@ async def _run_tool_turn(
                 DELIVER_TOOL_COMPLETION_NAME,
                 {"delivery_thread_id": thread_id, "route_name": route.route_name},
             )
+            binding_token = (
+                set_current_tool_invocation(
+                    ToolInvocation(tool_name=route.target_name, state_binding=route_state_binding)
+                )
+                if route_state_binding is not None
+                else None
+            )
             try:
                 # ``offload_sync``: a synchronous tool runs off the event loop, matching the
                 # meta-executor door, so a blocking tool cannot starve the turn engine.
                 result = await _tools().run_tool(route.target_name, kwargs, offload_sync=True)
             finally:
                 reset_park_completion(completion_token)
+                if binding_token is not None:
+                    reset_current_tool_invocation(binding_token)
     except PermissionDenied as exc:
         return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:

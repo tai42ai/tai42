@@ -2,7 +2,7 @@
 store and fake facet doors — no live database.
 
 Export reads the store directly; import writes through the facet doors
-(``put_module``/``put_declaration``/``mount``) plus the section's own
+(``put_template``/``put_declaration``/``mount``) plus the section's own
 ``restore_aliases``/``restore_records`` paths, reporting per-entity outcomes. The feature
 gate, version guard and registration seam are covered in ``tests/backup/
 test_states_section.py``; the full real-store round-trip in
@@ -26,7 +26,7 @@ class _FakeExportStore:
     """A store stand-in returning canned rows for the exporter's five reads."""
 
     def __init__(self) -> None:
-        self._modules = [{"body": {"kind": "state-module", "name": "m"}}]
+        self._modules = [{"body": {"kind": "state-template", "name": "m"}}]
         self._declarations = [
             {
                 "name": "alerts",
@@ -38,14 +38,14 @@ class _FakeExportStore:
             }
         ]
 
-    async def list_modules(self) -> list[dict[str, Any]]:
+    async def list_templates(self) -> list[dict[str, Any]]:
         return self._modules
 
     async def list_declarations(self) -> list[dict[str, Any]]:
         return self._declarations
 
-    async def list_mounts_for_state(self, state: str) -> list[dict[str, Any]]:
-        return [{"module": "m", "path": ["a"], "parameters": {"k": 1}, "declarations": {"d": 2}}]
+    async def list_attachments_for_state(self, state: str) -> list[dict[str, Any]]:
+        return [{"template": "m", "path": ["a"], "parameters": {"k": 1}, "declarations": {"d": 2}}]
 
     async def list_aliases(self, state: str) -> list[dict[str, Any]]:
         return [
@@ -75,11 +75,11 @@ async def test_export_states_reads_the_whole_store(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(backup_mod, "PostgresStatesStore", _FakeExportStore)
     payload = await export_states()
     assert payload["version"] == 1
-    assert payload["modules"] == [{"kind": "state-module", "name": "m"}]
+    assert payload["templates"] == [{"kind": "state-template", "name": "m"}]
     assert payload["declarations"][0]["name"] == "alerts"
     assert payload["declarations"][0]["retention_days"] == 30
-    assert payload["mounts"] == [
-        {"state": "alerts", "module": "m", "path": ["a"], "parameters": {"k": 1}, "declarations": {"d": 2}}
+    assert payload["attachments"] == [
+        {"state": "alerts", "template": "m", "path": ["a"], "parameters": {"k": 1}, "declarations": {"d": 2}}
     ]
     assert payload["aliases"][0]["state"] == "alerts"
     assert payload["aliases"][0]["alias_key"] == "old"
@@ -115,10 +115,10 @@ class _FakeStatesFacet:
         self.restored_aliases: list[tuple[str, int]] = []
         self.restored_records: list[tuple[str, int]] = []
 
-    async def get_module(self, name):
+    async def get_template(self, name):
         return object() if name in self.existing else None
 
-    async def put_module(self, doc, *, replace):
+    async def put_template(self, doc, *, replace):
         if doc.name in self.fail:
             raise StatesError(f"module {doc.name} refused")
         self.put_modules.append(doc.name)
@@ -131,17 +131,19 @@ class _FakeStatesFacet:
             raise StatesError(f"declaration {decl.name} refused")
         self.put_declarations.append(decl.name)
 
-    async def list_mounts(self, state, *, module):
-        return [{"state": state, "module": module}] if (state, module) in self.existing_mounts else []
+    async def list_attachments(self, state, *, template):
+        return [{"state": state, "template": template}] if (state, template) in self.existing_mounts else []
 
-    async def update_mount_declarations(self, state, module, declarations, *, options=None, skip_reconcilers=False):
-        self.updated_mounts.append((state, module))
+    async def update_attachment_declarations(
+        self, state, template, declarations, *, options=None, skip_reconcilers=False
+    ):
+        self.updated_mounts.append((state, template))
         self.skip_reconcilers_seen.append(skip_reconcilers)
 
-    async def mount(self, state, module, body, *, skip_reconcilers=False):
-        if module in self.fail:
-            raise StatesError(f"mount {module} refused")
-        self.mounted.append((state, module))
+    async def attach(self, state, template, body, *, skip_reconcilers=False):
+        if template in self.fail:
+            raise StatesError(f"attach {template} refused")
+        self.mounted.append((state, template))
         self.skip_reconcilers_seen.append(skip_reconcilers)
 
     async def restore_aliases(self, state, rows, *, origin):
@@ -164,9 +166,9 @@ def _wire(monkeypatch: pytest.MonkeyPatch, facet: _FakeStatesFacet) -> None:
 def _payload(**over: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "version": 1,
-        "modules": [{"name": "m"}],
+        "templates": [{"name": "m"}],
         "declarations": [{"name": "alerts", "subject_kinds": ["thread"], "default_subject_kind": "thread"}],
-        "mounts": [{"state": "alerts", "module": "m", "path": ["a"], "parameters": {}, "declarations": {}}],
+        "attachments": [{"state": "alerts", "template": "m", "path": ["a"], "parameters": {}, "declarations": {}}],
         "aliases": [
             {
                 "state": "alerts",
@@ -196,9 +198,9 @@ async def test_import_creates_all_entities(monkeypatch: pytest.MonkeyPatch) -> N
     facet = _FakeStatesFacet()
     _wire(monkeypatch, facet)
     report = await import_states(_payload())
-    assert report["modules"] == {"created": 1, "updated": 0, "failed": 0}
+    assert report["templates"] == {"created": 1, "updated": 0, "failed": 0}
     assert report["declarations"] == {"created": 1, "updated": 0, "failed": 0}
-    assert report["mounts"] == {"created": 1, "updated": 0, "failed": 0}
+    assert report["attachments"] == {"created": 1, "updated": 0, "failed": 0}
     assert report["aliases"] == {"restored": 1, "failed": 0}
     assert report["records"] == {"restored": 1, "failed": 0}
     assert report["errors"] == []
@@ -212,9 +214,9 @@ async def test_import_updates_present_entities(monkeypatch: pytest.MonkeyPatch) 
     facet = _FakeStatesFacet(existing={"m", "alerts"}, existing_mounts={("alerts", "m")})
     _wire(monkeypatch, facet)
     report = await import_states(_payload())
-    assert report["modules"] == {"created": 0, "updated": 1, "failed": 0}
+    assert report["templates"] == {"created": 0, "updated": 1, "failed": 0}
     assert report["declarations"] == {"created": 0, "updated": 1, "failed": 0}
-    assert report["mounts"] == {"created": 0, "updated": 1, "failed": 0}
+    assert report["attachments"] == {"created": 0, "updated": 1, "failed": 0}
     assert facet.updated_mounts == [("alerts", "m")]
     assert facet.skip_reconcilers_seen == [True]
     assert facet.mounted == []
@@ -226,9 +228,9 @@ async def test_import_reports_each_failed_entity_and_skips_it(monkeypatch: pytes
     report = await import_states(_payload())
     # the module and declaration doors both refuse; the mount refuses (its module failed);
     # the alias and record restores refuse (state "alerts"). Each is reported, none aborts.
-    assert report["modules"]["failed"] == 1
+    assert report["templates"]["failed"] == 1
     assert report["declarations"]["failed"] == 1
-    assert report["mounts"]["failed"] == 1
+    assert report["attachments"]["failed"] == 1
     assert report["aliases"]["failed"] == 1
     assert report["records"]["failed"] == 1
     assert len(report["errors"]) == 5
@@ -297,5 +299,5 @@ async def test_import_tolerates_absent_sections(monkeypatch: pytest.MonkeyPatch)
     facet = _FakeStatesFacet()
     _wire(monkeypatch, facet)
     report = await import_states({"version": 1})
-    assert report["modules"] == {"created": 0, "updated": 0, "failed": 0}
+    assert report["templates"] == {"created": 0, "updated": 0, "failed": 0}
     assert report["errors"] == []

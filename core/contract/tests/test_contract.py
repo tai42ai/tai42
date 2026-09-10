@@ -20,14 +20,14 @@ import tai42_contract
 
 from ._helpers import protocol_members  # stdlib-only helper, no application package
 
-# The frozen facade surface: the 112 (sub-protocol, member) pairs over 108
-# distinct flat names, grouped into the 23 sub-protocols. This is the
+# The frozen facade surface: the 118 (sub-protocol, member) pairs over 114
+# distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
-# (webhook_verifiers + channels), so the distinct-name union (108) is four
-# fewer than the pair count (112).
+# (webhook_verifiers + channels), so the distinct-name union (114) is four
+# fewer than the pair count (118).
 EXPECTED_FACADE = {
-    # tools (15)
+    # tools (16)
     "tool",
     "toolkit",
     "get_tool",
@@ -40,6 +40,8 @@ EXPECTED_FACADE = {
     "unregister_tool_info",
     "unregister_tool_base",
     "register_rename_referee",
+    "register_delete_referee",
+    "register_detach_referee",
     "tool_refs_extractor",
     "register_tier",
     "tier",
@@ -141,18 +143,20 @@ EXPECTED_FACADE = {
     "put_declaration",
     "delete_declaration",
     "stats",
-    "list_modules",
-    "get_module",
-    "put_module",
-    "delete_module",
-    "list_mounts",
-    "mount",
-    "update_mount_declarations",
-    "unmount",
+    "list_templates",
+    "get_template",
+    "put_template",
+    "delete_template",
+    "list_attachments",
+    "attach",
+    "update_attachment_declarations",
+    "detach",
     "read",
     "replace",
     "merge",
     "apply",
+    "eval_template_jq",
+    "apply_template_jq",
     "erase",
     "fold",
     "list_subjects",
@@ -162,9 +166,9 @@ EXPECTED_FACADE = {
     "context",
     "register_consumer_lister",
     "consumers",
-    "register_module_seed",
-    "register_mount_validator",
-    "register_mount_reconciler",
+    "register_template_seed",
+    "register_attach_validator",
+    "register_attach_reconciler",
 }
 
 
@@ -272,11 +276,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 114 (sub-protocol, member) pairs over 110 distinct names — ``store`` is exposed
+    # 118 (sub-protocol, member) pairs over 114 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 110, f"union={len(union)}"
-    assert total == 114 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 114, f"union={len(union)}"
+    assert total == 118 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_four_namespaces():

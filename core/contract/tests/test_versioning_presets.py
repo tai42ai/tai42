@@ -258,6 +258,7 @@ def test_preset_store_save_version_editable_fields_carry_forward_by_default():
         "output_schema",
         "description",
         "input_schema",
+        "state_binding",
         "tags",
     ]
     for field in ("fixed_kwargs", "extensions"):
@@ -266,6 +267,9 @@ def test_preset_store_save_version_editable_fields_carry_forward_by_default():
     assert sig.parameters["input_schema"].default is CARRY_FORWARD
     assert sig.parameters["input_schema"].kind is inspect.Parameter.KEYWORD_ONLY
     assert sig.parameters["description"].default is None
+    # ``state_binding`` follows ``input_schema``'s carry-forward sentinel discipline.
+    assert sig.parameters["state_binding"].default is CARRY_FORWARD
+    assert sig.parameters["state_binding"].kind is inspect.Parameter.KEYWORD_ONLY
     assert sig.parameters["tags"].default is None
     assert sig.parameters["tags"].kind is inspect.Parameter.KEYWORD_ONLY
     assert "base_tool" not in sig.parameters

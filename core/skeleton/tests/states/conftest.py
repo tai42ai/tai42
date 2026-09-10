@@ -1,7 +1,7 @@
 """A stateful in-memory fake Postgres for the subject-keyed state store tests.
 
 ``FakeStatesPg`` models the seven tables :class:`~tai42_skeleton.states.store.
-PostgresStatesStore` touches — ``state_declarations``, ``state_modules``, ``state_mounts``,
+PostgresStatesStore` touches — ``state_declarations``, ``state_templates``, ``state_attachments``,
 ``state_records``, ``state_subject_aliases``, ``state_applied_ops`` (the idempotency
 ledger) and ``state_writes`` (the write-provenance ledger) — and interprets the store's
 EXACT SQL by normalized text, monkeypatched in over the pooled ``client_ctx`` so the REAL
@@ -370,7 +370,7 @@ def _lock_effective_schema(cur, pg, norm, params):
 
 
 @_on(
-    r"SELECT m\.module, m\.path, mo\.body FROM state_mounts m JOIN state_modules mo ON mo\.name = m\.module "
+    r"SELECT m\.template, m\.path, mo\.body FROM state_attachments m JOIN state_templates mo ON mo\.name = m\.template "
     r"WHERE m\.state = %s$"
 )
 def _apply_mount_rows(cur, pg, norm, params):
@@ -382,8 +382,8 @@ def _apply_mount_rows(cur, pg, norm, params):
         mod = pg.modules.get(module)
         if mod is None:
             continue
-        rows.append({"module": module, "path": mount["path"], "body": mod["body"]})
-    rows.sort(key=lambda r: r["module"])
+        rows.append({"template": module, "path": mount["path"], "body": mod["body"]})
+    rows.sort(key=lambda r: r["template"])
     cur._all = rows
 
 
@@ -407,7 +407,7 @@ def _del_records_state(cur, pg, norm, params):
     pg.records = {k: v for k, v in pg.records.items() if v["state"] != state}
 
 
-@_on(r"DELETE FROM state_mounts WHERE state = %s$")
+@_on(r"DELETE FROM state_attachments WHERE state = %s$")
 def _del_mounts_state(cur, pg, norm, params):
     (state,) = params
     pg.mounts = {k: v for k, v in pg.mounts.items() if v["state"] != state}
@@ -447,26 +447,26 @@ def _field_stats_keys(cur, pg, norm, params):
 
 
 # -- modules -----------------------------------------------------------------
-@_on(r"SELECT name, body, shipped_hash, updated_at FROM state_modules WHERE name = %s$")
+@_on(r"SELECT name, body, shipped_hash, updated_at FROM state_templates WHERE name = %s$")
 def _get_module(cur, pg, norm, params):
     (name,) = params
     cur._one = pg.modules.get(name)
 
 
-@_on(r"SELECT name, body, shipped_hash, updated_at FROM state_modules ORDER BY name$")
+@_on(r"SELECT name, body, shipped_hash, updated_at FROM state_templates ORDER BY name$")
 def _list_modules(cur, pg, norm, params):
     cur._all = [pg.modules[n] for n in sorted(pg.modules)]
 
 
-@_on(r"SELECT module, count\(\*\) AS n FROM state_mounts GROUP BY module$")
+@_on(r"SELECT template, count\(\*\) AS n FROM state_attachments GROUP BY template$")
 def _mounted_counts(cur, pg, norm, params):
     counts: dict[str, int] = {}
     for _state, module in pg.mounts:
         counts[module] = counts.get(module, 0) + 1
-    cur._all = [{"module": m, "n": n} for m, n in counts.items()]
+    cur._all = [{"template": m, "n": n} for m, n in counts.items()]
 
 
-@_on(r"INSERT INTO state_modules \(name, body, shipped_hash, updated_at\)")
+@_on(r"INSERT INTO state_templates \(name, body, shipped_hash, updated_at\)")
 def _upsert_module(cur, pg, norm, params):
     name, body, shipped_hash = params
     row = pg.modules.get(name)
@@ -477,19 +477,19 @@ def _upsert_module(cur, pg, norm, params):
         row.update(values)
 
 
-@_on(r"DELETE FROM state_modules WHERE name = %s$")
+@_on(r"DELETE FROM state_templates WHERE name = %s$")
 def _delete_module(cur, pg, norm, params):
     (name,) = params
     cur.rowcount = 1 if pg.modules.pop(name, None) is not None else 0
 
 
 # -- mounts ------------------------------------------------------------------
-_MOUNT_COLS = ("state", "module", "path", "parameters", "declarations", "updated_at")
+_MOUNT_COLS = ("state", "template", "path", "parameters", "declarations", "updated_at")
 
 
 @_on(
-    r"SELECT state, module, path, parameters, declarations, updated_at FROM state_mounts "
-    r"WHERE state = %s AND module = %s$"
+    r"SELECT state, template, path, parameters, declarations, updated_at FROM state_attachments "
+    r"WHERE state = %s AND template = %s$"
 )
 def _get_mount(cur, pg, norm, params):
     state, module = params
@@ -497,17 +497,17 @@ def _get_mount(cur, pg, norm, params):
 
 
 @_on(
-    r"SELECT state, module, path, parameters, declarations, updated_at FROM state_mounts WHERE state = %s "
-    r"ORDER BY module$"
+    r"SELECT state, template, path, parameters, declarations, updated_at FROM state_attachments WHERE state = %s "
+    r"ORDER BY template$"
 )
 def _list_mounts_for_state(cur, pg, norm, params):
     (state,) = params
     rows = [v for (s, _m), v in pg.mounts.items() if s == state]
-    cur._all = sorted(rows, key=lambda r: r["module"])
+    cur._all = sorted(rows, key=lambda r: r["template"])
 
 
 @_on(
-    r"SELECT state, module, path, parameters, declarations, updated_at FROM state_mounts WHERE module = %s "
+    r"SELECT state, template, path, parameters, declarations, updated_at FROM state_attachments WHERE template = %s "
     r"ORDER BY state$"
 )
 def _list_mounts_of_module(cur, pg, norm, params):
@@ -517,20 +517,20 @@ def _list_mounts_of_module(cur, pg, norm, params):
 
 
 @_on(
-    r"SELECT state, module, path, parameters, declarations, updated_at FROM state_mounts "
-    r"ORDER BY state, module$"
+    r"SELECT state, template, path, parameters, declarations, updated_at FROM state_attachments "
+    r"ORDER BY state, template$"
 )
 def _list_all_mounts(cur, pg, norm, params):
-    cur._all = sorted(pg.mounts.values(), key=lambda r: (r["state"], r["module"]))
+    cur._all = sorted(pg.mounts.values(), key=lambda r: (r["state"], r["template"]))
 
 
-@_on(r"INSERT INTO state_mounts \(state, module, path, parameters, declarations, updated_at\)")
+@_on(r"INSERT INTO state_attachments \(state, template, path, parameters, declarations, updated_at\)")
 def _upsert_mount(cur, pg, norm, params):
     state, module, path, parameters, declarations = params
     key = (state, module)
     values = {
         "state": state,
-        "module": module,
+        "template": module,
         "path": _unwrap(path),
         "parameters": _unwrap(parameters),
         "declarations": _unwrap(declarations),
@@ -542,7 +542,7 @@ def _upsert_mount(cur, pg, norm, params):
         pg.mounts[key] = values
 
 
-@_on(r"UPDATE state_mounts SET declarations = %s, updated_at = now\(\) WHERE state = %s AND module = %s$")
+@_on(r"UPDATE state_attachments SET declarations = %s, updated_at = now\(\) WHERE state = %s AND template = %s$")
 def _update_mount_declarations(cur, pg, norm, params):
     declarations, state, module = params
     row = pg.mounts.get((state, module))
@@ -552,7 +552,7 @@ def _update_mount_declarations(cur, pg, norm, params):
         cur.rowcount = 1
 
 
-@_on(r"UPDATE state_mounts SET parameters = %s, updated_at = now\(\) WHERE state = %s AND module = %s$")
+@_on(r"UPDATE state_attachments SET parameters = %s, updated_at = now\(\) WHERE state = %s AND template = %s$")
 def _update_mount_parameters(cur, pg, norm, params):
     parameters, state, module = params
     row = pg.mounts.get((state, module))
@@ -562,7 +562,7 @@ def _update_mount_parameters(cur, pg, norm, params):
         cur.rowcount = 1
 
 
-@_on(r"DELETE FROM state_mounts WHERE state = %s AND module = %s$")
+@_on(r"DELETE FROM state_attachments WHERE state = %s AND template = %s$")
 def _delete_mount(cur, pg, norm, params):
     state, module = params
     cur.rowcount = 1 if pg.mounts.pop((state, module), None) is not None else 0

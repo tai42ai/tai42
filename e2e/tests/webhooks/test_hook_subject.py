@@ -1,6 +1,6 @@
 """The hook door of the platform state store — a webhook fire whose hook declares a
 ``subject`` writes the subject's record under the platform-stamped ``hook`` provenance,
-and a keyed write under a TRACED mount is stamped with ``_trace`` by the platform.
+and a keyed write under a TRACED attachment is stamped with ``_trace`` by the platform.
 
 Over ``replicas_stack`` (the webhook home, backend ON, access control OFF): a hook binds
 ``state_apply`` with a ``subject`` whose ``key_expr`` reads the event payload.
@@ -10,10 +10,10 @@ Over ``replicas_stack`` (the webhook home, backend ON, access control OFF): a ho
   the write ledger records the ``hook`` door with the actor set to the hook's execution key
   and a null ``turn_id`` (a fire is not a conversation turn). A delivery whose payload lacks
   the key fails the fire loudly and writes no record.
-- ``test_hook_keyed_write_under_a_traced_mount_stamps_trace`` — the same fire, but the op
-  writes under a mount whose module traces, so each written item carries the platform's
+- ``test_hook_keyed_write_under_a_traced_attachment_stamps_trace`` — the same fire, but the op
+  writes under an attachment whose template traces, so each written item carries the platform's
   ``_trace`` stamp (meta / run / at), the same stamp any consumer's write gets (the platform
-  stamps ``_trace`` under a traced mount for EVERY door, not only one consumer's).
+  stamps ``_trace`` under a traced attachment for EVERY door, not only one consumer's).
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ async def test_hook_subject_keys_record_and_ledgers_the_hook_door(
 ) -> None:
     api = replicas_stack.api(port=replicas_stack.port_a)
     state = uniq("watchstatus")
-    # The base schema carries the keyed array itself (no mount) so the door + subject
+    # The base schema carries the keyed array itself (no attachment) so the door + subject
     # provenance is exercised on a plain keyed write.
     await api.put(
         f"/api/states/{state}",
@@ -127,15 +127,15 @@ async def test_hook_keyed_write_under_a_traced_mount_stamps_trace(
 ) -> None:
     api = replicas_stack.api(port=replicas_stack.port_a)
     state = uniq("tracedwatch")
-    module = uniq("trace-mod").replace("_", "-")
+    template = uniq("trace-tmpl").replace("_", "-")
     await _declare_state(api, state)
-    # A traced module lands ``a.items`` (each item admits ``_trace``); a write under the
-    # mount is ``_trace``-stamped by the platform for EVERY door.
+    # A traced template lands ``a.items`` (each item admits ``_trace``); a write under the
+    # attachment is ``_trace``-stamped by the platform for EVERY door.
     await api.put(
-        f"/api/state-modules/{module}",
+        f"/api/state-templates/{template}",
         json={
-            "kind": "state-module",
-            "name": module,
+            "kind": "state-template",
+            "name": template,
             "schema": {
                 "type": "object",
                 "properties": {
@@ -148,7 +148,10 @@ async def test_hook_keyed_write_under_a_traced_mount_stamps_trace(
             "trace": {"enabled": True},
         },
     )
-    await api.put(f"/api/states/{state}/mounts/{module}", json={"path": ["a"], "parameters": {}, "declarations": {}})
+    await api.put(
+        f"/api/states/{state}/attachments/{template}",
+        json={"path": ["a"], "parameters": {}, "declarations": {}},
+    )
 
     topic = uniq("traced-topic").replace("_", "-")
     execution_key = uniq("traced-exec")
@@ -158,7 +161,7 @@ async def test_hook_keyed_write_under_a_traced_mount_stamps_trace(
     record = await _wait_record(api, state, _SUBJECT_KEY)
     item = record["data"]["a"]["items"][0]
     assert item["id"] == _SUBJECT_KEY
-    # The platform stamped ``_trace`` under the traced mount — meta / run / at present.
+    # The platform stamped ``_trace`` under the traced attachment — meta / run / at present.
     trace = item["_trace"]
     assert {"meta", "run", "at"} <= set(trace), trace
     assert trace["at"], trace

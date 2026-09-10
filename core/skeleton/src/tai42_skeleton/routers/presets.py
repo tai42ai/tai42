@@ -67,6 +67,7 @@ from tai42_skeleton.operations.presets import (
     read_edit_extensions,
     read_input_schema,
     read_output_schema,
+    read_state_binding,
 )
 from tai42_skeleton.operations.presets import (
     rename_preset as _rename_preset_op,
@@ -131,17 +132,19 @@ async def _extract_create(request: Request) -> dict[str, Any]:
         "extensions": read_create_extensions("extensions" in body, body.get("extensions")),
         "output_schema": read_output_schema(body.get("output_schema")),
         "input_schema": read_input_schema(body.get("input_schema")),
+        "state_binding": read_state_binding(body.get("state_binding")),
     }
 
 
 async def _extract_save_version(request: Request) -> dict[str, Any]:
     body = await _json_object(request)
     if not any(
-        field in body for field in ("fixed_kwargs", "extensions", "output_schema", "input_schema", "description")
+        field in body
+        for field in ("fixed_kwargs", "extensions", "output_schema", "input_schema", "description", "state_binding")
     ):
         raise BadRequestError(
             "body must provide at least one of 'fixed_kwargs', 'extensions', 'output_schema', "
-            "'input_schema', 'description'"
+            "'input_schema', 'description', 'state_binding'"
         )
     fixed_kwargs = body.get("fixed_kwargs")
     if fixed_kwargs is not None and not isinstance(fixed_kwargs, dict):
@@ -167,6 +170,11 @@ async def _extract_save_version(request: Request) -> dict[str, Any]:
         description = body["description"]
         if not isinstance(description, str):
             raise BadRequestError("'description' must be a string")
+    # ``state_binding`` mirrors ``input_schema``'s presence flag: PRESENT (even ``null``) is
+    # a deliberate value (``null`` CLEARS the binding), ABSENT carries the active value
+    # forward — the presence flag drives the store's carry-forward sentinel in the operation.
+    state_binding_provided = "state_binding" in body
+    state_binding = read_state_binding(body.get("state_binding")) if state_binding_provided else None
     return {
         "fixed_kwargs": fixed_kwargs,
         "extensions": extensions,
@@ -175,6 +183,8 @@ async def _extract_save_version(request: Request) -> dict[str, Any]:
         "input_schema": input_schema,
         "input_schema_provided": input_schema_provided,
         "description": description,
+        "state_binding": state_binding,
+        "state_binding_provided": state_binding_provided,
     }
 
 
@@ -208,6 +218,8 @@ async def _extract_validate(request: Request) -> dict[str, Any]:
         "output_schema_value": body.get("output_schema"),
         "input_schema_present": "input_schema" in body,
         "input_schema_value": body.get("input_schema"),
+        "state_binding_present": "state_binding" in body,
+        "state_binding_value": body.get("state_binding"),
     }
 
 

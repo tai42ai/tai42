@@ -642,7 +642,7 @@ class ToolBinding:
         # own defaults apply instead of a sentinel failing validation. No external
         # caller can produce _UNSET, so this is a no-op for ordinary arguments.
         arguments = {name: value for name, value in arguments.items() if value is not _UNSET}
-        async with dispatch_scope(self._app, key) as scope:
+        async with dispatch_scope(self._app, key, arguments) as scope:
             result = await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
             scope.observe(result)
             return result

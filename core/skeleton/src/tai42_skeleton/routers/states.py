@@ -1,13 +1,13 @@
 """HTTP routes for the subject-keyed state store — ``/api/states*``, the sibling
-``/api/state-modules*`` and ``/api/state-retention/prune`` (all AUTHED).
+``/api/state-templates*`` and ``/api/state-retention/prune`` (all AUTHED).
 
 Thin adapters over the operations in :mod:`tai42_skeleton.operations.states`; each door's
 body/query is parsed at the HTTP edge into the operation's flat kwargs. The sibling
-``/api/state-modules`` collection keeps the modules OFF the ``/api/states/{name}`` template
-position, so a state literally named ``modules`` stays reachable at ``GET
-/api/states/modules`` while ``GET /api/state-modules`` lists modules; the literal-prefix
-sibling + retention routes register BEFORE the ``/api/states`` template routes so the
-most-specific match is unambiguous.
+``/api/state-templates`` collection keeps the templates OFF the ``/api/states/{name}``
+position, so a state literally named ``templates`` stays reachable at ``GET
+/api/states/templates`` while ``GET /api/state-templates`` lists templates; the
+literal-prefix sibling + retention routes register BEFORE the ``/api/states`` template
+routes so the most-specific match is unambiguous.
 
 Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}`` (the states
 OFF refusal also carries a stable ``code``).
@@ -15,6 +15,7 @@ OFF refusal also carries a stable ``code``).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from starlette.requests import Request
@@ -25,13 +26,25 @@ from tai42_skeleton.operations.states import (
     apply_state_record as _apply_state_record_op,
 )
 from tai42_skeleton.operations.states import (
+    apply_state_template_jq as _apply_state_template_jq_op,
+)
+from tai42_skeleton.operations.states import (
+    attach_state_template as _attach_state_template_op,
+)
+from tai42_skeleton.operations.states import (
     delete_state as _delete_state_op,
 )
 from tai42_skeleton.operations.states import (
-    delete_state_module as _delete_state_module_op,
+    delete_state_template as _delete_state_template_op,
+)
+from tai42_skeleton.operations.states import (
+    detach_state_template as _detach_state_template_op,
 )
 from tai42_skeleton.operations.states import (
     erase_state_record as _erase_state_record_op,
+)
+from tai42_skeleton.operations.states import (
+    eval_state_template_jq as _eval_state_template_jq_op,
 )
 from tai42_skeleton.operations.states import (
     fold_state_record as _fold_state_record_op,
@@ -40,19 +53,19 @@ from tai42_skeleton.operations.states import (
     get_state as _get_state_op,
 )
 from tai42_skeleton.operations.states import (
-    get_state_module as _get_state_module_op,
+    get_state_attachment as _get_state_attachment_op,
 )
 from tai42_skeleton.operations.states import (
-    get_state_mount as _get_state_mount_op,
+    get_state_template as _get_state_template_op,
 )
 from tai42_skeleton.operations.states import (
-    list_state_modules as _list_state_modules_op,
-)
-from tai42_skeleton.operations.states import (
-    list_state_mounts as _list_state_mounts_op,
+    list_state_attachments as _list_state_attachments_op,
 )
 from tai42_skeleton.operations.states import (
     list_state_subjects as _list_state_subjects_op,
+)
+from tai42_skeleton.operations.states import (
+    list_state_templates as _list_state_templates_op,
 )
 from tai42_skeleton.operations.states import (
     list_state_writes as _list_state_writes_op,
@@ -64,16 +77,13 @@ from tai42_skeleton.operations.states import (
     merge_state_record as _merge_state_record_op,
 )
 from tai42_skeleton.operations.states import (
-    mount_state_module as _mount_state_module_op,
-)
-from tai42_skeleton.operations.states import (
     prune_state_retention as _prune_state_retention_op,
 )
 from tai42_skeleton.operations.states import (
     put_state as _put_state_op,
 )
 from tai42_skeleton.operations.states import (
-    put_state_module as _put_state_module_op,
+    put_state_template as _put_state_template_op,
 )
 from tai42_skeleton.operations.states import (
     read_state_record as _read_state_record_op,
@@ -91,10 +101,7 @@ from tai42_skeleton.operations.states import (
     state_stats as _state_stats_op,
 )
 from tai42_skeleton.operations.states import (
-    unmount_state_module as _unmount_state_module_op,
-)
-from tai42_skeleton.operations.states import (
-    update_state_mount as _update_state_mount_op,
+    update_state_attachment as _update_state_attachment_op,
 )
 
 # -- request-edge readers -----------------------------------------------------
@@ -156,11 +163,11 @@ async def _extract_declaration(request: Request) -> dict[str, Any]:
     return {"declaration": await _json_object(request)}
 
 
-async def _extract_mount(request: Request) -> dict[str, Any]:
+async def _extract_attach(request: Request) -> dict[str, Any]:
     return {"body": await _json_object(request)}
 
 
-async def _extract_mount_declarations(request: Request) -> dict[str, Any]:
+async def _extract_attach_declarations(request: Request) -> dict[str, Any]:
     body = await _json_object(request)
     ctx: dict[str, Any] = {"declarations": _require_object(body, "declarations")}
     if "options" in body:
@@ -206,6 +213,30 @@ async def _extract_apply(request: Request) -> dict[str, Any]:
     return {"ops": _require_list(body, "ops"), "op_id": op_id}
 
 
+async def _extract_template_jq_params(request: Request) -> dict[str, Any]:
+    """An input-purpose ``template_jq`` program's declared parameters from the query string:
+    each ``?<name>=<json>`` is decoded as a JSON value (so a param may be any JSON, not only a
+    string). A value that is not valid JSON is a loud 400."""
+    params: dict[str, Any] = {}
+    for name, raw in request.query_params.items():
+        try:
+            params[name] = json.loads(raw)
+        except ValueError as exc:
+            raise BadRequestError(f"template_jq param {name!r} must be a JSON value: {exc}") from exc
+    return {"params": params}
+
+
+async def _extract_template_jq_body(request: Request) -> dict[str, Any]:
+    """An update-purpose ``template_jq`` apply body ``{input?, op_id?}`` — ``input`` (any JSON,
+    the program's ``.input``, absent → null) and an optional string ``op_id`` idempotency
+    key."""
+    body = await _json_object(request)
+    op_id = body.get("op_id")
+    if op_id is not None and not isinstance(op_id, str):
+        raise BadRequestError("'op_id' must be a string")
+    return {"input": body.get("input"), "op_id": op_id}
+
+
 async def _extract_fold(request: Request) -> dict[str, Any]:
     body = await _json_object(request)
     return {"into": _require_object(body, "into"), "mode": _require_str(body, "mode")}
@@ -215,7 +246,7 @@ async def _extract_writes_query(request: Request) -> dict[str, Any]:
     return {"limit": _optional_int(request, "limit"), "cursor": request.query_params.get("cursor")}
 
 
-async def _extract_module_document(request: Request) -> dict[str, Any]:
+async def _extract_template_document(request: Request) -> dict[str, Any]:
     return {"document": await _json_object(request), "replace": _query_bool(request, "replace")}
 
 
@@ -230,28 +261,28 @@ async def _extract_module_document(request: Request) -> dict[str, Any]:
 _RECORD_PATH = "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"
 
 
-list_state_modules = register_operation_route(
-    tai42_app, operation_metadata_of(_list_state_modules_op), path="/api/state-modules", method="GET", action="read"
+list_state_templates = register_operation_route(
+    tai42_app, operation_metadata_of(_list_state_templates_op), path="/api/state-templates", method="GET", action="read"
 )
-get_state_module = register_operation_route(
+get_state_template = register_operation_route(
     tai42_app,
-    operation_metadata_of(_get_state_module_op),
-    path="/api/state-modules/{name}",
+    operation_metadata_of(_get_state_template_op),
+    path="/api/state-templates/{name}",
     method="GET",
     action="read",
 )
-put_state_module = register_operation_route(
+put_state_template = register_operation_route(
     tai42_app,
-    operation_metadata_of(_put_state_module_op),
-    path="/api/state-modules/{name}",
+    operation_metadata_of(_put_state_template_op),
+    path="/api/state-templates/{name}",
     method="PUT",
-    context_extractor=_extract_module_document,
+    context_extractor=_extract_template_document,
     action="write",
 )
-delete_state_module = register_operation_route(
+delete_state_template = register_operation_route(
     tai42_app,
-    operation_metadata_of(_delete_state_module_op),
-    path="/api/state-modules/{name}",
+    operation_metadata_of(_delete_state_template_op),
+    path="/api/state-templates/{name}",
     method="DELETE",
     action="write",
 )
@@ -283,40 +314,40 @@ delete_state = register_operation_route(
 state_stats = register_operation_route(
     tai42_app, operation_metadata_of(_state_stats_op), path="/api/states/{name}/stats", method="GET", action="read"
 )
-list_state_mounts = register_operation_route(
+list_state_attachments = register_operation_route(
     tai42_app,
-    operation_metadata_of(_list_state_mounts_op),
-    path="/api/states/{name}/mounts",
+    operation_metadata_of(_list_state_attachments_op),
+    path="/api/states/{name}/attachments",
     method="GET",
     action="read",
 )
-get_state_mount = register_operation_route(
+get_state_attachment = register_operation_route(
     tai42_app,
-    operation_metadata_of(_get_state_mount_op),
-    path="/api/states/{name}/mounts/{module}",
+    operation_metadata_of(_get_state_attachment_op),
+    path="/api/states/{name}/attachments/{template}",
     method="GET",
     action="read",
 )
-mount_state_module = register_operation_route(
+attach_state_template = register_operation_route(
     tai42_app,
-    operation_metadata_of(_mount_state_module_op),
-    path="/api/states/{name}/mounts/{module}",
+    operation_metadata_of(_attach_state_template_op),
+    path="/api/states/{name}/attachments/{template}",
     method="PUT",
-    context_extractor=_extract_mount,
+    context_extractor=_extract_attach,
     action="write",
 )
-update_state_mount = register_operation_route(
+update_state_attachment = register_operation_route(
     tai42_app,
-    operation_metadata_of(_update_state_mount_op),
-    path="/api/states/{name}/mounts/{module}",
+    operation_metadata_of(_update_state_attachment_op),
+    path="/api/states/{name}/attachments/{template}",
     method="PATCH",
-    context_extractor=_extract_mount_declarations,
+    context_extractor=_extract_attach_declarations,
     action="write",
 )
-unmount_state_module = register_operation_route(
+detach_state_template = register_operation_route(
     tai42_app,
-    operation_metadata_of(_unmount_state_module_op),
-    path="/api/states/{name}/mounts/{module}",
+    operation_metadata_of(_detach_state_template_op),
+    path="/api/states/{name}/attachments/{template}",
     method="DELETE",
     action="write",
 )
@@ -383,6 +414,27 @@ list_state_writes = register_operation_route(
     method="GET",
     context_extractor=_extract_writes_query,
     action="read",
+)
+# The template_jq sub-actions on a record. Registered BEFORE ``use_raw_path_key``
+# below so the raw-path key covers them too (the ``{key}`` segment stays one segment even
+# for a thread key carrying ``/``). The GET evaluates an input-purpose program (reads); the
+# POST applies an update-purpose program, its authz following its method (the write class) —
+# as the search POST does. Both share the ``…/template-jq/{program}`` path on their methods.
+eval_state_template_jq = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_eval_state_template_jq_op),
+    path=f"{_RECORD_PATH}/template-jq/{{program}}",
+    method="GET",
+    context_extractor=_extract_template_jq_params,
+    action="read",
+)
+apply_state_template_jq = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_apply_state_template_jq_op),
+    path=f"{_RECORD_PATH}/template-jq/{{program}}",
+    method="POST",
+    context_extractor=_extract_template_jq_body,
+    action="write",
 )
 
 # Match every single-record door against the raw request path so a percent-encoded ``/``

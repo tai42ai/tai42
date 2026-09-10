@@ -22,9 +22,9 @@ from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.states.db import STATES_COMPONENT, states_entry
-from tai42_skeleton.states.modules import compose_effective_schema, validate_module
 from tai42_skeleton.states.service import _validate_document
 from tai42_skeleton.states.store import PostgresStatesStore, make_cursor
+from tai42_skeleton.states.templates import compose_effective_schema, validate_template
 
 pytestmark = pytest.mark.integration
 
@@ -67,9 +67,9 @@ async def real_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Pos
     await _exec("DELETE FROM state_writes WHERE state = %s", (state,))
     await _exec("DELETE FROM state_subject_aliases WHERE state = %s", (state,))
     await _exec("DELETE FROM state_records WHERE state = %s", (state,))
-    await _exec("DELETE FROM state_mounts WHERE state = %s", (state,))
+    await _exec("DELETE FROM state_attachments WHERE state = %s", (state,))
     await _exec("DELETE FROM state_applied_ops WHERE op_id LIKE %s", (f"%:{state}",))
-    await _exec("DELETE FROM state_modules WHERE name = %s", (state + "_m",))
+    await _exec("DELETE FROM state_templates WHERE name = %s", (state + "_m",))
     await _exec("DELETE FROM state_declarations WHERE name = %s", (state,))
 
 
@@ -93,12 +93,12 @@ async def test_apply_read_writes_and_trace(real_store: tuple[PostgresStatesStore
         },
     }
     await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
-    await store.upsert_module(
+    await store.upsert_template(
         state + "_m",
-        {"kind": "state-module", "name": state + "_m", "schema": {"type": "object"}, "trace": {"enabled": True}},
+        {"kind": "state-template", "name": state + "_m", "schema": {"type": "object"}, "trace": {"enabled": True}},
         None,
     )
-    await store.upsert_mount(state, state + "_m", ["a"], {}, {}, effective_schema=schema)
+    await store.upsert_attachment(state, state + "_m", ["a"], {}, {}, effective_schema=schema)
 
     op_id = f"op-1:{state}"
     subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="t1")
@@ -146,7 +146,7 @@ async def test_traced_keyed_write_from_metaless_origin_stamps_null_meta(
     platform actually serves — which must admit a null meta object, not just a string."""
     store, state = real_store
     module_body = {
-        "kind": "state-module",
+        "kind": "state-template",
         "name": "m",
         "schema": {
             "type": "object",
@@ -160,13 +160,13 @@ async def test_traced_keyed_write_from_metaless_origin_stamps_null_meta(
         "trace": {"enabled": True},
     }
     effective = compose_effective_schema(
-        {"type": "object", "properties": {}}, [(validate_module(module_body), ["a"], {})]
+        {"type": "object", "properties": {}}, [(validate_template(module_body), ["a"], {})]
     )
     # the composed schema carries the real injected trace schema on the array's items
     assert "_trace" in effective["properties"]["a"]["properties"]["items"]["items"]["properties"]
     await store.upsert_declaration(state, "", {}, ["thread"], "thread", None, effective_schema=effective)
-    await store.upsert_module(state + "_m", {**module_body, "name": state + "_m"}, None)
-    await store.upsert_mount(state, state + "_m", ["a"], {}, {}, effective_schema=effective)
+    await store.upsert_template(state + "_m", {**module_body, "name": state + "_m"}, None)
+    await store.upsert_attachment(state, state + "_m", ["a"], {}, {}, effective_schema=effective)
 
     # the shape a builtin ``state_*`` tool produces (WriteOrigin meta=None), completed by
     # the hook door: meta/run/turn/inbound all null, only ``at`` and ``door`` stamped
@@ -200,17 +200,17 @@ async def test_composing_shape_refused(real_store: tuple[PostgresStatesStore, st
     store, state = real_store
     schema = {"type": "object", "properties": {"a": {"type": "object", "properties": {"items": {"type": "array"}}}}}
     await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
-    await store.upsert_module(
+    await store.upsert_template(
         state + "_m",
         {
-            "kind": "state-module",
+            "kind": "state-template",
             "name": state + "_m",
             "schema": {"type": "object"},
             "regimes": [{"path": ["items"], "regime": "composing"}],
         },
         None,
     )
-    await store.upsert_mount(state, state + "_m", ["a"], {}, {}, effective_schema=schema)
+    await store.upsert_attachment(state, state + "_m", ["a"], {}, {}, effective_schema=schema)
     subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="t1")
     with pytest.raises(RegimeViolationError):
         await store.apply_ops(
@@ -332,8 +332,8 @@ async def test_threaded_conn_makes_the_record_write_and_the_mount_atomic(
     store, state = real_store
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
     await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
-    await store.upsert_module(
-        state + "_m", {"kind": "state-module", "name": state + "_m", "schema": {"type": "object"}}, None
+    await store.upsert_template(
+        state + "_m", {"kind": "state-template", "name": state + "_m", "schema": {"type": "object"}}, None
     )
     subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="t1")
     await store.apply_ops(
@@ -361,7 +361,7 @@ async def test_threaded_conn_makes_the_record_write_and_the_mount_atomic(
                 retention_days=30,
                 conn=conn,
             )
-            await store.upsert_mount(state, state + "_m", ["x"], {}, {}, effective_schema=schema, conn=conn)
+            await store.upsert_attachment(state, state + "_m", ["x"], {}, {}, effective_schema=schema, conn=conn)
             raise _Rollback
 
     with pytest.raises(_Rollback):
@@ -369,7 +369,7 @@ async def test_threaded_conn_makes_the_record_write_and_the_mount_atomic(
 
     read, _seq = await store.read_record(state, subject)
     assert read == {"n": 1}  # the threaded record write rolled back with the transaction
-    assert await store.get_mount(state, state + "_m") is None
+    assert await store.get_attachment(state, state + "_m") is None
 
     # positive control: the same writes on the shared connection COMMIT together.
     async with store.begin() as conn:
@@ -383,10 +383,10 @@ async def test_threaded_conn_makes_the_record_write_and_the_mount_atomic(
             retention_days=30,
             conn=conn,
         )
-        await store.upsert_mount(state, state + "_m", ["x"], {}, {}, effective_schema=schema, conn=conn)
+        await store.upsert_attachment(state, state + "_m", ["x"], {}, {}, effective_schema=schema, conn=conn)
     read, _seq = await store.read_record(state, subject)
     assert read == {"n": 9}
-    assert await store.get_mount(state, state + "_m") is not None
+    assert await store.get_attachment(state, state + "_m") is not None
 
 
 async def test_a_read_on_the_threaded_conn_sees_an_in_flight_write(
@@ -450,17 +450,17 @@ async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
         },
     }
     await store.upsert_declaration(state, "", frag, ["thread"], "thread", None, effective_schema=frag)
-    await store.upsert_module(
+    await store.upsert_template(
         module,
         {
-            "kind": "state-module",
+            "kind": "state-template",
             "name": module,
             "schema": frag,
             "regimes": [{"path": ["entries"], "regime": "composing"}],
         },
         None,
     )
-    await store.upsert_mount(state, module, [], {}, {}, effective_schema=frag)
+    await store.upsert_attachment(state, module, [], {}, {}, effective_schema=frag)
     subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="led1")
     await store.apply_ops(
         state,

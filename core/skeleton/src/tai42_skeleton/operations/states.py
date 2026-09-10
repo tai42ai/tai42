@@ -1,5 +1,5 @@
 """Operations for the subject-keyed state store — ``/api/states*``, the sibling
-``/api/state-modules*`` and ``/api/state-retention/prune``.
+``/api/state-templates*`` and ``/api/state-retention/prune``.
 
 Thin, request-free operations over the ``tai42_app.states`` facet (the HTTP routes in
 :mod:`tai42_skeleton.routers.states` are their adapters). Every operation runs its facet
@@ -23,21 +23,20 @@ from typing import Any
 from pydantic import ValidationError
 from tai42_contract.states import (
     ApplyResult,
-    MountBody,
-    RecordView,
+    AttachBody,
     StateDeclaration,
-    StateModuleDocument,
+    StateRecord,
     StateSubject,
+    StateTemplateDocument,
+    TemplateJqApplyResult,
+    TemplateJqResult,
     WriteOrigin,
     WritesPage,
 )
 from tai42_contract.states.errors import (
+    AttachConflictError,
     DeclarationInUseError,
     InvalidPathError,
-    ModuleExistsError,
-    ModuleInUseError,
-    ModuleValidationError,
-    MountConflictError,
     NonAdditiveRedeclareError,
     RegimeViolationError,
     SchemaValidationError,
@@ -47,6 +46,9 @@ from tai42_contract.states.errors import (
     StatesNotConfiguredError,
     SubjectFoldError,
     SubjectRefusedError,
+    TemplateExistsError,
+    TemplateInUseError,
+    TemplateValidationError,
     ValueValidationError,
 )
 
@@ -59,23 +61,23 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations.response_models_group_states import (
+    AttachAck,
+    AttachUpdateAck,
+    DetachAck,
     EraseAck,
     FoldReport,
-    MountAck,
-    MountUpdateAck,
     PruneResult,
     ServedStateView,
+    StateAttachmentList,
+    StateAttachmentRow,
     StateConsumerList,
     StateDeclarationList,
     StateDeleteResult,
-    StateModuleCatalog,
-    StateMountList,
-    StateMountRow,
     StateRecordOrNull,
     StateSearchPage,
     StateStats,
     StateSubjectsPage,
-    UnmountAck,
+    StateTemplateCatalog,
 )
 
 # The machine-readable code the states OFF refusal carries; the message is the store's own.
@@ -91,15 +93,15 @@ _ERROR_MAP: dict[type[StatesError], type] = {
     NonAdditiveRedeclareError: ConflictError,
     DeclarationInUseError: ConflictError,
     SubjectFoldError: ConflictError,
-    ModuleExistsError: ConflictError,
-    ModuleInUseError: ConflictError,
-    MountConflictError: ConflictError,
+    TemplateExistsError: ConflictError,
+    TemplateInUseError: ConflictError,
+    AttachConflictError: ConflictError,
     SubjectRefusedError: ValidationRejected,
     SchemaValidationError: ValidationRejected,
     InvalidPathError: ValidationRejected,
     ValueValidationError: ValidationRejected,
     RegimeViolationError: ValidationRejected,
-    ModuleValidationError: ValidationRejected,
+    TemplateValidationError: ValidationRejected,
 }
 
 
@@ -115,7 +117,9 @@ def _states_door() -> Iterator[None]:
         mapped = _ERROR_MAP.get(type(exc))
         if mapped is None:
             raise
-        raise mapped(str(exc)) from exc
+        # A structured payload the raiser attached (e.g. a reconcile refusal's orphan list)
+        # rides onto the operation error body so a UI keys its follow-up on the data.
+        raise mapped(str(exc), extra=exc.extra) from exc
 
 
 def _states():
@@ -159,7 +163,7 @@ async def list_states() -> list[dict[str, Any]]:
 )
 async def get_state(name: str) -> dict[str, Any]:
     """One state's served declaration: base ``schema``, ``effective_schema``,
-    ``subject_kinds``, ``default_subject_kind``, its ``mounts``, computed ``regimes`` and
+    ``subject_kinds``, ``default_subject_kind``, its ``attachments``, computed ``regimes`` and
     ``updated_at`` (the ISO timestamp of its last write)."""
     with _states_door():
         return await _states().served_declaration(name)
@@ -198,7 +202,7 @@ async def put_state(name: str, declaration: dict[str, Any]) -> dict[str, Any]:
     response_model=StateDeleteResult,
 )
 async def delete_state(name: str) -> dict[str, Any]:
-    """Delete a state with its records, mounts and aliases; refused while a consumer binds it."""
+    """Delete a state with its records, attachments and aliases; refused while a consumer binds it."""
     with _states_door():
         await _states().delete_declaration(name)
     return {"deleted": True, "name": name}
@@ -217,84 +221,107 @@ async def state_stats(name: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Mounts                                                                       #
+# Attachments                                                                  #
 # --------------------------------------------------------------------------- #
 @operation(
-    summary="List a state's mounts",
+    summary="List a state's attachments",
     tags=["states"],
     errors=[NotSupportedError, NotFoundError],
-    response_model=StateMountList,
+    response_model=StateAttachmentList,
 )
-async def list_state_mounts(name: str) -> list[dict[str, Any]]:
-    """Every module mounted on the state — its path, resolved parameters and declarations."""
+async def list_state_attachments(name: str) -> list[dict[str, Any]]:
+    """Every template attached on the state — its path, resolved parameters and declarations."""
     with _states_door():
-        return await _states().list_mounts(name)
+        return await _states().list_attachments(name)
 
 
 @operation(
-    summary="Get a state's mount",
+    summary="Get a state's attachment",
     tags=["states"],
     errors=[NotSupportedError, NotFoundError],
-    response_model=StateMountRow,
+    response_model=StateAttachmentRow,
 )
-async def get_state_mount(name: str, module: str) -> dict[str, Any]:
-    """One module's mount on the state — its path, resolved parameters and declarations; the
-    same row the list serves. A module not mounted on the state is a 404."""
+async def get_state_attachment(name: str, template: str) -> dict[str, Any]:
+    """One template's attachment on the state — its path, resolved parameters and
+    declarations; the same row the list serves. A template not attached on the state is a
+    404."""
     with _states_door():
-        rows = await _states().list_mounts(name, module=module)
+        rows = await _states().list_attachments(name, template=template)
     if not rows:
-        raise NotFoundError(f"module {module!r} is not mounted on state {name!r}")
+        raise NotFoundError(f"template {template!r} is not attached on state {name!r}")
     return rows[0]
 
 
 @operation(
-    summary="Mount a module on a state",
+    summary="Attach a template on a state",
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected, ConflictError],
-    response_model=MountAck,
+    response_model=AttachAck,
 )
-async def mount_state_module(name: str, module: str, body: dict[str, Any]) -> dict[str, Any]:
-    """Mount ``module`` on the state at the body's ``path`` with its parameters and static
+async def attach_state_template(name: str, template: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Attach ``template`` on the state at the body's ``path`` with its parameters and static
     declarations; recomposes and validates the effective schema in one transaction."""
     try:
-        mount_body = MountBody.model_validate(body)
+        attach_body = AttachBody.model_validate(body)
     except ValidationError as exc:
-        raise ValidationRejected(f"invalid mount body: {exc.errors(include_url=False)}") from exc
+        raise ValidationRejected(f"invalid attach body: {exc.errors(include_url=False)}") from exc
     with _states_door():
-        await _states().mount(name, module, mount_body)
-    return {"mounted": True, "state": name, "module": module}
+        await _states().attach(name, template, attach_body)
+    return {"attached": True, "state": name, "template": template}
 
 
 @operation(
-    summary="Update a mount's declarations",
+    summary="Update an attachment's declarations",
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected, ConflictError],
-    response_model=MountUpdateAck,
+    response_model=AttachUpdateAck,
 )
-async def update_state_mount(
-    name: str, module: str, declarations: dict[str, Any], options: dict[str, Any] | None = None
+async def update_state_attachment(
+    name: str, template: str, declarations: dict[str, Any], options: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Replace a mount's static declaration values and reconcile ``options``, re-running the
-    mount validators and reconcilers and recomposing the effective schema."""
+    """Replace an attachment's static declaration values and reconcile ``options``, re-running
+    the attach validators and reconcilers and recomposing the effective schema."""
     with _states_door():
-        await _states().update_mount_declarations(name, module, declarations, options=options)
-    return {"updated": True, "state": name, "module": module}
+        await _states().update_attachment_declarations(name, template, declarations, options=options)
+    return {"updated": True, "state": name, "template": template}
+
+
+async def _detach_referees(state: str, template: str) -> list[str]:
+    """Every live door binding a detach of ``template`` from ``state`` would strand — the
+    union the detach gate blocks on. Each registered detach referee (the platform-internal
+    preset/conversation/hook/schedule holders + any plugin provider) is asked for the
+    ``(state, template)``; a referee RAISING propagates loudly — a detach never proceeds past
+    an unreadable holder store (no silent bypass)."""
+    holders: list[str] = []
+    for referee in instance.app.tools.detach_referees():
+        holders.extend(await referee(state, template))
+    return holders
 
 
 @operation(
-    summary="Unmount a module from a state",
+    summary="Detach a template from a state",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError],
-    response_model=UnmountAck,
+    errors=[NotSupportedError, NotFoundError, ConflictError],
+    response_model=DetachAck,
 )
-async def unmount_state_module(name: str, module: str) -> dict[str, Any]:
-    """Remove a module's mount and recompose the effective schema — nothing else."""
+async def detach_state_template(name: str, template: str) -> dict[str, Any]:
+    """Remove a template's attachment and recompose the effective schema — nothing else.
+
+    Consults the detach referees FIRST: a template still named by a live door binding (a
+    preset version, a conversation config, a hook, a schedule) is a 409 that detaches nothing
+    and lists the referencing bindings — the mount-at-save contract's referee, so a binding
+    never faults at run time on a template detached out from under it."""
+    referenced = await _detach_referees(name, template)
+    if referenced:
+        raise ConflictError(
+            f"template {template!r} on state {name!r} cannot be detached — referenced by: {'; '.join(referenced)}"
+        )
     with _states_door():
-        await _states().unmount(name, module)
-    return {"unmounted": True, "state": name, "module": module}
+        await _states().detach(name, template)
+    return {"detached": True, "state": name, "template": template}
 
 
 # --------------------------------------------------------------------------- #
@@ -348,11 +375,68 @@ async def read_state_record(
 
 
 @operation(
+    summary="Evaluate an input-purpose template_jq program for a subject",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    response_model=TemplateJqResult,
+)
+async def eval_state_template_jq(
+    name: str,
+    target_kind: str,
+    target_name: str,
+    kind: str,
+    key: str,
+    program: str,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """An ``input``-purpose ``template_jq`` program's result for one subject — its jq over the
+    subject's record. ``params`` supplies the program's declared parameters. ``program`` may be
+    unqualified or ``<template>.<name>``. An unknown program (or a subject with no attachment
+    declaring it) is a 404; an ambiguous unqualified name, an ``update``-purpose name, an
+    undeclared param or a program that fails to evaluate is a 422. Read-only."""
+    subject = _subject(target_kind, target_name, kind, key)
+    with _states_door():
+        result = await _states().eval_template_jq(name, subject, program, params or {})
+    return result.model_dump()
+
+
+@operation(
+    summary="Apply an update-purpose template_jq program to a subject's record",
+    tags=["states"],
+    destructive=True,
+    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    response_model=TemplateJqApplyResult,
+)
+async def apply_state_template_jq(
+    name: str,
+    target_kind: str,
+    target_name: str,
+    kind: str,
+    key: str,
+    program: str,
+    input: Any = None,
+    op_id: str | None = None,
+) -> dict[str, Any]:
+    """Apply an ``update``-purpose ``template_jq`` program to one subject. Its jq returns a
+    template-relative op batch applied through the same chokepoint as a delta — regimes, the
+    composing-shape guard, trace stamping and ``op_id`` idempotency all hold. ``program`` may be
+    unqualified or ``<template>.<name>``. An unknown program is a 404; an ambiguous unqualified
+    name, an ``input``-purpose name, or a program that fails to evaluate or returns the wrong
+    shape is a 422."""
+    subject = _subject(target_kind, target_name, kind, key)
+    with _states_door():
+        result = await _states().apply_template_jq(
+            name, subject, program, input, op_id=op_id, origin=WriteOrigin(meta={"template_jq": program})
+        )
+    return result.model_dump()
+
+
+@operation(
     summary="Replace a subject's record",
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected],
-    response_model=RecordView,
+    response_model=StateRecord,
 )
 async def replace_state_record(
     name: str, target_kind: str, target_name: str, kind: str, key: str, data: dict[str, Any]
@@ -369,7 +453,7 @@ async def replace_state_record(
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ValidationRejected],
-    response_model=RecordView,
+    response_model=StateRecord,
 )
 async def merge_state_record(
     name: str, target_kind: str, target_name: str, kind: str, key: str, patch: dict[str, Any]
@@ -398,7 +482,7 @@ async def apply_state_record(
     op_id: str | None = None,
 ) -> dict[str, Any]:
     """Apply an ordered op batch to a subject's document — refused if a whole-path write
-    violates a mounted path's regime; idempotent on a replayed ``op_id``."""
+    violates an attached path's regime; idempotent on a replayed ``op_id``."""
     subject = _subject(target_kind, target_name, kind, key)
     with _states_door():
         result = await _states().apply(name, subject, ops, op_id=op_id, origin=WriteOrigin())
@@ -485,71 +569,71 @@ async def state_consumers(name: str) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
-# Modules (the sibling collection) + retention                                #
+# Templates (the sibling collection) + retention                              #
 # --------------------------------------------------------------------------- #
 @operation(
-    summary="List state modules",
+    summary="List state templates",
     tags=["states"],
     errors=[NotSupportedError],
-    response_model=StateModuleCatalog,
+    response_model=StateTemplateCatalog,
 )
-async def list_state_modules() -> list[dict[str, Any]]:
-    """Every platform state-module document (the reusable schema fragments), each with the
-    catalog columns ``mounted_on`` (the number of states it is mounted on) and
+async def list_state_templates() -> list[dict[str, Any]]:
+    """Every platform state-template document (the reusable schema fragments), each with the
+    catalog columns ``attached_to`` (the number of states it is attached on) and
     ``shipped_default`` (whether it is an unedited shipped default)."""
     with _states_door():
-        return await _states().list_modules_catalog()
+        return await _states().list_templates_catalog()
 
 
 @operation(
-    summary="Get a state module",
+    summary="Get a state template",
     tags=["states"],
     errors=[NotSupportedError, NotFoundError],
-    response_model=StateModuleDocument,
+    response_model=StateTemplateDocument,
 )
-async def get_state_module(name: str) -> dict[str, Any]:
-    """One state-module document by name."""
+async def get_state_template(name: str) -> dict[str, Any]:
+    """One state-template document by name."""
     with _states_door():
-        doc = await _states().get_module(name)
+        doc = await _states().get_template(name)
     if doc is None:
-        raise NotFoundError(f"no state module named {name!r}")
+        raise NotFoundError(f"no state template named {name!r}")
     return doc.model_dump()
 
 
 @operation(
-    summary="Create or replace a state module",
+    summary="Create or replace a state template",
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, ValidationRejected, ConflictError],
-    response_model=StateModuleDocument,
+    response_model=StateTemplateDocument,
 )
-async def put_state_module(name: str, document: dict[str, Any], replace: bool = False) -> dict[str, Any]:
-    """Upload a state-module document; the ``name`` is taken from the path. An existing name
+async def put_state_template(name: str, document: dict[str, Any], replace: bool = False) -> dict[str, Any]:
+    """Upload a state-template document; the ``name`` is taken from the path. An existing name
     without ``replace`` is refused so an overwrite is deliberate."""
     body = {**document, "name": name}
     try:
-        doc = StateModuleDocument.model_validate(body)
+        doc = StateTemplateDocument.model_validate(body)
     except ValidationError as exc:
-        raise ValidationRejected(f"invalid module document: {exc.errors(include_url=False)}") from exc
+        raise ValidationRejected(f"invalid template document: {exc.errors(include_url=False)}") from exc
     with _states_door():
-        saved = await _states().put_module(doc, replace=replace)
+        saved = await _states().put_template(doc, replace=replace)
     return saved.model_dump()
 
 
 @operation(
-    summary="Delete a state module",
+    summary="Delete a state template",
     tags=["states"],
     destructive=True,
     errors=[NotSupportedError, NotFoundError, ConflictError],
     response_model=StateDeleteResult,
 )
-async def delete_state_module(name: str) -> dict[str, Any]:
-    """Delete a state-module document; refused while it is still mounted."""
+async def delete_state_template(name: str) -> dict[str, Any]:
+    """Delete a state-template document; refused while it is still attached."""
     with _states_door():
-        existing = await _states().get_module(name)
+        existing = await _states().get_template(name)
         if existing is None:
-            raise NotFoundError(f"no state module named {name!r}")
-        await _states().delete_module(name)
+            raise NotFoundError(f"no state template named {name!r}")
+        await _states().delete_template(name)
     return {"deleted": True, "name": name}
 
 

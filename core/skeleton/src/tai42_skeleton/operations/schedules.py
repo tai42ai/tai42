@@ -56,7 +56,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import OpaqueJson
-from tai42_contract.states import StateSubject
+from tai42_contract.states import StateBinding, StateSubject
+from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 from tai42_kit.utils.data import text_to_md5
 
 from tai42_skeleton.operations import (
@@ -177,11 +178,18 @@ async def _resolve_schedule_dispatch(
 
 class ScheduleCreate(BaseModel):
     """Create a schedule that periodically runs ``tool_name`` with ``tool_kwargs``
-    on the cadence in ``schedule_kwargs``."""
+    on the cadence in ``schedule_kwargs``.
+
+    ``state_binding`` is the OPTIONAL door-layer binding the recurring fire applies. Unlike
+    the per-schedule ``subject`` (a free key inside ``tool_kwargs`` that legitimately reaches
+    the base tool), it is a top-level field: it is injected into the dispatched arguments as
+    a reserved key the kit's ``schedule_task`` wrapper stamps under a backend arg and pops
+    before the base tool runs, so the tool never sees it."""
 
     tool_name: str = Field(min_length=1)
     tool_kwargs: dict[str, Any] = {}
     schedule_kwargs: dict[str, Any] = {}
+    state_binding: StateBinding | None = None
 
 
 async def _scheduling_backend_present() -> bool:
@@ -302,7 +310,12 @@ def _validate_schedule_subject(tool_kwargs: dict[str, Any]) -> None:
     request_model=ScheduleCreate,
     response_model=OpaqueJson,
 )
-async def create_schedule(tool_name: str, tool_kwargs: dict[str, Any], schedule_kwargs: dict[str, Any]) -> Any:
+async def create_schedule(
+    tool_name: str,
+    tool_kwargs: dict[str, Any],
+    schedule_kwargs: dict[str, Any],
+    state_binding: StateBinding | None = None,
+) -> Any:
     """Schedule a caller-named tool to run on a cadence — a run-ANY-tool door.
 
     The caller supplies ``tool_name``, so reaching this is arbitrary-tool-execution
@@ -313,9 +326,33 @@ async def create_schedule(tool_name: str, tool_kwargs: dict[str, Any], schedule_
         raise NotSupportedError(_NO_BACKEND_MESSAGE)
     _validate_schedule_subject(tool_kwargs)
     dispatch_name, arguments = await _resolve_schedule_dispatch(tool_name, tool_kwargs, schedule_kwargs)
+    # A RECURRING schedule (the ``_schedule_task`` branch, friendly or expert shape) carries
+    # the binding to its later fires under the reserved raw key the kit's ``schedule_task``
+    # wrapper stamps and pops; a RUN-ONCE shape (no cadence → the base tool dispatched
+    # immediately here) must NOT inject the key (nothing pops it before the base tool), so it
+    # deposits the binding on the ambient dispatch context around the immediate ``run_tool``,
+    # exactly like every other door. A caller-supplied ``state_binding`` inside ``tool_kwargs``
+    # is not a door signal and is refused so it can never forge the reserved key.
+    if "state_binding" in arguments:
+        raise BadRequestError("'state_binding' is a reserved schedule key set from the request field, not a tool kwarg")
+    recurring = dispatch_name.endswith(_SCHEDULE_BRANCH_SUFFIX) or _EXPERT_SCHEDULE_KEY in arguments
+    if state_binding is not None:
+        from tai42_skeleton.app import instance
+        from tai42_skeleton.tools.state_binding import validate_and_mount_binding
+
+        # Mount-on-use + validate the binding at SAVE (create), before persisting the
+        # schedule — a bad binding fails the create loudly, never a schedule that fires broken.
+        await validate_and_mount_binding(instance.app, state_binding)
+        if recurring:
+            arguments["state_binding"] = state_binding.model_dump(mode="json")
     # The recurring firing has no live caller, so this creation is the ONLY edge the inner
     # tool reaches — decide it here, over the exact arguments the dispatch below fires.
     await authorize_submitted_tool(dispatch_name, arguments)
+    binding_token = (
+        set_current_tool_invocation(ToolInvocation(tool_name=dispatch_name, state_binding=state_binding))
+        if state_binding is not None and not recurring
+        else None
+    )
     try:
         return await tai42_app.tools.run_tool(dispatch_name, arguments)
     except UnknownToolError as exc:
@@ -328,6 +365,9 @@ async def create_schedule(tool_name: str, tool_kwargs: dict[str, Any], schedule_
     except Exception as exc:
         logger.exception("create-schedule %r raised during execution", dispatch_name)
         raise OperationFailed(f"schedule creation failed ({type(exc).__name__})") from exc
+    finally:
+        if binding_token is not None:
+            reset_current_tool_invocation(binding_token)
 
 
 @operation(

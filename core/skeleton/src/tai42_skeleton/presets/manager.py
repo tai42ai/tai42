@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.presets import PresetBody
 from tai42_contract.presets.errors import PresetExistsError, PresetNameConflictError, PresetNotFoundError
+from tai42_contract.states.binding import StateBinding
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
@@ -170,6 +171,7 @@ class PresetManager:
         output_schema: dict[str, Any] | None = None,
         input_schema: dict[str, Any] | None = None,
         *,
+        state_binding: StateBinding | None = None,
         version: int = 1,
     ) -> None:
         """Bind ``name`` as a runnable tool from its full spec (public entry).
@@ -188,7 +190,15 @@ class PresetManager:
             raise ValueError(f"invalid preset name {name!r}: must match {_PRESET_NAME_RE.pattern}")
         async with self._locks[name]:
             await self._register(
-                name, base_tool, fixed_kwargs, extensions, description, output_schema, input_schema, version=version
+                name,
+                base_tool,
+                fixed_kwargs,
+                extensions,
+                description,
+                output_schema,
+                input_schema,
+                state_binding=state_binding,
+                version=version,
             )
 
     async def _register(
@@ -201,6 +211,7 @@ class PresetManager:
         output_schema: dict[str, Any] | None = None,
         input_schema: dict[str, Any] | None = None,
         *,
+        state_binding: StateBinding | None = None,
         version: int,
     ) -> None:
         """Bind ``name`` as a runnable tool from its full spec — the UNLOCKED core.
@@ -239,6 +250,7 @@ class PresetManager:
             description=description,
             output_schema=output_schema,
             input_schema=input_schema,
+            state_binding=state_binding,
             version=version,
         )
 
@@ -253,6 +265,7 @@ class PresetManager:
         description: str,
         output_schema: dict[str, Any] | None,
         input_schema: dict[str, Any] | None,
+        state_binding: StateBinding | None = None,
         version: int,
     ) -> None:
         """Seed the combos and force-register the prebuilt ``tool_obj``, then capture
@@ -289,6 +302,7 @@ class PresetManager:
             extensions=[list(combo) for combo in extensions],
             output_schema=output_schema,
             input_schema=input_schema,
+            state_binding=state_binding,
         )
         # The version is captured in lockstep with the spec it was read at, so the two
         # never drift (both are dropped together in ``_remove_registration``).
@@ -347,6 +361,7 @@ class PresetManager:
                     description=body.description,
                     output_schema=body.output_schema,
                     input_schema=body.input_schema,
+                    state_binding=body.state_binding,
                     version=version,
                 )
             except Exception:
@@ -359,6 +374,7 @@ class PresetManager:
                         captured.description,
                         captured.output_schema,
                         captured.input_schema,
+                        state_binding=captured.state_binding,
                         version=captured_version if captured_version is not None else version,
                     )
                 raise
@@ -413,6 +429,7 @@ class PresetManager:
                             body.description,
                             body.output_schema,
                             body.input_schema,
+                            state_binding=body.state_binding,
                             version=version,
                         )
                         continue
@@ -516,6 +533,7 @@ class PresetManager:
                 body.description,
                 body.output_schema,
                 body.input_schema,
+                state_binding=body.state_binding,
                 version=version,
             )
         except Exception:

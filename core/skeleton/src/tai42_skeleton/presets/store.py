@@ -44,6 +44,7 @@ from tai42_contract.presets.errors import (
     PresetNotFoundError,
     PresetVersionNotFoundError,
 )
+from tai42_contract.states.binding import StateBinding
 from tai42_contract.versioning import VersionedStore
 from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError, DocumentVersionNotFoundError
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
@@ -82,6 +83,7 @@ class PresetStoreView(PresetStore):
         output_schema: dict[str, Any] | None = None,
         input_schema: dict[str, Any] | None = None,
         *,
+        state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
     ) -> DocumentRecord:
         _validate_extensions(extensions)
@@ -94,6 +96,7 @@ class PresetStoreView(PresetStore):
             extensions=[list(combo) for combo in extensions],
             output_schema=output_schema,
             input_schema=input_schema,
+            state_binding=state_binding,
         )
         # ``tags`` labels version 1 in the SAME commit — a caller that must tag the
         # first version (the seed applier) leaves no untagged window; ``None`` is the
@@ -112,6 +115,7 @@ class PresetStoreView(PresetStore):
         description: str | None = None,
         *,
         input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
         tags: list[str] | None = None,
     ) -> DocumentVersion:
         active = await self._active_body(name)
@@ -119,6 +123,7 @@ class PresetStoreView(PresetStore):
         _validate_extensions(new_extensions)
         new_output_schema = active.output_schema if isinstance(output_schema, CarryForward) else output_schema
         new_input_schema = active.input_schema if isinstance(input_schema, CarryForward) else input_schema
+        new_state_binding = active.state_binding if isinstance(state_binding, CarryForward) else state_binding
         # ``description`` is editable per version: None carries the active value
         # forward, an explicit string sets it. The RESULTING description is validated
         # non-empty either way, so an explicit "" is rejected and a carry-forward from
@@ -133,6 +138,7 @@ class PresetStoreView(PresetStore):
             extensions=[list(combo) for combo in new_extensions],
             output_schema=new_output_schema,
             input_schema=new_input_schema,
+            state_binding=new_state_binding,
         )
         # ``tags`` labels the new version in the SAME save commit — a caller that must
         # tag it (the seed applier) leaves no untagged window; ``None`` is the door's

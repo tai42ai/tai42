@@ -62,6 +62,7 @@ async def test_set_creates_then_upserts(wired):
         "target_name": "assistant",
         "multichannel": False,
         "greeting_template": None,
+        "state_binding": None,
     }
     replaced = await ops.set_conversation_config(
         "agent", "assistant", multichannel=True, greeting_template="hi {pairing_code}"
@@ -111,6 +112,17 @@ async def test_set_refuses_a_blank_greeting(wired):
 async def test_set_refuses_an_unknown_target_kind(wired):
     with pytest.raises(BadRequestError):
         await ops.set_conversation_config("robot", "assistant")
+
+
+async def test_set_refuses_a_state_binding_on_an_agent_target(wired):
+    # A door binding applies around a tool DISPATCH; an agent turn deposits none. An agent
+    # config carrying one is refused at save (a 400), so the read path never serves a binding
+    # an agent turn would silently ignore.
+    from tai42_contract.states import StateBinding
+
+    binding = StateBinding.model_validate({"states": [{"state": "status", "subject_expr": ".x"}]})
+    with pytest.raises(BadRequestError, match="state_binding"):
+        await ops.set_conversation_config("agent", "assistant", state_binding=binding)
 
 
 async def test_get_unknown_is_404(wired):

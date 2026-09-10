@@ -15,23 +15,25 @@ from tai42_contract import ErrorKind, error_kind
 from tai42_contract.app.facets import AppStates
 from tai42_contract.states import (
     ApplyResult,
+    AttachBody,
+    AttachReconcileContext,
+    AttachReconcileRecords,
     CompletedOrigin,
     ConsumerRow,
     DeclarationInUseError,
-    ModuleValidationError,
-    MountBody,
-    MountReconcileContext,
-    MountReconcileRecords,
-    RecordView,
     StateContext,
     StateDeclaration,
     StateExistsError,
-    StateModuleDocument,
     StateNotFoundError,
+    StateRecord,
     StatesNotConfiguredError,
     StateSubject,
+    StateTemplateDocument,
     SubjectCandidates,
     SubjectRefusedError,
+    TemplateJqApplyResult,
+    TemplateJqResult,
+    TemplateValidationError,
     WriteEntry,
     WriteOrigin,
     WritesPage,
@@ -173,38 +175,62 @@ def test_declaration_carries_the_platform_composed_regimes():
 
 
 # --------------------------------------------------------------------------- #
-# StateModuleDocument
+# StateTemplateDocument
 # --------------------------------------------------------------------------- #
-def test_module_document_defaults_kind_and_round_trips_schema():
-    doc = StateModuleDocument.model_validate({"name": "agenda", "schema": {"type": "object"}})
-    assert doc.kind == "state-module"
+def test_template_document_defaults_kind_and_round_trips_schema():
+    doc = StateTemplateDocument.model_validate({"name": "planner", "schema": {"type": "object"}})
+    assert doc.kind == "state-template"
     assert doc.schema_ == {"type": "object"}
     assert "schema" in doc.model_dump()
 
 
-def test_module_document_refuses_any_key_outside_the_platform_set():
-    # A consumer keeps its own keys in its own sibling document; the platform module
-    # document forbids anything outside its set so a mis-split fails loudly at the wire.
-    for key in ("views", "widgets", "anything"):
+def test_template_document_refuses_any_key_outside_the_platform_set():
+    # The platform template document forbids anything outside its set so a stray/typo'd key
+    # fails loudly at the wire — but ``template_jq``/``reconcile`` now belong to it.
+    for key in ("widgets", "anything", "predicates"):
         with pytest.raises(ValidationError):
-            StateModuleDocument.model_validate({"name": "agenda", "schema": {}, key: {}})
+            StateTemplateDocument.model_validate({"name": "planner", "schema": {}, key: {}})
 
 
-@pytest.mark.parametrize("name", ["Agenda", "1agenda", "has_underscore", "a" * 64])
-def test_module_document_rejects_a_bad_name(name: str):
+def test_template_document_round_trips_template_jq_and_reconcile():
+    # template_jq/reconcile travel as free dicts (parsed + checked in the skeleton) and
+    # default to None so a template document without them still validates.
+    bare = StateTemplateDocument.model_validate({"name": "planner", "schema": {"type": "object"}})
+    assert (bare.template_jq, bare.reconcile) == (None, None)
+    doc = StateTemplateDocument.model_validate(
+        {
+            "name": "planner",
+            "schema": {"type": "object"},
+            "template_jq": {
+                "due_set": {"purpose": "input", "description": "the work due", "params": ["run"], "jq": "."},
+                "outcome": {"purpose": "update", "reads": [["l"]], "writes": [["l"]], "jq": "[]"},
+            },
+            "reconcile": {"view": ".", "close": "[]", "resolutions": "[]"},
+        }
+    )
+    dumped = doc.model_dump(by_alias=True)
+    assert dumped["template_jq"]["due_set"]["jq"] == "."
+    assert dumped["template_jq"]["outcome"]["writes"] == [["l"]]
+    assert dumped["reconcile"] == {"view": ".", "close": "[]", "resolutions": "[]"}
+    # Re-validating the dump is stable.
+    assert StateTemplateDocument.model_validate(dumped) == doc
+
+
+@pytest.mark.parametrize("name", ["Planner", "1planner", "has_underscore", "a" * 64])
+def test_template_document_rejects_a_bad_name(name: str):
     with pytest.raises(ValidationError):
-        StateModuleDocument.model_validate({"name": name, "schema": {}})
+        StateTemplateDocument.model_validate({"name": name, "schema": {}})
 
 
 # --------------------------------------------------------------------------- #
 # Origins, context, and the read/apply/audit shapes
 # --------------------------------------------------------------------------- #
 def test_write_origin_carries_only_consumer_facts():
-    origin = WriteOrigin(consumer="agenda", meta={"node": "n1"}, run_id="r1", op_id="e:agenda:k")
+    origin = WriteOrigin(consumer="planner", meta={"node": "n1"}, run_id="r1", op_id="e:planner:k")
     # A consumer cannot supply door/actor/turn_id — they are absent from its model.
     with pytest.raises(ValidationError):
-        WriteOrigin.model_validate({"consumer": "agenda", "door": "hook"})
-    assert origin.consumer == "agenda"
+        WriteOrigin.model_validate({"consumer": "planner", "door": "hook"})
+    assert origin.consumer == "planner"
     # ``meta`` is an opaque bag stored and echoed verbatim — the platform reads no key from it.
     assert origin.meta == {"node": "n1"}
 
@@ -222,7 +248,7 @@ def test_write_origin_meta_is_bounded_and_must_be_a_json_object():
 
 
 def test_completed_origin_adds_the_platform_stamped_fields():
-    completed = CompletedOrigin(consumer="agenda", door="hook", actor="k-fire", turn_id="t9", inbound_id="in-1")
+    completed = CompletedOrigin(consumer="planner", door="hook", actor="k-fire", turn_id="t9", inbound_id="in-1")
     assert (completed.door, completed.actor, completed.turn_id, completed.inbound_id) == (
         "hook",
         "k-fire",
@@ -247,10 +273,19 @@ def test_state_context_pins_the_door_literal_and_is_frozen():
 
 def test_record_apply_and_write_entry_shapes():
     subject = StateSubject.model_validate(_subject())
-    view = RecordView(state="profile", subject=subject, data={"a": "b"}, seq=1.0, canonical_subject=subject)
-    assert view.folded_from == []
+    record = StateRecord(state="profile", subject=subject, data={"a": "b"}, seq=1.0, canonical_subject=subject)
+    assert record.folded_from == []
     result = ApplyResult(applied=True, data={"a": "b"}, seq=2.0)
     assert result.skipped == []
+    # An input-purpose result carries any JSON value; an update-purpose result carries the
+    # apply outcome — a distinct model, not ApplyResult.
+    input_result = TemplateJqResult(name="due_set", value=[{"id": "a"}])
+    assert (input_result.name, input_result.purpose, input_result.value) == ("due_set", "input", [{"id": "a"}])
+    update_result = TemplateJqApplyResult(name="outcome", applied=True, data={"ledger": []}, seq=3.0)
+    assert update_result.data == {"ledger": []}
+    assert update_result.skipped == []
+    with pytest.raises(ValidationError):
+        TemplateJqApplyResult.model_validate({"name": "x", "applied": True, "stray": 1})
     entry = WriteEntry.model_validate(
         {
             "seq": 2.0,
@@ -293,7 +328,7 @@ def test_declaration_served_updated_at_is_optional_and_refused_shape_stays_forbi
 
 
 def test_consumer_row_allows_an_unavailable_marker():
-    assert ConsumerRow(kind="flow", name="agenda", detail="binds thread").name == "agenda"
+    assert ConsumerRow(kind="flow", name="planner", detail="binds thread").name == "planner"
     assert ConsumerRow(kind="schedule", unavailable="no scheduling backend").unavailable
 
 
@@ -308,7 +343,7 @@ def test_consumer_row_allows_an_unavailable_marker():
         (StateExistsError("x"), ErrorKind.CONFLICT),
         (SubjectRefusedError("bad"), ErrorKind.BAD_INPUT),
         (DeclarationInUseError("x"), ErrorKind.CONFLICT),
-        (ModuleValidationError("x"), ErrorKind.BAD_INPUT),
+        (TemplateValidationError("x"), ErrorKind.BAD_INPUT),
     ],
 )
 def test_errors_stamp_their_transport_neutral_kind(exc: Exception, kind: ErrorKind):
@@ -316,22 +351,22 @@ def test_errors_stamp_their_transport_neutral_kind(exc: Exception, kind: ErrorKi
 
 
 # --------------------------------------------------------------------------- #
-# Mount body options + reconcile context
+# Attach body options + reconcile context
 # --------------------------------------------------------------------------- #
-def test_mount_body_options_default_empty_and_round_trip():
-    assert MountBody().options == {}
-    body = MountBody(path=["a"], options={"on_orphan": "close", "resolution": {"closed": True}})
+def test_attach_body_options_default_empty_and_round_trip():
+    assert AttachBody().options == {}
+    body = AttachBody(path=["a"], options={"on_orphan": "close", "resolution": {"closed": True}})
     assert body.options == {"on_orphan": "close", "resolution": {"closed": True}}
 
 
-def test_mount_body_still_refuses_an_unknown_key():
+def test_attach_body_still_refuses_an_unknown_key():
     with pytest.raises(ValidationError):
-        MountBody(bogus=1)  # type: ignore[call-arg]
+        AttachBody(bogus=1)  # type: ignore[call-arg]
 
 
-def test_mount_reconcile_context_is_frozen_and_defaults_options():
+def test_attach_reconcile_context_is_frozen_and_defaults_options():
     class _Records:
-        async def read(self, subject: StateSubject) -> RecordView | None:  # pragma: no cover - shape only
+        async def read(self, subject: StateSubject) -> StateRecord | None:  # pragma: no cover - shape only
             return None
 
         async def list_subjects(
@@ -341,7 +376,7 @@ def test_mount_reconcile_context_is_frozen_and_defaults_options():
 
         async def merge(
             self, subject: StateSubject, patch: dict[str, object], *, origin: WriteOrigin
-        ) -> RecordView:  # pragma: no cover
+        ) -> StateRecord:  # pragma: no cover
             raise AssertionError
 
         async def apply(
@@ -350,19 +385,19 @@ def test_mount_reconcile_context_is_frozen_and_defaults_options():
             raise AssertionError
 
     records = _Records()
-    assert isinstance(records, MountReconcileRecords)
-    doc = StateModuleDocument(name="notes", schema={"type": "object"})
-    ctx = MountReconcileContext(
+    assert isinstance(records, AttachReconcileRecords)
+    doc = StateTemplateDocument(name="notes", schema={"type": "object"})
+    ctx = AttachReconcileContext(
         state="profile",
-        module=doc,
-        operation="mount",
+        template=doc,
+        operation="attach",
         previous_declarations=None,
         new_declarations={"cap": 5},
         records=records,
     )
     assert ctx.options == {}
     assert ctx.previous_declarations is None
-    assert ctx.operation == "mount"
+    assert ctx.operation == "attach"
     with pytest.raises(AttributeError):
         ctx.operation = "update_declarations"  # type: ignore[misc]
 
@@ -370,7 +405,7 @@ def test_mount_reconcile_context_is_frozen_and_defaults_options():
 # --------------------------------------------------------------------------- #
 # The facet surface
 # --------------------------------------------------------------------------- #
-def test_appstates_enumerates_its_twenty_nine_members():
+def test_appstates_enumerates_its_thirty_one_members():
     members = protocol_members(AppStates)
     assert members == {
         "list_declarations",
@@ -378,18 +413,20 @@ def test_appstates_enumerates_its_twenty_nine_members():
         "put_declaration",
         "delete_declaration",
         "stats",
-        "list_modules",
-        "get_module",
-        "put_module",
-        "delete_module",
-        "list_mounts",
-        "mount",
-        "update_mount_declarations",
-        "unmount",
+        "list_templates",
+        "get_template",
+        "put_template",
+        "delete_template",
+        "list_attachments",
+        "attach",
+        "update_attachment_declarations",
+        "detach",
         "read",
         "replace",
         "merge",
         "apply",
+        "eval_template_jq",
+        "apply_template_jq",
         "erase",
         "fold",
         "list_subjects",
@@ -399,7 +436,7 @@ def test_appstates_enumerates_its_twenty_nine_members():
         "context",
         "register_consumer_lister",
         "consumers",
-        "register_module_seed",
-        "register_mount_validator",
-        "register_mount_reconciler",
+        "register_template_seed",
+        "register_attach_validator",
+        "register_attach_reconciler",
     }

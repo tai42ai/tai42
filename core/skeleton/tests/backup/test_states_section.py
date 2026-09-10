@@ -1,6 +1,6 @@
 """The ``states`` backup section — the feature gate on export/import, the payload version
 guard, and the registration seam. The full data round-trip (export → import through the
-facet doors) needs a live store and is exercised on the real stack in WP-9c e2e."""
+facet doors) needs a live store and is exercised on the real stack by the states e2e suite."""
 
 from __future__ import annotations
 
@@ -13,7 +13,14 @@ from tai42_skeleton.states.backup import export_states, import_states, register_
 async def test_export_empty_when_feature_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(backup_mod, "states_store_configured", lambda: False)
     payload = await export_states()
-    assert payload == {"version": 1, "modules": [], "declarations": [], "mounts": [], "aliases": [], "records": []}
+    assert payload == {
+        "version": 1,
+        "templates": [],
+        "declarations": [],
+        "attachments": [],
+        "aliases": [],
+        "records": [],
+    }
 
 
 async def test_import_refuses_when_feature_off(monkeypatch: pytest.MonkeyPatch) -> None:

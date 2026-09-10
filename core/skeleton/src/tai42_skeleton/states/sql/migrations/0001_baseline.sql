@@ -10,7 +10,7 @@
 -- (states/store.py) enforces the rest.
 
 -- A declared state: its author base `schema`, the composed `effective_schema`
--- every document validation reads (base + each mounted module's fragment), the
+-- every document validation reads (base + each attached template's fragment), the
 -- `subject_kinds` it serves and the `default_subject_kind` a door's ambient subject
 -- resolves to, and an optional per-state `retention_days` (INT4; NULL keeps records
 -- forever unless the global default is set).
@@ -25,30 +25,30 @@ CREATE TABLE IF NOT EXISTS state_declarations (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- A platform state-module document (schema fragment + parameters + write regimes +
--- mount-time declarations + trace switch). `shipped_hash` is the seed applier's
+-- A platform state-template document (schema fragment + parameters + write regimes +
+-- attach-time declarations + trace switch). `shipped_hash` is the seed applier's
 -- canonical-body hash on a shipped default (NULL for an operator upload); it is the
--- only field that tells an unedited shipped module from an operator-owned one.
-CREATE TABLE IF NOT EXISTS state_modules (
+-- only field that tells an unedited shipped template from an operator-owned one.
+CREATE TABLE IF NOT EXISTS state_templates (
     name         TEXT PRIMARY KEY,
     body         JSONB       NOT NULL DEFAULT '{}'::jsonb,
     shipped_hash TEXT,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- One mount of a module on a state at `path`, carrying the resolved `parameters`
--- and the mount-time `declarations` values. The effective schema on the state is
--- recomposed from every mount in the same transaction as a mount write.
-CREATE TABLE IF NOT EXISTS state_mounts (
+-- One attachment of a template on a state at `path`, carrying the resolved `parameters`
+-- and the attach-time `declarations` values. The effective schema on the state is
+-- recomposed from every attachment in the same transaction as an attach write.
+CREATE TABLE IF NOT EXISTS state_attachments (
     state        TEXT        NOT NULL,
-    module       TEXT        NOT NULL,
+    template     TEXT        NOT NULL,
     path         JSONB       NOT NULL DEFAULT '[]'::jsonb,
     parameters   JSONB       NOT NULL DEFAULT '{}'::jsonb,
     declarations JSONB       NOT NULL DEFAULT '{}'::jsonb,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (state, module)
+    PRIMARY KEY (state, template)
 );
-CREATE INDEX IF NOT EXISTS state_mounts_module_idx ON state_mounts (module);
+CREATE INDEX IF NOT EXISTS state_attachments_template_idx ON state_attachments (template);
 
 -- One record: the JSON `data` document for a subject, validated whole against the
 -- state's effective schema on every write, plus its `updated_at` (the write's

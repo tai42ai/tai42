@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from tai42_contract.conversations import ConversationTargetKind
+from tai42_contract.states.binding import StateBinding
 from tai42_contract.states.models import SUBJECT_KIND_RE
 from tai42_contract.template import ConditionMixin, ExprMixin
 
@@ -92,6 +93,10 @@ class HookRegister(ConditionMixin, ExprMixin):
     # The optional state subject the fire targets; ``None`` leaves the fire with no
     # ambient state context, so a state tool it calls must carry an explicit subject.
     subject: HookSubject | None = None
+
+    # The OPTIONAL door-layer state binding applied around the hook's tool fire; deposited
+    # on the ambient dispatch context before ``run_recorded`` reaches ``run_tool``.
+    state_binding: StateBinding | None = None
 
     # ``expr``/``expr_id``/``condition``/``condition_id`` come from the mixins;
     # the ``*_kwargs`` fields are re-declared non-optional (hooks default them

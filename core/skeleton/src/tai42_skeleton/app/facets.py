@@ -49,23 +49,31 @@ if TYPE_CHECKING:
     from tai42_contract.sandbox import Sandbox, SandboxPolicy
     from tai42_contract.states import (
         ApplyResult,
+        AttachBody,
+        AttachReconciler,
+        AttachValidator,
         ConsumerLister,
         ConsumerRow,
-        MountBody,
-        MountReconciler,
-        MountValidator,
-        RecordView,
+        StateBinding,
         StateContext,
         StateDeclaration,
-        StateModuleDocument,
+        StateRecord,
         StateSubject,
+        StateTemplateDocument,
+        TemplateJqApplyResult,
+        TemplateJqResult,
         WriteOrigin,
         WritesPage,
     )
     from tai42_contract.storage import Storage
     from tai42_contract.sub_mcp import SubMcpAppRouter
     from tai42_contract.tool_meta import ToolMetaStore
-    from tai42_contract.tools import ToolRefsExtractor, ToolRenameReferee
+    from tai42_contract.tools import (
+        StateTemplateDetachReferee,
+        ToolDeleteReferee,
+        ToolRefsExtractor,
+        ToolRenameReferee,
+    )
     from tai42_contract.versioning import VersionedStore
     from tai42_contract.webhooks import WebhookVerifier
 
@@ -150,6 +158,25 @@ class ToolsFacet(_Facet):
         it, so it is not on the ``AppTools`` protocol (the register-only seam), the same
         precedent :meth:`PresetsFacet.write_validator` sets."""
         return self._app._rename_referee_registry.all()
+
+    def register_delete_referee(self, provider: ToolDeleteReferee) -> None:
+        return self._app._delete_referee_registry.register(provider)
+
+    def delete_referees(self) -> list[ToolDeleteReferee]:
+        """Every registered delete referee (plugin providers). Skeleton-only — the preset
+        delete door consults it, so it is not on the ``AppTools`` protocol's read side (the
+        register-only seam), mirroring :meth:`rename_referees`."""
+        return self._app._delete_referee_registry.all()
+
+    def register_detach_referee(self, provider: StateTemplateDetachReferee) -> None:
+        return self._app._detach_referee_registry.register(provider)
+
+    def detach_referees(self) -> list[StateTemplateDetachReferee]:
+        """Every registered state-template detach referee (platform-internal binding holders
+        + plugin providers). Skeleton-only — the state-template detach door consults it, so it
+        is not on the ``AppTools`` protocol's read side (the register-only seam), mirroring
+        :meth:`delete_referees`."""
+        return self._app._detach_referee_registry.all()
 
     def register_tier(self, base_tool: str, tier: RouteAction) -> None:
         return self._app._registration_tier_registry.register(base_tool, tier)
@@ -556,6 +583,7 @@ class PresetsFacet(_Facet):
         input_schema: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         extensions: list[list[ExtensionElement]] | None = None,
+        state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a preset in-process, returning the record view the HTTP create door
@@ -580,6 +608,7 @@ class PresetsFacet(_Facet):
             combos,
             output_schema,
             input_schema,
+            state_binding=state_binding,
             tags=tags,
             enforce_tier=False,
         )
@@ -604,6 +633,7 @@ class PresetsFacet(_Facet):
         output_schema_provided: bool = False,
         description: str | None = None,
         extensions: list[list[ExtensionElement]] | None = None,
+        state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Save a new preset version in-process, returning the version row the HTTP save
@@ -625,6 +655,7 @@ class PresetsFacet(_Facet):
             output_schema_provided=output_schema_provided,
             description=description,
             input_schema=input_schema,
+            state_binding=state_binding,
             tags=tags,
             enforce_tier=False,
         )
@@ -775,7 +806,7 @@ class BackupFacet(_Facet):
 class StatesFacet(_Facet):
     """``app.states`` — the subject-keyed state store namespace (``AppStates``): the
     door-agnostic record substrate every door and tool reads and writes a subject's
-    document through, plus the module/mount lifecycle and the consumer/seed/mount-validator
+    document through, plus the template/attach lifecycle and the consumer/seed/attach-validator
     seams. Forwards to the app's shared :class:`~tai42_skeleton.states.service.StatesService`
     and its registries; the write chokepoint completes provenance and the gate refuses 501
     while the store is unbound."""
@@ -790,9 +821,9 @@ class StatesFacet(_Facet):
     async def served_declaration(self, name: str) -> dict[str, Any]:
         """The composed declaration read the ``GET /api/states/{name}`` route serves: base
         ``schema``, composed ``effective_schema``, ``subject_kinds``, ``default_subject_kind``,
-        the state's ``mounts`` and computed ``regimes``. Skeleton-only (the HTTP composed
+        the state's ``attachments`` and computed ``regimes``. Skeleton-only (the HTTP composed
         view), so it is off the ``AppStates`` protocol — a consumer reads the typed
-        :meth:`get_declaration` + :meth:`list_mounts` — the ``target_validator`` precedent."""
+        :meth:`get_declaration` + :meth:`list_attachments` — the ``target_validator`` precedent."""
         return await self._app._states_service.served_declaration(name)
 
     async def put_declaration(self, decl: StateDeclaration) -> StateDeclaration:
@@ -804,49 +835,49 @@ class StatesFacet(_Facet):
     async def stats(self, name: str) -> dict[str, Any]:
         return await self._app._states_service.stats(name)
 
-    # -- modules --
-    async def list_modules(self) -> list[StateModuleDocument]:
-        return await self._app._states_service.list_modules()
+    # -- templates --
+    async def list_templates(self) -> list[StateTemplateDocument]:
+        return await self._app._states_service.list_templates()
 
-    async def list_modules_catalog(self) -> list[dict[str, Any]]:
-        """The module-catalog projection the ``GET /api/state-modules`` list route serves:
-        each stored document plus ``mounted_on`` (the number of states it is mounted on)
+    async def list_templates_catalog(self) -> list[dict[str, Any]]:
+        """The template-catalog projection the ``GET /api/state-templates`` list route serves:
+        each stored document plus ``attached_to`` (the number of states it is attached on)
         and ``shipped_default`` (whether it is an unedited shipped default). Skeleton-only
         (the HTTP catalog view), so it is off the ``AppStates`` protocol — a consumer reads
-        the typed :meth:`list_modules` — the ``served_declaration`` precedent."""
-        return await self._app._states_service.list_modules_catalog()
+        the typed :meth:`list_templates` — the ``served_declaration`` precedent."""
+        return await self._app._states_service.list_templates_catalog()
 
-    async def get_module(self, name: str) -> StateModuleDocument | None:
-        return await self._app._states_service.get_module(name)
+    async def get_template(self, name: str) -> StateTemplateDocument | None:
+        return await self._app._states_service.get_template(name)
 
-    async def put_module(self, doc: StateModuleDocument, *, replace: bool) -> StateModuleDocument:
-        return await self._app._states_service.put_module(doc, replace=replace)
+    async def put_template(self, doc: StateTemplateDocument, *, replace: bool) -> StateTemplateDocument:
+        return await self._app._states_service.put_template(doc, replace=replace)
 
-    async def delete_module(self, name: str) -> None:
-        return await self._app._states_service.delete_module(name)
+    async def delete_template(self, name: str) -> None:
+        return await self._app._states_service.delete_template(name)
 
-    # -- mounts --
-    async def list_mounts(self, state: str | None = None, *, module: str | None = None) -> list[dict[str, Any]]:
-        return await self._app._states_service.list_mounts(state, module=module)
+    # -- attachments --
+    async def list_attachments(self, state: str | None = None, *, template: str | None = None) -> list[dict[str, Any]]:
+        return await self._app._states_service.list_attachments(state, template=template)
 
-    async def mount(self, state: str, module: str, body: MountBody, *, skip_reconcilers: bool = False) -> None:
-        return await self._app._states_service.mount(state, module, body, skip_reconcilers=skip_reconcilers)
+    async def attach(self, state: str, template: str, body: AttachBody, *, skip_reconcilers: bool = False) -> None:
+        return await self._app._states_service.attach(state, template, body, skip_reconcilers=skip_reconcilers)
 
-    async def update_mount_declarations(
+    async def update_attachment_declarations(
         self,
         state: str,
-        module: str,
+        template: str,
         declarations: dict[str, Any],
         *,
         options: dict[str, Any] | None = None,
         skip_reconcilers: bool = False,
     ) -> None:
-        return await self._app._states_service.update_mount_declarations(
-            state, module, declarations, options=options, skip_reconcilers=skip_reconcilers
+        return await self._app._states_service.update_attachment_declarations(
+            state, template, declarations, options=options, skip_reconcilers=skip_reconcilers
         )
 
-    async def unmount(self, state: str, module: str) -> None:
-        return await self._app._states_service.unmount(state, module)
+    async def detach(self, state: str, template: str) -> None:
+        return await self._app._states_service.detach(state, template)
 
     # -- backup restore --
     async def restore_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
@@ -861,17 +892,17 @@ class StatesFacet(_Facet):
         return await self._app._states_service.restore_records(state, rows, origin=origin)
 
     # -- records --
-    async def read(self, state: str, subject: StateSubject) -> RecordView | None:
+    async def read(self, state: str, subject: StateSubject) -> StateRecord | None:
         return await self._app._states_service.read(state, subject)
 
     async def replace(
         self, state: str, subject: StateSubject, data: dict[str, Any], *, origin: WriteOrigin
-    ) -> RecordView:
+    ) -> StateRecord:
         return await self._app._states_service.replace(state, subject, data, origin=origin)
 
     async def merge(
         self, state: str, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin
-    ) -> RecordView:
+    ) -> StateRecord:
         return await self._app._states_service.merge(state, subject, patch, origin=origin)
 
     async def apply(
@@ -884,6 +915,25 @@ class StatesFacet(_Facet):
         origin: WriteOrigin,
     ) -> ApplyResult:
         return await self._app._states_service.apply(state, subject, ops, op_id=op_id, origin=origin)
+
+    async def eval_template_jq(
+        self, state: str, subject: StateSubject, name: str, params: dict[str, Any]
+    ) -> TemplateJqResult:
+        return await self._app._states_service.eval_template_jq(state, subject, name, params)
+
+    async def apply_template_jq(
+        self,
+        state: str,
+        subject: StateSubject,
+        name: str,
+        input: Any,
+        *,
+        op_id: str | None,
+        origin: WriteOrigin,
+    ) -> TemplateJqApplyResult:
+        return await self._app._states_service.apply_template_jq(
+            state, subject, name, input, op_id=op_id, origin=origin
+        )
 
     async def erase(self, state: str, subject: StateSubject, *, origin: WriteOrigin) -> None:
         return await self._app._states_service.erase(state, subject, origin=origin)
@@ -923,12 +973,12 @@ class StatesFacet(_Facet):
         return await self._app._states_service.consumers(state)
 
     # -- seeds --
-    def register_module_seed(self, doc: StateModuleDocument) -> None:
-        return self._app._states_service.register_module_seed(doc)
+    def register_template_seed(self, doc: StateTemplateDocument) -> None:
+        return self._app._states_service.register_template_seed(doc)
 
-    # -- mount validation --
-    def register_mount_validator(self, validator: MountValidator) -> None:
-        return self._app._states_service.register_mount_validator(validator)
+    # -- attach validation --
+    def register_attach_validator(self, validator: AttachValidator) -> None:
+        return self._app._states_service.register_attach_validator(validator)
 
-    def register_mount_reconciler(self, reconciler: MountReconciler) -> None:
-        return self._app._states_service.register_mount_reconciler(reconciler)
+    def register_attach_reconciler(self, reconciler: AttachReconciler) -> None:
+        return self._app._states_service.register_attach_reconciler(reconciler)

@@ -31,6 +31,7 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.interactions import LocationElement, MediaItem
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
+from tai42_contract.states.binding import StateBinding
 from tai42_kit.utils.data import get_compiled_jq
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
@@ -1560,6 +1561,7 @@ async def set_conversation_config(
     target_name: str,
     multichannel: bool = False,
     greeting_template: str | None = None,
+    state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """Create or replace the per-target config for ``(target_kind, target_name)`` — an
     UPSERT, so this is the create path AND the edit path for a config of that key.
@@ -1579,11 +1581,19 @@ async def set_conversation_config(
             target_name=target_name,
             multichannel=multichannel,
             greeting_template=greeting_template,
+            state_binding=state_binding,
         )
     except ValueError as exc:
         raise BadRequestError(f"invalid conversation config: {exc}") from exc
     _require_backend()
     await _assert_target_exists(config.target_kind, config.target_name)
+    if state_binding is not None:
+        from tai42_skeleton.app import instance
+        from tai42_skeleton.tools.state_binding import validate_and_mount_binding
+
+        # Mount-on-use + validate the binding at SAVE (the config upsert) — a bad binding is
+        # a 400 that persists no config.
+        await validate_and_mount_binding(instance.app, state_binding)
     created = await _config_store().upsert(config)
     return {
         "created": created,

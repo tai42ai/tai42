@@ -535,7 +535,12 @@ async def _extract_target_config(request: Request) -> dict:
         config = TargetConversationConfig.model_validate(body)
     except ValidationError as exc:
         raise BadRequestError(f"invalid conversation config: {exc}") from exc
-    return config.model_dump()
+    flat = config.model_dump()
+    # ``model_dump`` lowers the binding to a plain dict, but the operation's
+    # ``state_binding`` parameter (and its mount-on-use) needs the parsed model — pass the
+    # instance so a body binding is not dropped/mishandled at the route edge.
+    flat["state_binding"] = config.state_binding
+    return flat
 
 
 list_conversation_configs = register_operation_route(

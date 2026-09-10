@@ -199,15 +199,15 @@ def build_app() -> TaiMCP:
         # so it is verified whenever a database is bound, before any state read/write.
         app.lifecycle.on_startup(assert_states_schema_applied)
 
-        # Reconcile the shipped state-module seeds once the store is live (a no-op while
+        # Reconcile the shipped state-template seeds once the store is live (a no-op while
         # the feature is off). Registered after the schema gate so it never runs against
         # a pending-migration database. A closure over the persistent app reads the LIVE
         # per-epoch service at call time, so a reload reconciles the freshly-registered
         # seeds rather than a boot-epoch snapshot.
-        async def _reconcile_state_module_seeds() -> None:
-            await app._states_service.apply_module_seeds()
+        async def _reconcile_state_template_seeds() -> None:
+            await app._states_service.apply_template_seeds()
 
-        app.lifecycle.on_startup(_reconcile_state_module_seeds)
+        app.lifecycle.on_startup(_reconcile_state_template_seeds)
         if settings.enable:
             # The configured identity providers probe their OWN record stores once at
             # startup, so a deployment against a backend a provider cannot use fails
@@ -271,10 +271,19 @@ def build_app() -> TaiMCP:
         # re-armed every epoch: the referee collection is reset on each start(), and these
         # in-house holders re-register here (the public register_rename_referee seam is for
         # plugins). Consulted only at rename time, so ordering among the handlers is free.
-        from tai42_skeleton.tools.platform_referees import register_platform_rename_referees
+        from tai42_skeleton.tools.platform_referees import (
+            register_platform_detach_referees,
+            register_platform_rename_referees,
+        )
 
         app.lifecycle.on_startup(register_platform_rename_referees)
         app.lifecycle.on_reload(register_platform_rename_referees)
+        # The platform's own door-binding holders (presets/conversation configs/hooks/
+        # schedules) re-arm the template-detach referees the same way: the collection is
+        # reset each start(), so these in-house holders re-register here. Consulted only at
+        # detach time, so ordering among the handlers is free.
+        app.lifecycle.on_startup(register_platform_detach_referees)
+        app.lifecycle.on_reload(register_platform_detach_referees)
         # The platform's own state-consumer listers (hooks/schedules/agents) re-arm the
         # same way: the consumer-lister registry is reset on each start(), so these
         # platform-owned families re-register here (the public register_consumer_lister

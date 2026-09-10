@@ -8,6 +8,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.hooks.models import HookParams, HookSubject
 from tai42_contract.monitoring import MonitoringLevel, SpanKind
 from tai42_contract.states import StateContext, SubjectCandidates
+from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.jq_util import get_compiled_jq
 
@@ -110,9 +111,23 @@ class BaseHooksManager(ABC):
             context_scope: AbstractContextManager[Any] = (
                 state_context(hook_context) if hook_context is not None else nullcontext()
             )
-            async with bind_execution_identity(hook.execution_key, bound_fingerprint=hook.execution_key_fingerprint):
-                with context_scope:
-                    await run_recorded(hook.tool, tool_input)
+            # Deposit the hook's door binding on the ambient dispatch context (beside the
+            # state context) so the dispatch chokepoint carries it forward and applies it
+            # around the fired tool; a hook without a binding deposits nothing.
+            binding_token = (
+                set_current_tool_invocation(ToolInvocation(tool_name=hook.tool, state_binding=hook.state_binding))
+                if hook.state_binding is not None
+                else None
+            )
+            try:
+                async with bind_execution_identity(
+                    hook.execution_key, bound_fingerprint=hook.execution_key_fingerprint
+                ):
+                    with context_scope:
+                        await run_recorded(hook.tool, tool_input)
+            finally:
+                if binding_token is not None:
+                    reset_current_tool_invocation(binding_token)
 
     async def _run_hook_with_limit(
         self, hook: HookParams, payload: dict[str, Any], tool_kwargs_override: dict[str, Any] | None = None
