@@ -36,11 +36,7 @@ _LOCK_NAME = re.compile(r'^[ +-]name = "([^"]*)"$')
 def _changed_lines(diff: str) -> list[str]:
     """The added/removed content lines of a unified diff, minus the ``+++`` /
     ``---`` file headers."""
-    return [
-        line
-        for line in diff.splitlines()
-        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-    ]
+    return [line for line in diff.splitlines() if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))]
 
 
 def _lock_is_version_only(diff: str) -> bool:
