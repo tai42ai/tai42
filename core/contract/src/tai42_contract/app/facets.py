@@ -320,7 +320,7 @@ class AppChannels(Protocol):
         store: CorrelationStore,
         bridge: InboundBridge,
     ) -> InboundAnswerResult:
-        """Resolve one inbound guest reply against its pending ask — the ONE shared
+        """Resolve one inbound participant reply against its pending ask — the ONE shared
         inbound-answer ladder every correlated channel calls instead of hand-rolling
         its own "forward → interpret 2xx/404/400 → release/bridge/keep" sequence.
 
@@ -329,7 +329,7 @@ class AppChannels(Protocol):
         the answer's content, so a channel that owns its correction surface can render the
         door's specific message.
 
-        A channel computes its own opaque ``correlation_key`` for the guest's address,
+        A channel computes its own opaque ``correlation_key`` for the participant's address,
         provides the ``answer`` value to forward to the door, its
         :class:`~tai42_contract.channels.CorrelationStore`, and an :class:`InboundBridge` of the
         fields a bridged turn needs.
@@ -351,9 +351,9 @@ class AppChannels(Protocol):
         * The door returns 404 (the ask was withdrawn/expired/cancelled) -> release,
           bridge the reply as a fresh turn, return :attr:`InboundAnswerOutcome.BRIDGED`.
         * The door returns 400 on a LIVE ask -> read the door's ``retry_in_place``
-          (default True): True keeps the correlation, notifies the guest what's
+          (default True): True keeps the correlation, notifies the participant what's
           expected, fires ONE operator event, returns :attr:`InboundAnswerOutcome.RETRY_KEPT`;
-          False (a hard mismatch) releases, notifies the guest the question is closed,
+          False (a hard mismatch) releases, notifies the participant the question is closed,
           fires the event, bridges the reply, returns :attr:`InboundAnswerOutcome.BRIDGED`.
         * Anything else (401/413/5xx, or a transport fault) -> do NOT release; raise
           :class:`AnswerForwardError` so the channel's webhook redelivery re-runs the
@@ -427,29 +427,29 @@ class AppConversations(Protocol):
         :func:`~tai42_contract.conversations.validate_entry_params` before accept.
         ``params`` is ALSO the opaque-enrichment seam for the channel-specific inbound
         context that has no shared shape — a tapped reply/list id, a template button
-        payload, a referral, the reply-to context of the message the guest quoted, a
+        payload, a referral, the reply-to context of the message the participant quoted, a
         contact card or a reaction — which a channel adapter encodes as string entries a
         route reads deliberately; the platform adds no typed field for those.
 
-        ``form`` is an optional structured guest submission (an ask-less form's answers)
+        ``form`` is an optional structured participant submission (an ask-less form's answers)
         riding WITH the required rendered ``text`` — the text stays the whole turn every
         consumer sees, while a tool target's ``payload_expr`` may map the structured copy
         from the payload's ``form`` key (present only when the inbound carried one). The
         platform bounds it as pure transport
         (:func:`~tai42_contract.conversations.validate_inbound_form`) and attaches no
-        meaning and NO TRUST to the contents: guest-shaped data, never schema-conformant.
+        meaning and NO TRUST to the contents: participant-shaped data, never schema-conformant.
 
-        ``attachments`` is the STRUCTURED media the guest sent WITH the message — the
+        ``attachments`` is the STRUCTURED media the participant sent WITH the message — the
         inbound counterpart of an outbound answer's ``media`` — as :class:`MediaItem`
         (image/document/video/audio; a channel resolves a sticker to image/video, a voice
-        note to audio). ``location`` is a :class:`LocationElement` the guest shared. Both
+        note to audio). ``location`` is a :class:`LocationElement` the participant shared. Both
         are machine-consumable content with a shared cross-channel shape, so they are typed
         fields (not ``params``): they land in a tool target's payload under the stable
         ``attachments`` / ``location`` keys, present only when the inbound carried them, so
         a form-/media-unaware target still sees the whole turn as ``text``. ``None`` leaves
         the payload unchanged.
 
-        ``locale`` is the guest's BCP 47 language tag the channel resolved from its native
+        ``locale`` is the participant's BCP 47 language tag the channel resolved from its native
         inbound (a per-message language hint), captured onto the turn's subject so the
         rendering layer resolves every text template and list format against it — flows and
         state templates never select a language. It seeds a first-contact person's stored

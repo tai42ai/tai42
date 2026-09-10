@@ -239,7 +239,7 @@ def options_text_lines(options: list[str]) -> str:
     appends when the options do not fit native buttons (so they are shown, never dropped).
     Deliberately UNescaped: the sole consumer wraps these lines in a ``plain_text``
     section, which Slack never mrkdwn-parses — escaping here would render literal
-    entities to the guest."""
+    entities to the participant."""
     return "\n".join(f"• {option}" for option in options)
 
 

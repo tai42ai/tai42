@@ -79,7 +79,7 @@ _EVENTS_ACK = {
     InboundAnswerOutcome.BRIDGED_KEPT: "bridged",
 }
 
-# The generic guest-facing line rendered inline in the modal on a retryable rejection
+# The generic participant-facing line rendered inline in the modal on a retryable rejection
 # (RETRY_KEPT). The channel OWNS this correction surface (owns_retry_notice=True, so the
 # ladder sent no separate notice — no double-messaging); the door's specific field
 # reason rides the interactions_answer_rejected operator event the ladder emitted.
@@ -584,7 +584,7 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     form record shows the expired notice. Otherwise the state is coerced per the stored
     schema and handed to the ladder as ``{"answer": <dict>}`` with
     ``owns_retry_notice=True`` — a completed modal has no re-reply surface, so the
-    channel OWNS the guest correction (the ladder sends no separate notice, avoiding a
+    channel OWNS the participant correction (the ladder sends no separate notice, avoiding a
     double message) and renders it as the modal's inline Block-Kit error on RETRY_KEPT
     (the modal stays open). Outcome -> modal ack: FORWARDED closes the modal (the ladder
     released the record); BRIDGED_KEPT also closes it (the reply was bridged as a fresh
@@ -621,7 +621,7 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
         store=slack_form_correlation_store,
         bridge=InboundBridge(
             channel_id="slack",
-            # The submitting user is the guest; the bot is the operator identity a
+            # The submitting user is the participant; the bot is the operator identity a
             # bridged (gone-ask) submission answers from. Both are addresses only.
             our_identity=our_identity or "",
             client_address=user_id or interaction_id,
@@ -636,7 +636,7 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
         return JSONResponse({})
     if result.outcome is InboundAnswerOutcome.BRIDGED_KEPT:
         # A bridge-policy ask KEPT the correlation (still parked) and bridged this
-        # submission as a fresh turn — a digression, not the answer, carrying no guest
+        # submission as a fresh turn — a digression, not the answer, carrying no participant
         # notice. Closing the modal with an empty body is the accurate ack: the reply was
         # consumed as a turn (the flow replies in-thread) and the parked ask stays
         # answerable via its original message. The expired notice would be a lie — the ask
@@ -652,7 +652,7 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
         block = result.retry_field if _field_has_block(schema, result.retry_field) else first_block
         return _errors_response(block, error_text)
     # NO_CORRELATION / BRIDGED: the ask is gone. The ladder released the record (and, on
-    # a 404, bridged the submission); tell the guest the question is closed.
+    # a 404, bridged the submission); tell the participant the question is closed.
     logger.warning(
         "slack interactive: form %s ask is gone (%s); showing the expired notice", interaction_id, result.outcome
     )

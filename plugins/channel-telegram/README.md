@@ -210,7 +210,7 @@ Params ride **only on the bridge path**. A tap that **answers** a pending ask fo
 `{"answer": …}` to the callback door alongside the same params (the tap's token is already
 consumed there to select the option). Values are transport-bounded (per the platform's
 entry-param limits); an over-cap value is dropped (never truncated), and if the aggregate
-still overflows the whole set is dropped and the turn bridges without it — a guest message
+still overflows the whole set is dropped and the turn bridges without it — a participant message
 is never lost to a params bound. An option with no author-set id (a `select`/suggested-reply
 ask, a plain notify option) carries no params.
 

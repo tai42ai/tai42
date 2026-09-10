@@ -178,7 +178,7 @@ async def test_post_form_answer_schema_mismatch_400_carries_field(wired):
     assert body["error"] == "answer does not match schema at count: 'abc' is not of type 'integer'"
     assert body["field"] == "count"
     # The door signals a correlated channel that this rejection is re-answerable in
-    # place — the live ask stands, so the guest can answer again.
+    # place — the live ask stands, so the participant can answer again.
     assert body["retry_in_place"] is True
 
 

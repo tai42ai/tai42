@@ -33,10 +33,10 @@ class AnswerFormat(StrEnum):
 
 
 class AnswerMismatchPolicy(StrEnum):
-    """What a channel-delivered ask does with a guest reply the answer door REJECTS (a 400 on a
+    """What a channel-delivered ask does with a participant reply the answer door REJECTS (a 400 on a
     live ask — the reply did not fit the question's format).
 
-    ``RETRY`` (the default, today's behavior): keep the ask parked and tell the guest what's
+    ``RETRY`` (the default, today's behavior): keep the ask parked and tell the participant what's
     expected so they can answer again in place. ``BRIDGE``: treat an unmatched reply as a
     DIGRESSION — keep the ask parked (no notice), and hand the reply to the conversation as a fresh
     routed turn so the flow handles it; the ask then ends ONLY by a real answer or its timeout,
@@ -88,8 +88,8 @@ MEDIA_FILENAME_MAX_CHARS = 255
 LOCATION_NAME_MAX_CHARS = 1000
 LOCATION_ADDRESS_MAX_CHARS = 1000
 
-# Cap on a per-ask custom mismatch notice — the guest-facing rejection text a ``retry``-policy ask
-# may substitute for the built-in one. A single guest reply, so a small bound (channels impose
+# Cap on a per-ask custom mismatch notice — the participant-facing rejection text a ``retry``-policy ask
+# may substitute for the built-in one. A single participant reply, so a small bound (channels impose
 # their own tighter message caps); matches the conversation route's ``error_reply_text`` bound.
 MISMATCH_NOTICE_MAX_CHARS = 2000
 
@@ -227,7 +227,7 @@ def served_media_id(url: str) -> str | None:
 
 
 class MediaItem(BaseModel):
-    """One media item shown WITH a message — a display element, and inbound the shape a guest's
+    """One media item shown WITH a message — a display element, and inbound the shape a participant's
     sent media takes.
 
     ``kind`` selects how it renders: an ``image`` inline, a ``document``/``video``/``audio`` as
@@ -381,7 +381,7 @@ def validate_action_url(value: str) -> str:
 
 class LocationElement(BaseModel):
     """A geographic point shared on a message — the one shape used BOTH ways: an outbound place a
-    flow shares and the inbound location a guest sent.
+    flow shares and the inbound location a participant sent.
 
     ``latitude``/``longitude`` are WGS84 decimal degrees, bounded to their valid ranges
     (latitude -90..90, longitude -180..180). ``name`` is an optional place label and ``address``
@@ -644,13 +644,13 @@ class InteractionRequest(BaseModel):
     question: str
     answer_format: AnswerFormat = AnswerFormat.TEXT
     format_payload: dict[str, Any] | None = None
-    # What a channel-delivered ask does with a guest reply the answer door REJECTS: ``retry``
-    # (default — keep the ask parked and tell the guest what's expected) or ``bridge`` (treat an
+    # What a channel-delivered ask does with a participant reply the answer door REJECTS: ``retry``
+    # (default — keep the ask parked and tell the participant what's expected) or ``bridge`` (treat an
     # unmatched reply as a digression — keep the ask parked with no notice and hand the reply to
     # the conversation as a fresh routed turn). Set per ask by the tool author; the default is a
     # zero-behavior-change for every existing ask.
     on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY
-    # A per-ask custom guest-facing rejection notice, used ONLY under the ``retry`` policy: when
+    # A per-ask custom participant-facing rejection notice, used ONLY under the ``retry`` policy: when
     # set it REPLACES the platform's built-in retry notice. A literal ``{reason}`` token (if
     # present) is filled with the door's rejection reason by a PLAIN substitution — a notice
     # without the token is sent verbatim, and stray braces never raise (never ``str.format``). It
@@ -730,7 +730,7 @@ class InteractionRequest(BaseModel):
     @field_validator("mismatch_notice")
     @classmethod
     def _check_mismatch_notice(cls, value: str | None) -> str | None:
-        # None uses the built-in default; a set notice is non-blank and within the guest-reply cap.
+        # None uses the built-in default; a set notice is non-blank and within the participant-reply cap.
         if value is not None:
             if not value.strip():
                 raise ValueError("mismatch_notice must be non-blank when set")
@@ -854,7 +854,7 @@ class InteractionResponse(BaseModel):
     counterpart of the bridge path's :class:`~tai42_contract.channels.InboundBridge.params` and a
     conversation entry's ``params``: when a tap/reply that ANSWERS a pending ask also carries
     channel-specific context (a tapped reply id, a template button payload, a referral, the
-    reply-to context the guest quoted) the channel encodes it as string entries here so the asking
+    reply-to context the participant quoted) the channel encodes it as string entries here so the asking
     flow reads them beside ``answer``. The SAME transport vocabulary
     (:func:`~tai42_contract.entry_params.validate_entry_params`) bounds it as every params seam;
     the platform attaches no meaning and NO TRUST. ``None`` means no enrichment — a plain answer,

@@ -133,7 +133,7 @@ minimum or pattern), a completed Flow has no re-reply surface, so the channel
 **re-sends a fresh Flow** for the same interaction: same flow token, the cached
 flow id, and a body that repeats the question with the door's error line (which
 names the failing field). This is **bounded** — after a fixed number of
-rejections the channel stops re-sending, tells the guest once the form could not
+rejections the channel stops re-sending, tells the participant once the form could not
 be processed, and lets the ask time out on its own deadline. The platform
 validates the answer schema against this subset when the question is asked —
 before the question is stored — so an out-of-subset schema (nested objects,
@@ -183,7 +183,7 @@ first, then a WhatsApp Flow whose body is the message — but stores **no
 correlation**: the flow token is minted in the `tai42-nf:` namespace
 (`tai42-nf:{schema hash}:{random}`), and the inbound webhook routes an
 `nfm_reply` by that prefix *before* any pending-question lookup, so a submission
-enters the conversation as a structured guest message (rendered `label: value`
+enters the conversation as a structured participant message (rendered `label: value`
 text plus the structured copy) and can never answer — or disturb — a question
 pending on the same pair. The answer schema is cached durably beside the
 published-flow id under the schema hash; a reply carries only the hash, so a
@@ -230,7 +230,7 @@ whichever keys it understands. This is the channel's public inbound contract:
 | `contacts_count` | An inbound **contacts** message | The number of shared contact cards |
 | `contacts` | " | The raw `contacts` array as compact JSON (dropped when over the per-value cap; `contacts_count` still rides) |
 
-Guest **media** and **location** and **reactions** and **contacts** bridge
+Participant **media** and **location** and **reactions** and **contacts** bridge
 as turns. The caption of a media message becomes the
 turn text (a faithful `[image]` / `[document: file]` / `[voice message]` / … 
 placeholder when caption-less); an inbound **location** lands as a typed
@@ -257,11 +257,11 @@ consumed there to select the option. Values are transport-bounded (per the
 platform's entry-param limits — count, key charset, value length, total size); an
 individual value over the per-value cap is dropped (never truncated), and in the
 rare case the aggregate still overflows a bound the whole set is dropped and the
-turn bridges without it — a guest message is never lost to a params bound.
+turn bridges without it — a participant message is never lost to a params bound.
 
-Meta inbound **error notices** (e.g. an unsupported message type the guest sent,
+Meta inbound **error notices** (e.g. an unsupported message type the participant sent,
 carried as an `errors[]` array) are logged at **warning** with the detail and are
-never bridged as guest turns.
+never bridged as participant turns.
 
 ## Delivery statuses
 

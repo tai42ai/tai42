@@ -1,7 +1,7 @@
 """The ONE inbound-answer ladder every correlated channel shares.
 
 Four channel plugins (Twilio, Telegram, Slack, WhatsApp) each hand-roll the same
-"guest reply → forward to the interaction answer-door → interpret the door's
+"participant reply → forward to the interaction answer-door → interpret the door's
 2xx/404/400 → bridge / release / keep" sequence over their own correlation
 stores. :func:`handle_inbound_answer` is that ladder, lifted into core behind the
 minimal :class:`~tai42_contract.channels.CorrelationStore` port so the POLICY
@@ -14,7 +14,7 @@ hands the handler that key plus an :class:`InboundBridge` of the fields a bridge
 turn needs, and acts on the returned :class:`InboundAnswerOutcome`.
 
 The door is the policy authority: its 400 body carries ``retry_in_place`` (True
-for every current validation rejection — the guest can answer again in place),
+for every current validation rejection — the participant can answer again in place),
 and the handler honors it. A future hard-mismatch 400 sets it False, and the
 non-retryable seam already releases + bridges without a code change here.
 
@@ -22,7 +22,7 @@ The operator is told of a rejected answer through a PLATFORM EVENT, not a wired
 call: core states the fact by emitting the ``interactions_answer_rejected`` topic
 on the hooks manager, and a deployment decides what to do with it (a hook that
 runs ``notify_user``, opens a ticket, ...) in config. Emission is best-effort —
-a hooks-manager failure never fails the inbound webhook. NOTE: a hostile guest can
+a hooks-manager failure never fails the inbound webhook. NOTE: a hostile participant can
 fire these topics (``interactions_answer_rejected``, ``interactions_callback_discarded``)
 once per inbound message, so a hook wired on either topic should be rate-limit-aware.
 """
@@ -73,15 +73,15 @@ __all__ = [
 # response into a transport fault + provider redelivery loop.
 _FORWARD_TIMEOUT_SECONDS = 30.0
 
-# The guest-facing notice when the door rejects a still-live ask's answer and the
-# guest can answer again in place. Composed with the door's human-readable reason
-# so the guest knows exactly what to fix — nothing is silently swallowed. Tone
-# matches the conversation bridge's other guest-safe replies.
+# The participant-facing notice when the door rejects a still-live ask's answer and the
+# participant can answer again in place. Composed with the door's human-readable reason
+# so the participant knows exactly what to fix — nothing is silently swallowed. Tone
+# matches the conversation bridge's other participant-safe replies.
 ANSWER_REJECTED_RETRY_NOTICE = "Sorry, that didn't match what the question expects. {reason} Please try again."
 
-# The guest-facing notice when the door rejects the answer AND the ask cannot be
+# The participant-facing notice when the door rejects the answer AND the ask cannot be
 # re-answered in place (a hard mismatch): the reply is bridged as a fresh turn, so
-# the guest is told the question is closed rather than left waiting on a retry.
+# the participant is told the question is closed rather than left waiting on a retry.
 ANSWER_REJECTED_FINAL_NOTICE = "Sorry, that answer wasn't accepted and this question is now closed. {reason}"
 
 # The platform-event topic emitted when the answer door rejects a forwarded answer.
@@ -91,16 +91,16 @@ ANSWER_REJECTED_FINAL_NOTICE = "Sorry, that answer wasn't accepted and this ques
 ANSWER_REJECTED_EVENT_TOPIC = "interactions_answer_rejected"
 
 # The platform-event topic emitted when the handler DISCARDS a stored callback instead
-# of forwarding the guest's answer to it — because the callback's host is not the
+# of forwarding the participant's answer to it — because the callback's host is not the
 # configured public base, the public base is unset, or the stored URL is malformed
-# (fail-closed: the guest's answer is never shipped to a non-configured host). Best-effort
+# (fail-closed: the participant's answer is never shipped to a non-configured host). Best-effort
 # like the rejected-answer event; the payload carries the ``reason`` and NEVER the URL or
 # its ticket. A hook here should be rate-limit-aware (see the module docstring).
 CALLBACK_DISCARDED_EVENT_TOPIC = "interactions_callback_discarded"
 
 # Upper bound on the door's human-readable rejection reason as it rides into the
-# guest notice and the operator event payload. The door names the failing field in a
-# short sentence; a pathological or attacker-influenced body must not blow up a guest
+# participant notice and the operator event payload. The door names the failing field in a
+# short sentence; a pathological or attacker-influenced body must not blow up a participant
 # SMS/message or a persisted event frame, so the reason is bounded before either use.
 # Not a UX limit — a generous abuse ceiling; a real reason is far shorter.
 _REASON_MAX_CHARS = 300
@@ -113,9 +113,9 @@ def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id:
     A correlation's ``callback_url`` is a bearer capability THIS platform minted from
     ``INTERACTIONS_PUBLIC_BASE_URL`` (``helper.py`` builds it as
     ``{public_base_url}/api/interactions/callback/{ticket}``). Before the handler POSTs a
-    guest's answer to it, the URL is re-checked against the current public base — a stored
+    participant's answer to it, the URL is re-checked against the current public base — a stored
     entry that does not match must NEVER receive the answer, because that POST would ship
-    the guest's reply to a non-configured (possibly attacker-chosen) host. FAIL-CLOSED on
+    the participant's reply to a non-configured (possibly attacker-chosen) host. FAIL-CLOSED on
     every non-match: a host mismatch (``"host_mismatch"``), an unset public base the check
     cannot run against (``"public_base_unset"``), or a malformed stored/base URL — a bad
     port raises ``ValueError`` from ``urlparse().port`` (``"malformed_url"``). The offending
@@ -209,7 +209,7 @@ async def _bridge(bridge: InboundBridge) -> None:
 
 
 def _retry_notice_text(custom: str | None, reason: str) -> str:
-    """The guest-facing retry notice for a ``retry``-policy rejection. ``None`` uses the built-in
+    """The participant-facing retry notice for a ``retry``-policy rejection. ``None`` uses the built-in
     :data:`ANSWER_REJECTED_RETRY_NOTICE`; a per-ask ``custom`` notice REPLACES it, with a literal
     ``{reason}`` token filled by a PLAIN substitution (``str.replace``, never ``str.format``) so a
     notice without the token is sent verbatim and stray braces in authored text never raise."""
@@ -218,12 +218,12 @@ def _retry_notice_text(custom: str | None, reason: str) -> str:
     return custom.replace("{reason}", reason)
 
 
-async def _notify_guest(bridge: InboundBridge, message: str) -> None:
-    """Send the guest a rejection notice on the same channel the ask went out on.
+async def _notify_participant(bridge: InboundBridge, message: str) -> None:
+    """Send the participant a rejection notice on the same channel the ask went out on.
 
     Best-effort: a notify failure is logged and swallowed so it never turns a
     handled rejection into a lost webhook — the operator event still fires and the
-    outcome still returns. Sends from the ask's own identity to the guest address.
+    outcome still returns. Sends from the ask's own identity to the participant address.
     """
     try:
         channel = tai42_app.channels.get(bridge.channel_id)
@@ -262,13 +262,13 @@ async def _emit_answer_rejected(
 
     Core states the fact; a deployment wires a hook on this topic (e.g. a
     ``notify_user`` tool) to decide what an operator sees. ``notice_owner`` records
-    WHO messaged the guest about this rejection — ``"core"`` when this handler sent
-    the generic retry/final notice, ``"channel"`` when the channel owns the guest
+    WHO messaged the participant about this rejection — ``"core"`` when this handler sent
+    the generic retry/final notice, ``"channel"`` when the channel owns the participant
     correction surface (a re-opened Flow/modal) and core skipped its notice, ``"none"``
     when the ask's ``bridge`` digression policy sent no notice at all. ``policy`` records
     the ask's mismatch policy (``"retry"`` / ``"bridge"``) so an operator sees which arm
     handled the reply. Best-effort: a hooks-manager failure is logged and swallowed so it
-    never fails the inbound webhook — the guest notice and the ladder outcome are unaffected.
+    never fails the inbound webhook — the participant notice and the ladder outcome are unaffected.
     """
     # Local import: reach the hooks-manager accessor only when emitting, keeping
     # this module's load-time import surface to the contract + kit (the codebase's
@@ -304,7 +304,7 @@ async def _emit_callback_discarded(bridge: InboundBridge, *, interaction_id: str
 
     ``reason`` is one of ``"host_mismatch"`` / ``"public_base_unset"`` / ``"malformed_url"``.
     The payload deliberately carries NO ``callback_url`` (it embeds the bearer ticket) —
-    only the channel, interaction, guest address and reason. Best-effort: a hooks-manager
+    only the channel, interaction, participant address and reason. Best-effort: a hooks-manager
     failure is logged and swallowed so it never fails the inbound webhook.
     """
     from tai42_skeleton.hooks.cache import get_hooks_manager
@@ -335,7 +335,7 @@ async def handle_inbound_answer(
     store: CorrelationStore,
     bridge: InboundBridge,
 ) -> InboundAnswerResult:
-    """Resolve one inbound guest reply against its pending ask — the shared ladder.
+    """Resolve one inbound participant reply against its pending ask — the shared ladder.
 
     ``correlation_key`` is the channel's opaque key for this address; ``answer`` is
     the value forwarded to the door as ``{"answer": answer}`` (plus ``"params"`` when the
@@ -361,17 +361,17 @@ async def handle_inbound_answer(
       ask's ``on_mismatch`` policy off the correlation entry:
 
       - ``bridge`` (the DIGRESSION policy): KEEP the correlation (the ask stays parked, no
-        guest notice) and bridge the reply as a fresh routed turn through the STANDARD
+        participant notice) and bridge the reply as a fresh routed turn through the STANDARD
         target-agnostic bridge path, fire ONE operator alert tagged ``policy="bridge"``,
         return :attr:`~InboundAnswerOutcome.BRIDGED_KEPT`. The ask ends only by a real
         answer or its timeout — unmatched input never closes it.
       - ``retry`` (the default): fall through to the door's ``retry_in_place`` (default True):
 
-      - True: KEEP the correlation, notify the guest what's expected (unless the
+      - True: KEEP the correlation, notify the participant what's expected (unless the
         channel owns its notice), fire ONE operator alert, return
         :attr:`~InboundAnswerOutcome.RETRY_KEPT` carrying the door's reason/field. The
-        guest can answer again in place; nothing is silent.
-      - False (a future hard mismatch): release, notify the guest the question is
+        participant can answer again in place; nothing is silent.
+      - False (a future hard mismatch): release, notify the participant the question is
         closed, fire the operator alert, bridge the reply, return
         :attr:`~InboundAnswerOutcome.BRIDGED` carrying the door's reason/field.
 
@@ -388,7 +388,7 @@ async def handle_inbound_answer(
     pin_failure = _callback_pin_failure(entry.callback_url, channel_id=channel_id, interaction_id=entry.interaction_id)
     if pin_failure is not None:
         # The stored callback cannot be trusted (wrong host / unset base / malformed):
-        # never POST the guest's answer to it. Release the poisoned/stale reservation,
+        # never POST the participant's answer to it. Release the poisoned/stale reservation,
         # emit the operator event, and treat the reply as uncorrelated so the caller
         # bridges it as a normal turn (never lost) — the loud log is in the pin check.
         await store.release_correlation(correlation_key)
@@ -409,7 +409,7 @@ async def handle_inbound_answer(
 
     if status == 404:
         # Terminal: the ask is gone (withdrawn/expired/cancelled/thread-deleted).
-        # The dead ticket cannot accept the answer, but the guest's reply must
+        # The dead ticket cannot accept the answer, but the participant's reply must
         # never be lost — release and bridge it as an ordinary conversation turn.
         logger.warning(
             "inbound: answer door returned terminal 404 for interaction %s on channel %r; the ask is gone — "
@@ -426,11 +426,11 @@ async def handle_inbound_answer(
         # THE SPLIT: the LIVE ask rejected this answer's format. The door is the
         # policy authority — its structured body decides whether the ask is
         # re-answerable in place. Default RETRYABLE (text/select/confirm/form
-        # wrong-format cases): the guest can answer again on the same ask.
+        # wrong-format cases): the participant can answer again on the same ask.
         error, field, retry_in_place = _parse_rejection(forwarded)
         if entry.on_mismatch is AnswerMismatchPolicy.BRIDGE:
             # DIGRESSION policy: an unmatched reply is not a failed answer. KEEP the ask
-            # parked (no guest notice) and hand the reply to the conversation as a fresh
+            # parked (no participant notice) and hand the reply to the conversation as a fresh
             # routed turn through the STANDARD bridge path — target-agnostic, so a tool route
             # and an agent route are handled identically, with the reply's enrichment params
             # carried exactly as any bridged turn. The ask ends only by a real answer or its
@@ -454,14 +454,14 @@ async def handle_inbound_answer(
             )
             return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED_KEPT)
         if retry_in_place:
-            # KEEP the correlation so the guest's next reply resolves the same ask.
+            # KEEP the correlation so the participant's next reply resolves the same ask.
             # When the channel owns the retry notice (its correction surface is a
             # re-opened Flow/modal it renders off RETRY_KEPT), core skips its generic
-            # guest notice so the guest is messaged exactly once — but still keeps the
+            # participant notice so the participant is messaged exactly once — but still keeps the
             # correlation and still emits the operator event (tagged notice_owner).
             reason = error or "The answer wasn't in the expected format."
             if not bridge.owns_retry_notice:
-                await _notify_guest(bridge, _retry_notice_text(entry.mismatch_notice, reason))
+                await _notify_participant(bridge, _retry_notice_text(entry.mismatch_notice, reason))
             await _emit_answer_rejected(
                 bridge,
                 interaction_id=entry.interaction_id,
@@ -472,7 +472,7 @@ async def handle_inbound_answer(
             )
             logger.warning(
                 "inbound: answer door rejected the answer for interaction %s on channel %r (400, retry-in-place); "
-                "correlation kept so the guest can answer again (notice owner: %s)",
+                "correlation kept so the participant can answer again (notice owner: %s)",
                 entry.interaction_id,
                 channel_id,
                 "channel" if bridge.owns_retry_notice else "core",
@@ -486,12 +486,12 @@ async def handle_inbound_answer(
         # Non-retryable hard mismatch: the ask cannot take this answer and cannot be
         # re-answered in place. The channel's correction surface is moot for a closed
         # ask, so ``owns_retry_notice`` does not apply here — core ALWAYS sends the
-        # final notice (the guest must be told the question is closed) and owns it.
-        # Release, tell the guest the question is closed, alert the operator, and
+        # final notice (the participant must be told the question is closed) and owns it.
+        # Release, tell the participant the question is closed, alert the operator, and
         # bridge the reply as a fresh turn.
         reason = error or "The answer wasn't accepted."
         await store.release_correlation(correlation_key)
-        await _notify_guest(bridge, ANSWER_REJECTED_FINAL_NOTICE.format(reason=reason))
+        await _notify_participant(bridge, ANSWER_REJECTED_FINAL_NOTICE.format(reason=reason))
         await _emit_answer_rejected(
             bridge,
             interaction_id=entry.interaction_id,
@@ -530,8 +530,8 @@ def _parse_rejection(response: httpx.Response) -> tuple[str, str | None, bool]:
     error = body.get("error")
     field = body.get("field")
     retry_in_place = body.get("retry_in_place", True)
-    # Bound the reason before it rides into the guest notice and the persisted event
-    # payload — a pathological door body must not blow up a guest message or a frame.
+    # Bound the reason before it rides into the participant notice and the persisted event
+    # payload — a pathological door body must not blow up a participant message or a frame.
     return (
         error[:_REASON_MAX_CHARS] if isinstance(error, str) else "",
         field if isinstance(field, str) else None,

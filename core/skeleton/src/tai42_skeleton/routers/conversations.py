@@ -734,7 +734,7 @@ async def send_conversation_event(request: Request) -> Response:
     ``200`` and suppresses the callback). Default is ``202 {message_id, thread_id}``.
 
     This is a TRUSTED-integration door: an authorized writer may address ANY existing thread
-    of the route by ``thread_id`` (a channel guest's included), so a deployment grants its
+    of the route by ``thread_id`` (a channel participant's included), so a deployment grants its
     write action to service principals, not to low-trust API keys.
     """
     if reload_gate.locked:

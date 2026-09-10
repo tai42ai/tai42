@@ -1606,7 +1606,7 @@ async def test_forms_bridges_values_with_rendered_text_and_appends_inbound(
 
 async def test_forms_schema_violating_values_still_land_in_form(web_env, stub_app, registered_session: FakeRedis):
     # The pinned no-trust contract: this door never validates values against the
-    # stored schema — transport bounds only. Guest-shaped data lands in ``form``
+    # stored schema — transport bounds only. Participant-shaped data lands in ``form``
     # verbatim (the platform's validate_inbound_form still bounds size/depth at
     # accept), and the consumer treats it as never schema-conformant.
     _seed_form(registered_session)
@@ -1661,9 +1661,9 @@ async def test_forms_unknown_or_expired_token_is_the_uniform_404(web_env, stub_a
     assert stub_app.conversations.accept_calls == []
 
 
-async def test_forms_resubmission_is_its_own_guest_message(web_env, stub_app, registered_session: FakeRedis):
+async def test_forms_resubmission_is_its_own_participant_message(web_env, stub_app, registered_session: FakeRedis):
     # The record is READ, never claimed (the chips precedent): a second submission is
-    # a second guest message through a second accept, and the card stays answerable
+    # a second participant message through a second accept, and the card stays answerable
     # until its record ages out with the transcript.
     _seed_form(registered_session)
     first = await _handler(stub_app, _FORMS)(_form_request(values={"name": "Ada"}))

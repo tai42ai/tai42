@@ -998,7 +998,7 @@ class InteractionStore:
         thread delete (admin-delete, forget-me, route-delete) fires so a parked ``ask_user``
         the deletion would ORPHAN is torn down instead of lingering (its expiry reaper later
         firing a continuation into a thread that no longer exists → a delivery retry storm,
-        its channel correlation muting the guest's number until the ~24h deadline).
+        its channel correlation muting the participant's number until the ~24h deadline).
 
         Reads the thread's reverse-index members and runs the EXISTING ``prune_pending`` for
         each: status-gated and idempotent, it removes a still-pending park WITHOUT firing any

@@ -452,7 +452,7 @@ async def test_a_store_fault_mid_redeem_is_a_loud_error_outcome_not_invalid_code
 
 
 async def test_a_store_fault_mid_redeem_uses_the_route_error_reply_text_when_set(env, monkeypatch):
-    # The pairing infra-fault path (turn.py:911) resolves the guest-facing reply through the
+    # The pairing infra-fault path (turn.py:911) resolves the participant-facing reply through the
     # route: a route carrying ``error_reply_text`` sends THAT custom notice, while the record's
     # internal ``error`` detail keeps the diagnosable wording.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
@@ -474,7 +474,7 @@ async def test_a_store_fault_mid_redeem_uses_the_route_error_reply_text_when_set
     record = await _store().get_record(mid)
     assert record is not None
     assert record.answer_status == "error"
-    # The guest sees the route's custom reply; the internal detail is untouched.
+    # The participant sees the route's custom reply; the internal detail is untouched.
     assert record.answer == spanish
     assert record.error is not None
     assert "redis reset" in record.error

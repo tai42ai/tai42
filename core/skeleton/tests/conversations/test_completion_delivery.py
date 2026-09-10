@@ -230,7 +230,7 @@ async def test_completion_empty_result_uses_the_route_error_reply_text_when_set(
 async def test_completion_success_with_no_result_delivers_the_notice_and_warns(env, monkeypatch, caplog):
     # A success fire carrying NO result at all: serializing it renders the literal "null", which
     # is not blank, so the blank->notice check below it would sail straight past and post the
-    # word "null" into the guest's thread. It takes the client-safe notice instead, and — being
+    # word "null" into the participant's thread. It takes the client-safe notice instead, and — being
     # the same malformed-payload class the status guards catch — is announced.
     channel = FakeChannel()
     route = _channel_route()

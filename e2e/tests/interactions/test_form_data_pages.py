@@ -1,7 +1,7 @@
 """Per-send form data + pages — the composed callback-form-page path.
 
 A channel-delivered ``ask_user(answer_format="form", data=..., pages=...)`` mints the
-callback form page; this exercises the whole seam a guest's traffic takes:
+callback form page; this exercises the whole seam a participant's traffic takes:
 
 * the GET renders the page with the ``values`` prefilled into their controls, the
   per-send ``options`` as a ``<select>`` (labels shown, values posted) that REPLACES

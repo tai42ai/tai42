@@ -1,7 +1,7 @@
 """The event door — a structured event enters an existing thread as a turn.
 
 ``POST /api/conversations/{route}/events`` runs a structured event AS A TURN on a thread a
-guest already composed: it reserves the same thread slot an inbound message takes, runs the
+participant already composed: it reserves the same thread slot an inbound message takes, runs the
 route's TOOL target under the route's execution key, and delivers the reply back over the
 target route's door. The event is idempotent on its ``event_id`` — a redelivery starts no
 second turn and adds no transcript entry.
@@ -9,7 +9,7 @@ second turn and adds no transcript entry.
 The web channel is the medium here because it has no vendor: the visitor's own SSE stream is
 the client-side surface an event's reply either does or does not reach. The route's tool
 echoes the surfaced ``turn``/``event`` payload keys back as a JSON reply, so the
-guest's transcript is proof the keys reached the flow with the event's own inbound identity.
+participant's transcript is proof the keys reached the flow with the event's own inbound identity.
 """
 
 from __future__ import annotations
@@ -103,13 +103,13 @@ async def _listed_thread(bridge: BridgeHarness, route_name: str, expect_address:
     return thread["thread_id"]
 
 
-async def test_event_runs_as_a_turn_and_surfaces_its_inbound_id_on_the_guest_thread(
+async def test_event_runs_as_a_turn_and_surfaces_its_inbound_id_on_the_participant_thread(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
     route_name, identity = await _web_tool_route(bridge, uniq, "evt")
     web = await _open_visitor(bridge, identity)
 
-    # 1. The guest composes the thread with an ordinary message; its turn is a ``message``
+    # 1. The participant composes the thread with an ordinary message; its turn is a ``message``
     #    inbound, so the tool sees ``turn.inbound.kind == "message"`` and no ``event``.
     sent = await web.send(uniq("evt-in"))
     assert sent.status_code == 200, sent.text
@@ -120,8 +120,8 @@ async def test_event_runs_as_a_turn_and_surfaces_its_inbound_id_on_the_guest_thr
 
     thread_id = await _listed_thread(bridge, route_name, web.visitor_id)
 
-    # 2. An event addressed by the guest's address runs a TOOL turn on that same thread; its
-    #    reply reaches the guest's stream carrying the event kind and the event's OWN inbound
+    # 2. An event addressed by the participant's address runs a TOOL turn on that same thread; its
+    #    reply reaches the participant's stream carrying the event kind and the event's OWN inbound
     #    id/kind, and ``turn.id`` is the accepted record's message id.
     accepted = await bridge.api().post(
         f"/api/conversations/{route_name}/events",

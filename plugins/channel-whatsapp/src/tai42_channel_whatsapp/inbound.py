@@ -18,7 +18,7 @@ resolved option for an interactive tap, or the schema-coerced dict for a
 completed Flow form (``nfm_reply``); on a correlation miss the message enters the
 conversation bridge instead. An ``nfm_reply`` whose flow token rides the
 ``tai42-nf:`` namespace is an ASK-LESS form (a ``notify`` Flow): it has no
-reservation and enters the bridge as a structured guest message, routed by its
+reservation and enters the bridge as a structured participant message, routed by its
 token prefix before any pending-question lookup.
 """
 
@@ -85,7 +85,7 @@ _DELIVERY_RECEIPTS = {
 }
 
 # How many times a door-rejected form answer is recovered by re-sending a fresh
-# Flow before the guest is told it could not be processed and the ask is left to
+# Flow before the participant is told it could not be processed and the ask is left to
 # time out. Each re-send spends a slot of the callback door's own rate limit
 # (keyed on this server's egress IP, shared across every channel), so the loop is
 # bounded — matching the web channel's answer-restore cap in spirit.
@@ -96,14 +96,14 @@ _FORM_REJECTION_LEAD = "Your last answer could not be accepted:"
 # Shown once when the re-send cap is spent — the ask then times out on its side.
 _FORM_UNPROCESSABLE = "Sorry, your form could not be processed."
 # Shown in place of a 400 body that is not this platform's error envelope (a proxy
-# or WAF page); the guest is never shown an intermediary's content.
+# or WAF page); the participant is never shown an intermediary's content.
 _CALLBACK_REJECTION_OPAQUE = "the answer could not be accepted"
-# The door's own rejection line is bounded before it rides the guest-facing re-sent
+# The door's own rejection line is bounded before it rides the participant-facing re-sent
 # Flow body — it names the failing field, never an intermediary's whole page.
 _DOOR_REJECTION_MAX_CHARS = 500
 # Meta caps interactive.body.text at 1024 chars (WhatsApp Cloud API interactive
 # message limit); a longer body is a non-retryable param error that fails the
-# re-send forever, stranding the guest with neither the Flow nor a final message.
+# re-send forever, stranding the participant with neither the Flow nor a final message.
 _FLOW_BODY_MAX_CHARS = 1024
 # The lead + bounded door line alone always fit the cap, so the overflow fallback
 # (drop the whole question) is guaranteed deliverable — verified, not assumed.
@@ -168,7 +168,7 @@ assert len(_FORM_REJECTION_LEAD) + 1 + _DOOR_REJECTION_MAX_CHARS <= _FLOW_BODY_M
 # All values are transport-bounded by the contract (:func:`validate_entry_params`); an
 # individual value over ``ENTRY_PARAM_VALUE_MAX_CHARS`` is dropped at extraction and, in
 # the rare event the aggregate still overflows a bound, the whole params set is dropped
-# and the turn bridges without it — a guest message is never lost to a params bound.
+# and the turn bridges without it — a participant message is never lost to a params bound.
 _REFERRAL_PARAM_KEYS: dict[str, str] = {
     "source_url": "referral_source_url",
     "source_id": "referral_source_id",
@@ -388,7 +388,7 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
     wa_id = message.get("from", "")
 
     # Record the known-contact marker for EVERY authenticated inbound BEFORE the
-    # message-type drop: a guest who sent only a photo still opened Meta's window.
+    # message-type drop: a participant who sent only a photo still opened Meta's window.
     if phone_number_id and wa_id:
         await mark_known_contact(phone_number_id, wa_id)
 
@@ -417,7 +417,7 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
         # developer ``payload``), not ``interactive``.
         await _handle_button(message, phone_number_id, wa_id, wamid, context_params)
     elif message_type in _MEDIA_TYPES:
-        # Guest media (image/document/audio/video/sticker): bridge as a turn — caption → text,
+        # Participant media (image/document/audio/video/sticker): bridge as a turn — caption → text,
         # identity → ``media_*`` params (see the INBOUND MEDIA design note; no typed attachment).
         await _handle_media(message, message_type, phone_number_id, wa_id, wamid, context_params)
     elif message_type == "location":
@@ -430,8 +430,8 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
         # An emoji reaction to an earlier message: bridge as a turn, emoji + target in ``params``.
         await _handle_reaction(message, phone_number_id, wa_id, wamid, context_params)
     elif message.get("errors"):
-        # A Meta inbound error notice (e.g. an unsupported message type the guest sent):
-        # never a guest turn — surface it loudly for the operator, do not bridge.
+        # A Meta inbound error notice (e.g. an unsupported message type the participant sent):
+        # never a participant turn — surface it loudly for the operator, do not bridge.
         logger.warning("whatsapp inbound error notice for %s: %r", wamid, message.get("errors"))
     else:
         # Any other/future type is not bridged; name the type so an operator sees WHAT was
@@ -881,7 +881,7 @@ async def _handle_notify_form_reply(
     response: dict[str, Any], flow_token: str, phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
 ) -> None:
     """A completed ASK-LESS form (a ``notify`` Flow, token in the ``tai42-nf:``
-    namespace): enter it into the conversation as a structured guest message.
+    namespace): enter it into the conversation as a structured participant message.
 
     No reservation exists for it — the token itself carries the schema hash, which
     resolves the answer schema from the durable schema sidecar. On a hit the values
@@ -969,8 +969,8 @@ async def _resolve_answer(
     * ``NO_CORRELATION`` — the ask expired between the channel's decode-peek and the
       ladder's own peek: bridge the reply as a fresh turn (never lost).
     * ``RETRY_KEPT`` on a FORM ask — the channel owns the correction surface
-      (``owns_retry_notice=True``, so the ladder sent NO guest notice): re-send a fresh
-      Flow carrying the door's own reason so the guest can answer again in place.
+      (``owns_retry_notice=True``, so the ladder sent NO participant notice): re-send a fresh
+      Flow carrying the door's own reason so the participant can answer again in place.
     * ``FORWARDED`` / ``BRIDGED`` / ``RETRY_KEPT`` on a text/select ask (the ladder sent
       the generic notice) — mark the wamid seen so a redelivery is not re-processed.
 
@@ -995,7 +995,7 @@ async def _resolve_answer(
             bridge_text=bridge_text,
             # A form ask's correction surface is a re-opened Flow the channel renders
             # off RETRY_KEPT; a text/select ask is re-answered in place, so core owns
-            # its notice. Setting this per ask-shape keeps the guest messaged exactly
+            # its notice. Setting this per ask-shape keeps the participant messaged exactly
             # once either way.
             owns_retry_notice=is_form,
         ),
@@ -1012,7 +1012,7 @@ async def _resolve_answer(
 
 
 def _door_error_line(retry_reason: str | None) -> str:
-    """The guest-facing error line for the re-sent Flow: the door's OWN reason (already
+    """The participant-facing error line for the re-sent Flow: the door's OWN reason (already
     length-bounded by the ladder, re-capped here defensively at ``_DOOR_REJECTION_MAX_CHARS``
     which names the failing field), or the fixed opaque line when the door gave none."""
     return retry_reason[:_DOOR_REJECTION_MAX_CHARS] if retry_reason else _CALLBACK_REJECTION_OPAQUE
@@ -1025,8 +1025,8 @@ async def _recover_form_rejection(
     interaction, bounded by ``_MAX_FORM_REJECTIONS``.
 
     The shared ladder returned RETRY_KEPT: it KEPT the reservation and — because this
-    channel owns the retry notice — sent NO guest message, so the fresh Flow is the
-    guest's single correction message (no double-messaging). ``retry_reason`` is the
+    channel owns the retry notice — sent NO participant message, so the fresh Flow is the
+    participant's single correction message (no double-messaging). ``retry_reason`` is the
     door's own (already-truncated) message, which names the failing field and rides the
     re-sent Flow's body; a missing reason falls back to a fixed opaque line. Ordering is
     load-bearing for Meta's redelivery:
@@ -1036,8 +1036,8 @@ async def _recover_form_rejection(
       the wamid seen. A re-send that itself fails does NOT mark the wamid seen and
       leaves the counter unchanged, then raises — so Meta's redelivery re-runs the
       ladder, re-hits the 400, and re-enters this path (the counter is spent only by a
-      re-send that reached the guest).
-    * At the cap — tell the guest once the form could not be processed and mark the
+      re-send that reached the participant).
+    * At the cap — tell the participant once the form could not be processed and mark the
       wamid seen; the ask times out on its side.
     """
     if pending.interaction_id is None or pending.schema is None or pending.question is None:
@@ -1047,7 +1047,7 @@ async def _recover_form_rejection(
         )
     if pending.rejections >= _MAX_FORM_REJECTIONS:
         logger.error(
-            "form answer for %s rejected %d times (cap %d); not re-sending — telling the guest and "
+            "form answer for %s rejected %d times (cap %d); not re-sending — telling the participant and "
             "letting the ask time out",
             wamid,
             pending.rejections,
@@ -1123,7 +1123,7 @@ async def _bridge_inbound(
     ``form`` is an ask-less form submission's structured copy, riding beside its
     rendered ``text``; ``params`` are the channel's opaque entry-params (reply ids,
     referral, reply-to context, media identity — see the module's vocabulary block)
-    forwarded verbatim to the tool target's payload. ``attachments`` (typed guest media) and
+    forwarded verbatim to the tool target's payload. ``attachments`` (typed participant media) and
     ``location`` (a shared geographic point) are the structured inbound content that lands on
     a tool target's payload under the stable ``attachments``/``location`` keys; inbound media
     currently carries none (see the INBOUND MEDIA design note), while an inbound location
@@ -1134,7 +1134,7 @@ async def _bridge_inbound(
     ``params`` are validated against the contract's transport bounds HERE before accept: a
     bound violation (which would otherwise 5xx and have Meta redeliver the same poison
     message forever) drops the whole params set and bridges the turn without it — the
-    guest's message is never lost to a params bound. The refusal names the bound/key, never
+    participant's message is never lost to a params bound. The refusal names the bound/key, never
     an opaque value.
     """
     if params:

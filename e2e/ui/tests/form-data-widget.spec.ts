@@ -4,7 +4,7 @@
  * The platform + channel halves are proven elsewhere: the callback-form-page path in
  * `e2e/tests/interactions/test_form_data_pages.py` (a real ask → the server-rendered page
  * → the union POST → the resolved ask) and the channel adapter tests. THIS leg proves the
- * remaining seam a web guest's traffic actually takes: the REAL widget bundle, served by
+ * remaining seam a web participant's traffic actually takes: the REAL widget bundle, served by
  * the skeleton at the channel's public chat page, rendering a REAL web-channel delivery.
  *
  * A blocking `ask_user(channel="web", answer_format="form", data=..., pages=...)` is fired
@@ -132,7 +132,7 @@ test('a per-send form with data + pages renders in the widget, steps, and resolv
   // Chromium form-control repaint artifact — a native `<input>`/`<select>` keeps its light
   // background on the runtime toggle — so a faithful dark frame needs the scheme emulated
   // BEFORE the document paints. Reloading under the dark scheme is exactly a returning
-  // guest's own path: the SSE stream replays the transcript backlog, re-delivering the
+  // participant's own path: the SSE stream replays the transcript backlog, re-delivering the
   // still-parked ask, and the controls paint dark from the first frame.
   await settleCardEntry(page, card);
   await page.screenshot({ path: `${SHOTS_DIR}/form-pages-widget-light.png` });

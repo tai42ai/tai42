@@ -444,7 +444,7 @@ async def test_ladder_forward_error_propagates_so_telegram_redelivers(http_recor
 
 async def test_ladder_retry_kept_outcome_acks_rejected(http_recorder, fake_redis, channels):
     # The ladder's RETRY_KEPT outcome (the door rejected a re-answerable ask; the
-    # correlation is kept and the guest was told what's expected) acks "rejected".
+    # correlation is kept and the participant was told what's expected) acks "rejected".
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200

@@ -349,7 +349,7 @@ async def _resolve_template_target(settings: WhatsAppSettings, phone_number_id: 
     known contact of the send-from ``phone_number_id``, else refused loudly.
 
     A template is the one send Meta delivers cold, so it keeps an operator fence;
-    the known-contact lookup keys on the resolved send-from number — a guest is
+    the known-contact lookup keys on the resolved send-from number — a participant is
     "known" to the number they actually messaged.
     """
     target = _require_recipient(requested, _NO_DEFAULT_RECIPIENT)

@@ -4,7 +4,7 @@ agent's completion binding.
 The park-completion binding is the deferred-answer DELIVERY ADDRESS of the interaction the
 conversation door is waiting on, and it rides a contextvar. Without scoping, a parking driver
 reached through a tool — a flow preset invoked as a tool, say — reads that address as its own,
-posts its raw envelope into the guest thread, and orphans the agent's real answer.
+posts its raw envelope into the participant thread, and orphans the agent's real answer.
 
 The owner of the interaction owns delivery: a tool an agent dispatches never runs under the
 door's binding, while the agent's own park (raised by the graph, outside any tool body) still
@@ -226,7 +226,7 @@ def test_nested_tool_sees_no_binding_while_the_agent_park_still_captures(
             reset_park_completion(token)
 
         # The nested driver ran under the CHAINED binding: it can neither fire the conversation
-        # door's delivery tool nor read the guest thread it addresses — that binding survives
+        # door's delivery tool nor read the participant thread it addresses — that binding survives
         # only embedded inside the chain's context — and what it CAN fire re-enters this agent.
         assert len(nested.seen) == 1
         _assert_chained_over(nested.seen[0], (_COMPLETION_TOOL, _CONTEXT))

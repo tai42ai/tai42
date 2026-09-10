@@ -1057,7 +1057,7 @@ async def _callback_post(request: Request, r: Any, store: InteractionStore, sett
             # channel can pin the error on the right control; absent when unlocated.
             # ``retry_in_place`` is the door's policy signal to a correlated channel:
             # every current validation rejection is re-answerable in place (the live
-            # ask stands and the guest can answer again), so it is always True here.
+            # ask stands and the participant can answer again), so it is always True here.
             body: dict[str, Any] = {"error": str(exc), "retry_in_place": True}
             if exc.field is not None:
                 body["field"] = exc.field

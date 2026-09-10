@@ -51,7 +51,7 @@ class CapturingChannel:
     async def deliver(self, delivery: ChannelDelivery) -> None:
         self.deliveries.append(delivery)
         await self._store.set_correlation(
-            "guest-key",
+            "participant-key",
             Correlation(
                 callback_url=delivery.callback_url,
                 interaction_id=delivery.interaction_id,
@@ -211,8 +211,8 @@ async def test_helper_default_on_mismatch_is_retry_on_both_frames(wired, fake_re
 async def test_bridge_policy_reaches_the_ladder_through_the_real_helper(wired, fake_redis, driver, monkeypatch):
     # END TO END: the ask is created via the REAL helper with on_mismatch="bridge"; the
     # channel copies the delivery's policy onto the Correlation it parks; a mismatched
-    # guest reply (door 400 on a live ask) then BRIDGES as a digression through the shared
-    # ladder — the ask stays parked and no guest notice is sent. The field carries this
+    # participant reply (door 400 on a live ask) then BRIDGES as a digression through the shared
+    # ladder — the ask stays parked and no participant notice is sent. The field carries this
     # settability so the helper can express the policy.
     result = await ask_user(
         "proceed?",
@@ -224,7 +224,7 @@ async def test_bridge_policy_reaches_the_ladder_through_the_real_helper(wired, f
     )
     assert isinstance(result, SuspendedInteraction)
     # The parked Correlation carries the bridge policy the helper set on the delivery.
-    entry = await wired.corr_store.get_correlation("guest-key")
+    entry = await wired.corr_store.get_correlation("participant-key")
     assert entry is not None
     assert entry.on_mismatch is AnswerMismatchPolicy.BRIDGE
 
@@ -241,7 +241,7 @@ async def test_bridge_policy_reaches_the_ladder_through_the_real_helper(wired, f
 
     ladder = await handle_inbound_answer(
         channel_id="cap",
-        correlation_key="guest-key",
+        correlation_key="participant-key",
         answer="tell me about refunds",
         store=wired.corr_store,
         bridge=bridge,

@@ -102,7 +102,7 @@ def create_route(
         str | None,
         typer.Option(
             "--error-reply-text",
-            help="Guest-facing reply sent when a turn on this route fails; unset uses the built-in default.",
+            help="Participant-facing reply sent when a turn on this route fails; unset uses the built-in default.",
         ),
     ] = None,
     locale: Annotated[

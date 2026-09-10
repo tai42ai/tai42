@@ -752,7 +752,7 @@ async def test_ladder_forward_error_does_not_bridge(handler, stub_app, channels,
 
 
 async def test_text_ask_retry_kept_acks_and_keeps_correlation(handler, channels, fake_redis: FakeRedis):
-    # RETRY_KEPT on a text ask (owns_retry_notice=False, so the CORE sent the guest
+    # RETRY_KEPT on a text ask (owns_retry_notice=False, so the CORE sent the participant
     # notice): the correlation is kept and the wamid is marked seen — redelivering the
     # same body would be rejected again.
     await _seed_pending()
@@ -1015,7 +1015,7 @@ async def test_form_reply_bad_coercion_forwards_raw_then_re_sends_flow(
 ):
     # A decimal in an integer field is forwarded raw (int("3.5") fails); the ladder's
     # RETRY_KEPT on this form ask recovers by re-sending a fresh Flow (the channel owns
-    # the guest correction here — the ladder sent no notice).
+    # the participant correction here — the ladder sent no notice).
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
@@ -1066,7 +1066,7 @@ async def test_form_retry_kept_re_sends_fresh_flow(
 ):
     # RETRY_KEPT on a form ask recovers by re-sending a fresh Flow for the SAME
     # interaction: same flow_token, the cached flow id, a generic error line, the
-    # correlation kept alive with the rejection counted, and a single guest message.
+    # correlation kept alive with the rejection counted, and a single participant message.
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
@@ -1096,7 +1096,7 @@ async def test_form_retry_kept_without_reason_uses_opaque_line(
     waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # When the door gave no usable reason (retry_reason None), the re-sent Flow falls
-    # back to the fixed opaque line — the guest is never shown an intermediary's content.
+    # back to the fixed opaque line — the participant is never shown an intermediary's content.
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
@@ -1173,7 +1173,7 @@ async def test_form_rejection_cap_stops_re_send_and_bridges(
     caplog: pytest.LogCaptureFixture,
 ):
     # Two RETRY_KEPT rejections under the cap each re-send; the one that reaches the cap
-    # does NOT re-send — the guest gets one plain final message, the reservation is
+    # does NOT re-send — the participant gets one plain final message, the reservation is
     # released, and a later text bridges normally.
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
@@ -1580,7 +1580,7 @@ async def test_inbound_text_records_known_contact_marker(
 async def test_inbound_unknown_type_records_marker_before_type_drop(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # A guest who sent an unmodelled type still opened Meta's window: the marker is
+    # A participant who sent an unmodelled type still opened Meta's window: the marker is
     # written even though that message itself is dropped (no bridge turn, not seen).
     result = await handler(signed_request(message_payload(msg_type="system")))
 
@@ -1708,7 +1708,7 @@ async def test_notify_form_reply_accepts_coerced_form_and_rendered_text(
     )
 
     assert result.status_code == 200
-    # No pending ask involved: the reply enters the conversation as a guest message,
+    # No pending ask involved: the reply enters the conversation as a participant message,
     # never the inbound-answer ladder.
     assert channels.inbound_calls == []
     assert stub_app.conversations.accept_calls == [
@@ -2020,7 +2020,7 @@ async def test_inbound_error_notice_logged_warning_not_bridged(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
     # Claim 5 (born-red): a Meta inbound error notice (an unsupported message type the
-    # guest sent) is logged at WARNING with the detail and NOT bridged. OLD code dropped
+    # participant sent) is logged at WARNING with the detail and NOT bridged. OLD code dropped
     # it in the else-branch at DEBUG with no type/detail, so no WARNING was emitted.
     message = {
         "id": _WAMID,
@@ -2077,7 +2077,7 @@ async def test_oversized_param_value_is_dropped_not_5xx(
 async def test_inbound_image_with_caption_bridges_caption_as_text_and_media_params(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # A guest photo with a caption: the caption is the turn text; the media's identity rides
+    # A participant photo with a caption: the caption is the turn text; the media's identity rides
     # params (media_kind/id/mime/sha256). No typed attachment (see the INBOUND MEDIA design
     # note) — the id is the re-fetch handle.
     message = {
@@ -2317,4 +2317,4 @@ async def test_inbound_media_records_known_contact_marker(
     message = {"id": _WAMID, "from": WA_ID, "type": "image", "image": {"id": "m1", "caption": "hi"}}
     await handler(signed_request(_params_envelope(message)))
 
-    assert _CONTACT_KEY in fake_redis.store  # a guest photo opens Meta's window too
+    assert _CONTACT_KEY in fake_redis.store  # a participant photo opens Meta's window too

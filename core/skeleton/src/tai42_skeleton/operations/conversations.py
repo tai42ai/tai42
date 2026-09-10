@@ -280,7 +280,7 @@ async def create_conversation_route(
     back from the poll door. A positive
     ``turns_per_hour_override`` runs this route's per-address buckets at that rate instead
     of the global ``per_address_turns_per_hour`` cap; ``None`` runs them at the global rate.
-    A non-blank ``error_reply_text`` is the guest-facing reply sent when a turn on this route
+    A non-blank ``error_reply_text`` is the participant-facing reply sent when a turn on this route
     fails; ``None`` uses the built-in default.
     A ``locale`` is the operator-declared default language templated reply parts render in when
     a turn supplies none; it is the last fallback under a per-turn or stored-contact locale and
@@ -1014,7 +1014,7 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
         # Cancel every async ``ask_user`` parked on this thread BEFORE the indexes go, so
         # the deletion does not orphan a park (its expiry reaper would later fire a
         # continuation into this now-deleted thread — a delivery retry storm — and its
-        # channel correlation would mute the guest's number until the deadline). Runs under
+        # channel correlation would mute the participant's number until the deadline). Runs under
         # the same per-thread FIFO the teardown holds; idempotent, so a retry re-runs it.
         from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
@@ -1299,7 +1299,7 @@ async def send_conversation_thread_message(
     action), ``sections`` (the SECTIONED tappable-options alternative — titled groups of reply
     rows), ``header``/``footer`` (a media header / trailing line composing an interactive
     message) and ``schema`` (an ask-less form's
-    answer schema — the channel renders ``text`` as the form's prompt, and the guest's
+    answer schema — the channel renders ``text`` as the form's prompt, and the participant's
     submission enters the conversation as an ordinary inbound message) are OPTIONAL
     richer-send forms — FULL parity with the flow answer path's ``AnswerPart`` vocabulary —
     delivered ALONGSIDE ``text`` — the message is then stored and delivered as one rich

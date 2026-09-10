@@ -118,16 +118,16 @@ async def ask_user(
             An "async" ask requires a resuming driver bound by the engine.
         expiry_at: The async park deadline — when the parked question expires.
             Only valid with mode="async" and mutually exclusive with ``timeout``.
-        on_mismatch: What a channel-delivered ask does with a guest reply the
+        on_mismatch: What a channel-delivered ask does with a participant reply the
             answer door REJECTS on a LIVE ask (its format did not fit):
-            - "retry" (the default): keep the ask parked and tell the guest what
+            - "retry" (the default): keep the ask parked and tell the participant what
               is expected so they answer again in place.
             - "bridge": treat an unmatched reply as a DIGRESSION — keep the ask
-              parked with NO guest notice and hand the reply to the conversation
+              parked with NO participant notice and hand the reply to the conversation
               as a fresh routed turn, so the ask ends only by a real answer or its
               timeout, never by unmatched input.
             Takes effect only on a channel-delivered ask; an inbox-only ask ignores it.
-        mismatch_notice: An OPTIONAL custom guest-facing rejection notice used
+        mismatch_notice: An OPTIONAL custom participant-facing rejection notice used
             ONLY under ``on_mismatch="retry"``: when set it REPLACES the built-in
             retry notice. A literal ``{reason}`` token is filled with the door's
             rejection reason by a plain substitution (a notice without it is sent

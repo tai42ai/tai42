@@ -269,7 +269,7 @@ def test_tools_agent_run_park_captures_the_ambient_completion(
     # a park raised inside the run must CAPTURE it — in parity with the astream face — so the
     # resumed run's final answer has a path back to the door. On origin/main the run face binds
     # the park with completion_tool=None (no delivery leg), so agent_resume drives the answer to
-    # NOWHERE and the guest is orphaned; this pins the capture that makes the park deliverable.
+    # NOWHERE and the participant is orphaned; this pins the capture that makes the park deliverable.
     saver = InMemorySaver()
     ask = _AskStandIn("i1")
     model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
