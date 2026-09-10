@@ -531,13 +531,48 @@ def test_is_resolution_conflict_distinguishes_no_solution_from_other_errors():
     assert gate._is_resolution_conflict("error: failed to build wheel for some-consumer") is False
 
 
-def test_report_unresolvable_major_bump_passes(capsys):
+_PREVIOUS_NO_SOLUTION_STDERR = (
+    "No solution found when resolving dependencies:\n"
+    "  Because only some-consumer==0.44.0 is available and some-consumer==0.44.0 depends on\n"
+    "  tai42-contract>=8.1,<9, we can conclude that your requirements are unsatisfiable.\n"
+)
+
+
+def _one_consumer() -> list[gate.Consumer]:
+    return [gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")]
+
+
+def _report_kwargs(tmp_path: Path) -> dict:
+    return {
+        "package": "pkg",
+        "version": "12.0.1",
+        "repo_root": tmp_path,
+        "core_dirs": ["core/kit"],
+        "identity_package": "id-pkg",
+        "venv": tmp_path / "venv",
+    }
+
+
+def _reresolve_run_factory(dry_returncode: int, dry_stderr: str):
+    # Fake the worktree + dry-run seam of the previous-tag re-resolve: git worktree add/remove
+    # succeed, the dry-run install returns the configured verdict, so no real git or uv runs.
+    def _run(args, **kwargs):
+        if args[:3] in (["git", "worktree", "add"], ["git", "worktree", "remove"]):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ["uv", "pip", "install"]:
+            return subprocess.CompletedProcess(args, dry_returncode, "", dry_stderr)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    return _run
+
+
+def test_report_unresolvable_major_bump_passes(tmp_path: Path, capsys):
     # A resolution conflict under a major bump: every supplied consumer is an accepted
-    # break, the resolver's conclusion is quoted, and the gate passes (no raise).
-    consumers = [
-        gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
-    ]
-    gate._report_unresolvable_consumers("gate: pkg 12.0.0 (major bump)", "major", consumers, _NO_SOLUTION_STDERR)
+    # break, the resolver's conclusion is quoted, and the gate passes (no raise, no
+    # previous-release re-resolve).
+    gate._report_unresolvable_consumers(
+        "gate: pkg 12.0.0 (major bump)", "major", _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+    )
     out = capsys.readouterr().out
     assert "ACCEPTED as a major-bump break: some-consumer 0.44.0" in out
     assert "accepted break under a major bump" in out
@@ -545,13 +580,41 @@ def test_report_unresolvable_major_bump_passes(capsys):
     assert "your requirements are unsatisfiable" in out
 
 
-def test_report_unresolvable_minor_bump_fails(capsys):
-    # The same conflict under a non-major bump fails, with the resolver output in the message.
-    consumers = [
-        gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
-    ]
+def test_report_unresolvable_non_major_preexisting_conflict_passes(tmp_path: Path, monkeypatch, capsys):
+    # Conflict + patch bump + the previous released tag ALSO finds no solution: the
+    # incompatibility predates the candidate, so a notice names it and the gate passes.
+    monkeypatch.setattr(gate.api_gate, "_previous_tag", lambda *a, **k: "pkg-v12.0.0")
+    monkeypatch.setattr(gate.subprocess, "run", _reresolve_run_factory(1, _PREVIOUS_NO_SOLUTION_STDERR))
+    gate._report_unresolvable_consumers(
+        "gate: pkg 12.0.1 (patch bump)", "patch", _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+    )
+    out = capsys.readouterr().out
+    assert "pre-existing incompatibility" in out
+    assert "pkg-v12.0.0" in out
+    assert "gate passes" in out
+    assert "not introduced by this candidate" in out
+
+
+def test_report_unresolvable_non_major_candidate_introduced_fails(tmp_path: Path, monkeypatch):
+    # Conflict + patch bump + the previous released tag RESOLVES: the candidate introduced
+    # the conflict, so it is a break not carried by a non-major bump — the gate fails.
+    monkeypatch.setattr(gate.api_gate, "_previous_tag", lambda *a, **k: "pkg-v12.0.0")
+    monkeypatch.setattr(gate.subprocess, "run", _reresolve_run_factory(0, ""))
     with pytest.raises(SystemExit):
-        gate._report_unresolvable_consumers("gate: pkg 11.5.0 (minor bump)", "minor", consumers, _NO_SOLUTION_STDERR)
+        gate._report_unresolvable_consumers(
+            "gate: pkg 12.0.1 (patch bump)", "patch", _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+        )
+
+
+def test_report_unresolvable_previous_resolve_other_error_fails(tmp_path: Path, monkeypatch, capsys):
+    # Conflict + patch bump + the previous-tag re-resolve fails for a NON-conflict reason:
+    # the conflict cannot be classified, so the gate fails loudly (never a silent pass).
+    monkeypatch.setattr(gate.api_gate, "_previous_tag", lambda *a, **k: "pkg-v12.0.0")
+    monkeypatch.setattr(gate.subprocess, "run", _reresolve_run_factory(1, "error: failed to build wheel for kit"))
+    with pytest.raises(SystemExit):
+        gate._report_unresolvable_consumers(
+            "gate: pkg 12.0.1 (patch bump)", "patch", _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+        )
     err = capsys.readouterr().err
-    assert "boot venv install failed" in err
-    assert "No solution found when resolving dependencies" in err
+    assert "failed for a reason other than a dependency conflict" in err
+    assert "failed to build wheel for kit" in err
