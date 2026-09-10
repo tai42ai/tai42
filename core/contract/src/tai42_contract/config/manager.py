@@ -2,14 +2,14 @@
 
 The :class:`ConfigManager` ABC is the canonical pluggable-provider seam for
 configuration: it reads/writes env (key-value, including secrets) and the tool
-manifest. Concrete providers — ``file`` (the zero-dep default), ``k8s``, a future
-``vault`` — live downstream, following the same pattern as ``TaiApp``: the
-contract provides the interface, providers the implementation. No tenant /
-hosted-SaaS coupling lives here.
+manifest. The ``file`` provider (the zero-dep default) is built in; every other
+provider ships downstream and is selected by config mode, following the same
+pattern as ``TaiApp``: the contract provides the interface, providers the
+implementation. No tenant / hosted-SaaS coupling lives here.
 
 The connectors token store is not a config-manager concern: it is reached
 through the ``AppConnectors`` facet (``tai42_app.connectors.token_store``),
-independent of the file/k8s CONFIG mode.
+independent of the active config mode.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any
 class ConfigManager(ABC):
     """Abstract base for environment and manifest configuration backends.
 
-    Each config mode (file, k8s, ...) provides a concrete implementation.
+    Each config mode (``file`` built in, or an external provider) supplies a concrete implementation.
     Consumers access the active manager via ``tai42_app.config.config_manager``.
     """
 
