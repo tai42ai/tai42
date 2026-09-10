@@ -74,8 +74,13 @@ jobs:
       run_browsers: ${{ steps.assemble.outputs.run_browsers }}
       browser_engines: ${{ steps.assemble.outputs.browser_engines }}
       browser_lane: ${{ steps.assemble.outputs.browser_lane }}
+      needs_heavy: ${{ steps.assemble.outputs.needs_heavy }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Full history so the version-only classifier can diff the base...head
+        # range (scripts/version_only_diff.py, the needs_heavy gate below).
+        with:
+          fetch-depth: 0
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
@@ -132,6 +137,12 @@ jobs:
           # non-dispatch event keeps it.
           WIDEN: ${{ github.event_name != 'workflow_dispatch' || inputs.browsers != 'chromium' }}
           HEAD_REF: ${{ github.head_ref }}
+          REF_NAME: ${{ github.ref_name }}
+          # The range the version-only classifier diffs: a PR's base/head, or a
+          # push's before/after. Empty on an event that carries neither, which
+          # leaves needs_heavy true (the heavy lanes run) — the safe default.
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           # chromium is the always-present baseline engine of the ui-e2e matrix; the
@@ -157,6 +168,7 @@ jobs:
               echo "run_browsers=$WIDEN"
               echo "browser_engines=$(engine_list "$WIDEN")"
               echo 'browser_lane=true'
+              echo 'needs_heavy=true'
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -166,8 +178,10 @@ jobs:
             CORE=true
           fi
           # The release-please train PR is the tree that gets tagged and published on
-          # merge, so it runs the full workspace matrix rather than the lock-incidental
-          # subset its version-only diff would otherwise select.
+          # merge, so it runs the full CHECK matrix (ruff/pyright/unit for every
+          # member) rather than the lock-incidental subset its version-only diff would
+          # otherwise select. The heavy e2e / browser lanes add no signal to a
+          # version-only tree and are gated off it by needs_heavy below.
           case "${HEAD_REF:-}" in
             release-please--*) CORE=true ;;
           esac
@@ -277,6 +291,30 @@ jobs:
           echo "run_browsers=$run_browsers" >> "$GITHUB_OUTPUT"
           echo "browser_engines=$(engine_list "$run_browsers")" >> "$GITHUB_OUTPUT"
           echo "browser_lane=false" >> "$GITHUB_OUTPUT"
+          # The heavy lanes — the e2e backend matrix and the ui-e2e browser matrix,
+          # the jobs that boot service stacks or browsers — carry the CI cost. They
+          # add no signal to a commit that only carries release version bumps, so
+          # re-running them on every update of a release-please train (or on the
+          # version-only merge it lands on main) is pure waste. Gate them off a
+          # release-please train branch (this PR's head, or the merge push's ref) and
+          # off any version-only diff; a forced-full dispatch and the weekly schedule
+          # keep them on unconditionally (handled above by FORCE_FULL / the ui lane).
+          needs_heavy=true
+          if [ "$FORCE_FULL" != "true" ]; then
+            is_train=false
+            case "${HEAD_REF:-}" in release-please--*) is_train=true ;; esac
+            case "${REF_NAME:-}" in release-please--*) is_train=true ;; esac
+            version_only=false
+            if [ "$is_train" != "true" ] && [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+              if python3 scripts/version_only_diff.py --base "$BASE_SHA" --head "$HEAD_SHA"; then
+                version_only=true
+              fi
+            fi
+            if [ "$is_train" = "true" ] || [ "$version_only" = "true" ]; then
+              needs_heavy=false
+            fi
+          fi
+          echo "needs_heavy=$needs_heavy" >> "$GITHUB_OUTPUT"
 
   check:
     needs: [reuse, changes]
@@ -552,7 +590,7 @@ jobs:
   # out of balance.
   e2e:
     needs: [reuse, changes]
-    if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.run_e2e == 'true' }}
+    if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.run_e2e == 'true' && needs.changes.outputs.needs_heavy == 'true' }}
     name: e2e (${{ matrix.backend }}, shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -747,7 +785,7 @@ jobs:
 
   ui-e2e:
     needs: [reuse, changes, e2e]
-    if: ${{ needs.reuse.outputs.should_skip != 'true' && !cancelled() && needs.changes.outputs.run_ui == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
+    if: ${{ needs.reuse.outputs.should_skip != 'true' && !cancelled() && needs.changes.outputs.run_ui == 'true' && needs.changes.outputs.needs_heavy == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
     runs-on: ubuntu-latest
     # One runner per engine. Each engine boots its own services stack, so the
     # per-DB login bootstrap and per-stack pending-question state never bleed
