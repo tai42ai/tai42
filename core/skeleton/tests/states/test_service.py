@@ -45,14 +45,14 @@ class FakeStatesStore:
 
     def __init__(self) -> None:
         self.declarations: dict[str, dict[str, Any]] = {}
-        self.modules: dict[str, dict[str, Any]] = {}
+        self.templates: dict[str, dict[str, Any]] = {}
         self.attachments: dict[tuple[str, str], dict[str, Any]] = {}
         self.records: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.write_rows: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = {}
         self.applied_origins: list[Any] = []
         self.upsert_attach_calls = 0
         self.update_decl_calls = 0
-        self.upsert_module_calls = 0
+        self.upsert_template_calls = 0
 
     @asynccontextmanager
     async def begin(self):
@@ -112,17 +112,17 @@ class FakeStatesStore:
                 per_kind[sk] = per_kind.get(sk, 0) + 1
         return sum(per_kind.values()), {}, per_kind
 
-    # modules
+    # templates
     async def get_template(self, name):
-        return self.modules.get(name)
+        return self.templates.get(name)
 
     async def list_templates(self):
-        return list(self.modules.values())
+        return list(self.templates.values())
 
     async def attached_template_counts(self):
         counts: dict[str, int] = {}
-        for _s, module in self.attachments:
-            counts[module] = counts.get(module, 0) + 1
+        for _s, template in self.attachments:
+            counts[template] = counts.get(template, 0) + 1
         return counts
 
     async def writes(self, state, subject, *, limit, cursor):
@@ -133,30 +133,30 @@ class FakeStatesStore:
         return rows[start : start + limit]
 
     async def upsert_template(self, name, body, shipped_hash):
-        self.upsert_module_calls += 1
-        self.modules[name] = {"name": name, "body": body, "shipped_hash": shipped_hash, "updated_at": 1}
+        self.upsert_template_calls += 1
+        self.templates[name] = {"name": name, "body": body, "shipped_hash": shipped_hash, "updated_at": 1}
 
     async def delete_template(self, name):
-        return self.modules.pop(name, None) is not None
+        return self.templates.pop(name, None) is not None
 
     # attachments
-    async def get_attachment(self, state, module):
-        return self.attachments.get((state, module))
+    async def get_attachment(self, state, template):
+        return self.attachments.get((state, template))
 
     async def list_attachments_for_state(self, state):
         return [v for (s, _m), v in self.attachments.items() if s == state]
 
-    async def list_attachments_of_template(self, module):
-        return [v for (_s, m), v in self.attachments.items() if m == module]
+    async def list_attachments_of_template(self, template):
+        return [v for (_s, m), v in self.attachments.items() if m == template]
 
     async def list_all_attachments(self):
         return list(self.attachments.values())
 
-    async def upsert_attachment(self, state, module, path, parameters, declarations, *, effective_schema, conn=None):
+    async def upsert_attachment(self, state, template, path, parameters, declarations, *, effective_schema, conn=None):
         self.upsert_attach_calls += 1
-        self.attachments[(state, module)] = {
+        self.attachments[(state, template)] = {
             "state": state,
-            "template": module,
+            "template": template,
             "path": path,
             "parameters": parameters,
             "declarations": declarations,
@@ -164,19 +164,19 @@ class FakeStatesStore:
         }
         self.declarations[state]["effective_schema"] = effective_schema
 
-    async def update_attachment_declarations(self, state, module, declarations, *, effective_schema, conn=None):
+    async def update_attachment_declarations(self, state, template, declarations, *, effective_schema, conn=None):
         self.update_decl_calls += 1
-        self.attachments[(state, module)]["declarations"] = declarations
+        self.attachments[(state, template)]["declarations"] = declarations
         self.declarations[state]["effective_schema"] = effective_schema
         return True
 
-    async def update_attachment_parameters(self, state, module, parameters, *, effective_schema):
-        self.attachments[(state, module)]["parameters"] = parameters
+    async def update_attachment_parameters(self, state, template, parameters, *, effective_schema):
+        self.attachments[(state, template)]["parameters"] = parameters
         self.declarations[state]["effective_schema"] = effective_schema
         return True
 
-    async def delete_attachment(self, state, module, *, effective_schema):
-        self.attachments.pop((state, module), None)
+    async def delete_attachment(self, state, template, *, effective_schema):
+        self.attachments.pop((state, template), None)
         self.declarations[state]["effective_schema"] = effective_schema
         return True
 
@@ -190,13 +190,13 @@ class FakeStatesStore:
     async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, retention_days, conn=None):
         self.applied_origins.append(origin)
         # Mirror the store's chokepoint so the service-level provenance test is end to
-        # end: compose the state's traced paths from its attachments + modules and stamp
+        # end: compose the state's traced paths from its attachments + templates and stamp
         # ``_trace`` from the COMPLETED origin (the stamping mechanics themselves are pinned
         # in test_store.py). A state with no traced attach leaves the ops untouched.
         attach_rows = [
-            {"template": m["template"], "path": m["path"], "body": self.modules[m["template"]]["body"]}
-            for (s, _module), m in self.attachments.items()
-            if s == state and m["template"] in self.modules
+            {"template": m["template"], "path": m["path"], "body": self.templates[m["template"]]["body"]}
+            for (s, _template), m in self.attachments.items()
+            if s == state and m["template"] in self.templates
         ]
         traced = _traced_paths(attach_rows)
         if traced:
@@ -390,14 +390,14 @@ async def test_delete_allowed_when_only_an_unavailable_family_is_listed(svc: Sta
 
 async def test_attach_validator_runs_before_write(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    module_doc = StateTemplateDocument.model_validate(
+    template_doc = StateTemplateDocument.model_validate(
         {
             "kind": "state-template",
-            "name": "mod",
+            "name": "tpl",
             "schema": {"type": "object", "properties": {"y": {"type": "integer"}}},
         }
     )
-    await svc.put_template(module_doc, replace=False)
+    await svc.put_template(template_doc, replace=False)
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
 
     async def refusing(doc, declarations, effective) -> None:
@@ -406,26 +406,26 @@ async def test_attach_validator_runs_before_write(svc: StatesService) -> None:
     svc.register_attach_validator(refusing)
     before = store.upsert_attach_calls
     with pytest.raises(TemplateValidationError, match="consumer says no"):
-        await svc.attach("alerts", "mod", AttachBody(path=["sub"]))
+        await svc.attach("alerts", "tpl", AttachBody(path=["sub"]))
     # the validator ran BEFORE the write — no attach row was stored
     assert store.upsert_attach_calls == before
-    assert ("alerts", "mod") not in store.attachments
+    assert ("alerts", "tpl") not in store.attachments
 
 
 async def test_attach_and_detach_recompose_effective(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    module_doc = StateTemplateDocument.model_validate(
+    template_doc = StateTemplateDocument.model_validate(
         {
             "kind": "state-template",
-            "name": "mod",
+            "name": "tpl",
             "schema": {"type": "object", "properties": {"y": {"type": "integer"}}},
         }
     )
-    await svc.put_template(module_doc, replace=False)
-    await svc.attach("alerts", "mod", AttachBody(path=["sub"]))
+    await svc.put_template(template_doc, replace=False)
+    await svc.attach("alerts", "tpl", AttachBody(path=["sub"]))
     eff = await svc.effective_schema_for("alerts")
     assert "sub" in eff["properties"]
-    await svc.detach("alerts", "mod")
+    await svc.detach("alerts", "tpl")
     eff2 = await svc.effective_schema_for("alerts")
     assert "sub" not in eff2["properties"]
 
@@ -554,7 +554,7 @@ async def _attach_traced(svc: StatesService, store: FakeStatesStore) -> None:
     """A traced attach on ``alerts`` so an ``apply`` also exercises the ``_trace`` stamp
     at the fake store, populated directly (the attach lifecycle is pinned elsewhere)."""
     await svc.put_declaration(_STATE)
-    store.modules["traced_m"] = {
+    store.templates["traced_m"] = {
         "name": "traced_m",
         "body": {
             "kind": "state-template",
@@ -629,7 +629,7 @@ def test_consumer_supplied_door_refused_at_model() -> None:
 # --------------------------------------------------------------------------- #
 # served regimes                                                              #
 # --------------------------------------------------------------------------- #
-_REGIME_MODULE = {
+_REGIME_TEMPLATE = {
     "kind": "state-template",
     "name": "tagmod",
     "schema": {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}},
@@ -643,9 +643,9 @@ async def test_get_declaration_serves_regimes_for_a_attach_and_empty_for_none(sv
     detached = await svc.get_declaration("alerts")
     assert detached is not None
     assert detached.regimes == []
-    # attach a module declaring a composing regime; the served regime is ABSOLUTE (attach
-    # path prefixed onto the module's regime path) and matches served_declaration
-    await svc.put_template(StateTemplateDocument.model_validate(_REGIME_MODULE), replace=False)
+    # attach a template declaring a composing regime; the served regime is ABSOLUTE (attach
+    # path prefixed onto the template's regime path) and matches served_declaration
+    await svc.put_template(StateTemplateDocument.model_validate(_REGIME_TEMPLATE), replace=False)
     await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
     attached = await svc.get_declaration("alerts")
     assert attached is not None
@@ -656,7 +656,7 @@ async def test_get_declaration_serves_regimes_for_a_attach_and_empty_for_none(sv
 
 async def test_list_declarations_serves_composed_regimes(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    await svc.put_template(StateTemplateDocument.model_validate(_REGIME_MODULE), replace=False)
+    await svc.put_template(StateTemplateDocument.model_validate(_REGIME_TEMPLATE), replace=False)
     await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
     decls = await svc.list_declarations()
     assert [d.regimes for d in decls] == [[{"path": ["sub", "tags"], "regime": "composing"}]]
@@ -762,18 +762,18 @@ async def test_writes_refuses_a_malformed_cursor_with_a_value_error(svc: StatesS
 
 async def test_list_templates_catalog_adds_attached_to_and_shipped_default(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    await svc.put_template(StateTemplateDocument.model_validate(_REGIME_MODULE), replace=False)
+    await svc.put_template(StateTemplateDocument.model_validate(_REGIME_TEMPLATE), replace=False)
     await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
-    # A second, operator-uploaded module (no shipped_hash) that is attached nowhere.
+    # A second, operator-uploaded template (no shipped_hash) that is attached nowhere.
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
-    store.modules["loose"] = {
+    store.templates["loose"] = {
         "name": "loose",
         "body": {"kind": "state-template", "name": "loose", "schema": {"type": "object"}},
         "shipped_hash": None,
         "updated_at": 1,
     }
-    # Mark the attached module as an unedited shipped default.
-    store.modules["tagmod"]["shipped_hash"] = "abc123"
+    # Mark the attached template as an unedited shipped default.
+    store.templates["tagmod"]["shipped_hash"] = "abc123"
     catalog = {row["name"]: row for row in await svc.list_templates_catalog()}
     assert catalog["tagmod"]["attached_to"] == 1
     assert catalog["tagmod"]["shipped_default"] is True

@@ -175,8 +175,8 @@ class FakeStatesPg:
 
     def __init__(self) -> None:
         self.declarations: dict[str, dict[str, Any]] = {}  # name -> row
-        self.modules: dict[str, dict[str, Any]] = {}  # name -> row
-        self.attachments: dict[tuple[str, str], dict[str, Any]] = {}  # (state, module) -> row
+        self.templates: dict[str, dict[str, Any]] = {}  # name -> row
+        self.attachments: dict[tuple[str, str], dict[str, Any]] = {}  # (state, template) -> row
         self.records: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.aliases: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.applied_ops: dict[str, datetime] = {}  # op_id -> applied_at
@@ -201,7 +201,7 @@ class FakeStatesPg:
     def snapshot(self) -> dict[str, Any]:
         return {
             "declarations": copy.deepcopy(self.declarations),
-            "modules": copy.deepcopy(self.modules),
+            "templates": copy.deepcopy(self.templates),
             "attachments": copy.deepcopy(self.attachments),
             "records": copy.deepcopy(self.records),
             "aliases": copy.deepcopy(self.aliases),
@@ -211,7 +211,7 @@ class FakeStatesPg:
 
     def restore(self, snap: dict[str, Any]) -> None:
         self.declarations = snap["declarations"]
-        self.modules = snap["modules"]
+        self.templates = snap["templates"]
         self.attachments = snap["attachments"]
         self.records = snap["records"]
         self.aliases = snap["aliases"]
@@ -376,13 +376,13 @@ def _lock_effective_schema(cur, pg, norm, params):
 def _apply_attach_rows(cur, pg, norm, params):
     (state,) = params
     rows = []
-    for (s, module), attach in pg.attachments.items():
+    for (s, template), attach in pg.attachments.items():
         if s != state:
             continue
-        mod = pg.modules.get(module)
-        if mod is None:
+        tpl = pg.templates.get(template)
+        if tpl is None:
             continue
-        rows.append({"template": module, "path": attach["path"], "body": mod["body"]})
+        rows.append({"template": template, "path": attach["path"], "body": tpl["body"]})
     rows.sort(key=lambda r: r["template"])
     cur._all = rows
 
@@ -446,41 +446,41 @@ def _field_stats_keys(cur, pg, norm, params):
     cur._all = [{"key": k, "n": n} for k, n in counts.items()]
 
 
-# -- modules -----------------------------------------------------------------
+# -- templates -----------------------------------------------------------------
 @_on(r"SELECT name, body, shipped_hash, updated_at FROM state_templates WHERE name = %s$")
-def _get_module(cur, pg, norm, params):
+def _get_template(cur, pg, norm, params):
     (name,) = params
-    cur._one = pg.modules.get(name)
+    cur._one = pg.templates.get(name)
 
 
 @_on(r"SELECT name, body, shipped_hash, updated_at FROM state_templates ORDER BY name$")
-def _list_modules(cur, pg, norm, params):
-    cur._all = [pg.modules[n] for n in sorted(pg.modules)]
+def _list_templates(cur, pg, norm, params):
+    cur._all = [pg.templates[n] for n in sorted(pg.templates)]
 
 
 @_on(r"SELECT template, count\(\*\) AS n FROM state_attachments GROUP BY template$")
 def _attached_counts(cur, pg, norm, params):
     counts: dict[str, int] = {}
-    for _state, module in pg.attachments:
-        counts[module] = counts.get(module, 0) + 1
+    for _state, template in pg.attachments:
+        counts[template] = counts.get(template, 0) + 1
     cur._all = [{"template": m, "n": n} for m, n in counts.items()]
 
 
 @_on(r"INSERT INTO state_templates \(name, body, shipped_hash, updated_at\)")
-def _upsert_module(cur, pg, norm, params):
+def _upsert_template(cur, pg, norm, params):
     name, body, shipped_hash = params
-    row = pg.modules.get(name)
+    row = pg.templates.get(name)
     values = {"name": name, "body": _unwrap(body), "shipped_hash": shipped_hash, "updated_at": pg.now()}
     if row is None:
-        pg.modules[name] = values
+        pg.templates[name] = values
     else:
         row.update(values)
 
 
 @_on(r"DELETE FROM state_templates WHERE name = %s$")
-def _delete_module(cur, pg, norm, params):
+def _delete_template(cur, pg, norm, params):
     (name,) = params
-    cur.rowcount = 1 if pg.modules.pop(name, None) is not None else 0
+    cur.rowcount = 1 if pg.templates.pop(name, None) is not None else 0
 
 
 # -- attachments ------------------------------------------------------------------
@@ -492,8 +492,8 @@ _ATTACH_COLS = ("state", "template", "path", "parameters", "declarations", "upda
     r"WHERE state = %s AND template = %s$"
 )
 def _get_attach(cur, pg, norm, params):
-    state, module = params
-    cur._one = pg.attachments.get((state, module))
+    state, template = params
+    cur._one = pg.attachments.get((state, template))
 
 
 @_on(
@@ -510,9 +510,9 @@ def _list_attachments_for_state(cur, pg, norm, params):
     r"SELECT state, template, path, parameters, declarations, updated_at FROM state_attachments WHERE template = %s "
     r"ORDER BY state$"
 )
-def _list_attachments_of_module(cur, pg, norm, params):
-    (module,) = params
-    rows = [v for (_s, m), v in pg.attachments.items() if m == module]
+def _list_attachments_of_template(cur, pg, norm, params):
+    (template,) = params
+    rows = [v for (_s, m), v in pg.attachments.items() if m == template]
     cur._all = sorted(rows, key=lambda r: r["state"])
 
 
@@ -526,11 +526,11 @@ def _list_all_attachments(cur, pg, norm, params):
 
 @_on(r"INSERT INTO state_attachments \(state, template, path, parameters, declarations, updated_at\)")
 def _upsert_attach(cur, pg, norm, params):
-    state, module, path, parameters, declarations = params
-    key = (state, module)
+    state, template, path, parameters, declarations = params
+    key = (state, template)
     values = {
         "state": state,
-        "template": module,
+        "template": template,
         "path": _unwrap(path),
         "parameters": _unwrap(parameters),
         "declarations": _unwrap(declarations),
@@ -544,8 +544,8 @@ def _upsert_attach(cur, pg, norm, params):
 
 @_on(r"UPDATE state_attachments SET declarations = %s, updated_at = now\(\) WHERE state = %s AND template = %s$")
 def _update_attach_declarations(cur, pg, norm, params):
-    declarations, state, module = params
-    row = pg.attachments.get((state, module))
+    declarations, state, template = params
+    row = pg.attachments.get((state, template))
     if row is not None:
         row["declarations"] = _unwrap(declarations)
         row["updated_at"] = pg.now()
@@ -554,8 +554,8 @@ def _update_attach_declarations(cur, pg, norm, params):
 
 @_on(r"UPDATE state_attachments SET parameters = %s, updated_at = now\(\) WHERE state = %s AND template = %s$")
 def _update_attach_parameters(cur, pg, norm, params):
-    parameters, state, module = params
-    row = pg.attachments.get((state, module))
+    parameters, state, template = params
+    row = pg.attachments.get((state, template))
     if row is not None:
         row["parameters"] = _unwrap(parameters)
         row["updated_at"] = pg.now()
@@ -564,8 +564,8 @@ def _update_attach_parameters(cur, pg, norm, params):
 
 @_on(r"DELETE FROM state_attachments WHERE state = %s AND template = %s$")
 def _delete_attach(cur, pg, norm, params):
-    state, module = params
-    cur.rowcount = 1 if pg.attachments.pop((state, module), None) is not None else 0
+    state, template = params
+    cur.rowcount = 1 if pg.attachments.pop((state, template), None) is not None else 0
 
 
 @_on(r"UPDATE state_declarations SET effective_schema = %s, updated_at = now\(\) WHERE name = %s$")

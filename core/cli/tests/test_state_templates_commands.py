@@ -26,7 +26,7 @@ def test_list_gets_the_collection(monkeypatch: pytest.MonkeyPatch) -> None:
     assert json.loads(result.output) == [{"name": "counters"}]
 
 
-def test_get_reads_one_module(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_reads_one_template(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
         assert request.url.path == "/api/state-templates/counters"
@@ -68,7 +68,7 @@ def test_put_replace_sets_the_query_flag(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_put_reads_the_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    doc = tmp_path / "module.json"
+    doc = tmp_path / "template.json"
     doc.write_text('{"schema": {"type": "object"}}')
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -94,7 +94,7 @@ def test_put_reads_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_put_rejects_both_data_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    doc = tmp_path / "module.json"
+    doc = tmp_path / "template.json"
     doc.write_text("{}")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -118,7 +118,7 @@ def test_put_rejects_empty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "no document on stdin" in visible(result.output)
 
 
-def test_delete_hits_the_module_door(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_delete_hits_the_template_door(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"
         assert request.url.path == "/api/state-templates/counters"
@@ -130,7 +130,7 @@ def test_delete_hits_the_module_door(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_delete_surfaces_an_attached_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return error_response("module 'counters' is attached on state 'status'", 409)
+        return error_response("template 'counters' is attached on state 'status'", 409)
 
     result = run_cli(monkeypatch, handler, ["state-templates", "delete", "counters"])
     assert result.exit_code != 0
