@@ -166,7 +166,7 @@ def test_declaration_carries_the_platform_composed_effective_schema():
 
 def test_declaration_carries_the_platform_composed_regimes():
     # ``regimes`` are the absolute write-regime rules the platform composes over the
-    # mounts and serves on every read; a plain declaration carries none (None), and the
+    # attachments and serves on every read; a plain declaration carries none (None), and the
     # served field round-trips the composed list.
     served = StateDeclaration.model_validate(_decl(regimes=[{"path": ["sub", "tags"], "regime": "composing"}]))
     assert served.regimes == [{"path": ["sub", "tags"], "regime": "composing"}]

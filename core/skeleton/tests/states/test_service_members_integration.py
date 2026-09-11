@@ -231,12 +231,12 @@ async def test_reconciler_closes_an_orphan_through_a_keyed_op(
     # Narrowing ``allowed`` to [1, 3] orphans item 2; the built-in reconciler closes it with
     # the module's KEYED close op (remove_by_key) on the composing path — the write the
     # composing-shape guard admits (a whole-path ``set`` would be refused) — and the close
-    # commits on the mount transaction together with the declarations edit.
+    # commits on the attach transaction together with the declarations edit.
     await svc.update_attachment_declarations(
         state, module, {"allowed": [1, 3]}, options={"orphans": "close", "resolution": "closed"}
     )
     view = await svc.read(state, subject)
     assert view is not None
     assert [item["id"] for item in view.data["a"]["items"]] == [1, 3]
-    mounts = await svc.list_attachments(state, template=module)
-    assert mounts[0]["declarations"] == {"allowed": [1, 3]}
+    attachments = await svc.list_attachments(state, template=module)
+    assert attachments[0]["declarations"] == {"allowed": [1, 3]}

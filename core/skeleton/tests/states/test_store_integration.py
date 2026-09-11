@@ -1,5 +1,5 @@
 """A REAL Postgres exercise of the subject-keyed store: subject-column read/apply, the
-``_trace`` stamp under a traced mount, the ``state_writes`` ledger row with the completed
+``_trace`` stamp under a traced attach, the ``state_writes`` ledger row with the completed
 origin + touched paths, subject fold/alias resolution, and content search.
 
 This needs real Postgres semantics (jsonb ``@>``, ``clock_timestamp()``, row locks) — there
@@ -138,11 +138,11 @@ async def test_traced_keyed_write_from_metaless_origin_stamps_null_meta(
     real_store: tuple[PostgresStatesStore, str],
 ) -> None:
     """A writer with no provenance bag (a hook/schedule/api door, or a builtin ``state_*``
-    tool) carries ``meta=None``. The ``_trace`` stamp under a traced mount lands and reads
+    tool) carries ``meta=None``. The ``_trace`` stamp under a traced attach lands and reads
     back with ``_trace.meta`` null and ``_trace.at`` a string.
 
     The effective schema is the REAL composed one (``_inject_trace`` stamps ``_TRACE_SCHEMA``
-    onto every object under the tracing mount), so validation runs against the schema the
+    onto every object under the tracing attach), so validation runs against the schema the
     platform actually serves — which must admit a null meta object, not just a string."""
     store, state = real_store
     module_body = {
@@ -322,11 +322,11 @@ async def test_list_and_search_page_over_full_subject_identity(
     assert searched == [("a", "same"), ("b", "same")]
 
 
-async def test_threaded_conn_makes_the_record_write_and_the_mount_atomic(
+async def test_threaded_conn_makes_the_record_write_and_the_attach_atomic(
     real_store: tuple[PostgresStatesStore, str],
 ) -> None:
     # A write threaded onto ``begin()``'s connection joins that transaction. Here a
-    # record write and a mount write run on the shared connection and the transaction rolls
+    # record write and an attach write run on the shared connection and the transaction rolls
     # back — BOTH must vanish. Were ``apply_ops`` to open its own connection (the bug), the
     # record write would commit independently and survive the rollback.
     store, state = real_store
@@ -394,7 +394,7 @@ async def test_a_read_on_the_threaded_conn_sees_an_in_flight_write(
 ) -> None:
     # Read-your-writes: a read threaded onto ``begin()``'s connection sees that
     # transaction's own uncommitted write; a read on a fresh connection does NOT — proving
-    # a mount reconciler reading through the handle sees its own in-flight merges.
+    # an attach reconciler reading through the handle sees its own in-flight merges.
     store, state = real_store
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
     await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
@@ -433,7 +433,7 @@ async def test_a_read_on_the_threaded_conn_sees_an_in_flight_write(
 async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
     real_store: tuple[PostgresStatesStore, str],
 ) -> None:
-    # A record under a ``composing`` write regime is closed with a KEYED op on the mount
+    # A record under a ``composing`` write regime is closed with a KEYED op on the attach
     # transaction — exactly what a reconciler's ``apply`` does — while a whole-path ``set``
     # (what ``merge`` emits) is refused. Proves the composing close works on real Postgres.
     from tai42_contract.states.errors import RegimeViolationError

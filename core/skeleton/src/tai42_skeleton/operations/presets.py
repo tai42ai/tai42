@@ -584,7 +584,7 @@ async def _write_validator_error(body: PresetBody) -> str | None:
 
 async def _state_binding_error(state_binding: StateBinding | None) -> str | None:
     """The binding's dry-run verdict: the SAME shape/state/template/jq/adapter checks create
-    and save-version run through ``validate_and_mount_binding``, but WITHOUT the mount — the
+    and save-version run through ``validate_and_attach_binding``, but WITHOUT the attach — the
     validate door performs no attach. A rejection is a message (the write door would 4xx it);
     ``None`` when there is no binding or it validates."""
     if state_binding is None:
@@ -600,21 +600,21 @@ async def _state_binding_error(state_binding: StateBinding | None) -> str | None
     return None
 
 
-async def _mount_body_binding(state_binding: StateBinding | CarryForward | None) -> None:
-    """Validate + mount-on-use a NEWLY provided door binding at the write that activates it —
+async def _attach_body_binding(state_binding: StateBinding | CarryForward | None) -> None:
+    """Validate + attach-on-use a NEWLY provided door binding at the write that activates it —
     the shared seam create, save-version and rollback all call so their binding handling never
     drifts. Its named templates attach idempotently (shared by every door/node that binds the
     state) and its expressions/adapters compile, so a bad binding is a loud 400 that commits or
     re-points nothing. A carry-forward (already vetted at its own save) and an absent binding
-    mount nothing."""
+    attach nothing."""
     if not isinstance(state_binding, StateBinding):
         return
     from tai42_contract.states.errors import StatesError
 
-    from tai42_skeleton.tools.state_binding import validate_and_mount_binding
+    from tai42_skeleton.tools.state_binding import validate_and_attach_binding
 
     try:
-        await validate_and_mount_binding(instance.app, state_binding)
+        await validate_and_attach_binding(instance.app, state_binding)
     except (StatesError, ValueError) as exc:
         raise BadRequestError(f"invalid state_binding: {exc}") from exc
 
@@ -1102,10 +1102,10 @@ async def _create_preset_core(
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
 
-    # Mount-on-use + validate the door binding at SAVE (the write of the runnable
+    # Attach-on-use + validate the door binding at SAVE (the write of the runnable
     # definition carrying it): its named templates are attached idempotently and its
     # expressions/adapters compiled, so a bad binding fails the create before any row.
-    await _mount_body_binding(state_binding)
+    await _attach_body_binding(state_binding)
 
     record, census = await _claim_preset_name(name, body, tags)
     await instance.app.emit_list_changed("tool")
@@ -1358,11 +1358,11 @@ async def _save_version_core(
     write_validator_error = await _write_validator_error(new_body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
-    # A NEWLY provided binding is mount-validated at SAVE, exactly as create does — its
-    # named templates mount idempotently and its expressions/adapters compile, so a bad
+    # A NEWLY provided binding is attach-validated at SAVE, exactly as create does — its
+    # named templates attach idempotently and its expressions/adapters compile, so a bad
     # edit is a 400 that persists nothing. A carried-forward binding was vetted at its
-    # own save; an explicit ``null`` clears and mounts nothing.
-    await _mount_body_binding(state_binding)
+    # own save; an explicit ``null`` clears and attaches nothing.
+    await _attach_body_binding(state_binding)
     # Registration-tier fence: the tier is the CURRENT preset's base tool,
     # so editing a fenced base tool's preset is admin-fenced too. Skipped for a platform
     # seed (``enforce_tier=False``) — no caller to fence.
@@ -1525,11 +1525,11 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
         raise BadRequestError(write_validator_error)
     # Registration-tier fence: the tier is the target body's base tool.
     await _enforce_registration_tier(target_body.base_tool)
-    # A rollback ACTIVATES the target version's own door binding, so it is mount-validated
+    # A rollback ACTIVATES the target version's own door binding, so it is attach-validated
     # here exactly as create and save-version do (templates detached since the version was
     # authored are re-attached idempotently); a binding whose templates are gone is a loud
     # 400 that re-points nothing.
-    await _mount_body_binding(target_body.state_binding)
+    await _attach_body_binding(target_body.state_binding)
 
     prior_active = prior_record.active_version
     # Pinned before the rollback+reload local apply — see :func:`_census_at_start`.
@@ -1890,8 +1890,8 @@ async def _verdict_bind_chain(
     bake → input-schema support → write validator → state binding, as a verdict — the
     SAME chain the real create/save doors run, so the dry run never reports valid on a
     draft the write door would 400. ``extensions`` defaults to no combos for the bind
-    chain's combo/schema checks; ``state_binding`` is validated (WITHOUT mounting) exactly
-    as create/save validate-and-mount it."""
+    chain's combo/schema checks; ``state_binding`` is validated (WITHOUT attaching) exactly
+    as create/save validate-and-attach it."""
     combos: list[list[ExtensionElement]] = extensions or []
     combo_error = _combo_registry_error(combos)
     if combo_error is not None:

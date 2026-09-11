@@ -1,6 +1,6 @@
 """A REAL Postgres round-trip of the ``states`` backup section: export the store, then
 import it back through the facet doors in the plan's order (modules → declarations →
-mounts → aliases → records), asserting the per-entity created/updated/failed counts and
+attachments → aliases → records), asserting the per-entity created/updated/failed counts and
 that one refused entity is reported while the rest still lands.
 
 The gate/version/registration seams are pinned without a live store in
@@ -165,7 +165,7 @@ async def test_backup_round_trip_through_facet_doors(run_token: str) -> None:
     assert created["aliases"] == {"restored": 1, "failed": 0}
     assert created["records"] == {"restored": 1, "failed": 0}
 
-    # the data landed: declaration, module, mount, record, and the alias resolves
+    # the data landed: declaration, module, attach, record, and the alias resolves
     assert await tai42_app.states.get_declaration(state) is not None
     assert await tai42_app.states.get_template(module) is not None
     assert [m["template"] for m in await tai42_app.states.list_attachments(state)] == [module]

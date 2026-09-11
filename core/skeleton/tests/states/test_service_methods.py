@@ -1,4 +1,4 @@
-"""The states service's record, module and mount doors, plus the pure schema/parameter
+"""The states service's record, module and attach doors, plus the pure schema/parameter
 validators — driven against the in-memory ``FakeStatesStore`` (no live database). The
 declaration lifecycle, gate, subject validation and write-provenance chokepoint are pinned
 in ``test_service.py``; this file covers every remaining service branch that the real-store
@@ -326,11 +326,11 @@ async def test_put_module_without_replace_refuses_existing(svc: StatesService) -
         await svc.put_template(_module_doc("m"), replace=False)
 
 
-async def test_put_module_replace_revalidates_live_mounts(svc: StatesService) -> None:
+async def test_put_module_replace_revalidates_live_attachments(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     await svc.put_template(_module_doc("m"), replace=False)
     await svc.attach("alerts", "m", AttachBody(path=["sub"]))
-    # a replace with a still-compatible body backfills the mount's parameters and succeeds
+    # a replace with a still-compatible body backfills the attach's parameters and succeeds
     await svc.put_template(
         _module_doc("m", schema={"type": "object", "properties": {"y": {"type": "integer"}, "z": {"type": "string"}}}),
         replace=True,
@@ -346,7 +346,7 @@ async def test_put_module_replace_refused_when_a_validator_now_rejects(svc: Stat
     await svc.attach("alerts", "m", AttachBody(path=["sub"]))
 
     async def refusing(doc, declarations, effective) -> None:
-        raise TemplateValidationError("no longer valid on this mount")
+        raise TemplateValidationError("no longer valid on this attach")
 
     svc.register_attach_validator(refusing)
     with pytest.raises(TemplateInUseError, match="no longer validates"):
@@ -367,9 +367,9 @@ async def test_delete_module_paths(svc: StatesService) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# mounts                                                                        #
+# attachments                                                                        #
 # --------------------------------------------------------------------------- #
-async def test_list_mounts_every_form(svc: StatesService) -> None:
+async def test_list_attachments_every_form(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     await svc.put_template(_module_doc("m"), replace=False)
     await svc.attach("alerts", "m", AttachBody(path=["sub"]))
@@ -380,7 +380,7 @@ async def test_list_mounts_every_form(svc: StatesService) -> None:
     assert len(await svc.list_attachments()) == 1
 
 
-async def test_mount_refuses_a_duplicate(svc: StatesService) -> None:
+async def test_attach_refuses_a_duplicate(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     await svc.put_template(_module_doc("m"), replace=False)
     await svc.attach("alerts", "m", AttachBody(path=["sub"]))
@@ -388,7 +388,7 @@ async def test_mount_refuses_a_duplicate(svc: StatesService) -> None:
         await svc.attach("alerts", "m", AttachBody(path=["other"]))
 
 
-async def test_mount_missing_module_raises(svc: StatesService) -> None:
+async def test_attach_missing_module_raises(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     with pytest.raises(StateNotFoundError, match="no template"):
         await svc.attach("alerts", "absent", AttachBody(path=["sub"]))
@@ -396,35 +396,35 @@ async def test_mount_missing_module_raises(svc: StatesService) -> None:
 
 def _capped_module(name: str = "capped"):
     """A module whose declarations ``check`` constrains a declared ``count`` against the
-    mount's effective ``limit`` parameter, read as ``$parameters.limit``."""
+    attach's effective ``limit`` parameter, read as ``$parameters.limit``."""
     return _module_doc(
         name,
         schema={"type": "object", "properties": {"box": {"type": "object"}}},
         parameters={"limit": {"schema": {"type": "integer"}, "default": 5}},
         declarations={
             "schema": {"type": "object", "properties": {"count": {"type": "integer"}}},
-            "check": 'if .count <= $parameters.limit then true else "count exceeds the mount limit" end',
+            "check": 'if .count <= $parameters.limit then true else "count exceeds the attach limit" end',
         },
     )
 
 
-async def test_mount_check_reads_effective_parameters(svc: StatesService) -> None:
-    """A declarations check reads the mount's supplied parameters as ``$parameters``: a
-    declaration within the supplied ``limit`` mounts, one exceeding it is refused with the
+async def test_attach_check_reads_effective_parameters(svc: StatesService) -> None:
+    """A declarations check reads the attach's supplied parameters as ``$parameters``: a
+    declaration within the supplied ``limit`` attaches, one exceeding it is refused with the
     check's message."""
     await svc.put_declaration(_STATE)
     await svc.put_template(_capped_module(), replace=False)
-    with pytest.raises(TemplateValidationError, match="count exceeds the mount limit"):
+    with pytest.raises(TemplateValidationError, match="count exceeds the attach limit"):
         await svc.attach("alerts", "capped", AttachBody(path=["a"], parameters={"limit": 8}, declarations={"count": 9}))
     await svc.attach("alerts", "capped", AttachBody(path=["a"], parameters={"limit": 8}, declarations={"count": 7}))
 
 
-async def test_mount_check_sees_the_parameter_default(svc: StatesService) -> None:
-    """A mount supplying no ``limit`` sees the module default (5) in the check, so the check
+async def test_attach_check_sees_the_parameter_default(svc: StatesService) -> None:
+    """An attach supplying no ``limit`` sees the module default (5) in the check, so the check
     constrains against the same value the runtime persists."""
     await svc.put_declaration(_STATE)
     await svc.put_template(_capped_module(), replace=False)
-    with pytest.raises(TemplateValidationError, match="count exceeds the mount limit"):
+    with pytest.raises(TemplateValidationError, match="count exceeds the attach limit"):
         await svc.attach("alerts", "capped", AttachBody(path=["a"], declarations={"count": 6}))
     await svc.attach("alerts", "capped", AttachBody(path=["a"], declarations={"count": 4}))
 
@@ -443,7 +443,7 @@ def test_register_consumer_lister_refuses_duplicate_kind(svc: StatesService) -> 
         svc.register_consumer_lister("hook", lister)
 
 
-async def test_update_mount_declarations_paths(svc: StatesService) -> None:
+async def test_update_attach_declarations_paths(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     decl_module = _module_doc(
         "m",
@@ -453,21 +453,21 @@ async def test_update_mount_declarations_paths(svc: StatesService) -> None:
     await svc.attach("alerts", "m", AttachBody(path=["sub"], declarations={"n": 1}))
     await svc.update_attachment_declarations("alerts", "m", {"n": 2})
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
-    assert store.mounts[("alerts", "m")]["declarations"] == {"n": 2}
+    assert store.attachments[("alerts", "m")]["declarations"] == {"n": 2}
     with pytest.raises(StateNotFoundError, match="not attached"):
         await svc.update_attachment_declarations("alerts", "absent", {})
 
 
-async def test_unmount_missing_raises(svc: StatesService) -> None:
+async def test_detach_missing_raises(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     with pytest.raises(StateNotFoundError, match="not attached"):
         await svc.detach("alerts", "absent")
 
 
 # --------------------------------------------------------------------------- #
-# mount reconcilers                                                            #
+# attach reconcilers                                                            #
 # --------------------------------------------------------------------------- #
-async def _mount_module(svc: StatesService, *, declarations: dict, options: dict | None = None) -> None:
+async def _attach_module(svc: StatesService, *, declarations: dict, options: dict | None = None) -> None:
     decl_module = _module_doc(
         "m", declarations={"schema": {"type": "object", "properties": {"n": {"type": "integer"}}}}
     )
@@ -475,11 +475,11 @@ async def _mount_module(svc: StatesService, *, declarations: dict, options: dict
     await svc.attach("alerts", "m", AttachBody(path=["sub"], declarations=declarations, options=options or {}))
 
 
-async def test_mount_runs_reconciler_with_a_first_mount_context(svc: StatesService) -> None:
+async def test_attach_runs_reconciler_with_a_first_attach_context(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     seen = []
     svc.register_attach_reconciler(lambda ctx: seen.append(ctx) or _noop())
-    await _mount_module(svc, declarations={"n": 1}, options={"on_orphan": "close"})
+    await _attach_module(svc, declarations={"n": 1}, options={"on_orphan": "close"})
     (ctx,) = seen
     assert ctx.state == "alerts"
     assert ctx.template.name == "m"
@@ -491,7 +491,7 @@ async def test_mount_runs_reconciler_with_a_first_mount_context(svc: StatesServi
 
 async def test_update_declarations_runs_reconciler_with_previous_and_options(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    await _mount_module(svc, declarations={"n": 1})
+    await _attach_module(svc, declarations={"n": 1})
     seen = []
     svc.register_attach_reconciler(lambda ctx: seen.append(ctx) or _noop())
     await svc.update_attachment_declarations("alerts", "m", {"n": 2}, options={"on_orphan": "refuse"})
@@ -502,10 +502,10 @@ async def test_update_declarations_runs_reconciler_with_previous_and_options(svc
     assert ctx.options == {"on_orphan": "refuse"}
     # options are a per-operation directive passed to the reconciler, never stored.
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
-    assert "options" not in store.mounts[("alerts", "m")]
+    assert "options" not in store.attachments[("alerts", "m")]
 
 
-async def test_raising_reconciler_refuses_the_mount_and_writes_nothing(svc: StatesService) -> None:
+async def test_raising_reconciler_refuses_the_attach_and_writes_nothing(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
 
     async def _refuse(ctx):
@@ -513,12 +513,12 @@ async def test_raising_reconciler_refuses_the_mount_and_writes_nothing(svc: Stat
 
     svc.register_attach_reconciler(_refuse)
     with pytest.raises(TemplateValidationError, match="points at a value"):
-        await _mount_module(svc, declarations={"n": 1})
+        await _attach_module(svc, declarations={"n": 1})
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
-    assert ("alerts", "m") not in store.mounts
+    assert ("alerts", "m") not in store.attachments
 
 
-async def test_reconciler_writes_are_visible_after_the_mount_commits(svc: StatesService) -> None:
+async def test_reconciler_writes_are_visible_after_the_attach_commits(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     await svc.replace("alerts", _subject(key="open1"), {"n": 1}, origin=_ORIGIN)
 
@@ -529,17 +529,17 @@ async def test_reconciler_writes_are_visible_after_the_mount_commits(svc: States
             await ctx.records.merge(subject, {"closed": True}, origin=WriteOrigin(consumer="reconciler"))
 
     svc.register_attach_reconciler(_close_open)
-    await _mount_module(svc, declarations={"n": 1})
+    await _attach_module(svc, declarations={"n": 1})
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
-    assert ("alerts", "m") in store.mounts
+    assert ("alerts", "m") in store.attachments
     view = await svc.read("alerts", _subject(key="open1"))
     assert view is not None
     assert view.data["closed"] is True
 
 
-async def test_reconciler_merge_then_raise_rolls_back_the_record_and_the_mount(svc: StatesService) -> None:
-    # The reconcile + mount write share ONE transaction: a reconciler that writes a record
-    # and then refuses leaves NEITHER the record write NOR the mount — atomic all-or-nothing.
+async def test_reconciler_merge_then_raise_rolls_back_the_record_and_the_attach(svc: StatesService) -> None:
+    # The reconcile + attach write share ONE transaction: a reconciler that writes a record
+    # and then refuses leaves NEITHER the record write NOR the attach — atomic all-or-nothing.
     await svc.put_declaration(_STATE)
     await svc.replace("alerts", _subject(key="open1"), {"n": 1}, origin=_ORIGIN)
 
@@ -549,18 +549,18 @@ async def test_reconciler_merge_then_raise_rolls_back_the_record_and_the_mount(s
 
     svc.register_attach_reconciler(_write_then_refuse)
     with pytest.raises(TemplateValidationError, match="points at a value"):
-        await _mount_module(svc, declarations={"n": 1})
+        await _attach_module(svc, declarations={"n": 1})
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
-    assert ("alerts", "m") not in store.mounts
+    assert ("alerts", "m") not in store.attachments
     view = await svc.read("alerts", _subject(key="open1"))
     assert view is not None
     assert "closed" not in view.data
 
 
-async def test_failed_mount_write_rolls_back_a_reconciler_write(
+async def test_failed_attach_write_rolls_back_a_reconciler_write(
     svc: StatesService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A merge succeeds inside the reconciler, then the mount write itself fails: the shared
+    # A merge succeeds inside the reconciler, then the attach write itself fails: the shared
     # transaction rolls the reconciler's record write back too.
     await svc.put_declaration(_STATE)
     await svc.replace("alerts", _subject(key="open1"), {"n": 1}, origin=_ORIGIN)
@@ -571,11 +571,11 @@ async def test_failed_mount_write_rolls_back_a_reconciler_write(
     svc.register_attach_reconciler(_close_open)
 
     async def _boom(*args, **kwargs):
-        raise RuntimeError("mount write failed")
+        raise RuntimeError("attach write failed")
 
     monkeypatch.setattr(svc._store, "upsert_attachment", _boom)
-    with pytest.raises(RuntimeError, match="mount write failed"):
-        await _mount_module(svc, declarations={"n": 1})
+    with pytest.raises(RuntimeError, match="attach write failed"):
+        await _attach_module(svc, declarations={"n": 1})
     view = await svc.read("alerts", _subject(key="open1"))
     assert view is not None
     assert "closed" not in view.data
@@ -602,8 +602,8 @@ async def test_skip_reconcilers_runs_validators_but_not_reconcilers(svc: StatesS
 
 
 async def test_reconciler_reads_its_own_in_flight_merge(svc: StatesService) -> None:
-    # The record door's read/list_subjects run on the mount transaction, so a reconciler
-    # sees the merge it just wrote (read-your-writes) before the mount commits.
+    # The record door's read/list_subjects run on the attach transaction, so a reconciler
+    # sees the merge it just wrote (read-your-writes) before the attach commits.
     await svc.put_declaration(_STATE)
     await svc.replace("alerts", _subject(key="open1"), {"n": 1}, origin=_ORIGIN)
     seen: list[object] = []
@@ -616,7 +616,7 @@ async def test_reconciler_reads_its_own_in_flight_merge(svc: StatesService) -> N
         seen.append(len(page["subjects"]))
 
     svc.register_attach_reconciler(_read_own_write)
-    await _mount_module(svc, declarations={"n": 1})
+    await _attach_module(svc, declarations={"n": 1})
     assert seen == [9, 1]
 
 
@@ -658,7 +658,7 @@ async def test_reconciler_apply_closes_a_composing_record_that_merge_cannot(
 ) -> None:
     # A record under a ``composing`` write regime cannot be closed with ``merge`` (a
     # whole-path set is a RegimeViolationError); a reconciler closes it with the keyed
-    # ``apply`` — exactly what a module fill can write — and the mount commits it.
+    # ``apply`` — exactly what a module fill can write — and the attach commits it.
     rsvc = await _setup_composing_ledger(store, monkeypatch)
     subject = _subject(key="led1")
 
@@ -697,7 +697,7 @@ async def test_reconciler_apply_on_a_composing_record_rolls_back_on_refuse(
         await rsvc.update_attachment_declarations("alerts", "cmod", {})
     view = await rsvc.read("alerts", subject)
     assert view is not None
-    assert view.data["entries"] == [{"id": 1}]  # the keyed write rolled back with the refused mount
+    assert view.data["entries"] == [{"id": 1}]  # the keyed write rolled back with the refused attach
 
 
 async def test_reconciler_runs_after_the_validator(svc: StatesService) -> None:
@@ -712,7 +712,7 @@ async def test_reconciler_runs_after_the_validator(svc: StatesService) -> None:
 
     svc.register_attach_validator(_validator)
     svc.register_attach_reconciler(_reconciler)
-    await _mount_module(svc, declarations={"n": 1})
+    await _attach_module(svc, declarations={"n": 1})
     assert order == ["validator", "reconciler"]
 
 
@@ -784,9 +784,9 @@ async def test_stats_undeclared_raises(svc: StatesService) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# mount-value validation (unknown/invalid/missing params, declarations, check) #
+# attach-value validation (unknown/invalid/missing params, declarations, check) #
 # --------------------------------------------------------------------------- #
-async def test_validate_mount_values_parameter_branches(svc: StatesService) -> None:
+async def test_validate_attach_values_parameter_branches(svc: StatesService) -> None:
     param_module = validate_template(
         {
             "kind": "state-template",
@@ -803,7 +803,7 @@ async def test_validate_mount_values_parameter_branches(svc: StatesService) -> N
         await svc._validate_attach_values(param_module, {}, {})
 
 
-async def test_validate_mount_values_declaration_branches(svc: StatesService) -> None:
+async def test_validate_attach_values_declaration_branches(svc: StatesService) -> None:
     plain = validate_template(
         {"kind": "state-template", "name": "m", "schema": {"type": "object", "properties": {"x": {"type": "string"}}}}
     )
@@ -826,7 +826,7 @@ async def test_validate_mount_values_declaration_branches(svc: StatesService) ->
     await svc._validate_attach_values(checked, {}, {"n": 3})
 
 
-async def test_validate_mount_values_check_string_message_and_eval_error(svc: StatesService) -> None:
+async def test_validate_attach_values_check_string_message_and_eval_error(svc: StatesService) -> None:
     stringy = validate_template(
         {
             "kind": "state-template",
@@ -856,7 +856,7 @@ async def test_validate_mount_values_check_string_message_and_eval_error(svc: St
         await svc._validate_attach_values(erroring, {}, {"n": 1})
 
 
-def test_validate_mount_path_refusals(svc: StatesService) -> None:
+def test_validate_attach_path_refusals(svc: StatesService) -> None:
     with pytest.raises(AttachConflictError, match="must be a list"):
         svc._validate_attach_path("not-a-list")
     with pytest.raises(AttachConflictError, match="non-empty object key"):
