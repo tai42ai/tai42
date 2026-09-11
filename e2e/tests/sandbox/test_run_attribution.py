@@ -59,7 +59,7 @@ async def _drive_attributed(stack: TaiStack, tags: list[str], metadata: dict) ->
                 "tags": tags,
                 "metadata": metadata,
                 "inner_tool": "claude_code",
-                "inner_arguments": {"user_message": "hi"},
+                "inner_arguments": {"user_message": {"content": "hi"}},
             },
         )
     return [json.loads(rec) for rec in stack.records("monitor_spans")[before:]]
@@ -70,7 +70,7 @@ async def _drive_unattributed(stack: TaiStack) -> list[dict]:
     records this call appended."""
     before = len(stack.records("monitor_spans"))
     async with stack.mcp() as mcp:
-        await mcp.call_tool("claude_code", {"user_message": "hi"})
+        await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}})
     return [json.loads(rec) for rec in stack.records("monitor_spans")[before:]]
 
 

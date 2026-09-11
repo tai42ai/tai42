@@ -86,7 +86,7 @@ async def test_langchain_deep_agent_plan_subagent_synthesis_over_mcp(
         {
             "name": "researcher",
             "description": "Researches a topic and reports findings.",
-            "system_prompt": "You research topics and report concise findings.",
+            "system_prompt": {"content": "You research topics and report concise findings."},
         }
     ]
 
@@ -94,7 +94,7 @@ async def test_langchain_deep_agent_plan_subagent_synthesis_over_mcp(
     async with stack.mcp() as mcp:
         result = await mcp.call_tool(
             "langchain_deep_agent",
-            {"user_message": "research and summarize the topic", "subagents": subagents},
+            {"user_message": {"content": "research and summarize the topic"}, "subagents": subagents},
         )
 
     assert synthesis in json.dumps(result.data), f"langchain_deep_agent did not return the synthesis: {result.data}"

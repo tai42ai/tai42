@@ -50,14 +50,14 @@ async def test_the_tool_proxy_is_identity_gated_on_both_doors(
     async with stack.mcp() as mcp:
         result = await mcp.call_tool(
             "claude_code",
-            {"user_message": "hi", "tool_names": ["e2e_echo"]},
+            {"user_message": {"content": "hi"}, "tool_names": ["e2e_echo"]},
             retry_on_reloading=True,
             raise_on_error=False,
         )
     assert result.is_error, result.data
     assert "no bound execution identity" in error_text(result), error_text(result)
 
-    frames = await run_sse(stack, {"user_message": "hi", "tool_names": ["e2e_echo"]})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}, "tool_names": ["e2e_echo"]})
     errors = frames_of_type(frames, "stream.error")
     assert errors, frames
     assert "no bound execution identity" in errors[0]["message"], errors

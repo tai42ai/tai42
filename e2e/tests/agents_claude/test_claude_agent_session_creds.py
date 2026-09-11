@@ -72,7 +72,7 @@ async def test_static_cred_reaches_the_clean_session_env(
 ) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "session_creds", TAI_AGENTS_CLAUDE_CREDS=_static_creds())
     async with stack.mcp() as mcp:
-        result = await mcp.call_tool("claude_code", {"user_message": "hi"}, retry_on_reloading=True)
+        result = await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True)
     # The runner echoed ``E2E_SVC_TOKEN`` from its session env; the known token round-tripped.
     assert result.data == _KNOWN_TOKEN, result.data
 
@@ -83,7 +83,7 @@ async def test_connection_cred_on_identity_less_tool_face_fails_closed(
     stack = claude_stack(fresh_stack, llm_stub, "session_creds", TAI_AGENTS_CLAUDE_CREDS=_connection_creds())
     async with stack.mcp() as mcp:
         result = await mcp.call_tool(
-            "claude_code", {"user_message": "hi"}, retry_on_reloading=True, raise_on_error=False
+            "claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True, raise_on_error=False
         )
     assert result.is_error, result.data
     assert "no execution identity bound" in error_text(result), error_text(result)
@@ -93,7 +93,7 @@ async def test_connection_cred_on_identity_less_sse_route_fails_closed(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "session_creds", TAI_AGENTS_CLAUDE_CREDS=_connection_creds())
-    frames = await run_sse(stack, {"user_message": "hi"})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}})
     errors = frames_of_type(frames, "stream.error")
     assert errors, frames
     assert "no execution identity bound" in errors[0]["message"], errors

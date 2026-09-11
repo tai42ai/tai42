@@ -58,7 +58,7 @@ async def _park(stack: TaiStack, thread_id: str, question: str, expiry_seconds: 
         result = await mcp.call_tool(
             AGENT,
             {
-                "user_message": question,
+                "user_message": {"content": question},
                 "tool_names": _TOOL_NAMES,
                 "langgraph_config": {"configurable": {"thread_id": thread_id}},
             },
@@ -102,7 +102,7 @@ async def test_resume_checkpoint_id_is_unhonored(
     async with stack.mcp(port=stack.port_a) as mcp:
         result = await mcp.call_tool(
             AGENT,
-            {"user_message": uniq("q"), "resume_checkpoint_id": uniq("ckpt")},
+            {"user_message": {"content": uniq("q")}, "resume_checkpoint_id": uniq("ckpt")},
             raise_on_error=False,
             retry_on_reloading=True,
         )

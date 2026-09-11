@@ -44,7 +44,7 @@ async def test_tools_agent_llm_tool_llm_loop_over_http(
 
     async with agents_stack.mcp() as mcp:
         result = await mcp.call_tool(
-            "tools_agent", {"user_message": "echo the payload back", "tool_names": ["e2e_echo"]}
+            "tools_agent", {"user_message": {"content": "echo the payload back"}, "tool_names": ["e2e_echo"]}
         )
 
     assert final in json.dumps(result.data), f"agent did not return the scripted final content: {result.data}"
@@ -72,7 +72,7 @@ async def test_authored_agent_preset_created_on_one_worker_runs_via_http(
             "name": name,
             "base_tool": "tools_agent",
             "description": "authored agent preset",
-            "fixed_kwargs": {"user_message": "hi"},
+            "fixed_kwargs": {"user_message": {"content": "hi"}},
         },
     )
 

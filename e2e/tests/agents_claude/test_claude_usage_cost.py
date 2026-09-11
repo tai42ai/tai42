@@ -45,7 +45,7 @@ async def test_sdk_reported_usage_is_emitted_as_span_cost(
     before = len(stack.records("span_cost"))
 
     async with stack.mcp() as mcp:
-        result = await mcp.call_tool("claude_code", {"user_message": "hi"}, retry_on_reloading=True)
+        result = await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True)
     assert result.data == "counted", result.data
 
     # The adapter emitted the SDK usage/cost into the active trace DURING the drive (before the

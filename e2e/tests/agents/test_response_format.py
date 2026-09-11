@@ -57,7 +57,7 @@ async def test_untitled_response_format_is_rejected(agents_stack: TaiStack, llm_
         untitled = {"type": "object", "properties": {"value": {"type": "integer"}}}
         result = await mcp.call_tool(
             "tools_agent",
-            {"user_message": "answer the question", "response_format": untitled},
+            {"user_message": {"content": "answer the question"}, "response_format": untitled},
             raise_on_error=False,
         )
         assert result.is_error, f"an untitled response_format must be refused: {result.data}"
@@ -71,7 +71,7 @@ async def test_untitled_response_format_is_rejected(agents_stack: TaiStack, llm_
         }
         result2 = await mcp.call_tool(
             "tools_agent",
-            {"user_message": "answer the question", "response_format": oneof_untitled},
+            {"user_message": {"content": "answer the question"}, "response_format": oneof_untitled},
             raise_on_error=False,
         )
         assert result2.is_error, f"an untitled oneOf variant must be refused: {result2.data}"
@@ -113,7 +113,7 @@ async def test_structured_output_stream_suppresses_synthetic_tool_frames(
     frames = await _run_sse(
         agents_stack,
         "/api/agents/tools_agent/runs",
-        {"user_message": "answer with the value", "response_format": schema},
+        {"user_message": {"content": "answer with the value"}, "response_format": schema},
     )
     types = [frame.get("type") for frame in frames]
     # The synthetic structured-output tool call/result never surface as user-visible steps.

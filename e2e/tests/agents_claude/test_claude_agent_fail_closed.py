@@ -48,7 +48,7 @@ async def test_tool_names_on_identity_less_tool_face_is_refused(
     async with stack.mcp() as mcp:
         result = await mcp.call_tool(
             "claude_code",
-            {"user_message": "hi", "tool_names": ["e2e_echo"]},
+            {"user_message": {"content": "hi"}, "tool_names": ["e2e_echo"]},
             retry_on_reloading=True,
             raise_on_error=False,
         )
@@ -60,7 +60,7 @@ async def test_tool_names_on_identity_less_sse_route_is_refused(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "tool_call")
-    frames = await run_sse(stack, {"user_message": "hi", "tool_names": ["e2e_echo"]})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}, "tool_names": ["e2e_echo"]})
     errors = frames_of_type(frames, "stream.error")
     assert errors, frames
     assert "no bound execution identity" in errors[0]["message"], errors
@@ -70,7 +70,7 @@ async def test_malformed_frame_is_a_loud_protocol_error(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "malformed")
-    frames = await run_sse(stack, {"user_message": "hi"})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}})
     errors = frames_of_type(frames, "stream.error")
     assert errors, frames
     assert "protocol version" in errors[0]["message"], errors
@@ -78,7 +78,7 @@ async def test_malformed_frame_is_a_loud_protocol_error(
 
 async def test_runner_fatal_frame_raises_loudly(fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "fatal")
-    frames = await run_sse(stack, {"user_message": "hi"})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}})
     errors = frames_of_type(frames, "stream.error")
     assert errors, frames
     assert "fatal" in errors[0]["message"].lower(), errors

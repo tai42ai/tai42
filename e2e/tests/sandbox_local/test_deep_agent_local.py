@@ -54,7 +54,7 @@ async def test_deep_agent_scratch_round_trips_through_the_local_provider(
 
     async with sandbox_local_deep_stack.mcp() as mcp:
         result = await mcp.call_tool(
-            "langchain_deep_agent", {"user_message": "write the token to a file then read it back"}
+            "langchain_deep_agent", {"user_message": {"content": "write the token to a file then read it back"}}
         )
 
     assert final in json.dumps(result.data), f"the deep agent did not return the final content: {result.data}"

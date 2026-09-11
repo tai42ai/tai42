@@ -63,6 +63,7 @@ from tai42_contract.interactions import (
 from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.monitoring import RunAttribution
 from tai42_contract.states import StateContext, SubjectCandidates
+from tai42_contract.template import TemplatedText
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 from tai42_kit.utils.data import run_jq_bounded
 
@@ -434,7 +435,9 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _Agent
     message: MessageFinal | None = None
     # Route the live-caller drive through the shared seam so the turn is budgeted and its
     # trace attributed — this bridge holds a live client, so it is not detached-exempt.
-    async for event in drive_live_caller_astream(agent.astream(user_message=text, thread_id=thread_id)):
+    async for event in drive_live_caller_astream(
+        agent.astream(user_message=TemplatedText(content=text), thread_id=thread_id)
+    ):
         if isinstance(event, SuspendedFinal):
             # The agent parked on an async ask_user. The conversation door bound a completion
             # tool around the run, so its resumed answer is delivered out of band into this
