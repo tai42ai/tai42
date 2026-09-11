@@ -290,16 +290,25 @@ ETA_MCP_TOOL = "e2e_eta_mcp_ping"
 # contract ranges straddle the running tai42-contract major. 0.1.0 declares the
 # wide range, which admits the running major and everything below it; 0.2.0
 # declares the narrow future range — the next major up — which excludes the
-# running contract. Both ranges derive from the installed tai42-contract so the
-# bracket holds at every contract major with no hand edit (asserted at seed time
-# by ``assert_zeta_ranges_bracket_running_contract``). The wheels are forged per
-# compat spec via :func:`forge_zeta_wheel`, never through
+# running contract. Both ranges are computed from ``RUNNING_CONTRACT_MAJOR`` — the
+# major of the tai42-contract installed in this environment — so the bracket around
+# the running contract holds at every contract major with no hand edit (asserted at
+# seed time by ``assert_zeta_ranges_bracket_running_contract``). The wheels are
+# forged per compat spec via :func:`forge_zeta_wheel`, never through
 # ``forge_fixture_artifacts``.
 RUNNING_CONTRACT_MAJOR = int(importlib.metadata.version("tai42-contract").split(".", 1)[0])
+"""Major component of the tai42-contract installed in this environment; the origin
+both zeta compat ranges are derived from."""
 ZETA_COMPAT_VERSION = "0.1.0"
 ZETA_INCOMPAT_VERSION = "0.2.0"
 ZETA_WIDE_CONTRACT_RANGE = f">=0.1,<{RUNNING_CONTRACT_MAJOR + 1}"
+"""Zeta 0.1.0's declared contract range. Its upper bound is the major above the
+running contract, so the range admits the running contract major and every major
+below it — the compat verdict for this version resolves as INSTALLABLE."""
 ZETA_NARROW_CONTRACT_RANGE = f">={RUNNING_CONTRACT_MAJOR + 1},<{RUNNING_CONTRACT_MAJOR + 2}"
+"""Zeta 0.2.0's declared contract range. It spans only the single major above the
+running contract, so it excludes the running contract major — the compat verdict
+for this version resolves as INCOMPATIBLE."""
 # The module zeta's one tool item provides — the manifest config row an install
 # persists ({"title": <module>, "module": <module>}) targets this module.
 ZETA_TOOLS_MODULE = "tai_e2e_market_zeta.tools"
