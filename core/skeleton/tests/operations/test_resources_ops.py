@@ -10,11 +10,11 @@ projects normally.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from fastmcp.utilities.types import Image
 from tai42_contract.manifest import ApiToolsConfig
+from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.operations.resources as resources_ops
 from tai42_skeleton.operations import BadRequestError, NotFoundError, OperationRegistry, operation_metadata_of
@@ -43,10 +43,8 @@ class _ResourceManager:
             raise self._raise
         return self._loaded
 
-    async def render_by_id_or_content(
-        self, content: str | None = None, template_id: str | None = None, kwargs: dict[str, Any] | None = None
-    ) -> str:
-        self.render_calls.append((content, kwargs))
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        self.render_calls.append((text.content, text.kwargs))
         return self._rendered
 
 
@@ -128,10 +126,10 @@ async def test_broken_jinja_is_bad_request(monkeypatch: pytest.MonkeyPatch) -> N
     manager = _ResourceManager(loaded="{{ oops")
     _bind(monkeypatch, manager)
 
-    async def _broken(content=None, template_id=None, kwargs=None) -> str:
+    async def _broken(text, locale=None) -> str:
         raise TemplateSyntaxError("unexpected end of template", 1)
 
-    monkeypatch.setattr(manager, "render_by_id_or_content", _broken)
+    monkeypatch.setattr(manager, "render_templated_text", _broken)
     with pytest.raises(BadRequestError, match="template error"):
         await get_resource_by_id("t.j2", {})
 

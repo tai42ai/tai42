@@ -25,6 +25,7 @@ from starlette.requests import Request
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookParams
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.app import instance
@@ -138,15 +139,15 @@ class _FakeResourceManager:
     async def upload_template(self, path: str, content: str) -> None:
         self._templates[path] = content
 
-    async def render_by_id_or_content(self, *, content, template_id, kwargs) -> str:
-        """The condition render, resolving a ``template_id`` against the SAME store
+    async def render_templated_text(self, text, locale=None) -> str:
+        """The condition render, resolving a stored ``id`` against the SAME store
         ``upload_template`` writes into — so a condition template that has not been
         restored yet raises exactly as the real manager does."""
-        if template_id is None:
-            return content or ""
-        if template_id not in self._templates:
-            raise TemplateNotFoundError(template_id)
-        return self._templates[template_id]
+        if text.id is None:
+            return text.content or ""
+        if text.id not in self._templates:
+            raise TemplateNotFoundError(text.id)
+        return self._templates[text.id]
 
 
 class _FakeRouteConfig:
@@ -440,9 +441,9 @@ async def test_webhooks_roundtrip(monkeypatch, execution_gate_off):
 
 
 async def test_import_restores_condition_templates_before_the_hooks_that_render_them(monkeypatch):
-    """A hook bound to a key whose policy carries a ``condition_id`` restores from a
-    document that also carries the template — the replay order is what makes the
-    execution-key scan able to render it."""
+    """A hook bound to a key whose policy condition names a stored template by id
+    restores from a document that also carries the template — the replay order is what
+    makes the execution-key scan able to render it."""
     from types import SimpleNamespace as _NS
 
     from tai42_skeleton.access_control import policy as policy_module
@@ -455,9 +456,9 @@ async def test_import_restores_condition_templates_before_the_hooks_that_render_
     from ..access_control.conftest import make_client_ctx as make_access_control_client_ctx
 
     pg = FakeAccessControlPg()
-    # The key's condition lives in the template store, exactly as a ``condition_id``
-    # policy does on a real host.
-    pg.add_policy("svc", ["a"], condition_id="policies/svc.j2", policy_data={KEY_FINGERPRINT_CLAIM: "fp-svc"})
+    # The key's condition names a stored template by id, exactly as a real host's
+    # stored-template condition does.
+    pg.add_policy("svc", ["a"], condition={"id": "policies/svc.j2"}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-svc"})
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
@@ -1080,7 +1081,7 @@ async def test_import_webhooks_uncompilable_jq_record_is_per_record_not_a_torn_i
                     tool="mytool",
                     execution_key="k-fire",
                     execution_key_fingerprint="fp-fire",
-                    condition=".foo | (",
+                    condition=TemplatedText(content=".foo | ("),
                 ).model_dump(mode="json"),
                 HookParams(
                     name="last", topic="t1", tool="mytool", execution_key="k-fire", execution_key_fingerprint="fp-fire"

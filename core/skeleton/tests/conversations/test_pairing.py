@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, StructuredFinal, SuspendedFinal
 from tai42_contract.conversations import ConversationRoute, ConversationTargetKind, TargetConversationConfig
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.string_util import hash_api_key
 
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -90,6 +91,22 @@ class _FakeApp:
         self.channels = _FakeChannels(channel)
 
 
+class _FakeTemplateResourceManager:
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        assert text.content is not None
+        return text.content
+
+
+class _FakeTemplateStorage:
+    def __init__(self) -> None:
+        self.resource_manager = _FakeTemplateResourceManager()
+
+
+class _FakeTemplateApp:
+    def __init__(self) -> None:
+        self.storage = _FakeTemplateStorage()
+
+
 def _channel_route(route_name: str = "line-a", channel: str = "twilio", our_identity: str = "+15550001111"):
     return ConversationRoute(
         route_name=route_name,
@@ -151,6 +168,7 @@ def env(monkeypatch):
 def _wire(monkeypatch, manager: FakeManager, channel: FakeChannel | None = None, agent: Agent | None = None) -> None:
     monkeypatch.setattr(turn_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
+    monkeypatch.setattr(turn_module, "tai42_app", _FakeTemplateApp())
     if channel is not None:
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"assistant": agent or EchoAgent()})
@@ -181,7 +199,7 @@ def _tool_route(
         door="channel",
         target_kind="tool",
         target_name="pinger",
-        payload_expr=payload_expr,
+        payload_expr=TemplatedText(content=payload_expr) if payload_expr is not None else None,
         execution_key="svc",
         channel="twilio",
         our_identity=our_identity,
@@ -894,7 +912,7 @@ async def test_tool_payload_on_the_api_door_carries_the_person_and_composed_addr
         door="api",
         target_kind="tool",
         target_name="pinger",
-        payload_expr=".",
+        payload_expr=TemplatedText(content="."),
         execution_key="svc",
         callback_url="https://cb.example/x",
         callback_secret="sec-1",

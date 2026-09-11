@@ -442,3 +442,89 @@ def test_consumers_union_serializes_every_family_including_unavailable(monkeypat
     preset_row = next(r for r in rows if r["kind"] == "preset")
     assert preset_row["detail"] == "binds state_merge"
     assert preset_row["link"]["token"] == "presets"
+
+
+# --------------------------------------------------------------------------- #
+# put_state_template with a template_jq section — the operation door drives the   #
+# service's render + sibling-prelude compile. A stub service would skip that path, #
+# so these run the REAL service over an in-memory store with a resource manager    #
+# that serves stored program bodies by id.                                         #
+# --------------------------------------------------------------------------- #
+_TEMPLATE_JQ_STORED = {"stored-any-due": "(.ledger // []) | length > 0"}
+
+
+class _ProgramResourceManager:
+    """Renders a program body: inline ``content`` verbatim, a stored ``id`` from the
+    map, and a loud not-found for an unmapped id (the real manager's behavior)."""
+
+    async def render_templated_text(self, text, locale=None):
+        if text.id is not None:
+            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+
+            if text.id not in _TEMPLATE_JQ_STORED:
+                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+            return _TEMPLATE_JQ_STORED[text.id]
+        return text.content
+
+
+def _real_states_door(monkeypatch: pytest.MonkeyPatch):
+    """Wire ``ops._states`` to a real :class:`StatesService` over the in-memory store, with
+    a resource manager bound for the render at the save door, and return the service."""
+    from tai42_skeleton.states import service as service_mod
+    from tai42_skeleton.states.service import StatesService
+
+    from ..states.test_service import FakeStatesStore
+
+    class _App:
+        storage = type("_S", (), {"resource_manager": _ProgramResourceManager()})()
+
+    monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
+    svc = StatesService(store=FakeStatesStore())  # type: ignore[arg-type]
+    monkeypatch.setattr(ops, "_states", lambda: svc)
+    return _App()
+
+
+_LEDGER_SCHEMA = {"type": "object", "properties": {"ledger": {"type": "array", "items": {"type": "object"}}}}
+
+
+def test_put_state_template_with_template_jq_section_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _real_states_door(monkeypatch)
+    with tai42_app.bound(app):
+        inline = asyncio.run(
+            ops.put_state_template(
+                "summary",
+                {
+                    "schema": _LEDGER_SCHEMA,
+                    "template_jq": {"any_due": {"purpose": "input", "jq": {"content": "(.ledger // []) | length > 0"}}},
+                },
+            )
+        )
+        assert inline["name"] == "summary"
+        assert inline["template_jq"]["any_due"]["jq"] == {"content": "(.ledger // []) | length > 0"}
+        byid = asyncio.run(
+            ops.put_state_template(
+                "summary-byid",
+                {
+                    "schema": _LEDGER_SCHEMA,
+                    "template_jq": {"any_due": {"purpose": "input", "jq": {"id": "stored-any-due"}}},
+                },
+            )
+        )
+        assert byid["template_jq"]["any_due"]["jq"] == {"id": "stored-any-due"}
+
+
+def test_put_state_template_by_id_body_that_cannot_be_fetched_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _real_states_door(monkeypatch)
+    with tai42_app.bound(app), pytest.raises(ValidationRejected) as excinfo:
+        asyncio.run(
+            ops.put_state_template(
+                "summary-missing",
+                {
+                    "schema": _LEDGER_SCHEMA,
+                    "template_jq": {"any_due": {"purpose": "input", "jq": {"id": "absent-id"}}},
+                },
+            )
+        )
+    assert excinfo.value.status == 422
+    assert "absent-id" in str(excinfo.value)
+    assert "could not be fetched" in str(excinfo.value)

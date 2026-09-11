@@ -51,7 +51,7 @@ from tai42_contract.interactions.models import (
 )
 from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.states.binding import StateBinding
-from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
 #: Which door a route is reached through: ``api`` delivers by signed callback,
 #: ``channel`` delivers back through the medium adapter's ``notify``.
@@ -618,15 +618,16 @@ class ConversationRouteCreate(BaseModel):
     door: ConversationDoor
     target_kind: ConversationTargetKind
     target_name: str = Field(min_length=1)
-    # tool targets only: a jq program mapping the inbound payload to the tool kwargs, and
-    # one mapping the tool result to the reply. Compiled at create; an ``agent`` target
-    # carries neither. ``reply_expr`` maps the SUCCESS shape: a result whose own ``status``
-    # names a non-success terminal diverts to the turn's error outcome without being mapped.
+    # tool targets only: a templated text carrying (inline or by stored id) a jq program
+    # mapping the inbound payload to the tool kwargs, and one mapping the tool result to the
+    # reply. Rendered then compiled at create; an ``agent`` target carries neither.
+    # ``reply_expr`` maps the SUCCESS shape: a result whose own ``status`` names a
+    # non-success terminal diverts to the turn's error outcome without being mapped.
     # Both carry the ``x-tai42-expression`` schema annotation (via ``Annotated`` so the
     # attribute default stays the ``None`` literal — the api-gate flags a ``Field(default=...)``
     # redeclaration as breaking) so a schema-driven UI auto-renders the jq editor.
     payload_expr: Annotated[
-        str | None,
+        TemplatedText | None,
         Field(
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
@@ -659,7 +660,7 @@ class ConversationRouteCreate(BaseModel):
         ),
     ] = None
     reply_expr: Annotated[
-        str | None,
+        TemplatedText | None,
         Field(
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(

@@ -30,6 +30,7 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import get_resume_continuation_tool, suspended_interaction_marker
+from tai42_contract.template import TemplatedText
 
 from tai42_agents._internal.park import agent_resume, build_park_identity
 from tai42_agents._internal.park import driver as drv
@@ -763,7 +764,9 @@ def test_full_park_resume_cycle_runs_ask_once_and_clears_index(
     agent = tai42_app.agents.get_agent("langchain_deep_agent")
 
     async def go() -> Any:
-        receipt = await agent.run(tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-int")
+        receipt = await agent.run(
+            tool_names=["ask"], checkpoint_provider="redis", user_message=TemplatedText(content="go"), thread_id="t-int"
+        )
         assert receipt == {
             "status": "suspended",
             "interaction_ids": ["i1"],
@@ -800,7 +803,12 @@ def test_agent_resume_rejects_a_no_longer_pending_interrupt(
     agent = tai42_app.agents.get_agent("langchain_deep_agent")
 
     async def go() -> None:
-        await agent.run(tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-stale")
+        await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-stale",
+        )
 
         # Corrupt the stored interrupt id so it no longer matches the pending park interrupt.
         entry = await idx.read_park_entry("i1")
@@ -923,7 +931,9 @@ def _two_parallel_subagent_park_setup(
     )
     _wire_real_build(monkeypatch, model, saver, store)
 
-    subagent = DeepSubAgentSpec(name="asker", description="asks the user", system_prompt="ask", tools=["ask"])
+    subagent = DeepSubAgentSpec(
+        name="asker", description="asks the user", system_prompt=TemplatedText(content="ask"), tools=["ask"]
+    )
     agent = tai42_app.agents.get_agent("langchain_deep_agent")
     assert isinstance(agent, agent_mod.DeepAgent)
     return agent, subagent, ask_calls
@@ -937,7 +947,7 @@ async def _park_two_parallel_subagents(agent: Any, subagent: Any, ask_calls: dic
     receipt = await agent.run(
         subagents=[subagent],
         checkpoint_provider="redis",
-        user_message="go",
+        user_message=TemplatedText(content="go"),
         thread_id=thread_id,
     )
     assert receipt["status"] == "suspended"

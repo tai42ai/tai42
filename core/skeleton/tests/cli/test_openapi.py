@@ -1321,15 +1321,15 @@ def test_resources_get_read_route_documents_query_params_not_a_body(
     assert params["resource_id"]["in"] == "query"
     assert params["resource_id"]["required"] is True
     assert params["resource_id"]["schema"]["type"] == "string"
-    # ``template_kwargs`` is a body input the render POST takes, never a GET query value (a query
+    # ``kwargs`` is a body input the render POST takes, never a GET query value (a query
     # string cannot carry the nested object it is), so it is absent from the GET and rides the
     # POST's ``ResourceGet`` body alone — a generated GET client is never told to send a value
     # every request would reject.
-    assert "template_kwargs" not in params
+    assert "kwargs" not in params
     post_op = spec["paths"]["/api/resources/get"]["post"]
     assert post_op["requestBody"]["content"]["application/json"]["schema"]["$ref"].endswith("/ResourceGet")
     body = spec["components"]["schemas"]["ResourceGet"]
-    assert "template_kwargs" in body["properties"]
+    assert "kwargs" in body["properties"]
 
 
 def test_spec_validates_against_openapi_31(spec: dict) -> None:

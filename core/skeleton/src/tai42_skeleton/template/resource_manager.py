@@ -17,6 +17,7 @@ from jinja2 import Template as JinjaTemplate
 from jinja2.sandbox import SandboxedEnvironment
 from jinja2schema import JSONSchemaDraft4Encoder, infer, to_json_schema
 from tai42_contract.storage import Storage
+from tai42_contract.template import TemplatedText
 from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.net import fetch_url
 
@@ -514,35 +515,29 @@ class ResourceManager:
 
         return await asyncio.to_thread(_render)
 
-    async def render_by_id_or_content(
-        self,
-        content: str | None = None,
-        template_id: str | None = None,
-        kwargs: dict[str, Any] | None = None,
-        allow_empty: bool = True,
-        locale: str | None = None,
-    ) -> str:
-        if content is not None and template_id is not None:
-            raise ValueError("Provide either 'content' OR 'template_id', not both.")
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        """Render ``text`` — the stored resource it names by ``id``, else its inline
+        ``content`` — with its own ``kwargs`` as the render context.
 
-        context = self._with_locale(kwargs or {}, locale)
+        A stored id resolves through :meth:`render_by_id` (locale variants included), so a
+        missing one raises ``TemplateNotFoundError``; a template the engine cannot render
+        raises out of Jinja. ``locale`` also reaches an inline render, as the language the
+        ``list_format`` filter formats in.
+        """
+        if text.id is not None:
+            return await self.render_by_id(text.id, text.kwargs, locale=locale)
 
-        if content is not None:
+        content = text.content
+        # A templated text carries exactly one source, so with no id the content is a real
+        # string (present-but-empty included — an empty template renders to an empty string).
+        assert content is not None
+        context = self._with_locale(text.kwargs, locale)
 
-            def _parse_and_render() -> str:
-                with self._render_scope():
-                    return self._compile_inline(content).render(**context)
+        def _parse_and_render() -> str:
+            with self._render_scope():
+                return self._compile_inline(content).render(**context)
 
-            return await asyncio.to_thread(_parse_and_render)
-
-        elif template_id is not None:
-            return await self.render_by_id(template_id, kwargs or {}, locale=locale)
-
-        elif allow_empty:
-            return ""
-
-        else:
-            raise ValueError("You must provide either a template or a template_id.")
+        return await asyncio.to_thread(_parse_and_render)
 
     def _variables_only_schema(self, content: str) -> dict[str, Any]:
         """Build the degraded, names-only input schema for ``content``.

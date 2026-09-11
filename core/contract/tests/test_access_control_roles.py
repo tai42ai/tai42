@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from tai42_contract.access_control import RoleDefinition
+from tai42_contract.template import TemplatedText
 
 
 def test_exported_from_package():
@@ -29,8 +30,6 @@ def test_minimal_defaults():
     # scopes default to ["*"]; the jq base and base tier are unset; not allow-all.
     assert role.scopes == ["*"]
     assert role.condition is None
-    assert role.condition_id is None
-    assert role.condition_kwargs is None
     assert role.base_tier is None
     assert role.allow_all is False
     assert role.grants == {"presets": "write"}
@@ -49,7 +48,7 @@ def test_round_trips_through_model_dump():
         name="reviewer",
         description="Read-only reviewer",
         scopes=["read:things"],
-        condition='.request.method == "GET"',
+        condition=TemplatedText(content='.request.method == "GET"'),
         base_tier="viewer",
         allow_all=False,
         grants={"presets": "read", "hooks": "read", "access-control": "none"},
@@ -58,7 +57,7 @@ def test_round_trips_through_model_dump():
     rebuilt = RoleDefinition(**dumped)
     assert rebuilt == role
     # The jq base and every Layer-2 field survive the round-trip.
-    assert rebuilt.condition == '.request.method == "GET"'
+    assert rebuilt.condition == TemplatedText(content='.request.method == "GET"')
     assert rebuilt.base_tier == "viewer"
     assert rebuilt.allow_all is False
     assert rebuilt.grants == {"presets": "read", "hooks": "read", "access-control": "none"}

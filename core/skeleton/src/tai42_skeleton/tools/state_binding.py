@@ -26,10 +26,27 @@ from tai42_contract.states import (
     WriteOrigin,
 )
 from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import run_jq_first
+
+from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
+
+
+async def _render_slot(app: TaiMCP, slot: str, text: TemplatedText) -> str:
+    """Render one binding jq slot's templated text to its jq program before it is compiled or
+    evaluated — the render happens HERE at the door, never inside a contract model validator.
+
+    A slot given by ``id`` is fetched and rendered; a stored id that cannot be fetched is a
+    LOUD refusal naming the slot and the id, never a silent pass or a deferred surprise."""
+    try:
+        return await app.storage.resource_manager.render_templated_text(text)
+    except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+        raise ValueValidationError(
+            f"state binding {slot} references stored id {text.id!r}, which could not be fetched: {exc}"
+        ) from exc
 
 
 def merge_bindings(door: StateBinding | None, preset: StateBinding | None) -> StateBinding | None:
@@ -67,14 +84,15 @@ def merge_bindings(door: StateBinding | None, preset: StateBinding | None) -> St
     return StateBinding(states=[merged[name] for name in order])
 
 
-async def _scope_engaged(attach: StateAttach, run_input: dict[str, Any]) -> bool:
-    """Whether ``attach`` engages for this run — its ``scope_expr`` is an optional BOOLEAN
-    predicate over the run input: absent engages, ``true`` engages, ``false`` SKIPS the state
-    for this run (no injections/updates), and any non-boolean result is a loud refusal (never
-    a silent skip)."""
+async def _scope_engaged(app: TaiMCP, attach: StateAttach, run_input: dict[str, Any]) -> bool:
+    """Whether ``attach`` engages for this run — its ``scope_expr`` renders to an optional
+    BOOLEAN predicate over the run input: absent engages, ``true`` engages, ``false`` SKIPS the
+    state for this run (no injections/updates), and any non-boolean result is a loud refusal
+    (never a silent skip)."""
     if attach.scope_expr is None:
         return True
-    verdict = await run_jq_first(attach.scope_expr, run_input)
+    expr = await _render_slot(app, f"scope_expr for state {attach.state!r}", attach.scope_expr)
+    verdict = await run_jq_first(expr, run_input)
     if not isinstance(verdict, bool):
         raise ValueValidationError(
             f"state binding scope_expr for state {attach.state!r} must yield a boolean, got {verdict!r}"
@@ -90,7 +108,8 @@ async def _resolve_subject(app: TaiMCP, attach: StateAttach, run_input: dict[str
     from the ambient :class:`~tai42_contract.states.StateContext` the door deposited and its
     ``kind`` from the state's ``default_subject_kind``. Any other shape, or a key with no
     ambient scope, is a loud refusal — never a silent skip."""
-    resolved = await run_jq_first(attach.subject_expr, run_input)
+    expr = await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr)
+    resolved = await run_jq_first(expr, run_input)
     if isinstance(resolved, dict):
         return StateSubject.model_validate(resolved)
     if not isinstance(resolved, str) or not resolved.strip():
@@ -122,7 +141,7 @@ async def apply_binding_injections(app: TaiMCP, binding: StateBinding, arguments
     input jq is a loud refusal); a custom ``jq`` runs over ``{record, input}``. The value
     lands at ``into``. An attach whose ``scope_expr`` predicate is ``false`` is skipped."""
     for attach in binding.states:
-        if not await _scope_engaged(attach, arguments):
+        if not await _scope_engaged(app, attach, arguments):
             continue
         subject = await _resolve_subject(app, attach, arguments)
         for injection in attach.input_injections:
@@ -133,17 +152,21 @@ async def apply_binding_injections(app: TaiMCP, binding: StateBinding, arguments
                 assert injection.jq is not None  # the model sets exactly one of template_jq/jq
                 record = await app.states.read(attach.state, subject)
                 data = record.data if record is not None else {}
-                value = await run_jq_first(injection.jq, {"record": data, "input": arguments})
+                jq = await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq)
+                value = await run_jq_first(jq, {"record": data, "input": arguments})
             arguments[injection.into] = value
 
 
-async def _resolve_op_id(op_id_expr: str | None, run_input: dict[str, Any], output: Any) -> str | None:
-    """An update's optional ``op_id`` idempotency key from its expression over
+async def _resolve_op_id(
+    app: TaiMCP, state: str, op_id_expr: TemplatedText | None, run_input: dict[str, Any], output: Any
+) -> str | None:
+    """An update's optional ``op_id`` idempotency key from its rendered expression over
     ``{output, input}``; ``null`` means no key. A non-string, non-null result is a loud
     refusal."""
     if op_id_expr is None:
         return None
-    value = await run_jq_first(op_id_expr, {"output": output, "input": run_input})
+    expr = await _render_slot(app, f"op_id expression for state {state!r}", op_id_expr)
+    value = await run_jq_first(expr, {"output": output, "input": run_input})
     if value is None or isinstance(value, str):
         return value
     raise ValueValidationError(f"state binding op_id expression must yield a string or null, got {value!r}")
@@ -163,14 +186,15 @@ async def apply_binding_updates(
     CUSTOM update writes as the door's own writer (``door_id`` = the dispatched definition).
     An attach whose ``scope_expr`` predicate is ``false`` is skipped."""
     for attach in binding.states:
-        if not await _scope_engaged(attach, arguments):
+        if not await _scope_engaged(app, attach, arguments):
             continue
         subject = await _resolve_subject(app, attach, arguments)
         for update in attach.updates:
-            op_id = await _resolve_op_id(update.op_id, arguments, output)
+            op_id = await _resolve_op_id(app, attach.state, update.op_id, arguments, output)
             if update.template_jq is not None:
                 if update.adapter is not None:
-                    adapted = await run_jq_first(update.adapter, {"output": output, "input": arguments})
+                    adapter = await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter)
+                    adapted = await run_jq_first(adapter, {"output": output, "input": arguments})
                 else:
                     adapted = arguments
                 await app.states.apply_template_jq(
@@ -185,7 +209,8 @@ async def apply_binding_updates(
                 assert update.jq is not None  # the model sets exactly one of template_jq/jq
                 record = await app.states.read(attach.state, subject)
                 data = record.data if record is not None else {}
-                ops = await run_jq_first(update.jq, {"record": data, "output": output, "input": arguments})
+                jq = await _render_slot(app, f"update jq for state {attach.state!r}", update.jq)
+                ops = await run_jq_first(jq, {"record": data, "output": output, "input": arguments})
                 if not isinstance(ops, list):
                     raise ValueValidationError(
                         f"state binding custom update jq for state {attach.state!r} must return an op batch "
@@ -203,9 +228,11 @@ async def validate_and_attach_binding(app: TaiMCP, binding: StateBinding) -> Non
     Attach-on-use: each named template is attached at its own path ``[<template>]`` — shared by
     every door/node that binds the state — IDEMPOTENTLY (an already-attached template is left
     as is; a second template at an occupied path is refused by ``attach``). An attach failure
-    raises and the save fails. Then each expression is compiled (subject/scope exprs, custom
-    injection/update jqs, op-id exprs, adapters), and every named ``template_jq`` referenced by
-    an injection/update is resolved against the state's attachments with the right purpose — an
+    raises and the save fails. Then each authored slot (subject/scope exprs, custom
+    injection/update jqs, op-id exprs, adapters) is RENDERED to its jq program — a by-id slot
+    whose resource cannot be fetched fails the save loudly, naming the slot and the id — and
+    the rendered program is compiled; every named ``template_jq`` referenced by an
+    injection/update is resolved against the state's attachments with the right purpose — an
     unknown/ambiguous name, or a named update that names params but carries no adapter to fill
     them, is a loud refusal at save."""
     await _validate_binding(app, binding, do_attach=True)
@@ -239,27 +266,27 @@ async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bo
                 await app.states.attach(attach.state, template, AttachBody(path=[template]))
             elif await app.states.get_template(template) is None:
                 raise StateNotFoundError(f"template {template!r} to attach on state {attach.state!r} does not exist")
-        compile_check(attach.subject_expr)
+        compile_check(await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr))
         if attach.scope_expr is not None:
-            compile_check(attach.scope_expr)
+            compile_check(await _render_slot(app, f"scope_expr for state {attach.state!r}", attach.scope_expr))
         for injection in attach.input_injections:
             if injection.jq is not None:
-                compile_check(injection.jq)
+                compile_check(await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq))
             else:
                 assert injection.template_jq is not None  # the model sets exactly one source
                 await _require_program(app, attach.state, injection.template_jq, "input", declared=attach.templates)
         for update in attach.updates:
             if update.op_id is not None:
-                compile_check(update.op_id)
+                compile_check(await _render_slot(app, f"op_id expression for state {attach.state!r}", update.op_id))
             if update.jq is not None:
-                compile_check(update.jq)
+                compile_check(await _render_slot(app, f"update jq for state {attach.state!r}", update.jq))
             else:
                 assert update.template_jq is not None  # the model sets exactly one source
                 program = await _require_program(
                     app, attach.state, update.template_jq, "update", declared=attach.templates
                 )
                 if update.adapter is not None:
-                    compile_check(update.adapter)
+                    compile_check(await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter))
                 elif program.get("params"):
                     raise ValueValidationError(
                         f"state binding update {update.template_jq!r} on state {attach.state!r} declares params "

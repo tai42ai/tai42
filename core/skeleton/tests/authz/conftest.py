@@ -28,8 +28,8 @@ SHADOW_ROUTE = "/api/things/shadow/fenced"
 
 
 class _FakeResourceManager:
-    async def render_by_id_or_content(self, *, content, template_id, kwargs):
-        return content
+    async def render_templated_text(self, text, locale=None):
+        return text.content or ""
 
 
 class _FakeStorage:

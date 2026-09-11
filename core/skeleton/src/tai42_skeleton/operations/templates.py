@@ -26,12 +26,12 @@ Defense in depth over the store's own root check.
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from jinja2 import TemplateError
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 from tai42_contract.storage import StoragePathConflictError
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, operation
@@ -74,12 +74,10 @@ class TemplateDirDelete(BaseModel):
 
 
 class TemplateRender(BaseModel):
-    """Render a template — inline ``content`` OR a stored ``template_id`` — with
-    ``kwargs``."""
+    """Render the one authored ``text`` — inline ``content`` OR a stored ``id``,
+    plus its render ``kwargs`` — on demand."""
 
-    content: str | None = None
-    template_id: str | None = None
-    kwargs: dict[str, object] = {}
+    text: TemplatedText
 
 
 def _safe_key(key: object) -> str:
@@ -271,35 +269,22 @@ async def delete_template_dir(path: str) -> dict:
     request_model=TemplateRender,
     response_model=RenderedTemplate,
 )
-async def render_template(
-    content: str | None = None,
-    template_id: str | None = None,
-    kwargs: dict[str, Any] | None = None,
-) -> dict:
-    """Render an inline ``content`` OR a stored ``template_id`` with ``kwargs``.
+async def render_template(text: TemplatedText) -> dict:
+    """Render the one authored ``text`` — inline ``content`` OR a stored ``id`` — with
+    its ``kwargs``.
 
-    Exactly one of ``content``/``template_id`` is required. A missing stored
-    template is a ``404``; broken client-supplied Jinja (a syntax error, a
-    sandbox-blocked dunder traversal → ``SecurityError``, an undefined access) is
-    author error → ``400``. Genuine storage failures raise other types (``500``).
+    ``text`` carries EXACTLY ONE source: its own type refuses neither and both, so a
+    caller supplying the wrong shape is a loud ``400`` at the edge. A stored ``id`` that
+    cannot be fetched is a ``404`` naming that id; broken client-supplied Jinja (a syntax
+    error, a sandbox-blocked dunder traversal → ``SecurityError``, an undefined access)
+    is author error → ``400``. Genuine storage failures raise other types (``500``).
     """
-    kwargs = kwargs or {}
-    if content is None and template_id is None:
-        raise BadRequestError("one of 'content' or 'template_id' is required")
-    if content is not None and template_id is not None:
-        raise BadRequestError("provide either 'content' or 'template_id', not both")
-    if content is not None and not isinstance(content, str):
-        raise BadRequestError("'content' must be a string")
-    if not isinstance(kwargs, dict):
-        raise BadRequestError("'kwargs' must be a JSON object")
-    if template_id is not None:
-        template_id = _safe_key(template_id)
+    # A stored id is a caller-supplied logical key: run it through the containment guard
+    # (which maps an escape to a loud 400) before it reaches the store.
+    if text.id is not None:
+        text = TemplatedText(id=_safe_key(text.id), kwargs=text.kwargs)
     try:
-        rendered = await tai42_app.storage.resource_manager.render_by_id_or_content(
-            content=content,
-            template_id=template_id,
-            kwargs=kwargs,
-        )
+        rendered = await tai42_app.storage.resource_manager.render_templated_text(text)
     except TemplateNotFoundError as exc:
         raise NotFoundError(str(exc)) from exc
     except TemplateError as exc:

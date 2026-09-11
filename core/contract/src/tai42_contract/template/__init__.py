@@ -1,35 +1,39 @@
-"""Render-mixin models.
+"""The templated-text value type and the render mixins that carry it.
 
-``ConditionMixin`` / ``ExprMixin`` carry the jq/template fields a schema needs to
-render a condition or an expression. The ``rendered_condition`` / ``rendered_expr``
-methods are impl (they reach the live ``resource_manager``) and live with the
-``ResourceManager`` impl, not in this pure-model contract — only the field shape
-is the contract.
+:class:`TemplatedText` is the ONE shape every renderable text on the wire takes: inline
+``content`` or a stored ``id``, plus the ``kwargs`` its render takes. ``ConditionMixin``
+/ ``ExprMixin`` carry the templated text a schema needs to render a condition or an
+expression. The ``rendered_condition`` / ``rendered_expr`` methods are impl (they reach
+the live ``resource_manager``) and live with the ``ResourceManager`` impl, not in this
+pure-model contract — only the field shape is the contract.
 
-The jq-typed STRING fields (``condition`` / ``expr``) additionally declare
-themselves in every generated JSON schema: each carries a vendor annotation under
-:data:`EXPRESSION_ANNOTATION_KEY` built by :func:`expression_annotation`, so any
-schema consumer (an OpenAPI reader, a tool-listing client, editor tooling) can
-recognize the property as a jq expression and learn its input/output without
-guessing from field names. The annotation is schema METADATA only — it never
-validates a value — and it is strictly additive: a field without one generates a
-byte-identical schema to a plain declaration. A declaring model refines the
-generic wording here by overriding the field with its own surface-specific
-payload (see the backend callback schema). The ``*_id`` / ``*_kwargs`` template
-companions are NOT jq strings and stay unannotated.
+Two vendor annotations declare themselves in every generated JSON schema, both schema
+METADATA only (an ``x-``-prefixed key is ignored by JSON-Schema validation, so neither
+can change what values a schema accepts):
+
+* :data:`TEMPLATED_TEXT_ANNOTATION_KEY` on the :class:`TemplatedText` TYPE, so a schema
+  consumer recognizes every property of this type without matching field names.
+* :data:`EXPRESSION_ANNOTATION_KEY` on each jq-typed property, built by
+  :func:`expression_annotation`, so a consumer (an OpenAPI reader, a tool-listing
+  client, editor tooling) learns the expression's input/output without guessing. A
+  declaring model refines the generic wording here by overriding the field with its own
+  surface-specific payload (see the backend callback schema).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
-# The vendor-extension key a jq-typed string property carries in generated JSON
-# schemas. An ``x-``-prefixed key is ignored by JSON-Schema validation, so the
-# annotation can never change what values a schema accepts.
+# The vendor-extension key a jq-typed property carries in generated JSON schemas.
 EXPRESSION_ANNOTATION_KEY = "x-tai42-expression"
+
+# The vendor-extension key the ``TemplatedText`` type stamps on its own generated JSON
+# schema, and its payload: the language the text is rendered in.
+TEMPLATED_TEXT_ANNOTATION_KEY = "x-tai42-templated-text"
+TEMPLATED_TEXT_ANNOTATION: dict[str, Any] = {"language": "jinja"}
 
 # Sentinel distinguishing "no sample supplied" from a legitimate sample value of
 # None / {} / [] (all of which are meaningful sample documents).
@@ -78,6 +82,47 @@ def expression_annotation(
     return payload
 
 
+class TemplatedText(BaseModel):
+    """A renderable text: its source plus the parameters its render takes.
+
+    EXACTLY ONE source is set — ``content`` (the text inline) or ``id`` (the id of a
+    stored resource holding the text); neither and both are refused at construction.
+    ``kwargs`` are the render parameters for the TEXT and apply either way, so moving a
+    text from inline to stored (or back) leaves its parameters untouched.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid", json_schema_extra={TEMPLATED_TEXT_ANNOTATION_KEY: TEMPLATED_TEXT_ANNOTATION}
+    )
+
+    content: str | None = None
+    id: str | None = None
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _require_exactly_one_source(self) -> Self:
+        if self.content is not None and self.id is not None:
+            raise ValueError(
+                f"a templated text takes 'content' or 'id', not both: content={self.content!r}, id={self.id!r}"
+            )
+        if self.content is None and self.id is None:
+            raise ValueError("a templated text takes inline 'content' or a stored 'id'; neither was supplied")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_canonical(self, handler: Any) -> dict[str, Any]:
+        """The single wire shape every door emits: exactly the ONE source key that is set
+        (``content`` or ``id``) and ``kwargs`` only when it carries render parameters. The
+        unset source key and an empty ``kwargs`` are dropped, so the wire never carries a
+        null source or empty noise regardless of the caller's dump flags — a strict consumer
+        sees exactly one source and no nulls."""
+        data = handler(self)
+        data.pop("content" if self.content is None else "id", None)
+        if not self.kwargs:
+            data.pop("kwargs", None)
+        return data
+
+
 class ConditionMixin(BaseModel):
     # The generic payload is the TRUTHY common denominator: a non-overriding
     # inheriting surface (hook registration) evaluates ``condition`` over its own
@@ -88,7 +133,7 @@ class ConditionMixin(BaseModel):
     # facts are sharper than "truthy proceeds" must override rather than inherit
     # this wording (see the access-control and backend callback schemas).
     condition: Annotated[
-        str | None,
+        TemplatedText | None,
         Field(
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
@@ -99,8 +144,6 @@ class ConditionMixin(BaseModel):
             }
         ),
     ] = None
-    condition_id: str | None = None
-    condition_kwargs: dict[str, Any] | None = None
 
 
 class ExprMixin(BaseModel):
@@ -108,7 +151,7 @@ class ExprMixin(BaseModel):
     # surface evaluates ``expr`` over its own input document and consumes the
     # transformed result; surfaces with sharper facts override the field.
     expr: Annotated[
-        str | None,
+        TemplatedText | None,
         Field(
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
@@ -119,8 +162,14 @@ class ExprMixin(BaseModel):
             }
         ),
     ] = None
-    expr_id: str | None = None
-    expr_kwargs: dict[str, Any] | None = None
 
 
-__all__ = ["EXPRESSION_ANNOTATION_KEY", "ConditionMixin", "ExprMixin", "expression_annotation"]
+__all__ = [
+    "EXPRESSION_ANNOTATION_KEY",
+    "TEMPLATED_TEXT_ANNOTATION",
+    "TEMPLATED_TEXT_ANNOTATION_KEY",
+    "ConditionMixin",
+    "ExprMixin",
+    "TemplatedText",
+    "expression_annotation",
+]

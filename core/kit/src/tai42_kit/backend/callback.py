@@ -20,6 +20,7 @@ from tai42_contract.states import StateSubject
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.lc.signature_util import exclude_fastmcp_ctx_from_kwargs
+from tai42_kit.utils.render import render_templated_text
 from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG, SCHEDULE_SUBJECT_ARG
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
@@ -29,18 +30,12 @@ class CallbackSchema(CallbackFields):
     resource manager."""
 
     async def rendered_condition(self) -> str:
-        return await tai42_app.storage.resource_manager.render_by_id_or_content(
-            content=self.condition,
-            template_id=self.condition_id,
-            kwargs=self.condition_kwargs,
-        )
+        # No condition is an empty condition: the execution gate treats "" as "run".
+        return await render_templated_text(self.condition) if self.condition is not None else ""
 
     async def rendered_expr(self) -> str:
-        return await tai42_app.storage.resource_manager.render_by_id_or_content(
-            content=self.expr,
-            template_id=self.expr_id,
-            kwargs=self.expr_kwargs,
-        )
+        # No expression is an empty expression: the execution path yields {} for it.
+        return await render_templated_text(self.expr) if self.expr is not None else ""
 
 
 async def prepare_backend_kwargs(

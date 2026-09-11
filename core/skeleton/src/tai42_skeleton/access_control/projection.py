@@ -379,8 +379,8 @@ class _PreparedPass:
 
     Only ``.request`` varies per ``(path, method)`` probe, so a probe shallow-copies the
     base body and substitutes ``request`` rather than re-rendering the condition (a
-    storage read for a ``condition_id``) and rebuilding+dumping the whole context on
-    every pass — mirroring how the backend renders once per request."""
+    storage read for a stored ``condition`` id) and rebuilding+dumping the whole context
+    on every pass — mirroring how the backend renders once per request."""
 
     __slots__ = ("base", "condition", "configured")
 
@@ -400,10 +400,10 @@ async def _prepare_pass(
 ) -> _PreparedPass:
     """Render ``policy``'s condition ONCE and build the invariant jq-context body ONCE
     for reuse across every per-probe pass in this build."""
-    condition = await tai42_app.storage.resource_manager.render_by_id_or_content(
-        content=policy.condition, template_id=policy.condition_id, kwargs=policy.condition_kwargs
-    )
-    configured = policy.condition is not None or policy.condition_id is not None
+    condition = ""
+    if policy.condition is not None:
+        condition = await tai42_app.storage.resource_manager.render_templated_text(policy.condition)
+    configured = policy.condition is not None
     base = JqAuthContext(
         sub=user_id,
         scopes=list(scopes),
@@ -532,7 +532,7 @@ async def _build_uncached(
     owner_pass: _PreparedPass | None = None
     if not admin:
         key_pass = await _prepare_pass(policy, effective_scopes, claims, live_ctx, user_id, now)
-        if owner_policy is not None and (owner_policy.condition is not None or owner_policy.condition_id is not None):
+        if owner_policy is not None and owner_policy.condition is not None:
             owner_pass = await _prepare_pass(owner_policy, list(owner_policy.scopes), claims, live_ctx, user_id, now)
 
     async def admits(path: str, method: str) -> bool:

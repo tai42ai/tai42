@@ -256,7 +256,7 @@ async def test_create_api_key_disabled_refuses(monkeypatch):
     # gate fires before resolve_caller, so no acting principal is needed.
     monkeypatch.setattr(ops, "access_control_settings", lambda: AccessControlSettings(enable=False))
     with pytest.raises(NotSupportedError) as exc_info:
-        await ops.create_api_key("u", "d", [], None, None, None, None, None)
+        await ops.create_api_key("u", "d", [], None, None, None)
     assert exc_info.value.extra["code"] == "access-control-disabled"
 
 

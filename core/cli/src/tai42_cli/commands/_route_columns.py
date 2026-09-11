@@ -43,25 +43,13 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("GET", "/api/auth/capabilities"): RouteShape(items_key="providers", columns=("name", "mintable")),
     ("GET", "/api/auth/public-routes"): RouteShape(items_key=None, columns=("value",)),
     ("GET", "/api/auth/roles"): RouteShape(
-        items_key=None,
-        columns=(
-            "condition",
-            "condition_id",
-            "condition_kwargs",
-            "name",
-            "description",
-            "scopes",
-            "base_tier",
-            "allow_all",
-            "grants",
-        ),
+        items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
     ("GET", "/api/auth/routes"): RouteShape(
         items_key=None, columns=("path", "methods", "mapped", "tags", "summary", "action")
     ),
     ("GET", "/api/auth/tokens-payload"): RouteShape(
-        items_key=None,
-        columns=("user_id", "description", "scopes", "policy_data", "condition", "condition_id", "condition_kwargs"),
+        items_key=None, columns=("user_id", "description", "scopes", "policy_data", "condition")
     ),
     ("GET", "/api/backup/sections"): RouteShape(items_key=None, columns=("name", "secret")),
     ("GET", "/api/channels"): RouteShape(items_key="channels", columns=("value",)),
@@ -230,11 +218,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key="items",
         columns=(
             "expr",
-            "expr_id",
-            "expr_kwargs",
             "condition",
-            "condition_id",
-            "condition_kwargs",
             "name",
             "topic",
             "tool",
@@ -436,46 +420,13 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key=None, columns=("user_id", "updated", "scopes")
     ),
     ("POST", "/api/auth/roles"): RouteShape(
-        items_key=None,
-        columns=(
-            "condition",
-            "condition_id",
-            "condition_kwargs",
-            "name",
-            "description",
-            "scopes",
-            "base_tier",
-            "allow_all",
-            "grants",
-        ),
+        items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
     ("POST", "/api/auth/roles/{name}/grants"): RouteShape(
-        items_key=None,
-        columns=(
-            "condition",
-            "condition_id",
-            "condition_kwargs",
-            "name",
-            "description",
-            "scopes",
-            "base_tier",
-            "allow_all",
-            "grants",
-        ),
+        items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
     ("POST", "/api/auth/roles/{name}/rollback"): RouteShape(
-        items_key=None,
-        columns=(
-            "condition",
-            "condition_id",
-            "condition_kwargs",
-            "name",
-            "description",
-            "scopes",
-            "base_tier",
-            "allow_all",
-            "grants",
-        ),
+        items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
     ("POST", "/api/checkpoints/sweep"): RouteShape(
         items_key=None, columns=("provider", "ttl_minutes", "swept_count", "swept_threads", "skipped")
@@ -514,18 +465,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),
     ("PUT", "/api/auth/roles/{name}"): RouteShape(
-        items_key=None,
-        columns=(
-            "condition",
-            "condition_id",
-            "condition_kwargs",
-            "name",
-            "description",
-            "scopes",
-            "base_tier",
-            "allow_all",
-            "grants",
-        ),
+        items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
     ("PUT", "/api/conversations/persons/{person_id}/locale"): RouteShape(
         items_key="addresses", columns=("door", "routes", "channel", "our_identity", "address", "linked_at")

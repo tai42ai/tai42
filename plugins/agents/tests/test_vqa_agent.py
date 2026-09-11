@@ -424,11 +424,23 @@ def test_reject_unhonored_permits_empty_collection_param(param: str, empty: obje
     )
 
 
-@pytest.mark.parametrize(("param", "value"), [("resume", False), ("recursion_limit", 0), ("strategy", "")])
+@pytest.mark.parametrize(
+    ("param", "value"),
+    [
+        ("resume", False),
+        ("recursion_limit", 0),
+        ("strategy", ""),
+        ("system_message", ""),
+        ("user_message", ""),
+    ],
+)
 def test_run_rejects_falsy_but_meaningful_contract_param(fake_llm: None, param: str, value: Any) -> None:
     """A falsy-but-meaningful scalar (``resume=False`` / ``recursion_limit=0`` /
-    ``strategy=""``) is still a request the agent cannot honor and raises — a scalar
-    is set whenever it is not ``None``, so it never slips through a truthiness gate."""
+    ``strategy=""`` / ``system_message=""`` / ``user_message=""``) is still a request the
+    agent cannot honor and raises — a scalar is set whenever it is not ``None``, so it never
+    slips through a truthiness gate. ``system_message``/``user_message`` are scalar
+    (``TemplatedText | None``) contract params, so an empty string is a set value, not a
+    not-requested collection default."""
     with pytest.raises(RuntimeError, match=rf"vqa_agent\.run does not support .*\b{param}\b"):
         asyncio.run(VqaAgent().run(image_url="http://img", query="describe", **{param: value}))  # type: ignore[arg-type]
 
@@ -444,10 +456,8 @@ def test_unhonored_none_passes_the_guard(fake_llm: None, param: str) -> None:
 
 def test_unhonored_collection_empty_passes_the_guard(fake_llm: None) -> None:
     """An empty collection is the ABC's "not requested" sentinel and passes the guard:
-    ``tools=()`` / ``system_message=""`` reach the completion rather than raising."""
-    result = asyncio.run(
-        VqaAgent().run(image_url="http://img", query="describe", tools=(), subagents=[], system_message="")
-    )
+    ``tools=()`` / ``subagents=[]`` reach the completion rather than raising."""
+    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", tools=(), subagents=[]))
     assert result == "Hello"
 
 

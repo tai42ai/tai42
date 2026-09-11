@@ -40,6 +40,7 @@ from tai42_contract.interactions import (
     set_resume_continuation_tool,
     suspended_interaction_marker,
 )
+from tai42_contract.template import TemplatedText
 
 from tai42_agents._internal.park.driver import (
     AGENT_RESUME_TOOL_NAME,
@@ -377,7 +378,7 @@ def test_park_inside_a_subagent_propagates_and_resumes_by_id() -> None:
     subagent = ResolvedSubAgentSpec(
         name="asker",
         description="asks the user",
-        system_prompt="ask",
+        system_prompt=TemplatedText(content="ask"),
         tools=[ask.tool()],
     )
     # Call order across the shared model: main calls task(asker) → subagent calls ask
@@ -426,7 +427,7 @@ def test_two_parallel_subagent_parks_surface_and_resume_by_id() -> None:
     subagent = ResolvedSubAgentSpec(
         name="asker",
         description="asks the user",
-        system_prompt="ask",
+        system_prompt=TemplatedText(content="ask"),
         tools=[StructuredTool.from_function(ask_seq, name="ask", description="ask")],
     )
     model = ScriptedChatModel(

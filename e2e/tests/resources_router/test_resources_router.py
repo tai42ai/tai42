@@ -25,7 +25,7 @@ async def test_stored_resource_reads_back_and_unknown_is_404(
     # Store the resource through the real storage provider's CRUD door.
     await api.post("/api/storage/resources", json={"id": resource_id, "content_text": content})
 
-    # POST /api/resources/get with no template_kwargs returns the content as-is under
+    # POST /api/resources/get with no kwargs returns the content as-is under
     # the success envelope. Assert the raw envelope shape, not just the unwrapped value.
     ok = await api.request_raw("POST", "/api/resources/get", json={"resource_id": resource_id})
     assert ok.status_code == 200, ok.text

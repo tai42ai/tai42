@@ -890,20 +890,42 @@ def test_channel_route_requires_channel_and_identity_forbids_callback():
 
 def test_tool_target_carries_optional_exprs():
     from tai42_contract.conversations import ConversationRouteCreate
+    from tai42_contract.template import TemplatedText
 
     route = ConversationRouteCreate(
-        **_route_kwargs(target_kind="tool", target_name="echo", payload_expr="{message: .message}", reply_expr=".x")
+        **_route_kwargs(
+            target_kind="tool",
+            target_name="echo",
+            payload_expr={"content": "{message: .message}"},
+            reply_expr={"content": ".x"},
+        )
     )
     assert route.target_kind == "tool"
-    assert route.payload_expr == "{message: .message}"
-    assert route.reply_expr == ".x"
+    assert route.payload_expr == TemplatedText(content="{message: .message}")
+    assert route.reply_expr == TemplatedText(content=".x")
+
+
+def test_tool_target_carries_exprs_by_id():
+    from tai42_contract.conversations import ConversationRouteCreate
+    from tai42_contract.template import TemplatedText
+
+    route = ConversationRouteCreate(
+        **_route_kwargs(
+            target_kind="tool",
+            target_name="echo",
+            payload_expr={"id": "route-payload", "kwargs": {"k": "v"}},
+            reply_expr={"id": "route-reply"},
+        )
+    )
+    assert route.payload_expr == TemplatedText(id="route-payload", kwargs={"k": "v"})
+    assert route.reply_expr == TemplatedText(id="route-reply")
 
 
 @pytest.mark.parametrize("field", ["payload_expr", "reply_expr"])
 def test_route_exprs_carry_the_jq_expression_annotation(field: str):
-    # ``payload_expr``/``reply_expr`` are jq-typed strings, so each declares itself in the
-    # generated JSON schema under the shared ``x-tai42-expression`` vendor key (language jq)
-    # for a schema-driven UI to auto-render the jq editor.
+    # ``payload_expr``/``reply_expr`` are jq-typed templated texts, so each declares itself in
+    # the generated JSON schema under the shared ``x-tai42-expression`` vendor key (language
+    # jq) for a schema-driven UI to auto-render the jq editor.
     from tai42_contract.conversations import ConversationRouteCreate
     from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
 
@@ -929,10 +951,11 @@ def test_route_expr_annotation_keeps_the_none_default_additive():
     for field in ("payload_expr", "reply_expr"):
         prop = dict(schema["properties"][field])
         prop.pop(EXPRESSION_ANNOTATION_KEY)
-        # Once the vendor key is removed, the schema is a plain nullable-string defaulting None:
-        # the annotation added ONLY its key and left nullability + the None default intact.
+        # Once the vendor key is removed, the schema is a plain nullable templated text
+        # defaulting None: the annotation added ONLY its key and left nullability + the None
+        # default intact.
         assert prop["default"] is None
-        assert prop["anyOf"] == [{"type": "string"}, {"type": "null"}]
+        assert prop["anyOf"] == [{"$ref": "#/$defs/TemplatedText"}, {"type": "null"}]
 
 
 @pytest.mark.parametrize("field", ["payload_expr", "reply_expr"])
@@ -940,7 +963,7 @@ def test_agent_target_forbids_exprs(field: str):
     from tai42_contract.conversations import ConversationRouteCreate
 
     with pytest.raises(ValidationError, match="no payload_expr/reply_expr"):
-        ConversationRouteCreate(**_route_kwargs(**{field: ".x"}))
+        ConversationRouteCreate(**_route_kwargs(**{field: {"content": ".x"}}))
 
 
 def test_turns_per_hour_override_defaults_to_none_and_must_be_positive():

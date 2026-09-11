@@ -120,7 +120,7 @@ async def test_set_refuses_a_state_binding_on_an_agent_target(wired):
     # an agent turn would silently ignore.
     from tai42_contract.states import StateBinding
 
-    binding = StateBinding.model_validate({"states": [{"state": "status", "subject_expr": ".x"}]})
+    binding = StateBinding.model_validate({"states": [{"state": "status", "subject_expr": {"content": ".x"}}]})
     with pytest.raises(BadRequestError, match="state_binding"):
         await ops.set_conversation_config("agent", "assistant", state_binding=binding)
 

@@ -58,6 +58,7 @@ from tai42_contract.sandbox import (
     SandboxStreamChunk,
     SandboxStreamExit,
 )
+from tai42_contract.template import TemplatedText
 
 from tai42_agents._internal.nested_dispatch import nested_tool_dispatch
 from tai42_agents._internal.park import (
@@ -74,8 +75,9 @@ from tai42_agents._internal.park.lease import LEASE_HEADROOM_SECONDS
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
     reject_unhonored,
-    reject_untitled_response_format,
+    resolve_response_format,
 )
+from tai42_agents._internal.render import render_message
 from tai42_agents._internal.sandbox_util import build_policied_spec, workspace_key_for
 from tai42_agents.claude_code.options import build_options_payload, credential_env_names
 from tai42_agents.claude_code.payload import runner_payload_files
@@ -176,7 +178,7 @@ class SubagentSpecShape(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
     description: str = ""
-    system_prompt: str = ""
+    system_prompt: TemplatedText | None = None
     tool_names: list[str] = Field(default_factory=list)
 
 
@@ -191,12 +193,12 @@ class ClaudeCodeInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_message: str
-    system_message: str = ""
+    user_message: TemplatedText
+    system_message: TemplatedText | None = None
     tool_names: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     inline_skills: list[InlineSkillShape] = Field(default_factory=list)
-    response_format: dict[str, Any] | None = None
+    response_format: TemplatedText | dict[str, Any] | None = None
     max_turns: int | None = None
     subagents: list[SubagentSpecShape] = Field(default_factory=list)
 
@@ -259,17 +261,18 @@ class ClaudeCodeAgent(Agent):
 
     async def run(self, **kwargs: Any) -> Any:
         """Drive one turn and drain the stream to a value (the contract terminal rule)."""
-        return await self._drain(self.astream(**kwargs), response_format=kwargs.get("response_format"))
+        response_format = await resolve_response_format(AGENT_NAME, kwargs.get("response_format"))
+        return await self._drain(self.astream(**kwargs), response_format=response_format)
 
     async def astream(
         self,
         *,
-        user_message: str = "",
-        system_message: str = "",
+        user_message: TemplatedText | None = None,
+        system_message: TemplatedText | None = None,
         tool_names: Sequence[str] = (),
         skills: Sequence[str] = (),
         inline_skills: Sequence[dict[str, Any] | InlineSkillShape] = (),
-        response_format: dict[str, Any] | None = None,
+        response_format: TemplatedText | dict[str, Any] | None = None,
         max_turns: int | None = None,
         subagents: Sequence[dict[str, Any] | SubagentSpecShape] = (),
         thread_id: str | None = None,
@@ -291,7 +294,7 @@ class ClaudeCodeAgent(Agent):
             collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
         reject_blank_memory_keys(f"{AGENT_NAME}.astream", thread_id=thread_id, resume_checkpoint_id=None)
-        reject_untitled_response_format(AGENT_NAME, response_format)
+        response_format = await resolve_response_format(AGENT_NAME, response_format)
 
         skill_names = [validate_name("skill", name) for name in skills]
         inline = [s if isinstance(s, InlineSkillShape) else InlineSkillShape.model_validate(s) for s in inline_skills]
@@ -310,21 +313,34 @@ class ClaudeCodeAgent(Agent):
                 "proxied tool call could not be entitlement-checked"
             )
 
+        rendered_user = await render_message(user_message, allow_empty=False, field="user_message")
+        rendered_system = await render_message(system_message)
+        subagent_defs = [
+            {
+                **s.model_dump(mode="json", exclude={"system_prompt"}),
+                "system_prompt": await render_message(s.system_prompt),
+            }
+            for s in subs
+        ]
+
+        # The RENDERED texts are what the snapshot persists, so a resume re-drives the
+        # same prompt, system prompt, and subagent prompts rather than re-rendering a
+        # stored resource that may have changed underneath the parked turn.
         options_snapshot = {
-            "user_message": user_message,
-            "system_message": system_message,
+            "user_message": rendered_user,
+            "system_message": rendered_system,
             "tool_names": tools_list,
             "skills": skill_names,
             "inline_skills": [s.model_dump(mode="json") for s in inline],
             "response_format": response_format,
             "max_turns": max_turns,
-            "subagents": [s.model_dump(mode="json") for s in subs],
+            "subagents": subagent_defs,
         }
 
         async for event in self._drive_workspace(
             settings=settings,
             thread_id=thread_id,
-            prompt={"text": user_message},
+            prompt={"text": rendered_user},
             options_snapshot=options_snapshot,
         ):
             yield event

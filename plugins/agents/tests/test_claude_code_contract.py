@@ -7,6 +7,7 @@ import asyncio
 
 import pytest
 from pydantic import SecretStr, ValidationError
+from tai42_contract.template import TemplatedText
 
 import tai42_agents.claude_code.agent as agent_module
 from tai42_agents.claude_code.agent import ClaudeCodeAgent, ClaudeCodeError, ClaudeCodeInput
@@ -34,11 +35,11 @@ def test_thread_id_is_not_a_tool_input_field() -> None:
 
 def test_tool_input_forbids_unknown_keys() -> None:
     with pytest.raises(ValidationError):
-        ClaudeCodeInput(user_message="hi", surprise=1)  # type: ignore[call-arg]
+        ClaudeCodeInput(user_message=TemplatedText(content="hi"), surprise=1)  # type: ignore[call-arg]
 
 
 def test_tool_input_defaults() -> None:
-    parsed = ClaudeCodeInput(user_message="hi")
+    parsed = ClaudeCodeInput(user_message=TemplatedText(content="hi"))
     assert parsed.tool_names == []
     assert parsed.skills == []
     assert parsed.subagents == []
@@ -51,34 +52,36 @@ def test_registered_name_matches_tool_name() -> None:
 @pytest.mark.usefixtures("_settings")
 def test_unhonored_param_raises_loudly() -> None:
     with pytest.raises(RuntimeError, match="recursion_limit"):
-        asyncio.run(_drain(ClaudeCodeAgent(), user_message="hi", recursion_limit=5))
+        asyncio.run(_drain(ClaudeCodeAgent(), user_message=TemplatedText(content="hi"), recursion_limit=5))
 
 
 @pytest.mark.usefixtures("_settings")
 def test_live_tools_unhonored() -> None:
     with pytest.raises(RuntimeError, match="tools"):
-        asyncio.run(_drain(ClaudeCodeAgent(), user_message="hi", tools=[object()]))
+        asyncio.run(_drain(ClaudeCodeAgent(), user_message=TemplatedText(content="hi"), tools=[object()]))
 
 
 @pytest.mark.usefixtures("_settings")
 def test_untitled_response_format_raises() -> None:
     with pytest.raises(ValueError, match="title"):
-        asyncio.run(_drain(ClaudeCodeAgent(), user_message="hi", response_format={"type": "object"}))
+        asyncio.run(
+            _drain(ClaudeCodeAgent(), user_message=TemplatedText(content="hi"), response_format={"type": "object"})
+        )
 
 
 @pytest.mark.usefixtures("_settings")
 def test_blank_thread_id_raises() -> None:
     with pytest.raises(ValueError, match="non-empty"):
-        asyncio.run(_drain(ClaudeCodeAgent(), user_message="hi", thread_id="  "))
+        asyncio.run(_drain(ClaudeCodeAgent(), user_message=TemplatedText(content="hi"), thread_id="  "))
 
 
 @pytest.mark.usefixtures("_settings")
 def test_invalid_skill_name_raises() -> None:
     with pytest.raises(SkillNameError):
-        asyncio.run(_drain(ClaudeCodeAgent(), user_message="hi", skills=["../evil"]))
+        asyncio.run(_drain(ClaudeCodeAgent(), user_message=TemplatedText(content="hi"), skills=["../evil"]))
 
 
 @pytest.mark.usefixtures("_settings")
 def test_tool_names_without_identity_is_fail_closed() -> None:
     with pytest.raises(ClaudeCodeError, match="no bound execution identity"):
-        asyncio.run(_drain(ClaudeCodeAgent(), user_message="hi", tool_names=["some_tool"]))
+        asyncio.run(_drain(ClaudeCodeAgent(), user_message=TemplatedText(content="hi"), tool_names=["some_tool"]))

@@ -21,6 +21,7 @@ import pytest
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
 
 # -- The recording stub app ------------------------------------------------------
@@ -141,10 +142,22 @@ class StubAdmin:
 
 
 class StubResourceManager:
-    async def render_by_id_or_content(
-        self, content: str | None = None, template_id: str | None = None, kwargs: dict[str, Any] | None = None
-    ) -> str:
-        return content or ""
+    """Mirrors ``ResourceManager.render_templated_text``: inline ``content`` renders to
+    itself, a stored ``id`` resolves through this double's own template map, and a
+    missing id — or the by-construction-impossible no-source text — raises loudly
+    instead of silently rendering empty."""
+
+    def __init__(self) -> None:
+        self.templates: dict[str, str] = {}
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.content is not None:
+            return text.content
+        if text.id is None:
+            raise ValueError("a templated text sets exactly one of 'content' or 'id'; neither was supplied")
+        if text.id not in self.templates:
+            raise KeyError(f"no stored resource for template id {text.id!r}")
+        return self.templates[text.id]
 
 
 class StubStorage:
@@ -194,6 +207,7 @@ def _reset_stub_run_tool() -> None:
     _stub_app.tools.detached_seen.clear()
     _stub_app.tools.offloads.clear()
     _stub_app.tools.secret_capability_seen.clear()
+    _stub_app.storage.resource_manager.templates.clear()
     _stub_app.admin.calls.clear()
     # A fresh, pre-set boot-ready latch per test: the stub app is process-global,
     # so a reused Event would stay bound to a prior test's (closed) loop.

@@ -60,7 +60,7 @@ def test_delete_dir_rejected_without_auth(monkeypatch):
 
 def test_render_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.post("/api/render-template", json={"content": "hi"}).status_code in (401, 403)
+    assert client.post("/api/render-template", json={"text": {"content": "hi"}}).status_code in (401, 403)
 
 
 def test_clear_cache_rejected_without_auth(monkeypatch):

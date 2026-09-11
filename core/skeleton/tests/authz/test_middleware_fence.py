@@ -73,7 +73,7 @@ def ac(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
     redis = FakeRedis()
     pg.add_route(_SECRET_PATH, _CONFIG_SCOPE)
     pg.add_route(_GRANTABLE_PATH, _CONFIG_SCOPE)
-    pg.add_policy("editor-key", scopes=["*"], condition=EDITOR_JQ)
+    pg.add_policy("editor-key", scopes=["*"], condition={"content": EDITOR_JQ})
     pg.add_policy("root", scopes=["*"])
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")

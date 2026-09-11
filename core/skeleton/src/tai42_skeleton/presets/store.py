@@ -45,6 +45,7 @@ from tai42_contract.presets.errors import (
     PresetVersionNotFoundError,
 )
 from tai42_contract.states.binding import StateBinding
+from tai42_contract.template import TemplatedText
 from tai42_contract.versioning import VersionedStore
 from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError, DocumentVersionNotFoundError
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
@@ -80,8 +81,8 @@ class PresetStoreView(PresetStore):
         self,
         spec: PresetSpec,
         extensions: Sequence[Sequence[ExtensionElement]],
-        output_schema: dict[str, Any] | None = None,
-        input_schema: dict[str, Any] | None = None,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | None = None,
         *,
         state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
@@ -111,10 +112,10 @@ class PresetStoreView(PresetStore):
         name: str,
         fixed_kwargs: dict[str, Any] | None = None,
         extensions: Sequence[Sequence[ExtensionElement]] | None = None,
-        output_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        output_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
         description: str | None = None,
         *,
-        input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        input_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
         state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
         tags: list[str] | None = None,
     ) -> DocumentVersion:

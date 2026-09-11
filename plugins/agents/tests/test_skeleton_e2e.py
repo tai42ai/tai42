@@ -257,14 +257,14 @@ def test_tools_agent_authored_and_streamed_through_the_skeleton(skeleton: Any, m
             await instance.app.preset_manager.register(
                 "assistant_bot",
                 "tools_agent",
-                {"system_prompt": _BAKED_SYSTEM_PROMPT},
+                {"system_prompt": {"content": _BAKED_SYSTEM_PROMPT}},
                 [],
                 "An assistant.",
             )
 
             # 4. Stream a run: the request supplies only the non-baked user_message.
             run_resp = await skeleton.agents.run_authored_agent(
-                _run_request("assistant_bot", {"user_message": "what's the status of my request?"})
+                _run_request("assistant_bot", {"user_message": {"content": "what's the status of my request?"}})
             )
             assert isinstance(run_resp, StreamingResponse)
             frames = await _collect_frames(run_resp)
@@ -304,13 +304,13 @@ def test_tools_agent_response_format_streams_structured_through_the_skeleton(
             await instance.app.preset_manager.register(
                 "struct_bot",
                 "tools_agent",
-                {"system_prompt": _BAKED_SYSTEM_PROMPT},
+                {"system_prompt": {"content": _BAKED_SYSTEM_PROMPT}},
                 [],
                 "A structured assistant.",
             )
 
             run_resp = await skeleton.agents.run_authored_agent(
-                _run_request("struct_bot", {"user_message": "give me a number", "response_format": schema})
+                _run_request("struct_bot", {"user_message": {"content": "give me a number"}, "response_format": schema})
             )
             assert isinstance(run_resp, StreamingResponse)
             frames = await _collect_frames(run_resp)
@@ -346,7 +346,7 @@ def test_tools_agent_content_kwargs_reach_astream_through_the_skeleton(
             await instance.app.preset_manager.register(
                 "cache_bot",
                 "tools_agent",
-                {"system_prompt": _BAKED_SYSTEM_PROMPT},
+                {"system_prompt": {"content": _BAKED_SYSTEM_PROMPT}},
                 [],
                 "A caching assistant.",
             )
@@ -354,7 +354,7 @@ def test_tools_agent_content_kwargs_reach_astream_through_the_skeleton(
             run_resp = await skeleton.agents.run_authored_agent(
                 _run_request(
                     "cache_bot",
-                    {"user_message": "hi", "system_content_kwargs": cache, "user_content_kwargs": cache},
+                    {"user_message": {"content": "hi"}, "system_content_kwargs": cache, "user_content_kwargs": cache},
                 )
             )
             assert isinstance(run_resp, StreamingResponse)

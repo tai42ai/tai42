@@ -35,7 +35,7 @@ async def _upload(api, path: str, content: str) -> dict:
 
 async def _render(api, template_id: str, *, expect: int = 200) -> dict:
     return await api.post(
-        "/api/render-template", json={"template_id": template_id}, expect=expect, retry_on_reloading=True
+        "/api/render-template", json={"text": {"id": template_id}}, expect=expect, retry_on_reloading=True
     )
 
 

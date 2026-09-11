@@ -25,6 +25,7 @@ import json
 from collections.abc import Callable, Sequence
 from typing import Annotated, Any
 
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -111,22 +112,26 @@ class RetrievalToolsGraph:
         self._should_continue_node: Callable[..., Any] | None = None
         self._overwrite_store = overwrite_store
         self._tools_limit = tools_limit
-        # The system purge runs first so a stored system message never reaches the
-        # other strategies or the model; the leading-user normalization runs last,
-        # after the history is reduced, so a thread opening with an assistant
-        # message leads user-first for the next model call. The per-run system
-        # prompt is shared with the context-overflow middlewares so the trimming
-        # budget covers the full outgoing request, prompt included.
-        self._context_middlewares = [
-            SystemPurgeMiddleware(),
-            *context_overflow_middlewares(system_prompt=self.system_prompt),
-            LeadingUserMiddleware(),
-        ]
+        # Built in ``abuild`` (async): the context-overflow strategies render their
+        # configured prompt through the resource manager.
+        self._context_middlewares: list[AgentMiddleware] = []
 
     async def abuild(self) -> Any:
         store = self.store
         if store is None:
             raise ValueError("RetrievalToolsGraph requires a store to embed tool descriptions into")
+
+        # The system purge runs first so a stored system message never reaches the other
+        # strategies or the model; the leading-user normalization runs last, after the
+        # history is reduced, so a thread opening with an assistant message leads user-first
+        # for the next model call. The per-run system prompt is shared with the
+        # context-overflow middlewares so the trimming budget covers the full outgoing
+        # request, prompt included.
+        self._context_middlewares = [
+            SystemPurgeMiddleware(),
+            *await context_overflow_middlewares(system_prompt=self.system_prompt),
+            LeadingUserMiddleware(),
+        ]
 
         for tool in self.tools:
             self.tool_registry[text_to_md5(tool.name)] = tool

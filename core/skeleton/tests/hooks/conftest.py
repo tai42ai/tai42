@@ -289,11 +289,11 @@ class _FakeResourceManager:
         self._by_id = by_id or {}
         self.calls: list = []
 
-    async def render_by_id_or_content(self, *, content, template_id, kwargs):
-        self.calls.append((content, template_id, kwargs))
-        if template_id is not None:
-            return self._by_id.get(template_id)
-        return content
+    async def render_templated_text(self, text, locale=None):
+        self.calls.append((text.content, text.id, text.kwargs))
+        if text.id is not None:
+            return self._by_id.get(text.id)
+        return text.content
 
 
 class _FakeTools:

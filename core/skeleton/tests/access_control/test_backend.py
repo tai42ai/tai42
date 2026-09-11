@@ -193,7 +193,7 @@ async def test_verifier_error_falls_through_to_next_candidate(monkeypatch, bound
 
 async def test_authenticate_attaches_policy_scopes_when_condition_passes(monkeypatch, bound_app, store_pg):
     settings = AccessControlSettings()
-    store_pg.add_policy("u1", scopes=["res-a", "res-b"], condition='.sub == "u1"')
+    store_pg.add_policy("u1", scopes=["res-a", "res-b"], condition={"content": '.sub == "u1"'})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_FakeVerifier({"good": "u1"}), settings)
     creds, user = await backend.authenticate(_conn({"Authorization": "Bearer good"}))
@@ -237,8 +237,8 @@ async def test_authenticate_fails_closed_when_live_context_unavailable(monkeypat
 
 
 async def test_authenticate_allows_when_no_condition_configured(monkeypatch, bound_app, store_pg):
-    # A policy with scopes but NO condition (neither condition nor condition_id)
-    # is enforced as a no-op allow: the caller is authenticated with its scopes.
+    # A policy with scopes but NO condition is enforced as a no-op allow: the caller is
+    # authenticated with its scopes.
     settings = AccessControlSettings()
     store_pg.add_policy("u1", scopes=["res-a", "res-b"])
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
@@ -249,11 +249,11 @@ async def test_authenticate_allows_when_no_condition_configured(monkeypatch, bou
 
 
 async def test_authenticate_denies_when_configured_condition_renders_empty(monkeypatch, bound_app, caplog, store_pg):
-    # A condition WAS configured (via condition_id) but renders to empty. This must
+    # A condition WAS configured (via a stored id) but renders to empty. This must
     # fail closed as a deny, never be treated as "no condition" (which would let
     # the caller through against a condition that never passed).
     settings = AccessControlSettings()
-    store_pg.add_policy("u1", scopes=["res-a"], condition_id="renders-to-nothing")
+    store_pg.add_policy("u1", scopes=["res-a"], condition={"id": "renders-to-nothing"})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_FakeVerifier({"good": "u1"}), settings)
     with caplog.at_level("ERROR"), pytest.raises(AuthorizationError) as excinfo:
@@ -266,7 +266,7 @@ async def test_authenticate_denies_when_configured_condition_renders_empty(monke
 
 async def test_authenticate_denies_when_condition_fails(monkeypatch, bound_app, caplog, store_pg):
     settings = AccessControlSettings()
-    store_pg.add_policy("u1", scopes=["res-a"], condition='.sub == "someone-else"')
+    store_pg.add_policy("u1", scopes=["res-a"], condition={"content": '.sub == "someone-else"'})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_FakeVerifier({"good": "u1"}), settings)
     with caplog.at_level("ERROR"), pytest.raises(AuthorizationError) as excinfo:
@@ -352,7 +352,7 @@ async def test_direct_disabled_principal_denied(monkeypatch, bound_app, store_pg
 async def test_owned_key_owner_condition_denies_while_key_passes(monkeypatch, bound_app, store_pg):
     settings = AccessControlSettings()
     store_pg.add_policy("key1", scopes=["a"])  # no key condition
-    store_pg.add_policy("owner1", scopes=["a"], condition='.request.path == "/never"')
+    store_pg.add_policy("owner1", scopes=["a"], condition={"content": '.request.path == "/never"'})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
     with pytest.raises(AuthorizationError):
@@ -361,8 +361,8 @@ async def test_owned_key_owner_condition_denies_while_key_passes(monkeypatch, bo
 
 async def test_owned_key_both_conditions_pass_allows(monkeypatch, bound_app, store_pg):
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a"], condition='.request.path == "/x"')
-    store_pg.add_policy("owner1", scopes=["a"], condition='.request.path == "/x"')
+    store_pg.add_policy("key1", scopes=["a"], condition={"content": '.request.path == "/x"'})
+    store_pg.add_policy("owner1", scopes=["a"], condition={"content": '.request.path == "/x"'})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
     creds, user = await backend.authenticate(_conn({"X-Api-Key": "k"}, path="/x"))
@@ -376,7 +376,7 @@ async def test_owned_key_owner_editor_role_reaches_me(monkeypatch, bound_app, st
     # so a scoped delegated key can still introspect its own capabilities.
     settings = AccessControlSettings()
     store_pg.add_policy("key1", scopes=["a"])  # no key condition
-    store_pg.add_policy("owner1", scopes=["*"], condition=EDITOR_JQ)
+    store_pg.add_policy("owner1", scopes=["*"], condition={"content": EDITOR_JQ})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
     _creds, user = await backend.authenticate(_conn({"X-Api-Key": "k"}, path="/api/auth/me"))
@@ -388,7 +388,7 @@ async def test_owned_key_owner_editor_role_denied_on_admin_area(monkeypatch, bou
     # the owned key is denied a non-carved /api/auth route (the owner second pass denies).
     settings = AccessControlSettings()
     store_pg.add_policy("key1", scopes=["a"])
-    store_pg.add_policy("owner1", scopes=["*"], condition=EDITOR_JQ)
+    store_pg.add_policy("owner1", scopes=["*"], condition={"content": EDITOR_JQ})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
     with pytest.raises(AuthorizationError):
@@ -401,7 +401,7 @@ async def test_owner_condition_sees_owner_scopes_not_attenuated(monkeypatch, bou
     # owner-condition pass is judged against the OWNER's scopes, not the attenuated set.
     settings = AccessControlSettings()
     store_pg.add_policy("key1", scopes=["a", "b", "c"])  # no key condition
-    store_pg.add_policy("owner1", scopes=["a", "b", "c", "d", "e"], condition="(.scopes | length) == 5")
+    store_pg.add_policy("owner1", scopes=["a", "b", "c", "d", "e"], condition={"content": "(.scopes | length) == 5"})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
     creds, user = await backend.authenticate(_conn({"X-Api-Key": "k"}))
@@ -416,7 +416,7 @@ async def test_owner_condition_denies_when_gated_on_attenuated_length(monkeypatc
     # proving the pass is not judged against the attenuated set (which would have passed).
     settings = AccessControlSettings()
     store_pg.add_policy("key1", scopes=["a", "b", "c"])
-    store_pg.add_policy("owner1", scopes=["a", "b", "c", "d", "e"], condition="(.scopes | length) == 3")
+    store_pg.add_policy("owner1", scopes=["a", "b", "c", "d", "e"], condition={"content": "(.scopes | length) == 3"})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
     with pytest.raises(AuthorizationError):
@@ -523,13 +523,13 @@ async def test_step5b_level_miss_and_hard_fence_deny_with_cause(monkeypatch, bou
             "scopes": ["*"],
             "base_tier": "editor",
             "grants": {},
-            "condition": EDITOR_JQ,
+            "condition": {"content": EDITOR_JQ},
             "allow_all": False,
         },
     )
 
     settings = AccessControlSettings()
-    store_pg.add_policy("ed", scopes=["*"], condition=EDITOR_JQ, policy_data={"role": "narrow"})
+    store_pg.add_policy("ed", scopes=["*"], condition={"content": EDITOR_JQ}, policy_data={"role": "narrow"})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_FakeVerifier({"tok": "ed"}), settings)
 

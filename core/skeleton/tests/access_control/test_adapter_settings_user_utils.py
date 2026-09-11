@@ -19,6 +19,7 @@ from tai42_contract.access_control.context import (
 )
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
 from tai42_contract.access_control.models import AccessPolicy
+from tai42_contract.template import TemplatedText
 from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
 from tai42_kit.utils.data.string_util import hash_api_key
 
@@ -347,8 +348,11 @@ def test_is_admin_policy_true_for_condition_free_wildcard():
 
 
 def test_is_admin_policy_false_for_conditioned_wildcard():
-    assert is_admin_policy(AccessPolicy(scopes=["*"], condition='.request.method == "GET"'), None) is False
-    assert is_admin_policy(AccessPolicy(scopes=["*"], condition_id="tmpl"), None) is False
+    assert (
+        is_admin_policy(AccessPolicy(scopes=["*"], condition=TemplatedText(content='.request.method == "GET"')), None)
+        is False
+    )
+    assert is_admin_policy(AccessPolicy(scopes=["*"], condition=TemplatedText(id="tmpl")), None) is False
 
 
 def test_is_admin_policy_false_for_owned_wildcard_key():

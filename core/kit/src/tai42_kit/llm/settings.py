@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from pydantic import SecretStr, field_validator
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.template import TemplatedText
 
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
@@ -84,7 +85,9 @@ class SummarizationMiddlewareSettings(TaiBaseSettings):
     trigger_tokens: int = 5000  # summarize once history crosses this many tokens
     keep_messages: int = 20  # most recent messages kept verbatim
     trim_tokens_to_summarize: int = 4000  # cap on what is fed into the summary call
-    summary_prompt: str | None = None  # None -> built-in default prompt
+    # None -> built-in default prompt. A set value is a templated text (inline content or a
+    # stored id, plus render kwargs), rendered where the middleware is built.
+    summary_prompt: TemplatedText | None = None
 
 
 class ContextEditingSettings(TaiBaseSettings):

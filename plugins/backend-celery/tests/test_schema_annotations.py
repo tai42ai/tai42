@@ -62,9 +62,9 @@ def test_dispatch_branch_listed_schema_annotates_the_callback_expressions(factor
     assert callback_def["condition"][EXPRESSION_ANNOTATION_KEY] == CALLBACK_CONDITION_PAYLOAD
     assert callback_def["expr"][EXPRESSION_ANNOTATION_KEY] == CALLBACK_EXPR_PAYLOAD
 
-    # The annotation stays confined to the two jq strings: the callback's other
+    # The annotation stays confined to the two jq fields: the callback's other
     # fields and every dispatch option remain unannotated.
-    for name in ("condition_id", "condition_kwargs", "expr_id", "expr_kwargs", "tool"):
+    for name in ("tool",):
         assert EXPRESSION_ANNOTATION_KEY not in callback_def[name]
     for name in ("queue", "countdown", "priority", "retry", "routing_key", "expires", "eta", "a", "b"):
         assert EXPRESSION_ANNOTATION_KEY not in parameters["properties"][name]

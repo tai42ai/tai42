@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 from tai42_contract.hooks import HookParams, HookSubject
 from tai42_contract.states import StateContext
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 from tai42_skeleton.hooks.settings import HooksSettings
@@ -41,7 +42,11 @@ def _hook(subject: HookSubject | None) -> HookParams:
 async def test_declared_subject_establishes_the_hook_door_context(make_app) -> None:
     app = make_app()
     seen = _capture_context(app)
-    hook = _hook(HookSubject(target_kind="tool", target_name="assistant", kind="person", key_expr=".actor"))
+    hook = _hook(
+        HookSubject(
+            target_kind="tool", target_name="assistant", kind="person", key_expr=TemplatedText(content=".actor")
+        )
+    )
     await InMemoryHooksManager._run_hook(hook, {"actor": "p-42"})
     assert len(seen) == 1
     ctx = seen[0]
@@ -67,11 +72,30 @@ async def test_no_subject_leaves_no_state_context(make_app) -> None:
 async def test_key_expr_that_is_not_a_nonempty_string_fails_the_fire(make_app, payload) -> None:
     app = make_app()
     seen = _capture_context(app)
-    hook = _hook(HookSubject(target_kind="tool", target_name="assistant", kind="person", key_expr=".actor"))
+    hook = _hook(
+        HookSubject(
+            target_kind="tool", target_name="assistant", kind="person", key_expr=TemplatedText(content=".actor")
+        )
+    )
     with pytest.raises(ValueError, match="must yield a non-empty string"):
         await InMemoryHooksManager._run_hook(hook, payload)
     # The fire failed before running the tool — never a silent skip.
     assert seen == []
+
+
+async def test_key_expr_by_id_renders_then_resolves_the_subject_key(make_app) -> None:
+    # A by-id key_expr is rendered through the bound resource manager to its jq program
+    # IMMEDIATELY before it is evaluated over the event payload.
+    app = make_app(by_id={"hook-key": ".actor"})
+    seen = _capture_context(app)
+    hook = _hook(
+        HookSubject(target_kind="tool", target_name="assistant", kind="person", key_expr=TemplatedText(id="hook-key"))
+    )
+    await InMemoryHooksManager._run_hook(hook, {"actor": "p-42"})
+    assert len(seen) == 1
+    ctx = seen[0]
+    assert ctx is not None
+    assert ctx.candidates.by_kind == {"person": "p-42"}
 
 
 def _capture_invocation(app) -> list:
@@ -97,7 +121,7 @@ async def test_hook_deposits_its_state_binding_on_the_ambient_invocation(make_ap
 
     app = make_app()
     seen = _capture_invocation(app)
-    binding = StateBinding(states=[StateAttach(state="status", subject_expr=".actor")])
+    binding = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content=".actor"))])
     hook = HookParams(
         name="h",
         topic="t",

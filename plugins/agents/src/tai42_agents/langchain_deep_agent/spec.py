@@ -12,6 +12,7 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from tai42_contract.template import TemplatedText
 
 
 class InlineSkill(BaseModel):
@@ -54,7 +55,9 @@ class ResolvedSubAgentSpec(BaseModel):
 
     name: str = Field(description="Identifier the main agent uses to call this subagent.")
     description: str = Field(description="When to use this subagent; read by the main agent to route to it.")
-    system_prompt: str = Field(description="The subagent's own system instructions.")
+    system_prompt: TemplatedText = Field(
+        description="The subagent's own system instructions: inline content or a stored id, plus render kwargs."
+    )
 
     llm_provider: str | None = Field(
         default=None,

@@ -135,9 +135,9 @@ def create_route(
         "initial_mode": initial_mode,
     }
     if payload_expr is not None:
-        body["payload_expr"] = payload_expr
+        body["payload_expr"] = {"content": payload_expr}
     if reply_expr is not None:
-        body["reply_expr"] = reply_expr
+        body["reply_expr"] = {"content": reply_expr}
     if channel is not None:
         body["channel"] = channel
     if our_identity is not None:

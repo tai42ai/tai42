@@ -239,17 +239,17 @@ def test_keys_create_reads_policy_data_from_stdin(monkeypatch: pytest.MonkeyPatc
     assert seen["policy_data"] == {"tier": "gold"}
 
 
-def test_keys_create_reads_condition_kwargs_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    ck_file = tmp_path / "ck.json"
-    ck_file.write_text('{"scope":"read"}')
+def test_keys_create_reads_condition_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cond_file = tmp_path / "cond.json"
+    cond_file.write_text('{"content": ".ok", "kwargs": {"scope": "read"}}')
     seen: dict = {}
     result = run_cli(
         monkeypatch,
         _capture_key_create(seen),
-        ["keys", "create", "--user", "alice", "--description", "d", "--condition-kwargs-file", str(ck_file)],
+        ["keys", "create", "--user", "alice", "--description", "d", "--condition-file", str(cond_file)],
     )
     assert result.exit_code == 0, result.output
-    assert seen["condition_kwargs"] == {"scope": "read"}
+    assert seen["condition"] == {"content": ".ok", "kwargs": {"scope": "read"}}
 
 
 def test_keys_create_rejects_both_policy_data_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -275,9 +275,9 @@ def test_keys_create_rejects_both_policy_data_and_file(monkeypatch: pytest.Monke
     assert "--policy-data-file" in result.output
 
 
-def test_keys_create_rejects_both_condition_kwargs_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    ck_file = tmp_path / "ck.json"
-    ck_file.write_text("{}")
+def test_keys_create_rejects_both_condition_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cond_file = tmp_path / "cond.json"
+    cond_file.write_text('{"content": ".ok"}')
     result = run_cli(
         monkeypatch,
         _capture_key_create({}),
@@ -288,14 +288,14 @@ def test_keys_create_rejects_both_condition_kwargs_and_file(monkeypatch: pytest.
             "alice",
             "--description",
             "d",
-            "--condition-kwargs",
-            "{}",
-            "--condition-kwargs-file",
-            str(ck_file),
+            "--condition",
+            '{"content": ".ok"}',
+            "--condition-file",
+            str(cond_file),
         ],
     )
     assert result.exit_code != 0
-    assert "--condition-kwargs-file" in result.output
+    assert "--condition-file" in result.output
 
 
 def test_keys_create_rejects_two_stdin_sources(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,7 +311,7 @@ def test_keys_create_rejects_two_stdin_sources(monkeypatch: pytest.MonkeyPatch) 
             "d",
             "--policy-data-file",
             "-",
-            "--condition-kwargs-file",
+            "--condition-file",
             "-",
         ],
         stdin='{"tier":"gold"}',
@@ -328,7 +328,7 @@ def test_keys_edit_rejects_two_stdin_sources(monkeypatch: pytest.MonkeyPatch) ->
     result = run_cli(
         monkeypatch,
         handler,
-        ["keys", "edit", "alice", "--policy-data-file", "-", "--condition-kwargs-file", "-"],
+        ["keys", "edit", "alice", "--policy-data-file", "-", "--condition-file", "-"],
         stdin='{"tier":"gold"}',
     )
     assert result.exit_code != 0
@@ -352,7 +352,7 @@ def test_keys_edit_reads_policy_data_file(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert seen["policy_data"] == {"tier": "gold"}
 
 
-def test_keys_edit_reads_condition_kwargs_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_keys_edit_reads_condition_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -362,11 +362,11 @@ def test_keys_edit_reads_condition_kwargs_from_stdin(monkeypatch: pytest.MonkeyP
     result = run_cli(
         monkeypatch,
         handler,
-        ["keys", "edit", "alice", "--condition-kwargs-file", "-"],
-        stdin='{"scope":"read"}',
+        ["keys", "edit", "alice", "--condition-file", "-"],
+        stdin='{"content": ".ok", "kwargs": {"scope": "read"}}',
     )
     assert result.exit_code == 0, result.output
-    assert seen["condition_kwargs"] == {"scope": "read"}
+    assert seen["condition"] == {"content": ".ok", "kwargs": {"scope": "read"}}
 
 
 def test_keys_edit_rejects_both_policy_data_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -385,9 +385,9 @@ def test_keys_edit_rejects_both_policy_data_and_file(monkeypatch: pytest.MonkeyP
     assert "--policy-data-file" in result.output
 
 
-def test_validate_condition_reads_condition_kwargs_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    ck_file = tmp_path / "ck.json"
-    ck_file.write_text('{"scope":"read"}')
+def test_validate_condition_reads_condition_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cond_file = tmp_path / "cond.json"
+    cond_file.write_text('{"content": ".x", "kwargs": {"scope": "read"}}')
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -398,13 +398,13 @@ def test_validate_condition_reads_condition_kwargs_file(monkeypatch: pytest.Monk
     result = run_cli(
         monkeypatch,
         handler,
-        ["keys", "validate-condition", "--condition", ".x", "--condition-kwargs-file", str(ck_file)],
+        ["keys", "validate-condition", "--condition-file", str(cond_file)],
     )
     assert result.exit_code == 0, result.output
-    assert seen["condition_kwargs"] == {"scope": "read"}
+    assert seen["condition"] == {"content": ".x", "kwargs": {"scope": "read"}}
 
 
-def test_validate_condition_reads_condition_kwargs_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_validate_condition_reads_condition_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -414,16 +414,16 @@ def test_validate_condition_reads_condition_kwargs_from_stdin(monkeypatch: pytes
     result = run_cli(
         monkeypatch,
         handler,
-        ["keys", "validate-condition", "--condition", ".x", "--condition-kwargs-file", "-"],
-        stdin='{"scope":"read"}',
+        ["keys", "validate-condition", "--condition-file", "-"],
+        stdin='{"content": ".x", "kwargs": {"scope": "read"}}',
     )
     assert result.exit_code == 0, result.output
-    assert seen["condition_kwargs"] == {"scope": "read"}
+    assert seen["condition"] == {"content": ".x", "kwargs": {"scope": "read"}}
 
 
-def test_validate_condition_rejects_both_condition_kwargs_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    ck_file = tmp_path / "ck.json"
-    ck_file.write_text("{}")
+def test_validate_condition_rejects_both_condition_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cond_file = tmp_path / "cond.json"
+    cond_file.write_text('{"content": ".x"}')
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
@@ -431,10 +431,10 @@ def test_validate_condition_rejects_both_condition_kwargs_and_file(monkeypatch: 
     result = run_cli(
         monkeypatch,
         handler,
-        ["keys", "validate-condition", "--condition-kwargs", "{}", "--condition-kwargs-file", str(ck_file)],
+        ["keys", "validate-condition", "--condition", '{"content": ".x"}', "--condition-file", str(cond_file)],
     )
     assert result.exit_code != 0
-    assert "--condition-kwargs-file" in result.output
+    assert "--condition-file" in result.output
 
 
 # -- tools run / runs submit -------------------------------------------------
@@ -707,50 +707,48 @@ def _capture_render_template(seen: dict):
     return handler
 
 
-def test_templates_render_reads_kwargs_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    kwargs_file = tmp_path / "k.json"
-    kwargs_file.write_text('{"name":"secret"}')
+def test_templates_render_reads_text_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    text_file = tmp_path / "t.json"
+    text_file.write_text('{"id": "prompts/greeting.md", "kwargs": {"name": "secret"}}')
     seen: dict = {}
     result = run_cli(
         monkeypatch,
         _capture_render_template(seen),
-        ["templates", "render", "--template-id", "prompts/greeting.md", "--kwargs-file", str(kwargs_file)],
+        ["templates", "render", "--text-file", str(text_file)],
     )
     assert result.exit_code == 0, result.output
-    assert seen["kwargs"] == {"name": "secret"}
+    assert seen["text"] == {"id": "prompts/greeting.md", "kwargs": {"name": "secret"}}
 
 
-def test_templates_render_reads_kwargs_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_templates_render_reads_text_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
     result = run_cli(
         monkeypatch,
         _capture_render_template(seen),
-        ["templates", "render", "--template-id", "prompts/greeting.md", "--kwargs-file", "-"],
-        stdin='{"name":"secret"}',
+        ["templates", "render", "--text-file", "-"],
+        stdin='{"id": "prompts/greeting.md", "kwargs": {"name": "secret"}}',
     )
     assert result.exit_code == 0, result.output
-    assert seen["kwargs"] == {"name": "secret"}
+    assert seen["text"] == {"id": "prompts/greeting.md", "kwargs": {"name": "secret"}}
 
 
-def test_templates_render_rejects_both_kwargs_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    kwargs_file = tmp_path / "k.json"
-    kwargs_file.write_text("{}")
+def test_templates_render_rejects_both_text_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    text_file = tmp_path / "t.json"
+    text_file.write_text('{"content": "hi"}')
     result = run_cli(
         monkeypatch,
         _capture_render_template({}),
         [
             "templates",
             "render",
-            "--template-id",
-            "prompts/greeting.md",
-            "--kwargs",
-            "{}",
-            "--kwargs-file",
-            str(kwargs_file),
+            "--text",
+            '{"content": "hi"}',
+            "--text-file",
+            str(text_file),
         ],
     )
     assert result.exit_code != 0
-    assert "--kwargs-file" in result.output
+    assert "--text-file" in result.output
 
 
 # -- resources get (render) --------------------------------------------------
@@ -776,7 +774,7 @@ def test_resources_render_reads_kwargs_file(monkeypatch: pytest.MonkeyPatch, tmp
         ["resources", "get", "prompts/greeting.md", "--kwargs-file", str(kwargs_file)],
     )
     assert result.exit_code == 0, result.output
-    assert seen["template_kwargs"] == {"name": "secret"}
+    assert seen["kwargs"] == {"name": "secret"}
 
 
 def test_resources_render_reads_kwargs_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -788,7 +786,7 @@ def test_resources_render_reads_kwargs_from_stdin(monkeypatch: pytest.MonkeyPatc
         stdin='{"name":"secret"}',
     )
     assert result.exit_code == 0, result.output
-    assert seen["template_kwargs"] == {"name": "secret"}
+    assert seen["kwargs"] == {"name": "secret"}
 
 
 def test_resources_render_rejects_both_kwargs_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

@@ -38,7 +38,7 @@ class _ResourceManager:
             raise self._raise
         return self._loaded
 
-    async def render_by_id_or_content(self, content=None, template_id=None, kwargs=None) -> str:
+    async def render_templated_text(self, text, locale=None) -> str:
         return self._rendered
 
 
@@ -71,7 +71,7 @@ async def test_get_route_fetches_as_is_from_query(bind):
 
 async def test_get_renders_with_kwargs(bind):
     bind(_ResourceManager(loaded="Hello {{ name }}", rendered="Hello Ada"))
-    resp = await router.get_resource_by_id(_req({"resource_id": "greet.j2", "template_kwargs": {"name": "Ada"}}))
+    resp = await router.get_resource_by_id(_req({"resource_id": "greet.j2", "kwargs": {"name": "Ada"}}))
     assert _data(resp)["data"] == "Hello Ada"
 
 
@@ -95,6 +95,6 @@ async def test_get_missing_is_404(bind):
 
 async def test_render_media_is_400(bind):
     bind(_ResourceManager(loaded=Image(data=b"\x89PNG", format="png")))
-    resp = await router.get_resource_by_id(_req({"resource_id": "logo.png", "template_kwargs": {"x": 1}}))
+    resp = await router.get_resource_by_id(_req({"resource_id": "logo.png", "kwargs": {"x": 1}}))
     assert resp.status_code == 400
     assert "Cannot render media" in _data(resp)["error"]

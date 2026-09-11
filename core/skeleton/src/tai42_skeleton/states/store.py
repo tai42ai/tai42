@@ -32,6 +32,7 @@ what is never optional.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -312,8 +313,8 @@ class PostgresStatesStore:
         Locks the declaration row ``FOR UPDATE`` (blocking every ``apply_ops``'s
         ``FOR SHARE``, so no record can land mid-guard), reads the existing row and the
         per-kind record counts under that lock, then calls ``decide(existing_row |
-        None, per_kind_counts)`` — which raises to refuse (aborting the txn) — and
-        finally performs the upsert."""
+        None, per_kind_counts)`` — awaited so the decision may resolve a by-id base schema under
+        the lock — which raises to refuse (aborting the txn) — and finally performs the upsert."""
         async with (
             client_ctx(PostgresClient, _settings()) as pool,
             pool.connection() as conn,
@@ -332,7 +333,11 @@ class PostgresStatesStore:
                     (name,),
                 )
                 per_kind = {row["subject_kind"]: int(row["n"]) for row in await cur.fetchall()}
-            decide(existing, per_kind)  # raises to refuse — the txn aborts
+            outcome = decide(existing, per_kind)  # raises to refuse — the txn aborts
+            # ``decide`` may be sync or async (the declaration door's decision resolves a by-id
+            # base schema under this lock); await it only when it returns an awaitable.
+            if inspect.isawaitable(outcome):
+                await outcome
             await cur.execute(
                 "INSERT INTO state_declarations "
                 "(name, description, schema, effective_schema, subject_kinds, default_subject_kind, "

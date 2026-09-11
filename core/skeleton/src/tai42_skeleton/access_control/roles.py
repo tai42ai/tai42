@@ -8,7 +8,7 @@ per-tag ACCESS LEVEL map ``grants`` (feature-group tag → ``none``/``read``/``w
 Enforcement INTERSECTS the two with the route action-class fence, fail-closed.
 
 Roles are LIVE: a user's enforced policy carries a role-name POINTER
-(``policy_data[ROLE_POINTER_KEY]``, never ``condition_id``), and enforcement resolves
+(``policy_data[ROLE_POINTER_KEY]``, never the policy condition), and enforcement resolves
 the role's CURRENT grant map at request time — an edit to a role changes every holder's
 reach on their next request. Roles are stored under the generic
 :class:`~tai42_contract.versioning.VersionedStore` as ``kind="role"`` — a view mirroring
@@ -51,6 +51,7 @@ from typing import Any
 
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import RoleDefinition
+from tai42_contract.template import TemplatedText
 from tai42_contract.versioning import VersionedStore, VersionedStoreTransaction
 from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
@@ -68,8 +69,8 @@ RESERVED_ADMIN_ROLE = "admin"
 
 # The policy_data key holding a user's LIVE role pointer — the role NAME whose CURRENT
 # grant map governs the user, resolved per request. It is orthogonal metadata read ONLY
-# for the grant lookup: it is NEVER routed through ``condition_id`` (which would collide
-# with the ``is_admin_policy`` discriminator), and an ``allow_all``/admin policy carries
+# for the grant lookup: it is NEVER routed through the policy condition (which would
+# collide with the ``is_admin_policy`` discriminator), and an ``allow_all``/admin policy carries
 # no pointer so that discriminator holds byte-for-byte.
 ROLE_POINTER_KEY = "role"
 
@@ -147,14 +148,14 @@ def _seeded_roles() -> list[dict[str, Any]]:
             description="Everything except access-control administration; may manage own API keys.",
             base_tier="editor",
             grants=dict.fromkeys(grantable, "write"),
-            condition=EDITOR_JQ,
+            condition=TemplatedText(content=EDITOR_JQ),
         ).model_dump(),
         RoleDefinition(
             name="viewer",
             description="Read-only, plus login/logout and own-key management.",
             base_tier="viewer",
             grants=dict.fromkeys(grantable, "read"),
-            condition=VIEWER_JQ,
+            condition=TemplatedText(content=VIEWER_JQ),
         ).model_dump(),
     ]
 
@@ -227,8 +228,8 @@ class RoleStoreView:
 
     async def list_roles(self) -> list[dict[str, Any]]:
         """Every role's active body as a full ``RoleDefinition``-shaped dict
-        (``{name, description, scopes, condition, condition_id, condition_kwargs,
-        base_tier, allow_all, grants}``) — the listing shape the roles route returns."""
+        (``{name, description, scopes, condition, base_tier, allow_all, grants}``) — the
+        listing shape the roles route returns."""
         records = await self._store.list(_KIND)
         roles: list[dict[str, Any]] = []
         for record in records:
@@ -256,10 +257,9 @@ async def seed_default_roles() -> None:
 async def apply_role(user_id: str, role_name: str) -> None:
     """Assign role ``role_name`` to ``user_id``'s ENFORCED policy (LIVE semantics).
 
-    Writes the ``scopes`` + condition dimension (``condition``/``condition_id``/
-    ``condition_kwargs``, normalized together so a re-assignment never strands a prior
-    role's ``condition_id``/``condition_kwargs``) AND the role-name POINTER merged into
-    the user's existing ``policy_data`` — preserving the disabled marker and key
+    Writes the ``scopes`` + the role's ``condition`` (overwritten whole, so a
+    re-assignment never strands a prior role's condition) AND the role-name POINTER
+    merged into the user's existing ``policy_data`` — preserving the disabled marker and key
     ownership. It does NOT freeze a grant-map COPY: enforcement resolves the role's
     CURRENT grants through the pointer, so a later role edit retro-applies.
 
@@ -280,19 +280,13 @@ async def apply_role(user_id: str, role_name: str) -> None:
     role = RoleDefinition(**body)
     scopes = list(role.scopes)
     condition = role.condition
-    # Normalize the rest of the condition dimension so re-assignment leaves nothing stale.
-    condition_id = None
-    condition_kwargs: dict[str, Any] = {}
 
     # Fail-closed guard on the admin discriminator: a non-allow_all role MUST carry a
-    # base-tier condition. This guards on the condition actually WRITTEN below —
-    # ``condition_id`` is normalized to ``None`` here regardless of the role body, so a
-    # role carrying ``condition=None`` (whatever its stored ``condition_id``) would assign
-    # a condition-free ["*"] policy (condition/condition_id both None) that
-    # ``is_admin_policy`` reads as FULL ADMIN — the role pointer is orthogonal metadata the
-    # discriminator ignores. Only the reserved allow_all admin role is legitimately
-    # condition-free; refuse to mint an admin-shaped policy from any other role rather than
-    # silently escalate it.
+    # base-tier condition. A role carrying ``condition=None`` would assign a
+    # condition-free ["*"] policy that ``is_admin_policy`` reads as FULL ADMIN — the role
+    # pointer is orthogonal metadata the discriminator ignores. Only the reserved
+    # allow_all admin role is legitimately condition-free; refuse to mint an admin-shaped
+    # policy from any other role rather than silently escalate it.
     if not role.allow_all and role.condition is None:
         raise ValueError(
             f"role {role_name!r} is not allow_all yet carries no base-tier condition; assigning it would "
@@ -307,20 +301,19 @@ async def apply_role(user_id: str, role_name: str) -> None:
     else:
         policy_data[ROLE_POINTER_KEY] = role_name
 
+    condition_doc = condition.model_dump() if condition is not None else None
     committed = await store.update_policy_fields(
         user_id,
         {
             "scopes": scopes,
-            "condition": condition,
-            "condition_id": condition_id,
-            "condition_kwargs": condition_kwargs,
+            "condition": condition_doc,
             "policy_data": policy_data,
         },
     )
     if committed is None:
         # No policy row yet — upsert a real policy so the user (including the first
         # admin owner) is never left on the empty AccessPolicy() default.
-        committed = await store.create_policy(user_id, scopes, policy_data, condition, condition_id, condition_kwargs)
+        committed = await store.create_policy(user_id, scopes, policy_data, condition_doc)
 
     await management.bump_policy_version()
     await ac_policy_store().write(user_id, committed)

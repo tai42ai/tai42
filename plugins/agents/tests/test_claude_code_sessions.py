@@ -27,6 +27,7 @@ from tai42_contract.interactions import (
     set_park_completion,
 )
 from tai42_contract.sandbox import ExecResult, SandboxError, SandboxPolicy
+from tai42_contract.template import TemplatedText
 from tests._claude_app import LocalApp, build_local_app
 from tests._claude_stubs import (
     ASYNC_ASK,
@@ -124,7 +125,7 @@ def _bearer_cred() -> ConnectionCred:
 def test_threaded_turn_captures_and_persists_the_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
-    events = _run(build_local_app(), user_message="hi", thread_id="t1")
+    events = _run(build_local_app(), user_message=TemplatedText(content="hi"), thread_id="t1")
     assert any(isinstance(e, MessageFinal) for e in events)
     session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
     raw = asyncio.run(session.get_file(".runner/session_id"))
@@ -139,9 +140,9 @@ def test_second_threaded_turn_reuses_and_resumes(monkeypatch: pytest.MonkeyPatch
     key = workspace_key_for("claude_code", "t1")
 
     async def _two_turns() -> list[Any]:
-        await _astream(app, user_message="turn1", thread_id="t1")
+        await _astream(app, user_message=TemplatedText(content="turn1"), thread_id="t1")
         first = agent_module._LIVE_SESSIONS[key]
-        events = await _astream(app, user_message="turn2", thread_id="t1")
+        events = await _astream(app, user_message=TemplatedText(content="turn2"), thread_id="t1")
         # Turn 2 reuses the same live session (its create-time spec.env intact) and resumes the
         # persisted SDK id — the MESSAGE stub reports the same id, so no mismatch is raised.
         assert agent_module._LIVE_SESSIONS[key] is first
@@ -164,8 +165,8 @@ def test_bearer_file_refreshes_across_turns(monkeypatch: pytest.MonkeyPatch) -> 
 
     async def _two_turns() -> tuple[list[Any], list[Any]]:
         return (
-            await _astream(app, user_message="t1", thread_id="t1"),
-            await _astream(app, user_message="t2", thread_id="t1"),
+            await _astream(app, user_message=TemplatedText(content="t1"), thread_id="t1"),
+            await _astream(app, user_message=TemplatedText(content="t2"), thread_id="t1"),
         )
 
     token = set_request_user_id("user-1")
@@ -185,7 +186,7 @@ def test_terminal_exit_scrubs_the_bearer_file(monkeypatch: pytest.MonkeyPatch) -
     app = build_local_app(resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("tok1")))
     token = set_request_user_id("user-1")
     try:
-        _run(app, user_message="hi", thread_id="t1")
+        _run(app, user_message=TemplatedText(content="hi"), thread_id="t1")
     finally:
         reset_request_user_id(token)
     session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
@@ -201,7 +202,7 @@ def test_required_connection_cred_resolving_to_nothing_raises(monkeypatch: pytes
     token = set_request_user_id("user-1")
     try:
         with pytest.raises(Exception, match="resolved to nothing"):
-            _run(app, user_message="hi", thread_id="t1")
+            _run(app, user_message=TemplatedText(content="hi"), thread_id="t1")
     finally:
         reset_request_user_id(token)
 
@@ -216,7 +217,7 @@ def test_held_lease_busy_errors(monkeypatch: pytest.MonkeyPatch) -> None:
         key = workspace_key_for("claude_code", "t1")
         async with workspace_lease(key, lease_ms=60_000):
             with tai42_app.bound(app):
-                async for _ in ClaudeCodeAgent().astream(user_message="hi", thread_id="t1"):
+                async for _ in ClaudeCodeAgent().astream(user_message=TemplatedText(content="hi"), thread_id="t1"):
                     pass
 
     with pytest.raises(WorkspaceLeaseHeldError):
@@ -244,7 +245,9 @@ def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatc
     async def _park_then_read() -> tuple[list[Any], Any]:
         # The astream drive and the index read share ONE event loop (the fakeredis client is
         # loop-bound), so the persisted entry is read back on the same loop it was written on.
-        events = await _astream(app, user_message="deploy it", thread_id="t1", tool_names=["parkingtool"])
+        events = await _astream(
+            app, user_message=TemplatedText(content="deploy it"), thread_id="t1", tool_names=["parkingtool"]
+        )
         return events, await idx.read_park_entry("i-tool")
 
     token = set_request_user_id("user-1")
@@ -282,7 +285,7 @@ def test_proxied_tool_dispatch_is_delivery_scoped(monkeypatch: pytest.MonkeyPatc
     # A proxied tool call needs a bound execution identity (the door's entitlement gate).
     user_token = set_request_user_id("user-1")
     try:
-        _run(app, user_message="deploy it", thread_id="t1", tool_names=["peektool"])
+        _run(app, user_message=TemplatedText(content="deploy it"), thread_id="t1", tool_names=["peektool"])
         assert get_park_completion() == bound
     finally:
         reset_request_user_id(user_token)
@@ -309,7 +312,9 @@ def test_proxied_tool_park_this_session_does_not_own_is_refused_to_the_model(
     app = build_local_app(tool_runners={"parkingtool": nested_driver_tool})
 
     async def _drive() -> tuple[list[Any], Any]:
-        events = await _astream(app, user_message="deploy it", thread_id="t1", tool_names=["parkingtool"])
+        events = await _astream(
+            app, user_message=TemplatedText(content="deploy it"), thread_id="t1", tool_names=["parkingtool"]
+        )
         return events, await idx.read_park_entry("i-nested")
 
     token = set_request_user_id("user-1")
@@ -348,7 +353,7 @@ def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     token = set_request_user_id("user-1")
     try:
-        events = _run(app, user_message="deploy it", thread_id="t1")
+        events = _run(app, user_message=TemplatedText(content="deploy it"), thread_id="t1")
     finally:
         reset_request_user_id(token)
     suspended = [e for e in events if isinstance(e, SuspendedFinal)]
@@ -391,7 +396,10 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
 
     async def _park_then_resume() -> tuple[list[Any], Any, Any]:
         with tai42_app.bound(app):
-            events = [event async for event in agent.astream(user_message="deploy it", thread_id="te2e")]
+            events = [
+                event
+                async for event in agent.astream(user_message=TemplatedText(content="deploy it"), thread_id="te2e")
+            ]
             # The REAL async ask actually parked: the interaction is durable and resumable.
             assert await idx.read_park_entry("int-e2e") is not None
             # Resume drives a fresh session to a clean terminal (swap in the resume stub).
@@ -430,7 +438,7 @@ def test_park_persists_a_resumable_index_entry(monkeypatch: pytest.MonkeyPatch, 
         )
 
     async def _park_then_read() -> Any:
-        await _astream(build_local_app(ask_user=ask_user), user_message="deploy", thread_id="t9")
+        await _astream(build_local_app(ask_user=ask_user), user_message=TemplatedText(content="deploy"), thread_id="t9")
         return await idx.read_park_entry("int-9")
 
     entry = asyncio.run(_park_then_read())
@@ -486,7 +494,7 @@ def test_transcript_content_is_redacted_when_scrub_on(monkeypatch: pytest.Monkey
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(REDACT_TRANSCRIPT))
     app = build_local_app(policy=_scrub_on_policy())
-    _run(app, user_message="hi", thread_id="tscrub")
+    _run(app, user_message=TemplatedText(content="hi"), thread_id="tscrub")
 
     session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "tscrub")]
     body = asyncio.run(session.get_file(".claude-home/transcript.jsonl")).decode("utf-8")
@@ -513,7 +521,7 @@ def test_transcript_redaction_failure_raises_loudly(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(FakeSandboxSession, "exec", _failing_exec)
     with pytest.raises(ClaudeCodeError, match="transcript redaction failed"):
-        _run(app, user_message="hi", thread_id="tfail")
+        _run(app, user_message=TemplatedText(content="hi"), thread_id="tfail")
 
 
 # ---- resume session-id gate + malformed persisted session id ------------------------
@@ -528,10 +536,10 @@ def test_resume_session_id_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> N
 
     async def _two_turns() -> None:
         monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
-        await _astream(app, user_message="turn1", thread_id="t1")  # persists sess-1
+        await _astream(app, user_message=TemplatedText(content="turn1"), thread_id="t1")  # persists sess-1
         # Turn 2 reports sess-2 in its hello — mismatched against the resumed sess-1.
         monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE_SESSION_OTHER))
-        await _astream(app, user_message="turn2", thread_id="t1")
+        await _astream(app, user_message=TemplatedText(content="turn2"), thread_id="t1")
 
     with pytest.raises(ProtocolError, match="resumed id"):
         asyncio.run(_two_turns())
@@ -549,10 +557,10 @@ def test_malformed_persisted_session_id_raises(monkeypatch: pytest.MonkeyPatch, 
     key = workspace_key_for("claude_code", "t1")
 
     async def _turn_then_corrupt() -> None:
-        await _astream(app, user_message="turn1", thread_id="t1")  # creates the session id file
+        await _astream(app, user_message=TemplatedText(content="turn1"), thread_id="t1")  # creates the session id file
         session = agent_module._LIVE_SESSIONS[key]
         await session.put_file(".runner/session_id", corrupt)
-        await _astream(app, user_message="turn2", thread_id="t1")  # reads the corrupted file
+        await _astream(app, user_message=TemplatedText(content="turn2"), thread_id="t1")  # reads the corrupted file
 
     with pytest.raises(ProtocolError, match="malformed"):
         asyncio.run(_turn_then_corrupt())

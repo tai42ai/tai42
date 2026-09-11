@@ -25,7 +25,9 @@ from tai42_contract.states import (
     WriteOrigin,
 )
 from tai42_contract.states.errors import AttachConflictError, StateNotFoundError, ValueValidationError
+from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.template.resource_manager import TemplateNotFoundError
 from tai42_skeleton.tools.state_binding import (
     apply_binding_injections,
     apply_binding_updates,
@@ -101,8 +103,26 @@ class FakeStates:
         return self._templates.get(name)
 
 
-def _app(states: FakeStates) -> Any:
-    return SimpleNamespace(states=states)
+class FakeResourceManager:
+    """The subset of the resource manager the binding render seam calls. Renders a slot's
+    templated text to its jq program: an inline ``content`` is its own text; a stored ``id``
+    is looked up in ``resources`` and a MISSING id raises loudly (the store's own not-found
+    error), so the door's by-id save check fails just as it would against a real store."""
+
+    def __init__(self, resources: dict[str, str] | None = None) -> None:
+        self._resources = resources or {}
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.id is not None:
+            if text.id not in self._resources:
+                raise TemplateNotFoundError(f"template {text.id!r} not found")
+            return self._resources[text.id]
+        assert text.content is not None
+        return text.content
+
+
+def _app(states: FakeStates, resources: dict[str, str] | None = None) -> Any:
+    return SimpleNamespace(states=states, storage=SimpleNamespace(resource_manager=FakeResourceManager(resources)))
 
 
 # -- merge / precedence -------------------------------------------------------
@@ -111,9 +131,9 @@ def test_merge_door_wins_subject_unions_templates_concats_and_appends_preset_onl
         states=[
             StateAttach(
                 state="status",
-                subject_expr=".a",
+                subject_expr=TemplatedText(content=".a"),
                 templates=["t1"],
-                input_injections=[StateInjection(jq=".record", into="d")],
+                input_injections=[StateInjection(jq=TemplatedText(content=".record"), into="d")],
             )
         ]
     )
@@ -121,18 +141,18 @@ def test_merge_door_wins_subject_unions_templates_concats_and_appends_preset_onl
         states=[
             StateAttach(
                 state="status",
-                subject_expr=".b",
+                subject_expr=TemplatedText(content=".b"),
                 templates=["t2"],
-                input_injections=[StateInjection(jq=".record", into="p")],
+                input_injections=[StateInjection(jq=TemplatedText(content=".record"), into="p")],
             ),
-            StateAttach(state="events", subject_expr=".c"),
+            StateAttach(state="events", subject_expr=TemplatedText(content=".c")),
         ]
     )
     merged = merge_bindings(door, preset)
     assert merged is not None
     assert [a.state for a in merged.states] == ["status", "events"]
     status = merged.states[0]
-    assert status.subject_expr == ".a"  # door wins
+    assert status.subject_expr == TemplatedText(content=".a")  # door wins
     assert status.templates == ["t1", "t2"]  # union, door-first
     assert [i.into for i in status.input_injections] == ["d", "p"]  # concat door-first
     assert merge_bindings(None, preset) is preset
@@ -141,15 +161,27 @@ def test_merge_door_wins_subject_unions_templates_concats_and_appends_preset_onl
 
 def test_merge_scope_expr_door_wins_when_present_else_preset() -> None:
     # M4: the door's scope_expr wins WHEN PRESENT; when the door names none, the preset's is used.
-    door_with = StateBinding(states=[StateAttach(state="status", subject_expr=".a", scope_expr=".d")])
-    door_without = StateBinding(states=[StateAttach(state="status", subject_expr=".a")])
-    preset = StateBinding(states=[StateAttach(state="status", subject_expr=".b", scope_expr=".p")])
+    door_with = StateBinding(
+        states=[
+            StateAttach(
+                state="status", subject_expr=TemplatedText(content=".a"), scope_expr=TemplatedText(content=".d")
+            )
+        ]
+    )
+    door_without = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content=".a"))])
+    preset = StateBinding(
+        states=[
+            StateAttach(
+                state="status", subject_expr=TemplatedText(content=".b"), scope_expr=TemplatedText(content=".p")
+            )
+        ]
+    )
     won = merge_bindings(door_with, preset)
     assert won is not None
-    assert won.states[0].scope_expr == ".d"  # door's wins when present
+    assert won.states[0].scope_expr == TemplatedText(content=".d")  # door's wins when present
     fell_back = merge_bindings(door_without, preset)
     assert fell_back is not None
-    assert fell_back.states[0].scope_expr == ".p"  # preset's used when door names none
+    assert fell_back.states[0].scope_expr == TemplatedText(content=".p")  # preset's used when door names none
 
 
 # -- subject resolution -------------------------------------------------------
@@ -160,8 +192,10 @@ async def test_subject_from_full_object_expression() -> None:
         states=[
             StateAttach(
                 state="status",
-                subject_expr='{target_kind: "agent", target_name: "a", kind: "thread", key: .id}',
-                input_injections=[StateInjection(jq=".record.seen", into="out")],
+                subject_expr=TemplatedText(
+                    content='{target_kind: "agent", target_name: "a", kind: "thread", key: .id}'
+                ),
+                input_injections=[StateInjection(jq=TemplatedText(content=".record.seen"), into="out")],
             )
         ]
     )
@@ -177,9 +211,9 @@ async def test_scope_expr_false_skips_the_state_for_the_run() -> None:
         states=[
             StateAttach(
                 state="status",
-                subject_expr=".tid",
-                scope_expr=".enabled",  # a boolean predicate over the run input
-                input_injections=[StateInjection(jq=".record.n", into="n")],
+                subject_expr=TemplatedText(content=".tid"),
+                scope_expr=TemplatedText(content=".enabled"),  # a boolean predicate over the run input
+                input_injections=[StateInjection(jq=TemplatedText(content=".record.n"), into="n")],
             )
         ]
     )
@@ -196,9 +230,9 @@ async def test_scope_expr_true_engages_the_state() -> None:
         states=[
             StateAttach(
                 state="status",
-                subject_expr=".tid",
-                scope_expr=".enabled",
-                input_injections=[StateInjection(jq=".record.n", into="n")],
+                subject_expr=TemplatedText(content=".tid"),
+                scope_expr=TemplatedText(content=".enabled"),
+                input_injections=[StateInjection(jq=TemplatedText(content=".record.n"), into="n")],
             )
         ]
     )
@@ -214,9 +248,9 @@ async def test_scope_expr_non_boolean_is_loud() -> None:
         states=[
             StateAttach(
                 state="status",
-                subject_expr=".tid",
-                scope_expr='"nope"',
-                input_injections=[StateInjection(jq=".", into="x")],
+                subject_expr=TemplatedText(content=".tid"),
+                scope_expr=TemplatedText(content='"nope"'),
+                input_injections=[StateInjection(jq=TemplatedText(content="."), into="x")],
             )
         ]
     )
@@ -227,7 +261,13 @@ async def test_scope_expr_non_boolean_is_loud() -> None:
 async def test_subject_key_with_no_scope_and_no_ambient_context_is_loud() -> None:
     states = FakeStates(ctx=None)
     b = StateBinding(
-        states=[StateAttach(state="status", subject_expr=".tid", input_injections=[StateInjection(jq=".", into="x")])]
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".tid"),
+                input_injections=[StateInjection(jq=TemplatedText(content="."), into="x")],
+            )
+        ]
     )
     with pytest.raises(ValueValidationError, match="no ambient subject scope"):
         await apply_binding_injections(_app(states), b, {"tid": "k"})
@@ -239,7 +279,9 @@ async def test_subject_uses_ambient_context_scope_and_default_kind() -> None:
     b = StateBinding(
         states=[
             StateAttach(
-                state="status", subject_expr=".tid", input_injections=[StateInjection(template_jq="bound", into="c")]
+                state="status",
+                subject_expr=TemplatedText(content=".tid"),
+                input_injections=[StateInjection(template_jq="bound", into="c")],
             )
         ]
     )
@@ -263,10 +305,10 @@ async def test_named_injection_calls_eval_and_custom_runs_jq_over_record_and_inp
         states=[
             StateAttach(
                 state="status",
-                subject_expr=".tid",
+                subject_expr=TemplatedText(content=".tid"),
                 input_injections=[
                     StateInjection(template_jq="view", into="v"),
-                    StateInjection(jq="{c: .record.count, given: .input.tid}", into="w"),
+                    StateInjection(jq=TemplatedText(content="{c: .record.count, given: .input.tid}"), into="w"),
                 ],
             )
         ]
@@ -285,10 +327,14 @@ async def test_named_update_adapts_input_and_custom_update_authors_ops() -> None
         states=[
             StateAttach(
                 state="status",
-                subject_expr=".tid",
+                subject_expr=TemplatedText(content=".tid"),
                 updates=[
-                    StateUpdate(template_jq="mark", adapter="{verdict: .output.status}", op_id=".input.tid"),
-                    StateUpdate(jq='[{op: "set", path: ["last"], value: .output}]'),
+                    StateUpdate(
+                        template_jq="mark",
+                        adapter=TemplatedText(content="{verdict: .output.status}"),
+                        op_id=TemplatedText(content=".input.tid"),
+                    ),
+                    StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .output}]')),
                 ],
             )
         ]
@@ -318,7 +364,9 @@ async def test_attach_on_use_attaches_absent_and_skips_present_idempotently() ->
     # 'planner' already attached → skipped; 'other' absent → attached once.
     tpl2 = StateTemplateDocument.model_validate({"name": "other", "schema": {"type": "object"}, "template_jq": {}})
     states._templates["other"] = tpl2
-    b = StateBinding(states=[StateAttach(state="status", subject_expr=".id", templates=["planner", "other"])])
+    b = StateBinding(
+        states=[StateAttach(state="status", subject_expr=TemplatedText(content=".id"), templates=["planner", "other"])]
+    )
     await validate_and_attach_binding(_app(states), b)
     assert states.attached_now == [("status", "other", ["other"])]
 
@@ -329,7 +377,7 @@ async def test_attach_failure_or_occupied_path_fails_the_save() -> None:
         async def attach(self, state, template, body):
             raise AttachConflictError("occupied")
 
-    b = StateBinding(states=[StateAttach(state="status", subject_expr=".id", templates=["dup"])])
+    b = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content=".id"), templates=["dup"])])
     with pytest.raises(AttachConflictError):
         await validate_and_attach_binding(_app(BoomStates(attached={"status": []})), b)
 
@@ -343,7 +391,13 @@ async def test_named_update_without_adapter_but_declared_params_is_refused_at_sa
         }
     )
     states = FakeStates(attached={"status": ["planner"]}, templates={"planner": tpl})
-    b = StateBinding(states=[StateAttach(state="status", subject_expr=".id", updates=[StateUpdate(template_jq="put")])])
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status", subject_expr=TemplatedText(content=".id"), updates=[StateUpdate(template_jq="put")]
+            )
+        ]
+    )
     with pytest.raises(ValueValidationError, match="no adapter"):
         await validate_and_attach_binding(_app(states), b)
 
@@ -359,7 +413,7 @@ async def test_validate_binding_resolves_a_declared_template_without_attaching()
         states=[
             StateAttach(
                 state="status",
-                subject_expr=".id",
+                subject_expr=TemplatedText(content=".id"),
                 templates=["planner"],
                 input_injections=[StateInjection(template_jq="v", into="x")],
             )
@@ -382,13 +436,13 @@ async def test_validate_binding_compiles_scope_custom_and_qualified_named_exprs(
         states=[
             StateAttach(
                 state="status",
-                subject_expr=".id",
-                scope_expr=".ok",
+                subject_expr=TemplatedText(content=".id"),
+                scope_expr=TemplatedText(content=".ok"),
                 templates=["planner"],
-                input_injections=[StateInjection(jq="{v: .record}", into="x")],
+                input_injections=[StateInjection(jq=TemplatedText(content="{v: .record}"), into="x")],
                 updates=[
-                    StateUpdate(jq="[]", op_id=".output.id"),
-                    StateUpdate(template_jq="planner.mark", adapter="{v: 1}"),
+                    StateUpdate(jq=TemplatedText(content="[]"), op_id=TemplatedText(content=".output.id")),
+                    StateUpdate(template_jq="planner.mark", adapter=TemplatedText(content="{v: 1}")),
                 ],
             )
         ]
@@ -400,7 +454,13 @@ async def test_validate_binding_compiles_scope_custom_and_qualified_named_exprs(
 async def test_validate_binding_qualified_unknown_template_is_refused() -> None:
     states = FakeStates(attached={"status": []}, templates={})
     b = StateBinding(
-        states=[StateAttach(state="status", subject_expr=".id", updates=[StateUpdate(template_jq="ghost.mark")])]
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".id"),
+                updates=[StateUpdate(template_jq="ghost.mark")],
+            )
+        ]
     )
     with pytest.raises(StateNotFoundError, match="not attached"):
         await validate_binding(_app(states), b)
@@ -415,7 +475,11 @@ async def test_validate_binding_ambiguous_program_is_refused() -> None:
     )
     states = FakeStates(attached={"status": ["a", "b"]}, templates={"a": tpl_a, "b": tpl_b})
     b = StateBinding(
-        states=[StateAttach(state="status", subject_expr=".id", updates=[StateUpdate(template_jq="mark")])]
+        states=[
+            StateAttach(
+                state="status", subject_expr=TemplatedText(content=".id"), updates=[StateUpdate(template_jq="mark")]
+            )
+        ]
     )
     with pytest.raises(ValueValidationError, match="more than one"):
         await validate_binding(_app(states), b)
@@ -426,7 +490,13 @@ async def test_validate_binding_purpose_mismatch_is_refused() -> None:
         {"name": "planner", "schema": {"type": "object"}, "template_jq": {"vin": {"purpose": "input", "jq": "."}}}
     )
     states = FakeStates(attached={"status": ["planner"]}, templates={"planner": tpl})
-    b = StateBinding(states=[StateAttach(state="status", subject_expr=".id", updates=[StateUpdate(template_jq="vin")])])
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status", subject_expr=TemplatedText(content=".id"), updates=[StateUpdate(template_jq="vin")]
+            )
+        ]
+    )
     with pytest.raises(ValueValidationError, match="has purpose"):
         await validate_binding(_app(states), b)
 
@@ -435,7 +505,9 @@ async def test_validate_binding_missing_declared_template_is_a_loud_refusal() ->
     # A declared template that does not exist cannot be attached — the dry run refuses it,
     # the SAME rejection the save seam's attach would raise, without attaching.
     states = FakeStates(attached={"status": []}, templates={})
-    b = StateBinding(states=[StateAttach(state="status", subject_expr=".id", templates=["ghost"])])
+    b = StateBinding(
+        states=[StateAttach(state="status", subject_expr=TemplatedText(content=".id"), templates=["ghost"])]
+    )
     with pytest.raises(StateNotFoundError, match="does not exist"):
         await validate_binding(_app(states), b)
     assert states.attached_now == []
@@ -447,9 +519,48 @@ async def test_named_injection_referencing_unknown_program_is_refused_at_save() 
     b = StateBinding(
         states=[
             StateAttach(
-                state="status", subject_expr=".id", input_injections=[StateInjection(template_jq="ghost", into="x")]
+                state="status",
+                subject_expr=TemplatedText(content=".id"),
+                input_injections=[StateInjection(template_jq="ghost", into="x")],
             )
         ]
     )
     with pytest.raises(StateNotFoundError):
         await validate_and_attach_binding(_app(states), b)
+
+
+# -- by-id slots: render-then-compile at save --------------------------------
+async def test_by_id_slot_that_cannot_be_fetched_fails_the_save_loudly() -> None:
+    # A slot supplied by ``id`` is fetched and rendered at save before its jq is compiled; a
+    # referenced resource that does not exist is a LOUD refusal naming the slot and the id,
+    # never a silent pass or a deferred surprise.
+    states = FakeStates(attached={"status": []}, templates={})
+    b = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(id="ghost-expr"))])
+    with pytest.raises(ValueValidationError, match=r"subject_expr.*'ghost-expr'"):
+        await validate_and_attach_binding(_app(states, resources={}), b)
+
+
+async def test_by_id_slots_resolve_and_compile_at_save() -> None:
+    # By-id slots across every jq position resolve to their programs, which then compile with
+    # the binding's prelude; the save accepts them and attaches nothing beyond the declared use.
+    states = FakeStates(attached={"status": []}, templates={})
+    resources = {
+        "subj": ".id",
+        "scope": ".ok",
+        "inj": "{v: .record}",
+        "upd": "[]",
+        "op": ".output.id",
+    }
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(id="subj"),
+                scope_expr=TemplatedText(id="scope"),
+                input_injections=[StateInjection(jq=TemplatedText(id="inj"), into="x")],
+                updates=[StateUpdate(jq=TemplatedText(id="upd"), op_id=TemplatedText(id="op"))],
+            )
+        ]
+    )
+    await validate_and_attach_binding(_app(states, resources=resources), b)
+    assert states.attached_now == []

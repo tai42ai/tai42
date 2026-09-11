@@ -8,12 +8,14 @@ composing-regime refusal that need real Postgres semantics are pinned in
 from __future__ import annotations
 
 import pytest
+from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import (
     StateNotFoundError,
     TemplateValidationError,
     ValueValidationError,
 )
 from tai42_contract.states.models import AttachBody, StateTemplateDocument, WriteOrigin
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
@@ -21,6 +23,41 @@ from tai42_skeleton.states.service import StatesService
 from .test_service import _STATE, FakeStatesStore, _subject
 
 _ORIGIN = WriteOrigin(consumer="c")
+
+# The stored jq resources a by-id ``template_jq``/``reconcile`` program names, keyed by id →
+# its jq body. Mutable, so a test can delete an id after save to exercise the run-time
+# fetch-failure door. Reset by the ``svc`` fixture.
+_STORED_PROGRAMS_BASE = {
+    "stored-anything-due": "(.ledger // []) | length > 0",
+    "stored-orphans": ".new.allowed as $a|[(.data.ledger//[])[]|select(.id as $i|($a|index($i))==null)|{id,label:.id}]",
+    "stored-resolutions": '["closed"]',
+    "stored-close": '[{op: "set", path: ["ledger"], value: []}]',
+}
+_STORED_PROGRAMS: dict[str, str] = dict(_STORED_PROGRAMS_BASE)
+
+
+class _FakeResourceManager:
+    """Renders a program body: inline ``content`` verbatim, or a stored ``id`` from
+    ``_STORED_PROGRAMS`` — an unmapped id is the loud not-found the real manager raises."""
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.id is not None:
+            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+
+            if text.id not in _STORED_PROGRAMS:
+                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+            return _STORED_PROGRAMS[text.id]
+        assert text.content is not None
+        return text.content
+
+
+class _FakeStorage:
+    resource_manager = _FakeResourceManager()
+
+
+class _FakeApp:
+    storage = _FakeStorage()
+
 
 _TEMPLATE = StateTemplateDocument.model_validate(
     {
@@ -33,31 +70,41 @@ _TEMPLATE = StateTemplateDocument.model_validate(
         },
         "template_jq": {
             # input-purpose programs read the record and return a value
-            "anything_due": {"purpose": "input", "jq": "(.ledger // []) | length > 0"},
-            "ids": {"purpose": "input", "description": "the ledger ids", "jq": "[(.ledger // [])[] | .id]"},
+            "anything_due": {"purpose": "input", "jq": {"content": "(.ledger // []) | length > 0"}},
+            "ids": {
+                "purpose": "input",
+                "description": "the ledger ids",
+                "jq": {"content": "[(.ledger // [])[] | .id]"},
+            },
             "one": {
                 "purpose": "input",
                 "params": ["id"],
-                "jq": "[(.ledger // [])[] | select(.id == $params.id)] | first",
+                "jq": {"content": "[(.ledger // [])[] | select(.id == $params.id)] | first"},
             },
-            "count": {"purpose": "input", "jq": "(.ledger // []) | length"},
-            "due": {"purpose": "input", "jq": "tjq_anything_due({})"},  # input calling a sibling input
+            "count": {"purpose": "input", "jq": {"content": "(.ledger // []) | length"}},
+            "due": {"purpose": "input", "jq": {"content": "tjq_anything_due({})"}},  # input calling a sibling input
             # update-purpose programs map {record, input} to an op batch
             "add": {
                 "purpose": "update",
                 "writes": [["ledger"]],
-                "jq": '[{op: "set", path: ["ledger"], value: ((.record.ledger // []) + [.input])}]',
+                "jq": {"content": '[{op: "set", path: ["ledger"], value: ((.record.ledger // []) + [.input])}]'},
             },
-            "bad_shape": {"purpose": "update", "writes": [["ledger"]], "jq": '"not a list"'},
+            "bad_shape": {"purpose": "update", "writes": [["ledger"]], "jq": {"content": '"not a list"'}},
         },
     }
 )
 
 
 @pytest.fixture
-def svc(monkeypatch: pytest.MonkeyPatch) -> StatesService:
+def svc(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
-    return StatesService(store=FakeStatesStore())  # type: ignore[arg-type]
+    # A program body renders through the bound resource manager just before it is compiled or
+    # evaluated (inline or by-id), so bind a fake for the service's lifetime and reset the
+    # stored-program map each test.
+    _STORED_PROGRAMS.clear()
+    _STORED_PROGRAMS.update(_STORED_PROGRAMS_BASE)
+    with tai42_app.bound(_FakeApp()):
+        yield StatesService(store=FakeStatesStore())  # type: ignore[arg-type]
 
 
 async def _attached(svc: StatesService) -> None:
@@ -181,7 +228,7 @@ _PARAMS_TEMPLATE = StateTemplateDocument.model_validate(
                 "purpose": "update",
                 "params": ["id", "label"],
                 "writes": [["ledger"]],
-                "jq": '[{op: "set", path: ["ledger"], value: ((.record.ledger // []) + [.input])}]',
+                "jq": {"content": '[{op: "set", path: ["ledger"], value: ((.record.ledger // []) + [.input])}]'},
             }
         },
     }
@@ -229,7 +276,7 @@ async def test_apply_origin_carries_the_template_jq_name(svc: StatesService) -> 
 # name resolution across attachments                                            #
 # --------------------------------------------------------------------------- #
 async def test_program_declared_by_two_templates_is_ambiguous_and_qualifies(svc: StatesService) -> None:
-    dup = {"a": {"purpose": "input", "jq": "1"}}
+    dup = {"a": {"purpose": "input", "jq": {"content": "1"}}}
     m1 = StateTemplateDocument.model_validate(
         {"name": "one", "schema": {"type": "object", "properties": {"p": {"type": "integer"}}}, "template_jq": dup}
     )
@@ -276,11 +323,13 @@ _RECON_TEMPLATE = StateTemplateDocument.model_validate(
         },
         "declarations": {"schema": {"type": "object", "properties": {"allowed": {"type": "array"}}}},
         "reconcile": {
-            "orphans": (
-                ".new.allowed as $a|[(.data.ledger//[])[]|select(.id as $i|($a|index($i))==null)|{id,label:.id}]"
-            ),
-            "resolutions": '["closed"]',
-            "close": '[{op: "set", path: ["ledger"], value: []}]',
+            "orphans": {
+                "content": (
+                    ".new.allowed as $a|[(.data.ledger//[])[]|select(.id as $i|($a|index($i))==null)|{id,label:.id}]"
+                )
+            },
+            "resolutions": {"content": '["closed"]'},
+            "close": {"content": '[{op: "set", path: ["ledger"], value: []}]'},
         },
     }
 )
@@ -357,7 +406,7 @@ async def test_program_evaluation_failure_is_loud(svc: StatesService) -> None:
         {
             "name": "boom",
             "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
-            "template_jq": {"bad": {"purpose": "input", "jq": '.ledger | error("kaboom")'}},
+            "template_jq": {"bad": {"purpose": "input", "jq": {"content": '.ledger | error("kaboom")'}}},
         }
     )
     await svc.put_declaration(_STATE)
@@ -382,7 +431,11 @@ async def test_reconcile_orphans_returning_a_non_list_is_loud(svc: StatesService
             "name": "reconciler",
             "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
             "declarations": {"schema": {"type": "object", "properties": {"allowed": {"type": "array"}}}},
-            "reconcile": {"orphans": '"not a list"', "resolutions": "[]", "close": "[]"},
+            "reconcile": {
+                "orphans": {"content": '"not a list"'},
+                "resolutions": {"content": "[]"},
+                "close": {"content": "[]"},
+            },
         }
     )
     await svc.put_declaration(_STATE)
@@ -391,3 +444,113 @@ async def test_reconcile_orphans_returning_a_non_list_is_loud(svc: StatesService
     await svc.replace(_STATE.name, _subject(), {"ledger": []}, origin=_ORIGIN)
     with pytest.raises(TemplateValidationError, match="reconcile orphans must return a list"):
         await svc.update_attachment_declarations(_STATE.name, "reconciler", {"allowed": ["a"]})
+
+
+# --------------------------------------------------------------------------- #
+# by-id program bodies (a stored resource holds the jq)                         #
+# --------------------------------------------------------------------------- #
+async def test_input_program_by_id_resolves_and_evaluates(svc: StatesService) -> None:
+    # An input program whose body is a stored ``id`` renders to its jq immediately before it
+    # evaluates, over the subject's record.
+    template = StateTemplateDocument.model_validate(
+        {
+            "name": "byid",
+            "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
+            "template_jq": {"any_due": {"purpose": "input", "jq": {"id": "stored-anything-due"}}},
+        }
+    )
+    await svc.put_declaration(_STATE)
+    await svc.put_template(template, replace=False)
+    await svc.attach(_STATE.name, "byid", AttachBody(path=[]))
+    await svc.replace(_STATE.name, _subject(), {"ledger": [{"id": "a"}]}, origin=_ORIGIN)
+    result = await svc.eval_template_jq(_STATE.name, _subject(), "any_due", {})
+    assert result.value is True
+
+
+async def test_input_program_by_id_unfetchable_is_loud_at_save(svc: StatesService) -> None:
+    # A by-id body whose stored resource cannot be fetched fails the SAVE loudly, naming the
+    # program and the id.
+    template = StateTemplateDocument.model_validate(
+        {
+            "name": "byid",
+            "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
+            "template_jq": {"any_due": {"purpose": "input", "jq": {"id": "ghost"}}},
+        }
+    )
+    await svc.put_declaration(_STATE)
+    with pytest.raises(TemplateValidationError, match="template_jq 'any_due' references stored id 'ghost'"):
+        await svc.put_template(template, replace=False)
+
+
+async def test_input_program_by_id_unfetchable_at_run_time_is_loud(svc: StatesService) -> None:
+    # The resource exists at save (so the compile passes), then is removed before the program
+    # runs: the run-time render is a LOUD refusal naming the program and the id, never a silent
+    # skip.
+    template = StateTemplateDocument.model_validate(
+        {
+            "name": "byid",
+            "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
+            "template_jq": {"any_due": {"purpose": "input", "jq": {"id": "stored-anything-due"}}},
+        }
+    )
+    await svc.put_declaration(_STATE)
+    await svc.put_template(template, replace=False)
+    await svc.attach(_STATE.name, "byid", AttachBody(path=[]))
+    await svc.replace(_STATE.name, _subject(), {"ledger": [{"id": "a"}]}, origin=_ORIGIN)
+    del _STORED_PROGRAMS["stored-anything-due"]
+    with pytest.raises(
+        ValueValidationError, match=r"template_jq 'any_due' .* references stored id 'stored-anything-due'"
+    ):
+        await svc.eval_template_jq(_STATE.name, _subject(), "any_due", {})
+
+
+_RECON_BY_ID_TEMPLATE = StateTemplateDocument.model_validate(
+    {
+        "name": "reconciler",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ledger": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}}}}
+            },
+        },
+        "declarations": {"schema": {"type": "object", "properties": {"allowed": {"type": "array"}}}},
+        "reconcile": {
+            "orphans": {"id": "stored-orphans"},
+            "resolutions": {"id": "stored-resolutions"},
+            "close": {"id": "stored-close"},
+        },
+    }
+)
+
+
+async def test_reconcile_by_id_programs_resolve_and_close(svc: StatesService) -> None:
+    # A reconcile whose three programs are stored by id renders each immediately before it runs;
+    # a declarations edit that orphans is closed through the by-id ``close`` program.
+    await svc.put_declaration(_STATE)
+    await svc.put_template(_RECON_BY_ID_TEMPLATE, replace=False)
+    await svc.attach(_STATE.name, "reconciler", AttachBody(path=[], declarations={"allowed": ["a", "c"]}))
+    await svc.replace(_STATE.name, _subject(), {"ledger": [{"id": "a"}, {"id": "c"}]}, origin=_ORIGIN)
+    await svc.update_attachment_declarations(
+        _STATE.name, "reconciler", {"allowed": ["a"]}, options={"orphans": "close", "resolution": "closed"}
+    )
+    view = await svc.read(_STATE.name, _subject())
+    assert view is not None
+    assert view.data["ledger"] == []
+
+
+async def test_reconcile_by_id_unfetchable_is_loud_at_save(svc: StatesService) -> None:
+    template = StateTemplateDocument.model_validate(
+        {
+            "name": "reconciler",
+            "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
+            "declarations": {"schema": {"type": "object", "properties": {"allowed": {"type": "array"}}}},
+            "reconcile": {
+                "orphans": {"id": "ghost"},
+                "resolutions": {"content": "[]"},
+                "close": {"content": "[]"},
+            },
+        }
+    )
+    await svc.put_declaration(_STATE)
+    with pytest.raises(TemplateValidationError, match="reconcile orphans references stored id 'ghost'"):
+        await svc.put_template(template, replace=False)

@@ -53,6 +53,7 @@ from tai42_contract.interactions import (
     set_park_completion,
     set_resume_continuation_tool,
 )
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 from tests._delivery_scope import assert_delivery_scoped, probe_tool
 
@@ -91,7 +92,7 @@ def test_resolve_subagent_specs_resolves_tool_names_and_nesting(app_tools: Any) 
         DeepSubAgentSpec(
             name="researcher",
             description="does research",
-            system_prompt="research things",
+            system_prompt=TemplatedText(content="research things"),
             tools=["search", "fetch"],
             response_format={
                 "title": "Summary",
@@ -102,7 +103,7 @@ def test_resolve_subagent_specs_resolves_tool_names_and_nesting(app_tools: Any) 
                 DeepSubAgentSpec(
                     name="summarizer",
                     description="summarizes",
-                    system_prompt="summarize",
+                    system_prompt=TemplatedText(content="summarize"),
                     tools=["summarize"],
                 )
             ],
@@ -135,7 +136,7 @@ def test_resolve_subagent_specs_passes_inline_skills_through(app_tools: Any) -> 
         DeepSubAgentSpec(
             name="researcher",
             description="does research",
-            system_prompt="research",
+            system_prompt=TemplatedText(content="research"),
             inline_skills=[InlineSkill(name="demo", content="# demo body")],
         )
     ]
@@ -150,10 +151,12 @@ def test_deep_subagent_spec_rejects_unknown_key() -> None:
     honor — e.g. a per-sub ``strategy`` — is a loud validation error rather than a
     silently dropped field, matching ``DeepAgentInput``'s own strictness at the run door."""
     with pytest.raises(ValidationError):
-        DeepSubAgentSpec.model_validate({"name": "s", "description": "d", "system_prompt": "p", "strategy": "vote"})
+        DeepSubAgentSpec.model_validate(
+            {"name": "s", "description": "d", "system_prompt": {"content": "p"}, "strategy": "vote"}
+        )
     with pytest.raises(ValidationError):
         DeepSubAgentSpec.model_validate(
-            {"name": "s", "description": "d", "system_prompt": "p", "totally_unknown_key": 1}
+            {"name": "s", "description": "d", "system_prompt": {"content": "p"}, "totally_unknown_key": 1}
         )
 
 
@@ -167,7 +170,7 @@ def test_resolve_subagent_specs_rejects_response_format_without_title() -> None:
         DeepSubAgentSpec(
             name="researcher",
             description="does research",
-            system_prompt="research",
+            system_prompt=TemplatedText(content="research"),
             response_format={"type": "object", "properties": {"x": {"type": "string"}}},
         )
     ]
@@ -181,7 +184,7 @@ def test_resolve_subagent_specs_rejects_response_format_without_title() -> None:
 
 
 def test_neutral_to_internal_rejects_strategy() -> None:
-    spec = NeutralSubAgentSpec(name="s", description="d", system_prompt="p", strategy="vote")
+    spec = NeutralSubAgentSpec(name="s", description="d", system_prompt=TemplatedText(content="p"), strategy="vote")
     with pytest.raises(ValueError, match="strategy"):
         asyncio.run(_neutral_to_internal(spec))
 
@@ -191,7 +194,7 @@ def test_neutral_to_internal_resolves_tools_and_coerces_inline_skills(app_tools:
     spec = NeutralSubAgentSpec(
         name="s",
         description="d",
-        system_prompt="p",
+        system_prompt=TemplatedText(content="p"),
         tool_names=["search"],
         inline_skills=[{"name": "demo", "content": "# demo"}],
         skills=["/skills/ref/"],
@@ -273,7 +276,7 @@ def test_build_agent_passes_subagents_to_factory(monkeypatch: pytest.MonkeyPatch
     captured: dict[str, Any] = {}
     _patch_build(monkeypatch, captured)
 
-    spec = ResolvedSubAgentSpec(name="helper", description="d", system_prompt="p")
+    spec = ResolvedSubAgentSpec(name="helper", description="d", system_prompt=TemplatedText(content="p"))
     agent: Any = DeepAgent()
     asyncio.run(agent._build_agent(**_build_kwargs(subagents=[spec])))
     assert captured["subagents"] == [spec]
@@ -329,12 +332,14 @@ def test_astream_resolves_json_subagent_specs_from_the_run_door(app_tools: Any) 
     so a deep run WITH subagents does not die with an AttributeError over the streaming
     door (which is what happened when astream only understood the neutral shape)."""
     app_tools.client_tools["search"] = _client_tool("search")
-    json_spec = DeepSubAgentSpec(name="helper", description="d", system_prompt="p", tools=["search"])
+    json_spec = DeepSubAgentSpec(
+        name="helper", description="d", system_prompt=TemplatedText(content="p"), tools=["search"]
+    )
     resolved = asyncio.run(agent_mod._to_internal(json_spec))
     assert isinstance(resolved, ResolvedSubAgentSpec)
     assert resolved.name == "helper"
     # The neutral shape still resolves (both faces accept both).
-    neutral = NeutralSubAgentSpec(name="native", description="d", system_prompt="p")
+    neutral = NeutralSubAgentSpec(name="native", description="d", system_prompt=TemplatedText(content="p"))
     same = asyncio.run(agent_mod._to_internal(neutral))
     assert same.name == "native"
 
@@ -359,7 +364,7 @@ def test_astream_requires_exactly_one_of_message_or_resume() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         asyncio.run(drain(agent.astream(thread_id="t")))
     with pytest.raises(ValueError, match="exactly one"):
-        asyncio.run(drain(agent.astream(thread_id="t", user_message="hi", resume={"x": 1})))
+        asyncio.run(drain(agent.astream(thread_id="t", user_message=TemplatedText(content="hi"), resume={"x": 1})))
 
 
 # ===========================================================================
@@ -402,7 +407,7 @@ def test_deep_agent_astream_rejects_response_format_without_title() -> None:
         _drain_astream(
             DeepAgent().astream(
                 tool_names=[],
-                user_message="go",
+                user_message=TemplatedText(content="go"),
                 response_format={"type": "object", "properties": {"x": {"type": "string"}}},
             )
         )
@@ -413,7 +418,7 @@ def test_deep_agent_rejects_response_format_without_title() -> None:
         asyncio.run(
             DeepAgent().run(
                 tool_names=[],
-                user_message="go",
+                user_message=TemplatedText(content="go"),
                 response_format={"type": "object", "properties": {"x": {"type": "string"}}},
             )
         )
@@ -425,13 +430,15 @@ def test_deep_agent_astream_rejects_oneof_response_format_with_untitled_variant(
     titled."""
     schema = {"title": "Top", "oneOf": [{"title": "A", "type": "object"}, {"type": "object"}]}
     with pytest.raises(ValueError, match="oneOf variants must each"):
-        _drain_astream(DeepAgent().astream(tool_names=[], user_message="go", response_format=schema))
+        _drain_astream(
+            DeepAgent().astream(tool_names=[], user_message=TemplatedText(content="go"), response_format=schema)
+        )
 
 
 def test_deep_agent_run_rejects_oneof_response_format_with_untitled_variant() -> None:
     schema = {"title": "Top", "oneOf": [{"title": "A", "type": "object"}, {"type": "object"}]}
     with pytest.raises(ValueError, match="oneOf variants must each"):
-        asyncio.run(DeepAgent().run(tool_names=[], user_message="go", response_format=schema))
+        asyncio.run(DeepAgent().run(tool_names=[], user_message=TemplatedText(content="go"), response_format=schema))
 
 
 def _install_fake_resolve(monkeypatch: pytest.MonkeyPatch, agent: DeepAgent, graph: _FakeCompiledGraph) -> None:
@@ -463,7 +470,12 @@ def test_run_drains_streaming_core_with_resolved_inputs(
     monkeypatch.setattr(agent, "_resolve_and_build", fake_resolve_and_build)
 
     subagents = [
-        DeepSubAgentSpec(name="researcher", description="does research", system_prompt="research", tools=["search"])
+        DeepSubAgentSpec(
+            name="researcher",
+            description="does research",
+            system_prompt=TemplatedText(content="research"),
+            tools=["search"],
+        )
     ]
 
     result = asyncio.run(
@@ -472,8 +484,8 @@ def test_run_drains_streaming_core_with_resolved_inputs(
             subagents=subagents,
             skills=["/skills/foo"],
             inline_skills=[InlineSkill(name="demo", content="# demo")],
-            system_message="SYS",
-            user_message="go",
+            system_message=TemplatedText(content="SYS"),
+            user_message=TemplatedText(content="go"),
             interrupt_on={"calc": True},
             response_format={"title": "N", "type": "object", "properties": {"n": {"type": "integer"}}},
             langgraph_config={"configurable": {"thread_id": "t"}},
@@ -514,7 +526,7 @@ def test_run_raises_agent_interrupted_on_paused_run(
     with pytest.raises(AgentInterruptedError) as excinfo:
         asyncio.run(
             agent.run(
-                user_message="go",
+                user_message=TemplatedText(content="go"),
                 interrupt_on={"task": True},
                 response_format={"title": "N", "type": "object", "properties": {"n": {"type": "integer"}}},
             )
@@ -546,7 +558,11 @@ def test_run_threads_user_content_kwargs_into_graph_input(
     agent: Any = DeepAgent()
     _install_fake_resolve(monkeypatch, agent, graph)
 
-    asyncio.run(agent.run(user_message="go", user_content_kwargs={"cache_control": {"type": "ephemeral"}}))
+    asyncio.run(
+        agent.run(
+            user_message=TemplatedText(content="go"), user_content_kwargs={"cache_control": {"type": "ephemeral"}}
+        )
+    )
 
     assert graph.received_input == {
         "messages": [
@@ -567,7 +583,7 @@ def test_astream_threads_user_content_kwargs_into_graph_input(monkeypatch: pytes
         return [
             event
             async for event in agent.astream(
-                user_message="go", user_content_kwargs={"cache_control": {"type": "ephemeral"}}
+                user_message=TemplatedText(content="go"), user_content_kwargs={"cache_control": {"type": "ephemeral"}}
             )
         ]
 
@@ -598,11 +614,11 @@ def test_run_rejects_resume_with_user_message(app_tools: Any, resource_manager: 
     """run cannot both answer an interrupt and start a fresh turn — a resume with a
     user message raises loudly rather than silently dropping one."""
     with pytest.raises(ValueError, match="exactly one of user_message or resume"):
-        asyncio.run(DeepAgent().run(resume={"x": 1}, user_message="go"))
+        asyncio.run(DeepAgent().run(resume={"x": 1}, user_message=TemplatedText(content="go")))
 
 
 def test_run_rejects_neither_message_nor_resume() -> None:
-    """run with neither a user_message/user_message_id nor resume raises in the
+    """run with neither a user_message nor resume raises in the
     caller's own vocabulary — the same exactly-one-of guard astream uses — rather
     than falling through to the resource manager's template-vocabulary message."""
     with pytest.raises(ValueError, match="exactly one of user_message or resume") as excinfo:
@@ -625,7 +641,7 @@ def test_run_honors_live_tools(monkeypatch: pytest.MonkeyPatch, app_tools: Any, 
     agent: Any = DeepAgent()
     monkeypatch.setattr(agent, "_resolve_and_build", fake_resolve_and_build)
 
-    asyncio.run(agent.run(tools=[live], tool_names=["calc"], user_message="go"))
+    asyncio.run(agent.run(tools=[live], tool_names=["calc"], user_message=TemplatedText(content="go")))
     assert [tool.name for tool in captured["tools"]] == ["live", "calc"]
 
 
@@ -648,7 +664,7 @@ def test_run_dispatched_tools_are_delivery_scoped(
     agent: Any = DeepAgent()
     monkeypatch.setattr(agent, "_resolve_and_build", fake_resolve_and_build)
 
-    asyncio.run(agent.run(tool_names=["calc"], user_message="go"))
+    asyncio.run(agent.run(tool_names=["calc"], user_message=TemplatedText(content="go")))
     assert_delivery_scoped(captured["tools"][0], seen)
 
 
@@ -667,7 +683,7 @@ def test_astream_dispatched_tools_are_delivery_scoped(monkeypatch: pytest.Monkey
     monkeypatch.setattr(agent, "_build_agent", fake_build_agent)
 
     async def collect() -> list[Any]:
-        return [event async for event in agent.astream(user_message="go", tool_names=["calc"])]
+        return [event async for event in agent.astream(user_message=TemplatedText(content="go"), tool_names=["calc"])]
 
     asyncio.run(collect())
     assert_delivery_scoped(captured["tools"][0], seen)
@@ -679,7 +695,9 @@ def test_subagent_spec_tools_are_delivery_scoped(app_tools: Any) -> None:
     app_tools.client_tools["calc"] = probe
 
     resolved = asyncio.run(
-        resolve_subagent_specs([DeepSubAgentSpec(name="sub", description="d", system_prompt="s", tools=["calc"])])
+        resolve_subagent_specs(
+            [DeepSubAgentSpec(name="sub", description="d", system_prompt=TemplatedText(content="s"), tools=["calc"])]
+        )
     )
     assert_delivery_scoped(resolved[0].tools[0], seen)
 
@@ -688,13 +706,15 @@ def test_run_rejects_presets() -> None:
     """Main-agent presets are not a composable langchain_deep_agent input; run raises loudly
     rather than silently dropping them."""
     with pytest.raises(RuntimeError, match="does not support presets"):
-        asyncio.run(DeepAgent().run(user_message="go", presets=[PresetSpec(name="p", base_tool="calc")]))
+        asyncio.run(
+            DeepAgent().run(user_message=TemplatedText(content="go"), presets=[PresetSpec(name="p", base_tool="calc")])
+        )
 
 
 def test_run_rejects_strategy() -> None:
     """langchain_deep_agent applies no composition strategy; run raises rather than ignoring one."""
     with pytest.raises(RuntimeError, match="does not support strategy"):
-        asyncio.run(DeepAgent().run(user_message="go", strategy="vote"))
+        asyncio.run(DeepAgent().run(user_message=TemplatedText(content="go"), strategy="vote"))
 
 
 def test_run_names_both_offenders_at_once() -> None:
@@ -703,7 +723,11 @@ def test_run_names_both_offenders_at_once() -> None:
     rather than one raise per run."""
     with pytest.raises(RuntimeError, match=r"does not support presets, strategy"):
         asyncio.run(
-            DeepAgent().run(user_message="go", presets=[PresetSpec(name="p", base_tool="calc")], strategy="vote")
+            DeepAgent().run(
+                user_message=TemplatedText(content="go"),
+                presets=[PresetSpec(name="p", base_tool="calc")],
+                strategy="vote",
+            )
         )
 
 
@@ -723,14 +747,14 @@ _UNHONORED_CASES = [
 def test_run_rejects_every_unhonored_param(param: str, value: Any) -> None:
     """run rejects every key in the guard's reasons map, naming it and the run face."""
     with pytest.raises(RuntimeError, match=rf"langchain_deep_agent\.run does not support .*\b{param}\b"):
-        asyncio.run(DeepAgent().run(user_message="go", **{param: value}))
+        asyncio.run(DeepAgent().run(user_message=TemplatedText(content="go"), **{param: value}))
 
 
 @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
 def test_astream_rejects_every_unhonored_param(param: str, value: Any) -> None:
     """astream rejects the same full set as run — parity — naming the astream face."""
     with pytest.raises(RuntimeError, match=rf"langchain_deep_agent\.astream does not support .*\b{param}\b"):
-        _drain_astream(DeepAgent().astream(user_message="go", **{param: value}))
+        _drain_astream(DeepAgent().astream(user_message=TemplatedText(content="go"), **{param: value}))
 
 
 def test_unhonored_cases_cover_the_full_reasons_map() -> None:
@@ -784,7 +808,7 @@ def test_run_rejects_blank_memory_key(key: str, blank: str) -> None:
     checkpoint namespace across runs — so run raises rather than minting/overlaying it."""
     with pytest.raises(ValueError, match=rf"langchain_deep_agent\.run: {key} must be a non-empty string"):
         # The dynamic key spreads into a typed run parameter, so the arg-type mismatch is expected.
-        asyncio.run(DeepAgent().run(user_message="go", **{key: blank}))  # type: ignore[arg-type]
+        asyncio.run(DeepAgent().run(user_message=TemplatedText(content="go"), **{key: blank}))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
@@ -793,7 +817,7 @@ def test_astream_rejects_blank_memory_key(key: str, blank: str) -> None:
     """Parity with run: astream rejects a present-but-blank memory key loudly."""
     with pytest.raises(ValueError, match=rf"langchain_deep_agent\.astream: {key} must be a non-empty string"):
         # The dynamic key spreads into a typed astream parameter, so the arg-type mismatch is expected.
-        _drain_astream(DeepAgent().astream(user_message="go", **{key: blank}))  # type: ignore[arg-type]
+        _drain_astream(DeepAgent().astream(user_message=TemplatedText(content="go"), **{key: blank}))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("value", [123, ["x"]])
@@ -806,7 +830,7 @@ def test_run_rejects_non_string_memory_key(key: str, value: Any) -> None:
         TypeError, match=rf"langchain_deep_agent\.run: {key} must be a string or None; got {type(value).__name__}"
     ):
         # The dynamic key spreads into a typed run parameter, so the arg-type mismatch is expected.
-        asyncio.run(DeepAgent().run(user_message="go", **{key: value}))  # type: ignore[arg-type]
+        asyncio.run(DeepAgent().run(user_message=TemplatedText(content="go"), **{key: value}))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("value", [123, ["x"]])
@@ -818,7 +842,7 @@ def test_astream_rejects_non_string_memory_key(key: str, value: Any) -> None:
         TypeError, match=rf"langchain_deep_agent\.astream: {key} must be a string or None; got {type(value).__name__}"
     ):
         # The dynamic key spreads into a typed astream parameter, so the arg-type mismatch is expected.
-        _drain_astream(DeepAgent().astream(user_message="go", **{key: value}))  # type: ignore[arg-type]
+        _drain_astream(DeepAgent().astream(user_message=TemplatedText(content="go"), **{key: value}))  # type: ignore[arg-type]
 
 
 def test_run_config_pins_thread_and_checkpoint() -> None:
@@ -844,7 +868,7 @@ def test_astream_honors_langgraph_config_thread_id(monkeypatch: pytest.MonkeyPat
         return [
             event
             async for event in agent.astream(
-                user_message="go",
+                user_message=TemplatedText(content="go"),
                 langgraph_config={"configurable": {"thread_id": "T-42", "tenant": "acme"}},
             )
         ]
@@ -865,7 +889,7 @@ def test_astream_explicit_thread_id_wins_over_langgraph_config(monkeypatch: pyte
         return [
             event
             async for event in agent.astream(
-                user_message="go",
+                user_message=TemplatedText(content="go"),
                 thread_id="explicit",
                 langgraph_config={"configurable": {"thread_id": "from-config"}},
             )
@@ -961,7 +985,12 @@ def test_astream_emits_every_event_kind_and_interrupt(monkeypatch: pytest.Monkey
     _install_fake_graph(monkeypatch, agent, graph)
 
     async def collect() -> list[Any]:
-        return [event async for event in agent.astream(user_message="go", interrupt_on={"task": True}, thread_id="t")]
+        return [
+            event
+            async for event in agent.astream(
+                user_message=TemplatedText(content="go"), interrupt_on={"task": True}, thread_id="t"
+            )
+        ]
 
     events = asyncio.run(collect())
     by_type = {type(e) for e in events}
@@ -1014,7 +1043,7 @@ def test_astream_omits_interrupt_read_when_not_configured(monkeypatch: pytest.Mo
     _install_fake_graph(monkeypatch, agent, graph)
 
     async def collect() -> list[Any]:
-        return [event async for event in agent.astream(user_message="go", thread_id="t")]
+        return [event async for event in agent.astream(user_message=TemplatedText(content="go"), thread_id="t")]
 
     events = asyncio.run(collect())
     assert not any(isinstance(e, InterruptFinal) for e in events)
@@ -1052,7 +1081,12 @@ def test_astream_honors_tool_names(monkeypatch: pytest.MonkeyPatch, app_tools: A
     monkeypatch.setattr(agent, "_build_agent", fake_build_agent)
 
     async def collect() -> list[Any]:
-        return [event async for event in agent.astream(user_message="go", tools=[live], tool_names=["calc"])]
+        return [
+            event
+            async for event in agent.astream(
+                user_message=TemplatedText(content="go"), tools=[live], tool_names=["calc"]
+            )
+        ]
 
     asyncio.run(collect())
     assert [tool.name for tool in captured["tools"]] == ["live", "calc"]
@@ -1070,14 +1104,18 @@ def test_astream_rejects_presets() -> None:
     """Main-agent presets are not a composable langchain_deep_agent input; astream raises loudly
     rather than silently dropping them (parity with run)."""
     with pytest.raises(RuntimeError, match="does not support presets"):
-        _drain_astream(DeepAgent().astream(user_message="go", presets=[PresetSpec(name="p", base_tool="calc")]))
+        _drain_astream(
+            DeepAgent().astream(
+                user_message=TemplatedText(content="go"), presets=[PresetSpec(name="p", base_tool="calc")]
+            )
+        )
 
 
 def test_astream_rejects_strategy() -> None:
     """langchain_deep_agent applies no composition strategy; astream raises rather than ignoring
     one (parity with run)."""
     with pytest.raises(RuntimeError, match="does not support strategy"):
-        _drain_astream(DeepAgent().astream(user_message="go", strategy="vote"))
+        _drain_astream(DeepAgent().astream(user_message=TemplatedText(content="go"), strategy="vote"))
 
 
 # ===========================================================================
@@ -1102,14 +1140,19 @@ def test_structured_final_parity_when_structured_is_produced(monkeypatch: pytest
     ``run`` returns the structured value AND ``astream`` emits one ``StructuredFinal``."""
     run_agent: Any = DeepAgent()
     _install_fake_resolve(monkeypatch, run_agent, _FakeCompiledGraph(_scripted_chunks(), interrupts=[]))
-    result = asyncio.run(run_agent.run(user_message="go", response_format=_RESPONSE_FORMAT))
+    result = asyncio.run(run_agent.run(user_message=TemplatedText(content="go"), response_format=_RESPONSE_FORMAT))
     assert result == {"answer": "ok"}
 
     stream_agent = DeepAgent()
     _install_fake_graph(monkeypatch, stream_agent, _FakeCompiledGraph(_scripted_chunks(), interrupts=[]))
 
     async def collect() -> list[Any]:
-        return [event async for event in stream_agent.astream(user_message="go", response_format=_RESPONSE_FORMAT)]
+        return [
+            event
+            async for event in stream_agent.astream(
+                user_message=TemplatedText(content="go"), response_format=_RESPONSE_FORMAT
+            )
+        ]
 
     events = asyncio.run(collect())
     structured = [event for event in events if isinstance(event, StructuredFinal)]
@@ -1124,13 +1167,13 @@ def test_structured_final_parity_when_structured_is_missing(monkeypatch: pytest.
     run_agent: Any = DeepAgent()
     _install_fake_resolve(monkeypatch, run_agent, _FakeCompiledGraph(_chunks_without_structured(), interrupts=[]))
     with pytest.raises(RuntimeError) as run_exc:
-        asyncio.run(run_agent.run(user_message="go", response_format=_RESPONSE_FORMAT))
+        asyncio.run(run_agent.run(user_message=TemplatedText(content="go"), response_format=_RESPONSE_FORMAT))
 
     stream_agent = DeepAgent()
     _install_fake_graph(monkeypatch, stream_agent, _FakeCompiledGraph(_chunks_without_structured(), interrupts=[]))
 
     async def drain() -> None:
-        async for _ in stream_agent.astream(user_message="go", response_format=_RESPONSE_FORMAT):
+        async for _ in stream_agent.astream(user_message=TemplatedText(content="go"), response_format=_RESPONSE_FORMAT):
             pass
 
     with pytest.raises(RuntimeError) as stream_exc:
@@ -1155,7 +1198,7 @@ def test_astream_nonconforming_structured_raises(monkeypatch: pytest.MonkeyPatch
     chunks: list[tuple[str, Any]] = [("updates", {"agent": {"structured_response": {"n": -1}}})]
     _install_fake_graph(monkeypatch, agent, _FakeCompiledGraph(chunks, interrupts=[]))
     with pytest.raises(JsonSchemaValidationError):
-        _drain_astream(agent.astream(user_message="go", response_format=schema))
+        _drain_astream(agent.astream(user_message=TemplatedText(content="go"), response_format=schema))
 
 
 def test_astream_does_not_raise_missing_structured_when_interrupted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1172,7 +1215,7 @@ def test_astream_does_not_raise_missing_structured_when_interrupted(monkeypatch:
         return [
             event
             async for event in agent.astream(
-                user_message="go", interrupt_on={"task": True}, response_format=_RESPONSE_FORMAT
+                user_message=TemplatedText(content="go"), interrupt_on={"task": True}, response_format=_RESPONSE_FORMAT
             )
         ]
 
@@ -1251,7 +1294,7 @@ def test_astream_detaches_a_dead_chain_claimed_mid_stream_without_clobbering_a_l
     async def go() -> None:
         # A live park entry for a DIFFERENT interaction, pre-written, must be left exactly as is.
         await fake_park_redis.set(idx._park_key("i-live"), '{"thread_id": "t-live"}')
-        events = [event async for event in agent.astream(user_message="go", thread_id="t")]
+        events = [event async for event in agent.astream(user_message=TemplatedText(content="go"), thread_id="t")]
         assert events
         # The dead chain was tombstoned on the way out — detach fired from the streaming finally.
         entry = await read_park_entry(chain_key)

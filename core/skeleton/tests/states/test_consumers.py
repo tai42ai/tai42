@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from tai42_contract.hooks import HookParams, HookSubject
 from tai42_contract.presets import PresetBody
 from tai42_contract.states.models import StateSubject
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.operations import NotSupportedError
 from tai42_skeleton.states import consumers as consumers_mod
@@ -31,7 +32,7 @@ def _hook(name: str, *, subject_kind: str | None) -> HookParams:
     subject = (
         None
         if subject_kind is None
-        else HookSubject(target_kind="agent", target_name="a", kind=subject_kind, key_expr=".id")
+        else HookSubject(target_kind="agent", target_name="a", kind=subject_kind, key_expr=TemplatedText(content=".id"))
     )
     return HookParams(
         name=name,

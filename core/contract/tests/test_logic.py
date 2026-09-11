@@ -39,6 +39,7 @@ from tai42_contract.extensions import ExtensionKind
 from tai42_contract.extensions.kinds import ExtensionFactory
 from tai42_contract.manifest import Manifest, MCPConfig, TaiMCPConfig
 from tai42_contract.storage import assert_not_root
+from tai42_contract.template import TemplatedText
 
 UUID = "12345678-1234-1234-1234-123456789abc"
 
@@ -114,6 +115,14 @@ def test_sub_agent_spec_response_format_accepts_a_pydantic_class():
 
     spec = SubAgentSpec(name="agent", response_format=Answer)
     assert spec.response_format is Answer
+
+
+def test_sub_agent_spec_system_prompt_is_a_templated_text():
+    # The system prompt is a templated text (inline content or a stored id, plus render
+    # kwargs); omitted it defaults to None.
+    assert SubAgentSpec(name="agent").system_prompt is None
+    spec = SubAgentSpec(name="agent", system_prompt=TemplatedText(id="sp", kwargs={"tone": "brief"}))
+    assert spec.system_prompt == TemplatedText(id="sp", kwargs={"tone": "brief"})
 
 
 # -- spec_runnable capability marker (ClassVar, not an instance field) --------

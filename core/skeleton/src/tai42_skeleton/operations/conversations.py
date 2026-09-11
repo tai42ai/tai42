@@ -17,6 +17,7 @@ import secrets
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
+from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.conversations import (
     CONVERSATION_MODES,
@@ -32,6 +33,7 @@ from tai42_contract.conversations import (
 from tai42_contract.interactions import LocationElement, MediaItem
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
 from tai42_contract.states.binding import StateBinding
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import get_compiled_jq
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
@@ -76,6 +78,7 @@ from tai42_skeleton.operations.response_models_group_a import (
     ThreadSummaryEnvelope,
     TranscriptEnvelope,
 )
+from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
 
 if TYPE_CHECKING:
     from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager as _Manager
@@ -148,14 +151,22 @@ async def _assert_target_bindable(target_kind: str, target_name: str) -> None:
         raise ValidationRejected("\n".join(messages))
 
 
-def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
-    """Compile a tool target's jq programs at create so an invalid one is refused here, not
-    at the first message. The model already forbids exprs on an ``agent`` target."""
-    for field, expr in (("payload_expr", create.payload_expr), ("reply_expr", create.reply_expr)):
-        if expr is None:
+async def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
+    """Render a tool target's templated jq programs and compile each at create so an invalid
+    one is refused here, not at the first message. A by-id text whose stored resource cannot
+    be fetched fails the create loudly, naming the field and the id. The model already
+    forbids exprs on an ``agent`` target."""
+    for field, text in (("payload_expr", create.payload_expr), ("reply_expr", create.reply_expr)):
+        if text is None:
             continue
         try:
-            get_compiled_jq(expr)
+            program = await tai42_app.storage.resource_manager.render_templated_text(text)
+        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+            raise BadRequestError(
+                f"{field} references stored id {text.id!r}, which could not be fetched: {exc}"
+            ) from exc
+        try:
+            get_compiled_jq(program)
         except Exception as exc:
             raise BadRequestError(f"invalid {field}: {exc}") from exc
 
@@ -249,8 +260,8 @@ async def create_conversation_route(
     target_kind: str,
     target_name: str,
     execution_key: str,
-    payload_expr: str | None = None,
-    reply_expr: str | None = None,
+    payload_expr: TemplatedText | None = None,
+    reply_expr: TemplatedText | None = None,
     initial_mode: str = "agent",
     channel: str | None = None,
     our_identity: str | None = None,
@@ -269,8 +280,9 @@ async def create_conversation_route(
     to delegate it and it must be usable by a tokenless fire, both decided BEFORE the write
     so a refusal leaves any existing row untouched. ``target_name`` must merely EXIST — the
     agent (``target_kind=agent``) or tool (``target_kind=tool``) — the key's live grants
-    bound the turn at fire. A tool target's ``payload_expr``/``reply_expr`` jq programs, when
-    given, are compiled here so an invalid one is refused at create, not at first message. A
+    bound the turn at fire. A tool target's ``payload_expr``/``reply_expr`` templated jq
+    programs, when given, are rendered and compiled here so an invalid one — or a by-id text
+    whose stored resource cannot be fetched — is refused at create, not at first message. A
     ``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed
     on that channel. An edit that would change the ``door`` of a route already HOLDING
     threads is refused: the two doors key their threads differently, so the held threads
@@ -313,7 +325,7 @@ async def create_conversation_route(
 
     await _assert_target_exists(create.target_kind, create.target_name)
     await _assert_target_bindable(create.target_kind, create.target_name)
-    _assert_exprs_compile(create)
+    await _assert_exprs_compile(create)
 
     stored = create.model_dump()
     # Only a ``channel`` row carries both fields; its identity is stored canonicalized.

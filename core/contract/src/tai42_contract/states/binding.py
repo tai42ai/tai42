@@ -6,9 +6,12 @@ BEFORE the dispatch and applies template/custom updates AFTER it. The SAME docum
 repeated per NODE by a flow engine consuming the platform. Tools stay PURE — they never see
 the binding; the door applies it around them at the shared dispatch chokepoint.
 
-Only the SHAPE lives here (a contract holds models, never logic): the resolve/merge/apply
-seam and the save-time validate-and-attach live in the skeleton, and the wire shape mirrors
-the Studio api-client ``stateBinding`` schema exactly.
+Only the SHAPE lives here (a contract holds models, never logic): every authored jq slot is a
+:class:`~tai42_contract.template.TemplatedText` — inline ``content`` or a stored ``id`` — that
+the binding door RENDERS to its jq program before compiling/evaluating it; the render never
+runs inside a model validator. The resolve/merge/apply seam and the save-time
+validate-and-attach live in the skeleton, and the wire shape mirrors the Studio api-client
+``stateBinding`` schema exactly.
 """
 
 from __future__ import annotations
@@ -16,20 +19,21 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tai42_contract.states.models import STATE_NAME_RE
+from tai42_contract.template import TemplatedText
 
 
 class StateInjection(BaseModel):
     """One input injection placed into the run input under ``into`` before the dispatch.
 
     Exactly one source is set: ``template_jq`` names an ``input``-purpose template jq
-    (``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a custom
-    program over ``{record, input}``. ``into`` IS the adapter for an injection — the
-    run-input field the value lands under. Frozen."""
+    (``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated
+    text rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for
+    an injection — the run-input field the value lands under. Frozen."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     template_jq: str | None = None
-    jq: str | None = None
+    jq: TemplatedText | None = None
     into: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -44,16 +48,18 @@ class StateUpdate(BaseModel):
 
     Exactly one source is set: ``template_jq`` names an ``update``-purpose template jq
     (``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a
-    jq over ``{output, input}``) shapes from the run's output/input; or ``jq`` is a custom
-    program over ``{record, output, input}`` authoring the whole op batch itself (a custom
-    update carries no adapter). ``op_id`` is an optional idempotency-key expression. Frozen."""
+    templated text rendering to a jq over ``{output, input}``) shapes from the run's
+    output/input; or ``jq`` is a templated text rendering to a custom program over ``{record,
+    output, input}`` authoring the whole op batch itself (a custom update carries no adapter).
+    ``op_id`` is an optional templated text rendering to an idempotency-key expression.
+    Frozen."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     template_jq: str | None = None
-    jq: str | None = None
-    adapter: str | None = None
-    op_id: str | None = None
+    jq: TemplatedText | None = None
+    adapter: TemplatedText | None = None
+    op_id: TemplatedText | None = None
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> StateUpdate:
@@ -68,19 +74,19 @@ class StateUpdate(BaseModel):
 
 class StateAttach(BaseModel):
     """One state attached by a binding: the ``state`` name, the ``templates`` to attach on it
-    (attach-on-use, idempotent at save), the ``subject_expr`` (a jq over the run input → a full
-    subject object or the record KEY, its scope taken from the ambient door context and its
-    kind from the state's declared subject kind), an optional ``scope_expr`` (a BOOLEAN
-    predicate over the run input evaluated first — ``false`` skips this state for the run, a
-    non-boolean is a loud error, absent engages), and the ordered ``input_injections`` /
-    ``updates``. Frozen."""
+    (attach-on-use, idempotent at save), the ``subject_expr`` (a templated text rendering to a
+    jq over the run input → a full subject object or the record KEY, its scope taken from the
+    ambient door context and its kind from the state's declared subject kind), an optional
+    ``scope_expr`` (a templated text rendering to a BOOLEAN predicate over the run input
+    evaluated first — ``false`` skips this state for the run, a non-boolean is a loud error,
+    absent engages), and the ordered ``input_injections`` / ``updates``. Frozen."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     state: str
     templates: list[str] = Field(default_factory=list[str])
-    subject_expr: str = Field(min_length=1)
-    scope_expr: str | None = None
+    subject_expr: TemplatedText
+    scope_expr: TemplatedText | None = None
     input_injections: list[StateInjection] = Field(default_factory=list[StateInjection])
     updates: list[StateUpdate] = Field(default_factory=list[StateUpdate])
 

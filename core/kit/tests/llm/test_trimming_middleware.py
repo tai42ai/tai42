@@ -190,6 +190,6 @@ async def test_abefore_model_reuses_sync_path():
     assert await mw.abefore_model({"messages": msgs}) is None
 
 
-def test_build_middleware_rejects_unknown_method():
+async def test_build_middleware_rejects_unknown_method():
     with pytest.raises(ValueError, match="Unsupported context-overflow method"):
-        co._build_middleware("bogus")
+        await co._build_middleware("bogus")

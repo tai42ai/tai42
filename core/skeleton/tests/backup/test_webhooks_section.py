@@ -71,9 +71,9 @@ class _CountingRenderer:
     def __init__(self) -> None:
         self.rendered: list[str] = []
 
-    async def render_by_id_or_content(self, *, content, template_id, kwargs) -> str:
-        self.rendered.append(content or "")
-        return content or ""
+    async def render_templated_text(self, text, locale=None) -> str:
+        self.rendered.append(text.content or "")
+        return text.content or ""
 
 
 @pytest.fixture
@@ -599,7 +599,7 @@ async def test_hook_with_non_compiling_jq_per_record_rest_restored(store) -> Non
                 "tool": "notify",
                 "execution_key": "k-fire",
                 "execution_key_fingerprint": "fp",
-                "expr": ".foo |",
+                "expr": {"content": ".foo |"},
             },
             {
                 "name": "sound",
@@ -648,7 +648,7 @@ def _link_record(name: str, execution_key: str, topic: str = "t") -> dict:
 async def test_import_refuses_records_bound_to_a_key_no_fire_can_evaluate(store, policy_store) -> None:
     # BOTH import writers assert token-free-evaluability: a hook and a trigger link
     # naming an unevaluable key are each refused per record into ``errors``.
-    policy_store.add_policy("k-blind", condition=_UNEVALUABLE, policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+    policy_store.add_policy("k-blind", condition={"content": _UNEVALUABLE}, policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
     policy_store.add_policy("k-fire", scopes=["hooks"], policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
     doc = {
         "hooks": [
@@ -793,7 +793,7 @@ async def test_a_corrupt_stored_policy_fails_the_section_instead_of_blaming_the_
 async def test_one_execution_key_is_read_once_for_the_whole_import(store, policy_store) -> None:
     # Each DISTINCT execution key is asserted once, so the policy read and condition
     # render do not repeat per record.
-    policy_store.add_policy("k-fire", condition=_EVALUABLE, policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+    policy_store.add_policy("k-fire", condition={"content": _EVALUABLE}, policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
     doc = {
         "hooks": [
             {
@@ -828,7 +828,7 @@ async def test_one_execution_key_is_read_once_for_the_whole_import(store, policy
 async def test_a_refused_key_is_read_once_and_refuses_every_record_naming_it(store, policy_store) -> None:
     # Caching the verdict must not merge the refusals: every record naming the unusable
     # key still gets its own error, off one read and one render.
-    policy_store.add_policy("k-bad", condition=_UNEVALUABLE, policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+    policy_store.add_policy("k-bad", condition={"content": _UNEVALUABLE}, policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
     doc = {
         "hooks": [
             {"name": "h1", "topic": "t", "tool": "notify", "execution_key": "k-bad", "execution_key_fingerprint": "fp"},
@@ -852,7 +852,7 @@ async def test_keys_of_one_owner_read_the_owner_row_once_for_the_batch(store, po
     # The batch holds ONE enforcer, so the OWNER row two distinct execution keys share
     # is fetched once for the whole restore instead of once per key.
     owner_claim = {"owner_user_id": "acct", KEY_FINGERPRINT_CLAIM: "fp"}
-    policy_store.add_policy("acct", scopes=["hooks"], condition=_EVALUABLE)
+    policy_store.add_policy("acct", scopes=["hooks"], condition={"content": _EVALUABLE})
     policy_store.add_policy("k-one", scopes=["hooks"], policy_data=owner_claim)
     policy_store.add_policy("k-two", scopes=["hooks"], policy_data=owner_claim)
     doc = {
@@ -875,7 +875,7 @@ async def test_keys_of_one_owner_read_the_owner_row_once_for_the_batch(store, po
 async def test_a_tombstoned_record_skips_benignly_before_its_key_is_read(store, policy_store) -> None:
     # The tombstone check runs BEFORE the key assertion: a tombstoned record is a benign
     # skip, not an import error over something nothing can revive.
-    policy_store.add_policy("k-blind", condition=_UNEVALUABLE, policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+    policy_store.add_policy("k-blind", condition={"content": _UNEVALUABLE}, policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
     doc = {
         "hooks": [],
         "trigger_links": [{"name": "dead", "token_hash": "a" * 64, "record": _link_record("dead", "k-blind")}],

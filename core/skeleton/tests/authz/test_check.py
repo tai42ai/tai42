@@ -197,7 +197,7 @@ def test_jq_fence_denies_over_synthesized_path(ac_env, bound_app):
     settings = AccessControlSettings()
     ac_env.add_route("/api/things/wipe", "things")
     # A fence that only allows GET; a POST synthesized path is rejected.
-    ac_env.add_policy("alice", scopes=["things"], condition='.request.method == "GET"')
+    ac_env.add_policy("alice", scopes=["things"], condition={"content": '.request.method == "GET"'})
     reg = OperationRegistry()
     meta = _op(reg, method="POST")
     with pytest.raises(PermissionDenied, match="policy condition rejected"):
@@ -207,7 +207,7 @@ def test_jq_fence_denies_over_synthesized_path(ac_env, bound_app):
 def test_jq_fence_allows_matching_path(ac_env, bound_app):
     settings = AccessControlSettings()
     ac_env.add_route("/api/things/wipe", "things")
-    ac_env.add_policy("alice", scopes=["things"], condition='.request.path == "/api/things/wipe"')
+    ac_env.add_policy("alice", scopes=["things"], condition={"content": '.request.path == "/api/things/wipe"'})
     reg = OperationRegistry()
     meta = _op(reg, method="POST")
     asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
@@ -244,12 +244,12 @@ def test_policy_fetch_failure_denies_fail_closed(ac_env, bound_app):
 def test_enforcement_error_denies_fail_closed(ac_env, bound_app, monkeypatch):
     settings = AccessControlSettings()
     ac_env.add_route("/api/things/wipe", "things")
-    ac_env.add_policy("alice", scopes=["things"], condition=".request.path")
+    ac_env.add_policy("alice", scopes=["things"], condition={"content": ".request.path"})
 
-    async def _boom(**_):
+    async def _boom(*_, **__):
         raise ValueError("render blew up")
 
-    monkeypatch.setattr(bound_app.storage.resource_manager, "render_by_id_or_content", _boom)
+    monkeypatch.setattr(bound_app.storage.resource_manager, "render_templated_text", _boom)
     reg = OperationRegistry()
     meta = _op(reg)
     with pytest.raises(PermissionDenied, match="access denied"):
@@ -756,7 +756,7 @@ def test_owned_key_owner_condition_parity_http_mcp(ac_env, bound_app):
     # Key + owner both hold read+write, so effective scopes permit BOTH ops — the
     # write deny is decided ONLY by the owner's path-sensitive jq condition.
     ac_env.add_policy("key1", scopes=["read", "write"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
-    ac_env.add_policy("owner1", scopes=["read", "write"], condition='.request.path != "/api/things/write"')
+    ac_env.add_policy("owner1", scopes=["read", "write"], condition={"content": '.request.path != "/api/things/write"'})
 
     reg = OperationRegistry()
 
@@ -922,7 +922,7 @@ def test_identity_claims_parity_http_mcp(ac_env, bound_app):
     ac_env.add_route("/api/things/wipe", "things")
     # A negative predicate: a null (empty-identity) ``.identity.suspended`` would satisfy
     # it (null != true), so an empty identity flips a suspended caller's deny to allow.
-    ac_env.add_policy("alice", scopes=["things"], condition=".identity.suspended != true")
+    ac_env.add_policy("alice", scopes=["things"], condition={"content": ".identity.suspended != true"})
     reg = OperationRegistry()
     meta = _op(reg, method="POST")
 

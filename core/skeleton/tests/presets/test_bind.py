@@ -13,10 +13,39 @@ from typing import Any, cast
 
 import pytest
 from fastmcp.tools import Tool
-from tai42_contract.app import TaiApp
+from tai42_contract.app import TaiApp, tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
+from tai42_kit.utils.render import SchemaBodyError
 
 from tai42_skeleton.presets.bind import deep_merge, preset_bind
+
+# The stored resources a by-id preset ``output_schema`` / ``input_schema`` names, id → rendered
+# text (parsed as JSON at the point of bind).
+_SCHEMA_RESOURCES = {
+    "stored-output-schema": '{"type": "object", "title": "R", "properties": {"city": {"type": "string"}}}',
+    "not-json": "this is not JSON",
+}
+
+
+class _ByIdResourceManager:
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.id is not None:
+            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+
+            if text.id not in _SCHEMA_RESOURCES:
+                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+            return _SCHEMA_RESOURCES[text.id]
+        assert text.content is not None
+        return text.content
+
+
+class _ByIdStorage:
+    resource_manager = _ByIdResourceManager()
+
+
+class _ByIdApp:
+    storage = _ByIdStorage()
 
 
 def _base_tool() -> Tool:
@@ -516,3 +545,60 @@ async def test_caller_object_violation_is_verbatim_even_with_baked_payload():
     )
     with pytest.raises(FastMCPValidationError, match="caller input does not match"):
         await tool.run({"zzz": 9})
+
+
+# -- by-id (TemplatedText) authored schema bodies ----------------------------
+async def test_output_schema_by_id_is_rendered_parsed_and_advertised():
+    """A by-id ``output_schema`` is rendered, parsed as JSON and advertised as the resolved
+    schema on the bound tool — an inline author sees no change, a by-id author names it once."""
+    resolved = {"type": "object", "title": "R", "properties": {"city": {"type": "string"}}}
+    with tai42_app.bound(_ByIdApp()):
+        tool = await preset_bind(
+            _app(_dict_base_tool()), "report", {}, name="r", output_schema=TemplatedText(id="stored-output-schema")
+        )
+    assert tool.output_schema == resolved
+
+
+async def test_output_schema_by_id_unfetchable_fails_loudly():
+    with tai42_app.bound(_ByIdApp()), pytest.raises(SchemaBodyError, match="could not be rendered"):
+        await preset_bind(_app(_dict_base_tool()), "report", {}, name="r", output_schema=TemplatedText(id="missing"))
+
+
+async def test_output_schema_by_id_invalid_json_fails_loudly():
+    with tai42_app.bound(_ByIdApp()), pytest.raises(SchemaBodyError, match="did not render to valid JSON"):
+        await preset_bind(_app(_dict_base_tool()), "report", {}, name="r", output_schema=TemplatedText(id="not-json"))
+
+
+async def test_input_schema_by_id_is_rendered_and_advertised():
+    resolved = {"type": "object", "title": "R", "properties": {"city": {"type": "string"}}}
+    with tai42_app.bound(_ByIdApp()):
+        tool = await preset_bind(
+            _app(_payload_base_tool(), support=_Support("payload")),
+            "runner",
+            {},
+            name="r",
+            input_schema=TemplatedText(id="stored-output-schema"),
+        )
+    assert tool.parameters == resolved
+
+
+async def test_input_schema_by_id_unfetchable_fails_loudly():
+    with tai42_app.bound(_ByIdApp()), pytest.raises(SchemaBodyError, match="could not be rendered"):
+        await preset_bind(
+            _app(_payload_base_tool(), support=_Support("payload")),
+            "runner",
+            {},
+            name="r",
+            input_schema=TemplatedText(id="missing"),
+        )
+
+
+async def test_input_schema_by_id_invalid_json_fails_loudly():
+    with tai42_app.bound(_ByIdApp()), pytest.raises(SchemaBodyError, match="did not render to valid JSON"):
+        await preset_bind(
+            _app(_payload_base_tool(), support=_Support("payload")),
+            "runner",
+            {},
+            name="r",
+            input_schema=TemplatedText(id="not-json"),
+        )

@@ -31,6 +31,7 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -104,6 +105,34 @@ class _FakeApp:
         self.channels = _FakeChannels(channel)
 
 
+class _FakeTemplateResourceManager:
+    """Renders a route jq slot: inline ``content`` verbatim, or a stored ``id`` from a
+    per-id map — an unmapped id is the loud not-found the real manager raises."""
+
+    def __init__(self, by_id: dict[str, str] | None = None) -> None:
+        self._by_id = by_id or {}
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.id is not None:
+            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+
+            if text.id not in self._by_id:
+                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+            return self._by_id[text.id]
+        assert text.content is not None
+        return text.content
+
+
+class _FakeTemplateStorage:
+    def __init__(self, resource_manager: _FakeTemplateResourceManager) -> None:
+        self.resource_manager = resource_manager
+
+
+class _FakeTemplateApp:
+    def __init__(self, by_id: dict[str, str] | None = None) -> None:
+        self.storage = _FakeTemplateStorage(_FakeTemplateResourceManager(by_id))
+
+
 def _channel_route(
     route_name: str = "line",
     our_identity: str = "+15550001111",
@@ -160,6 +189,11 @@ def _api_route_no_callback(route_name: str = "chat") -> ConversationRoute:
     )
 
 
+def _expr(text: str | None) -> TemplatedText | None:
+    """A route jq slot as an inline templated text, or ``None`` when omitted."""
+    return TemplatedText(content=text) if text is not None else None
+
+
 def _tool_channel_route(
     route_name: str = "tool-line",
     our_identity: str = "+15550001111",
@@ -174,8 +208,8 @@ def _tool_channel_route(
         door="channel",
         target_kind="tool",
         target_name=target_name,
-        payload_expr=payload_expr,
-        reply_expr=reply_expr,
+        payload_expr=_expr(payload_expr),
+        reply_expr=_expr(reply_expr),
         execution_key="svc",
         channel="twilio",
         our_identity=our_identity,
@@ -197,8 +231,8 @@ def _tool_api_route(
         door="api",
         target_kind="tool",
         target_name=target_name,
-        payload_expr=payload_expr,
-        reply_expr=reply_expr,
+        payload_expr=_expr(payload_expr),
+        reply_expr=_expr(reply_expr),
         execution_key="svc",
         callback_url="https://cb.example/x",
         callback_secret="sec-1",
@@ -272,12 +306,22 @@ async def _settle(timeout: float = 2.0) -> None:
         await asyncio.wait(tasks, timeout=0.05)
 
 
-def _wire(monkeypatch, manager: FakeManager, channel: FakeChannel | None = None) -> None:
+def _wire(
+    monkeypatch,
+    manager: FakeManager,
+    channel: FakeChannel | None = None,
+    *,
+    template_by_id: dict[str, str] | None = None,
+) -> None:
     monkeypatch.setattr(turn_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
     # ``mode.default_mode`` resolves a person thread's spanned routes through a lazy import of
     # the cache accessor, so the fake manager must answer there too.
     monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
+    # The turn renders a tool route's payload/reply jq slots through the bound resource
+    # manager immediately before evaluating them; a fake renders inline slots verbatim and a
+    # stored id from ``template_by_id``.
+    monkeypatch.setattr(turn_module, "tai42_app", _FakeTemplateApp(template_by_id))
     if channel is not None:
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
 
@@ -442,6 +486,7 @@ async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatc
     # identity expr (".") surfaces the whole payload as the dispatched kwargs.
     route = _tool_channel_route(payload_expr=".")
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
+    monkeypatch.setattr(turn_module, "tai42_app", _FakeTemplateApp())
     record = turn_module._new_record(
         route=route,
         message_id="m-x",
@@ -473,6 +518,38 @@ async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatc
             "locale": None,
         },
     }
+
+
+async def test_tool_payload_expr_by_id_renders_then_maps(env, monkeypatch):
+    # A by-id payload_expr is rendered through the bound resource manager to its jq program
+    # IMMEDIATELY before the map runs, so the tool receives the mapped kwargs.
+    route = ConversationRoute(
+        route_name="tool-line",
+        door="channel",
+        target_kind="tool",
+        target_name="echo-tool",
+        payload_expr=TemplatedText(id="route-payload"),
+        execution_key="svc",
+        channel="twilio",
+        our_identity="+15550001111",
+        execution_key_fingerprint="fp-1",
+    )
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+    monkeypatch.setattr(turn_module, "tai42_app", _FakeTemplateApp({"route-payload": "{echoed: .message}"}))
+    record = turn_module._new_record(
+        route=route,
+        message_id="m-x",
+        thread_id="bridge:tool-line:+15550002222",
+        client_address="+15550002222",
+        caller_principal=None,
+        provider_message_id="PID1",
+        inbound_text="hello",
+        delivery_status=DeliveryStatus.ACCEPTED,
+    )
+
+    await turn_module._run_tool_turn(route, "hello", "bridge:tool-line:+15550002222", "+15550002222", record=record)
+
+    assert tools.calls[0]["arguments"] == {"echoed": "hello"}
 
 
 async def test_tool_target_kwargs_carry_the_turn_thread_id(env, monkeypatch):
@@ -4915,9 +4992,10 @@ async def test_tool_turn_deposits_the_route_state_binding_on_the_ambient_invocat
     # The real ``_run_tool_turn`` seam reads the target config's binding and deposits it on the
     # ambient ToolInvocation around the tool dispatch, so the chokepoint carries it forward.
     from tai42_contract.states import StateAttach, StateBinding
+    from tai42_contract.template import TemplatedText
     from tai42_contract.tools import current_tool_invocation
 
-    binding = StateBinding(states=[StateAttach(state="status", subject_expr=".thread_id")])
+    binding = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content=".thread_id"))])
     route = _tool_channel_route(payload_expr=".")
 
     class _Cfg:
@@ -4925,6 +5003,7 @@ async def test_tool_turn_deposits_the_route_state_binding_on_the_ambient_invocat
             return TargetConversationConfig(target_kind=target_kind, target_name=target_name, state_binding=binding)
 
     monkeypatch.setattr(turn_module, "_config_store", lambda: _Cfg())
+    monkeypatch.setattr(turn_module, "tai42_app", _FakeTemplateApp())
 
     seen: dict = {}
 

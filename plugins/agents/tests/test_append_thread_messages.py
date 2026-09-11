@@ -19,6 +19,7 @@ import asyncio
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain.agents import create_agent
@@ -31,6 +32,7 @@ from langgraph.constants import START
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.llm.middleware.leading_user import _CONVERSATION_START_MARKER
 
 # Importing each agent class registers its module through the recording app
@@ -163,7 +165,7 @@ class TestToolsAgentAppend:
         )
         monkeypatch.setattr(bta, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
         monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
-        monkeypatch.setattr(bta, "context_overflow_middlewares", lambda system_prompt=None: [])
+        monkeypatch.setattr(bta, "context_overflow_middlewares", AsyncMock(return_value=[]))
         monkeypatch.setattr(bta, "init_langgraph_config", _strip_callbacks)
 
         async def get_llm(*, provider: str, **k: Any) -> Any:
@@ -194,7 +196,7 @@ class TestToolsAgentAppend:
         self._seams(monkeypatch, model, saver)
         agent = tai42_app.agents.get_agent("tools_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-tools-run", messages=_PRIOR))
-        out = asyncio.run(agent.run(user_message="new turn", thread_id="t-tools-run"))
+        out = asyncio.run(agent.run(user_message=TemplatedText(content="new turn"), thread_id="t-tools-run"))
         assert out == "reply"
         _assert_run_saw_prior(model)
 
@@ -204,7 +206,7 @@ class TestToolsAgentAppend:
         self._seams(monkeypatch, model, saver)
         agent = tai42_app.agents.get_agent("tools_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-tools-op", messages=_OPERATOR_OPENER))
-        asyncio.run(agent.run(user_message="client turn", thread_id="t-tools-op"))
+        asyncio.run(agent.run(user_message=TemplatedText(content="client turn"), thread_id="t-tools-op"))
         _assert_leads_user_first(model)
 
     def test_append_heals_dangling_tool_call_before_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,7 +244,7 @@ class TestToolsAgentAppend:
 
         # A real turn now proceeds: the history handed to the model has no unanswered
         # tool_call, so a provider would not reject it.
-        out = asyncio.run(agent.run(user_message="third", thread_id="t-tools-heal"))
+        out = asyncio.run(agent.run(user_message=TemplatedText(content="third"), thread_id="t-tools-heal"))
         assert out == "reply"
         seen_repairs = [m for m in model.seen if isinstance(m, ToolMessage) and m.tool_call_id == "call_x"]
         assert len(seen_repairs) == 1
@@ -344,7 +346,7 @@ class TestDeepAgentAppend:
         self._seams(monkeypatch, model, saver, store)
         agent = tai42_app.agents.get_agent("langchain_deep_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-deep-run", messages=_PRIOR))
-        out = asyncio.run(agent.run(tools=[], user_message="new turn", thread_id="t-deep-run"))
+        out = asyncio.run(agent.run(tools=[], user_message=TemplatedText(content="new turn"), thread_id="t-deep-run"))
         assert out == "reply"
         _assert_run_saw_prior(model)
 
@@ -354,7 +356,7 @@ class TestDeepAgentAppend:
         self._seams(monkeypatch, model, saver, store)
         agent = tai42_app.agents.get_agent("langchain_deep_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-deep-op", messages=_OPERATOR_OPENER))
-        asyncio.run(agent.run(tools=[], user_message="client turn", thread_id="t-deep-op"))
+        asyncio.run(agent.run(tools=[], user_message=TemplatedText(content="client turn"), thread_id="t-deep-op"))
         _assert_leads_user_first(model)
 
     def test_invalid_role_raises(self) -> None:
@@ -439,7 +441,7 @@ class TestRetrievalAgentAppend:
         self._seams(monkeypatch, model, saver)
         agent = tai42_app.agents.get_agent("retrieval_tools_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-retr-run", messages=_PRIOR))
-        out = asyncio.run(agent.run(user_message="new turn", thread_id="t-retr-run"))
+        out = asyncio.run(agent.run(user_message=TemplatedText(content="new turn"), thread_id="t-retr-run"))
         assert out == "done"
         _assert_run_saw_prior(model)
 
@@ -449,7 +451,7 @@ class TestRetrievalAgentAppend:
         self._seams(monkeypatch, model, saver)
         agent = tai42_app.agents.get_agent("retrieval_tools_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-retr-op", messages=_OPERATOR_OPENER))
-        asyncio.run(agent.run(user_message="client turn", thread_id="t-retr-op"))
+        asyncio.run(agent.run(user_message=TemplatedText(content="client turn"), thread_id="t-retr-op"))
         _assert_leads_user_first(model)
 
     def test_invalid_role_raises(self) -> None:

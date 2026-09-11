@@ -33,6 +33,8 @@ import jsonschema
 import referencing.exceptions
 from jsonschema import Draft202012Validator
 from psycopg import AsyncConnection
+from pydantic import TypeAdapter
+from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import (
     AttachConflictError,
     DeclarationInUseError,
@@ -70,7 +72,9 @@ from tai42_contract.states.models import (
     WriteOrigin,
     WritesPage,
 )
-from tai42_kit.utils.data.jq_util import run_jq_first
+from tai42_contract.template import TemplatedText
+from tai42_kit.utils.data.jq_util import compile_check, run_jq_first
+from tai42_kit.utils.render import resolve_schema_body
 
 from tai42_skeleton.states.context import current_state_context, state_context
 from tai42_skeleton.states.db import states_store_configured
@@ -82,6 +86,8 @@ from tai42_skeleton.states.store import (
     store_settings_retention,
 )
 from tai42_skeleton.states.templates import (
+    DECLARATIONS_CHECK_VARIABLES,
+    MEMBER_JQ_VARIABLES,
     StateTemplate,
     TemplateReconcile,
     compose_effective_schema,
@@ -89,6 +95,7 @@ from tai42_skeleton.states.templates import (
     template_jq_prelude,
     validate_template,
 )
+from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +168,25 @@ class StatesConsumerListerRegistry:
 # --------------------------------------------------------------------------- #
 # Pure schema validators                                                      #
 # --------------------------------------------------------------------------- #
+_SCHEMA_BODY_ADAPTER = TypeAdapter(TemplatedText | dict[str, Any])
+
+
+async def _resolve_state_schema(field: str, stored: TemplatedText | dict[str, Any]) -> dict[str, Any]:
+    """Resolve a state's authored base ``schema`` — the ``TemplatedText | dict`` union — to the
+    plain schema dict every composition, validation and narrowing check works on.
+
+    An in-memory value already typed by the declaration model is used as-is; a value read raw
+    from the store (a JSON object) is RE-PARSED into the union first, so a stored
+    ``{"id": …}`` / ``{"content": …}`` body is recognized as a stored schema reference rather
+    than mistaken for an inline schema. A :class:`~tai42_contract.template.TemplatedText` is then
+    rendered and parsed to its schema; an unfetchable id or a body that does not render to a JSON
+    object raises loudly (naming ``field``), never a silent empty schema."""
+    typed = stored if isinstance(stored, TemplatedText) else _SCHEMA_BODY_ADAPTER.validate_python(stored)
+    resolved = await resolve_schema_body(field, typed)
+    assert resolved is not None  # a base schema is never None (its unset value is an empty dict)
+    return resolved
+
+
 def _canonical(value: Any) -> str:
     """A byte-stable canonical form for comparing two field schemas for equality."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -445,15 +471,36 @@ class StatesService:
                 "default database) to enable it"
             )
 
-    def _validated_template(self, row: dict[str, Any]) -> StateTemplate:
-        """Validate a template row into a :class:`StateTemplate`, memoized on ``(name,
-        updated_at)`` — an unchanged row is served from a bounded LRU."""
+    async def _resolve_template_body(self, name: str, body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Resolve a stored template body's fragment ``schema`` — the ``TemplatedText | dict``
+        union — to the plain fragment dict :func:`validate_template` and every composition work
+        on, returning ``(body_with_resolved_schema, was_by_id)``.
+
+        An inline dict fragment is used as-is (``was_by_id`` False). A by-id (or inline
+        templated) fragment is rendered and parsed to its schema (``was_by_id`` True); an
+        unfetchable id, or a body that does not render to a JSON object, raises loudly naming the
+        template. The stored body keeps the union — only this in-memory copy carries the resolved
+        fragment."""
+        typed = _SCHEMA_BODY_ADAPTER.validate_python(body.get("schema", {}))
+        if not isinstance(typed, TemplatedText):
+            return body, False
+        fragment = await resolve_schema_body(f"template {name!r} schema", typed)
+        return {**body, "schema": fragment}, True
+
+    async def _validated_template(self, row: dict[str, Any]) -> StateTemplate:
+        """Validate a template row into a :class:`StateTemplate`, its fragment ``schema`` union
+        resolved first. An inline-fragment template is memoized on ``(name, updated_at)`` — an
+        unchanged row is served from a bounded LRU; a by-id fragment is resolved and validated
+        FRESH each time (never memoized), so it always tracks the stored resource it names."""
+        resolved_body, by_id = await self._resolve_template_body(row["name"], row["body"])
+        if by_id:
+            return validate_template(resolved_body)
         key = (row["name"], row["updated_at"])
         cached = self._template_cache.get(key)
         if cached is not None:
             self._template_cache.move_to_end(key)
             return cached
-        template = validate_template(row["body"])
+        template = validate_template(resolved_body)
         self._template_cache[key] = template
         self._template_cache.move_to_end(key)
         if len(self._template_cache) > self._TEMPLATE_CACHE_MAX:
@@ -561,18 +608,29 @@ class StatesService:
             raise ValueError("regimes are computed by the platform")
         if decl.updated_at is not None:
             raise ValueError("updated_at is set by the platform")
-        _validate_schema(decl.schema_)
-        effective_schema = await self._compose_effective(decl.name, decl.schema_)
+        # The base ``schema`` is the ``TemplatedText | dict`` union: resolve it ONCE here — the
+        # save-and-use door — to its schema dict for validation, effective composition and the
+        # narrowing check. An unfetchable by-id schema (or one that does not render to a JSON
+        # object) fails the save loudly, naming the field, never a state declared on an empty
+        # schema. The UNION is stored as-is (baseline), so a read serves the by-id reference back.
+        resolved_schema = await _resolve_state_schema(f"state {decl.name!r} schema", decl.schema_)
+        _validate_schema(resolved_schema)
+        effective_schema = await self._compose_effective(decl.name, resolved_schema)
+        stored_schema = decl.schema_.model_dump() if isinstance(decl.schema_, TemplatedText) else decl.schema_
 
-        def decide(existing: dict[str, Any] | None, per_kind: dict[str, int]) -> None:
+        async def decide(existing: dict[str, Any] | None, per_kind: dict[str, int]) -> None:
             if existing is None:
                 return
             total = sum(per_kind.values())
-            if total > 0 and _is_narrowing(existing["schema"], decl.schema_):
-                raise NonAdditiveRedeclareError(
-                    f"state {decl.name!r} has records: removing or changing a field is refused while records "
-                    f"exist — erase them first"
-                )
+            if total > 0:
+                # Resolve the CURRENT stored base schema under the guard's lock so a by-id
+                # narrowing comparison sees the live schema, never a pre-read stale one.
+                existing_schema = await _resolve_state_schema(f"state {decl.name!r} stored schema", existing["schema"])
+                if _is_narrowing(existing_schema, resolved_schema):
+                    raise NonAdditiveRedeclareError(
+                        f"state {decl.name!r} has records: removing or changing a field is refused while records "
+                        f"exist — erase them first"
+                    )
             removed = set(existing["subject_kinds"]) - set(decl.subject_kinds)
             in_use = sorted(k for k in removed if per_kind.get(k, 0) > 0)
             if in_use:
@@ -584,7 +642,7 @@ class StatesService:
         await self._store.upsert_declaration_guarded(
             decl.name,
             decl.description,
-            decl.schema_,
+            stored_schema,
             decl.subject_kinds,
             decl.default_subject_kind,
             decl.retention_days,
@@ -615,7 +673,7 @@ class StatesService:
         if decl is None:
             raise StateNotFoundError(f"no state declared as {name!r}")
         records, per_field, per_kind = await self._store.field_stats(name)
-        props = decl["schema"].get("properties", {})
+        props = (await _resolve_state_schema(f"state {name!r} schema", decl["schema"])).get("properties", {})
         consumers = await self.consumers(name)
         return {
             "records": records,
@@ -763,6 +821,33 @@ class StatesService:
         template, path, parameters, declarations = matches[0]
         return template, path, parameters, declarations, name
 
+    async def _render_program_body(self, template: StateTemplate, program_name: str, text: TemplatedText) -> str:
+        """Render one ``template_jq`` program body to its jq text just before it is compiled or
+        evaluated — the render happens HERE, never in a validator. A by-id body whose stored
+        resource cannot be fetched is a LOUD refusal naming the program and the id."""
+        try:
+            return await tai42_app.storage.resource_manager.render_templated_text(text)
+        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} references stored id {text.id!r}, "
+                f"which could not be fetched: {exc}"
+            ) from exc
+
+    async def _render_template_jq(self, template: StateTemplate, program_name: str) -> tuple[str, str]:
+        """Render ``program_name``'s body and the sibling input-program prelude to jq text just
+        before the program runs. Every INPUT-purpose sibling is rendered (the prelude needs each
+        body); the target program's own body is rendered too (reusing the input render when it is
+        itself an input program). A by-id body that cannot be fetched raises loudly here."""
+        rendered_inputs: dict[str, str] = {}
+        for other_name, other in template.template_jq.items():
+            if other.purpose == "input":
+                rendered_inputs[other_name] = await self._render_program_body(template, other_name, other.jq)
+        prelude = template_jq_prelude(rendered_inputs)
+        body = rendered_inputs.get(program_name)
+        if body is None:
+            body = await self._render_program_body(template, program_name, template.template_jq[program_name].jq)
+        return body, prelude
+
     async def eval_template_jq(
         self,
         state: str,
@@ -800,8 +885,9 @@ class StatesService:
         record = await self._store.read_record_view(state, subject, conn=conn)
         subtree = _record_subtree(record["data"], path) if record is not None else {}
         variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations, "params": dict(args)}
+        body, prelude = await self._render_template_jq(template, program_name)
         try:
-            value = await run_jq_first(program.jq, subtree, prelude=template_jq_prelude(template), variables=variables)
+            value = await run_jq_first(body, subtree, prelude=prelude, variables=variables)
         except Exception as exc:
             raise ValueValidationError(
                 f"template_jq {program_name!r} on template {template.name!r} failed to evaluate: {exc}"
@@ -858,11 +944,12 @@ class StatesService:
         record = await self._store.read_record_view(state, subject, conn=conn)
         subtree = _record_subtree(record["data"], path) if record is not None else {}
         variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations}
+        body, prelude = await self._render_template_jq(template, program_name)
         try:
             result = await run_jq_first(
-                program.jq,
+                body,
                 {"record": subtree, "input": input},
-                prelude=template_jq_prelude(template),
+                prelude=prelude,
                 variables=variables,
             )
         except Exception as exc:
@@ -1073,8 +1160,98 @@ class StatesService:
         row = await self._store.get_template(name)
         if row is None:
             return None
-        self._validated_template(row)  # loud on a corrupt stored body
+        await self._validated_template(row)  # loud on a corrupt stored body
         return StateTemplateDocument.model_validate(row["body"])
+
+    @staticmethod
+    async def _compile_by_id_declarations_check(template: StateTemplate) -> None:
+        """Render and compile a by-id declarations ``check`` at the save door — the point that
+        can fetch the stored resource an inline compile in :func:`validate_template` cannot.
+        An unfetchable id fails the save loudly, naming the field and the id; a rendered jq
+        that does not compile is the same loud template error validate raises for inline jq."""
+        if template.declarations is None:
+            return
+        check = template.declarations.check
+        if check is None or check.id is None:
+            return
+        try:
+            rendered = await tai42_app.storage.resource_manager.render_templated_text(check)
+        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+            raise TemplateValidationError(
+                f"template {template.name!r} declarations check references stored id {check.id!r}, "
+                f"which could not be fetched: {exc}"
+            ) from exc
+        try:
+            compile_check(rendered, variables=DECLARATIONS_CHECK_VARIABLES)
+        except Exception as exc:
+            raise TemplateValidationError(
+                f"template {template.name!r} declarations check is not a valid jq expression: {exc}"
+            ) from exc
+
+    async def _render_program_body_at_save(
+        self, template: StateTemplate, program_name: str, text: TemplatedText
+    ) -> str:
+        """Render one ``template_jq`` program body at the save door — the point that can fetch a
+        stored resource an inline compile in :func:`validate_template` cannot. An unfetchable id
+        fails the save loudly naming the program and the id."""
+        try:
+            return await tai42_app.storage.resource_manager.render_templated_text(text)
+        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+            raise TemplateValidationError(
+                f"template {template.name!r} template_jq {program_name!r} references stored id {text.id!r}, "
+                f"which could not be fetched: {exc}"
+            ) from exc
+
+    async def _compile_by_id_template_jq(self, template: StateTemplate) -> None:
+        """Render and compile a by-id ``template_jq`` program at the save door. When a program
+        body is by-id, every program is rendered (the sibling prelude needs each input body) and
+        compiled over the full prelude; an unfetchable id fails the save loudly naming the program
+        and the id, and a rendered jq that does not compile is the same loud template error
+        validate raises for inline jq. An all-inline section is already compiled by
+        :func:`validate_template`, so this is a no-op for it."""
+        programs = template.template_jq
+        if not programs or all(p.jq.content is not None for p in programs.values()):
+            return
+        rendered = {name: await self._render_program_body_at_save(template, name, p.jq) for name, p in programs.items()}
+        rendered_inputs = {name: rendered[name] for name, p in programs.items() if p.purpose == "input"}
+        prelude = template_jq_prelude(rendered_inputs)
+        for name, program in programs.items():
+            variables = (*MEMBER_JQ_VARIABLES, "params") if program.purpose == "input" else MEMBER_JQ_VARIABLES
+            try:
+                compile_check(prelude + rendered[name], variables=variables)
+            except Exception as exc:
+                raise TemplateValidationError(
+                    f"template {template.name!r} template_jq {name!r} is not a valid jq expression: {exc}"
+                ) from exc
+
+    async def _compile_by_id_reconcile(self, template: StateTemplate) -> None:
+        """Render and compile a by-id ``reconcile`` program at the save door — the point that can
+        fetch a stored resource an inline compile in :func:`validate_template` cannot. An
+        unfetchable id fails the save loudly naming the program and the id; a rendered jq that does
+        not compile is the same loud template error validate raises for inline jq. An inline program
+        is already compiled by :func:`validate_template`."""
+        if template.reconcile is None:
+            return
+        for label, text in (
+            ("orphans", template.reconcile.orphans),
+            ("close", template.reconcile.close),
+            ("resolutions", template.reconcile.resolutions),
+        ):
+            if text.id is None:
+                continue
+            try:
+                rendered = await tai42_app.storage.resource_manager.render_templated_text(text)
+            except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+                raise TemplateValidationError(
+                    f"template {template.name!r} reconcile {label} references stored id {text.id!r}, "
+                    f"which could not be fetched: {exc}"
+                ) from exc
+            try:
+                compile_check(rendered)
+            except Exception as exc:
+                raise TemplateValidationError(
+                    f"template {template.name!r} reconcile {label} is not a valid jq expression: {exc}"
+                ) from exc
 
     async def put_template(self, doc: StateTemplateDocument, *, replace: bool) -> StateTemplateDocument:
         """Store a template document, running every registered attach validator over each live
@@ -1084,13 +1261,25 @@ class StatesService:
         # ``exclude_none`` drops an unset ``declarations`` (None) so the deep validator
         # sees the same absent-key shape ``to_document`` emits, never a null section.
         body = doc.model_dump(by_alias=True, exclude_none=True)
-        template = validate_template(body)
+        # The fragment ``schema`` is the ``TemplatedText | dict`` union: resolve a by-id fragment
+        # to its schema for structural validation (markers, regime/jq paths) at the save door,
+        # exactly as a by-id declarations ``check`` is rendered here. An unfetchable id fails the
+        # save loudly, naming the template. The UNION is stored as-is (``stored_body`` below), so
+        # a read serves the by-id reference back.
+        resolved_body, _by_id = await self._resolve_template_body(doc.name, body)
+        template = validate_template(resolved_body)
+        await self._compile_by_id_declarations_check(template)
+        await self._compile_by_id_template_jq(template)
+        await self._compile_by_id_reconcile(template)
         existing = await self._store.get_template(template.name)
         if existing is not None and not replace:
             raise TemplateExistsError(
                 f"template {template.name!r} already exists — upload with replace=true to overwrite it"
             )
-        template_doc = StateTemplateDocument.model_validate(template.to_document())
+        # Store the canonical document but with the ORIGINAL union fragment (never the resolved
+        # snapshot), so the stored body carries the by-id reference unchanged.
+        stored_body = {**template.to_document(), "schema": body["schema"]}
+        template_doc = StateTemplateDocument.model_validate(stored_body)
         attachment_rows = await self._store.list_attachments_of_template(template.name)
         for row in attachment_rows:
             attachment_declarations = dict(row["declarations"] or {})
@@ -1098,7 +1287,9 @@ class StatesService:
             try:
                 await self._validate_attach_values(template, resolved, attachment_declarations)
                 effective = compose_effective_schema(
-                    (await self._require_declaration(row["state"]))["schema"],
+                    await _resolve_state_schema(
+                        f"state {row['state']!r} schema", (await self._require_declaration(row["state"]))["schema"]
+                    ),
                     [
                         (m, p, pa)
                         for m, p, pa, _d in await self._load_state_attachments(
@@ -1112,7 +1303,7 @@ class StatesService:
                     f"template {template.name!r} cannot be replaced: its attach on state {row['state']!r} no longer "
                     f"validates: {exc}"
                 ) from exc
-        await self._store.upsert_template(template.name, template.to_document(), None)
+        await self._store.upsert_template(template.name, stored_body, None)
         for row in attachment_rows:
             resolved = self._effective_parameters(template, dict(row["parameters"] or {}))
             base_schema = (await self._require_declaration(row["state"]))["schema"]
@@ -1184,7 +1375,8 @@ class StatesService:
         resolved = self._effective_parameters(template, parameters)
         existing = await self._load_state_attachments(state)
         effective = compose_effective_schema(
-            decl["schema"], [*[(m, p, pa) for m, p, pa, _d in existing], (template, list(path), resolved)]
+            await _resolve_state_schema(f"state {state!r} schema", decl["schema"]),
+            [*[(m, p, pa) for m, p, pa, _d in existing], (template, list(path), resolved)],
         )
         _validate_schema(effective)
         template_doc = StateTemplateDocument.model_validate(template.to_document())
@@ -1265,7 +1457,9 @@ class StatesService:
         remaining = [
             (m, p, pa) for m, p, pa, _d in await self._load_state_attachments(state) if m.name != template_name
         ]
-        effective = compose_effective_schema(decl["schema"], remaining)
+        effective = compose_effective_schema(
+            await _resolve_state_schema(f"state {state!r} schema", decl["schema"]), remaining
+        )
         await self._store.delete_attachment(state, template_name, effective_schema=effective)
 
     async def effective_schema_for(self, state: str) -> dict[str, Any]:
@@ -1392,7 +1586,10 @@ class StatesService:
         to close it."""
         if context.previous_declarations is None:
             return
-        template = validate_template(context.template.model_dump(by_alias=True, exclude_none=True))
+        resolved_body, _by_id = await self._resolve_template_body(
+            context.template.name, context.template.model_dump(by_alias=True, exclude_none=True)
+        )
+        template = validate_template(resolved_body)
         if template.reconcile is None:
             return
         path = await self._reconcile_attach_path(context.state, context.template.name)
@@ -1422,7 +1619,11 @@ class StatesService:
                 if view is None:
                     continue
                 for item in await self._reconcile_orphans(
-                    reconcile, _record_subtree(view.data, path), previous=previous, new=new
+                    reconcile,
+                    _record_subtree(view.data, path),
+                    previous=previous,
+                    new=new,
+                    template_name=context.template.name,
                 ):
                     orphans.append((subject, item))
             cursor = page.get("next_cursor")
@@ -1446,17 +1647,29 @@ class StatesService:
             current = await context.records.read(subject)
             subtree = _record_subtree(current.data, path) if current is not None else {}
             ops = await self._run_reconcile_jq(
-                "close", reconcile.close, {"data": subtree, "id": item["id"], "resolution": resolution}
+                "close",
+                reconcile.close,
+                {"data": subtree, "id": item["id"], "resolution": resolution},
+                template_name=context.template.name,
             )
             if not isinstance(ops, list):
                 raise TemplateValidationError(f"reconcile close must return a list of ops, got {type(ops).__name__}")
             await context.records.apply(subject, [_rebase_op(op, path) for op in ops], origin=_RECONCILE_ORIGIN)
 
     async def _reconcile_orphans(
-        self, reconcile: TemplateReconcile, subtree: dict[str, Any], *, previous: dict[str, Any], new: dict[str, Any]
+        self,
+        reconcile: TemplateReconcile,
+        subtree: dict[str, Any],
+        *,
+        previous: dict[str, Any],
+        new: dict[str, Any],
+        template_name: str,
     ) -> list[dict[str, Any]]:
         result = await self._run_reconcile_jq(
-            "orphans", reconcile.orphans, {"previous": previous, "new": new, "data": subtree}
+            "orphans",
+            reconcile.orphans,
+            {"previous": previous, "new": new, "data": subtree},
+            template_name=template_name,
         )
         if not isinstance(result, list):
             raise TemplateValidationError(
@@ -1472,7 +1685,9 @@ class StatesService:
                 f"re-attaching template {context.template.name!r} on state {context.state!r}: "
                 'options.orphans="close" needs options.resolution naming a not-done resolution'
             )
-        declared = await self._run_reconcile_jq("resolutions", reconcile.resolutions, {"new": new})
+        declared = await self._run_reconcile_jq(
+            "resolutions", reconcile.resolutions, {"new": new}, template_name=context.template.name
+        )
         names = declared if isinstance(declared, list) else []
         if resolution not in names:
             raise TemplateValidationError(
@@ -1481,10 +1696,18 @@ class StatesService:
                 f"(declared: {sorted(str(n) for n in names)})"
             )
 
-    @staticmethod
-    async def _run_reconcile_jq(label: str, expr: str, payload: Any) -> Any:
-        """One reconcile jq program over its input payload — loud on an evaluation failure,
-        carrying the program's own ``error(...)`` message out."""
+    async def _run_reconcile_jq(self, label: str, text: TemplatedText, payload: Any, *, template_name: str) -> Any:
+        """One reconcile jq program over its input payload. Its body is a templated text rendered
+        to jq text IMMEDIATELY before it runs — a by-id body whose stored resource cannot be
+        fetched is a LOUD refusal naming the program and the id. Loud, too, on an evaluation
+        failure, carrying the program's own ``error(...)`` message out."""
+        try:
+            expr = await tai42_app.storage.resource_manager.render_templated_text(text)
+        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+            raise TemplateValidationError(
+                f"template {template_name!r} reconcile {label} references stored id {text.id!r}, "
+                f"which could not be fetched: {exc}"
+            ) from exc
         try:
             return await run_jq_first(expr, payload)
         except Exception as exc:
@@ -1519,7 +1742,7 @@ class StatesService:
         row = await self._store.get_template(name)
         if row is None:
             raise StateNotFoundError(f"no template {name!r}")
-        return self._validated_template(row)
+        return await self._validated_template(row)
 
     async def _load_state_attachments(
         self, state: str, *, override: dict[str, StateTemplate] | None = None
@@ -1534,10 +1757,14 @@ class StatesService:
             out.append((template, list(row["path"]), dict(row["parameters"] or {}), dict(row["declarations"] or {})))
         return out
 
-    async def _compose_effective(self, state: str, base_schema: dict[str, Any]) -> dict[str, Any]:
-        """The effective schema for ``base_schema`` over the state's CURRENT attachments."""
+    async def _compose_effective(self, state: str, base_schema: TemplatedText | dict[str, Any]) -> dict[str, Any]:
+        """The effective schema for ``base_schema`` over the state's CURRENT attachments.
+
+        ``base_schema`` is the ``TemplatedText | dict`` union (a by-id base resolves to its
+        schema); composition is over the resolved schema."""
+        resolved_base = await _resolve_state_schema(f"state {state!r} schema", base_schema)
         attachments = await self._load_state_attachments(state)
-        return compose_effective_schema(base_schema, [(m, p, pa) for m, p, pa, _d in attachments])
+        return compose_effective_schema(resolved_base, [(m, p, pa) for m, p, pa, _d in attachments])
 
     @staticmethod
     def _compose_regimes(
@@ -1610,9 +1837,11 @@ class StatesService:
             ) from exc
         if template.declarations.check is not None:
             try:
-                result = await run_jq_first(
-                    template.declarations.check, declarations, variables={"parameters": effective}
-                )
+                # Render the templated check to its jq program IMMEDIATELY before evaluating
+                # it; a by-id text whose stored resource cannot be fetched raises here and is
+                # surfaced as the loud check-evaluation failure.
+                rendered = await tai42_app.storage.resource_manager.render_templated_text(template.declarations.check)
+                result = await run_jq_first(rendered, declarations, variables={"parameters": effective})
             except Exception as exc:
                 raise TemplateValidationError(
                     f"template {template.name!r} declarations check failed to evaluate: {exc}"

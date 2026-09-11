@@ -53,6 +53,7 @@ from tai42_contract.interactions import (
     set_resume_continuation_tool,
     suspended_interaction_marker,
 )
+from tai42_contract.template import TemplatedText
 
 from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
@@ -235,7 +236,10 @@ def test_tools_agent_park_then_answer_exactly_once(
 
     async def go() -> None:
         receipt = await agent.run(
-            tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-tools"
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-tools",
         )
         assert receipt == {
             "status": "suspended",
@@ -285,7 +289,10 @@ def test_tools_agent_run_park_captures_the_ambient_completion(
         token = set_park_completion(completion_tool, completion_context)
         try:
             receipt = await agent.run(
-                tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-run-completion"
+                tool_names=["ask"],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id="t-run-completion",
             )
         finally:
             reset_park_completion(token)
@@ -317,7 +324,10 @@ def test_tools_agent_run_park_without_a_completion_binds_none(
 
     async def go() -> None:
         receipt = await agent.run(
-            tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-run-nocompletion"
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-run-nocompletion",
         )
         assert receipt["status"] == "suspended"
         entry = await idx.read_park_entry("i1")
@@ -348,7 +358,10 @@ def test_tools_agent_resume_delivers_a_legacy_ownerless_park_answer_end_to_end(
 
     async def go() -> None:
         receipt = await agent.run(
-            tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-legacy-e2e"
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-legacy-e2e",
         )
         assert receipt["status"] == "suspended"
 
@@ -393,7 +406,10 @@ def test_tools_agent_park_then_expiry_feeds_the_expiry_marker(
 
     async def go() -> None:
         receipt = await agent.run(
-            tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-expiry"
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-expiry",
         )
         assert receipt["expiry_at"] == deadline.isoformat()
         result = await agent_resume("i1", EXPIRY_ANSWER)
@@ -421,7 +437,12 @@ def test_tools_agent_park_has_no_interrupt_on_collision(
     agent = _agent()
 
     async def go() -> None:
-        await agent.run(tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-hitl")
+        await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-hitl",
+        )
         entry = await idx.read_park_entry("i1")
         # Exactly one park interrupt id was stored — no second (HITL) interrupt exists.
         assert entry is not None
@@ -478,7 +499,10 @@ def test_tools_agent_chains_a_nested_runs_park_and_resumes_with_its_terminal(
 
     async def go() -> None:
         receipt = await agent.run(
-            presets=[preset], checkpoint_provider="redis", user_message="go", thread_id="t-chained"
+            presets=[preset],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-chained",
         )
         assert isinstance(receipt, dict)
         assert receipt["status"] == "suspended"
@@ -551,7 +575,9 @@ def test_two_chained_calls_in_one_super_step_resume_together(
     ]
 
     async def go() -> None:
-        receipt = await agent.run(presets=presets, checkpoint_provider="redis", user_message="go", thread_id="t-two")
+        receipt = await agent.run(
+            presets=presets, checkpoint_provider="redis", user_message=TemplatedText(content="go"), thread_id="t-two"
+        )
         keys = receipt["interaction_ids"]
         assert len(set(keys)) == 2
         assert set(keys) == {first.chained_keys[0], second.chained_keys[0]}
@@ -595,7 +621,10 @@ def test_the_delivery_tool_accepts_the_whole_contract_fire_payload(
 
     async def go() -> None:
         receipt = await agent.run(
-            presets=[preset], checkpoint_provider="redis", user_message="go", thread_id="t-payload"
+            presets=[preset],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-payload",
         )
         (chain_token,) = receipt["interaction_ids"]
         fire = {
@@ -629,7 +658,10 @@ def test_a_chained_park_inherits_the_nested_asks_horizon(
 
     async def go() -> None:
         receipt = await agent.run(
-            presets=[preset], checkpoint_provider="redis", user_message="go", thread_id="t-horizon"
+            presets=[preset],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-horizon",
         )
         assert receipt["expiry_at"] == deadline.isoformat()
 
@@ -658,7 +690,9 @@ def test_a_chained_park_horizon_is_capped(
     )
 
     async def go() -> None:
-        receipt = await agent.run(presets=[preset], checkpoint_provider="redis", user_message="go", thread_id="t-cap")
+        receipt = await agent.run(
+            presets=[preset], checkpoint_provider="redis", user_message=TemplatedText(content="go"), thread_id="t-cap"
+        )
         capped = datetime.fromisoformat(receipt["expiry_at"])
         assert capped < far
         assert capped <= datetime.now(UTC) + timedelta(hours=1)
@@ -703,7 +737,10 @@ def test_a_re_park_extends_the_chained_parks_inherited_horizon(
 
     async def go() -> None:
         receipt = await agent.run(
-            presets=[preset], checkpoint_provider="redis", user_message="go", thread_id="t-repark"
+            presets=[preset],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-repark",
         )
         (chain_token,) = receipt["interaction_ids"]
         entry = await idx.read_park_entry(chain_token)
@@ -777,7 +814,10 @@ def test_a_failed_nested_terminal_re_enters_as_a_model_visible_tool_error(
 
     async def go() -> None:
         receipt = await agent.run(
-            presets=[preset], checkpoint_provider="redis", user_message="go", thread_id="t-failed"
+            presets=[preset],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-failed",
         )
         (chain_token,) = receipt["interaction_ids"]
         with caplog.at_level(logging.WARNING):
@@ -822,7 +862,12 @@ def test_a_terminal_for_a_chain_the_drive_never_parked_on_lands_benignly(
 
     async def go() -> None:
         with pytest.raises(Exception, match="the drive died"):
-            await agent.run(presets=[preset], checkpoint_provider="redis", user_message="go", thread_id="t-dead")
+            await agent.run(
+                presets=[preset],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id="t-dead",
+            )
         (chain_token,) = nested.chained_keys
         entry = await idx.read_park_entry(chain_token)
         assert entry is not None
@@ -891,7 +936,10 @@ def test_an_unchained_run_still_refuses_a_nested_runs_park(
         events = [
             event
             async for event in agent.astream(
-                presets=[preset], checkpoint_provider="redis", user_message="go", thread_id="t-unchained"
+                presets=[preset],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id="t-unchained",
             )
         ]
         assert events
@@ -950,7 +998,10 @@ def test_tools_agent_under_ambient_binding_does_not_answer_with_a_marker_when_no
         outer = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
         try:
             result = await agent.run(
-                tool_names=["relay"], checkpoint_provider="memory", user_message="go", thread_id="t-f1"
+                tool_names=["relay"],
+                checkpoint_provider="memory",
+                user_message=TemplatedText(content="go"),
+                thread_id="t-f1",
             )
         finally:
             reset_resume_continuation_tool(outer)
@@ -980,7 +1031,10 @@ def test_tools_agent_run_refuses_non_durable_checkpoint(
     async def go() -> None:
         with pytest.raises(Exception, match="resuming driver"):
             await agent.run(
-                tool_names=["ask"], checkpoint_provider="memory", user_message="go", thread_id="t-nondurable"
+                tool_names=["ask"],
+                checkpoint_provider="memory",
+                user_message=TemplatedText(content="go"),
+                thread_id="t-nondurable",
             )
         assert await idx.read_park_entry("i1") is None
 
@@ -1001,7 +1055,12 @@ def test_tools_agent_run_refuses_live_tools(
 
     async def go() -> None:
         with pytest.raises(Exception, match="resuming driver"):
-            await agent.run(tools=[ask.tool()], checkpoint_provider="redis", user_message="go", thread_id="t-livetools")
+            await agent.run(
+                tools=[ask.tool()],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id="t-livetools",
+            )
         assert await idx.read_park_entry("i1") is None
 
     asyncio.run(go())
@@ -1023,7 +1082,10 @@ def test_tools_agent_astream_refuses_async_ask_without_completion(
     async def go() -> None:
         with pytest.raises(Exception, match="resuming driver"):
             async for _event in agent.astream(
-                tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-astream"
+                tool_names=["ask"],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id="t-astream",
             ):
                 pass
         assert await idx.read_park_entry("i1") is None
@@ -1084,7 +1146,10 @@ def test_tools_agent_refuses_to_claim_a_marker_it_does_not_own(
 
     async def go() -> None:
         result = await agent.run(
-            tool_names=["relay"], checkpoint_provider="redis", user_message="go", thread_id="t-claim"
+            tool_names=["relay"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-claim",
         )
         # The turn COMPLETED on the refusal: not a park receipt, not a raised run.
         assert result == "I cannot run that here"
@@ -1120,7 +1185,10 @@ def test_tools_agent_run_never_answers_with_a_park_marker(
 
     async def go() -> None:
         result = await agent.run(
-            tool_names=["relay"], checkpoint_provider="redis", user_message="go", thread_id="t-escape"
+            tool_names=["relay"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-escape",
         )
         assert isinstance(result, str)
         assert SUSPENDED_INTERACTION_MARKER_KEY not in result
@@ -1148,7 +1216,10 @@ def test_tools_agent_astream_still_reaches_a_terminal_event(
         events = [
             event
             async for event in agent.astream(
-                tool_names=["relay"], checkpoint_provider="redis", user_message="go", thread_id="t-stream"
+                tool_names=["relay"],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id="t-stream",
             )
         ]
         assert [event for event in events if getattr(event, "final", False)], events

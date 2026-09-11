@@ -60,8 +60,8 @@ class _FakeResourceManager:
     async def delete_template_dir(self, path):
         self.deleted.append(path)
 
-    async def render_by_id_or_content(self, content=None, template_id=None, kwargs=None):
-        return f"rendered:{template_id or content}:{kwargs}"
+    async def render_templated_text(self, text, locale=None):
+        return f"rendered:{text.id or text.content}:{text.kwargs}"
 
     def clear_cache(self):
         self.cleared = True
@@ -219,12 +219,12 @@ async def test_get_template_id_traversal_rejected(manager, bad):
 
 @pytest.mark.parametrize("bad", ["/abs.j2", "../escape.j2", "a/../../etc", "back\\slash"])
 async def test_render_template_id_traversal_rejected(manager, bad):
-    resp = await router.render_template(_req({"template_id": bad}))
+    resp = await router.render_template(_req({"text": {"id": bad}}))
     assert resp.status_code == 400
 
 
 async def test_render_legit_template_id_passes(manager):
-    resp = await router.render_template(_req({"template_id": "dir/ok.j2"}))
+    resp = await router.render_template(_req({"text": {"id": "dir/ok.j2"}}))
     assert resp.status_code == 200
 
 
@@ -269,12 +269,12 @@ async def test_render_requires_source(manager):
 async def test_render_non_string_content_rejected(manager, bad):
     """A non-string inline ``content`` is refused with a clean 400 before it can
     reach Jinja and surface as a 500."""
-    resp = await router.render_template(_req({"content": bad}))
+    resp = await router.render_template(_req({"text": {"content": bad}}))
     assert resp.status_code == 400
 
 
 async def test_render(manager):
-    resp = await router.render_template(_req({"template_id": "a.j2", "kwargs": {"name": "Z"}}))
+    resp = await router.render_template(_req({"text": {"id": "a.j2", "kwargs": {"name": "Z"}}}))
     assert "rendered:a.j2" in _data(resp)["data"]["rendered"]
 
 
@@ -319,26 +319,26 @@ async def test_get_bad_jinja_400(manager, monkeypatch):
 
 
 async def test_render_missing_template_404(manager, monkeypatch):
-    async def _missing(content=None, template_id=None, kwargs=None):
-        raise TemplateNotFoundError(f"Template '{template_id}' not found.")
+    async def _missing(text, locale=None):
+        raise TemplateNotFoundError(f"Template '{text.id}' not found.")
 
-    monkeypatch.setattr(manager, "render_by_id_or_content", _missing)
-    resp = await router.render_template(_req({"template_id": "gone.j2"}))
+    monkeypatch.setattr(manager, "render_templated_text", _missing)
+    resp = await router.render_template(_req({"text": {"id": "gone.j2"}}))
     assert resp.status_code == 404
 
 
 async def test_render_bad_jinja_400(manager, monkeypatch):
-    async def _broken(content=None, template_id=None, kwargs=None):
+    async def _broken(text, locale=None):
         raise TemplateSyntaxError("bad syntax", 1)
 
-    monkeypatch.setattr(manager, "render_by_id_or_content", _broken)
-    resp = await router.render_template(_req({"content": "{{ oops"}))
+    monkeypatch.setattr(manager, "render_templated_text", _broken)
+    resp = await router.render_template(_req({"text": {"content": "{{ oops"}}))
     assert resp.status_code == 400
     assert "template error" in _data(resp)["error"]
 
 
 async def test_render_both_content_and_id_400(manager):
-    resp = await router.render_template(_req({"content": "hi", "template_id": "a.j2"}))
+    resp = await router.render_template(_req({"text": {"content": "hi", "id": "a.j2"}}))
     assert resp.status_code == 400
     assert "not both" in _data(resp)["error"]
 
@@ -346,12 +346,12 @@ async def test_render_both_content_and_id_400(manager):
 async def test_render_infra_error_propagates_as_500(manager, monkeypatch):
     # A genuine storage/infra failure is NOT an author error: it must propagate
     # (surfacing as a 500), never be masked as a 400/404.
-    async def _boom(content=None, template_id=None, kwargs=None):
+    async def _boom(text, locale=None):
         raise RuntimeError("redis down")
 
-    monkeypatch.setattr(manager, "render_by_id_or_content", _boom)
+    monkeypatch.setattr(manager, "render_templated_text", _boom)
     with pytest.raises(RuntimeError, match="redis down"):
-        await router.render_template(_req({"template_id": "a.j2"}))
+        await router.render_template(_req({"text": {"id": "a.j2"}}))
 
 
 # --- door-level: the REAL ResourceManager behind the route -------------------

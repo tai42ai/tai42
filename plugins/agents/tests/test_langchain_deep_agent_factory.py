@@ -16,6 +16,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, PrivateAttr, TypeAdapter, ValidationError
+from tai42_contract.template import TemplatedText
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
@@ -82,7 +83,7 @@ def _tool(name: str) -> StructuredTool:
 def test_resolve_subagent_emits_only_set_keys() -> None:
     """Inheritance relies on optional keys being ABSENT, not None; the shared async-park
     hook + tool-error middleware are the always-present stack entries every subagent gets."""
-    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p")
+    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt=TemplatedText(content="p"))
     sub = cast(dict[str, Any], asyncio.run(_resolve_subagent(spec)))
     assert sub == {
         "name": "b",
@@ -97,7 +98,9 @@ def test_resolve_subagent_resolves_model_when_provider_set(monkeypatch: pytest.M
         return f"LLM:{provider}"
 
     monkeypatch.setattr(factory, "get_llm_async", fake_get_llm_async)
-    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p", llm_provider="openai")
+    spec = ResolvedSubAgentSpec(
+        name="b", description="d", system_prompt=TemplatedText(content="p"), llm_provider="openai"
+    )
     sub = cast(dict[str, Any], asyncio.run(_resolve_subagent(spec)))
     assert sub["model"] == "LLM:openai"
 
@@ -106,7 +109,7 @@ def test_resolve_subagent_passes_through_tools_skills_interrupt() -> None:
     spec = ResolvedSubAgentSpec(
         name="b",
         description="d",
-        system_prompt="p",
+        system_prompt=TemplatedText(content="p"),
         tools=[_tool("x")],
         skills=[f"{SKILLS_ROOT}jq/"],
         interrupt_on={"edit_file": True},
@@ -117,13 +120,29 @@ def test_resolve_subagent_passes_through_tools_skills_interrupt() -> None:
     assert sub["interrupt_on"] == {"edit_file": True}
 
 
+def test_resolve_subagent_renders_a_stored_system_prompt(resource_manager: Any) -> None:
+    """A by-id system prompt resolves through the manager at the point deepagents consumes it."""
+    resource_manager.templates["sp-id"] = "stored instructions"
+    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt=TemplatedText(id="sp-id"))
+    sub = cast(dict[str, Any], asyncio.run(_resolve_subagent(spec)))
+    assert sub["system_prompt"] == "stored instructions"
+
+
+def test_resolve_subagent_missing_system_prompt_id_raises(resource_manager: Any) -> None:
+    """A by-id system prompt whose resource is absent fails loudly at the point of use,
+    never renders as empty text."""
+    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt=TemplatedText(id="absent"))
+    with pytest.raises(RuntimeError):
+        asyncio.run(_resolve_subagent(spec))
+
+
 # --- _validate guards ------------------------------------------------------
 
 
 def test_validate_rejects_duplicate_subagents() -> None:
     specs = [
-        ResolvedSubAgentSpec(name="x", description="d", system_prompt="p"),
-        ResolvedSubAgentSpec(name="x", description="d", system_prompt="p"),
+        ResolvedSubAgentSpec(name="x", description="d", system_prompt=TemplatedText(content="p")),
+        ResolvedSubAgentSpec(name="x", description="d", system_prompt=TemplatedText(content="p")),
     ]
     with pytest.raises(ValueError, match="duplicate subagent"):
         _validate([], specs, None)
@@ -140,7 +159,7 @@ def test_validate_rejects_builtin_tool_collision() -> None:
 
 
 def test_validate_rejects_subagent_named_like_builtin() -> None:
-    spec = ResolvedSubAgentSpec(name="task", description="d", system_prompt="p")
+    spec = ResolvedSubAgentSpec(name="task", description="d", system_prompt=TemplatedText(content="p"))
     with pytest.raises(ValueError, match="built-in tool names"):
         _validate([], [spec], None)
 
@@ -151,13 +170,15 @@ def test_validate_rejects_offroot_skill() -> None:
 
 
 def test_validate_rejects_offroot_subagent_skill() -> None:
-    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p", skills=["/nope/"])
+    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt=TemplatedText(content="p"), skills=["/nope/"])
     with pytest.raises(ValueError, match="must start with"):
         _validate([], [spec], None)
 
 
 def test_validate_accepts_clean_config() -> None:
-    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p", skills=[f"{SKILLS_ROOT}jq/"])
+    spec = ResolvedSubAgentSpec(
+        name="b", description="d", system_prompt=TemplatedText(content="p"), skills=[f"{SKILLS_ROOT}jq/"]
+    )
     _validate([_tool("search")], [spec], [f"{SKILLS_ROOT}flow/"])  # no raise
 
 
@@ -189,7 +210,7 @@ def test_resolve_subagent_emits_response_format() -> None:
     class M(BaseModel):
         x: int
 
-    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p", response_format=M)
+    spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt=TemplatedText(content="p"), response_format=M)
     sub = cast(dict[str, Any], asyncio.run(_resolve_subagent(spec)))
     # The schema is pinned to the tool-calling strategy, never provider-dependent
     # auto-routing.
@@ -274,7 +295,9 @@ def test_compile_nested_subagent_pins_response_format_to_tool_strategy(monkeypat
 
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: calls.append(kwargs) or _FakeRunnable())
-    child = ResolvedSubAgentSpec(name="leaf", description="l", system_prompt="sp", response_format=M)
+    child = ResolvedSubAgentSpec(
+        name="leaf", description="l", system_prompt=TemplatedText(content="sp"), response_format=M
+    )
     asyncio.run(
         factory._compile_nested_subagent(
             child, parent_model=_FAKE_LLM, parent_tools=[], store=InMemoryStore(), backend=object()
@@ -322,7 +345,7 @@ def test_build_deep_agent_does_not_double_add_general_purpose(monkeypatch: pytes
         return "AGENT"
 
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
-    gp_spec = ResolvedSubAgentSpec(name="general-purpose", description="d", system_prompt="p")
+    gp_spec = ResolvedSubAgentSpec(name="general-purpose", description="d", system_prompt=TemplatedText(content="p"))
     asyncio.run(
         build_langchain_deep_agent(
             llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], subagents=[gp_spec]
@@ -391,7 +414,7 @@ def test_nested_general_purpose_subagent_inherits_child_skill_sources(monkeypatc
     child = ResolvedSubAgentSpec(
         name="leaf",
         description="l",
-        system_prompt="sp",
+        system_prompt=TemplatedText(content="sp"),
         skills=[f"{SKILLS_ROOT}jq/"],
         inline_skills=[InlineSkill(name="helper", content="# helper")],
     )
@@ -413,11 +436,13 @@ def _nested_pair(
     child_tools: list[StructuredTool] | None = None,
     parent_tools: list[StructuredTool] | None = None,
 ) -> tuple[ResolvedSubAgentSpec, ResolvedSubAgentSpec]:
-    child = ResolvedSubAgentSpec(name="finder", description="cd", system_prompt="cp", tools=child_tools or [])
+    child = ResolvedSubAgentSpec(
+        name="finder", description="cd", system_prompt=TemplatedText(content="cp"), tools=child_tools or []
+    )
     parent = ResolvedSubAgentSpec(
         name="advisor",
         description="d",
-        system_prompt="p",
+        system_prompt=TemplatedText(content="p"),
         tools=parent_tools or [],
         subagents=[child],
     )
@@ -425,40 +450,56 @@ def _nested_pair(
 
 
 def test_validate_rejects_two_level_nesting() -> None:
-    grandchild = ResolvedSubAgentSpec(name="g", description="gd", system_prompt="gp")
-    child = ResolvedSubAgentSpec(name="c", description="cd", system_prompt="cp", subagents=[grandchild])
-    parent = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", subagents=[child])
+    grandchild = ResolvedSubAgentSpec(name="g", description="gd", system_prompt=TemplatedText(content="gp"))
+    child = ResolvedSubAgentSpec(
+        name="c", description="cd", system_prompt=TemplatedText(content="cp"), subagents=[grandchild]
+    )
+    parent = ResolvedSubAgentSpec(
+        name="a", description="d", system_prompt=TemplatedText(content="p"), subagents=[child]
+    )
     with pytest.raises(ValueError, match="one level deep"):
         _validate([], [parent], None)
 
 
 def test_validate_rejects_duplicate_nested_names() -> None:
     children = [
-        ResolvedSubAgentSpec(name="c", description="cd", system_prompt="cp"),
-        ResolvedSubAgentSpec(name="c", description="cd", system_prompt="cp"),
+        ResolvedSubAgentSpec(name="c", description="cd", system_prompt=TemplatedText(content="cp")),
+        ResolvedSubAgentSpec(name="c", description="cd", system_prompt=TemplatedText(content="cp")),
     ]
-    parent = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", subagents=children)
+    parent = ResolvedSubAgentSpec(
+        name="a", description="d", system_prompt=TemplatedText(content="p"), subagents=children
+    )
     with pytest.raises(ValueError, match="duplicate nested subagent names"):
         _validate([], [parent], None)
 
 
 def test_validate_rejects_nested_builtin_name() -> None:
-    child = ResolvedSubAgentSpec(name="task", description="cd", system_prompt="cp")
-    parent = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", subagents=[child])
+    child = ResolvedSubAgentSpec(name="task", description="cd", system_prompt=TemplatedText(content="cp"))
+    parent = ResolvedSubAgentSpec(
+        name="a", description="d", system_prompt=TemplatedText(content="p"), subagents=[child]
+    )
     with pytest.raises(ValueError, match="built-in tool names"):
         _validate([], [parent], None)
 
 
 def test_validate_rejects_nested_offroot_skill() -> None:
-    child = ResolvedSubAgentSpec(name="c", description="cd", system_prompt="cp", skills=["/nope/"])
-    parent = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", subagents=[child])
+    child = ResolvedSubAgentSpec(
+        name="c", description="cd", system_prompt=TemplatedText(content="cp"), skills=["/nope/"]
+    )
+    parent = ResolvedSubAgentSpec(
+        name="a", description="d", system_prompt=TemplatedText(content="p"), subagents=[child]
+    )
     with pytest.raises(ValueError, match="must start with"):
         _validate([], [parent], None)
 
 
 def test_validate_accepts_clean_nested_config() -> None:
-    child = ResolvedSubAgentSpec(name="c", description="cd", system_prompt="cp", skills=[f"{SKILLS_ROOT}finder/"])
-    parent = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", subagents=[child])
+    child = ResolvedSubAgentSpec(
+        name="c", description="cd", system_prompt=TemplatedText(content="cp"), skills=[f"{SKILLS_ROOT}finder/"]
+    )
+    parent = ResolvedSubAgentSpec(
+        name="a", description="d", system_prompt=TemplatedText(content="p"), subagents=[child]
+    )
     _validate([], [parent], None)  # no raise
 
 
@@ -520,8 +561,12 @@ def test_nested_child_resolves_own_provider(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
     monkeypatch.setattr(factory, "get_llm_async", fake_get_llm_async)
-    child = ResolvedSubAgentSpec(name="finder", description="cd", system_prompt="cp", llm_provider="openai")
-    parent = ResolvedSubAgentSpec(name="advisor", description="d", system_prompt="p", subagents=[child])
+    child = ResolvedSubAgentSpec(
+        name="finder", description="cd", system_prompt=TemplatedText(content="cp"), llm_provider="openai"
+    )
+    parent = ResolvedSubAgentSpec(
+        name="advisor", description="d", system_prompt=TemplatedText(content="p"), subagents=[child]
+    )
     asyncio.run(_resolve_subagent(parent, llm=_FAKE_LLM, tools=[], store=InMemoryStore(), backend=object()))
     assert captured[0]["model"] == "LLM:openai"
 
@@ -563,11 +608,13 @@ def _inline(name: str, content: str) -> InlineSkill:
 
 def test_collect_inline_skills_spans_all_agents() -> None:
     """Inline skills from the main agent + subagent + nested merge into one map."""
-    child = ResolvedSubAgentSpec(name="c", description="cd", system_prompt="cp", inline_skills=[_inline("child", "C")])
+    child = ResolvedSubAgentSpec(
+        name="c", description="cd", system_prompt=TemplatedText(content="cp"), inline_skills=[_inline("child", "C")]
+    )
     parent = ResolvedSubAgentSpec(
         name="a",
         description="d",
-        system_prompt="p",
+        system_prompt=TemplatedText(content="p"),
         inline_skills=[_inline("parent", "P")],
         subagents=[child],
     )
@@ -577,13 +624,17 @@ def test_collect_inline_skills_spans_all_agents() -> None:
 
 def test_collect_inline_skills_shared_name_identical_content_ok() -> None:
     """A name reused across agents with identical content collapses to one mount."""
-    parent = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", inline_skills=[_inline("shared", "X")])
+    parent = ResolvedSubAgentSpec(
+        name="a", description="d", system_prompt=TemplatedText(content="p"), inline_skills=[_inline("shared", "X")]
+    )
     collected = _collect_inline_skills([_inline("shared", "X")], [parent])
     assert collected == {"shared": "X"}
 
 
 def test_collect_inline_skills_name_collision_differing_content_raises() -> None:
-    parent = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", inline_skills=[_inline("dup", "B")])
+    parent = ResolvedSubAgentSpec(
+        name="a", description="d", system_prompt=TemplatedText(content="p"), inline_skills=[_inline("dup", "B")]
+    )
     with pytest.raises(ValueError, match="different content"):
         _collect_inline_skills([_inline("dup", "A")], [parent])
 
@@ -609,7 +660,7 @@ def test_resolve_subagent_auto_loads_its_inline_skills() -> None:
     spec = ResolvedSubAgentSpec(
         name="b",
         description="d",
-        system_prompt="p",
+        system_prompt=TemplatedText(content="p"),
         skills=[f"{SKILLS_ROOT}ref/"],
         inline_skills=[_inline("demo", "x")],
     )
@@ -654,7 +705,9 @@ def test_build_deep_agent_inline_collision_raises_before_create(monkeypatch: pyt
         return "AGENT"
 
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
-    sub = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p", inline_skills=[_inline("dup", "B")])
+    sub = ResolvedSubAgentSpec(
+        name="b", description="d", system_prompt=TemplatedText(content="p"), inline_skills=[_inline("dup", "B")]
+    )
     with pytest.raises(ValueError, match="different content"):
         asyncio.run(
             build_langchain_deep_agent(

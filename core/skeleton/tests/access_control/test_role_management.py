@@ -1,6 +1,6 @@
 """Role management: the admin-only CRUD/version ops, validate-before-persist, the
 un-lockout guards, LIVE grant propagation + the version-keyed cache, keys-inherit-owner,
-the audit trail, and the admin discriminator never routing through condition_id.
+the audit trail, and the admin discriminator never routing through the policy condition.
 """
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import AccessPolicy
+from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.operations.roles as roles_ops
 import tai42_skeleton.versioning as versioning_module
@@ -222,16 +223,14 @@ async def test_multiple_admins_and_admin_pointer_absent(mem, pg: FakeAccessContr
         body = pg.policy_body(who)
         assert body["scopes"] == ["*"]
         assert body["condition"] is None
-        assert body["condition_id"] is None  # admin is never routed through condition_id
         assert ROLE_POINTER_KEY not in (body.get("policy_data") or {})  # admin carries no pointer
 
 
-# -- the role pointer is a separate field, never condition_id ----------------
+# -- the role pointer is its own dedicated policy_data field -----------------
 
 
-def test_role_pointer_is_not_condition_id():
+def test_role_pointer_key_is_role():
     assert ROLE_POINTER_KEY == "role"
-    assert ROLE_POINTER_KEY != "condition_id"
 
 
 async def test_apply_role_refuses_conditionless_non_admin_role(mem, pg, redis_mgmt, monkeypatch):
@@ -247,12 +246,11 @@ async def test_apply_role_refuses_conditionless_non_admin_role(mem, pg, redis_mg
         await apply_role("bob", "broken")
 
 
-async def test_editor_pointer_lives_in_policy_data_not_condition_id(mem, pg, redis_mgmt, monkeypatch):
+async def test_editor_pointer_lives_in_policy_data(mem, pg, redis_mgmt, monkeypatch):
     await seed_default_roles()
     await apply_role("bob", "editor")
     body = pg.policy_body("bob")
     assert body["policy_data"][ROLE_POINTER_KEY] == "editor"
-    assert body["condition_id"] is None  # the pointer never populates condition_id
 
 
 # -- LIVE propagation + the version-keyed grant cache ------------------------
@@ -280,7 +278,9 @@ async def test_missing_role_denies_fail_closed(mem, pg, redis_mgmt, monkeypatch)
     _admin_caller(monkeypatch)
     await seed_default_roles()
     # A policy pointing at a role that does not exist is denied on a grantable route.
-    policy = AccessPolicy(scopes=["*"], condition="true", policy_data={ROLE_POINTER_KEY: "ghost"})
+    policy = AccessPolicy(
+        scopes=["*"], condition=TemplatedText(content="true"), policy_data={ROLE_POINTER_KEY: "ghost"}
+    )
     meta = _a_grantable_read_route()
     allowed, cause = await role_level_decision(policy, None, meta.path, "GET", 1)
     assert allowed is False
@@ -296,7 +296,9 @@ async def test_role_level_decision_allows_a_method_less_non_http_scope(mem, pg, 
     # a method). Passing a real fenced PATH with method=None still allows, proving the
     # branch keys on the absent method, not the path.
     await seed_default_roles()
-    editor = AccessPolicy(scopes=["*"], condition="editorbase", policy_data={ROLE_POINTER_KEY: "editor"})
+    editor = AccessPolicy(
+        scopes=["*"], condition=TemplatedText(content="editorbase"), policy_data={ROLE_POINTER_KEY: "editor"}
+    )
     allowed, cause = await role_level_decision(editor, None, "/api/marketplace/install", None, 1)
     assert allowed is True
     assert cause is None
@@ -309,7 +311,9 @@ async def test_role_level_decision_does_not_act_on_a_path_with_no_registered_rou
     # SYNTHESIZED path can miss the route it should have hit — which is why the tool edge
     # pins the operation's own route instead of resolving one here.
     await seed_default_roles()
-    editor = AccessPolicy(scopes=["*"], condition="editorbase", policy_data={ROLE_POINTER_KEY: "editor"})
+    editor = AccessPolicy(
+        scopes=["*"], condition=TemplatedText(content="editorbase"), policy_data={ROLE_POINTER_KEY: "editor"}
+    )
     assert resolve_route_meta("/studio/settings", "POST") is None
     allowed, cause = await role_level_decision(editor, None, "/studio/settings", "POST", 1)
     assert allowed is True
@@ -343,7 +347,9 @@ async def test_owned_key_inherits_owner_role(mem, pg, redis_mgmt, monkeypatch):
     read_route = _a_grantable_read_route()
     # A viewer owner: read on every grantable tag. An owned key (no role of its own)
     # inherits the owner's viewer grant map.
-    owner = AccessPolicy(scopes=["*"], condition="viewerbase", policy_data={ROLE_POINTER_KEY: "viewer"})
+    owner = AccessPolicy(
+        scopes=["*"], condition=TemplatedText(content="viewerbase"), policy_data={ROLE_POINTER_KEY: "viewer"}
+    )
     key = AccessPolicy(scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
 
     allowed, _ = await role_level_decision(key, owner, read_route.path, "GET", 1)
@@ -426,7 +432,9 @@ async def test_audit_records_actor_and_before_after(mem, pg, redis_mgmt, monkeyp
 
 async def test_denial_causes_are_internally_distinguishable(mem, pg, redis_mgmt, monkeypatch):
     await seed_default_roles()
-    editor = AccessPolicy(scopes=["*"], condition="editorbase", policy_data={ROLE_POINTER_KEY: "editor"})
+    editor = AccessPolicy(
+        scopes=["*"], condition=TemplatedText(content="editorbase"), policy_data={ROLE_POINTER_KEY: "editor"}
+    )
     # A fenced route → HARD_FENCE.
     _, fence_cause = await role_level_decision(editor, None, "/api/marketplace/install", "POST", 1)
     assert fence_cause is DenialCause.HARD_FENCE
@@ -437,32 +445,6 @@ async def test_denial_causes_are_internally_distinguishable(mem, pg, redis_mgmt,
     _, level_cause = grant_map_admits(meta, "GET", {})  # empty map → constant deny
     assert level_cause is DenialCause.LEVEL_MISS
     assert DenialCause.HARD_FENCE is not DenialCause.LEVEL_MISS is not DenialCause.SCOPE_MISS
-
-
-# -- admin discriminator guard: condition_id is never the escape hatch --------
-
-
-async def test_apply_role_refuses_conditionless_role_even_with_condition_id_set(mem, pg, redis_mgmt):
-    # apply_role hardcodes the WRITTEN condition_id to None, so a role body carrying
-    # condition=None but a stored condition_id must STILL be refused: the policy it would
-    # write is a condition-free ["*"] the admin discriminator misreads as full admin. The
-    # guard fires on the value actually written, not the role's stored condition_id.
-    await mem.create(
-        "role",
-        "sneaky",
-        {
-            "name": "sneaky",
-            "description": "x",
-            "scopes": ["*"],
-            "grants": {},
-            "condition": None,
-            "condition_id": "cid",
-            "allow_all": False,
-        },
-    )
-    with pytest.raises(ValueError, match="admin discriminator misreads"):
-        await apply_role("bob", "sneaky")
-    assert pg.policy("bob") is None  # nothing minted
 
 
 # -- the admin control plane is HARD-FENCED to editor/viewer -----------------

@@ -56,12 +56,12 @@ def get_resource_by_id(
     wants_render = render or kwargs is not None or kwargs_file is not None or kw
     with ctx_obj.client() as client:
         if wants_render:
-            # The render path carries arbitrary nested ``template_kwargs``, which needs
+            # The render path carries arbitrary nested render ``kwargs``, which needs
             # a request body — the write-classed POST door.
             render_kwargs = load_kwargs_arg(
                 kwargs, kwargs_file, kw, param_hint="--kwargs", file_param_hint="--kwargs-file", kw_param_hint="--kw"
             )
-            body = {"resource_id": resource_id, "template_kwargs": render_kwargs}
+            body = {"resource_id": resource_id, "kwargs": render_kwargs}
             data = client.post("/api/resources/get", json=body)
         else:
             # The plain fetch-as-is path — the read-classed GET door, so a resources

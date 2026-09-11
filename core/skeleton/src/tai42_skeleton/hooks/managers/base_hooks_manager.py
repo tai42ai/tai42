@@ -8,6 +8,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.hooks.models import HookParams, HookSubject
 from tai42_contract.monitoring import MonitoringLevel, SpanKind
 from tai42_contract.states import StateContext, SubjectCandidates
+from tai42_contract.template import TemplatedText
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.jq_util import get_compiled_jq
@@ -34,25 +35,25 @@ class BaseHooksManager(ABC):
         """Reject inline jq that does not compile, at registration time.
 
         A broken condition/expr would otherwise surface only as a hook that
-        never fires (indistinguishable from a false condition). Template-id
-        fields render per event and cannot be compiled here — their failures
-        surface loudly at fire time instead."""
+        never fires (indistinguishable from a false condition). A templated text
+        naming a stored resource renders per event and cannot be compiled here —
+        its failures surface loudly at fire time instead."""
         for field in ("condition", "expr"):
-            raw = getattr(params, field)
-            if not raw:
+            text: TemplatedText | None = getattr(params, field)
+            if text is None or not text.content:
                 continue
             try:
-                get_compiled_jq(raw)
+                get_compiled_jq(text.content)
             except Exception as exc:
                 raise ValueError(f"hook {params.name!r}: {field} is not valid jq: {exc}") from exc
 
     async def _check_condition(self, hook: HookParams, payload: dict[str, Any]) -> bool:
         writer = get_monitoring().writer
         with writer.start_span(name="hook_check_condition", kind=SpanKind.CHAIN):
-            raw_condition = await tai42_app.storage.resource_manager.render_by_id_or_content(
-                content=hook.condition,
-                template_id=hook.condition_id,
-                kwargs=hook.condition_kwargs,
+            raw_condition = (
+                await tai42_app.storage.resource_manager.render_templated_text(hook.condition)
+                if hook.condition is not None
+                else ""
             )
             writer.update_current_span(metadata={"hook_name": hook.name, "raw_condition": raw_condition})
 
@@ -96,10 +97,10 @@ class BaseHooksManager(ABC):
                 # substitute. Refuse before any work.
                 raise PermissionDenied(f"hook {hook.name!r} binds no execution key; refusing to fire")
 
-            rendered_expr = await tai42_app.storage.resource_manager.render_by_id_or_content(
-                content=hook.expr,
-                template_id=hook.expr_id,
-                kwargs=hook.expr_kwargs,
+            rendered_expr = (
+                await tai42_app.storage.resource_manager.render_templated_text(hook.expr)
+                if hook.expr is not None
+                else ""
             )
             event_input = (await run_jq_first(rendered_expr, payload)) if rendered_expr else {}
             # Shallow top-level merge, strongest last: expr input, then the per-link
@@ -236,11 +237,13 @@ async def _hook_state_context(hook: HookParams, payload: dict[str, Any]) -> Stat
     subject: HookSubject | None = hook.subject
     if subject is None:
         return None
-    key = await run_jq_first(subject.key_expr, payload)
+    # Render the templated key_expr to its jq program IMMEDIATELY before evaluating it; a
+    # by-id text whose stored resource cannot be fetched raises out of the manager and the
+    # fire fails loudly like any hook error.
+    key_expr = await tai42_app.storage.resource_manager.render_templated_text(subject.key_expr)
+    key = await run_jq_first(key_expr, payload)
     if not isinstance(key, str) or not key.strip():
-        raise ValueError(
-            f"hook {hook.name!r} subject key_expr {subject.key_expr!r} must yield a non-empty string, got {key!r}"
-        )
+        raise ValueError(f"hook {hook.name!r} subject key_expr {key_expr!r} must yield a non-empty string, got {key!r}")
     return StateContext(
         door="hook",
         candidates=SubjectCandidates(

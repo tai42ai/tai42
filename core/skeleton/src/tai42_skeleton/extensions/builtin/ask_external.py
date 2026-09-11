@@ -24,7 +24,9 @@ from typing import Any, cast
 from makefun import create_function
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import makefun_func_name
+from tai42_kit.utils.render import resolve_schema_body
 
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.interactions import ask_user
@@ -85,7 +87,7 @@ def ask_external(
     async def wrapper(
         *,
         question: str,
-        answer_schema: dict | None = None,
+        answer_schema: TemplatedText | dict | None = None,
         timeout: float | None = None,
         **tool_kwargs,
     ):
@@ -97,10 +99,11 @@ def ask_external(
                 return await result
             return result
 
+        resolved_schema = await resolve_schema_body("ask_external answer_schema", answer_schema)
         return await ask_user(
             question,
             answer_format="external",
-            schema=answer_schema,
+            schema=resolved_schema,
             timeout=timeout,
             link=build,
             verifier=verifier,
@@ -115,7 +118,9 @@ def ask_external(
     composed.extend(
         [
             inspect.Parameter("question", inspect.Parameter.KEYWORD_ONLY, annotation=str),
-            inspect.Parameter("answer_schema", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=dict | None),
+            inspect.Parameter(
+                "answer_schema", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=TemplatedText | dict | None
+            ),
             inspect.Parameter("timeout", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=float | None),
         ]
     )

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 from tai42_contract.storage import Storage
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
@@ -78,12 +79,9 @@ async def test_none_locale_renders_bare_template_unchanged() -> None:
 
 async def test_list_format_uses_the_render_locale() -> None:
     manager = _manager({})
-    he = await manager.render_by_id_or_content(
-        content="{{ x | list_format }}", kwargs={"x": ["a", "b", "c"]}, locale="he"
-    )
-    en = await manager.render_by_id_or_content(
-        content="{{ x | list_format }}", kwargs={"x": ["a", "b", "c"]}, locale="en"
-    )
+    text = TemplatedText(content="{{ x | list_format }}", kwargs={"x": ["a", "b", "c"]})
+    he = await manager.render_templated_text(text, "he")
+    en = await manager.render_templated_text(text, "en")
     assert he != en
     assert "and" in en
 
@@ -91,16 +89,22 @@ async def test_list_format_uses_the_render_locale() -> None:
 async def test_list_format_without_a_locale_raises() -> None:
     manager = _manager({})
     with pytest.raises(ValueError, match="needs the subject's locale"):
-        await manager.render_by_id_or_content(content="{{ x | list_format }}", kwargs={"x": ["a", "b"]}, locale=None)
+        await manager.render_templated_text(
+            TemplatedText(content="{{ x | list_format }}", kwargs={"x": ["a", "b"]}), None
+        )
 
 
 async def test_list_format_unknown_locale_raises() -> None:
     manager = _manager({})
     with pytest.raises(ValueError, match="no CLDR list patterns"):
-        await manager.render_by_id_or_content(content="{{ x | list_format }}", kwargs={"x": ["a", "b"]}, locale="zz")
+        await manager.render_templated_text(
+            TemplatedText(content="{{ x | list_format }}", kwargs={"x": ["a", "b"]}), "zz"
+        )
 
 
 async def test_reserved_locale_context_key_collision_raises() -> None:
     manager = _manager({})
     with pytest.raises(ValueError, match="reserved render variable"):
-        await manager.render_by_id_or_content(content="{{ ok }}", kwargs={"_tai_locale": "he", "ok": "x"}, locale="he")
+        await manager.render_templated_text(
+            TemplatedText(content="{{ ok }}", kwargs={"_tai_locale": "he", "ok": "x"}), "he"
+        )

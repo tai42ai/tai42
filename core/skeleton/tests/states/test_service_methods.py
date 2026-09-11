@@ -8,6 +8,7 @@ integration test otherwise exercises.
 from __future__ import annotations
 
 import pytest
+from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import (
     AttachConflictError,
     InvalidPathError,
@@ -23,9 +24,12 @@ from tai42_contract.states.errors import (
 )
 from tai42_contract.states.models import (
     AttachBody,
+    StateDeclaration,
     StateTemplateDocument,
     WriteOrigin,
 )
+from tai42_contract.template import TemplatedText
+from tai42_kit.utils.render import SchemaBodyError
 
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import (
@@ -40,11 +44,47 @@ from .test_service import _STATE, FakeStatesStore, _subject
 
 _ORIGIN = WriteOrigin(consumer="c")
 
+# The stored resources a by-id declarations ``check`` names, keyed by id → its jq body,
+# plus the by-id state/template ``schema`` bodies (rendered text is parsed as JSON).
+_CHECK_RESOURCES = {
+    "capped-check": 'if .count <= $parameters.limit then true else "count exceeds the attach limit" end',
+    "stored-state-schema": '{"type": "object", "properties": {"n": {"type": "integer"}}}',
+    "stored-fragment-schema": '{"type": "object", "properties": {"y": {"type": "integer"}}}',
+    "not-json-schema": "this is not JSON",
+}
+
+
+class _FakeResourceManager:
+    """Renders a declarations check or a schema body: inline ``content`` verbatim, or a stored
+    ``id`` from ``_CHECK_RESOURCES`` — an unmapped id is the loud not-found the real manager
+    raises."""
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.id is not None:
+            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+
+            if text.id not in _CHECK_RESOURCES:
+                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+            return _CHECK_RESOURCES[text.id]
+        assert text.content is not None
+        return text.content
+
+
+class _FakeStorage:
+    resource_manager = _FakeResourceManager()
+
+
+class _FakeApp:
+    storage = _FakeStorage()
+
 
 @pytest.fixture
-def svc(monkeypatch: pytest.MonkeyPatch) -> StatesService:
+def svc(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
-    return StatesService(store=FakeStatesStore())  # type: ignore[arg-type]
+    # The attach-check evaluation and the by-id save compile render through the bound
+    # resource manager, so bind a fake for the service's lifetime.
+    with tai42_app.bound(_FakeApp()):
+        yield StatesService(store=FakeStatesStore())  # type: ignore[arg-type]
 
 
 def _template_doc(name="tpl", **over):
@@ -339,6 +379,7 @@ async def test_put_template_replace_revalidates_live_attachments(svc: StatesServ
     )
     got = await svc.get_template("m")
     assert got is not None
+    assert isinstance(got.schema_, dict)
     assert "z" in got.schema_["properties"]
 
 
@@ -405,7 +446,7 @@ def _capped_template(name: str = "capped"):
         parameters={"limit": {"schema": {"type": "integer"}, "default": 5}},
         declarations={
             "schema": {"type": "object", "properties": {"count": {"type": "integer"}}},
-            "check": 'if .count <= $parameters.limit then true else "count exceeds the attach limit" end',
+            "check": {"content": 'if .count <= $parameters.limit then true else "count exceeds the attach limit" end'},
         },
     )
 
@@ -429,6 +470,45 @@ async def test_attach_check_sees_the_parameter_default(svc: StatesService) -> No
     with pytest.raises(TemplateValidationError, match="count exceeds the attach limit"):
         await svc.attach("alerts", "capped", AttachBody(path=["a"], declarations={"count": 6}))
     await svc.attach("alerts", "capped", AttachBody(path=["a"], declarations={"count": 4}))
+
+
+def _capped_template_by_id(name: str = "capped-by-id"):
+    """The capped template whose declarations ``check`` is carried by a stored id rather than
+    inline (the stored resource resolves to the same jq)."""
+    return _template_doc(
+        name,
+        schema={"type": "object", "properties": {"box": {"type": "object"}}},
+        parameters={"limit": {"schema": {"type": "integer"}, "default": 5}},
+        declarations={
+            "schema": {"type": "object", "properties": {"count": {"type": "integer"}}},
+            "check": {"id": "capped-check"},
+        },
+    )
+
+
+async def test_attach_check_by_id_renders_then_evaluates(svc: StatesService) -> None:
+    # A by-id declarations check is compiled at the save (put_template) and rendered again at
+    # attach IMMEDIATELY before it is evaluated over the declaration values.
+    await svc.put_declaration(_STATE)
+    await svc.put_template(_capped_template_by_id(), replace=False)
+    with pytest.raises(TemplateValidationError, match="count exceeds the attach limit"):
+        await svc.attach(
+            "alerts", "capped-by-id", AttachBody(path=["a"], parameters={"limit": 8}, declarations={"count": 9})
+        )
+    await svc.attach(
+        "alerts", "capped-by-id", AttachBody(path=["a"], parameters={"limit": 8}, declarations={"count": 7})
+    )
+
+
+async def test_put_template_rejects_unfetchable_by_id_check(svc: StatesService) -> None:
+    # The save door renders the by-id check to compile it; a stored id that cannot be fetched
+    # fails the save loudly, naming the field and the id.
+    doc = _template_doc(
+        "ghost-check",
+        declarations={"schema": {"type": "object"}, "check": {"id": "missing-resource"}},
+    )
+    with pytest.raises(TemplateValidationError, match="references stored id 'missing-resource'"):
+        await svc.put_template(doc, replace=False)
 
 
 async def test_effective_schema_for_undeclared_raises(svc: StatesService) -> None:
@@ -817,7 +897,10 @@ async def test_validate_attach_values_declaration_branches(svc: StatesService) -
             "kind": "state-template",
             "name": "m",
             "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
-            "declarations": {"schema": {"type": "object", "properties": {"n": {"type": "integer"}}}, "check": ".n > 0"},
+            "declarations": {
+                "schema": {"type": "object", "properties": {"n": {"type": "integer"}}},
+                "check": {"content": ".n > 0"},
+            },
         }
     )
     with pytest.raises(TemplateValidationError, match="invalid under template"):
@@ -836,7 +919,7 @@ async def test_validate_attach_values_check_string_message_and_eval_error(svc: S
             "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
             "declarations": {
                 "schema": {"type": "object", "properties": {"n": {"type": "integer"}}},
-                "check": 'if .n > 0 then true else "n must be positive" end',
+                "check": {"content": 'if .n > 0 then true else "n must be positive" end'},
             },
         }
     )
@@ -850,7 +933,7 @@ async def test_validate_attach_values_check_string_message_and_eval_error(svc: S
             "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
             "declarations": {
                 "schema": {"type": "object", "properties": {"n": {"type": "integer"}}},
-                "check": '.n | error("boom")',
+                "check": {"content": '.n | error("boom")'},
             },
         }
     )
@@ -865,3 +948,73 @@ def test_validate_attach_path_refusals(svc: StatesService) -> None:
         svc._validate_attach_path([""])
     with pytest.raises(AttachConflictError, match="non-empty object key"):
         svc._validate_attach_path([123])
+
+
+# --------------------------------------------------------------------------- #
+# by-id (TemplatedText) authored schema bodies — declaration + template        #
+# --------------------------------------------------------------------------- #
+async def test_put_declaration_resolves_a_by_id_base_schema(svc: StatesService) -> None:
+    """A declaration whose base ``schema`` is named by stored id resolves to that schema for
+    validation + effective composition, while the stored/served base keeps the by-id union."""
+    decl = StateDeclaration(
+        name="byid",
+        schema=TemplatedText(id="stored-state-schema"),
+        subject_kinds=["thread"],
+        default_subject_kind="thread",
+    )
+    await svc.put_declaration(decl)
+    served = await svc.served_declaration("byid")
+    # The stored/served base is the union (the by-id reference), not the resolved schema.
+    assert served["schema"] == {"id": "stored-state-schema"}
+    # The effective schema (no attachments) is the RESOLVED base schema.
+    assert served["effective_schema"] == {"type": "object", "properties": {"n": {"type": "integer"}}}
+
+
+async def test_put_declaration_by_id_unfetchable_fails_loudly(svc: StatesService) -> None:
+    decl = StateDeclaration(
+        name="byid",
+        schema=TemplatedText(id="missing-schema"),
+        subject_kinds=["thread"],
+        default_subject_kind="thread",
+    )
+    with pytest.raises(SchemaBodyError, match="could not be rendered"):
+        await svc.put_declaration(decl)
+
+
+async def test_put_declaration_by_id_invalid_json_fails_loudly(svc: StatesService) -> None:
+    decl = StateDeclaration(
+        name="byid",
+        schema=TemplatedText(id="not-json-schema"),
+        subject_kinds=["thread"],
+        default_subject_kind="thread",
+    )
+    with pytest.raises(SchemaBodyError, match="did not render to valid JSON"):
+        await svc.put_declaration(decl)
+
+
+async def test_put_template_resolves_a_by_id_fragment_schema(svc: StatesService) -> None:
+    """A template whose fragment ``schema`` is named by stored id resolves to that fragment for
+    structural validation, while the stored/served body keeps the by-id union."""
+    doc = StateTemplateDocument.model_validate(
+        {"kind": "state-template", "name": "byidtpl", "schema": {"id": "stored-fragment-schema"}}
+    )
+    await svc.put_template(doc, replace=True)
+    got = await svc.get_template("byidtpl")
+    assert got is not None
+    assert got.schema_ == TemplatedText(id="stored-fragment-schema")
+
+
+async def test_put_template_by_id_unfetchable_fails_loudly(svc: StatesService) -> None:
+    doc = StateTemplateDocument.model_validate(
+        {"kind": "state-template", "name": "byidtpl", "schema": {"id": "missing-fragment"}}
+    )
+    with pytest.raises(SchemaBodyError, match="could not be rendered"):
+        await svc.put_template(doc, replace=True)
+
+
+async def test_put_template_by_id_invalid_json_fails_loudly(svc: StatesService) -> None:
+    doc = StateTemplateDocument.model_validate(
+        {"kind": "state-template", "name": "byidtpl", "schema": {"id": "not-json-schema"}}
+    )
+    with pytest.raises(SchemaBodyError, match="did not render to valid JSON"):
+        await svc.put_template(doc, replace=True)

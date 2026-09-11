@@ -155,7 +155,7 @@ async def test_non_admin_denied_every_roles_mutation_admin_unaffected(
 
     # The admin policy is unaffected by any role pointer: the seeded root "*" admin still
     # reaches the secret roles listing, a normal read, and a write. (Its policy carries no
-    # role pointer and a null condition_id — the admin discriminator — asserted at the
+    # role pointer and a null condition — the admin discriminator — asserted at the
     # skeleton unit level; here the observable is that admin reaches everything a
     # non-admin was just denied.)
     assert (await admin.request_raw("GET", "/api/auth/roles")).status_code == 200

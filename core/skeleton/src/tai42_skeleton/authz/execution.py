@@ -294,16 +294,12 @@ async def _assert_condition_evaluable(policy: AccessPolicy, *, principal: str) -
     for. Only author-fixable failures become :class:`ExecutionConditionError`; an
     infrastructure fault propagates as itself.
     """
-    if policy.condition is None and policy.condition_id is None:
+    if policy.condition is None:
         # Nothing configured, so nothing to scan. A PRESENT-but-empty condition is NOT this
         # case — it is configured and still goes through the render.
         return
     try:
-        condition = await tai42_app.storage.resource_manager.render_by_id_or_content(
-            content=policy.condition,
-            template_id=policy.condition_id,
-            kwargs=policy.condition_kwargs,
-        )
+        condition = await tai42_app.storage.resource_manager.render_templated_text(policy.condition)
     except (ValueError, TemplateError, TemplateNotFoundError) as exc:
         raise ExecutionConditionError(
             f"the policy condition of {principal!r} does not render ({exc}), so it cannot be shown evaluable "

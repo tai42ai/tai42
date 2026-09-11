@@ -21,6 +21,7 @@ from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.presets import CARRY_FORWARD
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.extensions.registry import extension_name
 
@@ -561,8 +562,8 @@ class PresetsFacet(_Facet):
         *,
         name: str,
         description: str = "",
-        output_schema: dict[str, Any] | None = None,
-        input_schema: dict[str, Any] | None = None,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | None = None,
     ) -> Tool:
         return await self._app._preset_bind(
             base_tool,
@@ -580,8 +581,8 @@ class PresetsFacet(_Facet):
         description: str,
         fixed_kwargs: dict[str, Any],
         *,
-        input_schema: dict[str, Any] | None = None,
-        output_schema: dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | None = None,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
         extensions: list[list[ExtensionElement]] | None = None,
         state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
@@ -628,8 +629,8 @@ class PresetsFacet(_Facet):
         name: str,
         *,
         fixed_kwargs: dict[str, Any] | None = None,
-        input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
-        output_schema: dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
         output_schema_provided: bool = False,
         description: str | None = None,
         extensions: list[list[ExtensionElement]] | None = None,

@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tai42_contract.agent import Agent, MessageDelta, MessageFinal, StreamEvent, StructuredFinal
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.embedding import get_embedding_async
 from tai42_kit.llm.models import get_llm_async
@@ -38,7 +39,7 @@ from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
     reject_unhonored,
-    reject_untitled_response_format,
+    resolve_response_format,
 )
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.resolve_tools import resolve_tools
@@ -130,16 +131,13 @@ class RetrievalToolsAgentInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_message: str = ""
-    user_message_id: str = ""
-    user_message_kwargs: dict[str, Any] | None = None
-    system_message: str = ""
-    system_message_id: str = ""
-    system_message_kwargs: dict[str, Any] | None = None
+    user_message: TemplatedText | None = None
+    system_message: TemplatedText | None = None
     tool_names: list[str] = Field(default_factory=list)
     presets: list[PresetSpec] = Field(default_factory=list)
-    response_format: dict[str, Any] | None = Field(
-        default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
+    response_format: TemplatedText | dict[str, Any] | None = Field(
+        default=None,
+        description="JSON Schema of the forced structured output (needs a top-level 'title'); inline or by stored id.",
     )
     user_content_kwargs: dict[str, Any] | None = Field(
         default=None,
@@ -185,12 +183,8 @@ class RetrievalToolsAgent(Agent):
         tools: Sequence[StructuredTool] = (),
         tool_names: Sequence[str] = (),
         presets: Sequence[PresetSpec] = (),
-        system_message: str = "",
-        system_message_id: str = "",
-        system_message_kwargs: dict[str, Any] | None = None,
-        user_message: str = "",
-        user_message_id: str = "",
-        user_message_kwargs: dict[str, Any] | None = None,
+        system_message: TemplatedText | None = None,
+        user_message: TemplatedText | None = None,
         embedding_provider: str | None = None,
         llm_provider: str | None = None,
         checkpoint_provider: str | None = None,
@@ -207,8 +201,8 @@ class RetrievalToolsAgent(Agent):
         can run a structured finalization pass over the terminal result when a
         ``response_format`` was requested. ``user_content_kwargs`` (e.g.
         ``cache_control``) carries content-block keys onto the user message."""
-        rendered_system = await render_message(system_message, system_message_id, system_message_kwargs)
-        rendered_user = await render_message(user_message, user_message_id, user_message_kwargs, allow_empty=False)
+        rendered_system = await render_message(system_message)
+        rendered_user = await render_message(user_message, allow_empty=False, field="user_message")
 
         resolved_tools = await resolve_tools(tai42_app.tools, list(tool_names), list(tools), list(presets))
 
@@ -287,7 +281,7 @@ class RetrievalToolsAgent(Agent):
             thread_id=kwargs.get("thread_id"),
             resume_checkpoint_id=kwargs.get("resume_checkpoint_id"),
         )
-        reject_untitled_response_format("retrieval_tools_agent", kwargs.get("response_format"))
+        resolved_response_format = await resolve_response_format("retrieval_tools_agent", kwargs.get("response_format"))
 
         build_kwargs = {name: value for name, value in kwargs.items() if name in _BUILD_PARAMS}
         # The public ``langgraph_config`` overlays this agent's ``_build`` ``config``
@@ -313,12 +307,11 @@ class RetrievalToolsAgent(Agent):
                 "retrieval agent run produced no terminal message; the required status envelope was never emitted"
             )
         result_text = _terminal_result(terminal.text)
-        response_format = kwargs.get("response_format")
-        if response_format is not None:
-            structured = await llm.with_structured_output(response_format, include_raw=False).ainvoke(
+        if resolved_response_format is not None:
+            structured = await llm.with_structured_output(resolved_response_format, include_raw=False).ainvoke(
                 [HumanMessage(content=result_text)]
             )
-            yield StructuredFinal(data=validate_structured_output(structured, response_format))
+            yield StructuredFinal(data=validate_structured_output(structured, resolved_response_format))
             return
         yield MessageFinal(text=result_text)
 
@@ -341,8 +334,7 @@ class RetrievalToolsAgent(Agent):
             thread_id=kwargs.get("thread_id"),
             resume_checkpoint_id=kwargs.get("resume_checkpoint_id"),
         )
-        response_format = kwargs.get("response_format")
-        reject_untitled_response_format("retrieval_tools_agent", response_format)
+        response_format = await resolve_response_format("retrieval_tools_agent", kwargs.get("response_format"))
         return await self._drain(self.astream(**kwargs), response_format=response_format)
 
     async def _compile_for_append(
@@ -438,11 +430,7 @@ _BUILD_PARAMS = frozenset(
         "tool_names",
         "presets",
         "system_message",
-        "system_message_id",
-        "system_message_kwargs",
         "user_message",
-        "user_message_id",
-        "user_message_kwargs",
         "embedding_provider",
         "llm_provider",
         "checkpoint_provider",

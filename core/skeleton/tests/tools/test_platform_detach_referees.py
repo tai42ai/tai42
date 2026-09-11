@@ -14,8 +14,8 @@ from tai42_contract.conversations import TargetConversationConfig
 
 from tai42_skeleton.tools import platform_referees
 
-_BINDS_T1 = {"states": [{"state": "status", "subject_expr": ".x", "templates": ["t1"]}]}
-_BINDS_OTHER = {"states": [{"state": "status", "subject_expr": ".x", "templates": ["t2"]}]}
+_BINDS_T1 = {"states": [{"state": "status", "subject_expr": {"content": ".x"}, "templates": ["t1"]}]}
+_BINDS_OTHER = {"states": [{"state": "status", "subject_expr": {"content": ".x"}, "templates": ["t2"]}]}
 
 
 # -- preset versions ---------------------------------------------------------

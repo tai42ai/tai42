@@ -46,7 +46,7 @@ from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookParams, HookRegister, HookSubject
 from tai42_contract.states.binding import StateBinding
-from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
 from tai42_skeleton.hooks import trigger_links
 from tai42_skeleton.hooks.cache import get_hooks_manager
@@ -171,7 +171,7 @@ async def list_hooks(topic: str | None = None) -> dict[str, Any]:
 # metadata on the parameter type so the schema fastmcp builds off the flat signature
 # carries it; schema METADATA only, never validation.
 _HOOK_CONDITION_PARAM = Annotated[
-    str | None,
+    TemplatedText | None,
     Field(
         json_schema_extra={
             EXPRESSION_ANNOTATION_KEY: expression_annotation(
@@ -188,7 +188,7 @@ _HOOK_CONDITION_PARAM = Annotated[
     ),
 ]
 _HOOK_EXPR_PARAM = Annotated[
-    str | None,
+    TemplatedText | None,
     Field(
         json_schema_extra={
             EXPRESSION_ANNOTATION_KEY: expression_annotation(
@@ -224,11 +224,7 @@ async def register_hook(
     execution_key: str,
     tool_kwargs: dict[str, Any] | None = None,
     condition: _HOOK_CONDITION_PARAM = None,
-    condition_id: str | None = None,
-    condition_kwargs: dict[str, Any] | None = None,
     expr: _HOOK_EXPR_PARAM = None,
-    expr_id: str | None = None,
-    expr_kwargs: dict[str, Any] | None = None,
     *,
     subject: HookSubject | None = None,
     state_binding: StateBinding | None = None,
@@ -236,8 +232,8 @@ async def register_hook(
     """Register a hook from its flat parameters — an UPSERT, so this is the create
     path AND the edit path for a hook of that name.
 
-    Supports conditional execution (via ``condition`` or ``condition_id``), payload
-    transformation (via ``expr`` or ``expr_id``), and dynamic tool arguments.
+    Supports conditional execution (``condition``), payload transformation (``expr``) —
+    each a templated text carrying its jq inline or by stored id — and dynamic tool arguments.
     ``execution_key`` is the api-key identity every fire runs as; the caller's authority
     to delegate it and its usability by a tokenless fire are decided BEFORE the upsert, so
     a refusal stores nothing and leaves any existing hook of that name untouched. Returns
@@ -256,11 +252,7 @@ async def register_hook(
             subject=subject,
             state_binding=state_binding,
             condition=condition,
-            condition_id=condition_id,
-            condition_kwargs=condition_kwargs or {},
             expr=expr,
-            expr_id=expr_id,
-            expr_kwargs=expr_kwargs or {},
         )
         if state_binding is not None:
             from tai42_skeleton.app import instance

@@ -55,14 +55,18 @@ def _template_body(name: str) -> dict[str, Any]:
         "regimes": [{"path": ["items"], "regime": "composing"}],
         "trace": {"enabled": True},
         "template_jq": {
-            "ids": {"purpose": "input", "jq": "[(.items // [])[] | .id]"},
-            "count": {"purpose": "input", "jq": "(.items // []) | length"},
+            "ids": {"purpose": "input", "jq": {"content": "[(.items // [])[] | .id]"}},
+            "count": {"purpose": "input", "jq": {"content": "(.items // []) | length"}},
             "add": {
                 "purpose": "update",
                 "writes": [["items"]],
-                "jq": '[{op: "set_by_key", path: ["items"], key_field: "id", value: .input}]',
+                "jq": {"content": '[{op: "set_by_key", path: ["items"], key_field: "id", value: .input}]'},
             },
-            "wipe": {"purpose": "update", "writes": [["items"]], "jq": '[{op: "set", path: ["items"], value: []}]'},
+            "wipe": {
+                "purpose": "update",
+                "writes": [["items"]],
+                "jq": {"content": '[{op: "set", path: ["items"], value: []}]'},
+            },
         },
     }
 
@@ -83,12 +87,14 @@ def _reconciler_body(name: str) -> dict[str, Any]:
         "regimes": [{"path": ["items"], "regime": "composing"}],
         "declarations": {"schema": {"type": "object", "properties": {"allowed": {"type": "array"}}}},
         "reconcile": {
-            "orphans": (
-                ".new.allowed as $a | [(.data.items // [])[] "
-                "| select(.id as $i | ($a | index($i)) == null) | {id, label: (.id | tostring)}]"
-            ),
-            "resolutions": '["closed"]',
-            "close": '[{op: "remove_by_key", path: ["items"], key_field: "id", key: .id}]',
+            "orphans": {
+                "content": (
+                    ".new.allowed as $a | [(.data.items // [])[] "
+                    "| select(.id as $i | ($a | index($i)) == null) | {id, label: (.id | tostring)}]"
+                )
+            },
+            "resolutions": {"content": '["closed"]'},
+            "close": {"content": '[{op: "remove_by_key", path: ["items"], key_field: "id", key: .id}]'},
         },
     }
 

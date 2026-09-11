@@ -108,7 +108,8 @@ def _body(resp):
 
 def _seed_caller(pg: FakeAccessControlPg, caller_id: str, *, scopes, condition=None, owner=None):
     policy_data = {OWNER_USER_ID_CLAIM: owner} if owner is not None else {}
-    pg.add_policy(caller_id, scopes=scopes, condition=condition, policy_data=policy_data)
+    cond = {"content": condition} if isinstance(condition, str) else condition
+    pg.add_policy(caller_id, scopes=scopes, condition=cond, policy_data=policy_data)
 
 
 # -- admin discriminator -----------------------------------------------------
@@ -375,8 +376,6 @@ def _policy_body(scopes: list[str]) -> dict:
         "scopes": scopes,
         "policy_data": {},
         "condition": None,
-        "condition_id": None,
-        "condition_kwargs": None,
     }
 
 

@@ -14,7 +14,7 @@ from tai42_skeleton.routers import conversations as conversations_router
 from tai42_skeleton.routers import hooks as hooks_router
 from tai42_skeleton.routers import schedules as schedules_router
 
-_BINDING = {"states": [{"state": "status", "subject_expr": ".x"}]}
+_BINDING = {"states": [{"state": "status", "subject_expr": {"content": ".x"}}]}
 
 
 def _request(body: Any, **path_params: str) -> Request:

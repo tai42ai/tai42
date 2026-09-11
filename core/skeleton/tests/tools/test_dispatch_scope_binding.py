@@ -30,6 +30,7 @@ from tai42_contract.states import (
     TemplateJqApplyResult,
     TemplateJqResult,
 )
+from tai42_contract.template import TemplatedText
 from tai42_contract.tools import (
     ToolInvocation,
     current_tool_invocation,
@@ -77,7 +78,7 @@ class _FakeStates:
         return ApplyResult(applied=True, data={}, seq=1.0, skipped=[])
 
 
-_SUBJECT_EXPR = '{target_kind: "agent", target_name: "a", kind: "thread", key: (.x | tostring)}'
+_SUBJECT_EXPR = TemplatedText(content='{target_kind: "agent", target_name: "a", kind: "thread", key: (.x | tostring)}')
 
 
 def _attach(**kw: Any) -> StateAttach:
@@ -121,9 +122,11 @@ def test_door_and_preset_binding_merge_inject_before_and_update_after() -> None:
             preset_binding = StateBinding(
                 states=[
                     _attach(
-                        subject_expr=".missing_key",  # a DIFFERENT subject the door overrides
+                        subject_expr=TemplatedText(content=".missing_key"),  # a DIFFERENT subject the door overrides
                         input_injections=[StateInjection(template_jq="preset_view", into="p")],
-                        updates=[StateUpdate(template_jq="preset_mark", adapter="{v: .output.ok}")],
+                        updates=[
+                            StateUpdate(template_jq="preset_mark", adapter=TemplatedText(content="{v: .output.ok}"))
+                        ],
                     )
                 ]
             )
@@ -132,8 +135,10 @@ def test_door_and_preset_binding_merge_inject_before_and_update_after() -> None:
             door_binding = StateBinding(
                 states=[
                     _attach(
-                        input_injections=[StateInjection(jq="{n: .record.n}", into="injected")],
-                        updates=[StateUpdate(jq='[{op: "set", path: ["last"], value: .output.ok}]')],
+                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .record.n}"), into="injected")],
+                        updates=[
+                            StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .output.ok}]'))
+                        ],
                     )
                 ]
             )
@@ -197,8 +202,10 @@ def test_door_binding_applies_to_a_PLAIN_tool_target() -> None:
             binding = StateBinding(
                 states=[
                     _attach(
-                        input_injections=[StateInjection(jq="{n: .record.n}", into="injected")],
-                        updates=[StateUpdate(jq='[{op: "set", path: ["last"], value: .output.ok}]')],
+                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .record.n}"), into="injected")],
+                        updates=[
+                            StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .output.ok}]'))
+                        ],
                     )
                 ]
             )
@@ -224,7 +231,13 @@ def test_nested_preset_dispatch_does_not_apply_its_own_binding() -> None:
         async with app.app_context(Manifest.model_validate({})):
             fake.patch_onto(app._states_facet)
             inner_binding = StateBinding(
-                states=[_attach(updates=[StateUpdate(template_jq="inner_mark", adapter="{v: .output.ok}")])]
+                states=[
+                    _attach(
+                        updates=[
+                            StateUpdate(template_jq="inner_mark", adapter=TemplatedText(content="{v: .output.ok}"))
+                        ]
+                    )
+                ]
             )
             await _register_preset("inner", inner_binding, seen)
 
@@ -281,8 +294,8 @@ def test_in_process_park_result_applies_no_updates_but_injects_and_records_parke
             binding = StateBinding(
                 states=[
                     _attach(
-                        input_injections=[StateInjection(jq="{n: .record.n}", into="injected")],
-                        updates=[StateUpdate(jq='[{op: "set", path: ["last"], value: 1}]')],
+                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .record.n}"), into="injected")],
+                        updates=[StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: 1}]'))],
                     )
                 ]
             )
@@ -319,7 +332,11 @@ def test_mcp_edge_injects_into_absent_arguments_reaching_the_dispatch() -> None:
         async with app.app_context(Manifest.model_validate({})):
             fake.patch_onto(app._states_facet)
             binding = StateBinding(
-                states=[_attach(input_injections=[StateInjection(jq="{n: .record.n}", into="injected")])]
+                states=[
+                    _attach(
+                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .record.n}"), into="injected")]
+                    )
+                ]
             )
             await _register_preset("pm", binding, seen)
 
@@ -357,7 +374,7 @@ def test_injections_run_even_when_arguments_is_None_one_invariant() -> None:
                 states=[
                     _attach(
                         input_injections=[StateInjection(template_jq="v_in", into="p")],
-                        updates=[StateUpdate(template_jq="v_up", adapter="{v: 1}")],
+                        updates=[StateUpdate(template_jq="v_up", adapter=TemplatedText(content="{v: 1}"))],
                     )
                 ]
             )

@@ -14,6 +14,7 @@ import pytest
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.manifest import ApiToolsConfig
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.access_control.policy import policy_is_empty
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -90,8 +91,9 @@ def _gate_on(
 
 def _owned_by(owner: str, *, condition: str | None = None) -> AccessPolicy:
     """The stored policy of a live key owned by ``owner``, optionally carrying an
-    authorization ``condition``."""
-    return AccessPolicy(scopes=["hooks"], policy_data={OWNER_USER_ID_CLAIM: owner}, condition=condition)
+    authorization ``condition`` (an inline jq expression)."""
+    templated = TemplatedText(content=condition) if condition is not None else None
+    return AccessPolicy(scopes=["hooks"], policy_data={OWNER_USER_ID_CLAIM: owner}, condition=templated)
 
 
 @pytest.fixture
@@ -138,7 +140,11 @@ def registry():
 async def test_register_then_list_and_unregister(manager: InMemoryHooksManager) -> None:
     # Flat fields in, {"registered", "name"} out.
     assert await hooks_ops.register_hook(
-        name="h1", topic="events", tool="forward", execution_key="k-fire", condition='.status == "ready"'
+        name="h1",
+        topic="events",
+        tool="forward",
+        execution_key="k-fire",
+        condition=TemplatedText(content='.status == "ready"'),
     ) == {
         "registered": True,
         "name": "h1",
@@ -163,7 +169,11 @@ async def test_register_rejects_invalid_jq_condition(manager: InMemoryHooksManag
     # The manager's jq compile failure is a client-input 400, not a raw crash.
     with pytest.raises(BadRequestError, match="not valid jq"):
         await hooks_ops.register_hook(
-            name="bad", topic="t", tool="noop", execution_key="k-fire", condition="this is ( not jq"
+            name="bad",
+            topic="t",
+            tool="noop",
+            execution_key="k-fire",
+            condition=TemplatedText(content="this is ( not jq"),
         )
 
 
@@ -406,17 +416,17 @@ def test_mutating_trigger_ops_are_authority_changing_and_excluded_from_projectio
 
 class _FakeResourceManager:
     """Condition renderer reached through ``tai42_app``: inline ``content`` renders to
-    itself; an unknown ``template_id`` raises, as an unresolvable condition does."""
+    itself; an unknown stored ``id`` raises, as an unresolvable condition does."""
 
     def __init__(self, templates: dict[str, str]) -> None:
         self._templates = templates
 
-    async def render_by_id_or_content(self, *, content, template_id, kwargs) -> str:
-        if template_id is not None:
-            if template_id not in self._templates:
-                raise TemplateNotFoundError(f"no such template: {template_id!r}")
-            return self._templates[template_id]
-        return content or ""
+    async def render_templated_text(self, text, locale=None) -> str:
+        if text.id is not None:
+            if text.id not in self._templates:
+                raise TemplateNotFoundError(f"no such template: {text.id!r}")
+            return self._templates[text.id]
+        return text.content or ""
 
 
 @pytest.fixture
@@ -580,7 +590,10 @@ async def test_register_hook_refuses_a_key_whose_condition_needs_absent_claims(
     _gate_on(
         monkeypatch,
         caller_id="root",
-        policies={"root": _ADMIN_POLICY, "k-fire": AccessPolicy(scopes=["hooks"], condition=condition)},
+        policies={
+            "root": _ADMIN_POLICY,
+            "k-fire": AccessPolicy(scopes=["hooks"], condition=TemplatedText(content=condition)),
+        },
     )
     with pytest.raises(BadRequestError, match="unusable at a fire"):
         await hooks_ops.register_hook(name="h", topic="t", tool="noop", execution_key="k-fire")
@@ -597,7 +610,10 @@ async def test_register_hook_accepts_a_key_evaluable_without_a_token(
     _gate_on(
         monkeypatch,
         caller_id="root",
-        policies={"root": _ADMIN_POLICY, "k-fire": AccessPolicy(scopes=["hooks"], condition=condition)},
+        policies={
+            "root": _ADMIN_POLICY,
+            "k-fire": AccessPolicy(scopes=["hooks"], condition=TemplatedText(content=condition)),
+        },
     )
     assert (await hooks_ops.register_hook(name="h", topic="t", tool="noop", execution_key="k-fire"))["registered"]
 
@@ -613,7 +629,7 @@ async def test_register_hook_refuses_a_key_whose_OWNER_condition_needs_absent_cl
         policies={
             "root": _ADMIN_POLICY,
             "k-fire": owned,
-            "alice": AccessPolicy(scopes=["hooks"], condition='.identity.mfa == "yes"'),
+            "alice": AccessPolicy(scopes=["hooks"], condition=TemplatedText(content='.identity.mfa == "yes"')),
         },
     )
     with pytest.raises(BadRequestError, match="'alice' is unusable at a fire"):
@@ -629,7 +645,10 @@ async def test_register_hook_refuses_a_key_whose_condition_does_not_render(
     _gate_on(
         monkeypatch,
         caller_id="root",
-        policies={"root": _ADMIN_POLICY, "k-fire": AccessPolicy(scopes=["hooks"], condition_id="missing")},
+        policies={
+            "root": _ADMIN_POLICY,
+            "k-fire": AccessPolicy(scopes=["hooks"], condition=TemplatedText(id="missing")),
+        },
     )
     with pytest.raises(BadRequestError, match="does not render"):
         await hooks_ops.register_hook(name="h", topic="t", tool="noop", execution_key="k-fire")
@@ -694,7 +713,7 @@ async def test_register_hook_withholds_a_THIRD_principals_condition_from_a_non_a
         caller_id="alice",
         policies={
             "alice": _owned_by("boss"),
-            "boss": AccessPolicy(scopes=["hooks"], condition=_SECRET_CONDITION),
+            "boss": AccessPolicy(scopes=["hooks"], condition=TemplatedText(content=_SECRET_CONDITION)),
         },
     )
     with pytest.raises(BadRequestError, match="policy condition of 'boss' is not evaluable") as raised:
@@ -734,7 +753,7 @@ async def test_register_hook_carries_the_diagnostic_to_an_admin(
         policies={
             "root": _ADMIN_POLICY,
             "k-fire": _owned_by("boss"),
-            "boss": AccessPolicy(scopes=["hooks"], condition=_SECRET_CONDITION),
+            "boss": AccessPolicy(scopes=["hooks"], condition=TemplatedText(content=_SECRET_CONDITION)),
         },
     )
     with pytest.raises(BadRequestError, match="'boss' is unusable at a fire") as raised:

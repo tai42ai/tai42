@@ -12,6 +12,7 @@ import pytest
 from jinja2 import TemplateError
 from jinja2.exceptions import SecurityError
 from tai42_contract.storage import Storage
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager, TemplateNotFoundError
@@ -102,7 +103,7 @@ async def test_inline_template_is_compiled_once(monkeypatch: pytest.MonkeyPatch)
     assert first is second  # same content -> one compiled template, reused
 
     # Rendering still works through the memoized inline template.
-    assert await manager.render_by_id_or_content(content="Hi {{ x }}", kwargs={"x": 1}) == "Hi 1"
+    assert await manager.render_templated_text(TemplatedText(content="Hi {{ x }}", kwargs={"x": 1})) == "Hi 1"
 
 
 @pytest.mark.parametrize(
@@ -135,54 +136,58 @@ async def test_sandbox_blocks_dunder_traversal_chain() -> None:
     ``SecurityError`` at render, not host code execution."""
     manager, _ = _manager()
     with pytest.raises(SecurityError):
-        await manager.render_by_id_or_content(content="{{ ''.__class__.__mro__[1].__subclasses__() }}")
+        await manager.render_templated_text(TemplatedText(content="{{ ''.__class__.__mro__[1].__subclasses__() }}"))
 
 
 async def test_sandbox_leaves_normal_rendering_intact() -> None:
     """Ordinary variable/filter rendering is unaffected by the sandbox."""
     manager, _ = _manager()
-    assert await manager.render_by_id_or_content(content="{{ name | upper }}", kwargs={"name": "ada"}) == "ADA"
+    rendered = await manager.render_templated_text(TemplatedText(content="{{ name | upper }}", kwargs={"name": "ada"}))
+    assert rendered == "ADA"
 
 
-# --- render_by_id_or_content dispatch + guards ------------------------------
+# --- render_templated_text: the two sources ---------------------------------
 
 
-async def test_render_by_id_or_content_rejects_both() -> None:
-    manager, _ = _manager()
-    with pytest.raises(ValueError, match="not both"):
-        await manager.render_by_id_or_content(content="x", template_id="y")
-
-
-async def test_render_by_id_or_content_rejects_both_with_empty_content() -> None:
-    """The mutual-exclusion guard uses ``content is not None``: an empty inline
-    ``content`` alongside a ``template_id`` still trips 'not both' (it is not
-    treated as 'no content')."""
-    manager, _ = _manager()
-    with pytest.raises(ValueError, match="not both"):
-        await manager.render_by_id_or_content(content="", template_id="x")
-
-
-async def test_render_by_id_or_content_empty_content_renders_blank() -> None:
+async def test_render_templated_text_empty_content_renders_blank() -> None:
     """An explicit empty inline template renders as '' (content is honoured, not
     skipped as falsy)."""
     manager, _ = _manager()
-    assert await manager.render_by_id_or_content(content="") == ""
+    assert await manager.render_templated_text(TemplatedText(content="")) == ""
 
 
-async def test_render_by_id_or_content_via_template_id() -> None:
+async def test_render_templated_text_via_stored_id() -> None:
     manager, _ = _manager({"g.j2": "Hi {{ name }}"})
-    assert await manager.render_by_id_or_content(template_id="g.j2", kwargs={"name": "Z"}) == "Hi Z"
+    rendered = await manager.render_templated_text(TemplatedText(id="g.j2", kwargs={"name": "Z"}))
+    assert rendered == "Hi Z"
 
 
-async def test_render_by_id_or_content_empty_allowed_returns_blank() -> None:
-    manager, _ = _manager()
-    assert await manager.render_by_id_or_content() == ""
+_REFERENCE_TEXTS = [
+    TemplatedText(content=""),
+    TemplatedText(content="Hi {{ who }}", kwargs={"who": "there"}),
+    TemplatedText(content="{{ x | upper }}", kwargs={"x": "ada"}),
+    TemplatedText(id="g.j2", kwargs={"name": "Z"}),
+    TemplatedText(id="empty.j2"),
+]
 
 
-async def test_render_by_id_or_content_empty_disallowed_raises() -> None:
-    manager, _ = _manager()
-    with pytest.raises(ValueError, match="either a template or a template_id"):
-        await manager.render_by_id_or_content(allow_empty=False)
+async def _reference_render(manager: ResourceManager, text: TemplatedText, locale: str | None) -> str:
+    """The rendering path spelled out: a stored id resolves through the compiled-template
+    path, inline content compiles in the sandboxed engine, and both render with the
+    text's own kwargs under the resolved locale."""
+    if text.id is not None:
+        return await manager.render_by_id(text.id, text.kwargs, locale=locale)
+    assert text.content is not None
+    context = manager._with_locale(text.kwargs, locale)
+    with manager._render_scope():
+        return manager._compile_inline(text.content).render(**context)
+
+
+@pytest.mark.parametrize("text", _REFERENCE_TEXTS)
+@pytest.mark.parametrize("locale", [None, "he"])
+async def test_render_templated_text_matches_the_reference_render(text: TemplatedText, locale: str | None) -> None:
+    manager, _ = _manager({"g.j2": "Hi {{ name }}", "empty.j2": ""})
+    assert await manager.render_templated_text(text, locale) == await _reference_render(manager, text, locale)
 
 
 # --- fetch + compile error path ---------------------------------------------
@@ -320,9 +325,8 @@ async def test_uninferable_templates_still_render(content: str, expected_vars: l
     """The premise of the degrade: every template above is a working template, so a
     500 on reading its schema contradicted a 200 on rendering it."""
     manager, _ = _manager({"partial.j2": "P"})
-    rendered = await manager.render_by_id_or_content(
-        content=content,
-        kwargs={"cfg": {"a": 1}, "payload": {"k": 1}, "a": "A", "b": "B"},
+    rendered = await manager.render_templated_text(
+        TemplatedText(content=content, kwargs={"cfg": {"a": 1}, "payload": {"k": 1}, "a": "A", "b": "B"})
     )
     assert isinstance(rendered, str)
 

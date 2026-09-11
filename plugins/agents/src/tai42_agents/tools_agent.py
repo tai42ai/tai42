@@ -43,6 +43,7 @@ from tai42_contract.agent.base import PresetSpec, SubAgentSpec
 from tai42_contract.agent.events import StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import get_park_completion
+from tai42_contract.template import TemplatedText
 from tai42_kit.llm.runtime import build_user_output, extract_structured_output
 
 from tai42_agents._internal.append import require_thread_id, to_thread_messages
@@ -68,7 +69,7 @@ from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
     reject_unhonored,
-    reject_untitled_response_format,
+    resolve_response_format,
 )
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.resolve_tools import resolve_tools
@@ -141,12 +142,13 @@ class ToolsAgentInput(BaseModel):
         default=None,
         description="Base tools bound to fixed kwargs, exposed as callable tools (e.g. a flow graph).",
     )
-    system_prompt: str | None = Field(
+    system_prompt: TemplatedText | None = Field(
         default=None,
         description="System prompt baked into an authored agent (mapped to the system_message run kwarg).",
     )
-    response_format: dict[str, Any] | None = Field(
-        default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
+    response_format: TemplatedText | dict[str, Any] | None = Field(
+        default=None,
+        description="JSON Schema of the forced structured output (needs a top-level 'title'); inline or by stored id.",
     )
     system_content_kwargs: dict[str, Any] | None = Field(
         default=None,
@@ -164,12 +166,8 @@ class ToolsAgentInput(BaseModel):
             "stripped), so per-turn marking stays within the provider's breakpoint cap (Anthropic: 4)."
         ),
     )
-    system_message: str | None = ""
-    user_message: str | None = ""
-    system_message_id: str | None = ""
-    user_message_id: str | None = ""
-    system_message_kwargs: dict[str, Any] | None = None
-    user_message_kwargs: dict[str, Any] | None = None
+    system_message: TemplatedText | None = None
+    user_message: TemplatedText | None = None
     llm_provider: str | None = None
     checkpoint_provider: str | None = None
     llm_kwargs: dict[str, Any] | None = None
@@ -213,16 +211,15 @@ class ToolsAgent(Agent):
         run kwarg. Every other set field passes through unchanged.
 
         ``system_prompt`` and ``system_message`` both define the system message, so
-        supplying a NON-EMPTY ``system_message`` alongside ``system_prompt`` is a
-        conflict — it is rejected loudly rather than silently dropping one. (This is
-        what stops a run request's ``system_message`` from silently overriding an
-        authored agent's baked ``system_prompt``, which maps to the same run kwarg.) An
-        empty ``system_message`` — the field default the tool-face wrapper materializes
-        — is not a real value and is simply superseded by the mapped ``system_prompt``.
+        supplying a ``system_message`` alongside ``system_prompt`` is a conflict — it is
+        rejected loudly rather than silently dropping one. (This is what stops a run
+        request's ``system_message`` from silently overriding an authored agent's baked
+        ``system_prompt``, which maps to the same run kwarg.) An unset ``system_message``
+        is absent from the passed-through set fields, so the mapped ``system_prompt`` stands.
         """
         run_kwargs = super().from_tool_input(validated)
         if "system_prompt" in run_kwargs:
-            if run_kwargs.get("system_message"):
+            if run_kwargs.get("system_message") is not None:
                 raise ValueError(
                     "set only one of system_prompt or system_message: both define the system "
                     "message (system_prompt is the composable spec field mapped to system_message)"
@@ -245,12 +242,8 @@ class ToolsAgent(Agent):
         recursion_limit: int | None = None,
         resume: Any = None,
         store_provider: str | None = None,
-        system_message: str = "",
-        user_message: str = "",
-        system_message_id: str = "",
-        user_message_id: str = "",
-        system_message_kwargs: dict[str, Any] | None = None,
-        user_message_kwargs: dict[str, Any] | None = None,
+        system_message: TemplatedText | None = None,
+        user_message: TemplatedText | None = None,
         system_content_kwargs: dict[str, Any] | None = None,
         user_content_kwargs: dict[str, Any] | None = None,
         llm_provider: str | None = None,
@@ -321,24 +314,20 @@ class ToolsAgent(Agent):
             collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
         reject_blank_memory_keys("tools_agent.run", thread_id=thread_id, resume_checkpoint_id=resume_checkpoint_id)
-        reject_untitled_response_format("tools_agent", response_format)
-        if resume is None and not (user_message or user_message_id):
+        response_format = await resolve_response_format("tools_agent", response_format)
+        if resume is None and user_message is None:
             raise ValueError("tools_agent.run requires exactly one of user_message or resume")
         if resume is not None:
-            if user_message or user_message_id:
+            if user_message is not None:
                 raise ValueError("tools_agent.run requires exactly one of user_message or resume, not both.")
             if user_content_kwargs:
                 raise ValueError(
                     "tools_agent.run: user_content_kwargs applies to a fresh user_message turn, not a resume"
                 )
         resolved_tools = await resolve_tools(tai42_app.tools, list(tool_names), list(tools), list(presets or []))
-        rendered_system = await render_message(
-            system_message,
-            system_message_id,
-            system_message_kwargs,
-        )
+        rendered_system = await render_message(system_message)
         rendered_user = (
-            "" if resume is not None else await render_message(user_message, user_message_id, user_message_kwargs)
+            "" if resume is not None else await render_message(user_message, allow_empty=False, field="user_message")
         )
         config = build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
 
@@ -416,12 +405,8 @@ class ToolsAgent(Agent):
         recursion_limit: int | None = None,
         resume: Any = None,
         store_provider: str | None = None,
-        system_message: str = "",
-        user_message: str = "",
-        system_message_id: str = "",
-        user_message_id: str = "",
-        system_message_kwargs: dict[str, Any] | None = None,
-        user_message_kwargs: dict[str, Any] | None = None,
+        system_message: TemplatedText | None = None,
+        user_message: TemplatedText | None = None,
         system_content_kwargs: dict[str, Any] | None = None,
         user_content_kwargs: dict[str, Any] | None = None,
         llm_provider: str | None = None,
@@ -492,14 +477,12 @@ class ToolsAgent(Agent):
             collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
         reject_blank_memory_keys("tools_agent.astream", thread_id=thread_id, resume_checkpoint_id=resume_checkpoint_id)
-        reject_untitled_response_format("tools_agent", response_format)
-        if resume is not None and (user_message or user_message_id):
+        response_format = await resolve_response_format("tools_agent", response_format)
+        if resume is not None and user_message is not None:
             raise ValueError("tools_agent.astream requires exactly one of user_message or resume, not both.")
         resolved_tools = await resolve_tools(tai42_app.tools, list(tool_names), list(tools), list(presets or []))
-        rendered_system = await render_message(system_message, system_message_id, system_message_kwargs)
-        rendered_user = (
-            "" if resume is not None else await render_message(user_message, user_message_id, user_message_kwargs)
-        )
+        rendered_system = await render_message(system_message)
+        rendered_user = "" if resume is not None else await render_message(user_message)
         config = build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
         park_builder = self._astream_park_builder(
             tool_names=tool_names,
@@ -587,15 +570,15 @@ class ToolsAgent(Agent):
         compilation — the identity a cross-worker resume recompiles the same graph from.
 
         Every value is a ``ToolsAgentInput`` field name (presets dumped to JSON, the
-        system message already RENDERED so a resume never re-renders differently), so
-        :meth:`aresume_park` reconstructs the run inputs with ``ToolInput.model_validate``.
-        The checkpoint provider is pinned separately by
+        system message the already-RENDERED text carried as inline ``content`` so a resume
+        never re-renders differently), so :meth:`aresume_park` reconstructs the run inputs
+        with ``ToolInput.model_validate``. The checkpoint provider is pinned separately by
         :func:`~tai42_agents._internal.park.build_park_identity` (the resolved durable
         one), so it is deliberately absent here."""
         return {
             "tool_names": list(tool_names),
             "presets": [spec.model_dump(mode="json") for spec in (presets or [])],
-            "system_message": rendered_system,
+            "system_message": {"content": rendered_system},
             "system_content_kwargs": system_content_kwargs,
             "response_format": response_format,
             "llm_provider": llm_provider,
@@ -684,6 +667,7 @@ class ToolsAgent(Agent):
         rebuild = dict(rebuild_kwargs)
         recursion_limit = rebuild.pop("recursion_limit", None)
         validated = ToolsAgentInput.model_validate(rebuild)
+        resolved_response_format = await resolve_response_format("tools_agent", validated.response_format)
         resolved_tools = await resolve_tools(
             tai42_app.tools, list(validated.tool_names), [], list(validated.presets or [])
         )
@@ -692,8 +676,8 @@ class ToolsAgent(Agent):
             llm_provider=validated.llm_provider,
             checkpoint_provider=validated.checkpoint_provider,
             llm_kwargs=validated.llm_kwargs,
-            response_format=validated.response_format,
-            system_message=validated.system_message or "",
+            response_format=resolved_response_format,
+            system_message=(validated.system_message.content or "") if validated.system_message else "",
             system_content_kwargs=validated.system_content_kwargs,
         )
         config = init_langgraph_config(build_run_config(validated.langgraph_config, thread_id, None, recursion_limit))
@@ -711,8 +695,8 @@ class ToolsAgent(Agent):
             # index finalize. Re-produce the SAME terminal output from the persisted state —
             # never re-invoke a resolved graph — so the completion handoff re-fires under its
             # stable id and the delivery ledger dedupes it to one delivery.
-            if validated.response_format is not None:
-                return extract_structured_output(snapshot.values, validated.response_format)
+            if resolved_response_format is not None:
+                return extract_structured_output(snapshot.values, resolved_response_format)
             return build_user_output(snapshot.values)
 
         # Bind again so a re-park on resume re-persists a fresh index (resume re-enters
@@ -737,6 +721,6 @@ class ToolsAgent(Agent):
         for event in events:
             if isinstance(event, SuspendedFinal):
                 return _suspended_receipt(event)
-        if validated.response_format is not None:
-            return extract_structured_output(state, validated.response_format)
+        if resolved_response_format is not None:
+            return extract_structured_output(state, resolved_response_format)
         return build_user_output(state)

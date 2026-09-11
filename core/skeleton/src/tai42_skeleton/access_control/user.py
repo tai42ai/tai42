@@ -22,7 +22,7 @@ def is_admin_policy(policy: AccessPolicy, owner_claim: str | None) -> bool:
     stored policy — a you-plus escalation). ``owner_claim`` is the owner drawn from the
     caller's STORED ``policy.policy_data`` (the management dual-home), NEVER a request
     claim, so the classification is byte-identical wherever it is used."""
-    return "*" in policy.scopes and policy.condition is None and policy.condition_id is None and owner_claim is None
+    return "*" in policy.scopes and policy.condition is None and owner_claim is None
 
 
 class TaiUser(AuthenticatedUser):

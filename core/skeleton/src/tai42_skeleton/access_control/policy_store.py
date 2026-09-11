@@ -14,7 +14,7 @@ enforced policy the auth gate reads; this view's active pointer FOLLOWS that sto
 written through after each policy write.
 
 The body is the same shape enforcement reads from the policy store:
-``{scopes, policy_data, condition, condition_id, condition_kwargs}``.
+``{scopes, policy_data, condition}``.
 
 The one piece of view logic is **create-or-append**: the generic ``save_version``
 raises :class:`DocumentNotFoundError` when no document exists yet, so a uniform

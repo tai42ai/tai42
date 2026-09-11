@@ -46,6 +46,7 @@ from tai42_contract.interactions import (
     set_park_completion,
     suspended_interaction_marker,
 )
+from tai42_contract.template import TemplatedText
 
 from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
@@ -187,7 +188,10 @@ async def _park_via_astream(agent: tools_mod.ToolsAgent, thread_id: str) -> None
     token = set_park_completion(_COMPLETION_TOOL, _completion_context(thread_id))
     try:
         async for _event in agent.astream(
-            tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id=thread_id
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id=thread_id,
         ):
             pass
     finally:
@@ -660,7 +664,10 @@ def test_completion_fire_carries_only_the_bound_context(
         token = set_park_completion(_COMPLETION_TOOL)
         try:
             async for _event in agent.astream(
-                tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="bridge:acme:alice"
+                tool_names=["ask"],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id="bridge:acme:alice",
             ):
                 pass
         finally:
@@ -757,7 +764,10 @@ async def _park_via_astream_deep(agent: Any, thread_id: str) -> None:
     token = set_park_completion(_COMPLETION_TOOL, _completion_context(thread_id))
     try:
         async for _event in agent.astream(
-            tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id=thread_id
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id=thread_id,
         ):
             pass
     finally:

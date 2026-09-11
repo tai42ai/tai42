@@ -42,6 +42,7 @@ from tai42_contract.agent import (
     ToolResultStep,
 )
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 from tai42_kit.utils.data.string_util import text_to_md5
 
@@ -787,11 +788,11 @@ class TestTerminalResultSurfacing:
 
     def test_run_returns_terminal_result_not_the_envelope(self, monkeypatch: pytest.MonkeyPatch) -> None:
         agent = self._agent_over_graph(monkeypatch, self._two_step_graph("THE RESULT"))
-        assert asyncio.run(agent.run(user_message="x")) == "THE RESULT"
+        assert asyncio.run(agent.run(user_message=TemplatedText(content="x"))) == "THE RESULT"
 
     def test_astream_final_is_result_and_no_envelope_leaks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         agent = self._agent_over_graph(monkeypatch, self._two_step_graph("THE RESULT"))
-        events = asyncio.run(_collect(agent.astream(user_message="x")))
+        events = asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="x"))))
 
         finals = [e for e in events if isinstance(e, MessageFinal)]
         assert len(finals) == 1
@@ -814,7 +815,7 @@ class TestTerminalResultSurfacing:
         )
         graph = asyncio.run(RetrievalToolsGraph(tools=[alpha], llm=llm, store=StubStore([alpha_id])).abuild())
         agent = self._agent_over_graph(monkeypatch, graph)
-        assert asyncio.run(agent.run(user_message="x")) == "FINAL ANSWER"
+        assert asyncio.run(agent.run(user_message=TemplatedText(content="x"))) == "FINAL ANSWER"
 
     def test_astream_raises_when_no_terminal_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def fake_build(self: RetrievalToolsAgent, **kwargs: Any) -> tuple[Any, Any, Any, Any]:
@@ -827,7 +828,7 @@ class TestTerminalResultSurfacing:
         monkeypatch.setattr(ragent, "aproject_agent_events", fake_project)
         agent = RetrievalToolsAgent()
         with pytest.raises(ValueError, match="produced no terminal message"):
-            asyncio.run(_collect(agent.astream(user_message="x")))
+            asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="x"))))
 
     def test_astream_suppresses_interim_status_deltas(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A live provider streams the per-step status envelope as ``MessageDelta``
@@ -844,7 +845,7 @@ class TestTerminalResultSurfacing:
         monkeypatch.setattr(RetrievalToolsAgent, "_build", fake_build)
         monkeypatch.setattr(ragent, "aproject_agent_events", fake_project)
         agent = RetrievalToolsAgent()
-        events = asyncio.run(_collect(agent.astream(user_message="x")))
+        events = asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="x"))))
 
         assert not any(isinstance(e, MessageDelta) for e in events)
         finals = [e for e in events if isinstance(e, MessageFinal)]
@@ -1007,7 +1008,11 @@ class TestBuild:
         agent = RetrievalToolsAgent()
 
         compiled, messages, config, llm = asyncio.run(
-            agent._build(system_message="be brief", user_message="do it", tools_limit=7)
+            agent._build(
+                system_message=TemplatedText(content="be brief"),
+                user_message=TemplatedText(content="do it"),
+                tools_limit=7,
+            )
         )
 
         assert compiled is captured["compiled"]
@@ -1038,7 +1043,7 @@ class TestBuild:
 
         asyncio.run(
             agent._build(
-                user_message="hi",
+                user_message=TemplatedText(content="hi"),
                 llm_provider="my_llm",
                 embedding_provider="my_embedding",
                 checkpoint_provider="my_checkpoint",
@@ -1053,12 +1058,11 @@ class TestBuild:
 
     def test_run_raises_when_required_user_message_slot_is_unset(self, resource_manager: Any) -> None:
         """``_build`` renders the user message with ``allow_empty=False``: an unset
-        slot (empty content AND empty id) surfaces the resource manager's fail-loud
-        message rather than silently building on an empty prompt. Reached through the
-        real ``run`` face — before any provider seam — so a dropped render.py
-        ``allow_empty`` passthrough turns this red."""
+        slot (``None``) raises loudly rather than silently building on an empty prompt.
+        Reached through the real ``run`` face — before any provider seam — so a dropped
+        render.py ``allow_empty`` passthrough turns this red."""
         agent = RetrievalToolsAgent()
-        with pytest.raises(ValueError, match="must provide either"):
+        with pytest.raises(ValueError, match="required message was not provided"):
             asyncio.run(agent.run())
 
 
@@ -1120,12 +1124,14 @@ class TestAstreamAndRun:
         captured = self._script(monkeypatch, [self._final("done")])
         agent = RetrievalToolsAgent()
 
-        events = asyncio.run(_collect(agent.astream(user_message="hi", tools_limit=3, thread_id="keep-me")))
+        events = asyncio.run(
+            _collect(agent.astream(user_message=TemplatedText(content="hi"), tools_limit=3, thread_id="keep-me"))
+        )
 
         assert [type(event) for event in events] == [MessageFinal]
         assert events[0].text == "done"
         assert captured["build_kwargs"] == {
-            "user_message": "hi",
+            "user_message": TemplatedText(content="hi"),
             "tools_limit": 3,
             "config": {"configurable": {"thread_id": "keep-me"}},
         }
@@ -1138,7 +1144,7 @@ class TestAstreamAndRun:
         agent = RetrievalToolsAgent()
         cache = {"cache_control": {"type": "ephemeral"}}
 
-        asyncio.run(_collect(agent.astream(user_message="hi", user_content_kwargs=cache)))
+        asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="hi"), user_content_kwargs=cache)))
 
         assert captured["build_kwargs"]["user_content_kwargs"] == cache
 
@@ -1149,7 +1155,7 @@ class TestAstreamAndRun:
         captured = self._script(monkeypatch, [self._final("done")])
         agent = RetrievalToolsAgent()
 
-        asyncio.run(agent.run(user_message="hi", thread_id="th", resume_checkpoint_id="cp"))
+        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), thread_id="th", resume_checkpoint_id="cp"))
 
         assert captured["build_kwargs"]["config"]["configurable"] == {"thread_id": "th", "checkpoint_id": "cp"}
 
@@ -1163,7 +1169,7 @@ class TestAstreamAndRun:
         asyncio.run(
             _collect(
                 agent.astream(
-                    user_message="hi",
+                    user_message=TemplatedText(content="hi"),
                     thread_id="th",
                     langgraph_config={"configurable": {"monitoring_trace_id": "x"}},
                 )
@@ -1187,9 +1193,9 @@ class TestAstreamAndRun:
         agent = RetrievalToolsAgent()
 
         with pytest.raises(RuntimeError, match=rf"retrieval_tools_agent\.astream does not support .*\b{param}\b"):
-            asyncio.run(_collect(agent.astream(user_message="hi", **{param: value})))
+            asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="hi"), **{param: value})))
         with pytest.raises(RuntimeError, match=rf"retrieval_tools_agent\.run does not support .*\b{param}\b"):
-            asyncio.run(agent.run(user_message="hi", **{param: value}))
+            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{param: value}))
 
     def test_unhonored_cases_cover_the_full_reasons_map(self) -> None:
         # Every key in the guard's reasons map has a parametrized reject case above, so
@@ -1227,7 +1233,7 @@ class TestAstreamAndRun:
         self._script(monkeypatch, [self._final("done")])
         agent = RetrievalToolsAgent()
         with pytest.raises(ValueError, match=rf"retrieval_tools_agent\.astream: {key} must be a non-empty string"):
-            asyncio.run(_collect(agent.astream(user_message="hi", **{key: blank})))
+            asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="hi"), **{key: blank})))
 
     @pytest.mark.parametrize("blank", ["", "   "])
     @pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
@@ -1236,7 +1242,7 @@ class TestAstreamAndRun:
         self._script(monkeypatch, [self._final("done")])
         agent = RetrievalToolsAgent()
         with pytest.raises(ValueError, match=rf"retrieval_tools_agent\.run: {key} must be a non-empty string"):
-            asyncio.run(agent.run(user_message="hi", **{key: blank}))
+            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{key: blank}))
 
     @pytest.mark.parametrize("value", [123, ["x"]])
     @pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
@@ -1250,7 +1256,7 @@ class TestAstreamAndRun:
             TypeError,
             match=rf"retrieval_tools_agent\.astream: {key} must be a string or None; got {type(value).__name__}",
         ):
-            asyncio.run(_collect(agent.astream(user_message="hi", **{key: value})))
+            asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="hi"), **{key: value})))
 
     @pytest.mark.parametrize("value", [123, ["x"]])
     @pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
@@ -1262,7 +1268,7 @@ class TestAstreamAndRun:
         with pytest.raises(
             TypeError, match=rf"retrieval_tools_agent\.run: {key} must be a string or None; got {type(value).__name__}"
         ):
-            asyncio.run(agent.run(user_message="hi", **{key: value}))
+            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{key: value}))
 
     def test_astream_honors_recursion_limit_into_build_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # recursion_limit is a standard RunnableConfig key the compiled graph reads,
@@ -1271,7 +1277,7 @@ class TestAstreamAndRun:
         # test_config_util) rather than rejected. A falsy 0 is a real forwarded value.
         captured = self._script(monkeypatch, [self._final("done")])
         agent = RetrievalToolsAgent()
-        asyncio.run(_collect(agent.astream(user_message="hi", recursion_limit=0)))
+        asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="hi"), recursion_limit=0)))
         assert captured["build_kwargs"]["config"]["recursion_limit"] == 0
 
     def test_run_honors_recursion_limit_into_build_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1279,13 +1285,13 @@ class TestAstreamAndRun:
         # config seam.
         captured = self._script(monkeypatch, [self._final("done")])
         agent = RetrievalToolsAgent()
-        asyncio.run(agent.run(user_message="hi", recursion_limit=9))
+        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), recursion_limit=9))
         assert captured["build_kwargs"]["config"]["recursion_limit"] == 9
 
     def test_run_drains_astream_to_final_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._script(monkeypatch, [self._final("the answer")])
         agent = RetrievalToolsAgent()
-        assert asyncio.run(agent.run(user_message="hi")) == "the answer"
+        assert asyncio.run(agent.run(user_message=TemplatedText(content="hi"))) == "the answer"
 
     def test_astream_with_response_format_emits_one_structured_final(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # With a response_format set, the terminal result is forced into the schema
@@ -1296,7 +1302,9 @@ class TestAstreamAndRun:
         self._script(monkeypatch, [self._final("the answer")], llm=llm)
         agent = RetrievalToolsAgent()
 
-        events = asyncio.run(_collect(agent.astream(user_message="hi", response_format=_RETRIEVAL_SCHEMA)))
+        events = asyncio.run(
+            _collect(agent.astream(user_message=TemplatedText(content="hi"), response_format=_RETRIEVAL_SCHEMA))
+        )
 
         finals = [e for e in events if isinstance(e, StructuredFinal)]
         assert len(finals) == 1
@@ -1311,13 +1319,15 @@ class TestAstreamAndRun:
         llm = _StructuredLLM({"value": 7})
         self._script(monkeypatch, [self._final("the answer")], llm=llm)
         agent = RetrievalToolsAgent()
-        assert asyncio.run(agent.run(user_message="hi", response_format=_RETRIEVAL_SCHEMA)) == {"value": 7}
+        assert asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=_RETRIEVAL_SCHEMA)) == {
+            "value": 7
+        }
 
     def test_run_response_format_without_title_raises_loudly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._script(monkeypatch, [self._final("the answer")])
         agent = RetrievalToolsAgent()
         with pytest.raises(ValueError, match="top-level 'title'"):
-            asyncio.run(agent.run(user_message="hi", response_format={"type": "object"}))
+            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format={"type": "object"}))
 
     def test_astream_response_format_without_title_raises_loudly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The streaming face — the one the public run door drives — rejects an
@@ -1326,7 +1336,9 @@ class TestAstreamAndRun:
         self._script(monkeypatch, [self._final("the answer")])
         agent = RetrievalToolsAgent()
         with pytest.raises(ValueError, match="top-level 'title'"):
-            asyncio.run(_collect(agent.astream(user_message="hi", response_format={"type": "object"})))
+            asyncio.run(
+                _collect(agent.astream(user_message=TemplatedText(content="hi"), response_format={"type": "object"}))
+            )
 
     def test_run_response_format_unparseable_finalization_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # An unparseable structured-finalization output propagates the raise loudly —
@@ -1335,7 +1347,7 @@ class TestAstreamAndRun:
         self._script(monkeypatch, [self._final("the answer")], llm=llm)
         agent = RetrievalToolsAgent()
         with pytest.raises(ValueError, match="unparseable structured output"):
-            asyncio.run(agent.run(user_message="hi", response_format=_RETRIEVAL_SCHEMA))
+            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=_RETRIEVAL_SCHEMA))
 
     def test_run_response_format_nonconforming_structured_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A finalization payload violating a schema constraint keyword (minimum)
@@ -1350,7 +1362,7 @@ class TestAstreamAndRun:
         self._script(monkeypatch, [self._final("the answer")], llm=llm)
         agent = RetrievalToolsAgent()
         with pytest.raises(JsonSchemaValidationError):
-            asyncio.run(agent.run(user_message="hi", response_format=schema))
+            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=schema))
 
 
 class TestInputModel:
@@ -1358,23 +1370,27 @@ class TestInputModel:
         # ``extra="forbid"`` turns a typo at the run door into a loud validation
         # error rather than a silently ignored field.
         with pytest.raises(ValidationError):
-            RetrievalToolsAgentInput.model_validate({"user_message": "hi", "unknown_key": 1})
+            RetrievalToolsAgentInput.model_validate({"user_message": {"content": "hi"}, "unknown_key": 1})
 
     def test_input_advertises_response_format(self) -> None:
         # ``response_format`` is an advertised, honored field (round-trips through the
         # tool schema for the preset/authoring path).
         assert "response_format" in RetrievalToolsAgentInput.model_json_schema()["properties"]
-        parsed = RetrievalToolsAgentInput.model_validate({"user_message": "hi", "response_format": _RETRIEVAL_SCHEMA})
+        parsed = RetrievalToolsAgentInput.model_validate(
+            {"user_message": {"content": "hi"}, "response_format": _RETRIEVAL_SCHEMA}
+        )
         assert parsed.response_format == _RETRIEVAL_SCHEMA
 
     def test_empty_content_kwargs_normalize_to_none(self) -> None:
         # An empty ``user_content_kwargs`` dict from the JSON door reads as absent — the
         # builders treat {} as no mark, so the field normalizes to None rather than a
         # set-but-empty value the unhonored-reject face would misread.
-        validated = RetrievalToolsAgentInput.model_validate({"user_message": "hi", "user_content_kwargs": {}})
+        validated = RetrievalToolsAgentInput.model_validate(
+            {"user_message": {"content": "hi"}, "user_content_kwargs": {}}
+        )
         assert validated.user_content_kwargs is None
         # A non-empty mark is a real value and rides through unchanged.
         marked = RetrievalToolsAgentInput.model_validate(
-            {"user_message": "hi", "user_content_kwargs": {"cache_control": {"type": "ephemeral"}}}
+            {"user_message": {"content": "hi"}, "user_content_kwargs": {"cache_control": {"type": "ephemeral"}}}
         )
         assert marked.user_content_kwargs == {"cache_control": {"type": "ephemeral"}}

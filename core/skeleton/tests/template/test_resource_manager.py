@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 from tai42_contract.storage import Storage
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
@@ -66,7 +67,7 @@ async def test_render_by_content_needs_no_provider() -> None:
     """Inline content renders without touching storage, even unconfigured."""
     manager = ResourceManager(StorageRegistry().provider)
 
-    rendered = await manager.render_by_id_or_content(content="Hi {{ who }}", kwargs={"who": "there"})
+    rendered = await manager.render_templated_text(TemplatedText(content="Hi {{ who }}", kwargs={"who": "there"}))
     assert rendered == "Hi there"
 
 

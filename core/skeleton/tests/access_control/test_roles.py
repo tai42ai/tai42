@@ -8,6 +8,7 @@ import pytest
 from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
 from tai42_contract.accounts import AccountsAdminServices
+from tai42_contract.template import TemplatedText
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.data import run_jq_first
 
@@ -173,7 +174,7 @@ async def _level_allows(role_name: str, path: str, method: str) -> tuple[bool, o
     # A non-admin policy carries its base-tier condition, so ``is_admin_policy`` is False
     # (a scopes-only ["*"] with no condition would read as admin and skip the pass).
     base = {"editor": EDITOR_JQ, "viewer": VIEWER_JQ}[role_name]
-    policy = AccessPolicy(scopes=["*"], condition=base, policy_data={"role": role_name})
+    policy = AccessPolicy(scopes=["*"], condition=TemplatedText(content=base), policy_data={"role": role_name})
     return await role_level_decision(policy, None, path, method, 0)
 
 
@@ -391,11 +392,18 @@ async def test_reseed_does_not_overwrite_operator_edit(mem: _MemStore):
     await seed_default_roles()
     # An operator edits the editor template (a new active version).
     await mem.save_version(
-        "role", "editor", {"scopes": ["*"], "condition": ".custom", "policy_data": {}, "description": "edited"}
+        "role",
+        "editor",
+        {
+            "scopes": ["*"],
+            "condition": {"content": ".custom", "id": None, "kwargs": {}},
+            "policy_data": {},
+            "description": "edited",
+        },
     )
     await seed_default_roles()  # re-seed must not clobber it
     body = await role_store().get_active_body("editor")
-    assert body["condition"] == ".custom"
+    assert body["condition"] == {"content": ".custom", "id": None, "kwargs": {}}
 
 
 # -- apply_role copy + upsert semantics --------------------------------------
@@ -413,12 +421,19 @@ async def test_apply_role_upserts_when_no_prior_policy(mem, pg: FakeAccessContro
 async def test_apply_role_copies_and_does_not_retroapply(mem, pg: FakeAccessControlPg, redis_mgmt):
     await seed_default_roles()
     await apply_role("bob", "editor")
-    assert pg.policy_body("bob")["condition"] == EDITOR_JQ
+    assert pg.policy_body("bob")["condition"] == TemplatedText(content=EDITOR_JQ).model_dump()
     # Editing the template afterwards does NOT change bob's already-applied policy.
     await mem.save_version(
-        "role", "editor", {"scopes": ["*"], "condition": ".changed", "policy_data": {}, "description": "x"}
+        "role",
+        "editor",
+        {
+            "scopes": ["*"],
+            "condition": {"content": ".changed", "id": None, "kwargs": {}},
+            "policy_data": {},
+            "description": "x",
+        },
     )
-    assert pg.policy_body("bob")["condition"] == EDITOR_JQ
+    assert pg.policy_body("bob")["condition"] == TemplatedText(content=EDITOR_JQ).model_dump()
 
 
 async def test_apply_role_preserves_disabled_marker(mem, pg: FakeAccessControlPg, redis_mgmt):
@@ -432,7 +447,7 @@ async def test_apply_role_preserves_disabled_marker(mem, pg: FakeAccessControlPg
     body = pg.policy_body("bob")
     assert body["policy_data"]["disabled"] is True  # the marker survived the re-role
     assert body["scopes"] == ["*"]  # scopes WERE updated
-    assert body["condition"] == EDITOR_JQ  # condition WAS updated
+    assert body["condition"] == TemplatedText(content=EDITOR_JQ).model_dump()  # condition WAS updated
 
 
 async def test_apply_role_unknown_raises_keyerror(mem, pg: FakeAccessControlPg, redis_mgmt):
@@ -445,11 +460,10 @@ async def test_apply_role_normalizes_condition_dimension(mem, pg: FakeAccessCont
     await seed_default_roles()
     # A prior role leaves a condition; re-assigning admin (no condition) clears it.
     await apply_role("bob", "editor")
-    assert pg.policy_body("bob")["condition"] == EDITOR_JQ
+    assert pg.policy_body("bob")["condition"] == {"content": EDITOR_JQ}
     await apply_role("bob", "admin")
     body = pg.policy_body("bob")
     assert body["condition"] is None
-    assert body["condition_id"] is None
 
 
 # -- SkeletonAccountsAdminServices -------------------------------------------
@@ -463,7 +477,7 @@ async def test_services_apply_role_bumps_version(mem, pg: FakeAccessControlPg, r
     await seed_default_roles()
     services = SkeletonAccountsAdminServices()
     await services.apply_role("bob", "viewer")
-    assert pg.policy_body("bob")["condition"] == VIEWER_JQ
+    assert pg.policy_body("bob")["condition"] == TemplatedText(content=VIEWER_JQ).model_dump()
     assert int(redis_mgmt._strings["ac:policy_version"]) >= 1
 
 

@@ -7,6 +7,7 @@ import time
 import pytest
 from fastmcp import Context
 from tai42_contract.access_control import caller_may_read_secrets
+from tai42_contract.template import TemplatedText
 from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import jq_util
@@ -20,26 +21,38 @@ async def test_rendered_fields_default_to_empty():
 
 
 async def test_rendered_fields_use_inline_content(app):
-    callback = CallbackSchema(tool="t", condition=". > 5", expr="{value: .}")
+    callback = CallbackSchema(
+        tool="t", condition=TemplatedText(content=". > 5"), expr=TemplatedText(content="{value: .}")
+    )
     assert await callback.rendered_condition() == ". > 5"
     assert await callback.rendered_expr() == "{value: .}"
 
 
 async def test_rendered_fields_resolve_template_ids(app):
     app.storage.resource_manager.templates["cond-1"] = ". != null"
-    callback = CallbackSchema(tool="t", condition_id="cond-1")
+    callback = CallbackSchema(tool="t", condition=TemplatedText(id="cond-1"))
     assert await callback.rendered_condition() == ". != null"
 
 
+async def test_rendered_condition_unknown_id_raises(app):
+    # A by-id condition whose id resolves to nothing raises loudly instead of
+    # silently rendering an empty condition.
+    callback = CallbackSchema(tool="t", condition=TemplatedText(id="missing"))
+    with pytest.raises(KeyError):
+        await callback.rendered_condition()
+
+
 async def test_callback_execution_condition_failure_returns_none(app):
-    callback = CallbackSchema(tool="next", condition=". > 5")
+    callback = CallbackSchema(tool="next", condition=TemplatedText(content=". > 5"))
     assert await callback_execution(3, callback) is None
     assert app.tools.run_calls == []
 
 
 async def test_callback_execution_runs_tool_with_expr_output(app):
     app.tools.run_result = "chained-result"
-    callback = CallbackSchema(tool="next", condition=". > 5", expr="{value: .}")
+    callback = CallbackSchema(
+        tool="next", condition=TemplatedText(content=". > 5"), expr=TemplatedText(content="{value: .}")
+    )
 
     result = await callback_execution(10, callback)
     assert result == "chained-result"
@@ -50,7 +63,9 @@ async def test_callback_execution_runs_tool_detached(app):
     # A worker execution has no live caller, so the callback's tool observes the
     # detached flag set; the flag never leaks past the callback.
     app.tools.run_result = "chained-result"
-    callback = CallbackSchema(tool="next", condition=". > 5", expr="{value: .}")
+    callback = CallbackSchema(
+        tool="next", condition=TemplatedText(content=". > 5"), expr=TemplatedText(content="{value: .}")
+    )
 
     await callback_execution(10, callback)
 
@@ -65,7 +80,9 @@ async def test_callback_binds_the_worker_secret_capability(app, access_control, 
     # a dequeued task: OFF -> secret-capable, ON -> fail-closed, reset after.
     access_control(gate_enabled)
     app.tools.run_result = "chained-result"
-    callback = CallbackSchema(tool="next", condition=". > 5", expr="{value: .}")
+    callback = CallbackSchema(
+        tool="next", condition=TemplatedText(content=". > 5"), expr=TemplatedText(content="{value: .}")
+    )
 
     await callback_execution(10, callback)
 
@@ -75,12 +92,12 @@ async def test_callback_binds_the_worker_secret_capability(app, access_control, 
 
 async def test_callback_execution_without_condition_always_runs(app):
     app.tools.run_result = "ok"
-    callback = CallbackSchema(tool="next", expr="{value: .}")
+    callback = CallbackSchema(tool="next", expr=TemplatedText(content="{value: .}"))
     assert await callback_execution(1, callback) == "ok"
 
 
 async def test_callback_execution_without_tool_returns_expr_output(app):
-    callback = CallbackSchema(expr="{doubled: (. * 2)}")
+    callback = CallbackSchema(expr=TemplatedText(content="{doubled: (. * 2)}"))
     assert await callback_execution(4, callback) == {"doubled": 8}
     assert app.tools.run_calls == []
 
@@ -111,7 +128,7 @@ async def test_prepare_backend_kwargs_strips_fastmcp_context():
 
 
 async def test_callback_schema_round_trips_through_validation():
-    original = CallbackSchema(tool="t", condition=". > 1", expr="{a: .}")
+    original = CallbackSchema(tool="t", condition=TemplatedText(content=". > 1"), expr=TemplatedText(content="{a: .}"))
     restored = CallbackSchema.model_validate(original.model_dump())
     assert restored == original
 
@@ -131,7 +148,7 @@ async def test_callback_jq_eval_is_timeout_bounded(app, monkeypatch):
     monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
     reset_all_settings()
     try:
-        callback = CallbackSchema(tool="t", condition=". > 5")
+        callback = CallbackSchema(tool="t", condition=TemplatedText(content=". > 5"))
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
             await callback_execution(10, callback)
@@ -144,6 +161,6 @@ def test_bare_condition_syntax_error_propagates():
     """A broken jq filter raises loudly instead of silently passing."""
     import asyncio
 
-    callback = CallbackSchema(tool="t", condition="((broken")
+    callback = CallbackSchema(tool="t", condition=TemplatedText(content="((broken"))
     with pytest.raises(ValueError, match="syntax error"):
         asyncio.run(callback_execution(1, callback))

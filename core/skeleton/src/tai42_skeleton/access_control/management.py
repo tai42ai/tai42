@@ -36,6 +36,7 @@ from uuid import uuid4
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, IdentityProvider
 from tai42_contract.access_control.registry import get_identity_provider_factory
+from tai42_contract.template import TemplatedText
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -222,9 +223,7 @@ async def add_user_api_key(
     description: str,
     scopes: list[str],
     policy_data: dict[str, Any] | None = None,
-    condition: str | None = None,
-    condition_id: str | None = None,
-    condition_kwargs: dict[str, Any] | None = None,
+    condition: TemplatedText | None = None,
     owner_user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], str]:
     """Provision a new key for ``user_id`` and return
@@ -296,7 +295,9 @@ async def add_user_api_key(
     try:
         # 2. Policy row. The live-context hash needs no seed — it is created by the
         #    first counter write and an absent hash reads as an empty context.
-        body = await store.create_policy(user_id, scopes, policy_data, condition, condition_id, condition_kwargs)
+        body = await store.create_policy(
+            user_id, scopes, policy_data, condition.model_dump() if condition is not None else None
+        )
     except Exception as exc:
         raise RuntimeError(
             f"api key for user {user_id!r} was provisioned but its policy write failed; the key "
@@ -310,9 +311,7 @@ async def edit_user_payload(
     description: str | _Unset = _UNSET,
     scopes: list[str] | _Unset = _UNSET,
     policy_data: dict[str, Any] | _Unset | None = _UNSET,
-    condition: str | _Unset | None = _UNSET,
-    condition_id: str | _Unset | None = _UNSET,
-    condition_kwargs: dict[str, Any] | _Unset | None = _UNSET,
+    condition: TemplatedText | _Unset | None = _UNSET,
 ) -> dict[str, Any] | None:
     """Partially update an existing key's description and policy in place (never
     rotates the key). Only the arguments the caller actually supplies are written;
@@ -339,11 +338,7 @@ async def edit_user_payload(
     if not isinstance(policy_data, _Unset):
         updates["policy_data"] = policy_data
     if not isinstance(condition, _Unset):
-        updates["condition"] = condition
-    if not isinstance(condition_id, _Unset):
-        updates["condition_id"] = condition_id
-    if not isinstance(condition_kwargs, _Unset):
-        updates["condition_kwargs"] = condition_kwargs
+        updates["condition"] = condition.model_dump() if condition is not None else None
 
     policy = await store.update_policy_fields(user_id, updates)
     # No policy row → not provisioned. The description edit below is never attempted

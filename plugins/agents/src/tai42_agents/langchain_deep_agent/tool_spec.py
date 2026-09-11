@@ -14,9 +14,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
-from tai42_agents._internal.reject import reject_untitled_response_format
+from tai42_agents._internal.reject import resolve_response_format
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
 
@@ -41,7 +42,9 @@ class DeepSubAgentSpec(BaseModel):
 
     name: str = Field(description="Identifier the main agent uses to call this subagent.")
     description: str = Field(description="When to use this subagent; read by the main agent to route to it.")
-    system_prompt: str = Field(description="The subagent's own system instructions.")
+    system_prompt: TemplatedText = Field(
+        description="The subagent's own system instructions: inline content or a stored id, plus render kwargs."
+    )
 
     llm_provider: str | None = Field(
         default=None,
@@ -69,7 +72,7 @@ class DeepSubAgentSpec(BaseModel):
         default=None,
         description="Per-tool human-in-the-loop interrupt config; inherits the main agent's when None.",
     )
-    response_format: dict[str, Any] | None = Field(
+    response_format: TemplatedText | dict[str, Any] | None = Field(
         default=None,
         description="JSON Schema for this subagent's forced structured output; free-form text when None.",
     )
@@ -88,7 +91,7 @@ async def _resolve_subagent_spec(spec: DeepSubAgentSpec) -> ResolvedSubAgentSpec
     are resolved recursively. ``response_format`` (a JSON Schema dict) passes
     through to the core spec unchanged.
     """
-    reject_untitled_response_format(f"subagent {spec.name!r}", spec.response_format)
+    resolved_response_format = await resolve_response_format(f"subagent {spec.name!r}", spec.response_format)
     # Delivery-scoped: a subagent's tool is dispatched INSIDE the parent's turn, so it must
     # not capture the completion binding addressing the parent's own deferred answer.
     tools = scope_nested_dispatch_all(await tai42_app.tools.get_client_tools(spec.tools) if spec.tools else [])
@@ -103,7 +106,7 @@ async def _resolve_subagent_spec(spec: DeepSubAgentSpec) -> ResolvedSubAgentSpec
         skills=spec.skills,
         inline_skills=spec.inline_skills,
         interrupt_on=spec.interrupt_on,
-        response_format=spec.response_format,
+        response_format=resolved_response_format,
         subagents=subagents,
     )
 

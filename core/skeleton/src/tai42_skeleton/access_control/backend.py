@@ -256,21 +256,17 @@ class AccessControlAuthBackend(AuthenticationBackend):
         # enforce calls are semantically AND — no jq string concatenation (splicing is
         # injection-shaped).
         try:
-            condition = await tai42_app.storage.resource_manager.render_by_id_or_content(
-                content=policy.condition,
-                template_id=policy.condition_id,
-                kwargs=policy.condition_kwargs,
-            )
+            condition = ""
+            if policy.condition is not None:
+                condition = await tai42_app.storage.resource_manager.render_templated_text(policy.condition)
             # Whether a condition was configured is known from the policy, not from
             # the rendered string: a configured condition that renders empty must
             # still be enforced (deny), so pass the configured flag through and let
             # ``enforce`` fail closed rather than mistaking empty for "no condition".
-            condition_configured = policy.condition is not None or policy.condition_id is not None
+            condition_configured = policy.condition is not None
             await self.enforcer.enforce(context.model_dump(), condition, condition_configured=condition_configured)
 
-            if owner_policy is not None and (
-                owner_policy.condition is not None or owner_policy.condition_id is not None
-            ):
+            if owner_policy is not None and owner_policy.condition is not None:
                 owner_context = JqAuthContext(
                     sub=user_id,
                     scopes=owner_policy.scopes,
@@ -280,11 +276,7 @@ class AccessControlAuthBackend(AuthenticationBackend):
                     request={"method": conn.scope.get("method"), "path": conn.url.path},
                     system={"time": time.time()},
                 )
-                owner_condition = await tai42_app.storage.resource_manager.render_by_id_or_content(
-                    content=owner_policy.condition,
-                    template_id=owner_policy.condition_id,
-                    kwargs=owner_policy.condition_kwargs,
-                )
+                owner_condition = await tai42_app.storage.resource_manager.render_templated_text(owner_policy.condition)
                 await self.enforcer.enforce(owner_context.model_dump(), owner_condition, condition_configured=True)
         except Exception as e:
             # Log the underlying failure (jq internals, render errors) server-side,

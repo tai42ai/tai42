@@ -6,6 +6,7 @@ import time
 
 import pytest
 from tai42_contract.access_control import caller_may_read_secrets
+from tai42_contract.template import TemplatedText
 from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import jq_util
@@ -21,14 +22,27 @@ async def test_prepare_backend_kwargs_injects_tool_name_and_stamps_capability() 
     assert kwargs == {"a": 1, "backend_tool_name": "some_tool", "backend_secret_capability": False}
 
 
-async def test_rendered_fields_go_through_resource_manager() -> None:
-    callback = CallbackSchema(condition_id="cond-1", expr_id="expr-1")
-    assert await callback.rendered_condition() == "rendered:cond-1"
-    assert await callback.rendered_expr() == "rendered:expr-1"
+async def test_rendered_fields_go_through_resource_manager(stub_app) -> None:
+    # A by-id condition/expr resolves through the resource manager's stored template map.
+    stub_app.storage.resource_manager.templates["cond-1"] = ". > 0"
+    stub_app.storage.resource_manager.templates["expr-1"] = "{value: .}"
+    callback = CallbackSchema(condition=TemplatedText(id="cond-1"), expr=TemplatedText(id="expr-1"))
+    assert await callback.rendered_condition() == ". > 0"
+    assert await callback.rendered_expr() == "{value: .}"
+
+
+async def test_rendered_condition_unknown_id_raises(stub_app) -> None:
+    # A by-id condition whose id resolves to nothing raises loudly instead of
+    # silently rendering an empty condition.
+    callback = CallbackSchema(condition=TemplatedText(id="missing"))
+    with pytest.raises(KeyError):
+        await callback.rendered_condition()
 
 
 async def test_condition_failure_returns_none(stub_app) -> None:
-    callback = CallbackSchema(condition=".k == 2", expr=".", tool="follow_up")
+    callback = CallbackSchema(
+        condition=TemplatedText(content=".k == 2"), expr=TemplatedText(content="."), tool="follow_up"
+    )
     result = await callback_execution({"k": 1}, callback)
     assert result is None
     assert stub_app.tools.run_tool_calls == []
@@ -36,7 +50,7 @@ async def test_condition_failure_returns_none(stub_app) -> None:
 
 async def test_empty_condition_passes_and_runs_tool(stub_app) -> None:
     stub_app.tools.run_tool_result = {"ran": True}
-    callback = CallbackSchema(expr="{payload: .}", tool="follow_up")
+    callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up")
     result = await callback_execution(7, callback)
     assert result == {"ran": True}
     assert stub_app.tools.run_tool_calls == [("follow_up", {"payload": 7})]
@@ -46,7 +60,7 @@ async def test_callback_runs_tool_detached(stub_app) -> None:
     # A worker execution has no live caller, so the callback's tool observes the
     # detached flag set; the flag never leaks past the callback.
     stub_app.tools.run_tool_result = {"ran": True}
-    callback = CallbackSchema(expr="{payload: .}", tool="follow_up")
+    callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up")
 
     await callback_execution(7, callback)
 
@@ -63,7 +77,7 @@ async def test_callback_binds_the_worker_secret_capability(
     # a dequeued task: OFF -> secret-capable, ON -> fail-closed, reset after.
     access_control(gate_enabled)
     stub_app.tools.run_tool_result = {"ran": True}
-    callback = CallbackSchema(expr="{payload: .}", tool="follow_up")
+    callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up")
 
     await callback_execution(7, callback)
 
@@ -72,7 +86,7 @@ async def test_callback_binds_the_worker_secret_capability(
 
 
 async def test_no_tool_returns_expression_output(stub_app) -> None:
-    callback = CallbackSchema(condition=". > 1", expr=". * 2")
+    callback = CallbackSchema(condition=TemplatedText(content=". > 1"), expr=TemplatedText(content=". * 2"))
     result = await callback_execution(3, callback)
     assert result == 6
     assert stub_app.tools.run_tool_calls == []
@@ -101,7 +115,7 @@ async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> Non
     monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
     reset_all_settings()
     try:
-        callback = CallbackSchema(condition=". > 1", expr=". * 2")
+        callback = CallbackSchema(condition=TemplatedText(content=". > 1"), expr=TemplatedText(content=". * 2"))
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
             await callback_execution(3, callback)

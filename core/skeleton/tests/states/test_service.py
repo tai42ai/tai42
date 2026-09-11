@@ -6,6 +6,7 @@ Postgres (the store SQL is exercised in ``test_store_integration.py``)."""
 from __future__ import annotations
 
 import copy
+import inspect
 from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
@@ -90,7 +91,9 @@ class FakeStatesStore:
         for state, _tk, _tn, sk, _key in self.records:
             if state == name:
                 per_kind[sk] = per_kind.get(sk, 0) + 1
-        decide(existing, per_kind)
+        outcome = decide(existing, per_kind)
+        if inspect.isawaitable(outcome):
+            await outcome
         self.declarations[name] = {
             "name": name,
             "description": description,

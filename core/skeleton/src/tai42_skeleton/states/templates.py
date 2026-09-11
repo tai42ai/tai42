@@ -28,8 +28,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import ValidationError
 from tai42_contract.states.errors import AttachConflictError, TemplateValidationError
 from tai42_contract.states.models import TEMPLATE_NAME_RE
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.jq_util import compile_check
 
 TEMPLATE_KIND = "state-template"
@@ -88,24 +90,28 @@ class RegimeRule:
 @dataclass(frozen=True, slots=True)
 class TemplateDeclarations:
     """The declarations section: the ``schema`` of the static values an attachment stores,
-    and an OPTIONAL ``check`` (a jq predicate over those values returning ``true`` or a
-    message). The check stays platform — it is evaluated at attach over the declaration
-    values, which are its input, with the attachment's EFFECTIVE parameters (template
-    defaults overlaid by supplied values) bound as the named jq variable ``$parameters``. A
-    check may therefore constrain a declaration against a parameter (e.g. against a
-    parameter-declared enum) at attach, the earliest point both are known. Every evaluator
-    of a check MUST supply ``$parameters``; a check referencing it without the binding
-    fails loudly (jq: undefined variable ``$parameters``)."""
+    and an OPTIONAL ``check`` — a templated text carrying (inline or by stored id) a jq
+    predicate over those values returning ``true`` or a message. The check stays platform —
+    its rendered jq is evaluated at attach over the declaration values, which are its input,
+    with the attachment's EFFECTIVE parameters (template defaults overlaid by supplied
+    values) bound as the named jq variable ``$parameters``. A check may therefore constrain
+    a declaration against a parameter (e.g. against a parameter-declared enum) at attach, the
+    earliest point both are known. Every evaluator of a check MUST supply ``$parameters``; a
+    check referencing it without the binding fails loudly (jq: undefined variable
+    ``$parameters``)."""
 
     schema: dict[str, Any]
-    check: str | None = None
+    check: TemplatedText | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class TemplateJq:
-    """A named jq program on a template, of one of two purposes:
+    """A named jq program on a template, of one of two purposes. The program body ``jq`` is a
+    :class:`~tai42_contract.template.TemplatedText` — inline ``content`` or a stored ``id`` — so
+    an author may hold the program text inline or in a stored resource; it is rendered to its jq
+    program immediately before it is compiled or evaluated, never in a validator.
 
-    * ``input``: ``jq`` is a program over the record's attached subtree (``.`` = the subject's
+    * ``input``: ``jq`` renders to a program over the record's attached subtree (``.`` = the subject's
       document at the attach path) with the attachment's effective ``$parameters`` and
       ``$declarations`` bound and its declared ``params`` delivered as the SINGLE object
       ``$params`` (``{}`` when none) — a program reads a declared parameter as ``$params.<key>``.
@@ -125,7 +131,7 @@ class TemplateJq:
 
     ``params`` defaults empty; ``reads``/``writes`` are empty for an ``input`` program."""
 
-    jq: str
+    jq: TemplatedText
     purpose: str
     description: str = ""
     params: list[str] = field(default_factory=list)
@@ -141,11 +147,13 @@ class TemplateReconcile:
     ``resolutions`` over ``{new}`` returns the not-done resolution names a close may name;
     ``close`` over ``{data, id, resolution}`` returns the template-relative op batch that
     closes one orphan. ``{orphans, close, resolutions}`` is the reconcile section's own
-    vocabulary, distinct from ``template_jq``."""
+    vocabulary, distinct from ``template_jq``. Each program body is a
+    :class:`~tai42_contract.template.TemplatedText` — inline ``content`` or a stored ``id`` —
+    rendered to its jq program immediately before it is compiled or evaluated."""
 
-    orphans: str
-    close: str
-    resolutions: str
+    orphans: TemplatedText
+    close: TemplatedText
+    resolutions: TemplatedText
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,15 +202,15 @@ class StateTemplate:
         if self.declarations is not None:
             declarations: dict[str, Any] = {"schema": self.declarations.schema}
             if self.declarations.check is not None:
-                declarations["check"] = self.declarations.check
+                declarations["check"] = self.declarations.check.model_dump(exclude_none=True)
             doc["declarations"] = declarations
         if self.template_jq:
             doc["template_jq"] = {name: _program_to_document(program) for name, program in self.template_jq.items()}
         if self.reconcile is not None:
             doc["reconcile"] = {
-                "orphans": self.reconcile.orphans,
-                "close": self.reconcile.close,
-                "resolutions": self.reconcile.resolutions,
+                "orphans": self.reconcile.orphans.model_dump(exclude_none=True),
+                "close": self.reconcile.close.model_dump(exclude_none=True),
+                "resolutions": self.reconcile.resolutions.model_dump(exclude_none=True),
             }
         if self.trace.enabled:
             doc["trace"] = {"enabled": True}
@@ -210,13 +218,15 @@ class StateTemplate:
 
 
 def _program_to_document(program: TemplateJq) -> dict[str, Any]:
-    """The canonical JSON of one ``template_jq`` entry — purpose-specific keys only."""
+    """The canonical JSON of one ``template_jq`` entry — purpose-specific keys only. The
+    program body ``jq`` is emitted as its templated-text object (inline ``content`` or a stored
+    ``id``), so a by-id reference round-trips unchanged."""
     if program.purpose == "input":
         return {
             "description": program.description,
             "purpose": "input",
             "params": list(program.params),
-            "jq": program.jq,
+            "jq": program.jq.model_dump(exclude_none=True),
         }
     return {
         "description": program.description,
@@ -224,7 +234,7 @@ def _program_to_document(program: TemplateJq) -> dict[str, Any]:
         "params": list(program.params),
         "reads": [list(p) for p in program.reads],
         "writes": [list(p) for p in program.writes],
-        "jq": program.jq,
+        "jq": program.jq.model_dump(exclude_none=True),
     }
 
 
@@ -560,12 +570,20 @@ def _parse_declarations(raw: Any) -> TemplateDeclarations:
     _require_type(raw, dict, where="declarations")
     _reject_section_extra_keys(raw, frozenset({"schema", "check"}), where="declarations")
     schema = _require_type(raw.get("schema"), dict, where="declarations schema")
-    check = raw.get("check")
-    if check is not None:
-        _require_type(check, str, where="declarations check")
-        if not check.strip():
-            raise TemplateValidationError("declarations check must be a non-empty jq predicate or omitted")
-        _compile_check_jq(check, where="declarations check")
+    raw_check = raw.get("check")
+    check: TemplatedText | None = None
+    if raw_check is not None:
+        _require_type(raw_check, dict, where="declarations check")
+        try:
+            check = TemplatedText.model_validate(raw_check)
+        except ValidationError as exc:
+            raise TemplateValidationError(f"declarations check is not a valid templated text: {exc}") from exc
+        # Inline jq compiles here (pure, no fetch); a by-id check is rendered and compiled at
+        # the save door (``put_template``), which can fetch the stored resource.
+        if check.content is not None:
+            if not check.content.strip():
+                raise TemplateValidationError("declarations check must be a non-empty jq predicate or omitted")
+            _compile_check_jq(check.content, where="declarations check")
     return TemplateDeclarations(schema=schema, check=check)
 
 
@@ -607,11 +625,12 @@ def _parse_path_list(raw: Any, *, where: str) -> list[list[str]]:
     return out
 
 
-def _input_def(name: str, program: TemplateJq) -> str:
+def _input_def(name: str, jq: str) -> str:
     """One sibling def ``def tjq_<name>($params): <jq>;`` an input program may call as
     ``tjq_<name>({…})`` — always arity one, the declared params delivered as the single
-    ``$params`` object (``{}`` when the program declares none)."""
-    return f"def tjq_{name}($params): {program.jq}; "
+    ``$params`` object (``{}`` when the program declares none). ``jq`` is the input program's
+    RENDERED body text."""
+    return f"def tjq_{name}($params): {jq}; "
 
 
 def _references(expr: str, name: str) -> bool:
@@ -619,15 +638,15 @@ def _references(expr: str, name: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", expr) is not None
 
 
-def _input_order(inputs: Mapping[str, TemplateJq]) -> list[str]:
-    """A deterministic dependency-first ordering of input-program names: a program that
-    references a sibling is emitted AFTER it (jq resolves names backward only). A reference
-    cycle — which jq cannot express — falls back to sorted order, so the compile fails
-    loudly at validation rather than silently."""
-    names = sorted(inputs)
+def _input_order(rendered_inputs: Mapping[str, str]) -> list[str]:
+    """A deterministic dependency-first ordering of input-program names, keyed on each
+    program's RENDERED body text: a program that references a sibling is emitted AFTER it (jq
+    resolves names backward only). A reference cycle — which jq cannot express — falls back to
+    sorted order, so the compile fails loudly at validation rather than silently."""
+    names = sorted(rendered_inputs)
     # A sibling is called by its prelude def name ``tjq_<name>``; a def that calls another
     # must be emitted AFTER it (jq resolves names backward only).
-    deps = {a: {b for b in names if b != a and _references(inputs[a].jq, f"tjq_{b}")} for a in names}
+    deps = {a: {b for b in names if b != a and _references(rendered_inputs[a], f"tjq_{b}")} for a in names}
     ordered: list[str] = []
     remaining = set(names)
     while remaining:
@@ -640,31 +659,63 @@ def _input_order(inputs: Mapping[str, TemplateJq]) -> list[str]:
     return ordered
 
 
-def _template_jq_prelude_from(programs: Mapping[str, TemplateJq]) -> str:
-    """The dependency-first run of ``def tjq_<name>($params): <jq>;`` sibling declarations built from
-    the INPUT-purpose programs of a parsed ``template_jq`` map — the shared body of
-    :func:`template_jq_prelude` and the compile-time prelude :func:`_parse_template_jq`
-    prepends to every program."""
-    inputs = {name: p for name, p in programs.items() if p.purpose == "input"}
-    return "".join(_input_def(name, inputs[name]) for name in _input_order(inputs))
+def template_jq_prelude(rendered_inputs: Mapping[str, str]) -> str:
+    """The dependency-first run of ``def tjq_<name>($params): <jq>;`` sibling declarations, built
+    from the RENDERED body text of the template's INPUT-purpose programs (``name -> rendered
+    jq``) — prepended to a program's jq at compile and at evaluation so a reference to a sibling
+    input program resolves. Empty when the template declares no input programs. The bodies are
+    rendered at the point of use (the save door and the evaluator seam); this function is pure
+    over already-rendered text."""
+    return "".join(_input_def(name, rendered_inputs[name]) for name in _input_order(rendered_inputs))
 
 
-def template_jq_prelude(template: StateTemplate) -> str:
-    """The run of ``def tjq_<name>($params): <jq>;`` sibling declarations, dependency-first, built
-    from the template's INPUT-purpose programs — prepended to a program's jq at compile and
-    at evaluation so a reference to a sibling input program resolves. Empty when the
-    template declares no input programs."""
-    return _template_jq_prelude_from(template.template_jq)
+def _parse_program_body(raw: Any, *, where: str) -> TemplatedText:
+    """Parse one authored jq program body as a :class:`~tai42_contract.template.TemplatedText`
+    (inline ``content`` or a stored ``id``). A stray key inside the value is refused by the
+    value type (``extra="forbid"``), and an empty inline body is a loud refusal — a bad shape or
+    an empty program is the same loud :class:`TemplateValidationError` a malformed section is."""
+    _require_type(raw, dict, where=where)
+    try:
+        text = TemplatedText.model_validate(raw)
+    except ValidationError as exc:
+        raise TemplateValidationError(f"{where} is not a valid templated text: {exc}") from exc
+    if text.content is not None and not text.content.strip():
+        raise TemplateValidationError(f"{where} must be a non-empty jq program")
+    return text
+
+
+def _compile_template_jq_inline(programs: Mapping[str, TemplateJq]) -> None:
+    """Compile every ``template_jq`` program at upload when EVERY body is inline — the point the
+    full sibling prelude is known without a fetch. A by-id body anywhere in the section defers
+    the whole section's compile to the save door (:meth:`StatesService._compile_by_id_template_jq`),
+    the point that can render the stored resources; nothing is silently skipped. Each program
+    compiles over the sibling INPUT-purpose prelude, with ``$parameters``/``$declarations`` bound
+    and — for an input program — the single ``$params`` object predeclared; a reference cycle
+    among input programs (which jq cannot express) fails the compile loudly."""
+    if not all(p.jq.content is not None for p in programs.values()):
+        return
+    rendered_inputs = {name: p.jq.content for name, p in programs.items() if p.purpose == "input" and p.jq.content}
+    prelude = template_jq_prelude(rendered_inputs)
+    for name, program in programs.items():
+        assert program.jq.content is not None  # every body inline in this branch
+        # An input program's declared params ride the SINGLE ``$params`` object, never
+        # individual ``$<name>`` args; an update program reads ``{record, input}`` as ``.`` and
+        # declares its ``.input`` keys as ``params`` (validated at apply, not bound here).
+        variables = (*MEMBER_JQ_VARIABLES, "params") if program.purpose == "input" else MEMBER_JQ_VARIABLES
+        try:
+            compile_check(prelude + program.jq.content, variables=variables)
+        except Exception as exc:
+            raise TemplateValidationError(f"template_jq {name!r} jq is not a valid jq expression: {exc}") from exc
 
 
 def _parse_template_jq(raw: Any) -> dict[str, TemplateJq]:
     """Parse the ``template_jq`` section: each entry ``{description?, purpose, ...}`` with a
     ``purpose`` of ``input`` or ``update``. Both purposes may declare ``params``; an
-    ``input`` entry carries no ``reads``/``writes``, an ``update`` entry carries them. Every
-    program's jq compiles over the sibling INPUT-purpose prelude (so any program may call an
-    input program as ``tjq_<name>({…})``), with ``$parameters``/``$declarations`` bound and —
-    for an input program — the single ``$params`` object predeclared; a reference cycle among
-    input programs (which jq cannot express) fails the compile loudly. ``reads``/``writes``
+    ``input`` entry carries no ``reads``/``writes``, an ``update`` entry carries them. Each
+    entry's ``jq`` is a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a
+    stored ``id``). An all-inline section compiles here over the sibling INPUT-purpose prelude
+    (so any program may call an input program as ``tjq_<name>({…})``); a by-id body defers the
+    section's compile to the save door, which can render the stored resources. ``reads``/``writes``
     are template-relative paths (checked against the fragment in :func:`validate_template`)."""
     _require_type(raw, dict, where="template_jq")
     programs: dict[str, TemplateJq] = {}
@@ -676,9 +727,7 @@ def _parse_template_jq(raw: Any) -> dict[str, TemplateJq]:
         purpose = spec.get("purpose")
         if purpose not in ("input", "update"):
             raise TemplateValidationError(f"{where} purpose {purpose!r} must be 'input' or 'update'")
-        jq = _require_type(spec.get("jq"), str, where=f"{where} jq")
-        if not jq.strip():
-            raise TemplateValidationError(f"{where} jq must be a non-empty jq program")
+        jq = _parse_program_body(spec.get("jq"), where=f"{where} jq")
         description = _require_type(spec.get("description", ""), str, where=f"{where} description")
         params = _parse_identifier_list(spec.get("params", []), where=f"{where} params")
         if purpose == "input":
@@ -693,35 +742,27 @@ def _parse_template_jq(raw: Any) -> dict[str, TemplateJq]:
             programs[name] = TemplateJq(
                 jq=jq, purpose="update", description=description, params=params, reads=reads, writes=writes
             )
-    prelude = _template_jq_prelude_from(programs)
-    for name, program in programs.items():
-        # An input program's declared params ride the SINGLE ``$params`` object (decision 3),
-        # never individual ``$<name>`` args; an update program reads ``{record, input}`` as
-        # ``.`` and declares its ``.input`` keys as ``params`` (validated at apply, not bound
-        # here). Both compile over the sibling ``tjq_<name>`` input prelude.
-        variables = (*MEMBER_JQ_VARIABLES, "params") if program.purpose == "input" else MEMBER_JQ_VARIABLES
-        try:
-            compile_check(prelude + program.jq, variables=variables)
-        except Exception as exc:
-            raise TemplateValidationError(f"template_jq {name!r} jq is not a valid jq expression: {exc}") from exc
+    _compile_template_jq_inline(programs)
     return programs
 
 
 def _parse_reconcile(raw: Any) -> TemplateReconcile:
     """Parse the ``reconcile`` section ``{orphans, close, resolutions}`` — three jq programs,
-    each compiling over its own input payload (no ``$`` bindings)."""
+    each a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``)
+    over its own input payload (no ``$`` bindings). An inline body compiles here; a by-id body
+    defers its compile to the save door (:meth:`StatesService._compile_by_id_reconcile`), the
+    point that can render the stored resource."""
     _require_type(raw, dict, where="reconcile")
     _reject_section_extra_keys(raw, frozenset({"orphans", "close", "resolutions"}), where="reconcile")
-    programs: dict[str, str] = {}
+    programs: dict[str, TemplatedText] = {}
     for label in ("orphans", "close", "resolutions"):
-        expr = _require_type(raw.get(label), str, where=f"reconcile {label}")
-        if not expr.strip():
-            raise TemplateValidationError(f"reconcile {label} must be a non-empty jq program")
-        try:
-            compile_check(expr)
-        except Exception as exc:
-            raise TemplateValidationError(f"reconcile {label} is not a valid jq expression: {exc}") from exc
-        programs[label] = expr
+        text = _parse_program_body(raw.get(label), where=f"reconcile {label}")
+        if text.content is not None:
+            try:
+                compile_check(text.content)
+            except Exception as exc:
+                raise TemplateValidationError(f"reconcile {label} is not a valid jq expression: {exc}") from exc
+        programs[label] = text
     return TemplateReconcile(orphans=programs["orphans"], close=programs["close"], resolutions=programs["resolutions"])
 
 
@@ -758,11 +799,14 @@ def validate_template(doc: Any) -> StateTemplate:
     (a no-default parameter must appear as a marker, and every marker names a declared
     parameter); regime paths lie inside the fragment (``"*"`` only over
     ``items``/``additionalProperties``); the declarations schema is an object and its
-    optional ``check`` compiles; each ``template_jq`` program jq compiles (over the sibling
-    input-program prelude, so any program may call an input program; a reference cycle among
-    input programs fails loudly) and every update program's ``reads``/``writes`` paths
-    resolve in the fragment; each ``reconcile`` jq compiles. Any key outside the platform
-    set is refused. Raises
+    optional ``check`` is a templated text whose inline jq compiles (a by-id check is
+    rendered and compiled at the save door, which can fetch its stored resource); each
+    ``template_jq`` program's ``jq`` and each ``reconcile`` program are templated texts —
+    an all-inline ``template_jq`` section compiles over the sibling input-program prelude (so
+    any program may call an input program; a reference cycle among input programs fails loudly)
+    and an inline ``reconcile`` program compiles, while a by-id body is rendered and compiled at
+    the save door; every update program's ``reads``/``writes`` paths resolve in the fragment. Any
+    key outside the platform set is refused. Raises
     :class:`~tai42_contract.states.errors.TemplateValidationError` on the first violation."""
     _require_type(doc, dict, where="template document")
     _reject_extra_keys(doc, where="template document")

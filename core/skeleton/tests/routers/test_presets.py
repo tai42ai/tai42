@@ -2253,7 +2253,7 @@ def test_validate_create_good_state_binding_is_clean(pg, emit):
                         "name": "newp",
                         "base_tool": "weather",
                         "fixed_kwargs": {"units": "x"},
-                        "state_binding": {"states": [{"state": "status", "subject_expr": ".x"}]},
+                        "state_binding": {"states": [{"state": "status", "subject_expr": {"content": ".x"}}]},
                     }
                 )
             )
@@ -2274,7 +2274,9 @@ def test_validate_create_bad_state_binding_is_an_invalid_verdict(pg, emit):
                     {
                         "name": "newp",
                         "base_tool": "weather",
-                        "state_binding": {"states": [{"state": "status", "subject_expr": "this is not ) jq"}]},
+                        "state_binding": {
+                            "states": [{"state": "status", "subject_expr": {"content": "this is not ) jq"}}]
+                        },
                     }
                 )
             )
@@ -2294,7 +2296,7 @@ def test_validate_version_bad_state_binding_is_an_invalid_verdict(pg, emit):
                 await _validate(
                     {
                         "name": "ver",
-                        "state_binding": {"states": [{"state": "status", "subject_expr": "broken ( jq"}]},
+                        "state_binding": {"states": [{"state": "status", "subject_expr": {"content": "broken ( jq"}}]},
                     }
                 )
             )
@@ -2697,8 +2699,8 @@ def test_rename_keeps_the_pre_rename_generation_for_a_worker_owed_it_from_the_st
     asyncio.run(run())
 
 
-_ROUTE_BINDING = {"states": [{"state": "status", "subject_expr": ".x"}]}
-_ROUTE_BINDING2 = {"states": [{"state": "alerts", "subject_expr": ".y"}]}
+_ROUTE_BINDING = {"states": [{"state": "status", "subject_expr": {"content": ".x"}}]}
+_ROUTE_BINDING2 = {"states": [{"state": "alerts", "subject_expr": {"content": ".y"}}]}
 
 
 def test_create_and_save_version_thread_the_state_binding_over_http(pg, emit):
@@ -2747,7 +2749,7 @@ def test_create_and_save_version_thread_the_state_binding_over_http(pg, emit):
 # -- rollback re-attaches the target version's state binding ----------------------
 
 
-_TEMPLATED_BINDING = {"states": [{"state": "status", "subject_expr": ".x", "templates": ["t1"]}]}
+_TEMPLATED_BINDING = {"states": [{"state": "status", "subject_expr": {"content": ".x"}, "templates": ["t1"]}]}
 
 
 def _patch_fake_states(monkeypatch, *, existing: set[str], attached: set[tuple[str, str]]) -> list[tuple[str, str]]:

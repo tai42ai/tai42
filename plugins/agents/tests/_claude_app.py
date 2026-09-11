@@ -21,6 +21,7 @@ from typing import Any
 from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.monitoring.models import SpanKind
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
+from tai42_contract.template import TemplatedText
 from tests._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
 
 
@@ -154,6 +155,13 @@ class _ResourceManager:
 
     async def fetch_template(self, key: str) -> str:
         return self.templates[key]
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.content is not None:
+            return text.content
+        if text.id is None:
+            raise ValueError("a TemplatedText sets exactly one of content or id")
+        return self.templates[text.id]
 
 
 class _StorageFacet:

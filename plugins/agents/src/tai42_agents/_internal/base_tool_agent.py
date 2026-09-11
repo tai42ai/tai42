@@ -109,7 +109,7 @@ async def _compile_tools_agent(
             # evict its marked ToolMessage.
             _async_park_middleware,
             SystemPurgeMiddleware(),
-            *context_overflow_middlewares(system_prompt=system_prompt),
+            *await context_overflow_middlewares(system_prompt=system_prompt),
             LeadingUserMiddleware(),
             RollingCacheMarkMiddleware(),
             _tool_error_middleware,

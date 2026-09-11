@@ -23,13 +23,14 @@ from tai42_kit.llm.settings import (
     llm_settings,
     summarization_middleware_settings,
 )
+from tai42_kit.utils.render import render_templated_text
 
 # Fixed execution order when several strategies are composed: reclaim tokens
 # with cheap structural edits first, then fall back to LLM summarization.
 _METHOD_ORDER = {"context_editing": 0, "summarization": 1, "trimming": 2}
 
 
-def _build_middleware(method: str, system_prompt: SystemMessage | None = None) -> AgentMiddleware:
+async def _build_middleware(method: str, system_prompt: SystemMessage | None = None) -> AgentMiddleware:
     match method:
         case "trimming":
             return TrimmingMiddleware(system_prompt=system_prompt)
@@ -44,8 +45,11 @@ def _build_middleware(method: str, system_prompt: SystemMessage | None = None) -
                 "keep": ("messages", settings.keep_messages),
                 "trim_tokens_to_summarize": settings.trim_tokens_to_summarize,
             }
-            if settings.summary_prompt:
-                kwargs["summary_prompt"] = settings.summary_prompt
+            if settings.summary_prompt is not None:
+                # Render the configured prompt here, at the point the middleware is built: a
+                # stored id resolves through the manager (a missing one raises), an inline body
+                # fills its kwargs. Unset keeps LangChain's built-in default prompt.
+                kwargs["summary_prompt"] = await render_templated_text(settings.summary_prompt)
             return SummarizationMiddleware(**kwargs)
 
         case "context_editing":
@@ -65,13 +69,16 @@ def _build_middleware(method: str, system_prompt: SystemMessage | None = None) -
     raise ValueError(f"Unsupported context-overflow method: '{method}'")
 
 
-def context_overflow_middlewares(system_prompt: SystemMessage | str | None = None) -> list[AgentMiddleware]:
+async def context_overflow_middlewares(system_prompt: SystemMessage | str | None = None) -> list[AgentMiddleware]:
     """Build the configured context-overflow middleware(s).
 
     Reads ``CONTEXT_OVERFLOW_METHODS`` and returns the corresponding
     middlewares ordered by :data:`_METHOD_ORDER`, ready to spread into a
     ``create_agent`` ``middleware`` list (which runs every middleware hook
     automatically). For a raw ``StateGraph`` use :func:`areduce_context`.
+
+    Async because the summarization strategy renders its configured
+    ``summary_prompt`` (a templated text) through the bound resource manager.
 
     ``system_prompt`` is the caller's per-run system prompt (a ``SystemMessage``
     or its plain text). It never appears in graph state but is part of every
@@ -81,7 +88,7 @@ def context_overflow_middlewares(system_prompt: SystemMessage | str | None = Non
     if isinstance(system_prompt, str):
         system_prompt = SystemMessage(content=system_prompt) if system_prompt else None
     methods = sorted(context_overflow_settings().methods, key=_METHOD_ORDER.__getitem__)
-    return [_build_middleware(method, system_prompt) for method in methods]
+    return [await _build_middleware(method, system_prompt) for method in methods]
 
 
 async def areduce_context(
@@ -111,7 +118,7 @@ async def areduce_context(
     Returns the reduced message list, or ``None`` when nothing changed (so the
     caller can skip writing state).
     """
-    middlewares = middlewares if middlewares is not None else context_overflow_middlewares()
+    middlewares = middlewares if middlewares is not None else await context_overflow_middlewares()
     base_state = state or {}
     # Our middlewares ignore runtime; create_agent supplies it, a raw graph does not.
     no_runtime = cast(Runtime[Any], None)

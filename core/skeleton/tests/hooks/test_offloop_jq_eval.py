@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 from tai42_contract.hooks import HookParams
+from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.hooks.managers.base_hooks_manager as bhm
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
@@ -32,8 +33,8 @@ async def test_condition_and_expr_evaluate_through_off_loop_helper(make_app, mon
             tool="noop",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition='.status == "ready"',
-            expr="{id: .id}",
+            condition=TemplatedText(content='.status == "ready"'),
+            expr=TemplatedText(content="{id: .id}"),
         )
     )
 
@@ -56,7 +57,7 @@ async def test_fire_time_jq_error_is_not_swallowed(make_app):
             tool="noop",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition=".x | tonumber",
+            condition=TemplatedText(content=".x | tonumber"),
         )
     )
 

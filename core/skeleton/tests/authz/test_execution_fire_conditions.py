@@ -1,7 +1,7 @@
 """The token-free-evaluable rule re-asserted AT THE FIRE, on the rendered condition text.
 
 The bind-time scan is early rejection only: the invariant is about RENDERED text, and a
-``condition_id`` re-renders at every fire, so a template edit changes the effective
+stored condition ``id`` re-renders at every fire, so a template edit changes the effective
 condition with no policy-row write for any mutation-site guard to see. The hole is on the
 allow path — ``.identity.X != v`` evaluates TRUE against the absent claim and ALLOWS. The
 re-assert is gated on the ``execution_identity`` contextvar, so ordinary authed requests,
@@ -16,6 +16,7 @@ from collections.abc import Iterator
 import pytest
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.versioning as versioning_module
 from tai42_skeleton.access_control import management
@@ -54,14 +55,14 @@ class _MutableResourceManager:
     def __init__(self) -> None:
         self.templates: dict[str, str] = {}
 
-    async def render_by_id_or_content(self, *, content, template_id, kwargs) -> str:
-        if template_id is not None:
+    async def render_templated_text(self, text, locale=None) -> str:
+        if text.id is not None:
             try:
-                return self.templates[template_id]
+                return self.templates[text.id]
             except KeyError as exc:
                 # The real manager's answer for an id with no stored template.
-                raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
-        return content or ""
+                raise TemplateNotFoundError(f"Template '{text.id}' not found.") from exc
+        return text.content or ""
 
 
 @pytest.fixture
@@ -123,7 +124,9 @@ async def _request(identity: CallerIdentity, meta, settings: AccessControlSettin
 
 def test_a_key_whose_condition_is_evaluable_binds_and_fires(ac_env, renderer, probe_op, settings) -> None:
     ac_env.add_route(_ROUTE, _SCOPE)
-    ac_env.add_policy("k-fire", scopes=[_SCOPE], condition=_EVALUABLE, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"})
+    ac_env.add_policy(
+        "k-fire", scopes=[_SCOPE], condition={"content": _EVALUABLE}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
+    )
 
     asyncio.run(assert_execution_key_evaluable(_bind_enforcer(), "k-fire"))  # the bind scan passes
     asyncio.run(_fire("k-fire", probe_op, settings))  # and so does the fire
@@ -138,15 +141,17 @@ def test_a_policy_row_edited_after_the_bind_is_denied_at_the_next_fire(
     # ``edit_api_key`` knows nothing about any record that bound this key, and carries no
     # guard: the fire is what refuses.
     ac_env.add_route(_ROUTE, _SCOPE)
-    ac_env.add_policy("k-fire", scopes=[_SCOPE], condition=_EVALUABLE, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"})
+    ac_env.add_policy(
+        "k-fire", scopes=[_SCOPE], condition={"content": _EVALUABLE}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
+    )
     _wire_edit_door(monkeypatch, ac_env)
 
     asyncio.run(_fire("k-fire", probe_op, settings))  # allowed before the edit
 
-    asyncio.run(api_keys_ops.edit_api_key(user_id="k-fire", updates={"condition": _FAIL_OPEN}))
+    asyncio.run(api_keys_ops.edit_api_key(user_id="k-fire", updates={"condition": TemplatedText(content=_FAIL_OPEN)}))
 
     # The stored row really did change — the edit landed.
-    assert ac_env.policy("k-fire")["condition"] == _FAIL_OPEN
+    assert ac_env.policy("k-fire")["condition"] == TemplatedText(content=_FAIL_OPEN).model_dump()
 
     with pytest.raises(PermissionDenied, match="policy condition for 'k-fire' is not evaluable at a fire"):
         asyncio.run(_fire("k-fire", probe_op, settings))
@@ -155,7 +160,9 @@ def test_a_policy_row_edited_after_the_bind_is_denied_at_the_next_fire(
 def test_the_bind_scan_and_the_fire_assertion_are_one_rule(ac_env, renderer, probe_op, settings) -> None:
     # One implementation: a condition that cannot fire also cannot be freshly bound.
     ac_env.add_route(_ROUTE, _SCOPE)
-    ac_env.add_policy("k-fire", scopes=[_SCOPE], condition=_FAIL_OPEN, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"})
+    ac_env.add_policy(
+        "k-fire", scopes=[_SCOPE], condition={"content": _FAIL_OPEN}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
+    )
 
     with pytest.raises(TokenFreeConditionError, match="unusable at a fire"):
         asyncio.run(assert_execution_key_evaluable(_bind_enforcer(), "k-fire"))
@@ -171,7 +178,9 @@ def test_a_template_edited_after_the_bind_is_denied_with_no_policy_row_write(
 ) -> None:
     # The policy row is byte-identical before and after; only the template it points at changed.
     ac_env.add_route(_ROUTE, _SCOPE)
-    ac_env.add_policy("k-fire", scopes=[_SCOPE], condition_id="cond", policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"})
+    ac_env.add_policy(
+        "k-fire", scopes=[_SCOPE], condition={"id": "cond"}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
+    )
     renderer.templates["cond"] = _EVALUABLE
 
     asyncio.run(assert_execution_key_evaluable(_bind_enforcer(), "k-fire"))
@@ -193,7 +202,7 @@ def test_the_owners_condition_is_re_asserted_too(ac_env, renderer, probe_op, set
     ac_env.add_policy(
         "k-fire", scopes=[_SCOPE], policy_data={OWNER_USER_ID_CLAIM: "alice", KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
     )
-    ac_env.add_policy("alice", scopes=[_SCOPE], condition_id="owner-cond")
+    ac_env.add_policy("alice", scopes=[_SCOPE], condition={"id": "owner-cond"})
     renderer.templates["owner-cond"] = _EVALUABLE
 
     asyncio.run(_fire("k-fire", probe_op, settings))
@@ -211,7 +220,9 @@ def test_the_negative_predicate_would_have_allowed_the_fire(ac_env, renderer, pr
     """Non-vacuity for every deny above: with the gate off (an ordinary request) the same
     condition ALLOWS, because the absent ``.identity.suspended`` satisfies ``!= true``."""
     ac_env.add_route(_ROUTE, _SCOPE)
-    ac_env.add_policy("k-fire", scopes=[_SCOPE], condition=_FAIL_OPEN, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"})
+    ac_env.add_policy(
+        "k-fire", scopes=[_SCOPE], condition={"content": _FAIL_OPEN}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
+    )
 
     # No execution identity bound: the assertion does not run and the predicate allows.
     asyncio.run(_request(CallerIdentity(user_id="k-fire", effective_scopes=(_SCOPE,), claims={}), probe_op, settings))
@@ -225,7 +236,7 @@ def test_a_normal_authed_request_with_the_same_condition_is_unaffected(ac_env, r
     # The assertion is contextvar-gated, so a token-carrying caller is decided by the
     # condition itself, both ways.
     ac_env.add_route(_ROUTE, _SCOPE)
-    ac_env.add_policy("alice", scopes=[_SCOPE], condition=_FAIL_OPEN)
+    ac_env.add_policy("alice", scopes=[_SCOPE], condition={"content": _FAIL_OPEN})
 
     active = CallerIdentity(user_id="alice", effective_scopes=(_SCOPE,), claims={"suspended": False})
     suspended = CallerIdentity(user_id="alice", effective_scopes=(_SCOPE,), claims={"suspended": True})
@@ -236,10 +247,12 @@ def test_a_normal_authed_request_with_the_same_condition_is_unaffected(ac_env, r
 
 
 def test_a_condition_that_no_longer_renders_denies_the_fire(ac_env, renderer, probe_op, settings) -> None:
-    # An unresolvable ``condition_id`` is never read as "no condition". The refusal must NAME
+    # An unresolvable stored condition ``id`` is never read as "no condition". The refusal must NAME
     # the principal: a generic "access denied" is also what a swallowed render error produces.
     ac_env.add_route(_ROUTE, _SCOPE)
-    ac_env.add_policy("k-fire", scopes=[_SCOPE], condition_id="cond", policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"})
+    ac_env.add_policy(
+        "k-fire", scopes=[_SCOPE], condition={"id": "cond"}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
+    )
     renderer.templates["cond"] = _EVALUABLE
 
     asyncio.run(_fire("k-fire", probe_op, settings))

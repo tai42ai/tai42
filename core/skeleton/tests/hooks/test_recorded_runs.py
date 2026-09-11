@@ -58,8 +58,8 @@ class _Tools:
 
 
 class _ResourceManager:
-    async def render_by_id_or_content(self, *, content, template_id, kwargs):
-        return content
+    async def render_templated_text(self, text, locale=None):
+        return text.content
 
 
 class _App:

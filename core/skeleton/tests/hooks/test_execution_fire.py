@@ -69,9 +69,7 @@ async def test_a_keyless_record_that_reaches_the_fire_is_refused_and_runs_nothin
     # A record that reached the manager without a key is refused BEFORE any work; there
     # is no fallback to the server's own authority.
     app = make_app()
-    keyless = HookParams.model_construct(
-        name="h", topic="t", tool="noop", execution_key="", tool_kwargs={}, expr_kwargs={}, condition_kwargs={}
-    )
+    keyless = HookParams.model_construct(name="h", topic="t", tool="noop", execution_key="", tool_kwargs={})
     with pytest.raises(PermissionDenied, match="binds no execution key"):
         await InMemoryHooksManager._run_hook(keyless, {})
     assert app.tools.runs == []
@@ -87,9 +85,7 @@ async def test_a_keyless_record_in_a_fan_out_fails_only_its_own_hook(make_app, c
     )
     # Seeded into the topic bucket directly: the model forbids a keyless record, so the
     # only way this state exists is a store that already holds one.
-    keyless = HookParams.model_construct(
-        name="bad", topic="t", tool="boom", execution_key="", tool_kwargs={}, expr_kwargs={}, condition_kwargs={}
-    )
+    keyless = HookParams.model_construct(name="bad", topic="t", tool="boom", execution_key="", tool_kwargs={})
     manager._hooks[manager.settings.get_hook_key("t")]["bad"] = keyless
 
     with caplog.at_level(logging.ERROR):

@@ -31,6 +31,7 @@ from uuid import uuid4
 
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal, SuspendedFinal
+from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.conversations import (
     GREETING_PLACEHOLDER,
@@ -1075,8 +1076,12 @@ async def _tool_kwargs(route: ConversationRoute, payload: dict[str, object]) -> 
         if "event" in payload:
             kwargs["event"] = payload["event"]
         return kwargs
+    # Render the templated payload_expr to its jq program IMMEDIATELY before evaluating it;
+    # a by-id text whose stored resource cannot be fetched raises here and is surfaced as
+    # the route's loud payload_expr error.
+    program = await tai42_app.storage.resource_manager.render_templated_text(route.payload_expr)
     # Bounded at one, so an over-emitting program is capped rather than materialized whole.
-    values = await run_jq_bounded(route.payload_expr, payload, 1)
+    values = await run_jq_bounded(program, payload, 1)
     if len(values) != 1:
         raise ValueError(f"payload_expr must emit exactly one value, emitted {'more than one' if values else 'none'}")
     kwargs = values[0]
@@ -1107,8 +1112,12 @@ async def _tool_reply(route: ConversationRoute, result: object) -> str | list[An
             "a tool target with no reply_expr must return null, a string, or a list of parts, "
             f"returned {type(result).__name__}"
         )
+    # Render the templated reply_expr to its jq program IMMEDIATELY before evaluating it; a
+    # by-id text whose stored resource cannot be fetched raises here and is surfaced as the
+    # route's loud reply_expr error.
+    program = await tai42_app.storage.resource_manager.render_templated_text(route.reply_expr)
     # Bounded at one, so an over-emitting program is capped rather than materialized whole.
-    values = await run_jq_bounded(route.reply_expr, result, 1)
+    values = await run_jq_bounded(program, result, 1)
     if len(values) != 1:
         raise ValueError(f"reply_expr must emit exactly one value, emitted {'more than one' if values else 'none'}")
     reply = values[0]

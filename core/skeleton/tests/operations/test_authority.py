@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 import pytest
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import AccessPolicy
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -93,7 +94,11 @@ async def test_execution_identity_owned_key_is_never_admin(monkeypatch: pytest.M
 async def test_execution_identity_condition_bearing_key_is_never_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     # A role-holder carries ``["*"]`` plus a jq condition; a scopes-only test would hand
     # every editor/viewer the admin path on a fire.
-    _gate_on(monkeypatch, caller_id=None, policies={"k-editor": AccessPolicy(scopes=["*"], condition=".sub != null")})
+    _gate_on(
+        monkeypatch,
+        caller_id=None,
+        policies={"k-editor": AccessPolicy(scopes=["*"], condition=TemplatedText(content=".sub != null"))},
+    )
     async with _fire_as("k-editor"):
         assert (await authority.resolve_caller()).is_admin is False
 

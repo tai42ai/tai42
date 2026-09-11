@@ -30,6 +30,7 @@ from tai42_contract.agent import (
 )
 from tai42_contract.agent.base import PresetSpec, SubAgentSpec
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 from tai42_agents import tools_agent as tools_agent_module
 from tai42_agents._internal.reject import reject_unhonored
@@ -128,12 +129,12 @@ def test_tool_input_advertises_only_the_honored_composable_fields() -> None:
         {
             "tool_names": ["search"],
             "presets": [{"name": "p", "base_tool": "example_tool", "fixed_kwargs": {}}],
-            "system_prompt": "you are helpful",
+            "system_prompt": {"content": "you are helpful"},
         }
     )
     assert parsed.presets is not None
     assert isinstance(parsed.presets[0], PresetSpec)
-    assert parsed.system_prompt == "you are helpful"
+    assert parsed.system_prompt == TemplatedText(content="you are helpful")
 
     schema = ToolsAgentInput.model_json_schema()
     assert {"system_prompt", "tool_names", "presets", "response_format"} <= set(schema["properties"])
@@ -145,7 +146,7 @@ def test_tool_input_response_format_round_trips() -> None:
     the ``from_tool_input`` mapping — the field feeds the preset/authoring path."""
     schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
     assert "response_format" in ToolsAgentInput.model_json_schema()["properties"]
-    validated = ToolsAgentInput.model_validate({"user_message": "hi", "response_format": schema})
+    validated = ToolsAgentInput.model_validate({"user_message": {"content": "hi"}, "response_format": schema})
     run_kwargs = ToolsAgent.from_tool_input(validated)
     assert run_kwargs["response_format"] == schema
 
@@ -178,9 +179,9 @@ def test_from_tool_input_maps_system_prompt_to_system_message() -> None:
     to the ``system_message`` run/astream kwarg (the mapping lives ONLY here), and
     passes every other set field through unchanged — the raw ``system_prompt`` key
     never reaches the run layer."""
-    validated = ToolsAgentInput.model_validate({"system_prompt": "SYS", "tool_names": ["search"]})
+    validated = ToolsAgentInput.model_validate({"system_prompt": {"content": "SYS"}, "tool_names": ["search"]})
     run_kwargs = ToolsAgent.from_tool_input(validated)
-    assert run_kwargs["system_message"] == "SYS"
+    assert run_kwargs["system_message"] == TemplatedText(content="SYS")
     assert "system_prompt" not in run_kwargs
     assert run_kwargs["tool_names"] == ["search"]
 
@@ -198,7 +199,9 @@ def test_from_tool_input_rejects_both_system_prompt_and_system_message() -> None
     kwarg, so setting BOTH is a conflict — rejected loudly rather than silently
     dropping one. This is what stops a run request's ``system_message`` from silently
     overriding an authored agent's baked ``system_prompt``."""
-    validated = ToolsAgentInput.model_validate({"system_prompt": "baked", "system_message": "from-request"})
+    validated = ToolsAgentInput.model_validate(
+        {"system_prompt": {"content": "baked"}, "system_message": {"content": "from-request"}}
+    )
     with pytest.raises(ValueError, match="only one of system_prompt or system_message"):
         ToolsAgent.from_tool_input(validated)
 
@@ -235,8 +238,8 @@ def test_run_resolves_tools_and_returns_final_text(
         agent.run(
             tool_names=["search"],
             presets=[preset],
-            system_message="sys",
-            user_message="hi",
+            system_message=TemplatedText(content="sys"),
+            user_message=TemplatedText(content="hi"),
         )
     )
 
@@ -277,20 +280,17 @@ def test_preset_tool_invocation_raises_on_unknown_base_tool(app_tools: Any) -> N
     assert isinstance(caught.value.__cause__, RuntimeError)
 
 
-def test_run_treats_unset_message_slots_as_not_provided(
+def test_run_unset_system_message_renders_empty(
     monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
 ) -> None:
-    """A message slot's ``content`` and ``id`` both default to the empty string
-    ``""``; the render boundary maps that empty-string sentinel to "not provided"
-    so a slot never trips the manager's exactly-one-of guard against its own unset
-    counterpart.
+    """An unset system slot (``system_message`` left ``None``) renders to the empty
+    string rather than raising, and a system slot supplied as a stored ``id`` renders
+    through the template manager's map.
 
-    Two runs pin both halves of the translation. First, a fully unset system slot:
-    ``run(user_message="hi")`` renders and returns rather than raising the
-    exactly-one-of ``ValueError`` on ``("", "")``. Second, a system rendered from a
-    ``system_message_id`` while ``system_message`` stays unset: the unset content
-    must read as "not provided" beside the real id (an un-translated ``""`` content
-    would trip the guard), so the template renders through."""
+    Two runs pin both halves. First, a fully unset system slot: ``run`` renders and
+    returns with an empty system message. Second, a system supplied as a
+    :class:`~tai42_contract.template.TemplatedText` naming a stored ``id`` renders to
+    the stored text."""
     resource_manager.templates["sys_tpl"] = "SYSTEM"
     captured: dict[str, Any] = {}
 
@@ -301,33 +301,37 @@ def test_run_treats_unset_message_slots_as_not_provided(
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
 
     agent = _get_agent()
-    result = asyncio.run(agent.run(user_message="hi"))
+    result = asyncio.run(agent.run(user_message=TemplatedText(content="hi")))
 
     assert result == "the answer"
     assert captured["system_message"] == ""
     assert captured["user_message"] == ["hi"]
 
-    result = asyncio.run(agent.run(system_message_id="sys_tpl", user_message="hi"))
+    result = asyncio.run(
+        agent.run(system_message=TemplatedText(id="sys_tpl"), user_message=TemplatedText(content="hi"))
+    )
 
     assert result == "the answer"
     assert captured["system_message"] == "SYSTEM"
 
 
-def test_run_rejects_both_system_message_and_system_message_id(
+def test_run_raises_when_required_user_message_renders_empty(
     monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
 ) -> None:
-    """The sentinel translation only maps the empty-string default to "not provided":
-    a genuine ``system_message`` AND ``system_message_id`` for the same slot still
-    trips the manager's exactly-one-of guard, so ``run`` raises ``ValueError``."""
+    """``run`` requires exactly one of ``user_message`` or ``resume``; a user message
+    authored as explicitly empty inline content (``{"content": ""}``) satisfies the
+    ``is None`` guard yet renders to nothing, so the run face refuses it loudly rather
+    than dispatching on a blank prompt. The invoke seam is faked to a completing double
+    so a dropped ``allow_empty`` refusal would return "the answer" and turn this red."""
 
-    async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:  # pragma: no cover - never reached
-        return AgentInvokeResult(output="unreached", usage=CallUsage(0, 0, None))
+    async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
+        return AgentInvokeResult(output="the answer", usage=CallUsage(0, 0, None))
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
 
     agent = _get_agent()
-    with pytest.raises(ValueError, match="not both"):
-        asyncio.run(agent.run(system_message="sys", system_message_id="sys_id", user_message="hi"))
+    with pytest.raises(ValueError, match="user_message: required message was not provided"):
+        asyncio.run(agent.run(user_message=TemplatedText(content="")))
 
 
 _STRUCTURED_SCHEMA = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
@@ -349,7 +353,7 @@ def test_run_with_response_format_returns_the_structured_object(
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
 
     agent = _get_agent()
-    result = asyncio.run(agent.run(user_message="hi", response_format=_STRUCTURED_SCHEMA))
+    result = asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=_STRUCTURED_SCHEMA))
     assert result == payload
     assert captured["response_format"] == _STRUCTURED_SCHEMA
 
@@ -371,7 +375,7 @@ def test_run_with_response_format_but_no_structured_raises_loudly(
 
     agent = _get_agent()
     with pytest.raises(RuntimeError, match="no structured_response"):
-        asyncio.run(agent.run(user_message="hi", response_format=_STRUCTURED_SCHEMA))
+        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=_STRUCTURED_SCHEMA))
 
 
 def test_run_response_format_without_title_raises_loudly(app_tools: Any, resource_manager: Any) -> None:
@@ -379,7 +383,7 @@ def test_run_response_format_without_title_raises_loudly(app_tools: Any, resourc
     rejected loudly at the run seam (the title names the structured output)."""
     agent = _get_agent()
     with pytest.raises(ValueError, match="top-level 'title'"):
-        asyncio.run(agent.run(user_message="hi", response_format={"type": "object"}))
+        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format={"type": "object"}))
 
 
 def test_run_with_subagents_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -395,7 +399,7 @@ def test_run_with_subagents_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
     agent = _get_agent()
     with pytest.raises(RuntimeError, match="subagents"):
-        asyncio.run(agent.run(user_message="hi", subagents=[SubAgentSpec(name="helper")]))
+        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), subagents=[SubAgentSpec(name="helper")]))
     assert invoked is False
 
 
@@ -412,14 +416,15 @@ def test_run_with_strategy_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
     agent = _get_agent()
     with pytest.raises(RuntimeError, match="strategy"):
-        asyncio.run(agent.run(user_message="hi", strategy="react"))
+        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), strategy="react"))
     assert invoked is False
 
 
 def test_run_renders_message_by_template_id(
     monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
 ) -> None:
-    """A ``system_message_id`` renders through the template manager's stored map."""
+    """A system message supplied as a stored ``id`` renders through the template
+    manager's stored map."""
     resource_manager.templates["greeting"] = "rendered-system"
     captured: dict[str, Any] = {}
 
@@ -430,7 +435,7 @@ def test_run_renders_message_by_template_id(
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
 
     agent = _get_agent()
-    asyncio.run(agent.run(system_message_id="greeting", user_message="hi"))
+    asyncio.run(agent.run(system_message=TemplatedText(id="greeting"), user_message=TemplatedText(content="hi")))
     assert captured["system_message"] == "rendered-system"
 
 
@@ -455,7 +460,7 @@ def test_run_honors_live_tools_and_thread_config(
         agent.run(
             tools=[live_tool],
             tool_names=["search"],
-            user_message="hi",
+            user_message=TemplatedText(content="hi"),
             thread_id="th-1",
             resume_checkpoint_id="ck-9",
         )
@@ -479,7 +484,7 @@ def test_run_keyless_does_not_pin_thread_id(
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
     agent = _get_agent()
-    asyncio.run(agent.run(user_message="hi"))
+    asyncio.run(agent.run(user_message=TemplatedText(content="hi")))
     assert captured["config"] == {"configurable": {}}
 
 
@@ -524,7 +529,7 @@ def test_run_rejects_unhonored_params(param: str, value: Any) -> None:
     fails loud with a message naming the offending parameter, on the ``run`` face."""
     agent = _get_agent()
     with pytest.raises(RuntimeError, match=rf"tools_agent\.run does not support .*\b{param}\b"):
-        asyncio.run(agent.run(user_message="hi", **{param: value}))
+        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{param: value}))
 
 
 @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
@@ -533,7 +538,7 @@ def test_astream_rejects_unhonored_params(param: str, value: Any) -> None:
     each with a message naming the offending parameter, on the ``astream`` face."""
     agent = _get_agent()
     with pytest.raises(RuntimeError, match=rf"tools_agent\.astream does not support .*\b{param}\b"):
-        _collect(agent, user_message="hi", **{param: value})
+        _collect(agent, user_message=TemplatedText(content="hi"), **{param: value})
 
 
 def test_run_honors_recursion_limit_into_config(monkeypatch: pytest.MonkeyPatch, resource_manager: Any) -> None:
@@ -548,7 +553,7 @@ def test_run_honors_recursion_limit_into_config(monkeypatch: pytest.MonkeyPatch,
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
     agent = _get_agent()
-    asyncio.run(agent.run(user_message="hi", recursion_limit=0))
+    asyncio.run(agent.run(user_message=TemplatedText(content="hi"), recursion_limit=0))
     assert captured["config"]["recursion_limit"] == 0
 
 
@@ -560,7 +565,7 @@ def test_astream_honors_recursion_limit_into_config(monkeypatch: pytest.MonkeyPa
     captured: dict[str, Any] = {}
     _script_astream(monkeypatch, [MessageFinal(text="ok")], captured)
     agent = _get_agent()
-    _collect(agent, user_message="hi", recursion_limit=0)
+    _collect(agent, user_message=TemplatedText(content="hi"), recursion_limit=0)
     assert captured["config"]["recursion_limit"] == 0
 
 
@@ -596,7 +601,10 @@ def test_face_honors_langgraph_config_thread_id(monkeypatch: pytest.MonkeyPatch,
     caller's ``langgraph_config``, so a caller pinning a conversation's checkpointed
     memory reaches the graph's checkpointer on either face."""
     config = _capture_config(
-        monkeypatch, face, user_message="hi", langgraph_config={"configurable": {"thread_id": "T-42"}}
+        monkeypatch,
+        face,
+        user_message=TemplatedText(content="hi"),
+        langgraph_config={"configurable": {"thread_id": "T-42"}},
     )
     assert config["configurable"]["thread_id"] == "T-42"
 
@@ -608,7 +616,7 @@ def test_face_honors_langgraph_config_checkpoint_id(monkeypatch: pytest.MonkeyPa
     config = _capture_config(
         monkeypatch,
         face,
-        user_message="hi",
+        user_message=TemplatedText(content="hi"),
         langgraph_config={"configurable": {"thread_id": "T-42", "checkpoint_id": "CK-7"}},
     )
     assert config["configurable"]["checkpoint_id"] == "CK-7"
@@ -622,7 +630,7 @@ def test_face_explicit_memory_keys_win_over_langgraph_config(monkeypatch: pytest
     config = _capture_config(
         monkeypatch,
         face,
-        user_message="hi",
+        user_message=TemplatedText(content="hi"),
         thread_id="explicit",
         resume_checkpoint_id="explicit-cp",
         langgraph_config={"configurable": {"thread_id": "from-config", "checkpoint_id": "from-config-cp"}},
@@ -643,7 +651,9 @@ def test_face_preserves_the_rest_of_langgraph_config(monkeypatch: pytest.MonkeyP
         "tags": ["t1"],
         "metadata": {"origin": "api"},
     }
-    config = _capture_config(monkeypatch, face, user_message="hi", thread_id="T-1", langgraph_config=base)
+    config = _capture_config(
+        monkeypatch, face, user_message=TemplatedText(content="hi"), thread_id="T-1", langgraph_config=base
+    )
 
     assert config["configurable"] == {"tenant": "acme", "thread_id": "T-1"}
     assert config["recursion_limit"] == 12
@@ -663,7 +673,11 @@ def test_face_recursion_limit_param_overlays_langgraph_config(monkeypatch: pytes
     """An explicit ``recursion_limit`` wins over one carried in the caller's config,
     identically on both faces."""
     config = _capture_config(
-        monkeypatch, face, user_message="hi", recursion_limit=3, langgraph_config={"recursion_limit": 12}
+        monkeypatch,
+        face,
+        user_message=TemplatedText(content="hi"),
+        recursion_limit=3,
+        langgraph_config={"recursion_limit": 12},
     )
     assert config["recursion_limit"] == 3
 
@@ -685,10 +699,8 @@ def test_astream_renders_messages_by_template_id(monkeypatch: pytest.MonkeyPatch
     agent = _get_agent()
     _collect(
         agent,
-        system_message_id="sys-tpl",
-        user_message_id="user-tpl",
-        system_message_kwargs={"a": 1},
-        user_message_kwargs={"b": 2},
+        system_message=TemplatedText(id="sys-tpl", kwargs={"a": 1}),
+        user_message=TemplatedText(id="user-tpl", kwargs={"b": 2}),
     )
 
     assert captured["system_message"] == "rendered-system"
@@ -701,7 +713,7 @@ def test_astream_unknown_template_id_raises_loudly(monkeypatch: pytest.MonkeyPat
     _script_astream(monkeypatch, [MessageFinal(text="ok")], {})
     agent = _get_agent()
     with pytest.raises(RuntimeError, match="unknown template id: nope"):
-        _collect(agent, user_message_id="nope")
+        _collect(agent, user_message=TemplatedText(id="nope"))
 
 
 @pytest.mark.parametrize("face", ["run", "astream"])
@@ -709,7 +721,7 @@ def test_face_rejects_response_format_without_title(monkeypatch: pytest.MonkeyPa
     """A ``response_format`` dict with no top-level ``"title"`` (the structured-output
     name) is rejected loudly on both faces rather than handed to the graph."""
     with pytest.raises(ValueError, match="top-level 'title'"):
-        _capture_config(monkeypatch, face, user_message="hi", response_format={"type": "object"})
+        _capture_config(monkeypatch, face, user_message=TemplatedText(content="hi"), response_format={"type": "object"})
 
 
 @pytest.mark.parametrize("face", ["run", "astream"])
@@ -719,7 +731,7 @@ def test_face_rejects_oneof_response_format_with_untitled_variant(monkeypatch: p
     even though the container carries a top-level title."""
     schema = {"title": "Top", "oneOf": [{"title": "A", "type": "object"}, {"type": "object"}]}
     with pytest.raises(ValueError, match="oneOf variants must each"):
-        _capture_config(monkeypatch, face, user_message="hi", response_format=schema)
+        _capture_config(monkeypatch, face, user_message=TemplatedText(content="hi"), response_format=schema)
 
 
 # --------------------------------------------------------------------------
@@ -764,8 +776,8 @@ def test_astream_emits_the_full_event_taxonomy(monkeypatch: pytest.MonkeyPatch) 
     events = _collect(
         agent,
         tools=[live_tool],
-        system_message="sys",
-        user_message="hi",
+        system_message=TemplatedText(content="sys"),
+        user_message=TemplatedText(content="hi"),
         thread_id="th-1",
         resume_checkpoint_id="ck-9",
     )
@@ -808,7 +820,7 @@ def test_astream_resolves_baked_tool_names_and_presets(monkeypatch: pytest.Monke
     _script_astream(monkeypatch, [MessageFinal(text="ok")], captured)
     agent = _get_agent()
     preset = PresetSpec(name="my_preset", base_tool="example_tool", fixed_kwargs={"example_config": {"nodes": []}})
-    _collect(agent, tool_names=["search"], presets=[preset], user_message="hi")
+    _collect(agent, tool_names=["search"], presets=[preset], user_message=TemplatedText(content="hi"))
     assert [tool.name for tool in captured["tools"]] == ["search", "my_preset"]
 
 
@@ -816,14 +828,14 @@ def test_astream_with_subagents_raises_loudly() -> None:
     """``astream`` never silently drops baked ``subagents`` — parity with ``run``."""
     agent = _get_agent()
     with pytest.raises(RuntimeError, match="subagents"):
-        _collect(agent, user_message="hi", subagents=[SubAgentSpec(name="helper")])
+        _collect(agent, user_message=TemplatedText(content="hi"), subagents=[SubAgentSpec(name="helper")])
 
 
 def test_astream_with_strategy_raises_loudly() -> None:
     """``astream`` never silently drops a baked ``strategy`` — parity with ``run``."""
     agent = _get_agent()
     with pytest.raises(RuntimeError, match="strategy"):
-        _collect(agent, user_message="hi", strategy="react")
+        _collect(agent, user_message=TemplatedText(content="hi"), strategy="react")
 
 
 def test_astream_with_response_format_emits_structured_final(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -833,7 +845,7 @@ def test_astream_with_response_format_emits_structured_final(monkeypatch: pytest
     captured: dict[str, Any] = {}
     _script_astream(monkeypatch, [MessageFinal(text="text"), StructuredFinal(data={"value": 7})], captured)
     agent = _get_agent()
-    events = _collect(agent, user_message="hi", response_format=_STRUCTURED_SCHEMA)
+    events = _collect(agent, user_message=TemplatedText(content="hi"), response_format=_STRUCTURED_SCHEMA)
 
     finals = [event for event in events if isinstance(event, StructuredFinal)]
     assert len(finals) == 1
@@ -849,14 +861,14 @@ def test_astream_with_response_format_but_no_structured_raises_loudly(monkeypatc
     _script_astream(monkeypatch, [MessageFinal(text="text only")], captured)
     agent = _get_agent()
     with pytest.raises(RuntimeError, match="no structured output"):
-        _collect(agent, user_message="hi", response_format=_STRUCTURED_SCHEMA)
+        _collect(agent, user_message=TemplatedText(content="hi"), response_format=_STRUCTURED_SCHEMA)
 
 
 def test_astream_without_resume_omits_checkpoint_id(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
     _script_astream(monkeypatch, [MessageFinal(text="ok")], captured)
     agent = _get_agent()
-    _collect(agent, user_message="hi")
+    _collect(agent, user_message=TemplatedText(content="hi"))
     assert captured["config"] == {"configurable": {}}
 
 
@@ -869,7 +881,7 @@ def test_astream_rejects_blank_memory_key(key: str, blank: str) -> None:
     ``None`` is the unset path."""
     agent = _get_agent()
     with pytest.raises(ValueError, match=rf"tools_agent\.astream: {key} must be a non-empty string"):
-        _collect(agent, user_message="hi", **{key: blank})
+        _collect(agent, user_message=TemplatedText(content="hi"), **{key: blank})
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
@@ -880,7 +892,7 @@ def test_run_rejects_blank_memory_key(key: str, blank: str, app_tools: Any, reso
     agent = _get_agent()
     with pytest.raises(ValueError, match=rf"tools_agent\.run: {key} must be a non-empty string"):
         # The dynamic key spreads into a typed run parameter, so the arg-type mismatch is expected.
-        asyncio.run(agent.run(user_message="hi", **{key: blank}))  # type: ignore[arg-type]
+        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{key: blank}))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("value", [123, ["x"]])
@@ -895,7 +907,7 @@ def test_astream_rejects_non_string_memory_key(key: str, value: Any) -> None:
         TypeError,
         match=rf"tools_agent\.astream: {key} must be a string or None; got {type(value).__name__}",
     ):
-        _collect(agent, user_message="hi", **{key: value})
+        _collect(agent, user_message=TemplatedText(content="hi"), **{key: value})
 
 
 @pytest.mark.parametrize("value", [123, ["x"]])
@@ -909,7 +921,7 @@ def test_run_rejects_non_string_memory_key(key: str, value: Any, app_tools: Any,
         match=rf"tools_agent\.run: {key} must be a string or None; got {type(value).__name__}",
     ):
         # The dynamic key spreads into a typed run parameter, so the arg-type mismatch is expected.
-        asyncio.run(agent.run(user_message="hi", **{key: value}))  # type: ignore[arg-type]
+        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{key: value}))  # type: ignore[arg-type]
 
 
 def test_unhonored_cases_cover_the_full_reasons_map() -> None:
@@ -964,7 +976,7 @@ def test_astream_keyless_run_does_not_pin_thread_id_none(monkeypatch: pytest.Mon
     captured: dict[str, Any] = {}
     _script_astream(monkeypatch, [MessageFinal(text="ok")], captured)
     agent = _get_agent()
-    _collect(agent, user_message="hi")
+    _collect(agent, user_message=TemplatedText(content="hi"))
     assert "thread_id" not in captured["config"]["configurable"]
 
 
@@ -983,7 +995,7 @@ def test_astream_emits_structured_final(monkeypatch: pytest.MonkeyPatch) -> None
     ]
     _script_astream(monkeypatch, script, {})
     agent = _get_agent()
-    events = _collect(agent, user_message="hi")
+    events = _collect(agent, user_message=TemplatedText(content="hi"))
 
     finals = [event for event in events if isinstance(event, StructuredFinal)]
     assert len(finals) == 1
@@ -1003,7 +1015,7 @@ def test_drain_structured_stream_returns_data(monkeypatch: pytest.MonkeyPatch) -
     agent = _get_agent()
 
     async def go() -> Any:
-        return await agent._drain(agent.astream(user_message="hi"), response_format=Answer)
+        return await agent._drain(agent.astream(user_message=TemplatedText(content="hi")), response_format=Answer)
 
     assert asyncio.run(go()) == payload
 
@@ -1015,7 +1027,7 @@ def test_astream_never_emits_an_interrupt(monkeypatch: pytest.MonkeyPatch) -> No
 
     _script_astream(monkeypatch, [MessageDelta(text="hi"), MessageFinal(text="hi")], {})
     agent = _get_agent()
-    events = _collect(agent, user_message="hi")
+    events = _collect(agent, user_message=TemplatedText(content="hi"))
     assert not any(isinstance(event, InterruptFinal) for event in events)
 
 
@@ -1033,7 +1045,9 @@ def test_run_threads_content_kwargs_to_the_invoke_seam(
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
     agent = _get_agent()
     cache = {"cache_control": {"type": "ephemeral"}}
-    asyncio.run(agent.run(user_message="hi", system_content_kwargs=cache, user_content_kwargs=cache))
+    asyncio.run(
+        agent.run(user_message=TemplatedText(content="hi"), system_content_kwargs=cache, user_content_kwargs=cache)
+    )
 
     assert captured["system_content_kwargs"] == cache
     assert captured["user_content_kwargs"] == cache
@@ -1046,7 +1060,7 @@ def test_astream_threads_content_kwargs_to_the_event_seam(monkeypatch: pytest.Mo
     _script_astream(monkeypatch, [MessageFinal(text="hi")], captured)
     agent = _get_agent()
     cache = {"cache_control": {"type": "ephemeral"}}
-    _collect(agent, user_message="hi", system_content_kwargs=cache, user_content_kwargs=cache)
+    _collect(agent, user_message=TemplatedText(content="hi"), system_content_kwargs=cache, user_content_kwargs=cache)
 
     assert captured["system_content_kwargs"] == cache
     assert captured["user_content_kwargs"] == cache

@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageFinal, RunUsage, StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.llm.settings import llm_provider_settings
 
 from tai42_agents._internal.base_tool_agent import ainvoke_tools_agent
@@ -36,12 +37,8 @@ from tai42_agents.voting_agent.prompt import JUDGE_SYSTEM_MESSAGE, VOTER_SYSTEM_
 
 
 async def _run_voters(
-    judge_message: str | None,
-    voter_message: str | None,
-    judge_message_id: str | None,
-    voter_message_id: str | None,
-    judge_message_kwargs: dict[str, Any] | None,
-    voter_message_kwargs: dict[str, Any] | None,
+    judge_message: TemplatedText | None,
+    voter_message: TemplatedText | None,
     judge_llm_provider: str | None,
     judge_llm_kwargs: dict[str, Any] | None,
     voters: list[VoterSpec] | None,
@@ -60,12 +57,8 @@ async def _run_voters(
     Each ``VoteInfo.model`` records the model the voter actually ran on when known,
     else the model its spec pinned, else ``None`` — never a placeholder.
     """
-    rendered_judge_message: str = await render_message(
-        judge_message, judge_message_id, judge_message_kwargs, allow_empty=False
-    )
-    rendered_voter_message: str = await render_message(
-        voter_message, voter_message_id, voter_message_kwargs, allow_empty=False
-    )
+    rendered_judge_message: str = await render_message(judge_message, allow_empty=False, field="judge_message")
+    rendered_voter_message: str = await render_message(voter_message, allow_empty=False, field="voter_message")
     resolved_judge_llm_provider = judge_llm_provider or llm_provider_settings().llm
     resolved_judge_llm_kwargs = judge_llm_kwargs or {}
 
@@ -152,10 +145,10 @@ _UNHONORED_REASONS: dict[str, str] = {
         "use user_content_kwargs to mark the judge's last user turn (the final voter verdict when voters are present)"
     ),
 }
-# The unhonored parameters whose unset default is an empty sequence/string; every
-# other defaults to ``None`` and is set when not ``None``.
+# The unhonored parameters whose unset default is an empty sequence; every other
+# defaults to ``None`` and is set when not ``None``.
 _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset(
-    {"tools", "tool_names", "presets", "subagents", "skills", "inline_skills", "system_message", "user_message"}
+    {"tools", "tool_names", "presets", "subagents", "skills", "inline_skills"}
 )
 
 
@@ -198,12 +191,8 @@ class VotingAgentInput(BaseModel):
 
     judge_tools: list[str] | None = None
     voter_tools: list[str] | None = None
-    judge_message: str | None = ""
-    voter_message: str | None = ""
-    judge_message_id: str | None = ""
-    voter_message_id: str | None = ""
-    judge_message_kwargs: dict[str, Any] | None = None
-    voter_message_kwargs: dict[str, Any] | None = None
+    judge_message: TemplatedText | None = None
+    voter_message: TemplatedText | None = None
     judge_llm_provider: str | None = None
     checkpoint_provider: str | None = None
     judge_llm_kwargs: dict[str, Any] | None = None
@@ -246,12 +235,8 @@ class VotingAgent(Agent):
         *,
         judge_tools: list[str] | None = None,
         voter_tools: list[str] | None = None,
-        judge_message: str = "",
-        voter_message: str = "",
-        judge_message_id: str = "",
-        voter_message_id: str = "",
-        judge_message_kwargs: dict[str, Any] | None = None,
-        voter_message_kwargs: dict[str, Any] | None = None,
+        judge_message: TemplatedText | None = None,
+        voter_message: TemplatedText | None = None,
         judge_llm_provider: str | None = None,
         checkpoint_provider: str | None = None,
         judge_llm_kwargs: dict[str, Any] | None = None,
@@ -285,10 +270,6 @@ class VotingAgent(Agent):
         user_messages, voters_info, judge_llm_provider, judge_llm_kwargs = await _run_voters(
             judge_message,
             voter_message,
-            judge_message_id,
-            voter_message_id,
-            judge_message_kwargs,
-            voter_message_kwargs,
             judge_llm_provider,
             judge_llm_kwargs,
             voters,

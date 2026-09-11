@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
 
 
@@ -95,19 +96,22 @@ class RecordingBackends:
 
 
 class StubResourceManager:
-    """Renders by echoing the inline content (or a canned template body)."""
+    """Mirrors ``ResourceManager.render_templated_text``: inline ``content`` renders to
+    itself, a stored ``id`` resolves through this double's own template map, and a
+    missing id — or the by-construction-impossible no-source text — raises loudly
+    instead of silently rendering empty."""
 
     def __init__(self) -> None:
         self.templates: dict[str, str] = {}
 
-    async def render_by_id_or_content(
-        self, *, content: str | None, template_id: str | None, kwargs: dict[str, Any] | None
-    ) -> str:
-        if content is not None:
-            return content
-        if template_id is not None:
-            return self.templates[template_id]
-        return ""
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.content is not None:
+            return text.content
+        if text.id is None:
+            raise ValueError("a templated text sets exactly one of 'content' or 'id'; neither was supplied")
+        if text.id not in self.templates:
+            raise KeyError(f"no stored resource for template id {text.id!r}")
+        return self.templates[text.id]
 
 
 class StubStorage:

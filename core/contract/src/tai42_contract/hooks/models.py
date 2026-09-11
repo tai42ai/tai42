@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from tai42_contract.conversations import ConversationTargetKind
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.states.models import SUBJECT_KIND_RE
-from tai42_contract.template import ConditionMixin, ExprMixin
+from tai42_contract.template import ConditionMixin, ExprMixin, TemplatedText
 
 # A hook's ``topic`` is dispatched as ONE path segment of the public webhook URL
 # (``/universal_webhook/{topic}``), and its ``name`` addresses the hook on every
@@ -40,17 +40,18 @@ class TopicVerifierBinding(BaseModel):
 class HookSubject(BaseModel):
     """The optional state subject a hook fire targets: the conversation-target scope
     ``(target_kind, target_name)``, the subject ``kind`` (matching
-    :data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` jq evaluated
-    over the event payload at fire — it must yield a non-empty string, else the fire
-    fails loudly like any hook error. Frozen; deposited as the ambient state context so
-    a state write during the fire is keyed and attributed to the hook."""
+    :data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text
+    carrying (inline or by stored id) a jq program evaluated over the event payload at
+    fire — it must yield a non-empty string, else the fire fails loudly like any hook
+    error. Frozen; deposited as the ambient state context so a state write during the fire
+    is keyed and attributed to the hook."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     target_kind: ConversationTargetKind
     target_name: str = Field(min_length=1)
     kind: str
-    key_expr: str = Field(min_length=1)
+    key_expr: TemplatedText
 
     @field_validator("kind")
     @classmethod
@@ -97,12 +98,6 @@ class HookRegister(ConditionMixin, ExprMixin):
     # The OPTIONAL door-layer state binding applied around the hook's tool fire; deposited
     # on the ambient dispatch context before ``run_recorded`` reaches ``run_tool``.
     state_binding: StateBinding | None = None
-
-    # ``expr``/``expr_id``/``condition``/``condition_id`` come from the mixins;
-    # the ``*_kwargs`` fields are re-declared non-optional (hooks default them
-    # to {} and never carry None).
-    expr_kwargs: dict[str, Any] = Field(default_factory=dict)  # pyright: ignore[reportIncompatibleVariableOverride]
-    condition_kwargs: dict[str, Any] = Field(default_factory=dict)  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class HookParams(HookRegister):

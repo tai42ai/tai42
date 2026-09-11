@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from starlette.requests import Request
 from tai42_contract.hooks.models import HookParams
+from tai42_contract.template import TemplatedText
 
 # The unit-suite conftest bound this singleton as the global ``tai42_app`` handle
 # (the routers module below registers its route through the handle at import);
@@ -80,7 +81,7 @@ def test_webhook_fires_registered_hook_tool(monkeypatch: pytest.MonkeyPatch):
                     tool="run_event_flow",
                     execution_key="k-fire",
                     execution_key_fingerprint="fp-fire",
-                    expr=".payload",
+                    expr=TemplatedText(content=".payload"),
                     tool_kwargs={"source": "webhook"},
                 )
             )

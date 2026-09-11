@@ -34,6 +34,7 @@ from tai42_kit.llm.settings import llm_settings
 
 from tai42_agents._internal.park import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _tool_error_middleware
+from tai42_agents._internal.render import render_message
 from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents.langchain_deep_agent.backend import SKILLS_ROOT, build_backend
 from tai42_agents.langchain_deep_agent.sandbox_backend import build_sandbox_backend
@@ -230,7 +231,10 @@ async def _resolve_subagent(
     sub: SubAgent = {
         "name": spec.name,
         "description": spec.description,
-        "system_prompt": spec.system_prompt,
+        # Render the subagent's own system instructions here, at the point deepagents
+        # consumes them: a stored id resolves through the manager (a missing one raises),
+        # an inline body fills its kwargs.
+        "system_prompt": await render_message(spec.system_prompt),
     }
     if spec.tools:
         sub["tools"] = list(spec.tools)
@@ -301,7 +305,7 @@ async def _compile_nested_subagent(
     runnable = create_deep_agent(
         model=model,
         tools=list(child.tools) or parent_tools,
-        system_prompt=child.system_prompt,
+        system_prompt=await render_message(child.system_prompt),
         skills=child_skills,
         backend=backend,
         store=store,

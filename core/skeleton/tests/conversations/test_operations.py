@@ -10,6 +10,7 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
 from tai42_skeleton.conversations import records as records_module
@@ -113,12 +114,36 @@ class _FakeTools:
         return object()
 
 
+class _FakeResourceManager:
+    """Renders a route jq slot: inline ``content`` verbatim, or a stored ``id`` from a
+    per-id map — an unmapped id is the loud not-found the real manager raises."""
+
+    def __init__(self, by_id: dict[str, str] | None = None) -> None:
+        self._by_id = by_id or {}
+
+    async def render_templated_text(self, text, locale=None):
+        if text.id is not None:
+            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+
+            if text.id not in self._by_id:
+                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+            return self._by_id[text.id]
+        assert text.content is not None
+        return text.content
+
+
+class _FakeStorage:
+    def __init__(self, resource_manager: _FakeResourceManager) -> None:
+        self.resource_manager = resource_manager
+
+
 class _FakeApp:
-    def __init__(self, agents: dict[str, Agent], tools: set[str]) -> None:
+    def __init__(self, agents: dict[str, Agent], tools: set[str], by_id: dict[str, str] | None = None) -> None:
         self.agents = _FakeAgents(agents)
         self.tools = _FakeTools(tools)
         self._target_validator_registry = TargetBindValidatorRegistry()
         self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
+        self.storage = _FakeStorage(_FakeResourceManager(by_id))
 
 
 class _FakeRouteRequest:
@@ -162,15 +187,20 @@ def wired(monkeypatch, record_redis):
     monkeypatch.setattr(ops, "assert_execution_key_bindable", _bindable)
     monkeypatch.setattr(ops, "resolve_caller", _caller)
 
+    from tai42_contract.app import tai42_app
+
     from tai42_skeleton.app import instance
 
-    monkeypatch.setattr(
-        instance,
-        "app",
-        _FakeApp({"relay": _MemoryAgent(), "mute": _MemorylessAgent()}, {"echo-tool"}),
-        raising=False,
+    app = _FakeApp(
+        {"relay": _MemoryAgent(), "mute": _MemorylessAgent()},
+        {"echo-tool"},
+        by_id={"route-payload": "{message: .message}", "route-reply": ".result.reply // null"},
     )
-    return manager
+    monkeypatch.setattr(instance, "app", app, raising=False)
+    # The create door renders a tool route's payload/reply jq slots through the bound
+    # resource manager before compiling them, so bind the same fake as ``tai42_app``.
+    with tai42_app.bound(app):
+        yield manager
 
 
 async def test_create_api_route_mints_and_shows_the_secret_once(wired):
@@ -540,8 +570,8 @@ async def test_create_tool_route_validates_tool_and_compiles_exprs(wired):
         door="api",
         target_kind="tool",
         target_name="echo-tool",
-        payload_expr="{message: .message, who: .sender}",
-        reply_expr=".reply // null",
+        payload_expr=TemplatedText(content="{message: .message, who: .sender}"),
+        reply_expr=TemplatedText(content=".reply // null"),
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
@@ -549,8 +579,40 @@ async def test_create_tool_route_validates_tool_and_compiles_exprs(wired):
     row = wired.rows["chat"]
     assert row.target_kind == "tool"
     assert row.target_name == "echo-tool"
-    assert row.payload_expr == "{message: .message, who: .sender}"
-    assert row.reply_expr == ".reply // null"
+    assert row.payload_expr == TemplatedText(content="{message: .message, who: .sender}")
+    assert row.reply_expr == TemplatedText(content=".reply // null")
+
+
+async def test_create_tool_route_renders_and_stores_by_id_exprs(wired):
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="tool",
+        target_name="echo-tool",
+        payload_expr=TemplatedText(id="route-payload"),
+        reply_expr=TemplatedText(id="route-reply"),
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    assert result["created"] is True
+    row = wired.rows["chat"]
+    # The stored shape holds the templated text by id; the create rendered it (through the
+    # bound resource manager) only to compile-check the jq it resolves to.
+    assert row.payload_expr == TemplatedText(id="route-payload")
+    assert row.reply_expr == TemplatedText(id="route-reply")
+
+
+async def test_create_rejects_unfetchable_by_id_payload_expr(wired):
+    with pytest.raises(BadRequestError, match="payload_expr references stored id 'ghost'"):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="tool",
+            target_name="echo-tool",
+            payload_expr=TemplatedText(id="ghost"),
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
 
 
 async def test_create_rejects_unknown_tool(wired):
@@ -572,7 +634,7 @@ async def test_create_rejects_invalid_payload_expr(wired):
             door="api",
             target_kind="tool",
             target_name="echo-tool",
-            payload_expr="{unterminated",
+            payload_expr=TemplatedText(content="{unterminated"),
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
@@ -585,7 +647,7 @@ async def test_create_rejects_invalid_reply_expr(wired):
             door="api",
             target_kind="tool",
             target_name="echo-tool",
-            reply_expr=".[",
+            reply_expr=TemplatedText(content=".["),
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
@@ -598,7 +660,7 @@ async def test_create_rejects_exprs_on_agent_target(wired):
             door="api",
             target_kind="agent",
             target_name="relay",
-            reply_expr=".reply",
+            reply_expr=TemplatedText(content=".reply"),
             execution_key="svc",
             callback_url="https://example.com/cb",
         )

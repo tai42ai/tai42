@@ -361,7 +361,7 @@ def test_cache_and_chain_compose_over_agent_run_tool_across_a_real_run():
                     "text": "hi",
                     "times": 2,
                     "note": "n",
-                    "jq_expression": "{text: .}",
+                    "jq_expression": {"content": "{text: .}"},
                     "next_tool_name": "shout",
                 },
             )
@@ -398,7 +398,7 @@ def test_chain_over_agent_run_tool_omitting_an_optional_preserves_set_fields_onl
         async with app.app_context(manifest):
             chained = await app.tools.run_tool(
                 "echo_fields_chain",
-                {"text": "hi", "jq_expression": "{text: .}", "next_tool_name": "shout"},
+                {"text": "hi", "jq_expression": {"content": "{text: .}"}, "next_tool_name": "shout"},
             )
             # Only ``text`` was supplied, so the agent echoed only ``text`` (no sentinel
             # for the omitted ``times``/``note``), and ``shout`` returned it unchanged.

@@ -26,6 +26,7 @@ from tai42_contract.agent import (
     StreamEvent,
 )
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 AGENT_NAME = "fake_streamer"
 
@@ -92,4 +93,4 @@ def test_astream_emits_the_exact_scripted_sequence() -> None:
 
 def test_run_drains_the_stream_to_the_final_text() -> None:
     agent = tai42_app.agents.get_agent(AGENT_NAME)
-    assert asyncio.run(agent.run(user_message="hi")) == "hello world"
+    assert asyncio.run(agent.run(user_message=TemplatedText(content="hi"))) == "hello world"

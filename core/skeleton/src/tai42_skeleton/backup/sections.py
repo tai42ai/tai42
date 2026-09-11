@@ -20,6 +20,7 @@ from typing import Any
 
 from pydantic import ValidationError
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.backup.registry import current_import_mode
 
@@ -153,18 +154,21 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
             report["skipped_existing"] += 1
             continue
         description = token.get("description", "")
+        stored_condition = token.get("condition")
         try:
+            # The stored condition is the templated-text document ``model_dump`` wrote;
+            # parse it back through the contract so a malformed one raises here (a loud
+            # per-token rejection), never restores as a silently dropped condition.
+            condition = TemplatedText.model_validate(stored_condition) if stored_condition is not None else None
             api_key, _committed_body, _fingerprint = await management.add_user_api_key(
                 user_id,
                 description,
                 token.get("scopes") or [],
                 token.get("policy_data"),
-                token.get("condition"),
-                token.get("condition_id"),
-                token.get("condition_kwargs"),
+                condition,
             )
         except ValueError as exc:
-            # Per-token failure (collided id, absent scope) surfaced loudly; the rest still restore.
+            # Per-token failure (collided id, absent scope, bad condition) surfaced loudly; the rest still restore.
             report["errors"].append(f"token {user_id!r}: {exc}")
             report["skipped"] += 1
             continue
@@ -614,7 +618,7 @@ def register_core_sections(registry: Any) -> None:
     registry.register_section("access_control", _export_access_control, _import_access_control, secret=True)
     registry.register_section("sub_mcp", _export_sub_mcp, _import_sub_mcp)
     # Before ``webhooks``/``conversations``: their token-free scan renders policy
-    # conditions carried by ``condition_id``, which are templates this section restores.
+    # conditions naming a stored resource by id, which are templates this section restores.
     registry.register_section("templates", _export_templates, _import_templates)
     # AFTER ``access_control`` and ``templates`` (records decided against the live policy
     # store, which those restore). secret=True: the bulk export aggregates hook

@@ -20,6 +20,7 @@ import logging
 from collections.abc import AsyncIterator, Sequence
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain.agents import create_agent
@@ -34,6 +35,7 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.agent import ToolResultStep
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 from tai42_agents._internal import recovery as rec
 from tai42_agents._internal.stream_events import aproject_agent_events
@@ -158,7 +160,7 @@ class TestDeepAgentRecovery:
         self._seams(monkeypatch, model, saver, store)
         asyncio.run(
             tai42_app.agents.get_agent("langchain_deep_agent").run(
-                tools=[], user_message="second", thread_id="t-deep-repair"
+                tools=[], user_message=TemplatedText(content="second"), thread_id="t-deep-repair"
             )
         )
 
@@ -182,7 +184,9 @@ class TestDeepAgentRecovery:
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
             out = asyncio.run(
                 tai42_app.agents.get_agent("langchain_deep_agent").run(
-                    tools=[_raising_tool(ToolException("tool said no"))], user_message="hi", thread_id="t-deep-tool"
+                    tools=[_raising_tool(ToolException("tool said no"))],
+                    user_message=TemplatedText(content="hi"),
+                    thread_id="t-deep-tool",
                 )
             )
 
@@ -200,7 +204,9 @@ class TestDeepAgentRecovery:
         with pytest.raises(RuntimeError, match="infra down"):
             asyncio.run(
                 tai42_app.agents.get_agent("langchain_deep_agent").run(
-                    tools=[_raising_tool(RuntimeError("infra down"))], user_message="hi", thread_id="t-deep-rt"
+                    tools=[_raising_tool(RuntimeError("infra down"))],
+                    user_message=TemplatedText(content="hi"),
+                    thread_id="t-deep-rt",
                 )
             )
 
@@ -212,7 +218,7 @@ class TestDeepAgentRecovery:
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
             asyncio.run(
                 tai42_app.agents.get_agent("langchain_deep_agent").run(
-                    tools=[], user_message="hello", thread_id="t-deep-fresh"
+                    tools=[], user_message=TemplatedText(content="hello"), thread_id="t-deep-fresh"
                 )
             )
 
@@ -230,7 +236,9 @@ class TestDeepAgentRecovery:
             return worker
 
         monkeypatch.setattr(fac, "get_llm_async", get_llm)
-        spec = ResolvedSubAgentSpec(name="worker", description="w", system_prompt="sp", tools=[tool], llm_provider="w")
+        spec = ResolvedSubAgentSpec(
+            name="worker", description="w", system_prompt=TemplatedText(content="sp"), tools=[tool], llm_provider="w"
+        )
         return await fac.build_langchain_deep_agent(
             llm=parent, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], subagents=[spec]
         )
@@ -291,12 +299,16 @@ class TestDeepAgentRecovery:
         leaf_spec = ResolvedSubAgentSpec(
             name="leaf",
             description="l",
-            system_prompt="sp",
+            system_prompt=TemplatedText(content="sp"),
             tools=[_raising_tool(ToolException("tool said no"))],
             llm_provider="leaf",
         )
         mid_spec = ResolvedSubAgentSpec(
-            name="mid", description="m", system_prompt="sp", llm_provider="mid", subagents=[leaf_spec]
+            name="mid",
+            description="m",
+            system_prompt=TemplatedText(content="sp"),
+            llm_provider="mid",
+            subagents=[leaf_spec],
         )
 
         async def build() -> Any:
@@ -389,7 +401,10 @@ class TestDeepAgentRecovery:
 
         monkeypatch.setattr(fac, "create_deep_agent", fake_create)
         child = ResolvedSubAgentSpec(
-            name="leaf", description="l", system_prompt="sp", tools=[_raising_tool(ToolException("x"))]
+            name="leaf",
+            description="l",
+            system_prompt=TemplatedText(content="sp"),
+            tools=[_raising_tool(ToolException("x"))],
         )
         asyncio.run(
             fac._compile_nested_subagent(
@@ -417,7 +432,7 @@ class TestRefineAgentRecovery:
         )
         monkeypatch.setattr(fagent, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
         monkeypatch.setattr(fagent, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
-        monkeypatch.setattr(fagent, "context_overflow_middlewares", lambda system_prompt=None: [])
+        monkeypatch.setattr(fagent, "context_overflow_middlewares", AsyncMock(return_value=[]))
 
         async def get_llm(*, provider: str, **k: Any) -> Any:
             return models[provider]
@@ -437,8 +452,8 @@ class TestRefineAgentRecovery:
     def _run(self, **kwargs: Any) -> Any:
         return asyncio.run(
             tai42_app.agents.get_agent("refine_agent").run(
-                evaluator_message="draft it",
-                critic_message="review it",
+                evaluator_message=TemplatedText(content="draft it"),
+                critic_message=TemplatedText(content="review it"),
                 evaluator_llm_provider="eval",
                 critic_llm_provider="crit",
                 evaluator_langgraph_config=_thread("eval-t"),
@@ -560,7 +575,9 @@ class TestRetrievalAgentRecovery:
         asyncio.run(seed())
         self._seams(monkeypatch, model, saver)
         out = asyncio.run(
-            tai42_app.agents.get_agent("retrieval_tools_agent").run(user_message="second", thread_id="t-retr-repair")
+            tai42_app.agents.get_agent("retrieval_tools_agent").run(
+                user_message=TemplatedText(content="second"), thread_id="t-retr-repair"
+            )
         )
         assert out == "done"
 

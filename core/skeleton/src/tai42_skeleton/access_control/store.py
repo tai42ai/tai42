@@ -49,7 +49,7 @@ from tai42_skeleton.access_control.settings import AccessControlSettings, access
 from tai42_skeleton.db import SKELETON_COMPONENT
 
 # The policy body shape enforcement reads and the management surface writes.
-_POLICY_COLUMNS = "scopes, policy_data, condition, condition_id, condition_kwargs"
+_POLICY_COLUMNS = "scopes, policy_data, condition"
 
 
 def _normalize_url(url: str) -> str:
@@ -65,14 +65,15 @@ def _normalize_url(url: str) -> str:
 
 
 def _policy_body(row: tuple[Any, ...]) -> dict[str, Any]:
-    """Assemble the canonical policy body from a ``_POLICY_COLUMNS`` row."""
-    scopes, policy_data, condition, condition_id, condition_kwargs = row
+    """Assemble the canonical policy body from a ``_POLICY_COLUMNS`` row.
+
+    ``condition`` is the stored templated-text document (``{content|id, kwargs}``) or
+    ``None`` when no condition is configured."""
+    scopes, policy_data, condition = row
     return {
         "scopes": list(scopes or []),
         "policy_data": policy_data or {},
         "condition": condition,
-        "condition_id": condition_id,
-        "condition_kwargs": condition_kwargs,
     }
 
 
@@ -386,23 +387,20 @@ class PostgresAccessControlStore:
         user_id: str,
         scopes: list[str],
         policy_data: dict[str, Any] | None = None,
-        condition: str | None = None,
-        condition_id: str | None = None,
-        condition_kwargs: dict[str, Any] | None = None,
+        condition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Write the policy row for a freshly-minted key and return the committed
-        body. The ``UNIQUE (user_id)`` constraint rejects a racing duplicate mint as
-        the authority; that surfaces loudly (never a silent second row). Any supplied
-        scope is validated against live routes and its route rows are locked
-        ``FOR SHARE`` in the same transaction, so a scope's last route cannot be
-        removed between the check and the write — the grant-vs-remove race is closed.
-        Raises ``ValueError`` if any supplied scope has no live route."""
+        body. ``condition`` is the stored templated-text document (``{content|id,
+        kwargs}``) or ``None``. The ``UNIQUE (user_id)`` constraint rejects a racing
+        duplicate mint as the authority; that surfaces loudly (never a silent second
+        row). Any supplied scope is validated against live routes and its route rows
+        are locked ``FOR SHARE`` in the same transaction, so a scope's last route
+        cannot be removed between the check and the write — the grant-vs-remove race is
+        closed. Raises ``ValueError`` if any supplied scope has no live route."""
         body = {
             "scopes": scopes,
             "policy_data": policy_data or {},
             "condition": condition,
-            "condition_id": condition_id,
-            "condition_kwargs": condition_kwargs,
         }
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -413,16 +411,12 @@ class PostgresAccessControlStore:
             if scopes:
                 await self._lock_and_validate_scopes(cur, scopes)
             await cur.execute(
-                "INSERT INTO access_control_policies "
-                "(user_id, scopes, policy_data, condition, condition_id, condition_kwargs) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
+                "INSERT INTO access_control_policies (user_id, scopes, policy_data, condition) VALUES (%s, %s, %s, %s)",
                 (
                     user_id,
                     scopes,
                     Json(policy_data or {}),
-                    condition,
-                    condition_id,
-                    Json(condition_kwargs),
+                    Json(condition),
                 ),
             )
         return body
@@ -431,9 +425,9 @@ class PostgresAccessControlStore:
         """Partially update a key's POLICY fields in place and return the committed
         body, or ``None`` if ``user_id`` has no policy row (a falsy sentinel the
         route's 404 guard tests). ``updates`` carries only the fields the caller
-        actually supplied (keys ⊆ ``scopes``/``policy_data``/``condition``/
-        ``condition_id``/``condition_kwargs``); an absent field keeps its stored
-        value. Supplied scopes are validated against live routes with their route
+        actually supplied (keys ⊆ ``scopes``/``policy_data``/``condition``); an absent
+        field keeps its stored value. Supplied scopes are validated against live routes
+        with their route
         rows locked ``FOR SHARE`` in the same transaction, so a concurrent removal
         of a scope's last route serializes rather than committing against a dead
         scope. Raises ``ValueError`` if any supplied scope does not exist."""
@@ -468,10 +462,6 @@ class PostgresAccessControlStore:
                     body["policy_data"] = new_policy_data
                 if "condition" in updates:
                     body["condition"] = updates["condition"]
-                if "condition_id" in updates:
-                    body["condition_id"] = updates["condition_id"]
-                if "condition_kwargs" in updates:
-                    body["condition_kwargs"] = updates["condition_kwargs"]
                 await self._write_policy_body(cur, user_id, body)
             return body
 
@@ -493,8 +483,6 @@ class PostgresAccessControlStore:
             "scopes": list(body.get("scopes") or []),
             "policy_data": dict(body.get("policy_data") or {}),
             "condition": body.get("condition"),
-            "condition_id": body.get("condition_id"),
-            "condition_kwargs": body.get("condition_kwargs"),
         }
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -562,14 +550,11 @@ class PostgresAccessControlStore:
 
     async def _write_policy_body(self, cur: Any, user_id: str, body: dict[str, Any]) -> None:
         await cur.execute(
-            "UPDATE access_control_policies SET scopes = %s, policy_data = %s, condition = %s, "
-            "condition_id = %s, condition_kwargs = %s WHERE user_id = %s",
+            "UPDATE access_control_policies SET scopes = %s, policy_data = %s, condition = %s WHERE user_id = %s",
             (
                 body["scopes"],
                 Json(body["policy_data"]),
-                body["condition"],
-                body["condition_id"],
-                Json(body["condition_kwargs"]),
+                Json(body["condition"]),
                 user_id,
             ),
         )

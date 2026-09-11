@@ -683,23 +683,26 @@ def test_sub_mcp_register(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
 
 
-def test_templates_render_exclusive_args(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_templates_render_requires_a_text_source(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
 
     result = run_cli(monkeypatch, handler, ["templates", "render"])
     assert result.exit_code != 0
-    assert "exactly one" in result.output
+    assert "--text" in result.output
 
 
 def test_templates_render_by_id(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body["template_id"] == "greet"
-        assert body["kwargs"] == {"name": "Ada"}
+        assert body["text"] == {"id": "greet", "kwargs": {"name": "Ada"}}
         return data_response({"rendered": "hi Ada"})
 
-    result = run_cli(monkeypatch, handler, ["templates", "render", "--template-id", "greet", "--kw", 'name="Ada"'])
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["templates", "render", "--text", '{"id": "greet", "kwargs": {"name": "Ada"}}'],
+    )
     assert result.exit_code == 0, result.output
 
 
@@ -733,6 +736,42 @@ def test_keys_edit_requires_a_field(monkeypatch: pytest.MonkeyPatch) -> None:
         return data_response({})
 
     result = run_cli(monkeypatch, handler, ["keys", "edit", "alice"])
+    assert result.exit_code != 0
+
+
+def test_keys_edit_sets_condition(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path == "/api/auth/api-keys/alice"
+        assert json.loads(request.content) == {"condition": {"content": '.method == "GET"'}}
+        return data_response({"user_id": "alice"})
+
+    result = run_cli(
+        monkeypatch, handler, ["keys", "edit", "alice", "--condition", '{"content": ".method == \\"GET\\""}']
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_keys_edit_clear_condition_sends_null(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path == "/api/auth/api-keys/alice"
+        assert json.loads(request.content) == {"condition": None}
+        return data_response({"user_id": "alice"})
+
+    result = run_cli(monkeypatch, handler, ["keys", "edit", "alice", "--clear-condition"])
+    assert result.exit_code == 0, result.output
+
+
+def test_keys_edit_clear_condition_conflicts_with_condition(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        return data_response({})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["keys", "edit", "alice", "--clear-condition", "--condition", '{"content": "true"}'],
+    )
     assert result.exit_code != 0
 
 
@@ -1545,11 +1584,11 @@ def test_resources_get_plain_uses_read_get(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_resources_get_render_uses_write_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A render var -> the render path posts ``template_kwargs`` to the write-classed POST.
+    # A render var -> the render path posts ``kwargs`` to the write-classed POST.
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/api/resources/get"
-        assert json.loads(request.content) == {"resource_id": "greet.j2", "template_kwargs": {"name": "Ada"}}
+        assert json.loads(request.content) == {"resource_id": "greet.j2", "kwargs": {"name": "Ada"}}
         return data_response("Hello Ada")
 
     result = run_cli(monkeypatch, handler, ["resources", "get", "greet.j2", "--kw", "name=Ada"], json_output=True)

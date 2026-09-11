@@ -5,6 +5,7 @@ hash + pipeline seam.
 from __future__ import annotations
 
 from tai42_contract.hooks import HookParams
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.hooks.managers import redis_hooks_manager as redis_module
 from tai42_skeleton.hooks.managers.redis_hooks_manager import RedisHooksManager
@@ -28,7 +29,7 @@ async def test_register_writes_hook_and_topic_map(monkeypatch, fake_redis):
                 tool="forward",
                 execution_key="k-fire",
                 execution_key_fingerprint="fp-fire",
-                condition=".ok",
+                condition=TemplatedText(content=".ok"),
             )
         )
         is True
@@ -51,7 +52,7 @@ async def test_register_rejects_invalid_jq(monkeypatch, fake_redis):
                 tool="noop",
                 execution_key="k-fire",
                 execution_key_fingerprint="fp-fire",
-                condition="( not jq",
+                condition=TemplatedText(content="( not jq"),
             )
         )
 

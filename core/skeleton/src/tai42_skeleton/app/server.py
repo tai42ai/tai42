@@ -15,6 +15,7 @@ from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_contract.manifest import TaiMCPConfig
 from tai42_contract.storage import Storage
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.agent.binding import AgentBinding
 from tai42_skeleton.app.channels_facet import ChannelsFacet
@@ -821,8 +822,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
         *,
         name: str,
         description: str = "",
-        output_schema: dict[str, Any] | None = None,
-        input_schema: dict[str, Any] | None = None,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | None = None,
     ) -> "Tool":
         from tai42_skeleton.presets import preset_bind
 

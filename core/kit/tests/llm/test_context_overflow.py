@@ -14,6 +14,8 @@ from langchain.agents.middleware import (
 from langchain.agents.middleware.context_editing import ClearToolUsesEdit
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 from tai42_kit.llm.middleware import context_overflow as co
 from tai42_kit.llm.middleware.context_overflow import (
@@ -21,6 +23,28 @@ from tai42_kit.llm.middleware.context_overflow import (
     context_overflow_middlewares,
 )
 from tai42_kit.llm.middleware.trimming import TrimmingMiddleware
+
+
+class _FakeResourceManager:
+    """Renders a templated text like the real manager: a stored id from the map (a
+    missing one raises), else the inline content."""
+
+    def __init__(self) -> None:
+        self.resources: dict[str, str] = {}
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.id is not None:
+            return self.resources[text.id]
+        return text.content or ""
+
+
+@contextmanager
+def _bound_manager():
+    """Bind an app whose resource manager renders the summary prompt."""
+    fake = _FakeResourceManager()
+    app = SimpleNamespace(storage=SimpleNamespace(resource_manager=fake))
+    with tai42_app.bound(app):
+        yield fake
 
 
 def _summary_model(text: str = "SUMMARY") -> MagicMock:
@@ -68,19 +92,19 @@ class TestMiddlewareFactory:
     def _settings(self, methods):
         return SimpleNamespace(methods=methods)
 
-    def test_default_method_builds_trimming(self):
+    async def test_default_method_builds_trimming(self):
         with patch.object(co, "context_overflow_settings", return_value=self._settings(["trimming"])):
-            mws = context_overflow_middlewares()
+            mws = await context_overflow_middlewares()
         assert [type(m).__name__ for m in mws] == ["TrimmingMiddleware"]
 
-    def test_composed_methods_ordered_editing_before_summarization(self):
+    async def test_composed_methods_ordered_editing_before_summarization(self):
         # Input order is reversed; factory must reorder to canonical order.
         settings = self._settings(["summarization", "context_editing"])
         with (
             patch.object(co, "context_overflow_settings", return_value=settings),
             _patch_summary_build(),
         ):
-            mws = context_overflow_middlewares()
+            mws = await context_overflow_middlewares()
         assert [type(m).__name__ for m in mws] == [
             "ContextEditingMiddleware",
             "SummarizationMiddleware",
@@ -94,26 +118,51 @@ class TestMiddlewareFactory:
             summary_prompt=summary_prompt,
         )
 
-    def test_summary_prompt_falls_back_to_default_when_unset(self):
+    async def test_summary_prompt_falls_back_to_default_when_unset(self):
         with (
             patch.object(co, "context_overflow_settings", return_value=self._settings(["summarization"])),
             patch.object(co, "summarization_middleware_settings", return_value=self._summarization_settings(None)),
             _patch_summary_build(),
         ):
-            mws = context_overflow_middlewares()
+            mws = await context_overflow_middlewares()
         assert isinstance(mws[0], SummarizationMiddleware)
         assert mws[0].summary_prompt == DEFAULT_SUMMARY_PROMPT
 
-    def test_summary_prompt_passed_through_when_set(self):
-        smw = self._summarization_settings("CUSTOM PROMPT")
+    async def test_summary_prompt_inline_content_renders(self):
+        smw = self._summarization_settings(TemplatedText(content="CUSTOM PROMPT"))
         with (
             patch.object(co, "context_overflow_settings", return_value=self._settings(["summarization"])),
             patch.object(co, "summarization_middleware_settings", return_value=smw),
             _patch_summary_build(),
+            _bound_manager(),
         ):
-            mws = context_overflow_middlewares()
+            mws = await context_overflow_middlewares()
         assert isinstance(mws[0], SummarizationMiddleware)
         assert mws[0].summary_prompt == "CUSTOM PROMPT"
+
+    async def test_summary_prompt_resolves_a_stored_id(self):
+        smw = self._summarization_settings(TemplatedText(id="sum"))
+        with (
+            patch.object(co, "context_overflow_settings", return_value=self._settings(["summarization"])),
+            patch.object(co, "summarization_middleware_settings", return_value=smw),
+            _patch_summary_build(),
+            _bound_manager() as manager,
+        ):
+            manager.resources["sum"] = "STORED PROMPT"
+            mws = await context_overflow_middlewares()
+        assert isinstance(mws[0], SummarizationMiddleware)
+        assert mws[0].summary_prompt == "STORED PROMPT"
+
+    async def test_summary_prompt_missing_id_raises(self):
+        smw = self._summarization_settings(TemplatedText(id="absent"))
+        with (
+            patch.object(co, "context_overflow_settings", return_value=self._settings(["summarization"])),
+            patch.object(co, "summarization_middleware_settings", return_value=smw),
+            _patch_summary_build(),
+            _bound_manager(),
+            pytest.raises(KeyError),
+        ):
+            await context_overflow_middlewares()
 
 
 class TestAreduceContext:
@@ -177,7 +226,7 @@ class TestSummaryModelUsesMainLLM:
     """The 'summarization' factory case builds its summarizer from the main agent
     LLM (same provider + config) — no separate summary-LLM settings."""
 
-    def test_summary_model_built_from_main_llm(self):
+    async def test_summary_model_built_from_main_llm(self):
         with (
             patch.object(co, "context_overflow_settings", return_value=SimpleNamespace(methods=["summarization"])),
             patch.object(
@@ -189,5 +238,5 @@ class TestSummaryModelUsesMainLLM:
             ),
             _patch_summary_build(main_config={"model": "gpt-4o"}, provider="openai") as get_llm,
         ):
-            context_overflow_middlewares()
+            await context_overflow_middlewares()
         get_llm.assert_called_once_with("openai", model="gpt-4o")

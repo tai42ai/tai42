@@ -22,6 +22,7 @@ import asyncio
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
@@ -89,7 +90,7 @@ def _seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemor
     monkeypatch.setattr(bta, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=fake_get_checkpointer))
     # No context-overflow strategies in the test: keep the middleware list to the
     # system-purge / leading-user / tool-error middleware the factory attaches.
-    monkeypatch.setattr(bta, "context_overflow_middlewares", lambda system_prompt=None: [])
+    monkeypatch.setattr(bta, "context_overflow_middlewares", AsyncMock(return_value=[]))
     # The real config init wires the recording monitoring stub's non-callable
     # callback sentinels, which the live graph would try to invoke; keep the
     # caller's thread_id and nothing else.

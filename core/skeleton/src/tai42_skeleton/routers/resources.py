@@ -4,10 +4,10 @@ An AUTHED thin adapter over the operation in ``tai42_skeleton.operations.resourc
 The single ``get_resource_by_id`` operation backs both methods of ``/api/resources/get``:
 
 - ``GET /api/resources/get?resource_id=...`` — the plain fetch-as-is door. It reads
-  ``resource_id`` from the query string, never renders (no ``template_kwargs``), and is
+  ``resource_id`` from the query string, never renders (no ``kwargs``), and is
   ``action="read"``, so a role with the ``resources`` READ level can fetch a stored
   resource.
-- ``POST /api/resources/get`` — the render door. Its ``template_kwargs`` is arbitrary
+- ``POST /api/resources/get`` — the render door. Its ``kwargs`` is arbitrary
   nested JSON that legitimately needs a request body, so it is a write-classed POST;
   the READ level does not open it.
 
@@ -43,7 +43,7 @@ async def _extract_get_query(request: Request) -> dict:
 # The plain fetch-as-is door: ``GET /api/resources/get?resource_id=...``. The extractor
 # reads the flat ``resource_id`` from the query string (a GET never reads a body), so the
 # resource is returned as-is; the published query is ``ResourceGetQuery`` (``resource_id``
-# alone — ``template_kwargs`` is a body input the render POST takes). Registered BEFORE the
+# alone — ``kwargs`` is a body input the render POST takes). Registered BEFORE the
 # POST so the shared operation metadata's ``http_method`` ends on the POST.
 fetch_resource = register_operation_route(
     tai42_app,
@@ -55,7 +55,7 @@ fetch_resource = register_operation_route(
     action="read",
 )
 
-# The render door: ``POST /api/resources/get``. Its ``template_kwargs`` is arbitrary
+# The render door: ``POST /api/resources/get``. Its ``kwargs`` is arbitrary
 # nested JSON that needs a request body, so it is a write-classed POST.
 get_resource_by_id = register_operation_route(
     tai42_app,

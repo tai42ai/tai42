@@ -3,9 +3,9 @@
 ``get_resource_by_id`` loads a stored resource by its id/URL and optionally renders
 it as a Jinja template, returning the loaded (and optionally rendered) content —
 text or a :data:`~tai42_skeleton.template.media.MediaBlock`. It backs both methods of
-``/api/resources/get`` — the ``GET`` fetch-as-is door (no ``template_kwargs``) and the
+``/api/resources/get`` — the ``GET`` fetch-as-is door (no ``kwargs``) and the
 ``POST`` render door — and the ``tai resources get`` CLI, a thin skin over the app's
-resource manager (``load_file`` + ``render_by_id_or_content``).
+resource manager (``load_file`` + ``render_templated_text``).
 
 A READ door: it never mutates the store, so it is NOT destructive and stays outside
 the admin-mutation deny-fence.
@@ -18,6 +18,7 @@ from typing import Any
 from jinja2 import TemplateError
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.response_models_group_c import ResourceContent
@@ -29,7 +30,7 @@ from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 class ResourceGet(BaseModel):
     """Load a stored resource by ``resource_id``, optionally rendering it.
 
-    When ``template_kwargs`` is omitted the loaded content is returned as-is (a
+    When ``kwargs`` is omitted the loaded content is returned as-is (a
     template/text resource as its text, a document as extracted text, media as a
     ``MediaBlock``). When provided (any object, including ``{}``) the caller intends
     a render: text is rendered as a Jinja template with these variables; media
@@ -37,7 +38,7 @@ class ResourceGet(BaseModel):
     """
 
     resource_id: str
-    template_kwargs: dict[str, Any] | None = None
+    kwargs: dict[str, Any] | None = None
 
 
 class ResourceGetQuery(BaseModel):
@@ -56,12 +57,12 @@ class ResourceGetQuery(BaseModel):
     request_model=ResourceGet,
     response_model=ResourceContent,
 )
-async def get_resource_by_id(resource_id: str, template_kwargs: dict[str, Any] | None = None) -> str | MediaBlock:
+async def get_resource_by_id(resource_id: str, kwargs: dict[str, Any] | None = None) -> str | MediaBlock:
     """Load a stored resource by its id, optionally rendering it as a template.
 
     Args:
         resource_id: The id (path) of the resource to load.
-        template_kwargs: When omitted, the resource's loaded content is returned
+        kwargs: When omitted, the resource's loaded content is returned
             as-is. When provided (any dict, incl. ``{}``), text is rendered as a
             Jinja template with these variables; media raises loudly (``400``).
 
@@ -79,11 +80,11 @@ async def get_resource_by_id(resource_id: str, template_kwargs: dict[str, Any] |
         raise BadRequestError(str(exc)) from exc
     except (FileNotFoundError, TemplateNotFoundError) as exc:
         raise NotFoundError(f"resource {resource_id!r} not found") from exc
-    if template_kwargs is None:
+    if kwargs is None:
         return content
     if isinstance(content, MediaBlock):
-        raise BadRequestError(f"Cannot render media resource {resource_id!r} with template_kwargs.")
+        raise BadRequestError(f"Cannot render media resource {resource_id!r} with kwargs.")
     try:
-        return await manager.render_by_id_or_content(content=content, kwargs=template_kwargs)
+        return await manager.render_templated_text(TemplatedText(content=content, kwargs=kwargs))
     except TemplateError as exc:
         raise BadRequestError(f"template error: {exc}") from exc

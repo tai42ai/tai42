@@ -28,11 +28,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageDelta, MessageFinal, StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import validate_structured_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 
-from tai42_agents._internal.reject import reject_unhonored, reject_untitled_response_format
+from tai42_agents._internal.reject import reject_unhonored, resolve_response_format
 from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
 
@@ -72,7 +73,7 @@ class VqaAgentInput(BaseModel):
 
     image_url: str
     query: str
-    response_format: dict[str, Any] | None = Field(
+    response_format: TemplatedText | dict[str, Any] | None = Field(
         default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
     )
     llm_provider: str | None = None
@@ -110,10 +111,10 @@ _UNHONORED_REASONS: dict[str, str] = {
         "so there is no user content block to carry these keys"
     ),
 }
-# The unhonored parameters whose unset default is an empty sequence/string; every
-# other defaults to ``None`` and is set when not ``None``.
+# The unhonored parameters whose unset default is an empty sequence; every other
+# defaults to ``None`` and is set when not ``None``.
 _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset(
-    {"tools", "tool_names", "presets", "subagents", "skills", "inline_skills", "system_message", "user_message"}
+    {"tools", "tool_names", "presets", "subagents", "skills", "inline_skills"}
 )
 
 
@@ -142,7 +143,7 @@ class VqaAgent(Agent):
         parameter is rejected loudly, in parity with :meth:`astream`.
         """
         reject_unhonored("vqa_agent.run", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS)
-        reject_untitled_response_format("vqa_agent", response_format)
+        response_format = await resolve_response_format("vqa_agent", response_format)
         return await self._drain(
             self.astream(
                 image_url=image_url,
@@ -181,7 +182,7 @@ class VqaAgent(Agent):
         reject_unhonored(
             "vqa_agent.astream", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS
         )
-        reject_untitled_response_format("vqa_agent", response_format)
+        response_format = await resolve_response_format("vqa_agent", response_format)
         provider = llm_provider or llm_provider_settings().llm
         llm = await get_llm_async(provider=provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
 

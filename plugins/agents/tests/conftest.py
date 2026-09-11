@@ -21,11 +21,10 @@ through the handle:
   ``AppTools`` contract prescribes no exception type, so that is the fake's own
   unknown-tool signal. The ``app_tools`` fixture clears both maps per test so
   nothing leaks between tests.
-* ``storage`` (``AppStorage``) — ``resource_manager.render_by_id_or_content`` is
+* ``storage`` (``AppStorage``) — ``resource_manager.render_templated_text`` is
   backed by the mutable ``templates`` map with the real manager's semantics: a
-  non-``None`` ``content`` renders to itself, a non-``None`` ``template_id`` looks
-  up the map, providing both raises ``ValueError``, and an empty call returns
-  ``""`` (or raises when ``allow_empty`` is false). An unknown id raises.
+  :class:`~tai42_contract.template.TemplatedText` with inline ``content`` renders to
+  itself, one with a stored ``id`` looks the id up in the map. An unknown id raises.
   ``resource_manager.normalize_media`` records each call and returns an image
   ``ContentPart`` (a URL passes through, an id becomes a data-URI), raising on a
   resolvable non-image source like the real image-only guard. The
@@ -49,6 +48,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.connectors import ResolvedConnectionAuth
 from tai42_contract.monitoring import TraceContext
 from tai42_contract.sandbox import Sandbox, SandboxPolicy, SandboxUnavailableError
+from tai42_contract.template import TemplatedText
 from tests._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
 
 
@@ -174,7 +174,7 @@ def _looks_like_image(source: str) -> bool:
 
 
 class RecordingResourceManager:
-    """A ``resource_manager`` stub for ``render_by_id_or_content`` and
+    """A ``resource_manager`` stub for ``render_templated_text`` and
     ``normalize_media``."""
 
     def __init__(self) -> None:
@@ -196,29 +196,17 @@ class RecordingResourceManager:
             return {"type": "image_url", "image_url": {"url": source}}
         return {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}
 
-    async def render_by_id_or_content(
-        self,
-        content: str | None = None,
-        template_id: str | None = None,
-        kwargs: dict[str, Any] | None = None,
-        allow_empty: bool = True,
-    ) -> str:
-        if content is not None and template_id is not None:
-            raise ValueError("Provide either 'content' OR 'template_id', not both.")
-        if content is not None:
-            return content
-        if template_id is not None:
-            if template_id not in self.templates:
-                # The real manager raises ``TemplateNotFoundError`` (a bare
-                # ``Exception`` subclass tai42-agents cannot import); the agents
-                # never catch it, so what a caller observes is "propagates and
-                # aborts". ``RuntimeError`` reproduces that without a type — like
-                # ``KeyError`` — that a narrow ``except LookupError`` would catch.
-                raise RuntimeError(f"unknown template id: {template_id}")
-            return self.templates[template_id]
-        if allow_empty:
-            return ""
-        raise ValueError("You must provide either a template or a template_id.")
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.content is not None:
+            return text.content
+        if text.id not in self.templates:
+            # The real manager raises ``TemplateNotFoundError`` (a bare
+            # ``Exception`` subclass tai42-agents cannot import); the agents
+            # never catch it, so what a caller observes is "propagates and
+            # aborts". ``RuntimeError`` reproduces that without a type — like
+            # ``KeyError`` — that a narrow ``except LookupError`` would catch.
+            raise RuntimeError(f"unknown template id: {text.id}")
+        return self.templates[text.id]
 
 
 class RecordingStorage:

@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field, ValidationError
 from starlette.routing import Mount, Route
 from tai42_contract.access_control.models import JqAuthContext
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.errors import DocumentNotFoundError, DocumentVersionNotFoundError
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.jq_util import get_compiled_jq
@@ -106,15 +107,14 @@ class ScopeUrlRemove(BaseModel):
 
 class ApiKeyCreate(BaseModel):
     """Create an api key for ``user_id`` with a scope set and an optional jq
-    authorization condition (inline ``condition`` or stored ``condition_id``)."""
+    authorization ``condition`` (a templated text: inline ``content`` or a stored
+    ``id``, plus its render ``kwargs``)."""
 
     user_id: str = Field(min_length=1)
     description: str = Field(min_length=1)
     scopes: list[str]
     policy_data: dict[str, Any] | None = None
-    condition: str | None = None
-    condition_id: str | None = None
-    condition_kwargs: dict[str, Any] | None = None
+    condition: TemplatedText | None = None
     # The account that owns this key. A non-admin caller may only mint self-owned keys
     # (an explicit different owner is rejected); an admin may set any owner or None.
     owner_user_id: str | None = None
@@ -127,9 +127,7 @@ class ApiKeyEdit(BaseModel):
     description: str | None = Field(default=None, min_length=1)
     scopes: list[str] | None = None
     policy_data: dict[str, Any] | None = None
-    condition: str | None = None
-    condition_id: str | None = None
-    condition_kwargs: dict[str, Any] | None = None
+    condition: TemplatedText | None = None
 
 
 class KeyScopesModify(BaseModel):
@@ -145,9 +143,7 @@ class ConditionValidation(BaseModel):
     """A fail-closed jq policy-condition check — compile and (with a
     ``sample_context``) sample-evaluate a condition without persisting it."""
 
-    condition: str | None = None
-    condition_id: str | None = None
-    condition_kwargs: dict[str, Any] | None = None
+    condition: TemplatedText | None = None
     sample_context: dict[str, Any] | None = None
 
 
@@ -470,9 +466,7 @@ async def create_api_key(
     description: str,
     scopes: list[str],
     policy_data: dict[str, Any] | None,
-    condition: str | None,
-    condition_id: str | None,
-    condition_kwargs: dict[str, Any] | None,
+    condition: TemplatedText | None,
     owner_user_id: str | None,
 ) -> dict[str, Any]:
     """Provision a key, returning ``{"api_key", "key_fingerprint"}``. The raw ``sk-…``
@@ -501,8 +495,6 @@ async def create_api_key(
             scopes=scopes,
             policy_data=policy_data,
             condition=condition,
-            condition_id=condition_id,
-            condition_kwargs=condition_kwargs,
             owner_user_id=owner_user_id,
         )
     except ValueError as exc:
@@ -719,8 +711,8 @@ async def get_capabilities() -> dict[str, Any]:
 @operation(summary="List roles", tags=["access-control"], errors=[ForbiddenError], response_model=RoleDefinitionList)
 async def list_roles() -> list[dict[str, Any]]:
     """The seeded/operator-authored roles as full ``RoleDefinition``-shaped bodies
-    (``{name, description, scopes, condition, condition_id, condition_kwargs, base_tier,
-    allow_all, grants}``) — the users-admin role picker and the Studio Roles page read
+    (``{name, description, scopes, condition, base_tier, allow_all, grants}``) — the
+    users-admin role picker and the Studio Roles page read
     this. A store-less deployment (no versioned store configured) has no roles — the seed
     step is skipped at boot — so the read is skipped and the list is empty.
 
@@ -784,13 +776,11 @@ async def get_me(
     response_model=ConditionCheckResult,
 )
 async def validate_condition(
-    condition: str | None,
-    condition_id: str | None,
-    condition_kwargs: dict[str, Any] | None,
+    condition: TemplatedText | None,
     sample_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Fail-closed guard: compile — and optionally sample-evaluate — a jq policy
-    condition WITHOUT persisting it.
+    ``condition`` WITHOUT persisting it.
 
     A syntactically broken condition raises at enforcement and DENIES the key (a
     lock-out), so authoring flows validate here before saving. The condition is
@@ -799,21 +789,16 @@ async def validate_condition(
     sample. This ONLY compiles/evaluates; it never writes any store. Returns ``{"ok":
     true, "result": <bool|null>}`` (``result`` is ``null`` when no sample was evaluated).
     An AUTHOR error is a loud ``BadRequestError`` (400); a server-side fault (an
-    unconfigured resource manager, a redis/storage outage rendering a stored
-    ``condition_id``) is NOT an author error and propagates as a loud 500."""
-    if condition and condition_id:
-        raise BadRequestError("provide either 'condition' or 'condition_id', not both")
-
-    # Mirror enforcement's own "was a condition configured?" test exactly
-    # (``policy.condition is not None or policy.condition_id is not None``): a
-    # PRESENT-but-empty ``condition``/``condition_id`` (e.g. ``""``) is configured and
-    # denies at enforcement, so it must reach the render-empty lock-out branch below —
-    # a truthiness test would wrongly treat ``""`` as "nothing configured" and pass it.
-    configured = condition is not None or condition_id is not None
+    unconfigured resource manager, a redis/storage outage rendering a stored condition
+    ``id``) is NOT an author error and propagates as a loud 500."""
+    # Mirror enforcement's own "was a condition configured?" test exactly (``policy.condition
+    # is not None``): a PRESENT condition that renders empty is still configured and denies at
+    # enforcement, so it must reach the render-empty lock-out branch below.
+    configured = condition is not None
     try:
-        rendered = await tai42_app.storage.resource_manager.render_by_id_or_content(
-            content=condition, template_id=condition_id, kwargs=condition_kwargs
-        )
+        rendered = ""
+        if condition is not None:
+            rendered = await tai42_app.storage.resource_manager.render_templated_text(condition)
         result: Any = None
         if rendered:
             # Compile-validate the expression (the compile half of this endpoint):
@@ -839,7 +824,7 @@ async def validate_condition(
         # AUTHOR errors only — the jq compile/eval ``ValueError`` (the jq lib's error
         # type), the pydantic ``ValidationError`` from a malformed ``sample_context``,
         # a jinja ``TemplateError`` from a broken inline condition, and
-        # ``TemplateNotFoundError`` for a missing ``condition_id``. Their message is
+        # ``TemplateNotFoundError`` for a missing stored condition ``id``. Their message is
         # the actionable feedback the author needs, surfaced verbatim as a 400. Any
         # other exception (an unconfigured resource manager ``RuntimeError``, a
         # redis/storage outage) is a server fault and propagates as a loud 500.

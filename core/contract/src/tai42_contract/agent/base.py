@@ -39,6 +39,7 @@ from tai42_contract.agent.events import (
     SuspendedFinal,
 )
 from tai42_contract.errors import ErrorKind
+from tai42_contract.template import TemplatedText
 
 if TYPE_CHECKING:
     from langchain_core.tools import StructuredTool
@@ -82,18 +83,22 @@ class SubAgentSpec(BaseModel):
 
     ``tools`` is ``list[Any]`` in the contract (live ``StructuredTool`` objects in
     the impl) — a vendor type cannot be a runtime pydantic field here.
+
+    ``response_format`` is a live pydantic class (in-process), the ``TemplatedText | dict``
+    authored-schema union (a JSON caller's forced-output schema — inline, or named by stored
+    ``id`` and rendered/parsed to its schema at the point of use), or unset.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
     name: str
     description: str = ""
-    system_prompt: str = ""
+    system_prompt: TemplatedText | None = None
     tool_names: list[str] = []
     tools: list[Any] = []
     presets: list[PresetSpec] = []
     skills: list[str] = []
     inline_skills: list[dict[str, Any]] = []
-    response_format: type[BaseModel] | dict[str, Any] | None = None
+    response_format: type[BaseModel] | TemplatedText | dict[str, Any] | None = None
     strategy: str | None = None
     subagents: list[SubAgentSpec] = []
 
@@ -164,8 +169,8 @@ class Agent(ABC):
         tool_names: Sequence[str] = (),
         presets: Sequence[PresetSpec] = (),
         subagents: Sequence[SubAgentSpec] = (),
-        system_message: str = "",
-        user_message: str = "",
+        system_message: TemplatedText | None = None,
+        user_message: TemplatedText | None = None,
         response_format: Any = None,
         strategy: str | None = None,
         interrupt_on: dict[str, Any] | None = None,

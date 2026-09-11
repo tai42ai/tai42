@@ -25,8 +25,9 @@ from typing import TYPE_CHECKING, Any
 from jinja2 import TemplateError
 from starlette.authentication import AuthenticationError
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
-from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
+from tai42_contract.access_control.models import JqAuthContext
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton.access_control.backend import effective_scopes
@@ -135,8 +136,8 @@ def _assert_execution_condition_evaluable(condition: str, *, principal: str, tem
         raise PermissionDenied(f"access denied: policy condition for {principal!r} is not evaluable at a fire") from exc
 
 
-async def _render_condition(policy: AccessPolicy, *, principal: str) -> str:
-    """``policy``'s condition as the text ``enforce`` will evaluate.
+async def _render_condition(condition: TemplatedText, *, principal: str) -> str:
+    """``condition`` as the text ``enforce`` will evaluate.
 
     A render failure is a typed refusal naming the principal — never read as "no
     condition" and never flattened into the generic catch-all, which would drop the very
@@ -144,16 +145,12 @@ async def _render_condition(policy: AccessPolicy, *, principal: str) -> str:
     can quote template content.
     """
     try:
-        return await tai42_app.storage.resource_manager.render_by_id_or_content(
-            content=policy.condition,
-            template_id=policy.condition_id,
-            kwargs=policy.condition_kwargs,
-        )
+        return await tai42_app.storage.resource_manager.render_templated_text(condition)
     except (ValueError, TemplateError, TemplateNotFoundError) as exc:
         logger.warning(
             "authz: denied — the policy condition of %s (template %r) does not render: %s",
             principal,
-            policy.condition_id,
+            condition.id,
             exc,
         )
         raise PermissionDenied(f"access denied: the policy condition of {principal!r} does not render") from exc
@@ -373,21 +370,19 @@ async def _authorize_pinned_route(
         request={"method": method, "path": path},
         system={"time": time.time()},
     )
-    condition_configured = policy.condition is not None or policy.condition_id is not None
+    condition_configured = policy.condition is not None
     # A fire presents no token, so its ``.identity`` carries only the stored owner claim;
     # each rendered condition is re-asserted token-free-evaluable before being enforced.
     # An ordinary request carries full claims and skips this.
     try:
-        condition = await _render_condition(policy, principal=user_id)
-        if is_execution_fire and condition:
-            _assert_execution_condition_evaluable(condition, principal=user_id, template_id=policy.condition_id)
+        condition = ""
+        if policy.condition is not None:
+            condition = await _render_condition(policy.condition, principal=user_id)
+            if is_execution_fire and condition:
+                _assert_execution_condition_evaluable(condition, principal=user_id, template_id=policy.condition.id)
         await enforcer.enforce(jq_context.model_dump(), condition, condition_configured=condition_configured)
 
-        if (
-            owner is not None
-            and owner_policy is not None
-            and (owner_policy.condition is not None or owner_policy.condition_id is not None)
-        ):
+        if owner is not None and owner_policy is not None and owner_policy.condition is not None:
             owner_context = JqAuthContext(
                 sub=user_id,
                 scopes=owner_policy.scopes,
@@ -397,10 +392,10 @@ async def _authorize_pinned_route(
                 request={"method": method, "path": path},
                 system={"time": time.time()},
             )
-            owner_condition = await _render_condition(owner_policy, principal=owner)
+            owner_condition = await _render_condition(owner_policy.condition, principal=owner)
             if is_execution_fire and owner_condition:
                 _assert_execution_condition_evaluable(
-                    owner_condition, principal=owner, template_id=owner_policy.condition_id
+                    owner_condition, principal=owner, template_id=owner_policy.condition.id
                 )
             await enforcer.enforce(owner_context.model_dump(), owner_condition, condition_configured=True)
     except AuthenticationError as exc:

@@ -18,6 +18,7 @@ from pydantic import BaseModel, JsonValue, RootModel
 from tai42_contract.access_control.models import RoleDefinition
 from tai42_contract.app.responses import ApplyResponse, FanoutSummary
 from tai42_contract.conversations import ConversationRouteCreate, TargetConversationConfig
+from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.models import DocumentVersion
 
 from tai42_skeleton.conversations.models import ConversationRecord
@@ -84,9 +85,7 @@ class TokenPayloadRow(BaseModel):
     description: str
     scopes: list[str] | None = None
     policy_data: dict[str, Any] | None = None
-    condition: str | None = None
-    condition_id: str | None = None
-    condition_kwargs: dict[str, Any] | None = None
+    condition: TemplatedText | None = None
 
 
 class TokenPayloadList(RootModel[list[TokenPayloadRow]]):

@@ -12,7 +12,10 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from tai42_contract.app import tai42_app
 from tai42_contract.interactions import InteractionResponse
+from tai42_contract.template import TemplatedText
+from tai42_kit.utils.render import SchemaBodyError
 
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.builtin.ask_external import ask_external
@@ -389,3 +392,73 @@ async def test_verifier_rejected_at_ask_time_when_malformed_or_unknown(monkeypat
         )
     with pytest.raises(ValueError, match="unknown webhook verifier"):
         await ask_user("Sign?", answer_format="external", link="https://x/{callback_url}", verifier={"name": "nope"})
+
+
+# --------------------------------------------------------------------------- #
+# by-id (TemplatedText) answer_schema — the TemplatedText | dict union          #
+# --------------------------------------------------------------------------- #
+_ANSWER_SCHEMA_RESOURCES = {
+    "stored-answer-schema": '{"type": "object", "properties": {"ok": {"type": "boolean"}}}',
+    "not-json-answer": "this is not JSON",
+}
+
+
+class _AnswerResourceManager:
+    async def render_templated_text(self, text, locale=None):
+        if text.id is not None:
+            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+
+            if text.id not in _ANSWER_SCHEMA_RESOURCES:
+                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+            return _ANSWER_SCHEMA_RESOURCES[text.id]
+        assert text.content is not None
+        return text.content
+
+
+class _AnswerStorage:
+    resource_manager = _AnswerResourceManager()
+
+
+class _AnswerApp:
+    storage = _AnswerStorage()
+
+
+async def test_answer_schema_by_id_is_rendered_and_passed_to_ask_user(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_ask_user(question, *, answer_format, schema, timeout, link, verifier):
+        captured["schema"] = schema
+        return "answered"
+
+    monkeypatch.setitem(ask_external.__globals__, "ask_user", _fake_ask_user)
+
+    async def make_url(*, callback_url: str) -> str:
+        return f"https://ext.example/go?cb={callback_url}"
+
+    composed = ask_external(make_url, "make_url", "desc")
+    with tai42_app.bound(_AnswerApp()):
+        result = await composed(question="Approve?", answer_schema=TemplatedText(id="stored-answer-schema"))
+    assert result == "answered"
+    assert captured["schema"] == {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+
+
+async def test_answer_schema_by_id_unfetchable_fails_loudly(monkeypatch) -> None:
+    monkeypatch.setitem(ask_external.__globals__, "ask_user", lambda *a, **k: None)
+
+    async def make_url(*, callback_url: str) -> str:
+        return "https://ext.example/go"
+
+    composed = ask_external(make_url, "make_url", "desc")
+    with tai42_app.bound(_AnswerApp()), pytest.raises(SchemaBodyError, match="could not be rendered"):
+        await composed(question="Approve?", answer_schema=TemplatedText(id="missing-answer"))
+
+
+async def test_answer_schema_by_id_invalid_json_fails_loudly(monkeypatch) -> None:
+    monkeypatch.setitem(ask_external.__globals__, "ask_user", lambda *a, **k: None)
+
+    async def make_url(*, callback_url: str) -> str:
+        return "https://ext.example/go"
+
+    composed = ask_external(make_url, "make_url", "desc")
+    with tai42_app.bound(_AnswerApp()), pytest.raises(SchemaBodyError, match="did not render to valid JSON"):
+        await composed(question="Approve?", answer_schema=TemplatedText(id="not-json-answer"))

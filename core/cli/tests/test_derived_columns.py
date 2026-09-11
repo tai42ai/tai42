@@ -42,12 +42,10 @@ def test_notifications_list_derives_the_envelope_items_key(monkeypatch) -> None:
 
 def test_roles_list_derives_the_full_row_model_columns(monkeypatch) -> None:
     # RoleDefinitionList (a bare list of RoleDefinition) -> the row model's fields, so
-    # every RoleDefinition field is a column, including condition* and scopes.
+    # every RoleDefinition field is a column, including condition and scopes.
     payload = [
         {
             "condition": None,
-            "condition_id": None,
-            "condition_kwargs": {},
             "name": "ops",
             "description": "operators",
             "scopes": ["hooks:read"],

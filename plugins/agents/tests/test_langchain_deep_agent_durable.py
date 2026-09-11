@@ -30,6 +30,7 @@ from pydantic import SecretStr, TypeAdapter, ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors import ResolvedConnectionAuth
 from tai42_contract.sandbox import ExecResult, SandboxSession, SandboxUnavailableError
+from tai42_contract.template import TemplatedText
 
 from tai42_agents._internal.park import lease as lease_mod
 from tai42_agents._internal.park.errors import WorkspaceLeaseHeldError
@@ -106,14 +107,14 @@ def test_run_requires_a_sandbox_provider() -> None:
     every-door ``SandboxUnavailableError`` at the ``require_sandbox`` chokepoint."""
     _sandboxes().provider = None
     with pytest.raises(SandboxUnavailableError):
-        asyncio.run(DeepAgent().run(user_message="go"))
+        asyncio.run(DeepAgent().run(user_message=TemplatedText(content="go")))
 
 
 def test_astream_requires_a_sandbox_provider() -> None:
     _sandboxes().provider = None
 
     async def go() -> None:
-        async for _event in DeepAgent().astream(user_message="go"):
+        async for _event in DeepAgent().astream(user_message=TemplatedText(content="go")):
             pass
 
     with pytest.raises(SandboxUnavailableError):
@@ -164,7 +165,7 @@ def test_run_threads_a_live_session_into_the_backend(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(DeepAgent, "_resolve_and_build", capturing_resolve)
     with pytest.raises(_Captured) as excinfo:
-        asyncio.run(DeepAgent().run(user_message="go"))
+        asyncio.run(DeepAgent().run(user_message=TemplatedText(content="go")))
     # The run acquired a REAL session (not None) and threaded it into the backend build.
     assert isinstance(excinfo.value.session, SandboxSession)
 

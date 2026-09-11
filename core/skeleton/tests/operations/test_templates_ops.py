@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 from tai42_contract.manifest import ApiToolsConfig
+from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.operations.templates as templates_ops
 from tai42_skeleton.app import instance
@@ -64,8 +65,8 @@ class _ResourceManager:
     async def delete_template_dir(self, path: str) -> None:
         self.deleted.append(path)
 
-    async def render_by_id_or_content(self, content=None, template_id=None, kwargs=None) -> str:
-        return f"rendered:{template_id or content}:{kwargs}"
+    async def render_templated_text(self, text, locale=None) -> str:
+        return f"rendered:{text.id or text.content}:{text.kwargs}"
 
     def clear_cache(self) -> None:
         self.cleared = True
@@ -317,38 +318,32 @@ async def test_delete_template_dir_partial_failure_still_broadcasts_evict(
     assert local.outcome == OpOutcome.failed
 
 
-async def test_render_template_requires_a_source(manager: _ResourceManager) -> None:
-    with pytest.raises(BadRequestError, match="one of"):
-        await render_template()
-
-
-async def test_render_template_rejects_both(manager: _ResourceManager) -> None:
-    with pytest.raises(BadRequestError, match="not both"):
-        await render_template(content="hi", template_id="a.j2")
-
-
 async def test_render_template_by_id(manager: _ResourceManager) -> None:
-    result = await render_template(template_id="a.j2", kwargs={"name": "Z"})
+    result = await render_template(TemplatedText(id="a.j2", kwargs={"name": "Z"}))
     assert "rendered:a.j2" in result["rendered"]
 
 
-async def test_render_template_rejects_non_dict_kwargs(manager: _ResourceManager) -> None:
-    with pytest.raises(BadRequestError, match="'kwargs' must be a JSON object"):
-        await render_template(template_id="a.j2", kwargs=["not", "a", "dict"])  # type: ignore[arg-type]
+async def test_render_template_by_inline_content(manager: _ResourceManager) -> None:
+    result = await render_template(TemplatedText(content="Hi {{ name }}", kwargs={"name": "Z"}))
+    assert "rendered:Hi {{ name }}" in result["rendered"]
 
 
-async def test_render_template_rejects_non_string_content(manager: _ResourceManager) -> None:
-    with pytest.raises(BadRequestError, match="'content' must be a string"):
-        await render_template(content=123)  # type: ignore[arg-type]
+async def test_render_template_guards_a_traversing_id(manager: _ResourceManager) -> None:
+    # A stored id is a caller-supplied logical key: an escaping id is a loud 400 at the
+    # containment guard, before the store is reached.
+    with pytest.raises(BadRequestError):
+        await render_template(TemplatedText(id="../escape.j2"))
 
 
-async def test_render_template_missing_is_not_found(manager: _ResourceManager, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _missing(content=None, template_id=None, kwargs=None) -> str:
-        raise TemplateNotFoundError("Template 'gone.j2' not found.")
+async def test_render_template_missing_id_is_not_found(
+    manager: _ResourceManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _missing(text, locale=None) -> str:
+        raise TemplateNotFoundError(f"Template '{text.id}' not found.")
 
-    monkeypatch.setattr(manager, "render_by_id_or_content", _missing)
-    with pytest.raises(NotFoundError):
-        await render_template(template_id="gone.j2")
+    monkeypatch.setattr(manager, "render_templated_text", _missing)
+    with pytest.raises(NotFoundError, match=r"gone\.j2"):
+        await render_template(TemplatedText(id="gone.j2"))
 
 
 async def test_list_templates_returns_ids(monkeypatch: pytest.MonkeyPatch) -> None:

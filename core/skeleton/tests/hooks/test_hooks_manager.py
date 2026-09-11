@@ -9,6 +9,7 @@ renders condition/expr via the template impl, is verified at integration).
 
 import pytest
 from tai42_contract.hooks import HookParams, HooksManager
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 from tai42_skeleton.hooks.managers.redis_hooks_manager import RedisHooksManager
@@ -37,7 +38,7 @@ async def test_in_memory_register_list_unregister():
         tool="forward",
         execution_key="k-fire",
         execution_key_fingerprint="fp-fire",
-        condition='.status == "ready"',
+        condition=TemplatedText(content='.status == "ready"'),
     )
 
     assert await manager.register(hook) is True
@@ -60,7 +61,7 @@ async def test_register_rejects_invalid_jq():
         tool="noop",
         execution_key="k-fire",
         execution_key_fingerprint="fp-fire",
-        condition="this is ( not jq",
+        condition=TemplatedText(content="this is ( not jq"),
     )
 
     with pytest.raises(ValueError, match="not valid jq"):

@@ -4,7 +4,13 @@ from typing import Annotated
 
 from pydantic import Field
 
-from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, ConditionMixin, ExprMixin, expression_annotation
+from tai42_contract.template import (
+    EXPRESSION_ANNOTATION_KEY,
+    ConditionMixin,
+    ExprMixin,
+    TemplatedText,
+    expression_annotation,
+)
 
 
 class CallbackSchema(ConditionMixin, ExprMixin):
@@ -20,7 +26,7 @@ class CallbackSchema(ConditionMixin, ExprMixin):
     # and an empty expression — or a jq pipeline that produces no output —
     # deliberately yields ``{}`` rather than an error.
     condition: Annotated[
-        str | None,
+        TemplatedText | None,
         Field(
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
@@ -34,7 +40,7 @@ class CallbackSchema(ConditionMixin, ExprMixin):
         ),
     ] = None
     expr: Annotated[
-        str | None,
+        TemplatedText | None,
         Field(
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(

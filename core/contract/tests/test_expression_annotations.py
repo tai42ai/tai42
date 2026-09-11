@@ -25,6 +25,7 @@ from tai42_contract.template import (
     EXPRESSION_ANNOTATION_KEY,
     ConditionMixin,
     ExprMixin,
+    TemplatedText,
     expression_annotation,
 )
 
@@ -142,14 +143,12 @@ def test_mixin_condition_and_expr_carry_the_generic_annotation() -> None:
     assert expr[EXPRESSION_ANNOTATION_KEY] == GENERIC_EXPR_PAYLOAD
 
 
-def test_template_companion_fields_stay_unannotated() -> None:
-    # Only the jq STRINGS are expressions; the template id/kwargs companions are not.
-    cond_props = ConditionMixin.model_json_schema()["properties"]
-    expr_props = ExprMixin.model_json_schema()["properties"]
-    for name in ("condition_id", "condition_kwargs"):
-        assert EXPRESSION_ANNOTATION_KEY not in cond_props[name]
-    for name in ("expr_id", "expr_kwargs"):
-        assert EXPRESSION_ANNOTATION_KEY not in expr_props[name]
+def test_templated_text_properties_stay_unannotated() -> None:
+    # The jq expression is the DECLARING property; the templated text's own source
+    # and render-parameter properties carry no expression annotation.
+    props = ConditionMixin.model_json_schema()["$defs"]["TemplatedText"]["properties"]
+    for name in ("content", "id", "kwargs"):
+        assert EXPRESSION_ANNOTATION_KEY not in props[name]
 
 
 def test_annotation_is_purely_additive_to_a_plain_declaration() -> None:
@@ -158,9 +157,7 @@ def test_annotation_is_purely_additive_to_a_plain_declaration() -> None:
     # annotation adds one key and changes nothing else (defaults, titles,
     # nullability, required set).
     class PlainConditionModel(BaseModel):
-        condition: str | None = None
-        condition_id: str | None = None
-        condition_kwargs: dict[str, Any] | None = None
+        condition: TemplatedText | None = None
 
     annotated = ConditionMixin.model_json_schema()
     control = PlainConditionModel.model_json_schema()
@@ -196,14 +193,10 @@ def test_callback_override_changes_only_the_annotation_payload() -> None:
     # payload; type, default, and field ORDER must match the mixin composition of
     # a callback that never overrode them.
     class PlainMixinCondition(BaseModel):
-        condition: str | None = None
-        condition_id: str | None = None
-        condition_kwargs: dict[str, Any] | None = None
+        condition: TemplatedText | None = None
 
     class PlainMixinExpr(BaseModel):
-        expr: str | None = None
-        expr_id: str | None = None
-        expr_kwargs: dict[str, Any] | None = None
+        expr: TemplatedText | None = None
 
     class PlainCallbackSchema(PlainMixinCondition, PlainMixinExpr):
         tool: str = ""
@@ -226,13 +219,11 @@ def test_access_control_override_changes_only_the_annotation_payload(model: type
     # control that never overrode it. Removing the vendor key leaves byte-identical
     # bytes, proving the override adds one key and changes nothing else.
     class _PlainCondition(BaseModel):
-        condition: str | None = None
-        condition_id: str | None = None
-        condition_kwargs: dict[str, Any] | None = None
+        condition: TemplatedText | None = None
 
     annotated = model.model_json_schema()
-    # The condition trio leads both schemas (ConditionMixin is first in the MRO).
-    assert list(annotated["properties"])[:3] == ["condition", "condition_id", "condition_kwargs"]
+    # The condition leads both schemas (ConditionMixin is first in the MRO).
+    assert list(annotated["properties"])[:1] == ["condition"]
     assert annotated["properties"]["condition"].pop(EXPRESSION_ANNOTATION_KEY) == ACCESS_CONDITION_PAYLOAD
     control = _PlainCondition.model_json_schema()["properties"]["condition"]
     control.pop("title", None)

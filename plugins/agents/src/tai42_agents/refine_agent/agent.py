@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
@@ -37,7 +38,7 @@ from tai42_kit.logging.settings import logging_settings
 from tai42_agents._internal.config_util import init_langgraph_config
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
-from tai42_agents._internal.reject import reject_unhonored, reject_untitled_response_format
+from tai42_agents._internal.reject import reject_unhonored, resolve_response_format
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import as_tool_strategy
@@ -87,13 +88,11 @@ _UNHONORED_REASONS: dict[str, str] = {
         "through build_system_message; use user_content_kwargs to mark the evaluator's first user turn"
     ),
 }
-# The unhonored parameters whose unset default is an empty sequence or empty string
-# — a truthy value is a rejected request. Every other unhonored parameter defaults
-# to ``None`` and is set when it is not ``None`` (so ``response_format=None`` passes
-# but a falsy-but-meaningful ``strategy=""`` or ``resume=False`` still raises).
-_UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset(
-    {"tools", "presets", "subagents", "skills", "inline_skills", "system_message", "user_message"}
-)
+# The unhonored parameters whose unset default is an empty sequence — a truthy
+# value is a rejected request. Every other unhonored parameter defaults to ``None``
+# and is set when it is not ``None`` (so ``response_format=None`` passes but a
+# falsy-but-meaningful ``strategy=""`` or ``resume=False`` still raises).
+_UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"tools", "presets", "subagents", "skills", "inline_skills"})
 
 
 def _final_evaluator_input() -> dict[str, Any]:
@@ -104,12 +103,8 @@ def _final_evaluator_input() -> dict[str, Any]:
 
 async def _run_refine_loop(
     tools: Sequence[StructuredTool],
-    evaluator_message: str,
-    evaluator_message_id: str,
-    critic_message: str,
-    critic_message_id: str,
-    evaluator_message_kwargs: dict[str, Any] | None,
-    critic_message_kwargs: dict[str, Any] | None,
+    evaluator_message: TemplatedText | None,
+    critic_message: TemplatedText | None,
     max_iterations: int,
     evaluator_llm_provider: str | None,
     critic_llm_provider: str | None,
@@ -142,10 +137,8 @@ async def _run_refine_loop(
     Raises ``RuntimeError`` when the Critic returns no feedback or ``max_iterations``
     is reached without approval — an unapproved draft is never returned.
     """
-    evaluator_message = await render_message(
-        evaluator_message, evaluator_message_id, evaluator_message_kwargs, allow_empty=False
-    )
-    critic_message = await render_message(critic_message, critic_message_id, critic_message_kwargs, allow_empty=False)
+    rendered_evaluator_message = await render_message(evaluator_message, allow_empty=False, field="evaluator_message")
+    rendered_critic_message = await render_message(critic_message, allow_empty=False, field="critic_message")
 
     evaluator_llm_provider = evaluator_llm_provider or llm_provider_settings().llm
     critic_llm_provider = critic_llm_provider or llm_provider_settings().llm
@@ -175,7 +168,7 @@ async def _run_refine_loop(
         checkpointer=checkpointer,
         middleware=[
             SystemPurgeMiddleware(),
-            *context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
+            *await context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
             RollingCacheMarkMiddleware(),
             _tool_error_middleware,
         ],
@@ -188,7 +181,7 @@ async def _run_refine_loop(
         checkpointer=checkpointer,
         middleware=[
             SystemPurgeMiddleware(),
-            *context_overflow_middlewares(system_prompt=CRITIC_SYSTEM_MESSAGE),
+            *await context_overflow_middlewares(system_prompt=CRITIC_SYSTEM_MESSAGE),
             RollingCacheMarkMiddleware(),
             _tool_error_middleware,
         ],
@@ -203,7 +196,9 @@ async def _run_refine_loop(
     await _repair_dangling_tool_calls(critic, critic_config)
 
     iteration = 0
-    evaluator_input: dict[str, Any] = build_agent_input(evaluator_message, user_content_kwargs=user_content_kwargs)
+    evaluator_input: dict[str, Any] = build_agent_input(
+        rendered_evaluator_message, user_content_kwargs=user_content_kwargs
+    )
 
     while iteration < max_iterations:
         evaluator_state = await evaluator.ainvoke(evaluator_input, evaluator_config)
@@ -212,7 +207,7 @@ async def _run_refine_loop(
         if iteration > 0:
             critic_input: dict[str, Any] = {"messages": [{"role": "user", "content": evaluator_output}]}
         else:
-            critic_input = build_agent_input(critic_message, evaluator_output)
+            critic_input = build_agent_input(rendered_critic_message, evaluator_output)
 
         critic_state = await critic.ainvoke(critic_input, critic_config)
         critic_output = build_user_output(critic_state)
@@ -243,7 +238,7 @@ async def _run_refine_loop(
         checkpointer=checkpointer,
         middleware=[
             SystemPurgeMiddleware(),
-            *context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
+            *await context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
             RollingCacheMarkMiddleware(),
             _tool_error_middleware,
         ],
@@ -269,15 +264,11 @@ class RefineAgentInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    evaluator_message: str = ""
-    evaluator_message_id: str = ""
-    critic_message: str = ""
-    critic_message_id: str = ""
-    evaluator_message_kwargs: dict[str, Any] | None = None
-    critic_message_kwargs: dict[str, Any] | None = None
+    evaluator_message: TemplatedText | None = None
+    critic_message: TemplatedText | None = None
     tool_names: list[str] | None = None
     max_iterations: int = 3
-    response_format: dict[str, Any] | None = Field(
+    response_format: TemplatedText | dict[str, Any] | None = Field(
         default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
     )
     user_content_kwargs: dict[str, Any] | None = Field(
@@ -326,19 +317,14 @@ class RefineAgent(Agent):
         approved pass forces, raising loudly if the run produced none.
         """
         reject_unhonored("refine_agent.run", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS)
-        response_format = kwargs.get("response_format")
-        reject_untitled_response_format("refine_agent", response_format)
+        response_format = await resolve_response_format("refine_agent", kwargs.get("response_format"))
         return await self._drain(self.astream(**kwargs), response_format=response_format)
 
     async def astream(
         self,
         *,
-        evaluator_message: str = "",
-        evaluator_message_id: str = "",
-        critic_message: str = "",
-        critic_message_id: str = "",
-        evaluator_message_kwargs: dict[str, Any] | None = None,
-        critic_message_kwargs: dict[str, Any] | None = None,
+        evaluator_message: TemplatedText | None = None,
+        critic_message: TemplatedText | None = None,
         tool_names: list[str] | None = None,
         max_iterations: int = 3,
         evaluator_llm_provider: str | None = None,
@@ -372,7 +358,7 @@ class RefineAgent(Agent):
         reject_unhonored(
             "refine_agent.astream", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS
         )
-        reject_untitled_response_format("refine_agent", response_format)
+        response_format = await resolve_response_format("refine_agent", response_format)
         # Wrap the schema ONCE and bind that same strategy into both the structured
         # final pass and the projection, so the synthetic tool names match by identity.
         strategy = as_tool_strategy(response_format)
@@ -384,11 +370,7 @@ class RefineAgent(Agent):
         final_agent, final_input, final_config = await _run_refine_loop(
             tools=resolved_tools,
             evaluator_message=evaluator_message,
-            evaluator_message_id=evaluator_message_id,
             critic_message=critic_message,
-            critic_message_id=critic_message_id,
-            evaluator_message_kwargs=evaluator_message_kwargs,
-            critic_message_kwargs=critic_message_kwargs,
             max_iterations=max_iterations,
             evaluator_llm_provider=evaluator_llm_provider,
             critic_llm_provider=critic_llm_provider,

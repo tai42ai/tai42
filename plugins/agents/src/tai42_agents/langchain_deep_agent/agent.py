@@ -31,6 +31,7 @@ from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredF
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import get_park_completion
 from tai42_contract.sandbox import SandboxSession
+from tai42_contract.template import TemplatedText
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_user_output, extract_structured_output
@@ -57,7 +58,7 @@ from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
     reject_unhonored,
-    reject_untitled_response_format,
+    resolve_response_format,
 )
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.resolve_tools import resolve_tools
@@ -123,14 +124,10 @@ class DeepAgentInput(BaseModel):
     inline_skills: list[InlineSkill] | None = Field(
         default=None, description="Skills supplied inline (name + SKILL.md content)."
     )
-    system_message: str | None = ""
-    user_message: str | None = ""
-    system_message_id: str | None = ""
-    user_message_id: str | None = ""
-    system_message_kwargs: dict[str, Any] | None = None
-    user_message_kwargs: dict[str, Any] | None = None
+    system_message: TemplatedText | None = None
+    user_message: TemplatedText | None = None
     interrupt_on: dict[str, Any] | None = None
-    response_format: dict[str, Any] | None = Field(
+    response_format: TemplatedText | dict[str, Any] | None = Field(
         default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
     )
     user_content_kwargs: dict[str, Any] | None = Field(
@@ -180,10 +177,16 @@ async def _neutral_to_internal(spec: NeutralSubAgentSpec) -> ResolvedSubAgentSpe
             "deepagents sub-agent spec cannot carry; pass response_format as a "
             "ToolStrategy on the parent instead."
         )
+    if spec.system_prompt is None:
+        raise ValueError(
+            f"sub-agent {spec.name!r} has no system_prompt; the deepagents sub-agent spec "
+            "requires one, so a neutral spec that omits it is refused here rather than run "
+            "with empty instructions."
+        )
     tools = await resolve_tools(tai42_app.tools, list(spec.tool_names), list(spec.tools), list(spec.presets))
     subagents = [await _neutral_to_internal(child) for child in spec.subagents]
     # Neutral inline_skills are plain dicts; coerce to InlineSkill for the factory.
-    reject_untitled_response_format(f"subagent {spec.name!r}", spec.response_format)
+    resolved_response_format = await resolve_response_format(f"subagent {spec.name!r}", spec.response_format)
     inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (spec.inline_skills or [])]
     return ResolvedSubAgentSpec(
         name=spec.name,
@@ -192,7 +195,7 @@ async def _neutral_to_internal(spec: NeutralSubAgentSpec) -> ResolvedSubAgentSpe
         tools=tools,
         skills=list(spec.skills) or None,
         inline_skills=inline_skills or None,
-        response_format=spec.response_format,
+        response_format=resolved_response_format,
         subagents=subagents,
     )
 
@@ -238,12 +241,8 @@ class DeepAgent(Agent):
         subagents: list[DeepSubAgentSpec] | None = None,
         skills: list[str] | None = None,
         inline_skills: list[InlineSkill] | None = None,
-        system_message: str = "",
-        user_message: str = "",
-        system_message_id: str = "",
-        user_message_id: str = "",
-        system_message_kwargs: dict[str, Any] | None = None,
-        user_message_kwargs: dict[str, Any] | None = None,
+        system_message: TemplatedText | None = None,
+        user_message: TemplatedText | None = None,
         interrupt_on: dict[str, Any] | None = None,
         response_format: Any = None,
         strategy: str | None = None,
@@ -291,12 +290,12 @@ class DeepAgent(Agent):
             collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
         reject_blank_memory_keys("langchain_deep_agent.run", thread_id=thread_id, resume_checkpoint_id=None)
-        reject_untitled_response_format("langchain_deep_agent", response_format)
+        response_format = await resolve_response_format("langchain_deep_agent", response_format)
 
-        if resume is None and not (user_message or user_message_id):
+        if resume is None and user_message is None:
             raise ValueError("langchain_deep_agent.run requires exactly one of user_message or resume")
         if resume is not None:
-            if user_message or user_message_id:
+            if user_message is not None:
                 raise ValueError("langchain_deep_agent.run requires exactly one of user_message or resume, not both.")
             if user_content_kwargs:
                 raise ValueError(
@@ -304,8 +303,8 @@ class DeepAgent(Agent):
                 )
             rendered_user: str | None = None
         else:
-            rendered_user = await render_message(user_message, user_message_id, user_message_kwargs, allow_empty=False)
-        rendered_system = await render_message(system_message, system_message_id, system_message_kwargs)
+            rendered_user = await render_message(user_message, allow_empty=False, field="user_message")
+        rendered_system = await render_message(system_message)
 
         client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
         # Delivery-scoped: a tool this agent dispatches must not capture the completion binding
@@ -487,8 +486,8 @@ class DeepAgent(Agent):
         subagents: Sequence[NeutralSubAgentSpec | DeepSubAgentSpec] | None = None,
         skills: list[str] | None = None,
         inline_skills: Sequence[dict[str, Any]] | None = None,
-        system_message: str = "",
-        user_message: str | None = None,
+        system_message: TemplatedText | None = None,
+        user_message: TemplatedText | None = None,
         response_format: Any = None,
         strategy: str | None = None,
         system_content_kwargs: dict[str, Any] | None = None,
@@ -509,9 +508,10 @@ class DeepAgent(Agent):
         :class:`InterruptFinal` per pending interrupt.
 
         Provide exactly one of ``user_message`` (a fresh turn) or ``resume``
-        (answering a prior interrupt). The system prompt is passed verbatim (the API
-        resolved it already). Live ``tools`` combine with the client tools from
-        ``tool_names``.
+        (answering a prior interrupt). ``user_message`` / ``system_message`` are each a
+        :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored
+        ``id`` plus render ``kwargs``) rendered here through the kit's resource-manager
+        seam. Live ``tools`` combine with the client tools from ``tool_names``.
 
         ``langgraph_config`` is the base run config (built through :meth:`_run_config`
         as :meth:`run`): a ``configurable.thread_id`` / ``checkpoint_id`` it carries
@@ -536,13 +536,17 @@ class DeepAgent(Agent):
             collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
         reject_blank_memory_keys("langchain_deep_agent.astream", thread_id=thread_id, resume_checkpoint_id=None)
-        reject_untitled_response_format("langchain_deep_agent", response_format)
+        response_format = await resolve_response_format("langchain_deep_agent", response_format)
         if (user_message is None) == (resume is None):
             raise ValueError("langchain_deep_agent.astream requires exactly one of user_message or resume")
         if resume is not None and user_content_kwargs:
             raise ValueError(
                 "langchain_deep_agent.astream: user_content_kwargs applies to a fresh user_message turn, not a resume"
             )
+        rendered_system = await render_message(system_message)
+        rendered_user: str | None = (
+            None if resume is not None else await render_message(user_message, allow_empty=False, field="user_message")
+        )
 
         client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
         # Delivery-scoped, as in ``run`` above.
@@ -568,7 +572,7 @@ class DeepAgent(Agent):
                     subagents=internal_subagents,
                     skills=skills,
                     inline_skills=coerced_inline_skills or None,
-                    system_message=system_message,
+                    system_message=rendered_system,
                     response_format=strategy,
                     interrupt_on=interrupt_on,
                     thread_id=thread_id,
@@ -584,9 +588,9 @@ class DeepAgent(Agent):
                 if resume is not None:
                     agent_input: Any = Command(resume=resume)
                 else:
-                    # The exactly-one-of guard above makes user_message non-None here.
-                    assert user_message is not None
-                    agent_input = build_agent_input(user_message, user_content_kwargs=user_content_kwargs)
+                    # The exactly-one-of guard above makes user_message (and its render) non-None here.
+                    assert rendered_user is not None
+                    agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
 
                 # The streaming face returns its stream to a caller that cannot receive a late
                 # answer, so it binds a resume path — and lets an async ask park — ONLY when a
@@ -612,7 +616,7 @@ class DeepAgent(Agent):
                             subagents=[s for s in (subagents or []) if isinstance(s, DeepSubAgentSpec)],
                             skills=skills,
                             inline_skills=coerced_inline_skills,
-                            rendered_system=system_message,
+                            rendered_system=rendered_system,
                             interrupt_on=interrupt_on,
                             response_format=response_format,
                             llm_provider=llm_provider,
@@ -814,11 +818,11 @@ class DeepAgent(Agent):
         compilation — the identity a cross-worker resume recompiles the same graph from.
 
         Every DeepAgentInput value is a ``DeepAgentInput`` field name (subagents/inline_skills
-        dumped to JSON, the system message already RENDERED so resume never re-renders
-        differently), so :meth:`aresume_park` reconstructs the run inputs with
-        ``ToolInput.model_validate``. The checkpoint provider and ``recursion_limit`` are pinned
-        separately by :func:`~tai42_agents._internal.park.build_park_identity`, so they are
-        deliberately absent here.
+        dumped to JSON, the system message the already-RENDERED text carried as a
+        ``TemplatedText`` inline ``content`` so resume never re-renders differently), so
+        :meth:`aresume_park` reconstructs the run inputs with ``ToolInput.model_validate``. The checkpoint
+        provider and ``recursion_limit`` are pinned separately by
+        :func:`~tai42_agents._internal.park.build_park_identity`, so they are deliberately absent here.
 
         ``workspace_key`` is the engine extra a cross-worker resume needs to REATTACH THE SAME
         durable volume; like ``recursion_limit`` it is NOT a ``DeepAgentInput`` field, so
@@ -828,7 +832,7 @@ class DeepAgent(Agent):
             "subagents": [spec.model_dump(mode="json") for spec in (subagents or [])],
             "skills": list(skills) if skills else None,
             "inline_skills": [skill.model_dump(mode="json") for skill in inline_skills],
-            "system_message": rendered_system,
+            "system_message": {"content": rendered_system},
             "interrupt_on": interrupt_on,
             "response_format": response_format,
             "llm_provider": llm_provider,
@@ -893,7 +897,7 @@ class DeepAgent(Agent):
                     subagents=internal_subagents,
                     skills=validated.skills,
                     inline_skills=coerced_inline_skills or None,
-                    system_message=validated.system_message or "",
+                    system_message=(validated.system_message.content or "") if validated.system_message else "",
                     response_format=strategy,
                     interrupt_on=interrupt_on,
                     llm_provider=validated.llm_provider,

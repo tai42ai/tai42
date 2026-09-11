@@ -17,6 +17,7 @@ from typing import Any, Literal, cast, get_args
 
 from pydantic import BaseModel, Field
 from tai42_contract.access_control.models import RoleDefinition
+from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError, DocumentVersionNotFoundError
 from tai42_kit.utils.data import get_compiled_jq
 
@@ -119,7 +120,7 @@ def _resolved_create(name: str, description: str, base_tier: str, grants: Mappin
             base_tier=base_tier,
             scopes=["*"],
             grants=cast("_GrantMap", dict(grants)),
-            condition=condition,
+            condition=TemplatedText(content=condition),
         )
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc

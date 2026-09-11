@@ -41,10 +41,12 @@ from fastmcp.tools import Tool
 from fastmcp.tools.tool_transform import ArgTransform, forward, forward_raw
 from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.secrets import SECRET_PLACEHOLDER, unwrap_secrets
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import (
     JsonSchemaValidationError,
     validate_against_json_schema,
 )
+from tai42_kit.utils.render import resolve_schema_body
 
 from tai42_skeleton.tools.reveal_gate import secret_was_revealed, stowed_park, stowed_reveal_payload
 
@@ -59,8 +61,8 @@ async def preset_bind(
     *,
     name: str,
     description: str = "",
-    output_schema: dict[str, Any] | None = None,
-    input_schema: dict[str, Any] | None = None,
+    output_schema: TemplatedText | dict[str, Any] | None = None,
+    input_schema: TemplatedText | dict[str, Any] | None = None,
 ) -> Tool:
     """Return a FastMCP tool transform of ``base_tool`` as the new named tool ``name``.
 
@@ -73,7 +75,16 @@ async def preset_bind(
     validated object into the base tool's ``payload_arg`` (the base tool must have
     registered ``PresetInputSchemaSupport``; without it this is a loud error — the
     mechanism carries no base-tool knowledge).
+
+    Each schema is the ``TemplatedText | dict`` union: this bind is the single point every
+    preset builds its live tool through (the live rehydrate/reload AND the save-time dry-run
+    bake), so it is where a by-id schema is RESOLVED — rendered and parsed to its schema dict
+    — before use. An unfetchable stored id or a body that does not render to a JSON-object
+    schema fails LOUDLY here, so a bad by-id schema is a 400 at the save's dry-run bake, never
+    a live tool bound on an empty or unparsed schema.
     """
+    output_schema = await resolve_schema_body(f"preset {name!r} output_schema", output_schema)
+    input_schema = await resolve_schema_body(f"preset {name!r} input_schema", input_schema)
     base = await app.tools.get_tool(base_tool)
     transform_args = {key: ArgTransform(hide=True, default=value) for key, value in fixed_kwargs.items()}
 

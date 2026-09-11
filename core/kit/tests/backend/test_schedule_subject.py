@@ -17,7 +17,7 @@ from tai42_kit.utils.schedule_subject import (
 )
 from tai42_kit.utils.state_context import current_state_context
 
-_BINDING = {"states": [{"state": "status", "subject_expr": ".subject.key", "templates": ["summary"]}]}
+_BINDING = {"states": [{"state": "status", "subject_expr": {"content": ".subject.key"}, "templates": ["summary"]}]}
 
 
 def _func(subject=None, backend_tool_name=None, **_: object) -> None:

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from arq.jobs import JobStatus
 from tai42_contract.access_control import caller_may_read_secrets
+from tai42_contract.template import TemplatedText
 from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import jq_util
@@ -127,7 +128,9 @@ async def test_callback_job_runs_callback_over_result(monkeypatch, stub_app) -> 
     _bind_job(monkeypatch, _FakeJob(statuses=[JobStatus.complete], result={"value": 3}))
     stub_app.tools.run_tool_mock = AsyncMock(return_value="chained")
 
-    out = await tasks.callback_job({"redis": object()}, "job-1", {"tool": "next_tool", "expr": "{v: .value}"})
+    out = await tasks.callback_job(
+        {"redis": object()}, "job-1", {"tool": "next_tool", "expr": {"content": "{v: .value}"}}
+    )
 
     assert out == "chained"
     stub_app.tools.run_tool_mock.assert_awaited_once_with("next_tool", {"v": 3})
@@ -176,7 +179,7 @@ async def test_callback_job_aborted_predecessor_reported_as_failure(monkeypatch)
 
 async def test_callback_condition_pass_runs_tool(stub_app) -> None:
     stub_app.tools.run_tool_mock = AsyncMock(return_value="ran")
-    cb = CallbackSchema(condition=".ok", expr="{x: .value}", tool="next")
+    cb = CallbackSchema(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
 
     out = await callback_execution({"ok": True, "value": 5}, cb)
 
@@ -187,7 +190,7 @@ async def test_callback_condition_pass_runs_tool(stub_app) -> None:
 async def test_callback_runs_tool_detached(stub_app) -> None:
     # A worker execution has no live caller, so the callback's tool observes the
     # detached flag set; the flag never leaks past the callback.
-    cb = CallbackSchema(condition=".ok", expr="{x: .value}", tool="next")
+    cb = CallbackSchema(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
 
     await callback_execution({"ok": True, "value": 5}, cb)
 
@@ -203,7 +206,7 @@ async def test_callback_binds_the_worker_secret_capability(
     # A dequeued callback's follow-up tool sees the same worker-bound capability as
     # a dequeued task: OFF -> secret-capable, ON -> fail-closed, reset after.
     access_control(gate_enabled)
-    cb = CallbackSchema(condition=".ok", expr="{x: .value}", tool="next")
+    cb = CallbackSchema(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
 
     await callback_execution({"ok": True, "value": 5}, cb)
 
@@ -212,7 +215,7 @@ async def test_callback_binds_the_worker_secret_capability(
 
 
 async def test_callback_condition_fail_returns_none(stub_app) -> None:
-    cb = CallbackSchema(condition=".ok", expr="{x: .value}", tool="next")
+    cb = CallbackSchema(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
     out = await callback_execution({"ok": False, "value": 5}, cb)
     assert out is None
     stub_app.tools.run_tool_mock.assert_not_called()
@@ -221,7 +224,11 @@ async def test_callback_condition_fail_returns_none(stub_app) -> None:
 async def test_callback_condition_empty_pipeline_skips(stub_app) -> None:
     # A condition that evaluates to an EMPTY pipeline (emits nothing) must skip the
     # callback (return None) rather than crash with the opaque RuntimeError.
-    cb = CallbackSchema(condition=".errors[] | select(.fatal)", expr="{x: .value}", tool="next")
+    cb = CallbackSchema(
+        condition=TemplatedText(content=".errors[] | select(.fatal)"),
+        expr=TemplatedText(content="{x: .value}"),
+        tool="next",
+    )
     out = await callback_execution({"errors": [{"fatal": False}], "value": 5}, cb)
     assert out is None
     stub_app.tools.run_tool_mock.assert_not_called()
@@ -231,14 +238,16 @@ async def test_callback_expr_empty_pipeline_yields_empty_mapping(stub_app) -> No
     # An expr that evaluates to an EMPTY pipeline yields {} (default), passed to the
     # tool as {} — never the opaque RuntimeError.
     stub_app.tools.run_tool_mock = AsyncMock(return_value="ran")
-    cb = CallbackSchema(condition=".ok", expr=".errors[] | select(.fatal)", tool="next")
+    cb = CallbackSchema(
+        condition=TemplatedText(content=".ok"), expr=TemplatedText(content=".errors[] | select(.fatal)"), tool="next"
+    )
     out = await callback_execution({"ok": True, "errors": [{"fatal": False}]}, cb)
     assert out == "ran"
     stub_app.tools.run_tool_mock.assert_awaited_once_with("next", {})
 
 
 async def test_callback_without_tool_returns_expr_output() -> None:
-    cb = CallbackSchema(expr="{doubled: (.value * 2)}")
+    cb = CallbackSchema(expr=TemplatedText(content="{doubled: (.value * 2)}"))
     out = await callback_execution({"value": 4}, cb)
     assert out == {"doubled": 8}
 
@@ -266,7 +275,9 @@ async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> Non
     monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
     reset_all_settings()
     try:
-        cb = CallbackSchema(condition=".ok", expr="{x: .value}", tool="next")
+        cb = CallbackSchema(
+            condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next"
+        )
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
             await callback_execution({"ok": True, "value": 5}, cb)
@@ -289,9 +300,24 @@ async def test_prepare_backend_kwargs_injects_tool_name_and_stamps_capability() 
 
 
 async def test_rendered_fields_resolve_through_resource_manager() -> None:
-    cb = CallbackSchema(condition=".ok", expr=".x")
+    cb = CallbackSchema(condition=TemplatedText(content=".ok"), expr=TemplatedText(content=".x"))
     assert await cb.rendered_condition() == ".ok"
     assert await cb.rendered_expr() == ".x"
     empty = CallbackSchema()
     assert await empty.rendered_condition() == ""
     assert await empty.rendered_expr() == ""
+
+
+async def test_rendered_condition_resolves_template_id(stub_app) -> None:
+    # A by-id condition resolves through the resource manager's stored template map.
+    stub_app.storage.resource_manager.templates["cond-1"] = ".ok"
+    cb = CallbackSchema(condition=TemplatedText(id="cond-1"))
+    assert await cb.rendered_condition() == ".ok"
+
+
+async def test_rendered_condition_unknown_id_raises(stub_app) -> None:
+    # A by-id condition whose id resolves to nothing raises loudly instead of
+    # silently rendering an empty condition.
+    cb = CallbackSchema(condition=TemplatedText(id="missing"))
+    with pytest.raises(KeyError):
+        await cb.rendered_condition()

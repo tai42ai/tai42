@@ -33,7 +33,7 @@ def policy_is_empty(policy: AccessPolicy) -> bool:
     identity build, the tool edge's live re-read, the execution-key bind door, the HTTP
     backend's owner check) asks the same question and can never disagree about which
     keys exist."""
-    return not policy.scopes and policy.condition is None and policy.condition_id is None
+    return not policy.scopes and policy.condition is None
 
 
 class PolicyEnforcer:

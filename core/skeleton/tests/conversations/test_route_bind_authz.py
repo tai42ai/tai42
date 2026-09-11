@@ -63,10 +63,10 @@ class _FakeApp:
 
 
 class _FakeResourceManager:
-    async def render_by_id_or_content(self, *, content, template_id, kwargs):
+    async def render_templated_text(self, text, locale=None):
         # The auth gate's policy condition is inline jq — returned unchanged, as the real
         # renderer does for inline content.
-        return content
+        return text.content or ""
 
 
 class _FakeStorage:
@@ -110,7 +110,7 @@ def env(monkeypatch):
         "k-cond",
         scopes=["conversations"],
         policy_data={OWNER_USER_ID_CLAIM: "alice", KEY_FINGERPRINT_CLAIM: "fp-k-cond"},
-        condition='.identity.department == "eng"',
+        condition={"content": '.identity.department == "eng"'},
     )
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")

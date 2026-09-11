@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
 
 
@@ -148,15 +149,22 @@ class _StubAdmin:
 
 
 class _StubResourceManager:
-    """Renders templates the way the tests need: inline content wins, else the
-    id is echoed, else empty."""
+    """Mirrors ``ResourceManager.render_templated_text``: inline ``content`` renders to
+    itself, a stored ``id`` resolves through this double's own template map, and a
+    missing id — or the by-construction-impossible no-source text — raises loudly
+    instead of silently rendering empty."""
 
-    async def render_by_id_or_content(self, content: Any = None, template_id: Any = None, kwargs: Any = None) -> str:
-        if content:
-            return str(content)
-        if template_id:
-            return f"rendered:{template_id}"
-        return ""
+    def __init__(self) -> None:
+        self.templates: dict[str, str] = {}
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.content is not None:
+            return text.content
+        if text.id is None:
+            raise ValueError("a templated text sets exactly one of 'content' or 'id'; neither was supplied")
+        if text.id not in self.templates:
+            raise KeyError(f"no stored resource for template id {text.id!r}")
+        return self.templates[text.id]
 
 
 class _RecordingLifecycle:
@@ -228,6 +236,7 @@ def _reset_stub_state() -> Any:
     stub_app_instance.tools.detached_seen.clear()
     stub_app_instance.tools.offloads.clear()
     stub_app_instance.tools.secret_capability_seen.clear()
+    stub_app_instance.storage.resource_manager.templates.clear()
     stub_app_instance.clients.client = None
     stub_app_instance.clients.shutdown_calls = 0
     stub_app_instance.admin.calls.clear()

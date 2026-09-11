@@ -755,7 +755,7 @@ def _role_body(tags: list[str], level: str) -> dict:
         "description": "the probe route's governing role",
         "scopes": ["*"],
         "grants": dict.fromkeys(tags, level),
-        "condition": "true",
+        "condition": {"content": "true"},
         "allow_all": False,
     }
 
@@ -766,8 +766,6 @@ def _policy_body(scopes: list[str]) -> dict:
         "scopes": list(scopes),
         "policy_data": {KEY_FINGERPRINT_CLAIM: "fp-k-scoped"},
         "condition": None,
-        "condition_id": None,
-        "condition_kwargs": None,
     }
 
 

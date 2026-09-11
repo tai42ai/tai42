@@ -36,6 +36,7 @@ from tai42_contract.presets.errors import (
     PresetVersionNotFoundError,
 )
 from tai42_contract.states.binding import StateBinding
+from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.errors import DocumentVersionNotFoundError
 from tai42_contract.versioning.models import DocumentVersion
 from tai42_kit.db import component_store_configured
@@ -43,6 +44,7 @@ from tai42_kit.utils.data.json_schema_util import (
     InvalidJsonSchemaError,
     check_json_schema,
 )
+from tai42_kit.utils.render import SchemaBodyError, resolve_schema_body
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome
@@ -103,8 +105,8 @@ class PresetCreate(BaseModel):
     description: str
     fixed_kwargs: dict[str, Any] = {}
     extensions: list[list[ExtensionElement]] = []
-    output_schema: dict[str, Any] | None = None
-    input_schema: dict[str, Any] | None = None
+    output_schema: TemplatedText | dict[str, Any] | None = None
+    input_schema: TemplatedText | dict[str, Any] | None = None
     state_binding: StateBinding | None = None
 
 
@@ -120,8 +122,8 @@ class PresetVersionSave(BaseModel):
 
     fixed_kwargs: dict[str, Any] | None = None
     extensions: list[list[ExtensionElement]] | None = None
-    output_schema: dict[str, Any] | None = None
-    input_schema: dict[str, Any] | None = None
+    output_schema: TemplatedText | dict[str, Any] | None = None
+    input_schema: TemplatedText | dict[str, Any] | None = None
     description: str | None = None
     #: Omitted carries the active binding forward; an explicit ``null`` clears it; a
     #: binding sets it — the presence flag (``state_binding_provided``) tells absent from
@@ -153,8 +155,8 @@ class PresetValidate(BaseModel):
     description: str | None = None
     fixed_kwargs: dict[str, Any] | None = None
     extensions: list[list[ExtensionElement]] | None = None
-    output_schema: dict[str, Any] | None = None
-    input_schema: dict[str, Any] | None = None
+    output_schema: TemplatedText | dict[str, Any] | None = None
+    input_schema: TemplatedText | dict[str, Any] | None = None
     state_binding: StateBinding | None = None
 
 
@@ -236,24 +238,31 @@ def read_edit_extensions(present: bool, value: Any) -> list[list[ExtensionElemen
     return read_combos(value)
 
 
-def read_output_schema(value: Any) -> dict[str, Any] | None:
-    """The optional author-set output schema from a request value: ``null`` →
-    ``None``; a JSON object → itself; anything else → a loud 400."""
+def _read_schema_body(field: str, value: Any) -> TemplatedText | dict[str, Any] | None:
+    """The optional author-set schema body — the ``TemplatedText | dict`` union — from a
+    request value: ``null`` → ``None``; a ``{content|id, kwargs}`` object → the parsed
+    :class:`~tai42_contract.template.TemplatedText` (a stored schema named by id, or inline
+    templated content); any other JSON object → the inline schema dict itself; anything else
+    → a loud 400. A by-id resource is not fetched here — it is rendered, parsed and validated
+    at the save-time dry-run bake and at the point of use."""
     if value is None:
         return None
     if not isinstance(value, dict):
-        raise BadRequestError("'output_schema' must be a JSON object (a JSON Schema)")
-    return value
+        raise BadRequestError(f"'{field}' must be a JSON object (a JSON Schema) or a stored-body reference")
+    try:
+        return TypeAdapter(TemplatedText | dict[str, Any]).validate_python(value)
+    except ValidationError as exc:
+        raise BadRequestError(f"invalid '{field}': {exc.errors(include_url=False)}") from exc
 
 
-def read_input_schema(value: Any) -> dict[str, Any] | None:
-    """The optional author-set input schema from a request value: ``null`` → ``None``;
-    a JSON object → itself; anything else → a loud 400."""
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise BadRequestError("'input_schema' must be a JSON object (a JSON Schema)")
-    return value
+def read_output_schema(value: Any) -> TemplatedText | dict[str, Any] | None:
+    """The optional author-set output schema from a request value (see :func:`_read_schema_body`)."""
+    return _read_schema_body("output_schema", value)
+
+
+def read_input_schema(value: Any) -> TemplatedText | dict[str, Any] | None:
+    """The optional author-set input schema from a request value (see :func:`_read_schema_body`)."""
+    return _read_schema_body("input_schema", value)
 
 
 def read_state_binding(value: Any) -> StateBinding | None:
@@ -506,25 +515,34 @@ def _combo_registry_error(extensions: Sequence[Sequence[ExtensionElement]]) -> s
 
 
 async def _output_schema_error(
-    base_tool: str, output_schema: dict[str, Any] | None, extensions: Sequence[Sequence[ExtensionElement]]
+    base_tool: str,
+    output_schema: TemplatedText | dict[str, Any] | None,
+    extensions: Sequence[Sequence[ExtensionElement]],
 ) -> str | None:
     """The first author-time violation of an ``output_schema``, as a 400 message, or
     ``None`` if it is unset or valid — shared by create/save-version/rollback so a
     bad schema is a 400 that never persists nor reaches the bind kernel.
 
-    Rejects, in order: a schema that fails the draft-2020-12 meta-schema; a
-    non-object schema (both dispatch paths require an object root); a clash with an
-    explicit ``output_schema`` extension entry (the shape declared in two places);
-    and an agent base whose run tool does not advertise ``response_format``
-    (voting_agent) — that base cannot force structured output, so reject at
-    authoring rather than let the bake target a missing parameter at bind time."""
+    Rejects, in order: a by-id schema whose stored resource cannot be rendered or does not
+    render to a JSON object (the ``TemplatedText | dict`` union is resolved here the same
+    way the dry-run bake resolves it, so a bad by-id schema is a 400 at save); a schema that
+    fails the draft-2020-12 meta-schema; a non-object schema (both dispatch paths require an
+    object root); a clash with an explicit ``output_schema`` extension entry (the shape
+    declared in two places); and an agent base whose run tool does not advertise
+    ``response_format`` (voting_agent) — that base cannot force structured output, so reject
+    at authoring rather than let the bake target a missing parameter at bind time."""
     if output_schema is None:
         return None
     try:
-        check_json_schema(output_schema)
+        resolved = await resolve_schema_body("output_schema", output_schema)
+    except SchemaBodyError as exc:
+        return str(exc)
+    assert resolved is not None  # a non-None union resolves to a non-None schema
+    try:
+        check_json_schema(resolved)
     except InvalidJsonSchemaError as exc:
         return f"output_schema is not a valid JSON Schema: {exc}"
-    if output_schema.get("type") != "object":
+    if resolved.get("type") != "object":
         return 'output_schema must be an object schema ("type": "object")'
     for combo in extensions:
         for element in combo:
@@ -545,8 +563,8 @@ async def _dry_run_bind_error(
     *,
     name: str,
     description: str,
-    output_schema: dict[str, Any] | None = None,
-    input_schema: dict[str, Any] | None = None,
+    output_schema: TemplatedText | dict[str, Any] | None = None,
+    input_schema: TemplatedText | dict[str, Any] | None = None,
 ) -> str | None:
     """Bake the body through the kernel WITHOUT registering, returning a 400 message
     if the bake raises (unknown base tool, a ``fixed_kwargs`` key that is not an
@@ -688,8 +706,8 @@ def _new_record_view(
     base_tool: str,
     description: str,
     extensions: list[list[ExtensionElement]],
-    output_schema: dict[str, Any] | None,
-    input_schema: dict[str, Any] | None,
+    output_schema: TemplatedText | dict[str, Any] | None,
+    input_schema: TemplatedText | dict[str, Any] | None,
     *,
     active_version: int,
     uses: list[str],
@@ -990,8 +1008,8 @@ async def _create_preset_core(
     description: str,
     fixed_kwargs: dict[str, Any],
     extensions: list[list[ExtensionElement]],
-    output_schema: dict[str, Any] | None,
-    input_schema: dict[str, Any] | None = None,
+    output_schema: TemplatedText | dict[str, Any] | None,
+    input_schema: TemplatedText | dict[str, Any] | None = None,
     *,
     state_binding: StateBinding | None = None,
     tags: list[str] | None = None,
@@ -1132,8 +1150,8 @@ async def create_preset(
     description: str,
     fixed_kwargs: dict[str, Any],
     extensions: list[list[ExtensionElement]],
-    output_schema: dict[str, Any] | None,
-    input_schema: dict[str, Any] | None = None,
+    output_schema: TemplatedText | dict[str, Any] | None,
+    input_schema: TemplatedText | dict[str, Any] | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """Create a preset, ATOMIC: the shared :func:`_create_preset_core` runs the ordered
@@ -1170,8 +1188,8 @@ async def _create_response(
     base_tool: str,
     description: str,
     extensions: list[list[ExtensionElement]],
-    output_schema: dict[str, Any] | None,
-    input_schema: dict[str, Any] | None,
+    output_schema: TemplatedText | dict[str, Any] | None,
+    input_schema: TemplatedText | dict[str, Any] | None,
     *,
     active_version: int,
     report: FleetResult,
@@ -1270,10 +1288,10 @@ async def _save_version_core(
     *,
     fixed_kwargs: dict[str, Any] | None,
     extensions: list[list[ExtensionElement]] | None,
-    output_schema: dict[str, Any] | None,
+    output_schema: TemplatedText | dict[str, Any] | None,
     output_schema_provided: bool,
     description: str | None,
-    input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+    input_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
     state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
     tags: list[str] | None = None,
     enforce_tier: bool = True,
@@ -1429,10 +1447,10 @@ async def save_version(
     name: str,
     fixed_kwargs: dict[str, Any] | None,
     extensions: list[list[ExtensionElement]] | None,
-    output_schema: dict[str, Any] | None,
+    output_schema: TemplatedText | dict[str, Any] | None,
     output_schema_provided: bool,
     description: str | None,
-    input_schema: dict[str, Any] | None = None,
+    input_schema: TemplatedText | dict[str, Any] | None = None,
     input_schema_provided: bool = False,
     state_binding: StateBinding | None = None,
     state_binding_provided: bool = False,
@@ -1831,8 +1849,8 @@ async def _validate_create(
     description: str | None,
     fixed_kwargs: dict[str, Any],
     extensions: list[list[ExtensionElement]],
-    output_schema: dict[str, Any] | None,
-    input_schema: dict[str, Any] | None = None,
+    output_schema: TemplatedText | dict[str, Any] | None,
+    input_schema: TemplatedText | dict[str, Any] | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """The create route's full pre-store verdict for a brand-new preset — the exact
@@ -1881,8 +1899,8 @@ async def _verdict_bind_chain(
     *,
     name: str,
     description: str,
-    output_schema: dict[str, Any] | None,
-    input_schema: dict[str, Any] | None = None,
+    output_schema: TemplatedText | dict[str, Any] | None,
+    input_schema: TemplatedText | dict[str, Any] | None = None,
     extensions: list[list[ExtensionElement]] | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:

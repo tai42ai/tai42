@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 import tai42_kit.utils.data.jq_util as jq_util
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.template import TemplatedText
 from tai42_kit.settings import reset_all_settings
 
 import tai42_toolbox.extensions.chain as chain_module
@@ -36,7 +37,7 @@ def test_composed_variants_listed_schema_annotates_the_jq_param():
 
     properties = Tool.from_function(chain(_tool, "tool", "desc")).parameters["properties"]
 
-    assert properties["jq_expression"]["type"] == "string"
+    assert properties["jq_expression"]["$ref"] == "#/$defs/TemplatedText"
     assert properties["jq_expression"]["x-tai42-expression"] == {
         "language": "jq",
         "label": "expression",
@@ -50,7 +51,7 @@ def test_composed_variants_listed_schema_annotates_the_jq_param():
 def test_composed_variants_listed_schema_is_otherwise_unchanged():
     # Byte-identity guard: apart from the one added vendor key, the composed
     # variant's listed schema must equal the schema of the same composition with
-    # a PLAIN ``str`` jq param — the annotation is additive-only.
+    # a PLAIN ``TemplatedText`` jq param — the annotation is additive-only.
     import inspect as _inspect
     import json
 
@@ -64,7 +65,7 @@ def test_composed_variants_listed_schema_is_otherwise_unchanged():
 
     plain_sig = with_added_params(
         _inspect.signature(_tool).replace(return_annotation=Any),
-        _inspect.Parameter("jq_expression", _inspect.Parameter.KEYWORD_ONLY, annotation=str),
+        _inspect.Parameter("jq_expression", _inspect.Parameter.KEYWORD_ONLY, annotation=TemplatedText),
         _inspect.Parameter("next_tool_name", _inspect.Parameter.KEYWORD_ONLY, annotation=str),
     )
 
@@ -121,7 +122,7 @@ def test_chains_first_tool_through_jq_into_second(bind_fake_app):
         execute_chain(
             tool_name="get_user",
             tool_arguments={"user_id": 1},
-            jq_expression="{name: .name}",
+            jq_expression=TemplatedText(content="{name: .name}"),
             next_tool_name="greet",
         )
     )
@@ -158,7 +159,7 @@ def test_a_parked_first_stage_propagates_without_touching_jq_or_the_next_tool(bi
             tool_name="source",
             tool_arguments={},
             # A jq expression that WOULD fault on a non-object input, proving jq was skipped.
-            jq_expression=".name",
+            jq_expression=TemplatedText(content=".name"),
             next_tool_name="sink",
         )
     )
@@ -192,13 +193,41 @@ def test_jq_expression_evaluates_off_loop_and_value_round_trips(bind_fake_app):
         execute_chain(
             tool_name="measure",
             tool_arguments={},
-            jq_expression="{total: (.readings | add), count: (.readings | length)}",
+            jq_expression=TemplatedText(content="{total: (.readings | add), count: (.readings | length)}"),
             next_tool_name="sink",
         )
     )
 
     assert result == {"total": 6, "count": 3}
     assert received == {"total": 6, "count": 3}
+
+
+def test_jq_expression_by_id_renders_then_evaluates(bind_fake_app):
+    # A by-id jq_expression is rendered through the bound resource manager to its jq program
+    # IMMEDIATELY before it transforms the first tool's output.
+    received: dict[str, Any] = {}
+
+    async def run_tool(key: str, arguments: dict[str, Any]) -> Any:
+        if key == "measure":
+            return {"readings": [3, 1, 2]}
+        if key == "sink":
+            received.update(arguments)
+            return arguments
+        raise AssertionError(f"unexpected tool {key}")
+
+    bind_fake_app(FakeTools(run_tool=run_tool), {"chain-jq": "{total: (.readings | add)}"})
+
+    result = asyncio.run(
+        execute_chain(
+            tool_name="measure",
+            tool_arguments={},
+            jq_expression=TemplatedText(id="chain-jq"),
+            next_tool_name="sink",
+        )
+    )
+
+    assert result == {"total": 6}
+    assert received == {"total": 6}
 
 
 class _BlockingProgram:
@@ -232,7 +261,7 @@ def test_pathological_jq_expression_surfaces_timeout_through_chain(bind_fake_app
                 execute_chain(
                     tool_name="source",
                     tool_arguments={},
-                    jq_expression="[range(1e9)]",
+                    jq_expression=TemplatedText(content="[range(1e9)]"),
                     next_tool_name="sink",
                 )
             )

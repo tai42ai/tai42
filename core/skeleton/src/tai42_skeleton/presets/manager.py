@@ -41,6 +41,7 @@ from tai42_contract.manifest import ExtensionElement
 from tai42_contract.presets import PresetBody
 from tai42_contract.presets.errors import PresetExistsError, PresetNameConflictError, PresetNotFoundError
 from tai42_contract.states.binding import StateBinding
+from tai42_contract.template import TemplatedText
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
@@ -168,8 +169,8 @@ class PresetManager:
         fixed_kwargs: dict[str, Any],
         extensions: Sequence[Sequence[ExtensionElement]],
         description: str = "",
-        output_schema: dict[str, Any] | None = None,
-        input_schema: dict[str, Any] | None = None,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | None = None,
         *,
         state_binding: StateBinding | None = None,
         version: int = 1,
@@ -208,8 +209,8 @@ class PresetManager:
         fixed_kwargs: dict[str, Any],
         extensions: Sequence[Sequence[ExtensionElement]],
         description: str = "",
-        output_schema: dict[str, Any] | None = None,
-        input_schema: dict[str, Any] | None = None,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | None = None,
         *,
         state_binding: StateBinding | None = None,
         version: int,
@@ -263,8 +264,8 @@ class PresetManager:
         base_tool: str,
         fixed_kwargs: dict[str, Any],
         description: str,
-        output_schema: dict[str, Any] | None,
-        input_schema: dict[str, Any] | None,
+        output_schema: TemplatedText | dict[str, Any] | None,
+        input_schema: TemplatedText | dict[str, Any] | None,
         state_binding: StateBinding | None = None,
         version: int,
     ) -> None:

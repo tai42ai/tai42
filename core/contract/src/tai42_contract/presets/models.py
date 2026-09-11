@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.states.binding import StateBinding
+from tai42_contract.template import TemplatedText
 
 
 class PresetBody(BaseModel):
@@ -38,6 +39,11 @@ class PresetBody(BaseModel):
     :class:`PresetInputSchemaSupport`). Only a base tool that DECLARES input-schema
     support accepts one; otherwise a set ``input_schema`` is a loud authoring error.
 
+    Each schema is the ``TemplatedText | dict`` union: an inline ``dict`` is the JSON
+    Schema document itself; a :class:`~tai42_contract.template.TemplatedText` names a stored
+    schema by ``id`` (or carries it inline as ``content``), rendered and parsed as JSON to the
+    same schema at the point of use and save.
+
     Every field must survive carry-forward on a version save: dropping
     ``extensions`` would make the branch tools vanish on reload, dropping
     ``base_tool`` would break the bind, dropping ``description`` would strip the
@@ -50,8 +56,8 @@ class PresetBody(BaseModel):
     description: str = ""
     fixed_kwargs: dict[str, Any] = Field(default_factory=dict)
     extensions: list[list[ExtensionElement]] = Field(default_factory=list[list[ExtensionElement]])
-    output_schema: dict[str, Any] | None = None
-    input_schema: dict[str, Any] | None = None
+    output_schema: TemplatedText | dict[str, Any] | None = None
+    input_schema: TemplatedText | dict[str, Any] | None = None
     #: The OPTIONAL door-layer state binding this preset carries; the dispatch chokepoint
     #: resolves it from the active version stamp and merges it with any door binding. Like
     #: every other body field it must survive version carry-forward (dropping it would
@@ -102,8 +108,8 @@ class PresetSeed(BaseModel):
     description: str
     base_tool: str
     fixed_kwargs: dict[str, Any] = Field(default_factory=dict)
-    input_schema: dict[str, Any] | None = None
-    output_schema: dict[str, Any] | None = None
+    input_schema: TemplatedText | dict[str, Any] | None = None
+    output_schema: TemplatedText | dict[str, Any] | None = None
     tool_meta: PresetSeedToolMeta | None = None
     #: The OPTIONAL door-layer state binding the seed installs onto the preset it creates.
     state_binding: StateBinding | None = None

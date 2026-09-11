@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 from tai42_contract.states.errors import AttachConflictError, TemplateValidationError
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.states.templates import (
     StateTemplate,
@@ -112,13 +113,29 @@ def test_regime_wildcard_needs_array() -> None:
 
 
 def test_declarations_check_compiles() -> None:
-    ok = _doc(declarations={"schema": {"type": "object", "properties": {"n": {"type": "integer"}}}, "check": ".n > 0"})
+    ok = _doc(
+        declarations={
+            "schema": {"type": "object", "properties": {"n": {"type": "integer"}}},
+            "check": {"content": ".n > 0"},
+        }
+    )
     template = validate_template(ok)
     assert template.declarations is not None
-    assert template.declarations.check == ".n > 0"
-    bad = _doc(declarations={"schema": {"type": "object"}, "check": "this is (not jq"})
+    assert template.declarations.check == TemplatedText(content=".n > 0")
+    bad = _doc(declarations={"schema": {"type": "object"}, "check": {"content": "this is (not jq"}})
     with pytest.raises(TemplateValidationError, match="not a valid jq"):
         validate_template(bad)
+
+
+def test_declarations_check_by_id_is_accepted_and_round_trips() -> None:
+    # A by-id check is not compiled by the pure validator (it cannot fetch the resource); the
+    # save door renders and compiles it. Validate accepts the shape and ``to_document`` emits
+    # the nested templated text verbatim.
+    doc = _doc(declarations={"schema": {"type": "object"}, "check": {"id": "count-check", "kwargs": {"limit": 3}}})
+    template = validate_template(doc)
+    assert template.declarations is not None
+    assert template.declarations.check == TemplatedText(id="count-check", kwargs={"limit": 3})
+    assert template.to_document()["declarations"]["check"] == {"id": "count-check", "kwargs": {"limit": 3}}
 
 
 def test_trace_enabled() -> None:
@@ -218,13 +235,13 @@ def test_input_programs_parse_with_params_and_description() -> None:
                 "anything_due": {
                     "purpose": "input",
                     "description": "any work due",
-                    "jq": "(.ledger // []) | length > 0",
+                    "jq": {"content": "(.ledger // []) | length > 0"},
                 },
                 "due_set": {
                     "purpose": "input",
                     "description": "the work due",
                     "params": ["run"],
-                    "jq": "[(.ledger // [])[] | {id, run: $params.run}]",
+                    "jq": {"content": "[(.ledger // [])[] | {id, run: $params.run}]"},
                 },
             }
         )
@@ -240,7 +257,9 @@ def test_input_declared_params_ride_the_single_params_object() -> None:
     # Decision 3: a declared param arrives as ``$params.<key>``, never a bare ``$<name>``.
     # A body reading the bare ``$run`` references an undeclared variable and is refused.
     with pytest.raises(TemplateValidationError, match="not a valid jq"):
-        validate_template(_planner_doc(template_jq={"v": {"purpose": "input", "params": ["run"], "jq": "{run: $run}"}}))
+        validate_template(
+            _planner_doc(template_jq={"v": {"purpose": "input", "params": ["run"], "jq": {"content": "{run: $run}"}}})
+        )
 
 
 def test_input_program_may_call_a_sibling_by_name_in_dependency_order() -> None:
@@ -249,8 +268,11 @@ def test_input_program_may_call_a_sibling_by_name_in_dependency_order() -> None:
     template = validate_template(
         _planner_doc(
             template_jq={
-                "anything_due": {"purpose": "input", "jq": "(.ledger // []) | length > 0"},
-                "due_set": {"purpose": "input", "jq": "if tjq_anything_due({}) then (.ledger // []) else [] end"},
+                "anything_due": {"purpose": "input", "jq": {"content": "(.ledger // []) | length > 0"}},
+                "due_set": {
+                    "purpose": "input",
+                    "jq": {"content": "if tjq_anything_due({}) then (.ledger // []) else [] end"},
+                },
             }
         )
     )
@@ -262,8 +284,8 @@ def test_input_program_reference_cycle_is_a_loud_refusal() -> None:
         validate_template(
             _planner_doc(
                 template_jq={
-                    "a": {"purpose": "input", "jq": "tjq_b({})"},
-                    "b": {"purpose": "input", "jq": "tjq_a({})"},
+                    "a": {"purpose": "input", "jq": {"content": "tjq_b({})"}},
+                    "b": {"purpose": "input", "jq": {"content": "tjq_a({})"}},
                 }
             )
         )
@@ -271,14 +293,14 @@ def test_input_program_reference_cycle_is_a_loud_refusal() -> None:
 
 def test_non_compiling_program_jq_is_refused() -> None:
     with pytest.raises(TemplateValidationError, match="template_jq 'bad' jq is not a valid jq"):
-        validate_template(_planner_doc(template_jq={"bad": {"purpose": "input", "jq": "this is (not jq"}}))
+        validate_template(_planner_doc(template_jq={"bad": {"purpose": "input", "jq": {"content": "this is (not jq"}}}))
 
 
 def test_program_using_parameters_and_declarations_variables_compiles() -> None:
     template = validate_template(
         _planner_doc(
             declarations={"schema": {"type": "object"}},
-            template_jq={"scoped": {"purpose": "input", "jq": "$parameters + $declarations | .ledger"}},
+            template_jq={"scoped": {"purpose": "input", "jq": {"content": "$parameters + $declarations | .ledger"}}},
         )
     )
     assert "scoped" in template.template_jq
@@ -286,16 +308,18 @@ def test_program_using_parameters_and_declarations_variables_compiles() -> None:
 
 def test_program_bad_name_or_param_refused() -> None:
     with pytest.raises(TemplateValidationError, match="template_jq name"):
-        validate_template(_planner_doc(template_jq={"Bad-Name": {"purpose": "input", "jq": "."}}))
+        validate_template(_planner_doc(template_jq={"Bad-Name": {"purpose": "input", "jq": {"content": "."}}}))
     with pytest.raises(TemplateValidationError, match="params"):
-        validate_template(_planner_doc(template_jq={"v": {"purpose": "input", "jq": ".", "params": ["Bad Param"]}}))
+        validate_template(
+            _planner_doc(template_jq={"v": {"purpose": "input", "jq": {"content": "."}, "params": ["Bad Param"]}})
+        )
 
 
 def test_bad_or_missing_purpose_refused() -> None:
     with pytest.raises(TemplateValidationError, match="purpose"):
-        validate_template(_planner_doc(template_jq={"v": {"jq": "."}}))
+        validate_template(_planner_doc(template_jq={"v": {"jq": {"content": "."}}}))
     with pytest.raises(TemplateValidationError, match="purpose"):
-        validate_template(_planner_doc(template_jq={"v": {"purpose": "verdict", "jq": "."}}))
+        validate_template(_planner_doc(template_jq={"v": {"purpose": "verdict", "jq": {"content": "."}}}))
 
 
 def test_purpose_specific_keys_refused() -> None:
@@ -303,9 +327,13 @@ def test_purpose_specific_keys_refused() -> None:
     # BOTH purposes (an update's ``params`` names its ``.input`` keys). A key outside a
     # purpose's set is refused.
     with pytest.raises(TemplateValidationError, match="unknown key"):
-        validate_template(_planner_doc(template_jq={"v": {"purpose": "input", "writes": [["ledger"]], "jq": "."}}))
+        validate_template(
+            _planner_doc(template_jq={"v": {"purpose": "input", "writes": [["ledger"]], "jq": {"content": "."}}})
+        )
     with pytest.raises(TemplateValidationError, match="unknown key"):
-        validate_template(_planner_doc(template_jq={"u": {"purpose": "update", "reads_x": [["a"]], "jq": "[]"}}))
+        validate_template(
+            _planner_doc(template_jq={"u": {"purpose": "update", "reads_x": [["a"]], "jq": {"content": "[]"}}})
+        )
 
 
 def test_update_may_declare_params_naming_its_input_keys() -> None:
@@ -316,7 +344,7 @@ def test_update_may_declare_params_naming_its_input_keys() -> None:
                     "purpose": "update",
                     "params": ["verdict"],
                     "writes": [["ledger"]],
-                    "jq": '[{op: "set", path: ["ledger"], value: .input.verdict}]',
+                    "jq": {"content": '[{op: "set", path: ["ledger"], value: .input.verdict}]'},
                 }
             }
         )
@@ -338,7 +366,7 @@ def test_update_programs_parse_reads_and_writes() -> None:
                     "description": "settle",
                     "reads": [["ledger"]],
                     "writes": [["ledger"]],
-                    "jq": '[{op: "set", path: ["ledger"], value: .input}]',
+                    "jq": {"content": '[{op: "set", path: ["ledger"], value: .input}]'},
                 },
             }
         )
@@ -351,7 +379,7 @@ def test_update_programs_parse_reads_and_writes() -> None:
 def test_update_writing_outside_the_fragment_is_refused() -> None:
     with pytest.raises(TemplateValidationError, match="template_jq 'bad'"):
         validate_template(
-            _planner_doc(template_jq={"bad": {"purpose": "update", "writes": [["nonesuch"]], "jq": "[]"}})
+            _planner_doc(template_jq={"bad": {"purpose": "update", "writes": [["nonesuch"]], "jq": {"content": "[]"}}})
         )
 
 
@@ -364,7 +392,7 @@ def test_update_may_write_any_regime_including_single() -> None:
                 "seed": {
                     "purpose": "update",
                     "writes": [["phases"]],
-                    "jq": '[{op: "set", path: ["phases"], value: []}]',
+                    "jq": {"content": '[{op: "set", path: ["phases"], value: []}]'},
                 }
             }
         )
@@ -375,7 +403,9 @@ def test_update_may_write_any_regime_including_single() -> None:
 def test_non_compiling_update_jq_is_refused() -> None:
     with pytest.raises(TemplateValidationError, match="template_jq 'bad' jq is not a valid jq"):
         validate_template(
-            _planner_doc(template_jq={"bad": {"purpose": "update", "writes": [["ledger"]], "jq": "this is (not jq"}})
+            _planner_doc(
+                template_jq={"bad": {"purpose": "update", "writes": [["ledger"]], "jq": {"content": "this is (not jq"}}}
+            )
         )
 
 
@@ -386,14 +416,16 @@ def test_update_may_call_an_input_program_by_name() -> None:
     template = validate_template(
         _planner_doc(
             template_jq={
-                "anything_due": {"purpose": "input", "jq": "(.ledger // []) | length > 0"},
+                "anything_due": {"purpose": "input", "jq": {"content": "(.ledger // []) | length > 0"}},
                 "act": {
                     "purpose": "update",
                     "writes": [["ledger"]],
-                    "jq": (
-                        "if (.record | tjq_anything_due({})) then "
-                        '[{op: "set", path: ["ledger"], value: []}] else [] end'
-                    ),
+                    "jq": {
+                        "content": (
+                            "if (.record | tjq_anything_due({})) then "
+                            '[{op: "set", path: ["ledger"], value: []}] else [] end'
+                        )
+                    },
                 },
             }
         )
@@ -409,33 +441,96 @@ def test_reconcile_parses_three_jq_programs() -> None:
     template = validate_template(
         _planner_doc(
             reconcile={
-                "orphans": "[.data.ledger[]? | {id, label: .id}]",
-                "resolutions": "[.new.resolutions[]?]",
-                "close": '[{op: "remove", path: ["ledger"], keys: [.id]}]',
+                "orphans": {"content": "[.data.ledger[]? | {id, label: .id}]"},
+                "resolutions": {"content": "[.new.resolutions[]?]"},
+                "close": {"content": '[{op: "remove", path: ["ledger"], keys: [.id]}]'},
             }
         )
     )
     assert template.reconcile is not None
-    assert template.reconcile.orphans.startswith("[.data")
+    assert template.reconcile.orphans.content is not None
+    assert template.reconcile.orphans.content.startswith("[.data")
     assert validate_template(template.to_document()).reconcile == template.reconcile
 
 
 def test_reconcile_missing_a_program_is_refused() -> None:
     with pytest.raises(TemplateValidationError, match="reconcile close"):
-        validate_template(_planner_doc(reconcile={"orphans": ".", "resolutions": "."}))
+        validate_template(_planner_doc(reconcile={"orphans": {"content": "."}, "resolutions": {"content": "."}}))
 
 
 def test_reconcile_non_compiling_jq_is_refused() -> None:
     with pytest.raises(TemplateValidationError, match="reconcile orphans is not a valid jq"):
-        validate_template(_planner_doc(reconcile={"orphans": "this is (not jq", "close": "[]", "resolutions": "[]"}))
+        validate_template(
+            _planner_doc(
+                reconcile={
+                    "orphans": {"content": "this is (not jq"},
+                    "close": {"content": "[]"},
+                    "resolutions": {"content": "[]"},
+                }
+            )
+        )
 
 
 def test_empty_or_badly_named_members_are_refused() -> None:
     with pytest.raises(TemplateValidationError, match="template_jq 'v' jq must be a non-empty"):
-        validate_template(_planner_doc(template_jq={"v": {"purpose": "input", "jq": "  "}}))
+        validate_template(_planner_doc(template_jq={"v": {"purpose": "input", "jq": {"content": "  "}}}))
     with pytest.raises(TemplateValidationError, match="template_jq name"):
-        validate_template(_planner_doc(template_jq={"Bad-Rule": {"purpose": "update", "jq": "[]"}}))
+        validate_template(_planner_doc(template_jq={"Bad-Rule": {"purpose": "update", "jq": {"content": "[]"}}}))
     with pytest.raises(TemplateValidationError, match="template_jq 'r' jq must be a non-empty"):
-        validate_template(_planner_doc(template_jq={"r": {"purpose": "update", "jq": ""}}))
+        validate_template(_planner_doc(template_jq={"r": {"purpose": "update", "jq": {"content": ""}}}))
     with pytest.raises(TemplateValidationError, match="reconcile close must be a non-empty"):
-        validate_template(_planner_doc(reconcile={"orphans": ".", "close": "  ", "resolutions": "."}))
+        validate_template(
+            _planner_doc(
+                reconcile={"orphans": {"content": "."}, "close": {"content": "  "}, "resolutions": {"content": "."}}
+            )
+        )
+
+
+# --------------------------------------------------------------------------- #
+# by-id program bodies (a stored resource holds the jq)                         #
+# --------------------------------------------------------------------------- #
+def test_template_jq_by_id_is_accepted_and_round_trips() -> None:
+    # A by-id program body is not compiled by the pure validator (it cannot fetch the resource);
+    # the save door renders and compiles it. Validate accepts the shape and ``to_document`` emits
+    # the nested templated text verbatim, so the by-id reference round-trips.
+    doc = _planner_doc(
+        template_jq={
+            "any_due": {"purpose": "input", "jq": {"id": "stored-any-due", "kwargs": {"limit": 3}}},
+        }
+    )
+    template = validate_template(doc)
+    assert template.template_jq["any_due"].jq == TemplatedText(id="stored-any-due", kwargs={"limit": 3})
+    assert template.to_document()["template_jq"]["any_due"]["jq"] == {"id": "stored-any-due", "kwargs": {"limit": 3}}
+    assert validate_template(template.to_document()).template_jq == template.template_jq
+
+
+def test_reconcile_by_id_is_accepted_and_round_trips() -> None:
+    doc = _planner_doc(
+        reconcile={
+            "orphans": {"id": "stored-orphans"},
+            "resolutions": {"content": "[.new.resolutions[]?]"},
+            "close": {"id": "stored-close"},
+        }
+    )
+    template = validate_template(doc)
+    assert template.reconcile is not None
+    assert template.reconcile.orphans == TemplatedText(id="stored-orphans")
+    assert template.reconcile.close == TemplatedText(id="stored-close")
+    assert template.to_document()["reconcile"]["orphans"] == {"id": "stored-orphans"}
+    assert validate_template(template.to_document()).reconcile == template.reconcile
+
+
+def test_program_body_with_a_stray_key_is_refused() -> None:
+    # A stray key inside the nested templated-text value is refused by the value type.
+    with pytest.raises(TemplateValidationError, match="not a valid templated text"):
+        validate_template(_planner_doc(template_jq={"v": {"purpose": "input", "jq": {"content": ".", "extra": 1}}}))
+    with pytest.raises(TemplateValidationError, match="not a valid templated text"):
+        validate_template(
+            _planner_doc(
+                reconcile={
+                    "orphans": {"content": ".", "extra": 1},
+                    "close": {"content": "."},
+                    "resolutions": {"content": "."},
+                }
+            )
+        )

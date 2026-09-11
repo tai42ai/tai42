@@ -140,7 +140,7 @@ class _MemStore(VersionedStore):
 
 
 def _policy(**over: Any) -> dict[str, Any]:
-    base = {"scopes": ["s"], "policy_data": {}, "condition": None, "condition_id": None, "condition_kwargs": None}
+    base: dict[str, Any] = {"scopes": ["s"], "policy_data": {}, "condition": None}
     base.update(over)
     return base
 

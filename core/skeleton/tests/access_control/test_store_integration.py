@@ -116,8 +116,6 @@ async def test_scope_strip_cascade_runs_as_real_array_remove(store: tuple[Postgr
                 "scopes": [keep, "*"],
                 "policy_data": {},
                 "condition": None,
-                "condition_id": None,
-                "condition_kwargs": None,
             },
         )
     ]
@@ -158,9 +156,7 @@ async def test_remove_url_cascade_reads_last_route_via_any(store: tuple[Postgres
     # Dropping the last route empties the scope, so the cascade strips it from the policy.
     existed, affected = await s.remove_url_from_scope(f"/{token}/b")
     assert existed is True
-    assert affected == [
-        (user, {"scopes": [], "policy_data": {}, "condition": None, "condition_id": None, "condition_kwargs": None})
-    ]
+    assert affected == [(user, {"scopes": [], "policy_data": {}, "condition": None})]
 
 
 async def test_grant_and_remove_serialize_under_row_lock_coupling(

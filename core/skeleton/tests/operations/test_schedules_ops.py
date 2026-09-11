@@ -475,9 +475,10 @@ async def test_run_once_schedule_deposits_binding_and_does_not_inject_it(install
     # be injected into its arguments (nothing pops it) — it is deposited on the ambient
     # invocation around the immediate run_tool, like every other door.
     from tai42_contract.states import StateAttach, StateBinding
+    from tai42_contract.template import TemplatedText
     from tai42_contract.tools import current_tool_invocation
 
-    binding = StateBinding(states=[StateAttach(state="status", subject_expr=".x")])
+    binding = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content=".x"))])
     seen: dict = {}
 
     class _Tools(_FakeTools):

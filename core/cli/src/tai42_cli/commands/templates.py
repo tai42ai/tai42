@@ -16,7 +16,7 @@ from tai42_cli.commands._common import (
     app_context,
     covers,
     emit_result,
-    load_kwargs_arg,
+    load_json_object_arg,
 )
 
 app = typer.Typer(
@@ -25,10 +25,13 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_KWARGS_FILE_HELP = (
-    "Read the render kwargs JSON object from a file, or from stdin when the path is '-', instead of putting a "
-    "secret on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --kwargs; "
-    "--kw pairs still override its keys."
+_TEXT_HELP = (
+    'The templated text to render as a JSON object: inline Jinja under "content" OR a stored resource id under '
+    '"id" (exactly one), plus any render parameters under "kwargs".'
+)
+_TEXT_FILE_HELP = (
+    "Read the templated-text JSON object from a file, or from stdin when the path is '-', instead of putting a "
+    "secret on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --text."
 )
 
 
@@ -114,31 +117,19 @@ def delete_template_dir(
 @covers(("POST", "/api/render-template"))
 def render_template(
     ctx: typer.Context,
-    template_id: Annotated[str | None, typer.Option("--template-id", help="A stored template id to render.")] = None,
-    content: Annotated[str | None, typer.Option("--content", help="Inline template content to render.")] = None,
-    kwargs: Annotated[str | None, typer.Option("--kwargs", help="Render kwargs as a JSON object.")] = None,
-    kwargs_file: Annotated[str | None, typer.Option("--kwargs-file", help=_KWARGS_FILE_HELP)] = None,
-    kw: Annotated[
-        list[str] | None, typer.Option("--kw", help="A key=value render kwarg (repeatable; value parsed as JSON).")
-    ] = None,
+    text: Annotated[str | None, typer.Option("--text", help=_TEXT_HELP)] = None,
+    text_file: Annotated[str | None, typer.Option("--text-file", help=_TEXT_FILE_HELP)] = None,
 ) -> None:
-    """Render a template by id or inline content with kwargs.
+    """Render a templated text by id or inline content with kwargs.
 
-    Example: ``tai templates render --template-id prompts/greeting.md --kw name=Ada``
+    Example: ``tai templates render --text '{"id": "prompts/greeting.md", "kwargs": {"name": "Ada"}}'``
     """
     ctx_obj = app_context(ctx)
-    if (template_id is None) == (content is None):
-        raise typer.BadParameter("provide exactly one of --template-id or --content")
-    render_kwargs = load_kwargs_arg(
-        kwargs, kwargs_file, kw, param_hint="--kwargs", file_param_hint="--kwargs-file", kw_param_hint="--kw"
-    )
-    body: dict = {"kwargs": render_kwargs}
-    if template_id is not None:
-        body["template_id"] = template_id
-    else:
-        body["content"] = content
+    text_obj = load_json_object_arg(text, text_file, param_hint="--text", file_param_hint="--text-file")
+    if text_obj is None:
+        raise typer.BadParameter("give one of --text or --text-file", param_hint="--text/--text-file")
     with ctx_obj.client() as client:
-        data = client.post("/api/render-template", json=body)
+        data = client.post("/api/render-template", json={"text": text_obj})
     emit_result(ctx_obj, data)
 
 

@@ -33,6 +33,7 @@ from tai42_contract.agent.events import (
     ToolResultStep,
 )
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tests._delivery_scope import assert_delivery_scoped, probe_tool
 
 from tai42_agents._internal.reject import reject_unhonored
@@ -122,8 +123,8 @@ def test_astream_emits_every_kind_then_structured_final(monkeypatch, app_tools, 
             agent.astream(
                 judge_tools=["jt"],
                 voter_tools=["vt"],
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 voters=[VoterSpec(provider="p1", model="m1")],
             )
@@ -172,8 +173,8 @@ def test_astream_event_order_tool_call_final_structured(monkeypatch, app_tools, 
     events = asyncio.run(
         _collect(
             agent.astream(
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 voters=[VoterSpec(provider="p1", model="m1")],
             )
@@ -201,7 +202,15 @@ def test_astream_threads_user_content_kwargs_to_the_judge_stream(monkeypatch, ap
 
     cache = {"cache_control": {"type": "ephemeral"}}
     agent = tai42_app.agents.get_agent(AGENT_NAME)
-    asyncio.run(_collect(agent.astream(judge_message="decide", voter_message="answer", user_content_kwargs=cache)))
+    asyncio.run(
+        _collect(
+            agent.astream(
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
+                user_content_kwargs=cache,
+            )
+        )
+    )
     assert captured["user_content_kwargs"] == cache
 
 
@@ -213,8 +222,8 @@ def test_run_drains_to_voting_output(monkeypatch, app_tools, resource_manager) -
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     result = asyncio.run(
         agent.run(
-            judge_message="decide",
-            voter_message="answer",
+            judge_message=TemplatedText(content="decide"),
+            voter_message=TemplatedText(content="answer"),
             judge_llm_provider="jp",
             judge_llm_kwargs={"model": "jm"},
             voters=[VoterSpec(provider="p1", model="m1")],
@@ -239,8 +248,8 @@ def test_default_voter_uses_judge_provider(monkeypatch, app_tools, resource_mana
     events = asyncio.run(
         _collect(
             agent.astream(
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
             )
         )
@@ -272,8 +281,8 @@ def test_judge_and_voter_tools_are_delivery_scoped(monkeypatch, app_tools, resou
             agent.astream(
                 judge_tools=["jt"],
                 voter_tools=["vt"],
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 voters=[VoterSpec(provider="p1", model="m1")],
             )
         )
@@ -298,8 +307,8 @@ def test_multiple_judge_tools_flow_through_as_a_list(monkeypatch, app_tools, res
         _collect(
             agent.astream(
                 judge_tools=["jt1", "jt2"],
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 voters=[VoterSpec(provider="p1", model="m1")],
             )
@@ -322,8 +331,8 @@ def test_duplicate_provider_voters_each_run(monkeypatch, app_tools, resource_man
     events = asyncio.run(
         _collect(
             agent.astream(
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 voters=[
                     VoterSpec(provider="p1", model="a"),
@@ -358,8 +367,8 @@ def test_voter_model_prefers_run_reported_model(monkeypatch, app_tools, resource
     events = asyncio.run(
         _collect(
             agent.astream(
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 voters=[VoterSpec(provider="p1", model="requested")],
             )
@@ -383,8 +392,8 @@ def test_voter_spec_model_kwarg_folds_into_llm_kwargs(monkeypatch, app_tools, re
     events = asyncio.run(
         _collect(
             agent.astream(
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 voters=[VoterSpec(provider="p1", model="explicit", llm_kwargs={"model": "shadowed", "temperature": 0})],
             )
@@ -425,8 +434,8 @@ def test_checkpoint_provider_reaches_the_seam_on_both_faces(monkeypatch, app_too
     asyncio.run(
         _collect(
             agent.astream(
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 checkpoint_provider="cp",
             )
@@ -439,8 +448,8 @@ def test_checkpoint_provider_reaches_the_seam_on_both_faces(monkeypatch, app_too
     captured.clear()
     asyncio.run(
         agent.run(
-            judge_message="decide",
-            voter_message="answer",
+            judge_message=TemplatedText(content="decide"),
+            voter_message=TemplatedText(content="answer"),
             judge_llm_provider="jp",
             checkpoint_provider="cp",
         )
@@ -459,8 +468,8 @@ def test_voting_output_response_format_is_accepted_on_both_faces(monkeypatch, ap
     events = asyncio.run(
         _collect(
             agent.astream(
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 response_format=VotingOutput,
             )
@@ -470,8 +479,8 @@ def test_voting_output_response_format_is_accepted_on_both_faces(monkeypatch, ap
 
     result = asyncio.run(
         agent.run(
-            judge_message="decide",
-            voter_message="answer",
+            judge_message=TemplatedText(content="decide"),
+            voter_message=TemplatedText(content="answer"),
             judge_llm_provider="jp",
             response_format=VotingOutput,
         )
@@ -487,7 +496,9 @@ def test_astream_rejects_foreign_response_format(monkeypatch, app_tools, resourc
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError, match=r"voting_agent\.astream does not support response_format"):
-        asyncio.run(_collect(agent.astream(judge_message="decide", response_format=_NotVotingOutput)))
+        asyncio.run(
+            _collect(agent.astream(judge_message=TemplatedText(content="decide"), response_format=_NotVotingOutput))
+        )
 
 
 def test_run_rejects_foreign_response_format(monkeypatch, app_tools, resource_manager) -> None:
@@ -499,7 +510,7 @@ def test_run_rejects_foreign_response_format(monkeypatch, app_tools, resource_ma
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError, match=r"voting_agent\.run does not support response_format"):
-        asyncio.run(agent.run(judge_message="decide", response_format=_NotVotingOutput))
+        asyncio.run(agent.run(judge_message=TemplatedText(content="decide"), response_format=_NotVotingOutput))
 
 
 def test_astream_rejects_unhonored_abc_param(monkeypatch, app_tools, resource_manager) -> None:
@@ -510,7 +521,7 @@ def test_astream_rejects_unhonored_abc_param(monkeypatch, app_tools, resource_ma
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError, match=r"voting_agent\.astream does not support .*\bthread_id\b"):
-        asyncio.run(_collect(agent.astream(judge_message="decide", thread_id="t1")))
+        asyncio.run(_collect(agent.astream(judge_message=TemplatedText(content="decide"), thread_id="t1")))
 
 
 def test_run_rejects_unhonored_abc_param(monkeypatch, app_tools, resource_manager) -> None:
@@ -522,7 +533,7 @@ def test_run_rejects_unhonored_abc_param(monkeypatch, app_tools, resource_manage
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError, match=r"voting_agent\.run does not support .*\btools\b"):
-        asyncio.run(agent.run(judge_message="decide", tools=[_make_tool("x")]))
+        asyncio.run(agent.run(judge_message=TemplatedText(content="decide"), tools=[_make_tool("x")]))
 
 
 @pytest.mark.parametrize(("param", "value"), [("strategy", ""), ("resume", False), ("recursion_limit", 0)])
@@ -536,7 +547,13 @@ def test_run_rejects_falsy_but_meaningful_abc_param(monkeypatch, app_tools, reso
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError, match=rf"voting_agent\.run does not support .*\b{param}\b"):
         # The base Agent.run signature types some of these non-optional, so the mismatch is expected.
-        asyncio.run(agent.run(judge_message="decide", voter_message="answer", **{param: value}))  # type: ignore[arg-type]
+        asyncio.run(
+            agent.run(
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
+                **{param: value},
+            )
+        )  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -552,7 +569,13 @@ def test_unhonored_none_passes_the_guard(monkeypatch, app_tools, resource_manage
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     # The base Agent.run signature types some of these non-optional, so the None mismatch is expected.
-    result = asyncio.run(agent.run(judge_message="decide", voter_message="answer", **{param: None}))  # type: ignore[arg-type]
+    result = asyncio.run(
+        agent.run(
+            judge_message=TemplatedText(content="decide"),
+            voter_message=TemplatedText(content="answer"),
+            **{param: None},  # type: ignore[arg-type]
+        )
+    )
     assert isinstance(result, VotingOutput)
 
 
@@ -596,7 +619,7 @@ def test_run_rejects_every_unhonored_param(monkeypatch, app_tools, resource_mana
     _install_reject_fakes(monkeypatch)
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError, match=rf"voting_agent\.run does not support .*\b{param}\b"):
-        asyncio.run(agent.run(judge_message="decide", **{param: value}))
+        asyncio.run(agent.run(judge_message=TemplatedText(content="decide"), **{param: value}))
 
 
 @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
@@ -605,7 +628,7 @@ def test_astream_rejects_every_unhonored_param(monkeypatch, app_tools, resource_
     _install_reject_fakes(monkeypatch)
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError, match=rf"voting_agent\.astream does not support .*\b{param}\b"):
-        asyncio.run(_collect(agent.astream(judge_message="decide", **{param: value})))
+        asyncio.run(_collect(agent.astream(judge_message=TemplatedText(content="decide"), **{param: value})))
 
 
 def test_unhonored_cases_cover_the_full_reasons_map() -> None:
@@ -660,51 +683,58 @@ def test_run_names_response_format_and_another_offender_at_once(monkeypatch, app
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError) as excinfo:
         # subagents is typed Sequence[SubAgentSpec]; the object() is deliberately wrong to exercise the guard.
-        asyncio.run(agent.run(judge_message="decide", response_format=_NotVotingOutput, subagents=[object()]))  # type: ignore[list-item]
+        asyncio.run(
+            agent.run(
+                judge_message=TemplatedText(content="decide"),
+                response_format=_NotVotingOutput,
+                subagents=[object()],  # type: ignore[list-item]
+            )
+        )
     message = str(excinfo.value)
     assert "response_format" in message
     assert "subagents" in message
 
 
 def test_run_raises_when_required_judge_message_slot_is_unset(monkeypatch, app_tools, resource_manager) -> None:
-    """The judge message renders with ``allow_empty=False``: an unset slot (empty
-    content AND empty id, with no alternative like resume) surfaces the resource
-    manager's fail-loud message rather than silently running on an empty prompt.
-    The voter/judge seams are faked so that WITHOUT render.py's ``allow_empty``
-    passthrough the run would instead complete — a dropped passthrough turns this
-    red rather than letting the empty prompt slip through."""
+    """The judge message renders with ``allow_empty=False``: an unset slot (``None``,
+    with no alternative like resume) raises loudly rather than silently running on an
+    empty prompt. The voter/judge seams are faked so that WITHOUT render.py's
+    ``allow_empty`` passthrough the run would instead complete — a dropped passthrough
+    turns this red rather than letting the empty prompt slip through."""
     _install_reject_fakes(monkeypatch)
     agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(ValueError, match="must provide either"):
-        asyncio.run(agent.run(voter_message="answer"))
+    with pytest.raises(ValueError, match="required message was not provided"):
+        asyncio.run(agent.run(voter_message=TemplatedText(content="answer")))
 
 
 def test_run_propagates_unknown_template_id_from_the_handle(monkeypatch, app_tools, resource_manager) -> None:
-    """A ``judge_message_id`` naming no registered template surfaces the resource
-    manager's unknown-id ``RuntimeError`` (it propagates and aborts the run) rather
-    than being silently treated as an empty prompt."""
+    """A ``judge_message`` naming a stored ``id`` with no registered template surfaces
+    the resource manager's unknown-id ``RuntimeError`` (it propagates and aborts the
+    run) rather than being silently treated as an empty prompt."""
     _install_reject_fakes(monkeypatch)
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError, match="unknown template id"):
-        asyncio.run(agent.run(judge_message_id="no-such-template", voter_message="answer"))
+        asyncio.run(
+            agent.run(judge_message=TemplatedText(id="no-such-template"), voter_message=TemplatedText(content="answer"))
+        )
 
 
 def test_voting_agent_input_rejects_unknown_key() -> None:
     """``extra="forbid"`` turns an unknown key on the JSON tool-face into a loud
     validation error rather than a silently ignored field."""
     with pytest.raises(ValidationError):
-        VotingAgentInput.model_validate({"judge_message": "decide", "totally_unknown_key": 1})
+        VotingAgentInput.model_validate({"judge_message": {"content": "decide"}, "totally_unknown_key": 1})
 
 
 def test_voting_agent_input_empty_content_kwargs_normalize_to_none() -> None:
     """An empty ``user_content_kwargs`` dict from the JSON door reads as absent — the
     builders treat {} as no mark, so the field normalizes to None rather than a
     set-but-empty value the unhonored-reject face would misread."""
-    validated = VotingAgentInput.model_validate({"judge_message": "decide", "user_content_kwargs": {}})
+    validated = VotingAgentInput.model_validate({"judge_message": {"content": "decide"}, "user_content_kwargs": {}})
     assert validated.user_content_kwargs is None
     # A non-empty mark is a real value and rides through unchanged.
     marked = VotingAgentInput.model_validate(
-        {"judge_message": "decide", "user_content_kwargs": {"cache_control": {"type": "ephemeral"}}}
+        {"judge_message": {"content": "decide"}, "user_content_kwargs": {"cache_control": {"type": "ephemeral"}}}
     )
     assert marked.user_content_kwargs == {"cache_control": {"type": "ephemeral"}}
 
@@ -732,8 +762,8 @@ def test_over_limit_voters_raise_before_any_llm_call(monkeypatch, app_tools, res
         asyncio.run(
             _collect(
                 agent.astream(
-                    judge_message="decide",
-                    voter_message="answer",
+                    judge_message=TemplatedText(content="decide"),
+                    voter_message=TemplatedText(content="answer"),
                     judge_llm_provider="jp",
                     voters=[VoterSpec(provider="p1"), VoterSpec(provider="p2"), VoterSpec(provider="p3")],
                 )
@@ -776,8 +806,8 @@ def test_voter_concurrency_one_never_overlaps(monkeypatch, app_tools, resource_m
     asyncio.run(
         _collect(
             agent.astream(
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 voters=[VoterSpec(provider="p1"), VoterSpec(provider="p2")],
             )
@@ -815,8 +845,8 @@ def test_verdict_order_matches_input_order_despite_completion_order(monkeypatch,
     events = asyncio.run(
         _collect(
             agent.astream(
-                judge_message="decide",
-                voter_message="answer",
+                judge_message=TemplatedText(content="decide"),
+                voter_message=TemplatedText(content="answer"),
                 judge_llm_provider="jp",
                 voters=[VoterSpec(provider="p1"), VoterSpec(provider="p2"), VoterSpec(provider="p3")],
             )

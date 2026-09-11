@@ -168,9 +168,9 @@ class BridgeHarness:
             "our_identity": our_identity,
         }
         if payload_expr is not None:
-            body["payload_expr"] = payload_expr
+            body["payload_expr"] = {"content": payload_expr}
         if reply_expr is not None:
-            body["reply_expr"] = reply_expr
+            body["reply_expr"] = {"content": reply_expr}
         return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def create_api_route(
@@ -215,9 +215,9 @@ class BridgeHarness:
             "callback_url": callback_url,
         }
         if payload_expr is not None:
-            body["payload_expr"] = payload_expr
+            body["payload_expr"] = {"content": payload_expr}
         if reply_expr is not None:
-            body["reply_expr"] = reply_expr
+            body["reply_expr"] = {"content": reply_expr}
         return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def set_target_config(

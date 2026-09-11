@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from tai42_contract.hooks import HookParams
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.hooks.managers.base_hooks_manager import BaseHooksManager
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
@@ -33,8 +34,8 @@ async def test_on_event_fires_tool_with_merged_expr_and_kwargs(make_app):
             tool="forward_tool",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition='.status == "ready"',
-            expr="{id: .id}",
+            condition=TemplatedText(content='.status == "ready"'),
+            expr=TemplatedText(content="{id: .id}"),
             tool_kwargs={"extra": 1},
         )
     )
@@ -73,7 +74,7 @@ async def test_on_event_skips_hook_when_condition_false(make_app):
             tool="noop",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition='.status == "ready"',
+            condition=TemplatedText(content='.status == "ready"'),
         )
     )
 
@@ -93,7 +94,7 @@ async def test_on_event_raises_when_condition_errors_at_runtime(make_app):
             tool="noop",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition=".x | tonumber",
+            condition=TemplatedText(content=".x | tonumber"),
         )
     )
 
@@ -209,7 +210,7 @@ async def test_on_event_isolates_a_failing_hook(make_app, caplog):
 
 
 async def test_condition_rendered_via_template_id(make_app):
-    # condition_id resolves through the template manager to a real jq expression.
+    # A condition naming a stored resource resolves through the template manager to a real jq expression.
     app = make_app(by_id={"cond-tmpl": ".ok == true"})
     manager = InMemoryHooksManager(_settings())
     await manager.register(
@@ -219,7 +220,7 @@ async def test_condition_rendered_via_template_id(make_app):
             tool="noop",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition_id="cond-tmpl",
+            condition=TemplatedText(id="cond-tmpl"),
         )
     )
 
@@ -239,8 +240,8 @@ def test_validate_jq_accepts_valid_expr_and_condition():
             tool="noop",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition=".a",
-            expr=".b",
+            condition=TemplatedText(content=".a"),
+            expr=TemplatedText(content=".b"),
         )
     )
     # Nothing to validate when both inline fields are absent.
@@ -256,7 +257,7 @@ def test_validate_jq_rejects_bad_expr():
         tool="noop",
         execution_key="k-fire",
         execution_key_fingerprint="fp-fire",
-        expr="this is ( not jq",
+        expr=TemplatedText(content="this is ( not jq"),
     )
     with pytest.raises(ValueError, match="expr is not valid jq"):
         BaseHooksManager.validate_jq_fields(bad)
@@ -277,7 +278,7 @@ async def test_override_merges_over_event_input_but_under_hook_kwargs(make_app):
             tool="tool",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            expr="{k: .k, m: .m, e: 1}",
+            expr=TemplatedText(content="{k: .k, m: .m, e: 1}"),
             tool_kwargs={"k": "hook", "h": 2},
         )
     )
@@ -320,7 +321,7 @@ async def test_none_override_is_byte_identical(make_app):
             tool="tool",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            expr="{id: .id}",
+            expr=TemplatedText(content="{id: .id}"),
             tool_kwargs={"x": 1},
         )
     )

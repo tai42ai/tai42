@@ -91,7 +91,6 @@ async def test_bootstrap_mints_the_first_admin_key(
     policy = pg.policy_body("root")
     assert policy["scopes"] == ["*"]
     assert policy["condition"] is None
-    assert policy["condition_id"] is None
     assert OWNER_USER_ID_CLAIM not in (policy["policy_data"] or {})
 
 

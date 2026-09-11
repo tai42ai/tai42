@@ -28,6 +28,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
+from tai42_contract.template import TemplatedText
 from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
 
@@ -194,8 +195,8 @@ async def test_create_returns_raw_key_once(store: _Fakes) -> None:
 
 
 async def test_create_forwards_policy_data_and_condition_into_stored_policy(store: _Fakes) -> None:
-    # The create route forwards the optional policy_data + condition/condition_id/
-    # condition_kwargs through create_api_key into the stored policy record.
+    # The create route forwards the optional policy_data + the condition (its inline jq
+    # content and render kwargs) through create_api_key into the stored policy record.
     await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
     resp = await api_keys.create_api_key(
         _req(
@@ -204,9 +205,7 @@ async def test_create_forwards_policy_data_and_condition_into_stored_policy(stor
                 "description": "desc",
                 "scopes": ["scope-a"],
                 "policy_data": {"limit": 7},
-                "condition": ".context.used < .policy.limit",
-                "condition_id": "quota",
-                "condition_kwargs": {"tier": "pro"},
+                "condition": {"content": ".context.used < .policy.limit", "kwargs": {"tier": "pro"}},
             }
         )
     )
@@ -215,9 +214,7 @@ async def test_create_forwards_policy_data_and_condition_into_stored_policy(stor
     assert store.pg.policy_body("u1") == {
         "scopes": ["scope-a"],
         "policy_data": {"limit": 7, KEY_FINGERPRINT_CLAIM: fingerprint},
-        "condition": ".context.used < .policy.limit",
-        "condition_id": "quota",
-        "condition_kwargs": {"tier": "pro"},
+        "condition": {"content": ".context.used < .policy.limit", "kwargs": {"tier": "pro"}},
     }
 
 
@@ -344,9 +341,7 @@ async def test_edit_description_only_preserves_policy_and_condition(store: _Fake
                 "description": "desc",
                 "scopes": ["scope-a"],
                 "policy_data": {"limit": 7},
-                "condition": ".context.used < .policy.limit",
-                "condition_id": "quota",
-                "condition_kwargs": {"tier": "pro"},
+                "condition": {"content": ".context.used < .policy.limit", "kwargs": {"tier": "pro"}},
             }
         )
     )
@@ -358,9 +353,7 @@ async def test_edit_description_only_preserves_policy_and_condition(store: _Fake
     assert store.pg.policy_body("u1") == {
         "scopes": ["scope-a"],
         "policy_data": {"limit": 7, KEY_FINGERPRINT_CLAIM: fingerprint},
-        "condition": ".context.used < .policy.limit",
-        "condition_id": "quota",
-        "condition_kwargs": {"tier": "pro"},
+        "condition": {"content": ".context.used < .policy.limit", "kwargs": {"tier": "pro"}},
     }
 
 
@@ -374,7 +367,7 @@ async def test_edit_scopes_only_preserves_policy_and_condition(store: _Fakes) ->
                 "description": "desc",
                 "scopes": ["scope-a"],
                 "policy_data": {"limit": 7},
-                "condition": "c",
+                "condition": _cond("c"),
             }
         )
     )
@@ -386,7 +379,7 @@ async def test_edit_scopes_only_preserves_policy_and_condition(store: _Fakes) ->
     policy = store.pg.policy_body("u1")
     assert policy["scopes"] == ["scope-b"]
     assert policy["policy_data"] == {"limit": 7, KEY_FINGERPRINT_CLAIM: minted_fp}
-    assert policy["condition"] == "c"
+    assert policy["condition"] == _cond_doc("c")
 
 
 async def test_modify_scopes_round_trip_through_route(store: _Fakes) -> None:
@@ -414,7 +407,7 @@ async def test_edit_explicit_null_clears_policy_and_condition(store: _Fakes) -> 
                 "description": "desc",
                 "scopes": ["scope-a"],
                 "policy_data": {"limit": 7},
-                "condition": "c",
+                "condition": _cond("c"),
             }
         )
     )
@@ -447,10 +440,10 @@ async def test_edit_condition_only_leaves_policy_data_untouched(store: _Fakes) -
 
     minted_fp = store.pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM]
 
-    resp = await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "x"}))
+    resp = await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("x")}))
     assert resp.status_code == 200
     policy = store.pg.policy_body("u1")
-    assert policy["condition"] == "x"
+    assert policy["condition"] == _cond_doc("x")
     assert policy["policy_data"] == {"limit": 7, KEY_FINGERPRINT_CLAIM: minted_fp}
 
 
@@ -630,10 +623,20 @@ def bound_app():
         yield app
 
 
+def _cond(jq: str) -> dict:
+    """A templated-text condition body carrying inline jq ``content`` (the HTTP shape)."""
+    return {"content": jq}
+
+
+def _cond_doc(jq: str) -> dict:
+    """The stored form of an inline-jq condition — a ``TemplatedText`` dump."""
+    return {"content": jq}
+
+
 async def _seed_key(store: _Fakes, *, condition: str) -> None:
     await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
     await api_keys.create_api_key(
-        _req(body={"user_id": "u1", "description": "d", "scopes": ["scope-a"], "condition": condition})
+        _req(body={"user_id": "u1", "description": "d", "scopes": ["scope-a"], "condition": _cond(condition)})
     )
 
 
@@ -644,26 +647,26 @@ async def test_first_policy_write_creates_version_one(store: _Fakes, pg_store: _
     doc = pg_store.docs[("ac_policy", "u1")]
     assert doc["active"] == 1
     assert list(doc["versions"]) == [1]
-    assert doc["versions"][1][0]["condition"] == "a"
+    assert doc["versions"][1][0]["condition"] == _cond_doc("a")
 
 
 async def test_policy_edit_is_store_first_then_history_and_bumps(store: _Fakes, pg_store: _MemStore) -> None:
     await _seed_key(store, condition="a")
     version_before = int(store.redis._strings[S.policy_version_key])
 
-    resp = await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))
+    resp = await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))
     assert resp.status_code == 200
 
     # The enforced store (the authority) holds the new condition.
-    assert store.pg.policy_body("u1")["condition"] == "b"
+    assert store.pg.policy_body("u1")["condition"] == _cond_doc("b")
     # PG history appended v2 and advanced the active pointer.
     doc = pg_store.docs[("ac_policy", "u1")]
     assert doc["active"] == 2
-    assert doc["versions"][2][0]["condition"] == "b"
+    assert doc["versions"][2][0]["condition"] == _cond_doc("b")
     # The version key was bumped so sibling-worker enforcer caches invalidate.
     assert int(store.redis._strings[S.policy_version_key]) > version_before
     # Enforcement reads the store, seeing the new condition.
-    assert (await PolicyEnforcer(S).get_policy("u1")).condition == "b"
+    assert (await PolicyEnforcer(S).get_policy("u1")).condition == TemplatedText(content="b")
 
 
 async def test_description_only_edit_does_not_pollute_history(store: _Fakes, pg_store: _MemStore) -> None:
@@ -676,15 +679,15 @@ async def test_description_only_edit_does_not_pollute_history(store: _Fakes, pg_
 
 async def test_policy_version_history_lists_from_pg(store: _Fakes, pg_store: _MemStore) -> None:
     await _seed_key(store, condition="a")
-    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))
+    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))
 
     resp = await api_keys.list_policy_versions(_req(path_params={"user_id": "u1"}))
     assert resp.status_code == 200
     versions = _body(resp)["data"]
     assert [v["version"] for v in versions] == [1, 2]
     assert [v["is_current"] for v in versions] == [False, True]
-    assert versions[0]["body"]["condition"] == "a"
-    assert versions[1]["body"]["condition"] == "b"
+    assert versions[0]["body"]["condition"] == _cond_doc("a")
+    assert versions[1]["body"]["condition"] == _cond_doc("b")
 
 
 async def test_policy_version_history_absent_is_404(store: _Fakes, pg_store: _MemStore) -> None:
@@ -694,7 +697,7 @@ async def test_policy_version_history_absent_is_404(store: _Fakes, pg_store: _Me
 
 async def test_policy_rollback_restores_store_first_and_bumps(store: _Fakes, pg_store: _MemStore) -> None:
     await _seed_key(store, condition="a")
-    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))  # v2 active
+    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))  # v2 active
     version_before = int(store.redis._strings[S.policy_version_key])
 
     resp = await api_keys.rollback_policy(_req(path_params={"user_id": "u1"}, body={"version": 1}))
@@ -702,12 +705,12 @@ async def test_policy_rollback_restores_store_first_and_bumps(store: _Fakes, pg_
     assert _body(resp)["data"] == {"user_id": "u1", "active_version": 1}
 
     # Target version body written back to the enforced store (the authority).
-    assert store.pg.policy_body("u1")["condition"] == "a"
+    assert store.pg.policy_body("u1")["condition"] == _cond_doc("a")
     # PG history pointer advanced to the rolled-back version.
     assert pg_store.docs[("ac_policy", "u1")]["active"] == 1
     # Version key bumped so enforcement follows on cache invalidation.
     assert int(store.redis._strings[S.policy_version_key]) > version_before
-    assert (await PolicyEnforcer(S).get_policy("u1")).condition == "a"
+    assert (await PolicyEnforcer(S).get_policy("u1")).condition == TemplatedText(content="a")
 
 
 async def test_route_edit_busts_a_warm_enforcer_cache(store: _Fakes, pg_store: _MemStore) -> None:
@@ -717,28 +720,28 @@ async def test_route_edit_busts_a_warm_enforcer_cache(store: _Fakes, pg_store: _
     # ttl wait — proving the route (not just a manual bump) invalidates a warm cache.
     await _seed_key(store, condition="a")
     enforcer = PolicyEnforcer(S)
-    assert (await enforcer.get_policy("u1")).condition == "a"  # warm the per-worker cache
+    assert (await enforcer.get_policy("u1")).condition == TemplatedText(content="a")  # warm the per-worker cache
 
-    resp = await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))
+    resp = await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))
     assert resp.status_code == 200
 
     # The route's bump forced the warm cache to re-read the store (the authority) at once.
-    assert (await enforcer.get_policy("u1")).condition == "b"
+    assert (await enforcer.get_policy("u1")).condition == TemplatedText(content="b")
 
 
 async def test_route_rollback_busts_a_warm_enforcer_cache(store: _Fakes, pg_store: _MemStore) -> None:
     # Same pin for the ROLLBACK route: warm at the post-edit version, roll back through the
     # route, and the SAME warm enforcer serves the rolled-back body immediately.
     await _seed_key(store, condition="a")  # v1
-    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))  # v2 active
+    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))  # v2 active
     enforcer = PolicyEnforcer(S)
-    assert (await enforcer.get_policy("u1")).condition == "b"  # warm at the current version
+    assert (await enforcer.get_policy("u1")).condition == TemplatedText(content="b")  # warm at the current version
 
     resp = await api_keys.rollback_policy(_req(path_params={"user_id": "u1"}, body={"version": 1}))
     assert resp.status_code == 200
 
     # The rollback route's bump busts the same warm cache — it now serves the prior version.
-    assert (await enforcer.get_policy("u1")).condition == "a"
+    assert (await enforcer.get_policy("u1")).condition == TemplatedText(content="a")
 
 
 async def test_policy_rollback_absent_version_is_404(store: _Fakes, pg_store: _MemStore) -> None:
@@ -756,7 +759,7 @@ async def test_edit_store_failure_raises_history_untouched_key_intact(store: _Fa
 
     store.pg.fault = ("UPDATE access_control_policies SET scopes", RuntimeError("pg down"))
     with pytest.raises(RuntimeError, match="pg down"):
-        await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))
+        await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))
 
     assert list(pg_store.docs[("ac_policy", "u1")]["versions"]) == [1]
     assert pg_store.docs[("ac_policy", "u1")]["active"] == 1
@@ -765,7 +768,7 @@ async def test_edit_store_failure_raises_history_untouched_key_intact(store: _Fa
 
 async def test_rollback_store_failure_raises_pointer_not_advanced(store: _Fakes, pg_store: _MemStore) -> None:
     await _seed_key(store, condition="a")
-    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))  # v2 active
+    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))  # v2 active
     policy_before = store.pg.policy_body("u1")
 
     store.pg.fault = ("UPDATE access_control_policies SET scopes", RuntimeError("pg down"))
@@ -791,20 +794,20 @@ async def test_edit_history_failure_still_bumps_and_raises(store: _Fakes, pg_sto
     pg_store.save_version = boom  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="history down"):
-        await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))
+        await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))
 
     # The enforced store holds the tightened condition, and the cache-buster WAS bumped
     # so every worker re-reads it at once — enforcement follows despite the failed audit.
-    assert store.pg.policy_body("u1")["condition"] == "b"
+    assert store.pg.policy_body("u1")["condition"] == _cond_doc("b")
     assert int(store.redis._strings[S.policy_version_key]) > version_before
     # The history pointer never advanced past v1 (the append never landed).
     assert pg_store.docs[("ac_policy", "u1")]["active"] == 1
-    assert (await PolicyEnforcer(S).get_policy("u1")).condition == "b"
+    assert (await PolicyEnforcer(S).get_policy("u1")).condition == TemplatedText(content="b")
 
 
 async def test_revoke_preserves_history_and_recreate_resumes(store: _Fakes, pg_store: _MemStore) -> None:
     await _seed_key(store, condition="a")  # v1
-    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))  # v2
+    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))  # v2
 
     await api_keys.revoke_api_key(_req(path_params={"user_id": "u1"}))
     # Revoke clears the key record + enforced policy + context; the version HISTORY persists.
@@ -813,13 +816,13 @@ async def test_revoke_preserves_history_and_recreate_resumes(store: _Fakes, pg_s
     # Re-creating the same user_id RESUMES history — the next write is a save_version
     # (v3), never a fresh version 1.
     resp = await api_keys.create_api_key(
-        _req(body={"user_id": "u1", "description": "d", "scopes": ["scope-a"], "condition": "c"})
+        _req(body={"user_id": "u1", "description": "d", "scopes": ["scope-a"], "condition": _cond("c")})
     )
     assert resp.status_code == 200
     doc = pg_store.docs[("ac_policy", "u1")]
     assert sorted(doc["versions"]) == [1, 2, 3]
     assert doc["active"] == 3
-    assert doc["versions"][3][0]["condition"] == "c"
+    assert doc["versions"][3][0]["condition"] == _cond_doc("c")
 
 
 async def test_scope_delete_cascade_records_policy_version(store: _Fakes, pg_store: _MemStore) -> None:
@@ -861,13 +864,13 @@ async def test_remove_url_cascade_records_policy_version(store: _Fakes, pg_store
 
 
 async def test_validate_condition_valid_ok(bound_app: Any) -> None:
-    resp = await api_keys.validate_condition(_req(body={"condition": ".policy.limit"}))
+    resp = await api_keys.validate_condition(_req(body={"condition": _cond(".policy.limit")}))
     assert resp.status_code == 200
     assert _body(resp)["data"] == {"ok": True, "result": None}
 
 
 async def test_validate_condition_broken_is_400_with_message(bound_app: Any) -> None:
-    resp = await api_keys.validate_condition(_req(body={"condition": ".("}))
+    resp = await api_keys.validate_condition(_req(body={"condition": _cond(".(")}))
     assert resp.status_code == 400
     # The jq compiler's own message is surfaced VERBATIM (not a generic placeholder), so
     # the author can see exactly what is wrong and fix the lock-out condition.
@@ -877,24 +880,26 @@ async def test_validate_condition_broken_is_400_with_message(bound_app: Any) -> 
 
 
 async def test_validate_condition_both_set_is_400(bound_app: Any) -> None:
-    resp = await api_keys.validate_condition(_req(body={"condition": ".a", "condition_id": "x"}))
+    # A templated text takes inline ``content`` OR a stored ``id``, never both; the door
+    # rejects the invalid document.
+    resp = await api_keys.validate_condition(_req(body={"condition": {"content": ".a", "id": "x"}}))
     assert resp.status_code == 400
     assert "not both" in _body(resp)["error"]
 
 
 async def test_validate_condition_renders_named_template_by_id(bound_app: Any) -> None:
-    # Named-template mode: the condition is authored by condition_id (+ kwargs) with NO
+    # Named-template mode: the condition names a stored template by ``id`` (+ kwargs) with NO
     # inline content. The route renders it via the template manager exactly as enforcement
-    # (render_by_id_or_content — content=None, template_id + kwargs passed through), compiles
-    # the rendered expression, and reports ok. Pins the template-id branch, not just inline.
-    async def render_template(*, content: Any, template_id: Any, kwargs: Any) -> str:
-        assert content is None
-        assert template_id == "ac_quota"
-        assert kwargs == {"limit": 5}
+    # (render_templated_text), compiles the rendered expression, and reports ok. Pins the
+    # stored-id branch, not just inline.
+    async def render_template(text: Any, locale: Any = None) -> str:
+        assert text.content is None
+        assert text.id == "ac_quota"
+        assert text.kwargs == {"limit": 5}
         return ".policy.limit > .context.used"
 
-    bound_app.storage.resource_manager.render_by_id_or_content = render_template
-    resp = await api_keys.validate_condition(_req(body={"condition_id": "ac_quota", "condition_kwargs": {"limit": 5}}))
+    bound_app.storage.resource_manager.render_templated_text = render_template
+    resp = await api_keys.validate_condition(_req(body={"condition": {"id": "ac_quota", "kwargs": {"limit": 5}}}))
     assert resp.status_code == 200
     assert _body(resp)["data"] == {"ok": True, "result": None}
 
@@ -903,7 +908,7 @@ async def test_validate_condition_sample_eval_returns_boolean(bound_app: Any) ->
     resp = await api_keys.validate_condition(
         _req(
             body={
-                "condition": ".policy.limit > .context.used",
+                "condition": _cond(".policy.limit > .context.used"),
                 "sample_context": {"policy": {"limit": 5}, "context": {"used": 3}},
             }
         )
@@ -919,7 +924,7 @@ async def test_validate_condition_sample_eval_deny_returns_false(bound_app: Any)
     resp = await api_keys.validate_condition(
         _req(
             body={
-                "condition": ".policy.limit > .context.used",
+                "condition": _cond(".policy.limit > .context.used"),
                 "sample_context": {"policy": {"limit": 3}, "context": {"used": 5}},
             }
         )
@@ -934,7 +939,7 @@ async def test_validate_condition_sample_eval_truthy_non_bool_denies(bound_app: 
     # the raw value into the ``bool | null`` result. Dropping the ``is True`` coercion (bare
     # ``.first()``) would return the number and fail this — pinning the coercion.
     resp = await api_keys.validate_condition(
-        _req(body={"condition": ".policy.limit", "sample_context": {"policy": {"limit": 7}}})
+        _req(body={"condition": _cond(".policy.limit"), "sample_context": {"policy": {"limit": 7}}})
     )
     assert resp.status_code == 200
     assert _body(resp)["data"] == {"ok": True, "result": False}
@@ -944,11 +949,11 @@ async def test_validate_condition_configured_but_renders_empty_is_400(bound_app:
     # A configured condition that renders to an EMPTY string denies at enforcement
     # (fail-closed lock-out), so the guard must reject it loudly rather than report
     # ``ok`` and let a lock-out condition be saved.
-    async def render_empty(*, content: Any, template_id: Any, kwargs: Any) -> str:
+    async def render_empty(text: Any, locale: Any = None) -> str:
         return ""
 
-    bound_app.storage.resource_manager.render_by_id_or_content = render_empty
-    resp = await api_keys.validate_condition(_req(body={"condition": ".policy.limit"}))
+    bound_app.storage.resource_manager.render_templated_text = render_empty
+    resp = await api_keys.validate_condition(_req(body={"condition": _cond(".policy.limit")}))
     assert resp.status_code == 400
     assert "lock the key out" in _body(resp)["error"]
 
@@ -958,7 +963,7 @@ async def test_validate_condition_present_but_empty_string_is_400(bound_app: Any
     # tests ``is not None``) and denies as configured-but-empty. The guard mirrors
     # that exactly, so an empty-string condition is a loud 400, never a false ok — a
     # truthiness ``bool("")`` test would have wrongly green-lit this lock-out input.
-    resp = await api_keys.validate_condition(_req(body={"condition": ""}))
+    resp = await api_keys.validate_condition(_req(body={"condition": {"content": ""}}))
     assert resp.status_code == 400
     assert "lock the key out" in _body(resp)["error"]
 
@@ -969,18 +974,18 @@ async def test_validate_condition_infra_error_propagates_as_500(bound_app: Any) 
     # exception set ``(ValueError, ValidationError, TemplateError, TemplateNotFoundError)``
     # → 400 and lets everything else propagate → 500. Drive a plain ``RuntimeError``
     # through the render path and assert it propagates rather than being masked as a 400.
-    async def _boom(*, content: Any, template_id: Any, kwargs: Any) -> str:
+    async def _boom(text: Any, locale: Any = None) -> str:
         raise RuntimeError("resource manager down")
 
-    bound_app.storage.resource_manager.render_by_id_or_content = _boom
+    bound_app.storage.resource_manager.render_templated_text = _boom
     with pytest.raises(RuntimeError, match="resource manager down"):
-        await api_keys.validate_condition(_req(body={"condition": ".policy.limit"}))
+        await api_keys.validate_condition(_req(body={"condition": _cond(".policy.limit")}))
 
 
 async def test_validate_condition_never_persists(store: _Fakes, bound_app: Any) -> None:
     # Compiling/evaluating a condition must never write any store — a broken
     # condition can never reach enforcement from the validate path.
-    await api_keys.validate_condition(_req(body={"condition": ".policy.limit"}))
+    await api_keys.validate_condition(_req(body={"condition": _cond(".policy.limit")}))
     assert store.pg.policies == []
     assert store.pg.routes == []
     assert store.redis._hashes == {}
@@ -1004,16 +1009,15 @@ async def test_create_non_dict_policy_data_400(store: _Fakes) -> None:
     assert "policy_data" in _body(resp)["error"]
 
 
-async def test_edit_condition_id_and_kwargs_written(store: _Fakes, pg_store: _MemStore) -> None:
+async def test_edit_condition_by_stored_id_written(store: _Fakes, pg_store: _MemStore) -> None:
     await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
     await api_keys.create_api_key(_req(body={"user_id": "u1", "description": "d", "scopes": ["scope-a"]}))
     resp = await api_keys.edit_api_key(
-        _req(path_params={"user_id": "u1"}, body={"condition_id": "quota", "condition_kwargs": {"tier": "pro"}})
+        _req(path_params={"user_id": "u1"}, body={"condition": {"id": "quota", "kwargs": {"tier": "pro"}}})
     )
     assert resp.status_code == 200
     policy = store.pg.policy_body("u1")
-    assert policy["condition_id"] == "quota"
-    assert policy["condition_kwargs"] == {"tier": "pro"}
+    assert policy["condition"] == {"id": "quota", "kwargs": {"tier": "pro"}}
 
 
 async def test_edit_empty_description_is_400(store: _Fakes) -> None:
@@ -1044,7 +1048,7 @@ async def test_rollback_no_live_key_is_404(store: _Fakes, pg_store: _MemStore) -
     # The PG version history survives a revoke, but with no live key the store restore
     # returns None — a rollback surfaces a loud 404 rather than resurrecting a revoked key.
     await _seed_key(store, condition="a")  # v1
-    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": "b"}))  # v2
+    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))  # v2
     await api_keys.revoke_api_key(_req(path_params={"user_id": "u1"}))
     resp = await api_keys.rollback_policy(_req(path_params={"user_id": "u1"}, body={"version": 1}))
     assert resp.status_code == 404

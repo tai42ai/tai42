@@ -13,19 +13,19 @@ from makefun import create_function
 from pydantic import Field
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
-from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_toolbox._internal.extensions.chain_executor import execute_chain
 from tai42_toolbox._internal.extensions.signature import with_added_params
 
-# The jq-typed parameter's schema annotation: the composed variant runs the
-# expression over the wrapped tool's raw output and hands the result to the
-# second tool as its kwargs object (see ``execute_chain``). Declared on the
+# The jq-typed parameter's schema annotation: the composed variant renders the
+# templated expression, runs it over the wrapped tool's raw output, and hands the result to
+# the second tool as its kwargs object (see ``execute_chain``). Declared on the
 # ``Annotated`` parameter type so the derived tool schema carries it; purely
 # schema metadata, never validation.
 _JQ_EXPRESSION_PARAM = Annotated[
-    str,
+    TemplatedText,
     Field(
         json_schema_extra={
             EXPRESSION_ANNOTATION_KEY: expression_annotation(

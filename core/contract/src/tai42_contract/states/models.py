@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.locale import normalize_optional_locale
+from tai42_contract.template import TemplatedText
 
 #: A subject ``kind`` (and every entry of a declaration's ``subject_kinds``): a
 #: lowercase identifier of at most 63 characters.
@@ -210,7 +211,7 @@ class StateDeclaration(BaseModel):
 
     name: str
     description: str = ""
-    schema_: dict[str, Any] = Field(default_factory=dict, alias="schema")
+    schema_: TemplatedText | dict[str, Any] = Field(default_factory=dict, alias="schema")
     subject_kinds: list[str] = Field(min_length=1)
     default_subject_kind: str
     retention_days: int | None = Field(default=None, gt=0, le=MAX_RETENTION_DAYS)
@@ -265,7 +266,7 @@ class StateTemplateDocument(BaseModel):
     name: str
     description: str = ""
     parameters: dict[str, Any] = Field(default_factory=dict)
-    schema_: dict[str, Any] = Field(default_factory=dict, alias="schema")
+    schema_: TemplatedText | dict[str, Any] = Field(default_factory=dict, alias="schema")
     regimes: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
     declarations: dict[str, Any] | None = None
     trace: dict[str, Any] = Field(default_factory=dict)

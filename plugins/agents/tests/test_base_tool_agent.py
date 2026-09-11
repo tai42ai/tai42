@@ -56,7 +56,7 @@ def _patch_seams(
         return "checkpointer-obj"
 
     monkeypatch.setattr(bta, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=fake_get_checkpointer))
-    monkeypatch.setattr(bta, "context_overflow_middlewares", lambda system_prompt=None: ["mw"])
+    monkeypatch.setattr(bta, "context_overflow_middlewares", AsyncMock(return_value=["mw"]))
     monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: level == "DEBUG"))
     monkeypatch.setattr(bta, "init_langgraph_config", lambda config: {"configurable": {"thread_id": "t"}})
 

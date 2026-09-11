@@ -45,8 +45,10 @@ from __future__ import annotations
 from json import JSONDecodeError
 from typing import Any, cast
 
+from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.user import TaiUser
@@ -123,6 +125,18 @@ def _opt_dict(body: dict, key: str) -> dict[str, Any] | None:
     return value
 
 
+def _opt_templated_text(body: dict, key: str) -> TemplatedText | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise BadRequestError(f"{key} must be a JSON object")
+    try:
+        return TemplatedText.model_validate(value)
+    except ValidationError as exc:
+        raise BadRequestError(f"{key} is not a valid templated text: {exc}") from exc
+
+
 def _opt_int(body: dict, key: str) -> int | None:
     value = body.get(key)
     if value is None:
@@ -175,9 +189,7 @@ async def _extract_create_api_key(request: Request) -> dict:
         "description": _require_str(body, "description"),
         "scopes": _require_str_list(body, "scopes"),
         "policy_data": _opt_dict(body, "policy_data"),
-        "condition": _opt_str(body, "condition"),
-        "condition_id": _opt_str(body, "condition_id"),
-        "condition_kwargs": _opt_dict(body, "condition_kwargs"),
+        "condition": _opt_templated_text(body, "condition"),
         "owner_user_id": _opt_str(body, "owner_user_id"),
     }
 
@@ -195,11 +207,7 @@ async def _extract_edit_api_key(request: Request) -> dict:
     if "policy_data" in body:
         updates["policy_data"] = _opt_dict(body, "policy_data")
     if "condition" in body:
-        updates["condition"] = _opt_str(body, "condition")
-    if "condition_id" in body:
-        updates["condition_id"] = _opt_str(body, "condition_id")
-    if "condition_kwargs" in body:
-        updates["condition_kwargs"] = _opt_dict(body, "condition_kwargs")
+        updates["condition"] = _opt_templated_text(body, "condition")
     return {"updates": updates}
 
 
@@ -221,9 +229,7 @@ async def _extract_create_claim_link(request: Request) -> dict:
 async def _extract_validate_condition(request: Request) -> dict:
     body = await _json_body(request)
     return {
-        "condition": _opt_str(body, "condition"),
-        "condition_id": _opt_str(body, "condition_id"),
-        "condition_kwargs": _opt_dict(body, "condition_kwargs"),
+        "condition": _opt_templated_text(body, "condition"),
         "sample_context": _opt_dict(body, "sample_context"),
     }
 

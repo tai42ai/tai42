@@ -6,6 +6,7 @@ import sys
 
 import pytest
 from tai42_contract.access_control import caller_may_read_secrets
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_backend_celery.core import tasks as tasks_module
@@ -147,7 +148,7 @@ def test_callback_task_runs_callback_execution(stub_app) -> None:
     from tai42_backend_celery.core.tasks import callback_task
 
     try:
-        out = callback_task.apply(args=({"k": 3}, CallbackSchema(expr=".k * 2"))).get()
+        out = callback_task.apply(args=({"k": 3}, CallbackSchema(expr=TemplatedText(content=".k * 2")))).get()
     finally:
         if callback_task._loop is not None:
             callback_task._loop.close()

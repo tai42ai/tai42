@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ValidationError
+from tai42_contract.template import TemplatedText
 
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
@@ -32,7 +33,7 @@ def test_requires_core_fields() -> None:
 
 
 def test_defaults() -> None:
-    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p")
+    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt=TemplatedText(content="p"))
     assert spec.tools == []
     assert spec.skills is None
     assert spec.inline_skills is None
@@ -45,7 +46,7 @@ def test_accepts_inline_skills() -> None:
     spec = ResolvedSubAgentSpec(
         name="a",
         description="d",
-        system_prompt="p",
+        system_prompt=TemplatedText(content="p"),
         inline_skills=[InlineSkill(name="demo", content="# demo")],
     )
     assert spec.inline_skills is not None
@@ -72,12 +73,14 @@ def test_inline_skill_rejects_invalid_name(bad_name: str) -> None:
 
 
 def test_accepts_structured_tool() -> None:
-    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", tools=[_tool("search")])
+    spec = ResolvedSubAgentSpec(
+        name="a", description="d", system_prompt=TemplatedText(content="p"), tools=[_tool("search")]
+    )
     assert [t.name for t in spec.tools] == ["search"]
 
 
 def test_response_format_defaults_none() -> None:
-    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p")
+    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt=TemplatedText(content="p"))
     assert spec.response_format is None
 
 
@@ -85,16 +88,16 @@ def test_accepts_response_format() -> None:
     class M(BaseModel):
         x: int
 
-    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", response_format=M)
+    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt=TemplatedText(content="p"), response_format=M)
     assert spec.response_format is M
 
 
 def test_subagents_default_empty() -> None:
-    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p")
+    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt=TemplatedText(content="p"))
     assert spec.subagents == []
 
 
 def test_accepts_nested_subagents() -> None:
-    child = ResolvedSubAgentSpec(name="c", description="cd", system_prompt="cp")
-    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt="p", subagents=[child])
+    child = ResolvedSubAgentSpec(name="c", description="cd", system_prompt=TemplatedText(content="cp"))
+    spec = ResolvedSubAgentSpec(name="a", description="d", system_prompt=TemplatedText(content="p"), subagents=[child])
     assert [s.name for s in spec.subagents] == ["c"]

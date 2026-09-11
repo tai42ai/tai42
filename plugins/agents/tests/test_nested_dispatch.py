@@ -53,6 +53,7 @@ from tai42_contract.interactions import (
     set_resume_continuation_tool,
     suspended_interaction_marker,
 )
+from tai42_contract.template import TemplatedText
 
 from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
@@ -219,7 +220,10 @@ def test_nested_tool_sees_no_binding_while_the_agent_park_still_captures(
         token = set_park_completion(_COMPLETION_TOOL, _CONTEXT)
         try:
             async for _event in agent.astream(
-                tool_names=["peek", "ask"], checkpoint_provider="redis", user_message="go", thread_id=_THREAD
+                tool_names=["peek", "ask"],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id=_THREAD,
             ):
                 pass
         finally:
@@ -273,7 +277,10 @@ def test_nested_tool_sees_no_binding_on_the_deep_agent_resume_drive(
         token = set_park_completion(_COMPLETION_TOOL, _CONTEXT)
         try:
             async for _event in agent.astream(
-                tool_names=["peek", "ask"], checkpoint_provider="redis", user_message="go", thread_id=_THREAD
+                tool_names=["peek", "ask"],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id=_THREAD,
             ):
                 pass
         finally:

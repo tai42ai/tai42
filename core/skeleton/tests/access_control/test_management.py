@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, registry
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
+from tai42_contract.template import TemplatedText
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.access_control import management
@@ -397,7 +398,9 @@ async def test_edit_splits_description_to_provider_and_policy_to_store(
 async def test_edit_description_only_leaves_policy_untouched(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
-    _raw, _body, fingerprint = await management.add_user_api_key("u1", "old", [], policy_data={"k": 1}, condition=".c")
+    _raw, _body, fingerprint = await management.add_user_api_key(
+        "u1", "old", [], policy_data={"k": 1}, condition=TemplatedText(content=".c")
+    )
     updated = await management.edit_user_payload("u1", description="new")
     assert updated is not None
     # A description-only edit preserves every stored policy field (returns them),
@@ -405,9 +408,7 @@ async def test_edit_description_only_leaves_policy_untouched(
     assert updated == {
         "scopes": [],
         "policy_data": {"k": 1, KEY_FINGERPRINT_CLAIM: fingerprint},
-        "condition": ".c",
-        "condition_id": None,
-        "condition_kwargs": None,
+        "condition": {"content": ".c"},
     }
     assert provider.identities["u1"] == "new"
 
@@ -425,7 +426,9 @@ async def test_edit_scopes_only_never_touches_provider(
 async def test_edit_explicit_null_clears_policy_fields(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
-    _raw, _body, fingerprint = await management.add_user_api_key("u1", "desc", [], policy_data={"k": 1}, condition=".c")
+    _raw, _body, fingerprint = await management.add_user_api_key(
+        "u1", "desc", [], policy_data={"k": 1}, condition=TemplatedText(content=".c")
+    )
     updated = await management.edit_user_payload("u1", policy_data=None, condition=None)
     assert updated is not None
     # The explicit clear drops the caller's policy_data but preserves the server-owned,
@@ -473,8 +476,6 @@ async def test_tokens_payload_merges_identity_and_policy(
             "scopes": ["scope-a"],
             "policy_data": {KEY_FINGERPRINT_CLAIM: fingerprint},
             "condition": None,
-            "condition_id": None,
-            "condition_kwargs": None,
         }
     ]
 

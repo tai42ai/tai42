@@ -233,21 +233,19 @@ CREATE TRIGGER trg_versioned_documents_role_audit_guard_update
 -- ------------------------------------------------------------
 -- access_control_policies — one row per provisioned `user_id`, holding the policy
 -- body the gate enforces: the granted `scopes`, the opaque `policy_data`, and the
--- optional jq authorization `condition` (inline `condition` or a stored
--- `condition_id`, plus `condition_kwargs`). Identities are COLUMN VALUES
--- (`user_id`), so an OIDC subject containing `:`/`@`/unicode is a plain
--- parameterized value with no key-encoding hazard. There is deliberately NO
--- `description` column and NO api-key-hash column: both belong to the identity
--- record, whose single home is the provider's storage — duplicating them here
--- would create a second, stale-able copy.
+-- optional jq authorization `condition` — a single templated-text document
+-- (`{content|id, kwargs}`, exactly one of inline `content` or a stored `id`) or
+-- NULL when no condition is configured. Identities are COLUMN VALUES (`user_id`),
+-- so an OIDC subject containing `:`/`@`/unicode is a plain parameterized value with
+-- no key-encoding hazard. There is deliberately NO `description` column and NO
+-- api-key-hash column: both belong to the identity record, whose single home is the
+-- provider's storage — duplicating them here would create a second, stale-able copy.
 CREATE TABLE IF NOT EXISTS access_control_policies (
     id               BIGSERIAL    NOT NULL,
     user_id          TEXT         NOT NULL,
     scopes           TEXT[]       NOT NULL DEFAULT '{}',
     policy_data      JSONB        NOT NULL DEFAULT '{}',
-    condition        TEXT,
-    condition_id     TEXT,
-    condition_kwargs JSONB,
+    condition        JSONB,
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (id),
     CONSTRAINT access_control_policies_user_id_unique UNIQUE (user_id)

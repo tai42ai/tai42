@@ -14,6 +14,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from tai42_contract.template import TemplatedText
+from tai42_kit.utils.render import resolve_schema_body
+
 
 def reject_unhonored(
     qualified_face: str,
@@ -117,3 +120,23 @@ def reject_untitled_response_format(agent_name: str, response_format: Any) -> No
                 f"{agent_name} response_format oneOf variants must each be a JSON Schema with a "
                 "non-empty 'title' (used as the structured-output name)."
             )
+
+
+async def resolve_response_format(agent_name: str, response_format: Any) -> Any:
+    """Resolve an agent's ``response_format`` to the value the run forces structured output
+    with, then run the untitled guard on it.
+
+    ``response_format`` is the ``TemplatedText | dict`` authored-schema union, a live pydantic
+    class (in-process), or ``None``. A :class:`~tai42_contract.template.TemplatedText` (a stored
+    schema named by ``id``, or inline ``content``) is RENDERED and PARSED to its JSON-Schema
+    dict — a render failure, a parse failure, or a non-object result raises loudly naming the
+    field, never a silent empty or unparsed schema. An inline dict, a pydantic class, and
+    ``None`` pass through unchanged, so an inline author sees no behaviour change. The resolved
+    value then passes :func:`reject_untitled_response_format` (a JSON-Schema dict must carry the
+    top-level ``title`` the run forces the structured output under), and is returned for the
+    agent to force its structured output with.
+    """
+    if isinstance(response_format, TemplatedText):
+        response_format = await resolve_schema_body(f"{agent_name} response_format", response_format)
+    reject_untitled_response_format(agent_name, response_format)
+    return response_format

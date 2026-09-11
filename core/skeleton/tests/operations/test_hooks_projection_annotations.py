@@ -1,11 +1,11 @@
 """``register_hook``'s projected MCP tool form carries the jq annotations on its
 FLAT ``condition`` / ``expr`` parameters.
 
-The operation exposes flat ``condition``/``expr`` string params, so the model-level
-``x-tai42-expression`` annotation on ``HookRegister.condition``/``expr`` never reaches
-the tool form fastmcp derives from the flat signature — the door this suite guards.
-The Annotated metadata on the two params restores it, stating the HOOK surface's
-facts (both run over the webhook body; the condition is TRUTHY, unlike access
+The operation exposes flat ``condition``/``expr`` params, each a ``TemplatedText``, so
+the model-level ``x-tai42-expression`` annotation on ``HookRegister.condition``/``expr``
+never reaches the tool form fastmcp derives from the flat signature — the door this
+suite guards. The Annotated metadata on the two params restores it, stating the HOOK
+surface's facts (both run over the webhook body; the condition is TRUTHY, unlike access
 control's strict-true; the expr yields the fired tool's kwargs object). The tool
 schema is derived exactly as the platform projects it (``_make_tool`` +
 ``Tool.from_function``), and the payloads are pinned VERBATIM as the wire shape a
@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 
 from fastmcp.tools import Tool
-from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText
 
 from tai42_skeleton.operations.decorator import operation_metadata_of
 from tai42_skeleton.operations.hooks import register_hook
@@ -64,29 +64,21 @@ def test_register_hook_projection_annotates_the_flat_jq_params() -> None:
     assert props["expr"][EXPRESSION_ANNOTATION_KEY] == HOOK_EXPR_PAYLOAD
 
 
-def test_annotation_stays_confined_to_the_two_jq_strings() -> None:
+def test_annotation_stays_confined_to_the_two_jq_params() -> None:
     props = _projected_tool_properties()
-    # The template companions and every other flat param stay unannotated.
-    for name in (
-        "name",
-        "topic",
-        "tool",
-        "execution_key",
-        "tool_kwargs",
-        "condition_id",
-        "condition_kwargs",
-        "expr_id",
-        "expr_kwargs",
-    ):
+    # Every other flat param stays unannotated.
+    for name in ("name", "topic", "tool", "execution_key", "tool_kwargs", "subject", "state_binding"):
         assert EXPRESSION_ANNOTATION_KEY not in props[name], name
 
 
 def test_annotation_is_purely_additive_to_the_flat_params() -> None:
     # Removing the vendor key must leave the exact schema an un-annotated
-    # ``str | None = None`` param generates — proving the Annotated metadata adds
-    # one key and changes nothing else (type, nullability, default).
+    # ``TemplatedText | None = None`` param generates — proving the Annotated metadata
+    # adds one key and changes nothing else (type, nullability, default).
+    async def _plain(param: TemplatedText | None = None) -> None: ...
+
+    plain = json.dumps(Tool.from_function(_plain).parameters["properties"]["param"], sort_keys=True)
     props = _projected_tool_properties()
-    plain = json.dumps(props["condition_id"], sort_keys=True)
     for field in ("condition", "expr"):
         stripped = {k: v for k, v in props[field].items() if k != EXPRESSION_ANNOTATION_KEY}
         assert json.dumps(stripped, sort_keys=True) == plain

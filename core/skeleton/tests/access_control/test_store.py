@@ -88,7 +88,7 @@ async def test_remove_url_cascades_scope_out_of_token_policies(pg: FakeAccessCon
     assert affected == [
         (
             "u1",
-            {"scopes": ["keep"], "policy_data": {}, "condition": None, "condition_id": None, "condition_kwargs": None},
+            {"scopes": ["keep"], "policy_data": {}, "condition": None},
         )
     ]
     assert pg.policy("u1")["scopes"] == ["keep"]
@@ -225,7 +225,7 @@ async def test_remove_scope_strips_policies_and_returns_count(pg: FakeAccessCont
     assert affected == [
         (
             "u1",
-            {"scopes": ["other"], "policy_data": {}, "condition": None, "condition_id": None, "condition_kwargs": None},
+            {"scopes": ["other"], "policy_data": {}, "condition": None},
         )
     ]
     assert pg.policy("u1")["scopes"] == ["other"]
@@ -244,22 +244,18 @@ async def test_remove_scope_inconsistent_state_reports_mutation(pg: FakeAccessCo
     pg.add_policy("u1", scopes=["scope-a"])
     deleted, affected = await STORE().remove_scope("scope-a")
     assert deleted == 1
-    assert affected == [
-        ("u1", {"scopes": [], "policy_data": {}, "condition": None, "condition_id": None, "condition_kwargs": None})
-    ]
+    assert affected == [("u1", {"scopes": [], "policy_data": {}, "condition": None})]
 
 
 # -- policy body read / write ------------------------------------------------
 
 
 async def test_get_policy_body_reads_stored_policy(pg: FakeAccessControlPg) -> None:
-    pg.add_policy("u1", scopes=["admin"], policy_data={"plan_limit": 100}, condition=".x")
+    pg.add_policy("u1", scopes=["admin"], policy_data={"plan_limit": 100}, condition={"content": ".x", "kwargs": {}})
     assert await STORE().get_policy_body("u1") == {
         "scopes": ["admin"],
         "policy_data": {"plan_limit": 100},
-        "condition": ".x",
-        "condition_id": None,
-        "condition_kwargs": None,
+        "condition": {"content": ".x", "kwargs": {}},
     }
 
 
@@ -275,13 +271,11 @@ async def test_policy_exists(pg: FakeAccessControlPg) -> None:
 
 async def test_create_policy_writes_row(pg: FakeAccessControlPg) -> None:
     pg.add_route("/s", "s")  # the granted scope must have a live route
-    body = await STORE().create_policy("u1", ["s"], {"k": 1}, ".c", None, {"a": 2})
+    body = await STORE().create_policy("u1", ["s"], {"k": 1}, {"content": ".c", "id": None, "kwargs": {"a": 2}})
     assert body == {
         "scopes": ["s"],
         "policy_data": {"k": 1},
-        "condition": ".c",
-        "condition_id": None,
-        "condition_kwargs": {"a": 2},
+        "condition": {"content": ".c", "id": None, "kwargs": {"a": 2}},
     }
     assert await STORE().get_policy_body("u1") == body
 
@@ -327,19 +321,17 @@ async def test_delete_policy(pg: FakeAccessControlPg) -> None:
 
 async def test_update_scopes_only_preserves_other_fields(pg: FakeAccessControlPg) -> None:
     await STORE().add_url_to_scope("s2", "/b")
-    pg.add_policy("u1", scopes=["s1"], policy_data={"k": 1}, condition=".c")
+    pg.add_policy("u1", scopes=["s1"], policy_data={"k": 1}, condition={"content": ".c", "kwargs": {}})
     body = await STORE().update_policy_fields("u1", {"scopes": ["s2"]})
     assert body == {
         "scopes": ["s2"],
         "policy_data": {"k": 1},
-        "condition": ".c",
-        "condition_id": None,
-        "condition_kwargs": None,
+        "condition": {"content": ".c", "kwargs": {}},
     }
 
 
 async def test_update_explicit_clear(pg: FakeAccessControlPg) -> None:
-    pg.add_policy("u1", scopes=["s1"], policy_data={"k": 1}, condition=".c")
+    pg.add_policy("u1", scopes=["s1"], policy_data={"k": 1}, condition={"content": ".c", "kwargs": {}})
     body = await STORE().update_policy_fields("u1", {"policy_data": None, "condition": None})
     assert body is not None
     assert body["policy_data"] == {}
@@ -384,9 +376,7 @@ async def test_restore_policy_body_writes_body(pg: FakeAccessControlPg) -> None:
     body = {
         "scopes": ["new"],
         "policy_data": {"k": 1},
-        "condition": ".c",
-        "condition_id": None,
-        "condition_kwargs": None,
+        "condition": {"content": ".c", "id": None, "kwargs": {}},
     }
     restored = await STORE().restore_policy_body("u1", body)
     assert restored == body

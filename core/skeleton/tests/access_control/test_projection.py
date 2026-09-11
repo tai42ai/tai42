@@ -164,7 +164,7 @@ async def test_deny_wins_requires_all_resolved_scopes(env: _Env):
 
 
 async def test_editor_projects_me_and_non_auth_but_not_admin_area(env: _Env):
-    env.pg.add_policy("editor1", scopes=["*"], condition=EDITOR_JQ)
+    env.pg.add_policy("editor1", scopes=["*"], condition={"content": EDITOR_JQ})
     env.pg.add_route("/api/auth/scopes", "auth-api")
     env.pg.add_route("/api/tools", "tools")
     env.routes(
@@ -183,7 +183,7 @@ async def test_owned_key_projects_intersection_and_respects_owner_condition(env:
     # A ["*"] key owned by a scoped owner that fences to a single path: the projection
     # shows the attenuated intersection AND the owner second-pass denial.
     env.pg.add_policy("key1", scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
-    env.pg.add_policy("owner1", scopes=["tools", "other"], condition='.request.path == "/api/tools"')
+    env.pg.add_policy("owner1", scopes=["tools", "other"], condition={"content": '.request.path == "/api/tools"'})
     env.pg.add_route("/api/tools", "tools")
     env.pg.add_route("/api/other", "other")
     env.routes(("/api/tools", ["GET"]), ("/api/other", ["GET"]))
@@ -231,7 +231,7 @@ async def test_non_admin_projection_omits_a_fenced_route(env: _Env):
     # ``role_level_decision`` hard-fences it exactly as the request gate does. POST
     # /api/run-tool is a REAL fenced route (the resolver reads the live registry, not the
     # monkeypatched candidate list); /api/x is a non-registered control the same caller reaches.
-    env.pg.add_policy("u1", scopes=["s"], condition="true")  # jq admits everything
+    env.pg.add_policy("u1", scopes=["s"], condition={"content": "true"})  # jq admits everything
     env.pg.add_route("/api/run-tool", "s")
     env.pg.add_route("/api/x", "s")
     env.routes(("/api/run-tool", ["POST"]), ("/api/x", ["GET"]))
@@ -242,7 +242,7 @@ async def test_non_admin_projection_omits_a_fenced_route(env: _Env):
 
 
 async def test_agents_projected_per_run_path_for_editor(env: _Env):
-    env.pg.add_policy("editor1", scopes=["*"], condition=EDITOR_JQ)
+    env.pg.add_policy("editor1", scopes=["*"], condition={"content": EDITOR_JQ})
     env.pg.add_route("/api/agents/alpha/runs", "agents")
     env.pg.add_route("/api/agents/beta/runs", "agents")
     env.agents(["alpha", "beta"])
@@ -253,7 +253,7 @@ async def test_agents_projected_per_run_path_for_editor(env: _Env):
 async def test_agents_excluded_when_run_door_jq_denies(env: _Env):
     # A viewer cannot POST an agent run (only the read-only leg admits its methods), so no
     # agent projects even though the run door resolves and its scope is covered.
-    env.pg.add_policy("viewer1", scopes=["*"], condition=VIEWER_JQ)
+    env.pg.add_policy("viewer1", scopes=["*"], condition={"content": VIEWER_JQ})
     env.pg.add_route("/api/agents/alpha/runs", "agents")
     env.agents(["alpha"])
     result = await build_projection("viewer1", ["*"], {})
@@ -386,10 +386,10 @@ async def _gate_oracle(
                 request=request,
                 system={"time": 0},
             ).model_dump(),
-            policy.condition,
-            condition_configured=policy.condition is not None or policy.condition_id is not None,
+            policy.condition.content if policy.condition is not None else "",
+            condition_configured=policy.condition is not None,
         )
-        if owner_policy is not None and (owner_policy.condition is not None or owner_policy.condition_id is not None):
+        if owner_policy is not None and owner_policy.condition is not None:
             await enforcer.enforce(
                 JqAuthContext(
                     sub=user_id,
@@ -400,7 +400,7 @@ async def _gate_oracle(
                     request=request,
                     system={"time": 0},
                 ).model_dump(),
-                owner_policy.condition,
+                owner_policy.condition.content,
                 condition_configured=True,
             )
     except AuthenticationError:
@@ -414,10 +414,10 @@ async def test_projection_equals_gate_across_identity_matrix(env: _Env):
     # admin (the total branch), and an owned key whose OWNER carries a path-fencing
     # condition (the two-pass owner branch).
     settings = access_control_settings()
-    env.pg.add_policy("editor1", scopes=["*"], condition=EDITOR_JQ)
+    env.pg.add_policy("editor1", scopes=["*"], condition={"content": EDITOR_JQ})
     env.pg.add_policy("admin1", scopes=["*"])
     env.pg.add_policy("key1", scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
-    env.pg.add_policy("owner1", scopes=["tools", "other"], condition='.request.path == "/api/tools"')
+    env.pg.add_policy("owner1", scopes=["tools", "other"], condition={"content": '.request.path == "/api/tools"'})
     env.pg.add_route("/api/auth/scopes", "auth-api")
     env.pg.add_route("/api/tools", "tools")
     env.pg.add_route("/api/other", "other")
@@ -473,7 +473,7 @@ async def test_projection_uses_original_scope_order_like_the_gate(env: _Env):
     # first scope: original order has "tools" first (admit), a sorted order would put
     # "other" first (a wrong deny).
     settings = access_control_settings()
-    env.pg.add_policy("u1", scopes=["*"], condition='.scopes[0] == "tools"')
+    env.pg.add_policy("u1", scopes=["*"], condition={"content": '.scopes[0] == "tools"'})
     env.pg.add_route("/api/tools", "tools")
     env.routes(("/api/tools", ["GET"]))
     scopes = ["tools", "other"]
@@ -488,7 +488,7 @@ async def test_jq_infra_fault_during_build_propagates_and_gate_fails_closed(env:
     # A condition that raises at EVALUATION (a path string cannot be a number) is an
     # INFRASTRUCTURE fault, NOT a policy deny.
     settings = access_control_settings()
-    env.pg.add_policy("u1", scopes=["*"], condition=".request.path | tonumber")
+    env.pg.add_policy("u1", scopes=["*"], condition={"content": ".request.path | tonumber"})
     env.pg.add_route("/api/tools", "tools")
     env.routes(("/api/tools", ["GET"]))
     # (a) The build PROPAGATES it loudly — never a silently-shrunk 200 projection with the

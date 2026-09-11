@@ -22,8 +22,10 @@ from __future__ import annotations
 from json import JSONDecodeError
 from typing import Any
 
+from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.templates import clear_templates_cache as _clear_templates_cache_op
@@ -61,13 +63,22 @@ async def _extract_delete(request: Request) -> dict[str, Any]:
     return {"path": body.get("path")}
 
 
+def _req_templated_text(body: dict, key: str) -> TemplatedText:
+    """Parse a REQUIRED templated-text JSON object under ``key``, mapping a missing or
+    malformed one (including the type's neither/both-source rule) to a loud ``400``
+    naming the field."""
+    value = body.get(key)
+    if not isinstance(value, dict):
+        raise BadRequestError(f"{key!r} must be a templated-text JSON object with 'content' or 'id'")
+    try:
+        return TemplatedText.model_validate(value)
+    except ValidationError as exc:
+        raise BadRequestError(f"{key!r} is not a valid templated text: {exc}") from exc
+
+
 async def _extract_render(request: Request) -> dict[str, Any]:
     body = await _json_body(request)
-    return {
-        "content": body.get("content"),
-        "template_id": body.get("template_id"),
-        "kwargs": body.get("kwargs"),
-    }
+    return {"text": _req_templated_text(body, "text")}
 
 
 list_templates = register_operation_route(

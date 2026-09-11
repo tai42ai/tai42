@@ -12,7 +12,9 @@ from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import run_jq_first
+from tai42_kit.utils.render import render_templated_text
 
 try:
     import jq  # noqa: F401
@@ -25,7 +27,7 @@ except ImportError as exc:
 async def execute_chain(
     tool_name: str,
     tool_arguments: dict[str, Any],
-    jq_expression: str,
+    jq_expression: TemplatedText,
     next_tool_name: str,
 ) -> Any:
     """Call ``tool_name``, transform its output with ``jq_expression``, then call
@@ -44,5 +46,8 @@ async def execute_chain(
         # Propagated WHOLE — the park's resume owner rides with the sentinel, so whoever
         # claims it downstream still checks it owns it. Re-minting one here would drop that.
         return first_result
-    jq_result = await run_jq_first(jq_expression, first_result)
+    # Render the templated expression to its jq program IMMEDIATELY before evaluating it; a
+    # by-id text whose stored resource cannot be fetched raises out of the render.
+    program = await render_templated_text(jq_expression)
+    jq_result = await run_jq_first(program, first_result)
     return await tai42_app.tools.run_tool(next_tool_name, jq_result)

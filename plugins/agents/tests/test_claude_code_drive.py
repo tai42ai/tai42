@@ -26,6 +26,7 @@ from tai42_contract.agent.events import (
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.monitoring.models import SpanKind
+from tai42_contract.template import TemplatedText
 from tests._claude_app import LocalApp, RecordingWriter, build_local_app
 from tests._claude_stubs import (
     ASYNC_ASK,
@@ -42,7 +43,7 @@ from tests._claude_stubs import (
 )
 
 import tai42_agents.claude_code.agent as agent_module
-from tai42_agents.claude_code.agent import ClaudeCodeAgent, ClaudeCodeError
+from tai42_agents.claude_code.agent import ClaudeCodeAgent, ClaudeCodeError, SubagentSpecShape
 from tai42_agents.claude_code.protocol import ProtocolError
 from tai42_agents.claude_code.settings import ClaudeCodeSettings, ConnectionCred, StaticCred
 
@@ -75,7 +76,7 @@ def _run(app: LocalApp, **kwargs: Any) -> list[Any]:
 def test_message_drive_yields_delta_and_final(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
-    events = _run(build_local_app(), user_message="hi")
+    events = _run(build_local_app(), user_message=TemplatedText(content="hi"))
     assert any(isinstance(e, MessageDelta) and e.text == "hello world" for e in events)
     finals = [e for e in events if isinstance(e, MessageFinal)]
     assert len(finals) == 1
@@ -85,7 +86,9 @@ def test_message_drive_yields_delta_and_final(monkeypatch: pytest.MonkeyPatch) -
 def test_structured_drive_yields_structured_final(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(STRUCTURED))
-    events = _run(build_local_app(), user_message="hi", response_format={"title": "Ans", "type": "object"})
+    events = _run(
+        build_local_app(), user_message=TemplatedText(content="hi"), response_format={"title": "Ans", "type": "object"}
+    )
     finals = [e for e in events if isinstance(e, StructuredFinal)]
     assert len(finals) == 1
     assert finals[0].data == {"answer": 42}
@@ -100,7 +103,7 @@ def test_sync_ask_is_answered_adapter_side(monkeypatch: pytest.MonkeyPatch) -> N
         asked.append(question)
         return "blue"
 
-    events = _run(build_local_app(ask_user=ask_user), user_message="hi")
+    events = _run(build_local_app(ask_user=ask_user), user_message=TemplatedText(content="hi"))
     assert asked == ["color?"]
     assert any(isinstance(e, MessageFinal) and "answer=blue" in e.text for e in events)
 
@@ -111,7 +114,7 @@ def test_proxied_tool_call_runs_under_run_tool(monkeypatch: pytest.MonkeyPatch) 
     app = build_local_app(tool_runners={"mytool": lambda **kw: {"echo": kw}})
     token = set_request_user_id("user-1")
     try:
-        events = _run(app, user_message="hi", tool_names=["mytool"])
+        events = _run(app, user_message=TemplatedText(content="hi"), tool_names=["mytool"])
     finally:
         reset_request_user_id(token)
     assert any(isinstance(e, MessageDelta) and "err=False" in e.text for e in events)
@@ -124,7 +127,7 @@ def test_tool_call_outside_allowlist_is_rejected(monkeypatch: pytest.MonkeyPatch
     token = set_request_user_id("user-1")
     try:
         with pytest.raises(ProtocolError, match="outside the granted allowlist"):
-            _run(app, user_message="hi", tool_names=["granted"])
+            _run(app, user_message=TemplatedText(content="hi"), tool_names=["granted"])
     finally:
         reset_request_user_id(token)
 
@@ -134,7 +137,7 @@ def test_usage_emits_into_active_trace_via_span_update(monkeypatch: pytest.Monke
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
     writer = RecordingWriter()
     writer.trace_id = "trace-1"
-    _run(build_local_app(writer=writer), user_message="hi")
+    _run(build_local_app(writer=writer), user_message=TemplatedText(content="hi"))
     assert len(writer.spans) == 1
     span = writer.spans[0]
     assert span["kind"] == SpanKind.LLM
@@ -148,14 +151,14 @@ def test_usage_not_emitted_without_active_trace(monkeypatch: pytest.MonkeyPatch)
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
     writer = RecordingWriter()  # trace_id stays None
-    _run(build_local_app(writer=writer), user_message="hi")
+    _run(build_local_app(writer=writer), user_message=TemplatedText(content="hi"))
     assert writer.spans == []
 
 
 def test_async_ask_on_ephemeral_run_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ASYNC_ASK))
-    events = _run(build_local_app(), user_message="hi")
+    events = _run(build_local_app(), user_message=TemplatedText(content="hi"))
     # No park on a thread-less run; the model got a tool error instead.
     assert not any(isinstance(e, SuspendedFinal) for e in events)
     assert any(isinstance(e, MessageDelta) and "refused=True" in e.text for e in events)
@@ -164,7 +167,7 @@ def test_async_ask_on_ephemeral_run_is_refused(monkeypatch: pytest.MonkeyPatch) 
 def test_ephemeral_run_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
-    _run(build_local_app(), user_message="hi")
+    _run(build_local_app(), user_message=TemplatedText(content="hi"))
     assert agent_module._LIVE_SESSIONS == {}
 
 
@@ -172,14 +175,14 @@ def test_sdk_version_mismatch_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(VERSION_MISMATCH))
     with pytest.raises(ProtocolError, match="version"):
-        _run(build_local_app(), user_message="hi")
+        _run(build_local_app(), user_message=TemplatedText(content="hi"))
 
 
 def test_tool_names_without_identity_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
     with pytest.raises(ClaudeCodeError, match="no bound execution identity"):
-        _run(build_local_app(), user_message="hi", tool_names=["t"])
+        _run(build_local_app(), user_message=TemplatedText(content="hi"), tool_names=["t"])
 
 
 def test_fatal_frame_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,7 +190,7 @@ def test_fatal_frame_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(FATAL))
     with pytest.raises(ProtocolError, match="fatal error"):
-        _run(build_local_app(), user_message="hi")
+        _run(build_local_app(), user_message=TemplatedText(content="hi"))
 
 
 def test_proxied_tool_exception_round_trips_as_error_result(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,7 +205,7 @@ def test_proxied_tool_exception_round_trips_as_error_result(monkeypatch: pytest.
     app = build_local_app(tool_runners={"mytool": boom})
     token = set_request_user_id("user-1")
     try:
-        events = _run(app, user_message="hi", tool_names=["mytool"])
+        events = _run(app, user_message=TemplatedText(content="hi"), tool_names=["mytool"])
     finally:
         reset_request_user_id(token)
     # The stub echoed the result frame back: the error flag is set and the exception text carried.
@@ -214,7 +217,7 @@ def test_non_text_events_map_to_contract_steps(monkeypatch: pytest.MonkeyPatch) 
     ReasoningStep / ToolCallStep / ToolResultStep; a blank ``thinking`` is dropped."""
     _settings(monkeypatch)
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(EVENTS_RICH))
-    events = _run(build_local_app(), user_message="hi")
+    events = _run(build_local_app(), user_message=TemplatedText(content="hi"))
     reasoning = [e for e in events if isinstance(e, ReasoningStep)]
     assert [e.text for e in reasoning] == ["pondering"]  # the whitespace-only thinking is skipped
     calls = [e for e in events if isinstance(e, ToolCallStep)]
@@ -227,6 +230,41 @@ def test_non_text_events_map_to_contract_steps(monkeypatch: pytest.MonkeyPatch) 
     assert results[0].call_id == "u1"
     assert results[0].result == "hit"
     assert results[0].is_error is False
+
+
+def test_subagent_system_prompt_renders_by_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A subagent's by-id system prompt resolves through the resource manager and the RENDERED
+    text is what reaches the options payload the runner receives."""
+    _settings(monkeypatch)
+    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    captured: dict[str, Any] = {}
+    real = agent_module.build_options_payload
+
+    def _capture(**kwargs: Any) -> Any:
+        captured["subagents"] = kwargs["subagents"]
+        return real(**kwargs)
+
+    monkeypatch.setattr(agent_module, "build_options_payload", _capture)
+    app = build_local_app(templates={"sp-id": "stored instructions"})
+    _run(
+        app,
+        user_message=TemplatedText(content="hi"),
+        subagents=[SubagentSpecShape(name="reviewer", system_prompt=TemplatedText(id="sp-id"))],
+    )
+    assert captured["subagents"][0]["system_prompt"] == "stored instructions"
+
+
+def test_subagent_system_prompt_missing_id_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A subagent's by-id system prompt whose resource is absent fails loudly at the point of
+    use, never rendering as empty text."""
+    _settings(monkeypatch)
+    app = build_local_app()
+    with pytest.raises(KeyError):
+        _run(
+            app,
+            user_message=TemplatedText(content="hi"),
+            subagents=[SubagentSpecShape(name="reviewer", system_prompt=TemplatedText(id="absent"))],
+        )
 
 
 def test_static_and_env_connection_creds_reach_the_clean_session_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,7 +287,7 @@ def test_static_and_env_connection_creds_reach_the_clean_session_env(monkeypatch
     )
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ENV_CRED_ECHO))
     app = build_local_app(resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("resolved-env-val")))
-    events = _run(app, user_message="hi")
+    events = _run(app, user_message=TemplatedText(content="hi"))
     finals = [e for e in events if isinstance(e, MessageFinal)]
     assert len(finals) == 1
     assert finals[0].text == "static=static-secret,conn=resolved-env-val"

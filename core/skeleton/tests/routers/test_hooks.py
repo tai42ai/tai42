@@ -291,7 +291,13 @@ async def test_register_hook_maps_manager_jq_error_to_400(monkeypatch: pytest.Mo
 
     manager = _RaisingManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
-    payload = {"name": "c", "topic": "events", "tool": "notify", "execution_key": "k-fire", "condition": "{{bad"}
+    payload = {
+        "name": "c",
+        "topic": "events",
+        "tool": "notify",
+        "execution_key": "k-fire",
+        "condition": {"content": "{{bad"},
+    }
     response = await hooks.register_hook(cast(Request, _JsonReq(payload)))
     assert response.status_code == 400
     assert "not valid jq" in _body(response)["error"]

@@ -103,10 +103,32 @@ class FakeTools:
         return self._tool_title(func)
 
 
+class _FakeResourceManager:
+    """Renders a jq slot: inline ``content`` verbatim, or a stored ``id`` from a per-id map —
+    an unmapped id is the loud not-found the real manager raises."""
+
+    def __init__(self, by_id: dict[str, str] | None = None) -> None:
+        self._by_id = by_id or {}
+
+    async def render_templated_text(self, text: Any, locale: str | None = None) -> str:
+        if text.id is not None:
+            if text.id not in self._by_id:
+                raise KeyError(f"no stored resource {text.id!r}")
+            return self._by_id[text.id]
+        assert text.content is not None
+        return text.content
+
+
+class _FakeStorage:
+    def __init__(self, resource_manager: _FakeResourceManager) -> None:
+        self.resource_manager = resource_manager
+
+
 class FakeApp:
-    def __init__(self, tools: FakeTools) -> None:
+    def __init__(self, tools: FakeTools, by_id: dict[str, str] | None = None) -> None:
         self.tools = tools
         self.extensions = _NullExtensions()
+        self.storage = _FakeStorage(_FakeResourceManager(by_id))
 
 
 @pytest.fixture(autouse=True)
@@ -118,9 +140,9 @@ def restore_null_app() -> Iterator[None]:
 
 
 @pytest.fixture
-def bind_fake_app() -> Callable[[FakeTools], None]:
-    def _bind(tools: FakeTools) -> None:
-        tai42_app.bind(FakeApp(tools))
+def bind_fake_app() -> Callable[..., None]:
+    def _bind(tools: FakeTools, by_id: dict[str, str] | None = None) -> None:
+        tai42_app.bind(FakeApp(tools, by_id))
 
     return _bind
 

@@ -57,9 +57,7 @@ def test_keys_create_includes_all_optional_gates(monkeypatch: pytest.MonkeyPatch
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         assert body["user_id"] == "bob"
-        assert body["condition"] == '.method == "GET"'
-        assert body["condition_id"] == "cond1"
-        assert body["condition_kwargs"] == {"role": "admin"}
+        assert body["condition"] == {"content": '.method == "GET"', "kwargs": {"role": "admin"}}
         assert body["policy_data"] == {"team": "ops"}
         return data_response("sk-secret")
 
@@ -74,11 +72,7 @@ def test_keys_create_includes_all_optional_gates(monkeypatch: pytest.MonkeyPatch
             "--description",
             "ci",
             "--condition",
-            '.method == "GET"',
-            "--condition-id",
-            "cond1",
-            "--condition-kwargs",
-            '{"role":"admin"}',
+            '{"content": ".method == \\"GET\\"", "kwargs": {"role": "admin"}}',
             "--policy-data",
             '{"team":"ops"}',
         ],
@@ -87,14 +81,14 @@ def test_keys_create_includes_all_optional_gates(monkeypatch: pytest.MonkeyPatch
     assert "sk-secret" in result.output
 
 
-def test_keys_create_rejects_non_object_condition_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_keys_create_rejects_non_object_condition(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response("sk")
 
     result = run_cli(
         monkeypatch,
         handler,
-        ["keys", "create", "--user", "bob", "--description", "ci", "--condition-kwargs", "[1,2]"],
+        ["keys", "create", "--user", "bob", "--description", "ci", "--condition", "[1,2]"],
     )
     assert result.exit_code != 0
     assert "JSON object" in result.output
@@ -119,9 +113,7 @@ def test_keys_edit_writes_every_optional_gate(monkeypatch: pytest.MonkeyPatch) -
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/auth/api-keys/alice"
         assert json.loads(request.content) == {
-            "condition": ".ok",
-            "condition_id": "cond1",
-            "condition_kwargs": {"role": "admin"},
+            "condition": {"content": ".ok", "kwargs": {"role": "admin"}},
             "policy_data": {"team": "ops"},
         }
         return data_response({"updated": True})
@@ -134,11 +126,7 @@ def test_keys_edit_writes_every_optional_gate(monkeypatch: pytest.MonkeyPatch) -
             "edit",
             "alice",
             "--condition",
-            ".ok",
-            "--condition-id",
-            "cond1",
-            "--condition-kwargs",
-            '{"role":"admin"}',
+            '{"content": ".ok", "kwargs": {"role": "admin"}}',
             "--policy-data",
             '{"team":"ops"}',
         ],
@@ -148,10 +136,10 @@ def test_keys_edit_writes_every_optional_gate(monkeypatch: pytest.MonkeyPatch) -
 
 def test_keys_validate_condition_by_stored_id(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert json.loads(request.content) == {"condition_id": "cond1"}
+        assert json.loads(request.content) == {"condition": {"id": "cond1"}}
         return data_response({"valid": True})
 
-    result = run_cli(monkeypatch, handler, ["keys", "validate-condition", "--condition-id", "cond1"])
+    result = run_cli(monkeypatch, handler, ["keys", "validate-condition", "--condition", '{"id": "cond1"}'])
     assert result.exit_code == 0, result.output
 
 
@@ -170,8 +158,7 @@ def test_keys_validate_condition_body(monkeypatch: pytest.MonkeyPatch) -> None:
         assert request.method == "POST"
         assert request.url.path == "/api/auth/validate-condition"
         body = json.loads(request.content)
-        assert body["condition"] == ".ok"
-        assert body["condition_kwargs"] == {"n": 1}
+        assert body["condition"] == {"content": ".ok", "kwargs": {"n": 1}}
         assert body["sample_context"] == {"method": "GET"}
         return data_response({"valid": True})
 
@@ -182,9 +169,7 @@ def test_keys_validate_condition_body(monkeypatch: pytest.MonkeyPatch) -> None:
             "keys",
             "validate-condition",
             "--condition",
-            ".ok",
-            "--condition-kwargs",
-            '{"n":1}',
+            '{"content": ".ok", "kwargs": {"n": 1}}',
             "--sample-context",
             '{"method":"GET"}',
         ],
@@ -791,12 +776,14 @@ def test_templates_delete_dir_posts_path(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_templates_render_by_inline_content(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body["content"] == "Hi {{ name }}"
-        assert "template_id" not in body
-        assert body["kwargs"] == {"name": "Ada"}
+        assert body["text"] == {"content": "Hi {{ name }}", "kwargs": {"name": "Ada"}}
         return data_response({"rendered": "Hi Ada"})
 
-    result = run_cli(monkeypatch, handler, ["templates", "render", "--content", "Hi {{ name }}", "--kw", 'name="Ada"'])
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["templates", "render", "--text", '{"content": "Hi {{ name }}", "kwargs": {"name": "Ada"}}'],
+    )
     assert result.exit_code == 0, result.output
 
 

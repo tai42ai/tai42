@@ -1,7 +1,7 @@
 """The LIVE role→grant-map resolution + the shared per-tag enforcement decision.
 
 Editing a role affects EVERY holder LIVE: a user's enforced policy carries a separate
-role-name POINTER (``policy_data[ROLE_POINTER_KEY]``, never ``condition_id`` — that
+role-name POINTER (``policy_data[ROLE_POINTER_KEY]``, never the policy condition — that
 would collide with the admin discriminator), read here to fetch the role's CURRENT
 grant map. The lookup rides a VERSION-KEYED cache busted by ``bump_policy_version`` on
 any role edit, so a live edit lands on the next request with no uncached hot-path store

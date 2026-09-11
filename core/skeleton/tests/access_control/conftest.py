@@ -399,15 +399,15 @@ def _isolate_identity_registry():
 
 
 class _FakeResourceManager:
-    """Renders a condition/expr by returning the inline ``content`` unchanged
+    """Renders a templated-text condition by returning its inline ``content`` unchanged
     (the auth gate's policy condition is inline jq), recording each call."""
 
     def __init__(self) -> None:
         self.calls: list = []
 
-    async def render_by_id_or_content(self, *, content, template_id, kwargs):
-        self.calls.append((content, template_id, kwargs))
-        return content
+    async def render_templated_text(self, text, locale=None):
+        self.calls.append(text)
+        return text.content or ""
 
 
 class _FakeStorage:
@@ -533,7 +533,7 @@ class _PgCursor:
             else:
                 pg.routes.append({"id": pg.next_route_id(), "url": url, "scope_id": scope_id, "pattern": pattern})
         elif norm.startswith("INSERT INTO access_control_policies"):
-            user_id, scopes, policy_data, condition, condition_id, condition_kwargs = params
+            user_id, scopes, policy_data, condition = params
             if any(p["user_id"] == user_id for p in pg.policies):
                 raise _PolicyUserViolation()
             pg.policies.append(
@@ -542,9 +542,7 @@ class _PgCursor:
                     "user_id": user_id,
                     "scopes": list(scopes),
                     "policy_data": _unwrap(policy_data),
-                    "condition": condition,
-                    "condition_id": condition_id,
-                    "condition_kwargs": _unwrap(condition_kwargs),
+                    "condition": _unwrap(condition),
                 }
             )
         elif norm.startswith("DELETE FROM access_control_routes WHERE scope_id"):
@@ -576,21 +574,17 @@ class _PgCursor:
                             list(p["scopes"]),
                             p["policy_data"],
                             p["condition"],
-                            p["condition_id"],
-                            p["condition_kwargs"],
                         )
                     )
             self.rowcount = len(affected)
             self._all = affected
         elif norm.startswith("UPDATE access_control_policies SET scopes = %s"):
-            scopes, policy_data, condition, condition_id, condition_kwargs, user_id = params
+            scopes, policy_data, condition, user_id = params
             for p in pg.policies:
                 if p["user_id"] == user_id:
                     p["scopes"] = list(scopes)
                     p["policy_data"] = _unwrap(policy_data)
-                    p["condition"] = condition
-                    p["condition_id"] = condition_id
-                    p["condition_kwargs"] = _unwrap(condition_kwargs)
+                    p["condition"] = _unwrap(condition)
                     self.rowcount = 1
         elif norm.startswith("SELECT url, scope_id FROM access_control_routes"):
             if "<>" in norm:
@@ -625,7 +619,7 @@ class _PgCursor:
             # filter is what the fake exercises.
             scopes, public = params
             self._all = [(r["scope_id"],) for r in pg.routes if r["scope_id"] in scopes and r["scope_id"] != public]
-        elif norm.startswith("SELECT scopes, policy_data, condition, condition_id, condition_kwargs"):
+        elif norm.startswith("SELECT scopes, policy_data, condition"):
             (user_id,) = params
             p = next((p for p in pg.policies if p["user_id"] == user_id), None)
             self._one = (
@@ -635,8 +629,6 @@ class _PgCursor:
                     list(p["scopes"]),
                     p["policy_data"],
                     p["condition"],
-                    p["condition_id"],
-                    p["condition_kwargs"],
                 )
             )
         elif norm.startswith("SELECT 1 FROM access_control_policies WHERE user_id"):
@@ -701,8 +693,6 @@ class FakeAccessControlPg:
             "scopes": list(scopes or []),
             "policy_data": {},
             "condition": None,
-            "condition_id": None,
-            "condition_kwargs": None,
         }
         body.update(fields)
         self.policies.append({"id": self.next_policy_id(), "user_id": user_id, **body})
@@ -719,7 +709,7 @@ class FakeAccessControlPg:
         p = self.policy(user_id)
         if p is None:
             return None
-        return {k: p[k] for k in ("scopes", "policy_data", "condition", "condition_id", "condition_kwargs")}
+        return {k: p[k] for k in ("scopes", "policy_data", "condition")}
 
     def route(self, url: str) -> Any:
         return next((r for r in self.routes if r["url"] == url), None)
