@@ -315,9 +315,8 @@ services:
   # must create a nested user namespace and program the inner bridge (vpnkit tap +
   # iptables); in a container that setup needs `privileged: true` — WITHOUT it
   # rootlesskit cannot mount sysfs or create tap0 and the daemon never boots (this
-  # is docker's own dind-rootless requirement; the prior "NOT --privileged" posture
-  # never actually started the daemon). `privileged` makes the CONTAINER privileged;
-  # dockerd inside stays rootless.
+  # is docker's own dind-rootless requirement). `privileged` makes the CONTAINER
+  # privileged; dockerd inside stays rootless.
   #
   # Privilege does NOT widen what an inner SESSION can reach. Session isolation from
   # the deployment is enforced by (a) the `sandbox-ctrl` NETWORK SPLIT — this engine
