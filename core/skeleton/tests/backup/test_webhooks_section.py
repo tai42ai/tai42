@@ -24,6 +24,7 @@ from tai42_skeleton.hooks.managers.redis_hooks_manager import RedisHooksManager
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.hooks.trigger_links import TriggerLinkError, create_trigger_link, resolve_trigger_token
 
+from .._helpers import inline_templated_text
 from ..access_control.conftest import FakeAccessControlPg, make_pg_ctx
 from ..access_control.conftest import FakeRedis as FakeAccessControlRedis
 from ..access_control.conftest import make_client_ctx as make_access_control_client_ctx
@@ -66,14 +67,15 @@ def in_memory_store(monkeypatch):
 
 class _CountingRenderer:
     """Condition renderer that records every render so a test can count them; inline
-    ``content`` renders to itself."""
+    ``content`` renders to itself and no stored resource resolves."""
 
     def __init__(self) -> None:
         self.rendered: list[str] = []
 
     async def render_templated_text(self, text, locale=None) -> str:
-        self.rendered.append(text.content or "")
-        return text.content or ""
+        rendered = inline_templated_text(text)
+        self.rendered.append(rendered)
+        return rendered
 
 
 @pytest.fixture

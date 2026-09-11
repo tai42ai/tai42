@@ -22,6 +22,7 @@ from tai42_skeleton.conversations.target_validators import TargetBindValidatorRe
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError
 
+from .._helpers import inline_templated_text
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
 pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
@@ -63,10 +64,11 @@ class _FakeApp:
 
 
 class _FakeResourceManager:
+    """Renders the auth gate's policy condition: inline jq returned unchanged, as the real
+    renderer does for inline content. It resolves no stored resource."""
+
     async def render_templated_text(self, text, locale=None):
-        # The auth gate's policy condition is inline jq — returned unchanged, as the real
-        # renderer does for inline content.
-        return text.content or ""
+        return inline_templated_text(text)
 
 
 class _FakeStorage:

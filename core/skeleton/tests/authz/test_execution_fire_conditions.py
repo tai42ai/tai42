@@ -62,7 +62,7 @@ class _MutableResourceManager:
             except KeyError as exc:
                 # The real manager's answer for an id with no stored template.
                 raise TemplateNotFoundError(f"Template '{text.id}' not found.") from exc
-        return text.content or ""
+        return text.content
 
 
 @pytest.fixture

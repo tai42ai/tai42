@@ -32,6 +32,7 @@ from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 
 from .._fakes.tool_runs_redis import FakeRedis
+from .._helpers import inline_templated_text
 
 
 class _Tools:
@@ -58,8 +59,10 @@ class _Tools:
 
 
 class _ResourceManager:
+    """Renders a hook's inline condition/expr to itself; it resolves no stored resource."""
+
     async def render_templated_text(self, text, locale=None):
-        return text.content
+        return inline_templated_text(text)
 
 
 class _App:

@@ -15,6 +15,7 @@ from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.role_gate import reset_route_index
 from tai42_skeleton.app.route_registry import RouteAction, route_registry
 
+from .._helpers import inline_templated_text
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
 # The routes the suite's probe operations are registered at — all grantable ``write``.
@@ -28,8 +29,11 @@ SHADOW_ROUTE = "/api/things/shadow/fenced"
 
 
 class _FakeResourceManager:
+    """Renders a policy condition by returning its inline jq unchanged; it resolves no
+    stored resource."""
+
     async def render_templated_text(self, text, locale=None):
-        return text.content or ""
+        return inline_templated_text(text)
 
 
 class _FakeStorage:

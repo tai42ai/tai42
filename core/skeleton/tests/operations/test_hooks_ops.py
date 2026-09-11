@@ -426,7 +426,7 @@ class _FakeResourceManager:
             if text.id not in self._templates:
                 raise TemplateNotFoundError(f"no such template: {text.id!r}")
             return self._templates[text.id]
-        return text.content or ""
+        return text.content
 
 
 @pytest.fixture

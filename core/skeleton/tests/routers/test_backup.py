@@ -144,7 +144,7 @@ class _FakeResourceManager:
         ``upload_template`` writes into — so a condition template that has not been
         restored yet raises exactly as the real manager does."""
         if text.id is None:
-            return text.content or ""
+            return text.content
         if text.id not in self._templates:
             raise TemplateNotFoundError(text.id)
         return self._templates[text.id]

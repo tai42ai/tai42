@@ -30,6 +30,8 @@ from psycopg.errors import UniqueViolation
 from redis.exceptions import WatchError
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
 
+from .._helpers import inline_templated_text
+
 
 @pytest.fixture(autouse=True)
 def _default_database(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -400,14 +402,15 @@ def _isolate_identity_registry():
 
 class _FakeResourceManager:
     """Renders a templated-text condition by returning its inline ``content`` unchanged
-    (the auth gate's policy condition is inline jq), recording each call."""
+    (the auth gate's policy condition is inline jq), recording each call. It resolves no
+    stored resource."""
 
     def __init__(self) -> None:
         self.calls: list = []
 
     async def render_templated_text(self, text, locale=None):
         self.calls.append(text)
-        return text.content or ""
+        return inline_templated_text(text)
 
 
 class _FakeStorage:

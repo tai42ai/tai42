@@ -25,6 +25,7 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution as execution_module
+from tai42_skeleton.template.resource_manager import TemplateNotFoundError
 
 
 def _bind_app_and_load_tool_runs() -> None:
@@ -283,7 +284,8 @@ def make_ctx():
 
 class _FakeResourceManager:
     """Renders by returning inline ``content`` (or a per-id mapping), recording
-    every call so a test can assert the firing path rendered condition + expr."""
+    every call so a test can assert the firing path rendered condition + expr. An
+    unmapped id is the loud not-found the real manager raises."""
 
     def __init__(self, by_id: dict | None = None) -> None:
         self._by_id = by_id or {}
@@ -292,7 +294,9 @@ class _FakeResourceManager:
     async def render_templated_text(self, text, locale=None):
         self.calls.append((text.content, text.id, text.kwargs))
         if text.id is not None:
-            return self._by_id.get(text.id)
+            if text.id not in self._by_id:
+                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+            return self._by_id[text.id]
         return text.content
 
 
