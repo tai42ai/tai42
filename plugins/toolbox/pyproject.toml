@@ -26,10 +26,10 @@ dependencies = [
     # The pure interface contract these tools and tool extensions register through
     # — the tai42_app handle, ExtensionKind, and the tool/extension facets.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=9.0,<10",
+    "tai42-contract>=10.0,<11",
     # Leaf helpers: settings machinery, the curl client, the jq compiler, and the
     # llm/embedding factories the extra-gated modules wire to.
-    "tai42-kit>=3.13,<4",
+    "tai42-kit>=4.0,<5",
     # Composed callables for the transformer extensions (batch, chain) present a
     # real, concrete signature via makefun.create_function.
     "makefun>=1.15",
