@@ -33,7 +33,7 @@ async def test_chain_transforms_output_into_next_tool_input(
                 # Transform echo's output string into e2e_record's (key, value)
                 # arguments: the key is this run's unique key, the value is the
                 # echo output (``.``).
-                "jq_expression": f'{{key: "{key}", value: .}}',
+                "jq_expression": {"content": f'{{key: "{key}", value: .}}'},
                 "next_tool_name": "e2e_record",
             },
         )
