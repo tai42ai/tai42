@@ -48,7 +48,7 @@ async def register_record_hook(
         "execution_key": execution_key,
     }
     if expr is not None:
-        body["expr"] = expr
+        body["expr"] = {"content": expr}
     await admin.post("/api/hooks", json=body)
 
 
