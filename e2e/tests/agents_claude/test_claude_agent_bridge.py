@@ -49,7 +49,7 @@ async def test_stalling_turn_errs_at_the_turn_budget_over_sse(
     # A short turn budget plus the stalling runner: the live-caller SSE drive is budgeted, so
     # the turn ends LOUDLY at the timeout rather than running to the (much larger) exec ceiling.
     stack = claude_stack(fresh_stack, llm_stub, "stall", TAI_TURN_TIMEOUT_SECONDS="3")
-    frames = await run_sse(stack, {"user_message": "hi"})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}})
     errors = frames_of_type(frames, "stream.error")
     assert errors, frames
     assert "turn timeout" in errors[0]["message"], errors
@@ -59,7 +59,7 @@ async def test_async_ask_on_an_ephemeral_run_does_not_park(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "ask_async")
-    frames = await run_sse(stack, {"user_message": "hi"})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}})
     # A thread-less run cannot rebind an async continuation, so it never parks.
     assert not frames_of_type(frames, "suspended_final"), frames
     assert frames[-1] == {"type": "stream.end"}, frames

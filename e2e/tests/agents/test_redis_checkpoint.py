@@ -81,7 +81,7 @@ async def test_redis_checkpoint_resumes_across_replicas(
     async with agents_redis_stack.mcp(port=agents_redis_stack.port_a) as mcp_a:
         await mcp_a.call_tool(
             "tools_agent",
-            {"user_message": f"my name is {name_token}", "langgraph_config": langgraph_config},
+            {"user_message": {"content": f"my name is {name_token}"}, "langgraph_config": langgraph_config},
         )
 
     # Turn 2 on replica B: same thread id, a question that only the restored
@@ -89,7 +89,7 @@ async def test_redis_checkpoint_resumes_across_replicas(
     async with agents_redis_stack.mcp(port=agents_redis_stack.port_b) as mcp_b:
         await mcp_b.call_tool(
             "tools_agent",
-            {"user_message": "what is my name?", "langgraph_config": langgraph_config},
+            {"user_message": {"content": "what is my name?"}, "langgraph_config": langgraph_config},
         )
 
     requests = llm_stub.requests
@@ -136,7 +136,7 @@ async def test_redis_checkpoint_resumes_across_replicas_over_sse_run_door(
         agents_redis_stack,
         agents_redis_stack.port_a,
         path,
-        {"user_message": f"my name is {name_token}", "langgraph_config": langgraph_config},
+        {"user_message": {"content": f"my name is {name_token}"}, "langgraph_config": langgraph_config},
     )
     assert any(name_token in frame for frame in frames_a), f"replica A run did not complete: {frames_a}"
 
@@ -144,7 +144,7 @@ async def test_redis_checkpoint_resumes_across_replicas_over_sse_run_door(
         agents_redis_stack,
         agents_redis_stack.port_b,
         path,
-        {"user_message": "what is my name?", "langgraph_config": langgraph_config},
+        {"user_message": {"content": "what is my name?"}, "langgraph_config": langgraph_config},
     )
 
     requests = llm_stub.requests
@@ -195,14 +195,22 @@ async def test_system_prompt_is_per_run_never_checkpointed_across_replicas(
     async with agents_redis_stack.mcp(port=agents_redis_stack.port_a) as mcp_a:
         await mcp_a.call_tool(
             "tools_agent",
-            {"system_prompt": sys_a, "user_message": f"my name is {name_token}", "langgraph_config": langgraph_config},
+            {
+                "system_prompt": {"content": sys_a},
+                "user_message": {"content": f"my name is {name_token}"},
+                "langgraph_config": langgraph_config,
+            },
         )
 
     # Turn 2 on replica B: same thread id, a DIFFERENT per-run system prompt.
     async with agents_redis_stack.mcp(port=agents_redis_stack.port_b) as mcp_b:
         await mcp_b.call_tool(
             "tools_agent",
-            {"system_prompt": sys_b, "user_message": "what is my name?", "langgraph_config": langgraph_config},
+            {
+                "system_prompt": {"content": sys_b},
+                "user_message": {"content": "what is my name?"},
+                "langgraph_config": langgraph_config,
+            },
         )
 
     requests = llm_stub.requests
@@ -242,7 +250,7 @@ async def test_redis_store_round_trip_through_stack(
     async with agents_redis_stack.mcp(port=agents_redis_stack.port_a) as mcp:
         result = await mcp.call_tool(
             "retrieval_tools_agent",
-            {"user_message": "echo something for me", "tool_names": ["e2e_echo"]},
+            {"user_message": {"content": "echo something for me"}, "tool_names": ["e2e_echo"]},
         )
 
     assert result_text in json.dumps(result.data), f"retrieval agent did not return the terminal result: {result.data}"

@@ -44,7 +44,7 @@ async def test_claude_agent_smoke_over_the_local_provider(
     async with sandbox_local_claude_stack.mcp() as mcp:
         result = await mcp.call_tool(
             "claude_code",
-            {"user_message": f"Reply with exactly this word and nothing else: {token}"},
+            {"user_message": {"content": f"Reply with exactly this word and nothing else: {token}"}},
         )
 
     # One trivial-prompt smoke: a MessageFinal lands — the drained final answer is a non-empty

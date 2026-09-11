@@ -52,7 +52,7 @@ async def test_retrieval_agent_embeds_and_retrieves_over_mcp(
     async with agents_stack.mcp() as mcp:
         result = await mcp.call_tool(
             "retrieval_tools_agent",
-            {"user_message": "echo something for me", "tool_names": ["e2e_echo"]},
+            {"user_message": {"content": "echo something for me"}, "tool_names": ["e2e_echo"]},
         )
 
     assert result_text in json.dumps(result.data), f"retrieval agent did not return the terminal result: {result.data}"

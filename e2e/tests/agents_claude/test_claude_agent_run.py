@@ -54,12 +54,12 @@ async def test_answer_drains_to_message_final_over_both_doors(
 
     # Tool face: the run drains to the terminal message text (the contract terminal rule).
     async with stack.mcp() as mcp:
-        result = await mcp.call_tool("claude_code", {"user_message": "hi"}, retry_on_reloading=True)
+        result = await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True)
     assert result.data == "hello from the stub", result.data
 
     # SSE: the streamed text deltas arrive as ``message_delta`` frames and the turn ends on a
     # ``message_final`` carrying the same assembled text, then a terminal ``stream.end``.
-    frames = await run_sse(stack, {"user_message": "hi"})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}})
     deltas = frames_of_type(frames, "message_delta")
     assert "".join(f["text"] for f in deltas) == "hello from the stub", frames
     finals = frames_of_type(frames, "message_final")
@@ -75,12 +75,14 @@ async def test_structured_result_carries_top_level_title(
 
     async with stack.mcp() as mcp:
         result = await mcp.call_tool(
-            "claude_code", {"user_message": "hi", "response_format": response_format}, retry_on_reloading=True
+            "claude_code",
+            {"user_message": {"content": "hi"}, "response_format": response_format},
+            retry_on_reloading=True,
         )
     # A structured terminal returns its ``data`` object verbatim (never the message text).
     assert result.data == {"title": "stub result", "body": "structured"}, result.data
 
-    frames = await run_sse(stack, {"user_message": "hi", "response_format": response_format})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}, "response_format": response_format})
     structured = frames_of_type(frames, "structured_final")
     assert len(structured) == 1, frames
     assert structured[0]["data"] == {"title": "stub result", "body": "structured"}, structured
@@ -89,7 +91,7 @@ async def test_structured_result_carries_top_level_title(
 async def test_thinking_maps_to_reasoning_step(fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "reasoning")
 
-    frames = await run_sse(stack, {"user_message": "hi"})
+    frames = await run_sse(stack, {"user_message": {"content": "hi"}})
     reasoning = frames_of_type(frames, "reasoning_step")
     assert [f["text"] for f in reasoning] == ["considering the request"], frames
     # The reasoning step precedes the final answer in stream order.
@@ -108,14 +110,14 @@ async def test_unhonored_params_are_refused_loudly(
     # the offending field — never a silent drop that would run with a default.
     url = f"http://{stack.host}:{stack.port_a}{CLAUDE_RUN_PATH}"
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(url, json={"user_message": "hi", field: "x"})
+        response = await client.post(url, json={"user_message": {"content": "hi"}, field: "x"})
     assert response.status_code == 400, response.text
     assert field in response.text, response.text
 
     # Tool face: the same unknown key is rejected by the tool-input schema (``extra="forbid"``).
     async with stack.mcp() as mcp:
         with pytest.raises(ToolError) as excinfo:
-            await mcp.call_tool("claude_code", {"user_message": "hi", field: "x"}, retry_on_reloading=True)
+            await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}, field: "x"}, retry_on_reloading=True)
     assert field in str(excinfo.value), excinfo.value
 
 
@@ -125,7 +127,7 @@ async def test_model_auth_requires_exactly_one_mode(fresh_stack: Callable[..., T
     neither = claude_stack(fresh_stack, llm_stub, "answer", TAI_AGENTS_CLAUDE_API_KEY="")
     async with neither.mcp() as mcp:
         result = await mcp.call_tool(
-            "claude_code", {"user_message": "hi"}, retry_on_reloading=True, raise_on_error=False
+            "claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True, raise_on_error=False
         )
     assert result.is_error, result.data
     assert "EXACTLY ONE model credential" in error_text(result), error_text(result)
@@ -134,7 +136,7 @@ async def test_model_auth_requires_exactly_one_mode(fresh_stack: Callable[..., T
     both = claude_stack(fresh_stack, llm_stub, "answer", TAI_AGENTS_CLAUDE_OAUTH_TOKEN="oauth-tok")
     async with both.mcp() as mcp:
         result = await mcp.call_tool(
-            "claude_code", {"user_message": "hi"}, retry_on_reloading=True, raise_on_error=False
+            "claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True, raise_on_error=False
         )
     assert result.is_error, result.data
     assert "EXACTLY ONE model credential" in error_text(result), error_text(result)
@@ -144,7 +146,7 @@ async def test_each_auth_mode_is_accepted_alone(fresh_stack: Callable[..., TaiSt
     # The default stack runs api-key mode; prove it drives a clean turn.
     api_key = claude_stack(fresh_stack, llm_stub, "answer")
     async with api_key.mcp() as mcp:
-        result = await mcp.call_tool("claude_code", {"user_message": "hi"}, retry_on_reloading=True)
+        result = await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True)
     assert result.data == "hello from the stub", result.data
 
     # OAuth mode: unset the api key, set the oauth token — the exactly-one rule holds for it too.
@@ -152,7 +154,7 @@ async def test_each_auth_mode_is_accepted_alone(fresh_stack: Callable[..., TaiSt
         fresh_stack, llm_stub, "answer", TAI_AGENTS_CLAUDE_API_KEY="", TAI_AGENTS_CLAUDE_OAUTH_TOKEN="oauth-tok"
     )
     async with oauth.mcp() as mcp:
-        result = await mcp.call_tool("claude_code", {"user_message": "hi"}, retry_on_reloading=True)
+        result = await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True)
     assert result.data == "hello from the stub", result.data
 
 
@@ -162,7 +164,7 @@ async def test_bare_tag_session_image_is_refused_loudly(
     stack = claude_stack(fresh_stack, llm_stub, "answer", TAI_AGENTS_CLAUDE_SESSION_IMAGE="registry.example/img:latest")
     async with stack.mcp() as mcp:
         result = await mcp.call_tool(
-            "claude_code", {"user_message": "hi"}, retry_on_reloading=True, raise_on_error=False
+            "claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True, raise_on_error=False
         )
     assert result.is_error, result.data
     assert "digest reference" in error_text(result), error_text(result)

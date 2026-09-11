@@ -79,7 +79,7 @@ async def _park_agent_run(stack: TaiStack, thread_id: str, question: str, expiry
         result = await mcp.call_tool(
             "tools_agent",
             {
-                "user_message": question,
+                "user_message": {"content": question},
                 "tool_names": _TOOL_NAMES,
                 "langgraph_config": {"configurable": {"thread_id": thread_id}},
             },

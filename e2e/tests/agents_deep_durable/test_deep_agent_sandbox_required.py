@@ -36,7 +36,9 @@ async def test_run_without_a_sandbox_provider_raises_loudly(
     # model call, so the scripted turn stays untouched.
     llm_stub.script([{"content": "unreached"}])
     async with stack.mcp(port=stack.port_a) as mcp:
-        result = await mcp.call_tool(AGENT, {"user_message": uniq("q")}, raise_on_error=False, retry_on_reloading=True)
+        result = await mcp.call_tool(
+            AGENT, {"user_message": {"content": uniq("q")}}, raise_on_error=False, retry_on_reloading=True
+        )
     assert result.is_error, "a run with no sandbox provider did not fail"
     text = " ".join(getattr(p, "text", "") for p in result.content)
     assert "sandbox" in text.lower(), f"the failure was not the sandbox hard-dependency error: {text}"

@@ -75,7 +75,7 @@ async def test_agent_run_trace_reaches_langfuse_and_serves_back(
     llm_stub.script([{"content": f"done {marker}"}])
 
     async with monitoring_stack.mcp() as mcp:
-        await mcp.call_tool("tools_agent", {"user_message": f"trace the marker {marker}"})
+        await mcp.call_tool("tools_agent", {"user_message": {"content": f"trace the marker {marker}"}})
 
     api = monitoring_stack.api()
 

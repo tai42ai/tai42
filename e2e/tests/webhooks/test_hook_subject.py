@@ -63,7 +63,7 @@ async def _register_hook(api: ApiClient, *, topic: str, state: str, path: list[s
                 "target_kind": _TARGET_KIND,
                 "target_name": _TARGET_NAME,
                 "kind": _SUBJECT_KIND,
-                "key_expr": ".key",
+                "key_expr": {"content": ".key"},
             },
         },
     )

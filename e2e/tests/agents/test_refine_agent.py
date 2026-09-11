@@ -58,7 +58,7 @@ async def test_refine_agent_loop_to_approval_over_mcp(
     async with agents_stack.mcp() as mcp:
         result = await mcp.call_tool(
             "refine_agent",
-            {"evaluator_message": "write a haiku", "critic_message": "review the haiku"},
+            {"evaluator_message": {"content": "write a haiku"}, "critic_message": {"content": "review the haiku"}},
         )
 
     assert final in json.dumps(result.data), f"refine_agent did not return the final approved answer: {result.data}"

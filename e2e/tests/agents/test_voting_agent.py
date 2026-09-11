@@ -50,7 +50,7 @@ async def test_voting_agent_voter_then_judge_over_mcp(
     async with agents_stack.mcp() as mcp:
         result = await mcp.call_tool(
             "voting_agent",
-            {"judge_message": "pick the best answer", "voter_message": "answer the question"},
+            {"judge_message": {"content": "pick the best answer"}, "voter_message": {"content": "answer the question"}},
         )
 
     payload = json.dumps(result.data)

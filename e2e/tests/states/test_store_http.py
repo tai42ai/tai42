@@ -187,7 +187,9 @@ async def test_core_stack_mount_check_reads_effective_parameters(
             "parameters": {"limit": {"schema": {"type": "integer"}, "default": 5}},
             "declarations": {
                 "schema": {"type": "object", "properties": {"count": {"type": "integer"}}},
-                "check": 'if .count <= $parameters.limit then true else "count exceeds the attach limit" end',
+                "check": {
+                    "content": 'if .count <= $parameters.limit then true else "count exceeds the attach limit" end'
+                },
             },
         },
     )
@@ -242,14 +244,26 @@ async def test_core_stack_template_jq_input_and_update(core_stack: TaiStack, uni
             },
             "regimes": [{"path": ["items"], "regime": "composing"}],
             "template_jq": {
-                "ids": {"purpose": "input", "description": "the item ids", "jq": "[(.items // [])[] | .id]"},
-                "at_least": {"purpose": "input", "params": ["min"], "jq": "((.items // []) | length) >= $params.min"},
-                "size": {"purpose": "input", "description": "the item count", "jq": "(.items // []) | length"},
+                "ids": {
+                    "purpose": "input",
+                    "description": "the item ids",
+                    "jq": {"content": "[(.items // [])[] | .id]"},
+                },
+                "at_least": {
+                    "purpose": "input",
+                    "params": ["min"],
+                    "jq": {"content": "((.items // []) | length) >= $params.min"},
+                },
+                "size": {
+                    "purpose": "input",
+                    "description": "the item count",
+                    "jq": {"content": "(.items // []) | length"},
+                },
                 "add": {
                     "purpose": "update",
                     "description": "add an item",
                     "writes": [["items"]],
-                    "jq": '[{op: "set_by_key", path: ["items"], key_field: "id", value: .input}]',
+                    "jq": {"content": '[{op: "set_by_key", path: ["items"], key_field: "id", value: .input}]'},
                 },
             },
         },

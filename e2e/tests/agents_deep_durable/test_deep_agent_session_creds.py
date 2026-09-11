@@ -69,7 +69,7 @@ async def test_static_cred_reaches_the_deep_agent_sandbox_shell(
         ]
     )
     async with stack.mcp(port=stack.port_a) as mcp:
-        await mcp.call_tool(AGENT, {"user_message": uniq("read the token")}, retry_on_reloading=True)
+        await mcp.call_tool(AGENT, {"user_message": {"content": uniq("read the token")}}, retry_on_reloading=True)
 
     read_back = [m for m in llm_stub.requests[-1]["messages"] if m.get("role") == "tool"][-1]
     assert _STATIC_TOKEN in json.dumps(read_back), (
@@ -99,7 +99,9 @@ async def test_connection_ref_on_an_identity_less_door_fails_closed(
     # model call.
     llm_stub.script([{"content": "unreached"}])
     async with stack.mcp(port=stack.port_a) as mcp:
-        result = await mcp.call_tool(AGENT, {"user_message": uniq("q")}, raise_on_error=False, retry_on_reloading=True)
+        result = await mcp.call_tool(
+            AGENT, {"user_message": {"content": uniq("q")}}, raise_on_error=False, retry_on_reloading=True
+        )
 
     assert result.is_error, "a connection-ref cred on an identity-less door did not fail"
     text = " ".join(getattr(p, "text", "") for p in result.content)
