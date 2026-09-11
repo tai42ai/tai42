@@ -565,7 +565,7 @@ def render_iota_descriptor(idp_base_url: str, version: str, *, name: str = IOTA_
     contract-bearing fixture: the registry stores the descriptor's declared range and
     returns it at resolve, where the installer gates it against the running
     ``tai42-contract`` — a static range would go stale the moment a release window moved
-    the workspace contract past it (it was authored ``>=2,<3`` in the contract-2 era)."""
+    the workspace contract past it."""
     scope_lines = [IOTA_SCOPE_V1] if version == IOTA_VERSION_V1 else [IOTA_SCOPE_V1, IOTA_SCOPE_V2_ADDED]
     scopes = "\n".join(f"            - {scope}" for scope in scope_lines)
     values = {
@@ -584,8 +584,7 @@ def render_kappa_descriptor(python: str) -> str:
 
     The declared ``contract`` range is stamped to the workspace band
     (:func:`_workspace_contract_range`) like :func:`render_iota_descriptor`, so the
-    installer's resolve-time contract gate tracks the running ``tai42-contract`` instead
-    of the stale ``>=2,<3`` the template carried from the contract-2 era."""
+    installer's resolve-time contract gate tracks the running ``tai42-contract``."""
     values = {"PYTHON": python, "CONTRACT": _workspace_contract_range()}
     return render_descriptor_fixture(_descriptor_template("kappa"), values).decode("utf-8")
 
