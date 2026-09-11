@@ -53,6 +53,7 @@ from tai42_skeleton.operations.errors import PermissionDenied
 from tai42_skeleton.presets.bind import preset_bind
 from tai42_skeleton.states.context import current_state_context
 
+from .conftest import rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -67,9 +68,10 @@ class EchoAgent(Agent):
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None]] = []
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
-        self.calls.append((user_message, thread_id))
-        return f"echo: {user_message}"
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        text = rendered_user_message(user_message)
+        self.calls.append((text, thread_id))
+        return f"echo: {text}"
 
 
 class FakeManager:
@@ -1921,7 +1923,7 @@ async def test_agent_structured_array_final_stays_one_serialized_message(env, mo
         tool_name = "arr"
         ToolInput = _EchoInput
 
-        async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+        async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
             return ["alpha", "beta", "gamma"]
 
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": _ArrayAgent()})
@@ -2346,9 +2348,10 @@ async def test_api_slow_wait_returns_202_then_posts_the_callback(env, monkeypatc
         tool_name = "slow"
         ToolInput = _EchoInput
 
-        async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+        async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
             await release.wait()
-            return f"echo: {user_message}"
+            text = rendered_user_message(user_message)
+            return f"echo: {text}"
 
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": _SlowAgent()})
     posted: list = []
@@ -2394,9 +2397,10 @@ async def test_api_no_callback_slow_wait_202_then_readable_by_poll_and_no_callba
         tool_name = "slow"
         ToolInput = _EchoInput
 
-        async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+        async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
             await release.wait()
-            return f"echo: {user_message}"
+            text = rendered_user_message(user_message)
+            return f"echo: {text}"
 
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": _SlowAgent()})
     posted: list = []
@@ -2951,9 +2955,10 @@ class MemoryAgent(Agent):
     def __init__(self) -> None:
         self.threads: dict[str, list[str]] = {}
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        text = rendered_user_message(user_message)
         history = self.threads.setdefault(thread_id or "", [])
-        history.append(user_message)
+        history.append(text)
         return " | ".join(history)
 
 
@@ -3004,7 +3009,7 @@ def _fixed_answer_agent(answer: str) -> Agent:
         tool_name = "fixed"
         ToolInput = _EchoInput
 
-        async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+        async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
             return answer
 
     return _Fixed()
@@ -3130,11 +3135,12 @@ class BlockingAgent(Agent):
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
-        self.calls.append(user_message)
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        text = rendered_user_message(user_message)
+        self.calls.append(text)
         self.entered.set()
         await self.release.wait()
-        return f"echo: {user_message}"
+        return f"echo: {text}"
 
 
 def _intake_record(message_id: str, provider_message_id: str):

@@ -11,6 +11,22 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
+from tai42_contract.template import TemplatedText
+
+
+def rendered_user_message(user_message: TemplatedText | None) -> str:
+    """The inline text an agent double receives as its ``user_message``.
+
+    ``None`` is the no-message call shape and renders to the empty string. A
+    :class:`TemplatedText` in the stored-``id`` form carries ``content is None``; the
+    doubles resolve no stored resource, so that shape raises rather than reading as
+    empty text and blessing a message that never arrived.
+    """
+    if user_message is None:
+        return ""
+    if user_message.content is None:
+        raise ValueError(f"agent double received a stored-id templated text with no inline content: {user_message!r}")
+    return user_message.content
 
 
 @pytest.fixture(autouse=True)
