@@ -28,10 +28,8 @@ from pathlib import Path
 from typing import TypedDict
 
 import pytest
-from tai42_contract.sandbox import SandboxError, SandboxExecTimeoutError, SandboxSessionSpec
+from tai42_contract.sandbox import SandboxError, SandboxSessionSpec
 from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession, permissive_policy
-
-from tai42_e2e.waiting import WaitTimeout, wait_for_async
 
 
 class _StubSandboxes:
@@ -149,6 +147,9 @@ def egress_spec(*, workspace_key: str) -> SandboxSessionSpec:
 # -- in-session network probes ---------------------------------------------------
 
 _PROBE_WAIT = 4
+# A lookup goes to the session's own resolver and is answered from the engine's view
+# of its networks; the ceiling only has to outlast the resolver's own retransmissions.
+_DNS_WAIT = 20
 
 
 async def tcp_dials(session: ManagedSandboxSession, host: str, port: int, *, payload: bytes = b"") -> bool:
@@ -177,32 +178,16 @@ async def http_over_tcp(session: ManagedSandboxSession, host: str, port: int, pa
     return result.stdout
 
 
-async def resolves_dns(session: ManagedSandboxSession, name: str) -> bool:
-    """Whether the session can resolve ``name`` — i.e. DNS egress is OPEN.
+async def dns_answer(session: ManagedSandboxSession, name: str) -> str:
+    """The session resolver's answer for ``name``, as busybox ``nslookup`` printed it.
 
-    Egress-open is a STEADY-STATE policy property, not a promise about the
-    runner's network: on a shared CI host a single UDP lookup can be lost or run
-    slow without the policy being closed, and external DNS latency there is not
-    this probe's subject. So the resolution is a bounded retry — a few short
-    attempts on a small backoff, each capped at a short per-attempt timeout so a
-    hung lookup counts as one retryable miss (caught and treated as "not yet")
-    instead of consuming the whole window or escaping as a hard error. A firewall
-    that truly blocks DNS fails every attempt deterministically, so this only
-    rides out transient loss; it returns True the instant a lookup succeeds and
-    never turns a real block into a pass."""
-
-    async def resolved() -> bool:
-        try:
-            result = await session.exec(["nslookup", name], stdin=b"", timeout_seconds=5)
-        except SandboxExecTimeoutError:
-            return False
-        return result.exit_code == 0
-
-    try:
-        await wait_for_async(resolved, deadline=12.0, interval=1.0, message=f"{name} never resolved")
-    except WaitTimeout:
-        return False
-    return True
+    The answer TEXT is the signal, never the exit code: ``nslookup`` reports failure
+    whenever any of the queries it sends misses, and a name with an A record but no
+    AAAA record is such a partial miss. The caller asserts on the address it expects,
+    which also keeps a resolver that answers with something else from passing.
+    """
+    result = await session.exec(["nslookup", name], stdin=b"", timeout_seconds=_DNS_WAIT)
+    return result.stdout
 
 
 async def default_gateway(session: ManagedSandboxSession) -> str:
@@ -229,11 +214,11 @@ __all__ = [
     "ManagedSandbox",
     "ManagedSandboxSession",
     "default_gateway",
+    "dns_answer",
     "egress_spec",
     "http_over_tcp",
     "open_sandbox",
     "requires_engine",
-    "resolves_dns",
     "sh",
     "tcp_dials",
 ]

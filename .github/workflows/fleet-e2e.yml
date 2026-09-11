@@ -12,6 +12,13 @@ name: fleet-e2e
 # The allowlist is these two front-end repos — every packaged member lives in
 # this repo and gates through the in-repo ci.yml, so there is nothing else to
 # receive.
+#
+# The dispatch names a COMMIT, not a branch: by the time this receiver runs, that
+# commit's branch may have moved on, merged, or been deleted, and then a plain
+# clone does not carry the commit at all (`checkout` dies on the missing object)
+# even though the source repo still serves it by sha. So every checkout of a
+# dispatched sha fetches that commit explicitly by sha, and a fetch the source
+# repo cannot answer fails the job loudly instead of testing another commit.
 
 on:
   repository_dispatch:
@@ -139,14 +146,11 @@ jobs:
           [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
           git clone https://github.com/tai42ai/tai-studio
           if [ "$SRC_REPO" = "tai-studio" ]; then
-            # A dispatched sha can vanish before this run starts (source branch
-            # deleted on merge, or rewritten) — fall back to main rather than
-            # failing a fleet check whose real subject still exists there.
-            if git -C tai-studio checkout --detach "$SRC_REF" 2>/dev/null; then
-              :
-            else
-              echo "::warning::dispatched sha $SRC_REF is gone; falling back to main"
-            fi
+            # Fetch the commit itself: a clone carries only what its refs reach, so a
+            # dispatched sha whose branch has since moved on or gone is absent from the
+            # clone while the repo still serves it by sha.
+            git -C tai-studio fetch origin "$SRC_REF"
+            git -C tai-studio checkout --detach "$SRC_REF"
           fi
       - name: Record the resolved tai-studio commit (provenance, no pinning)
         # tai-studio is checked out at the dispatched sha when studio-dispatched, else
@@ -173,8 +177,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
-          git clone https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace
+          git clone "https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace"
           if [ "$SRC_REPO" = "tai-marketplace" ]; then
+            # Fetch the commit itself, for the same reason as the studio clone above.
+            git -C tai-marketplace fetch origin "$SRC_REF"
             git -C tai-marketplace checkout --detach "$SRC_REF"
           fi
       - name: Build the Studio SPA
@@ -201,6 +207,7 @@ jobs:
           SRC_REPO: ${{ github.event.client_payload.repo }}
           SHA: ${{ github.event.client_payload.ref }}
           RESULT: ${{ needs.suite.result }}
+          PENDING_RESULT: ${{ needs.pending.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -210,8 +217,16 @@ jobs:
           esac
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SHA"; exit 1; }
           case "$RESULT" in
-            success) state=success; desc="cross-repo e2e passed" ;;
-            *)       state=failure; desc="cross-repo e2e ${RESULT}" ;;
+            success)   state=success; desc="cross-repo e2e passed" ;;
+            failure)   state=failure; desc="cross-repo e2e failed" ;;
+            cancelled) state=failure; desc="cross-repo e2e cancelled" ;;
+            skipped)
+              # `suite` runs unconditionally after `pending`, so it is skipped only
+              # when `pending` did not succeed — it could not post the starting
+              # status, or it was cancelled. Either way that job reports the cause.
+              echo "::notice::no fleet-e2e status posted: the suite never ran for ${SHA}; the pending job ended ${PENDING_RESULT}"
+              exit 0 ;;
+            *) echo "::error::unexpected suite result: ${RESULT}"; exit 1 ;;
           esac
           for attempt in 1 2 3 4 5; do
             gh api "repos/${GITHUB_REPOSITORY_OWNER}/${SRC_REPO}/statuses/${SHA}" \

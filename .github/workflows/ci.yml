@@ -740,10 +740,10 @@ jobs:
         # The one docker-gated sandbox leg (tests/sandbox_docker): the real
         # sandbox-docker provider driven against a REAL rootless-dind engine, for
         # the kit conformance pass + the four session-isolation negatives that
-        # only a true network-split + egress-firewall + mTLS topology can prove
-        # (PLAN_5 §4). The process-based fake sandbox carries the sandbox surface
-        # on every other leg, so — like the isolation topology — this is
-        # backend-invariant and one leg suffices: the default (arq) leg, shard 1.
+        # only a true network-split + egress-firewall + mTLS topology can prove.
+        # The process-based fake sandbox carries the sandbox surface on every
+        # other leg, so — like the isolation topology — this is backend-invariant
+        # and one leg suffices: the default (arq) leg, shard 1.
         # The compose `sandbox` profile self-generates the dind mTLS client certs
         # into the bind-mounted dir; it is pre-created world-writable so the
         # rootless daemon's mapped uid can write into it (the entrypoint then
@@ -876,7 +876,7 @@ jobs:
         if: steps.mp.outputs.enabled == 'true'
         env:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-        run: git clone --depth 1 https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace
+        run: git clone --depth 1 "https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace"
       - name: Build the Studio SPA
         uses: ./.github/actions/studio-spa
       - name: Install the ui/ workspace

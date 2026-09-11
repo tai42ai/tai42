@@ -13,7 +13,10 @@ assert:
    sandbox-ctrl / RFC1918 control-plane or compose-service address is DROPPED by the
    egress firewall on the FORWARD/POSTROUTING path;
 2. cloud metadata (``169.254.169.254``) is BLOCKED;
-3. public internet egress + DNS SUCCEED (egress default open);
+3. egress + DNS to a destination the firewall does NOT deny SUCCEED (egress default
+   open) — proved against the harness's own listening peer on the documentation-range
+   ``sandbox-public`` segment, which the firewall treats exactly as it treats the
+   internet, so the policy is the only thing the leg can fail on;
 4. the session carries NO engine credential and mounts ONLY its own ``/workspace``, and
    two sessions are workspace-isolated from each other.
 
@@ -34,11 +37,11 @@ from ._support import (
     DockerSandbox,
     ManagedSandboxSession,
     default_gateway,
+    dns_answer,
     egress_spec,
     http_over_tcp,
     open_sandbox,
     requires_engine,
-    resolves_dns,
     sh,
     tcp_dials,
 )
@@ -46,17 +49,18 @@ from ._support import (
 pytestmark = requires_engine
 
 # The cloud-metadata endpoint is a universal constant (link-local), so its block is
-# asserted unconditionally. The public egress target and the RFC1918 control-plane
-# address the firewall must DROP are deployment coordinates: the public target has a
-# sensible default the harness can override, and the blocked address — a host that is
-# genuinely LISTENING so a DROP is distinguishable from a dead route — is supplied by
-# the harness or its leg skips loudly.
+# asserted unconditionally. The reachable egress peer and the RFC1918 control-plane
+# address the firewall must DROP are deployment coordinates, and BOTH are hosts that
+# genuinely LISTEN, so a DROP is distinguishable from a dead route and a pass from a
+# vacuous one: the egress peer is the harness's own `sandbox-egress-peer` service
+# (its compose service name, static address and port are the defaults here), and the
+# blocked address is supplied by the harness or its leg skips loudly.
 _METADATA_HOST = "169.254.169.254"
 _METADATA_PORT = 80
 
-_EGRESS_HOST = os.environ.get("SANDBOX_DOCKER_EGRESS_HOST", "1.1.1.1")
-_EGRESS_PORT = int(os.environ.get("SANDBOX_DOCKER_EGRESS_PORT", "443"))
-_EGRESS_DNS = os.environ.get("SANDBOX_DOCKER_EGRESS_DNS", "one.one.one.one")
+_EGRESS_PEER_NAME = os.environ.get("SANDBOX_DOCKER_EGRESS_PEER_NAME", "sandbox-egress-peer")
+_EGRESS_PEER_ADDR = os.environ.get("SANDBOX_DOCKER_EGRESS_PEER_ADDR", "192.0.2.9")
+_EGRESS_PEER_PORT = int(os.environ.get("SANDBOX_DOCKER_EGRESS_PEER_PORT", "9000"))
 
 _CONTROL_API_PORT = int(os.environ.get("SANDBOX_DOCKER_CONTROL_API_PORT", "2376"))
 _BLOCKED_ADDR = os.environ.get("SANDBOX_DOCKER_BLOCKED_ADDR")
@@ -74,14 +78,19 @@ async def egress_session(sandbox: DockerSandbox) -> ManagedSandboxSession:
     return await sandbox.create_session(egress_spec(workspace_key="iso-egress"))
 
 
-async def test_public_egress_open(egress_session: ManagedSandboxSession) -> None:
-    """The egress default is OPEN: the session resolves a public name and opens a TCP
-    connection to a public host — the positive that makes the blocks below meaningful."""
-    assert await resolves_dns(egress_session, _EGRESS_DNS), (
-        f"the egress session could not resolve {_EGRESS_DNS!r}: DNS egress is not open"
+async def test_egress_open(egress_session: ManagedSandboxSession) -> None:
+    """The egress default is OPEN: the session resolves a name through its own resolver
+    and opens a TCP connection to an address the firewall does not deny — the positive
+    that makes the blocks below meaningful. Both halves address the harness's egress
+    peer, which sits where the internet sits relative to the firewall's rules, so what
+    this leg can fail on is the egress policy and nothing else."""
+    answer = await dns_answer(egress_session, _EGRESS_PEER_NAME)
+    assert _EGRESS_PEER_ADDR in answer, (
+        f"the egress session's resolver did not answer {_EGRESS_PEER_NAME!r} with "
+        f"{_EGRESS_PEER_ADDR}: DNS egress is not open. nslookup said: {answer!r}"
     )
-    assert await tcp_dials(egress_session, _EGRESS_HOST, _EGRESS_PORT), (
-        f"the egress session could not reach {_EGRESS_HOST}:{_EGRESS_PORT}: public egress is not open"
+    assert await tcp_dials(egress_session, _EGRESS_PEER_ADDR, _EGRESS_PEER_PORT), (
+        f"the egress session could not reach {_EGRESS_PEER_ADDR}:{_EGRESS_PEER_PORT}: egress is not open"
     )
 
 
