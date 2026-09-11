@@ -5513,7 +5513,7 @@ provides-extras = ["dev", "api-gate"]
 
 [[package]]
 name = "tai42-contract"
-version = "9.0.0"
+version = "9.0.1"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -6078,7 +6078,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "12.0.1"
+version = "13.0.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },

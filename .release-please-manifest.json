@@ -1,8 +1,8 @@
 {
-  "core/contract": "9.0.0",
+  "core/contract": "9.0.1",
   "core/kit": "3.13.1",
   "core/cli": "6.0.1",
-  "core/skeleton": "12.0.1",
+  "core/skeleton": "13.0.0",
   "plugins/accounts-oidc": "1.2.4",
   "plugins/accounts-postgres": "2.4.4",
   "plugins/agents": "5.5.5",
