@@ -1456,11 +1456,11 @@ class StatesService:
         self, reconcile: TemplateReconcile, subtree: dict[str, Any], *, previous: dict[str, Any], new: dict[str, Any]
     ) -> list[dict[str, Any]]:
         result = await self._run_reconcile_jq(
-            "view", reconcile.view, {"previous": previous, "new": new, "data": subtree}
+            "orphans", reconcile.orphans, {"previous": previous, "new": new, "data": subtree}
         )
         if not isinstance(result, list):
             raise TemplateValidationError(
-                f"reconcile view must return a list of {{id, label}}, got {type(result).__name__}"
+                f"reconcile orphans must return a list of {{id, label}}, got {type(result).__name__}"
             )
         return result
 

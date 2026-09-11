@@ -273,7 +273,7 @@ class StateTemplateDocument(BaseModel):
     #: entry (with ``params``) reads the record → a value; an ``update``-purpose entry (with
     #: ``reads``/``writes``) maps ``{record, input}`` → a template-relative op batch.
     template_jq: dict[str, Any] | None = None
-    #: ``{view, close, resolutions}`` — how a declarations edit settles open records.
+    #: ``{orphans, close, resolutions}`` — how a declarations edit settles open records.
     reconcile: dict[str, Any] | None = None
 
     @field_validator("name")
