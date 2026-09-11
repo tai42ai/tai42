@@ -136,14 +136,14 @@ class TemplateJq:
 @dataclass(frozen=True, slots=True)
 class TemplateReconcile:
     """How a declarations edit settles a state's OPEN records. Three jq programs, each over
-    an input payload (no ``$`` bindings): ``view`` over ``{previous, new, data}`` returns
+    an input payload (no ``$`` bindings): ``orphans`` over ``{previous, new, data}`` returns
     the ``[{id, label}]`` items a record's subtree orphans against the new declarations;
     ``resolutions`` over ``{new}`` returns the not-done resolution names a close may name;
     ``close`` over ``{data, id, resolution}`` returns the template-relative op batch that
-    closes one orphan. ``{view, close, resolutions}`` is the reconcile section's own
+    closes one orphan. ``{orphans, close, resolutions}`` is the reconcile section's own
     vocabulary, distinct from ``template_jq``."""
 
-    view: str
+    orphans: str
     close: str
     resolutions: str
 
@@ -200,7 +200,7 @@ class StateTemplate:
             doc["template_jq"] = {name: _program_to_document(program) for name, program in self.template_jq.items()}
         if self.reconcile is not None:
             doc["reconcile"] = {
-                "view": self.reconcile.view,
+                "orphans": self.reconcile.orphans,
                 "close": self.reconcile.close,
                 "resolutions": self.reconcile.resolutions,
             }
@@ -708,12 +708,12 @@ def _parse_template_jq(raw: Any) -> dict[str, TemplateJq]:
 
 
 def _parse_reconcile(raw: Any) -> TemplateReconcile:
-    """Parse the ``reconcile`` section ``{view, close, resolutions}`` — three jq programs,
+    """Parse the ``reconcile`` section ``{orphans, close, resolutions}`` — three jq programs,
     each compiling over its own input payload (no ``$`` bindings)."""
     _require_type(raw, dict, where="reconcile")
-    _reject_section_extra_keys(raw, frozenset({"view", "close", "resolutions"}), where="reconcile")
+    _reject_section_extra_keys(raw, frozenset({"orphans", "close", "resolutions"}), where="reconcile")
     programs: dict[str, str] = {}
-    for label in ("view", "close", "resolutions"):
+    for label in ("orphans", "close", "resolutions"):
         expr = _require_type(raw.get(label), str, where=f"reconcile {label}")
         if not expr.strip():
             raise TemplateValidationError(f"reconcile {label} must be a non-empty jq program")
@@ -722,7 +722,7 @@ def _parse_reconcile(raw: Any) -> TemplateReconcile:
         except Exception as exc:
             raise TemplateValidationError(f"reconcile {label} is not a valid jq expression: {exc}") from exc
         programs[label] = expr
-    return TemplateReconcile(view=programs["view"], close=programs["close"], resolutions=programs["resolutions"])
+    return TemplateReconcile(orphans=programs["orphans"], close=programs["close"], resolutions=programs["resolutions"])
 
 
 def _parse_trace(raw: Any) -> TemplateTrace:

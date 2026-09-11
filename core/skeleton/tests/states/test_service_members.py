@@ -276,7 +276,10 @@ _RECON_TEMPLATE = StateTemplateDocument.model_validate(
         },
         "declarations": {"schema": {"type": "object", "properties": {"allowed": {"type": "array"}}}},
         "reconcile": {
-            "view": ".new.allowed as $a|[(.data.ledger//[])[]|select(.id as $i|($a|index($i))==null)|{id,label:.id}]",
+            "orphans": (
+                ".new.allowed as $a|[(.data.ledger//[])[]"
+                "|select(.id as $i|($a|index($i))==null)|{id,label:.id}]"
+            ),
             "resolutions": '["closed"]',
             "close": '[{op: "set", path: ["ledger"], value: []}]',
         },
@@ -374,18 +377,18 @@ async def test_reconcile_unknown_directive_is_loud(svc: StatesService) -> None:
         )
 
 
-async def test_reconcile_view_returning_a_non_list_is_loud(svc: StatesService) -> None:
+async def test_reconcile_orphans_returning_a_non_list_is_loud(svc: StatesService) -> None:
     template = StateTemplateDocument.model_validate(
         {
             "name": "reconciler",
             "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
             "declarations": {"schema": {"type": "object", "properties": {"allowed": {"type": "array"}}}},
-            "reconcile": {"view": '"not a list"', "resolutions": "[]", "close": "[]"},
+            "reconcile": {"orphans": '"not a list"', "resolutions": "[]", "close": "[]"},
         }
     )
     await svc.put_declaration(_STATE)
     await svc.put_template(template, replace=False)
     await svc.attach(_STATE.name, "reconciler", AttachBody(path=[], declarations={"allowed": []}))
     await svc.replace(_STATE.name, _subject(), {"ledger": []}, origin=_ORIGIN)
-    with pytest.raises(TemplateValidationError, match="reconcile view must return a list"):
+    with pytest.raises(TemplateValidationError, match="reconcile orphans must return a list"):
         await svc.update_attachment_declarations(_STATE.name, "reconciler", {"allowed": ["a"]})

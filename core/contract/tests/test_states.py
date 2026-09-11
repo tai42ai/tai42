@@ -205,13 +205,13 @@ def test_template_document_round_trips_template_jq_and_reconcile():
                 "due_set": {"purpose": "input", "description": "the work due", "params": ["run"], "jq": "."},
                 "outcome": {"purpose": "update", "reads": [["l"]], "writes": [["l"]], "jq": "[]"},
             },
-            "reconcile": {"view": ".", "close": "[]", "resolutions": "[]"},
+            "reconcile": {"orphans": ".", "close": "[]", "resolutions": "[]"},
         }
     )
     dumped = doc.model_dump(by_alias=True)
     assert dumped["template_jq"]["due_set"]["jq"] == "."
     assert dumped["template_jq"]["outcome"]["writes"] == [["l"]]
-    assert dumped["reconcile"] == {"view": ".", "close": "[]", "resolutions": "[]"}
+    assert dumped["reconcile"] == {"orphans": ".", "close": "[]", "resolutions": "[]"}
     # Re-validating the dump is stable.
     assert StateTemplateDocument.model_validate(dumped) == doc
 

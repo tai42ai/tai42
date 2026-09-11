@@ -409,25 +409,25 @@ def test_reconcile_parses_three_jq_programs() -> None:
     template = validate_template(
         _planner_doc(
             reconcile={
-                "view": "[.data.ledger[]? | {id, label: .id}]",
+                "orphans": "[.data.ledger[]? | {id, label: .id}]",
                 "resolutions": "[.new.resolutions[]?]",
                 "close": '[{op: "remove", path: ["ledger"], keys: [.id]}]',
             }
         )
     )
     assert template.reconcile is not None
-    assert template.reconcile.view.startswith("[.data")
+    assert template.reconcile.orphans.startswith("[.data")
     assert validate_template(template.to_document()).reconcile == template.reconcile
 
 
 def test_reconcile_missing_a_program_is_refused() -> None:
     with pytest.raises(TemplateValidationError, match="reconcile close"):
-        validate_template(_planner_doc(reconcile={"view": ".", "resolutions": "."}))
+        validate_template(_planner_doc(reconcile={"orphans": ".", "resolutions": "."}))
 
 
 def test_reconcile_non_compiling_jq_is_refused() -> None:
-    with pytest.raises(TemplateValidationError, match="reconcile view is not a valid jq"):
-        validate_template(_planner_doc(reconcile={"view": "this is (not jq", "close": "[]", "resolutions": "[]"}))
+    with pytest.raises(TemplateValidationError, match="reconcile orphans is not a valid jq"):
+        validate_template(_planner_doc(reconcile={"orphans": "this is (not jq", "close": "[]", "resolutions": "[]"}))
 
 
 def test_empty_or_badly_named_members_are_refused() -> None:
@@ -438,4 +438,4 @@ def test_empty_or_badly_named_members_are_refused() -> None:
     with pytest.raises(TemplateValidationError, match="template_jq 'r' jq must be a non-empty"):
         validate_template(_planner_doc(template_jq={"r": {"purpose": "update", "jq": ""}}))
     with pytest.raises(TemplateValidationError, match="reconcile close must be a non-empty"):
-        validate_template(_planner_doc(reconcile={"view": ".", "close": "  ", "resolutions": "."}))
+        validate_template(_planner_doc(reconcile={"orphans": ".", "close": "  ", "resolutions": "."}))

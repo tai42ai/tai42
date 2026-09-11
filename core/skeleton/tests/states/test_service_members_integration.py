@@ -83,7 +83,7 @@ def _reconciler_body(name: str) -> dict[str, Any]:
         "regimes": [{"path": ["items"], "regime": "composing"}],
         "declarations": {"schema": {"type": "object", "properties": {"allowed": {"type": "array"}}}},
         "reconcile": {
-            "view": (
+            "orphans": (
                 ".new.allowed as $a | [(.data.items // [])[] "
                 "| select(.id as $i | ($a | index($i)) == null) | {id, label: (.id | tostring)}]"
             ),
