@@ -277,8 +277,7 @@ _RECON_TEMPLATE = StateTemplateDocument.model_validate(
         "declarations": {"schema": {"type": "object", "properties": {"allowed": {"type": "array"}}}},
         "reconcile": {
             "orphans": (
-                ".new.allowed as $a|[(.data.ledger//[])[]"
-                "|select(.id as $i|($a|index($i))==null)|{id,label:.id}]"
+                ".new.allowed as $a|[(.data.ledger//[])[]|select(.id as $i|($a|index($i))==null)|{id,label:.id}]"
             ),
             "resolutions": '["closed"]',
             "close": '[{op: "set", path: ["ledger"], value: []}]',
