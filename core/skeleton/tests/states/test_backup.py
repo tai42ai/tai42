@@ -26,7 +26,7 @@ class _FakeExportStore:
     """A store stand-in returning canned rows for the exporter's five reads."""
 
     def __init__(self) -> None:
-        self._modules = [{"body": {"kind": "state-template", "name": "m"}}]
+        self._templates = [{"body": {"kind": "state-template", "name": "m"}}]
         self._declarations = [
             {
                 "name": "alerts",
@@ -39,7 +39,7 @@ class _FakeExportStore:
         ]
 
     async def list_templates(self) -> list[dict[str, Any]]:
-        return self._modules
+        return self._templates
 
     async def list_declarations(self) -> list[dict[str, Any]]:
         return self._declarations
@@ -107,7 +107,7 @@ class _FakeStatesFacet:
         self.existing = existing or set()
         self.fail = fail or set()
         self.existing_attachments = existing_attachments or set()
-        self.put_modules: list[str] = []
+        self.put_templates: list[str] = []
         self.put_declarations: list[str] = []
         self.attached: list[tuple[str, str]] = []
         self.updated_attachments: list[tuple[str, str]] = []
@@ -120,8 +120,8 @@ class _FakeStatesFacet:
 
     async def put_template(self, doc, *, replace):
         if doc.name in self.fail:
-            raise StatesError(f"module {doc.name} refused")
-        self.put_modules.append(doc.name)
+            raise StatesError(f"template {doc.name} refused")
+        self.put_templates.append(doc.name)
 
     async def get_declaration(self, name):
         return object() if name in self.existing else None
@@ -226,7 +226,7 @@ async def test_import_reports_each_failed_entity_and_skips_it(monkeypatch: pytes
     facet = _FakeStatesFacet(fail={"m", "alerts"})
     _wire(monkeypatch, facet)
     report = await import_states(_payload())
-    # the module and declaration doors both refuse; the attach refuses (its module failed);
+    # the template and declaration doors both refuse; the attach refuses (its template failed);
     # the alias and record restores refuse (state "alerts"). Each is reported, none aborts.
     assert report["templates"]["failed"] == 1
     assert report["declarations"]["failed"] == 1
@@ -285,7 +285,7 @@ async def test_import_groups_alias_and_record_rows_by_state(monkeypatch: pytest.
             },
         ],
         declarations=[],
-        modules=[],
+        templates=[],
         attachments=[],
     )
     report = await import_states(payload)

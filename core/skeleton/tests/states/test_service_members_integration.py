@@ -42,7 +42,7 @@ async def _exec(sql: LiteralString, params: tuple = ()) -> None:
         await conn.execute(sql, params)
 
 
-def _module_body(name: str) -> dict[str, Any]:
+def _template_body(name: str) -> dict[str, Any]:
     return {
         "kind": "state-template",
         "name": name,
@@ -68,7 +68,7 @@ def _module_body(name: str) -> dict[str, Any]:
 
 
 def _reconciler_body(name: str) -> dict[str, Any]:
-    """A module that declares ``reconcile`` and a ``composing`` ``items`` path, closing an
+    """A template that declares ``reconcile`` and a ``composing`` ``items`` path, closing an
     orphan with a KEYED op (``remove_by_key``) — the only close shape the composing regime
     admits (a whole-path ``set`` would be refused)."""
     return {
@@ -93,12 +93,12 @@ def _reconciler_body(name: str) -> dict[str, Any]:
     }
 
 
-async def _cleanup_state(state: str, module: str) -> None:
+async def _cleanup_state(state: str, template: str) -> None:
     await _exec("DELETE FROM state_writes WHERE state = %s", (state,))
     await _exec("DELETE FROM state_records WHERE state = %s", (state,))
     await _exec("DELETE FROM state_attachments WHERE state = %s", (state,))
     await _exec("DELETE FROM state_applied_ops WHERE op_id LIKE %s", (f"%:{state}",))
-    await _exec("DELETE FROM state_templates WHERE name = %s", (module,))
+    await _exec("DELETE FROM state_templates WHERE name = %s", (template,))
     await _exec("DELETE FROM state_declarations WHERE name = %s", (state,))
 
 
@@ -113,7 +113,7 @@ async def real_service(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[S
     await apply_migrations([states_entry()])
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
     state = f"st_{uuid.uuid4().hex[:12]}"
-    module = f"mod{uuid.uuid4().hex[:10]}"
+    template = f"tpl{uuid.uuid4().hex[:10]}"
     svc = StatesService()
     await svc.put_declaration(
         StateDeclaration(
@@ -123,10 +123,10 @@ async def real_service(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[S
             default_subject_kind="thread",
         )
     )
-    await svc.put_template(StateTemplateDocument.model_validate(_module_body(module)), replace=False)
-    await svc.attach(state, module, AttachBody(path=["a"]))
-    yield svc, state, module
-    await _cleanup_state(state, module)
+    await svc.put_template(StateTemplateDocument.model_validate(_template_body(template)), replace=False)
+    await svc.attach(state, template, AttachBody(path=["a"]))
+    yield svc, state, template
+    await _cleanup_state(state, template)
 
 
 @pytest.fixture
@@ -140,7 +140,7 @@ async def real_reconciler(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tupl
     await apply_migrations([states_entry()])
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
     state = f"st_{uuid.uuid4().hex[:12]}"
-    module = f"mod{uuid.uuid4().hex[:10]}"
+    template = f"tpl{uuid.uuid4().hex[:10]}"
     svc = StatesService()
     await svc.put_declaration(
         StateDeclaration(
@@ -150,10 +150,10 @@ async def real_reconciler(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tupl
             default_subject_kind="thread",
         )
     )
-    await svc.put_template(StateTemplateDocument.model_validate(_reconciler_body(module)), replace=False)
-    await svc.attach(state, module, AttachBody(path=["a"], declarations={"allowed": [1, 2, 3]}))
-    yield svc, state, module
-    await _cleanup_state(state, module)
+    await svc.put_template(StateTemplateDocument.model_validate(_reconciler_body(template)), replace=False)
+    await svc.attach(state, template, AttachBody(path=["a"], declarations={"allowed": [1, 2, 3]}))
+    yield svc, state, template
+    await _cleanup_state(state, template)
 
 
 def _subject(state: str) -> StateSubject:
@@ -163,7 +163,7 @@ def _subject(state: str) -> StateSubject:
 async def test_update_program_applies_a_keyed_op_under_a_composing_regime_and_traces(
     real_service: tuple[StatesService, str, str],
 ) -> None:
-    svc, state, _module = real_service
+    svc, state, _template = real_service
     subject = _subject(state)
     result = await svc.apply_template_jq(
         state, subject, "add", {"id": 1}, op_id=f"tjq-1:{state}", origin=WriteOrigin(meta={"template_jq": "add"})
@@ -187,7 +187,7 @@ async def test_update_program_applies_a_keyed_op_under_a_composing_regime_and_tr
 async def test_update_program_is_idempotent_on_a_replayed_op_id(
     real_service: tuple[StatesService, str, str],
 ) -> None:
-    svc, state, _module = real_service
+    svc, state, _template = real_service
     subject = _subject(state)
     op_id = f"rule-2:{state}"
     first = await svc.apply_template_jq(state, subject, "add", {"id": 7}, op_id=op_id, origin=WriteOrigin())
@@ -202,7 +202,7 @@ async def test_update_program_is_idempotent_on_a_replayed_op_id(
 async def test_update_program_whole_path_write_on_a_composing_path_is_refused(
     real_service: tuple[StatesService, str, str],
 ) -> None:
-    svc, state, _module = real_service
+    svc, state, _template = real_service
     subject = _subject(state)
     await svc.apply_template_jq(state, subject, "add", {"id": 1}, op_id=f"tjq-3:{state}", origin=WriteOrigin())
     with pytest.raises(RegimeViolationError):
@@ -210,7 +210,7 @@ async def test_update_program_whole_path_write_on_a_composing_path_is_refused(
 
 
 async def test_input_program_reads_without_writing(real_service: tuple[StatesService, str, str]) -> None:
-    svc, state, _module = real_service
+    svc, state, _template = real_service
     subject = _subject(state)
     await svc.apply_template_jq(state, subject, "add", {"id": 1}, op_id=f"tjq-5:{state}", origin=WriteOrigin())
     await svc.apply_template_jq(state, subject, "add", {"id": 2}, op_id=f"tjq-6:{state}", origin=WriteOrigin())
@@ -224,19 +224,19 @@ async def test_input_program_reads_without_writing(real_service: tuple[StatesSer
 async def test_reconciler_closes_an_orphan_through_a_keyed_op(
     real_reconciler: tuple[StatesService, str, str],
 ) -> None:
-    svc, state, module = real_reconciler
+    svc, state, template = real_reconciler
     subject = _subject(state)
     # Seed three items under the composing ``items`` path.
     await svc.replace(state, subject, {"a": {"items": [{"id": 1}, {"id": 2}, {"id": 3}]}}, origin=WriteOrigin())
     # Narrowing ``allowed`` to [1, 3] orphans item 2; the built-in reconciler closes it with
-    # the module's KEYED close op (remove_by_key) on the composing path — the write the
+    # the template's KEYED close op (remove_by_key) on the composing path — the write the
     # composing-shape guard admits (a whole-path ``set`` would be refused) — and the close
     # commits on the attach transaction together with the declarations edit.
     await svc.update_attachment_declarations(
-        state, module, {"allowed": [1, 3]}, options={"orphans": "close", "resolution": "closed"}
+        state, template, {"allowed": [1, 3]}, options={"orphans": "close", "resolution": "closed"}
     )
     view = await svc.read(state, subject)
     assert view is not None
     assert [item["id"] for item in view.data["a"]["items"]] == [1, 3]
-    attachments = await svc.list_attachments(state, template=module)
+    attachments = await svc.list_attachments(state, template=template)
     assert attachments[0]["declarations"] == {"allowed": [1, 3]}

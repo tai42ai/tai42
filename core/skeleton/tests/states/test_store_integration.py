@@ -62,7 +62,7 @@ async def real_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Pos
     yield PostgresStatesStore(), state
     # Every row this run wrote is scoped by the unique ``state``: state-columned tables
     # delete on ``state``; the two GLOBAL ledgers with no ``state`` column — the applied-op
-    # ledger (op-ids suffixed with the unique ``state``) and the module table (named
+    # ledger (op-ids suffixed with the unique ``state``) and the template table (named
     # ``state + "_m"``) — delete on that suffix/name, so a re-run starts clean.
     await _exec("DELETE FROM state_writes WHERE state = %s", (state,))
     await _exec("DELETE FROM state_subject_aliases WHERE state = %s", (state,))
@@ -145,7 +145,7 @@ async def test_traced_keyed_write_from_metaless_origin_stamps_null_meta(
     onto every object under the tracing attach), so validation runs against the schema the
     platform actually serves — which must admit a null meta object, not just a string."""
     store, state = real_store
-    module_body = {
+    template_body = {
         "kind": "state-template",
         "name": "m",
         "schema": {
@@ -160,12 +160,12 @@ async def test_traced_keyed_write_from_metaless_origin_stamps_null_meta(
         "trace": {"enabled": True},
     }
     effective = compose_effective_schema(
-        {"type": "object", "properties": {}}, [(validate_template(module_body), ["a"], {})]
+        {"type": "object", "properties": {}}, [(validate_template(template_body), ["a"], {})]
     )
     # the composed schema carries the real injected trace schema on the array's items
     assert "_trace" in effective["properties"]["a"]["properties"]["items"]["items"]["properties"]
     await store.upsert_declaration(state, "", {}, ["thread"], "thread", None, effective_schema=effective)
-    await store.upsert_template(state + "_m", {**module_body, "name": state + "_m"}, None)
+    await store.upsert_template(state + "_m", {**template_body, "name": state + "_m"}, None)
     await store.upsert_attachment(state, state + "_m", ["a"], {}, {}, effective_schema=effective)
 
     # the shape a builtin ``state_*`` tool produces (WriteOrigin meta=None), completed by
@@ -439,7 +439,7 @@ async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
     from tai42_contract.states.errors import RegimeViolationError
 
     store, state = real_store
-    module = state + "_m"
+    template = state + "_m"
     frag = {
         "type": "object",
         "properties": {
@@ -451,16 +451,16 @@ async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
     }
     await store.upsert_declaration(state, "", frag, ["thread"], "thread", None, effective_schema=frag)
     await store.upsert_template(
-        module,
+        template,
         {
             "kind": "state-template",
-            "name": module,
+            "name": template,
             "schema": frag,
             "regimes": [{"path": ["entries"], "regime": "composing"}],
         },
         None,
     )
-    await store.upsert_attachment(state, module, [], {}, {}, effective_schema=frag)
+    await store.upsert_attachment(state, template, [], {}, {}, effective_schema=frag)
     subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="led1")
     await store.apply_ops(
         state,

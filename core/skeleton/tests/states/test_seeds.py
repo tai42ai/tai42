@@ -1,4 +1,4 @@
-"""The state-template seed registry and the seed applier — the module-side twin of the preset
+"""The state-template seed registry and the seed applier — the template-side twin of the preset
 applier — driven with an in-memory fake store (no live database)."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from tai42_skeleton.states.seeds import StateTemplateSeedRegistry, apply_templat
 
 
 class _FakeSeedStore:
-    """Records module upserts; ``present`` names read back as already stored."""
+    """Records template upserts; ``present`` names read back as already stored."""
 
     def __init__(self, *, present: set[str] | None = None) -> None:
         self.present = present or set()

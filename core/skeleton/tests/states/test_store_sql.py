@@ -218,9 +218,9 @@ async def test_field_stats(pg: FakeStatesPg, store: PostgresStatesStore) -> None
 
 
 # --------------------------------------------------------------------------- #
-# modules + attachments                                                              #
+# templates + attachments                                                              #
 # --------------------------------------------------------------------------- #
-async def test_module_upsert_get_list_delete(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+async def test_template_upsert_get_list_delete(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     assert await store.get_template("m") is None
     await store.upsert_template("m", {"name": "m"}, "hash-1")
     row = await store.get_template("m")
@@ -236,11 +236,11 @@ async def test_module_upsert_get_list_delete(pg: FakeStatesPg, store: PostgresSt
     assert await store.delete_template("m") is False
 
 
-async def test_attached_module_counts(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
-    for state, module in (("s1", "m1"), ("s2", "m1"), ("s1", "m2")):
-        pg.attachments[(state, module)] = {
+async def test_attached_template_counts(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+    for state, template in (("s1", "m1"), ("s2", "m1"), ("s1", "m2")):
+        pg.attachments[(state, template)] = {
             "state": state,
-            "template": module,
+            "template": template,
             "path": [],
             "parameters": {},
             "declarations": {},
@@ -250,10 +250,10 @@ async def test_attached_module_counts(pg: FakeStatesPg, store: PostgresStatesSto
 
 
 async def test_attach_reads(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
-    for state, module in (("s1", "m2"), ("s1", "m1"), ("s2", "m1")):
-        pg.attachments[(state, module)] = {
+    for state, template in (("s1", "m2"), ("s1", "m1"), ("s2", "m1")):
+        pg.attachments[(state, template)] = {
             "state": state,
-            "template": module,
+            "template": template,
             "path": ["p"],
             "parameters": {"k": 1},
             "declarations": {},
@@ -276,7 +276,7 @@ async def test_upsert_attach_writes_row_and_effective_schema(pg: FakeStatesPg, s
     await store.upsert_attachment("alerts", "m", ["a"], {"k": 1}, {"d": 2}, effective_schema=eff)
     assert pg.attachments[("alerts", "m")]["path"] == ["a"]
     assert pg.declarations["alerts"]["effective_schema"] == eff
-    # a second upsert on the same (state, module) updates in place
+    # a second upsert on the same (state, template) updates in place
     await store.upsert_attachment("alerts", "m", ["b"], {}, {}, effective_schema=eff)
     assert pg.attachments[("alerts", "m")]["path"] == ["b"]
 
@@ -533,7 +533,7 @@ async def test_apply_ops_all_guards_skip_on_existing_keeps_record(pg: FakeStates
 
 async def test_apply_ops_stamps_trace_under_traced_attach(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     pg.seed_declaration("alerts")
-    pg.modules["m"] = {
+    pg.templates["m"] = {
         "name": "m",
         "body": {"kind": "state-template", "name": "m", "schema": {"type": "object"}, "trace": {"enabled": True}},
         "shipped_hash": None,
@@ -567,7 +567,7 @@ async def test_apply_ops_stamps_trace_under_traced_attach(pg: FakeStatesPg, stor
 
 async def test_apply_ops_refuses_composing_shape_before_ledger(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     pg.seed_declaration("alerts")
-    pg.modules["m"] = {
+    pg.templates["m"] = {
         "name": "m",
         "body": {
             "kind": "state-template",

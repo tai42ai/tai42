@@ -25,14 +25,14 @@ def _doc(**over):
     return doc
 
 
-def test_validate_minimal_module() -> None:
-    module = validate_template(_doc())
-    assert isinstance(module, StateTemplate)
-    assert module.name == "demo"
-    assert module.trace.enabled is False
-    assert module.declarations is None
+def test_validate_minimal_template() -> None:
+    template = validate_template(_doc())
+    assert isinstance(template, StateTemplate)
+    assert template.name == "demo"
+    assert template.trace.enabled is False
+    assert template.declarations is None
     # round-trips through to_document
-    assert validate_template(module.to_document()).name == "demo"
+    assert validate_template(template.to_document()).name == "demo"
 
 
 def test_wrong_kind_refused() -> None:
@@ -71,8 +71,8 @@ def test_parameters_and_defaults() -> None:
         schema={"type": "object", "properties": {"cap": {"$parameter": "cap"}}},
         parameters={"cap": {"schema": {"type": "object"}, "default": {"type": "integer"}}},
     )
-    module = validate_template(doc)
-    assert module.defaults() == {"cap": {"type": "integer"}}
+    template = validate_template(doc)
+    assert template.defaults() == {"cap": {"type": "integer"}}
 
 
 def test_no_default_parameter_must_appear_as_marker() -> None:
@@ -95,8 +95,8 @@ def test_regime_valid_and_invalid_path() -> None:
         schema={"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object"}}}},
         regimes=[{"path": ["items"], "regime": "composing"}],
     )
-    module = validate_template(ok)
-    assert module.regimes[0].regime == "composing"
+    template = validate_template(ok)
+    assert template.regimes[0].regime == "composing"
     bad = _doc(regimes=[{"path": ["nope"], "regime": "single"}])
     with pytest.raises(TemplateValidationError, match="not a property of the fragment"):
         validate_template(bad)
@@ -113,18 +113,18 @@ def test_regime_wildcard_needs_array() -> None:
 
 def test_declarations_check_compiles() -> None:
     ok = _doc(declarations={"schema": {"type": "object", "properties": {"n": {"type": "integer"}}}, "check": ".n > 0"})
-    module = validate_template(ok)
-    assert module.declarations is not None
-    assert module.declarations.check == ".n > 0"
+    template = validate_template(ok)
+    assert template.declarations is not None
+    assert template.declarations.check == ".n > 0"
     bad = _doc(declarations={"schema": {"type": "object"}, "check": "this is (not jq"})
     with pytest.raises(TemplateValidationError, match="not a valid jq"):
         validate_template(bad)
 
 
 def test_trace_enabled() -> None:
-    module = validate_template(_doc(trace={"enabled": True}))
-    assert module.trace.enabled is True
-    assert module.to_document()["trace"] == {"enabled": True}
+    template = validate_template(_doc(trace={"enabled": True}))
+    assert template.trace.enabled is True
+    assert template.to_document()["trace"] == {"enabled": True}
 
 
 def test_fragment_must_be_object_schema() -> None:
@@ -144,32 +144,32 @@ def test_substitute_parameters_is_pure() -> None:
 
 def test_compose_effective_schema_places_fragment() -> None:
     base = {"type": "object", "properties": {"top": {"type": "string"}}}
-    module = validate_template(_doc(name="m", schema={"type": "object", "properties": {"y": {"type": "integer"}}}))
-    effective = compose_effective_schema(base, [(module, ["sub"], {})])
+    template = validate_template(_doc(name="m", schema={"type": "object", "properties": {"y": {"type": "integer"}}}))
+    effective = compose_effective_schema(base, [(template, ["sub"], {})])
     assert effective["properties"]["top"] == {"type": "string"}
     assert effective["properties"]["sub"]["properties"]["y"] == {"type": "integer"}
 
 
 def test_compose_effective_schema_collision_refused() -> None:
     base = {"type": "object", "properties": {"sub": {"type": "string"}}}
-    module = validate_template(_doc(name="m"))
+    template = validate_template(_doc(name="m"))
     with pytest.raises(AttachConflictError, match="collides"):
-        compose_effective_schema(base, [(module, ["sub"], {})])
+        compose_effective_schema(base, [(template, ["sub"], {})])
 
 
 def test_compose_effective_schema_overlap_refused() -> None:
-    module = validate_template(_doc(name="m"))
+    template = validate_template(_doc(name="m"))
     base = {"type": "object", "properties": {}}
     with pytest.raises(AttachConflictError, match="overlaps"):
-        compose_effective_schema(base, [(module, ["a"], {}), (module, ["a", "b"], {})])
+        compose_effective_schema(base, [(template, ["a"], {}), (template, ["a", "b"], {})])
 
 
 def test_compose_injects_trace_under_tracing_mount() -> None:
     base = {"type": "object", "properties": {}}
-    module = validate_template(
+    template = validate_template(
         _doc(name="m", schema={"type": "object", "properties": {"y": {"type": "integer"}}}, trace={"enabled": True})
     )
-    effective = compose_effective_schema(base, [(module, ["sub"], {})])
+    effective = compose_effective_schema(base, [(template, ["sub"], {})])
     sub = effective["properties"]["sub"]
     assert "_trace" in sub["properties"]
     # ``meta`` is a nullable object: a writer with no provenance bag (a hook/schedule/api
@@ -179,7 +179,7 @@ def test_compose_injects_trace_under_tracing_mount() -> None:
 
 
 def test_regime_for_longest_match() -> None:
-    module = validate_template(
+    template = validate_template(
         _doc(
             schema={
                 "type": "object",
@@ -188,9 +188,9 @@ def test_regime_for_longest_match() -> None:
             regimes=[{"path": ["a"], "regime": "composing"}, {"path": ["a", "b"], "regime": "single"}],
         )
     )
-    assert regime_for(module, ["a", "b"]) == "single"
-    assert regime_for(module, ["a"]) == "composing"
-    assert regime_for(module, ["z"]) == "free"
+    assert regime_for(template, ["a", "b"]) == "single"
+    assert regime_for(template, ["a"]) == "composing"
+    assert regime_for(template, ["z"]) == "free"
 
 
 # --------------------------------------------------------------------------- #
@@ -212,7 +212,7 @@ def _planner_doc(**over):
 
 
 def test_input_programs_parse_with_params_and_description() -> None:
-    module = validate_template(
+    template = validate_template(
         _planner_doc(
             template_jq={
                 "anything_due": {
@@ -229,11 +229,11 @@ def test_input_programs_parse_with_params_and_description() -> None:
             }
         )
     )
-    assert set(module.template_jq) == {"anything_due", "due_set"}
-    assert module.template_jq["due_set"].purpose == "input"
-    assert module.template_jq["due_set"].params == ["run"]
-    assert module.template_jq["due_set"].description == "the work due"
-    assert validate_template(module.to_document()).template_jq == module.template_jq
+    assert set(template.template_jq) == {"anything_due", "due_set"}
+    assert template.template_jq["due_set"].purpose == "input"
+    assert template.template_jq["due_set"].params == ["run"]
+    assert template.template_jq["due_set"].description == "the work due"
+    assert validate_template(template.to_document()).template_jq == template.template_jq
 
 
 def test_input_declared_params_ride_the_single_params_object() -> None:
@@ -246,7 +246,7 @@ def test_input_declared_params_ride_the_single_params_object() -> None:
 def test_input_program_may_call_a_sibling_by_name_in_dependency_order() -> None:
     # ``due_set`` calls the sibling ``tjq_anything_due({})``; the compile prelude emits the
     # sibling def first, so the reference resolves.
-    module = validate_template(
+    template = validate_template(
         _planner_doc(
             template_jq={
                 "anything_due": {"purpose": "input", "jq": "(.ledger // []) | length > 0"},
@@ -254,7 +254,7 @@ def test_input_program_may_call_a_sibling_by_name_in_dependency_order() -> None:
             }
         )
     )
-    assert set(module.template_jq) == {"anything_due", "due_set"}
+    assert set(template.template_jq) == {"anything_due", "due_set"}
 
 
 def test_input_program_reference_cycle_is_a_loud_refusal() -> None:
@@ -275,13 +275,13 @@ def test_non_compiling_program_jq_is_refused() -> None:
 
 
 def test_program_using_parameters_and_declarations_variables_compiles() -> None:
-    module = validate_template(
+    template = validate_template(
         _planner_doc(
             declarations={"schema": {"type": "object"}},
             template_jq={"scoped": {"purpose": "input", "jq": "$parameters + $declarations | .ledger"}},
         )
     )
-    assert "scoped" in module.template_jq
+    assert "scoped" in template.template_jq
 
 
 def test_program_bad_name_or_param_refused() -> None:
@@ -309,7 +309,7 @@ def test_purpose_specific_keys_refused() -> None:
 
 
 def test_update_may_declare_params_naming_its_input_keys() -> None:
-    module = validate_template(
+    template = validate_template(
         _planner_doc(
             template_jq={
                 "outcome": {
@@ -321,16 +321,16 @@ def test_update_may_declare_params_naming_its_input_keys() -> None:
             }
         )
     )
-    assert module.template_jq["outcome"].params == ["verdict"]
+    assert template.template_jq["outcome"].params == ["verdict"]
     # to_document round-trips update params.
-    assert validate_template(module.to_document()).template_jq == module.template_jq
+    assert validate_template(template.to_document()).template_jq == template.template_jq
 
 
 # --------------------------------------------------------------------------- #
 # template_jq — update programs                                                 #
 # --------------------------------------------------------------------------- #
 def test_update_programs_parse_reads_and_writes() -> None:
-    module = validate_template(
+    template = validate_template(
         _planner_doc(
             template_jq={
                 "outcome": {
@@ -343,9 +343,9 @@ def test_update_programs_parse_reads_and_writes() -> None:
             }
         )
     )
-    assert module.template_jq["outcome"].purpose == "update"
-    assert module.template_jq["outcome"].writes == [["ledger"]]
-    assert validate_template(module.to_document()).template_jq == module.template_jq
+    assert template.template_jq["outcome"].purpose == "update"
+    assert template.template_jq["outcome"].writes == [["ledger"]]
+    assert validate_template(template.to_document()).template_jq == template.template_jq
 
 
 def test_update_writing_outside_the_fragment_is_refused() -> None:
@@ -358,7 +358,7 @@ def test_update_writing_outside_the_fragment_is_refused() -> None:
 def test_update_may_write_any_regime_including_single() -> None:
     # An update program may write a ``single``-regime path (``phases``); the runtime apply
     # enforces the single-writer rule, not validation.
-    module = validate_template(
+    template = validate_template(
         _planner_doc(
             template_jq={
                 "seed": {
@@ -369,7 +369,7 @@ def test_update_may_write_any_regime_including_single() -> None:
             }
         )
     )
-    assert module.template_jq["seed"].writes == [["phases"]]
+    assert template.template_jq["seed"].writes == [["phases"]]
 
 
 def test_non_compiling_update_jq_is_refused() -> None:
@@ -383,7 +383,7 @@ def test_update_may_call_an_input_program_by_name() -> None:
     # An update program's jq may call an input program by its relative name; the compile
     # prepends the sibling input-program prelude exactly as the evaluator does, so a
     # reference over ``.record`` resolves.
-    module = validate_template(
+    template = validate_template(
         _planner_doc(
             template_jq={
                 "anything_due": {"purpose": "input", "jq": "(.ledger // []) | length > 0"},
@@ -398,15 +398,15 @@ def test_update_may_call_an_input_program_by_name() -> None:
             }
         )
     )
-    assert module.template_jq["act"].purpose == "update"
-    assert module.template_jq["anything_due"].purpose == "input"
+    assert template.template_jq["act"].purpose == "update"
+    assert template.template_jq["anything_due"].purpose == "input"
 
 
 # --------------------------------------------------------------------------- #
 # reconcile                                                                     #
 # --------------------------------------------------------------------------- #
 def test_reconcile_parses_three_jq_programs() -> None:
-    module = validate_template(
+    template = validate_template(
         _planner_doc(
             reconcile={
                 "view": "[.data.ledger[]? | {id, label: .id}]",
@@ -415,9 +415,9 @@ def test_reconcile_parses_three_jq_programs() -> None:
             }
         )
     )
-    assert module.reconcile is not None
-    assert module.reconcile.view.startswith("[.data")
-    assert validate_template(module.to_document()).reconcile == module.reconcile
+    assert template.reconcile is not None
+    assert template.reconcile.view.startswith("[.data")
+    assert validate_template(template.to_document()).reconcile == template.reconcile
 
 
 def test_reconcile_missing_a_program_is_refused() -> None:
