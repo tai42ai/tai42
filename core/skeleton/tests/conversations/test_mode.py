@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import mode as mode_module
@@ -92,7 +93,7 @@ class _MemoryAgent(Agent):
     tool_name = "echo"
     ToolInput = _AgentInput
 
-    async def run(self, *, user_message: str = "", **kwargs):
+    async def run(self, *, user_message: TemplatedText | None = None, **kwargs):
         return ""
 
     async def append_thread_messages(self, *, thread_id, messages, **kwargs) -> None:

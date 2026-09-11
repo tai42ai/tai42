@@ -37,6 +37,7 @@ from tai42_skeleton.conversations.persons import ConversationPersonStore, Pairin
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _CODE_RE = re.compile(r"LINK-[A-Z0-9]{8}")
@@ -53,9 +54,10 @@ class EchoAgent(Agent):
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None]] = []
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
-        self.calls.append((user_message, thread_id))
-        return f"echo: {user_message}"
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        text = rendered_user_message(user_message)
+        self.calls.append((text, thread_id))
+        return f"echo: {text}"
 
 
 class FakeManager:
@@ -798,7 +800,7 @@ async def test_greeting_due_first_contact_with_an_error_outcome_keeps_the_greeti
         tool_name = "boom"
         ToolInput = _EchoInput
 
-        async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+        async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
             raise RuntimeError("agent blew up")
 
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=_BoomAgent())
@@ -1010,10 +1012,12 @@ class _StreamAgent(Agent):
     def __init__(self, *events) -> None:
         self._events = events
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):  # pragma: no cover
+    async def run(
+        self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs
+    ):  # pragma: no cover
         raise NotImplementedError  # astream is overridden, so run is never reached
 
-    async def astream(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+    async def astream(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
         for event in self._events:
             yield event
 

@@ -14,6 +14,7 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute, TargetConversationConfig
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import cache as cache_module
@@ -33,6 +34,7 @@ from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -49,9 +51,10 @@ class ManualAgent(Agent):
         self.appended: list[tuple[str, list[dict[str, str]]]] = []
         self._append_fails = append_fails
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
-        self.runs.append((user_message, thread_id))
-        return f"echo: {user_message}"
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        text = rendered_user_message(user_message)
+        self.runs.append((text, thread_id))
+        return f"echo: {text}"
 
     async def append_thread_messages(self, *, thread_id: str, messages, **kwargs) -> None:
         if self._append_fails:
@@ -69,9 +72,10 @@ class MemorylessAgent(Agent):
     def __init__(self) -> None:
         self.runs: list[tuple[str, str | None]] = []
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
-        self.runs.append((user_message, thread_id))
-        return f"echo: {user_message}"
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        text = rendered_user_message(user_message)
+        self.runs.append((text, thread_id))
+        return f"echo: {text}"
 
 
 class ContextModeAgent(Agent):
@@ -83,7 +87,7 @@ class ContextModeAgent(Agent):
     tool_name = "echo"
     ToolInput = _EchoInput
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
         from tai42_skeleton.conversations.mode import set_current_thread_mode
 
         await set_current_thread_mode("manual")

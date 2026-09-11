@@ -17,6 +17,7 @@ from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ConversationRoute
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
@@ -82,7 +83,7 @@ class ToolCallingAgent(Agent):
         self._tool = tool
         self._arguments = arguments
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
         [tool] = await tai42_app.tools.get_client_tools([self._tool])
         return str(await tool.ainvoke(self._arguments))
 
@@ -235,7 +236,7 @@ class _IdentityProbeAgent(Agent):
     tool_name = _AGENT
     ToolInput = _ToolInput
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
         identity = get_execution_identity()
         return "unbound" if identity is None else identity.user_id
 

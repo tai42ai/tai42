@@ -76,7 +76,7 @@ class _MemoryAgent(Agent):
     tool_name = "memory"
     ToolInput = _AgentInput
 
-    async def run(self, *, user_message: str = "", **kwargs):
+    async def run(self, *, user_message: TemplatedText | None = None, **kwargs):
         return ""
 
     async def append_thread_messages(self, *, thread_id, messages, **kwargs) -> None:
@@ -90,7 +90,7 @@ class _MemorylessAgent(Agent):
     tool_name = "memoryless"
     ToolInput = _AgentInput
 
-    async def run(self, *, user_message: str = "", **kwargs):
+    async def run(self, *, user_message: TemplatedText | None = None, **kwargs):
         return ""
 
 

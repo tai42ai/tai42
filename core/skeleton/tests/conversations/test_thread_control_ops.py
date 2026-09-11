@@ -14,6 +14,7 @@ from tai42_contract.agent import Agent
 from tai42_contract.channels import ChannelTemplate, OptionSection, ReplyOption
 from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
 from tai42_contract.interactions import LocationElement, MediaItem, MediaKind
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import records as records_module
@@ -68,7 +69,7 @@ class _MemoryAgent(Agent):
     tool_name = "relay"
     ToolInput = _AgentInput
 
-    async def run(self, *, user_message: str = "", **kwargs):
+    async def run(self, *, user_message: TemplatedText | None = None, **kwargs):
         return ""
 
     async def append_thread_messages(self, *, thread_id, messages, **kwargs) -> None:
@@ -82,7 +83,7 @@ class _MemorylessAgent(Agent):
     tool_name = "relay"
     ToolInput = _AgentInput
 
-    async def run(self, *, user_message: str = "", **kwargs):
+    async def run(self, *, user_message: TemplatedText | None = None, **kwargs):
         return ""
 
 

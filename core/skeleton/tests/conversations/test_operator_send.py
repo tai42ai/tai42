@@ -13,6 +13,7 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import caps as caps_module
@@ -28,6 +29,7 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import OperatorAppendError, operator_send
 
+from .conftest import rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -44,8 +46,9 @@ class RecordingAgent(Agent):
         self.appended: list[tuple[str, list[dict[str, str]]]] = []
         self._append_fails = append_fails
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
-        self.runs.append((user_message, thread_id))
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        text = rendered_user_message(user_message)
+        self.runs.append((text, thread_id))
         return "unexpected"
 
     async def append_thread_messages(self, *, thread_id: str, messages, **kwargs) -> None:
@@ -64,8 +67,9 @@ class MemorylessAgent(Agent):
     def __init__(self) -> None:
         self.runs: list = []
 
-    async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
-        self.runs.append((user_message, thread_id))
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        text = rendered_user_message(user_message)
+        self.runs.append((text, thread_id))
         return "unexpected"
 
 
