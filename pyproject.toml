@@ -17,7 +17,7 @@ exclude = [
 # suites and ``trustme`` the toolbox HTTPS-proxy path; each member also keeps its
 # own copy in ``[project.optional-dependencies].dev`` for the scoped
 # ``--package <member> --extra dev`` CI leg.
-dev = ["pytest>=8", "pyyaml>=6", "packaging>=24", "fakeredis[lua]>=2.21", "trustme>=1.1"]
+dev = ["pytest>=8", "pyyaml>=6", "packaging>=26.3", "fakeredis[lua]>=2.21", "trustme>=1.1"]
 
 # Lint config for the root-level scripts/ and tests/ — the only Python here not
 # owned by a workspace member. Mirrors every member's ruff regime; src marks the

@@ -84,7 +84,7 @@ dependencies = [
     "openapi-spec-validator>=0.9",
     # PEP 440 version/specifier parsing for the marketplace installer
     # (update-availability comparison, advisory range matching, pin validation).
-    "packaging>=24",
+    "packaging>=26.3",
     # The marketplace installer shells out to `sys.executable -m pip`;
     # uv-managed venvs do not ship pip, so the skeleton declares it.
     "pip>=25",
