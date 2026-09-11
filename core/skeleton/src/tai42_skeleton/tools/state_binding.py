@@ -1,5 +1,5 @@
 """The door-layer state-binding runtime: merge, apply-before / apply-after, and the
-save-time validate-and-mount seam.
+save-time validate-and-attach seam.
 
 ONE binding shape rides every door (:class:`~tai42_contract.states.StateBinding`). It reaches
 the shared dispatch chokepoint through the ambient :class:`~tai42_contract.tools.ToolInvocation`
@@ -196,49 +196,49 @@ async def apply_binding_updates(
                 )
 
 
-async def validate_and_mount_binding(app: TaiMCP, binding: StateBinding) -> None:
-    """Validate a binding and MOUNT its named templates at SAVE (the write of the runnable
+async def validate_and_attach_binding(app: TaiMCP, binding: StateBinding) -> None:
+    """Validate a binding and ATTACH its named templates at SAVE (the write of the runnable
     definition carrying it).
 
-    Mount-on-use: each named template is attached at its own path ``[<template>]`` — shared by
+    Attach-on-use: each named template is attached at its own path ``[<template>]`` — shared by
     every door/node that binds the state — IDEMPOTENTLY (an already-attached template is left
-    as is; a second template at an occupied path is refused by ``attach``). A mount failure
+    as is; a second template at an occupied path is refused by ``attach``). An attach failure
     raises and the save fails. Then each expression is compiled (subject/scope exprs, custom
     injection/update jqs, op-id exprs, adapters), and every named ``template_jq`` referenced by
     an injection/update is resolved against the state's attachments with the right purpose — an
     unknown/ambiguous name, or a named update that names params but carries no adapter to fill
     them, is a loud refusal at save."""
-    await _validate_binding(app, binding, mount=True)
+    await _validate_binding(app, binding, do_attach=True)
 
 
 async def validate_binding(app: TaiMCP, binding: StateBinding) -> None:
-    """The SAME validation :func:`validate_and_mount_binding` runs, but WITHOUT mounting —
+    """The SAME validation :func:`validate_and_attach_binding` runs, but WITHOUT attaching —
     the dry-run (preset validate) door performs NO attach. Each declared template is verified
-    to EXIST (so it could be mounted) instead of being attached, and named ``template_jq``
-    references resolve against the state's current attachments UNION the binding's own declared
-    templates. A bad shape/state/template/jq/adapter is the same loud refusal, so the validate
-    verdict matches what a create/save would accept."""
-    await _validate_binding(app, binding, mount=False)
+    to EXIST (proving it could be attached) rather than actually being attached, and named
+    ``template_jq`` references resolve against the state's current attachments UNION the
+    binding's own declared templates. A bad shape/state/template/jq/adapter is the same loud
+    refusal, so the validate verdict matches what a create/save would accept."""
+    await _validate_binding(app, binding, do_attach=False)
 
 
-async def _validate_binding(app: TaiMCP, binding: StateBinding, *, mount: bool) -> None:
-    """Shared binding validation. With ``mount`` the named templates are attached
+async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bool) -> None:
+    """Shared binding validation. With ``do_attach`` the named templates are attached
     idempotently (the SAVE seam); without it they are only verified to exist (the dry-run
     seam) — the one difference between the two doors, so neither drifts from the other's
     verdict."""
     from tai42_kit.utils.data.jq_util import compile_check
 
     for attach in binding.states:
-        # Mount-on-use, idempotent: skip an already-attached template (``attach`` would 409).
-        # A dry run performs no attach — it only asserts the template exists (is mountable).
+        # Attach-on-use, idempotent: skip an already-attached template (``attach`` would 409).
+        # A dry run performs no attach — it only asserts the template exists (is attachable).
         for template in attach.templates:
             already = await app.states.list_attachments(attach.state, template=template)
             if already:
                 continue
-            if mount:
+            if do_attach:
                 await app.states.attach(attach.state, template, AttachBody(path=[template]))
             elif await app.states.get_template(template) is None:
-                raise StateNotFoundError(f"template {template!r} to mount on state {attach.state!r} does not exist")
+                raise StateNotFoundError(f"template {template!r} to attach on state {attach.state!r} does not exist")
         compile_check(attach.subject_expr)
         if attach.scope_expr is not None:
             compile_check(attach.scope_expr)
@@ -273,8 +273,8 @@ async def _require_program(
     """Resolve a named ``template_jq`` across ``state``'s attachments and assert its purpose;
     return its document entry (so the caller can read declared ``params``). An unknown or
     ambiguous name, or a wrong purpose, is a loud refusal. ``declared`` names the binding's own
-    would-be-mounted templates: on the SAVE seam they are already attached and appear here
-    anyway, so this only matters to the dry-run seam, where a self-mounted template resolves
+    would-be-attached templates: on the SAVE seam they are already attached and appear here
+    anyway, so this only matters to the dry-run seam, where a self-declared template resolves
     without being attached."""
     attachments = await app.states.list_attachments(state)
     templates = {row["template"] for row in attachments} | set(declared)

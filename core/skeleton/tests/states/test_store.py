@@ -1,5 +1,5 @@
 """The store's pure helpers — the trace-stamping rule, the composing-shape refusal, the
-regime/traced-path derivation from mount rows, and the retention-window
+regime/traced-path derivation from attach rows, and the retention-window
 validation. The SQL behaviors (subject-keyed read/apply/fold/alias/search and the
 ``state_writes`` ledger) run against an in-memory fake Postgres in ``test_store_sql.py``
 and against a real Postgres in ``test_store_integration.py``."""
@@ -24,7 +24,7 @@ from tai42_skeleton.states.store import (
 _STAMP = {"meta": {"node": "n1"}, "run": "r1", "turn": "t1", "inbound": "i1", "at": "2026-09-06T00:00:00+00:00"}
 
 
-def _mounts() -> list[dict]:
+def _attachments() -> list[dict]:
     return [
         {
             "template": "traced",
@@ -39,17 +39,17 @@ def _mounts() -> list[dict]:
     ]
 
 
-def test_abs_regime_paths_from_mounts() -> None:
-    paths = _abs_regime_paths(_mounts())
+def test_abs_regime_paths_from_attachments() -> None:
+    paths = _abs_regime_paths(_attachments())
     assert (["a", "items"], "composing", "traced") in paths
 
 
-def test_traced_paths_only_tracing_mounts() -> None:
-    assert _traced_paths(_mounts()) == (("a",),)
+def test_traced_paths_only_tracing_attachments() -> None:
+    assert _traced_paths(_attachments()) == (("a",),)
 
 
 def test_composing_shape_refuses_whole_path_set() -> None:
-    regime_paths = _abs_regime_paths(_mounts())
+    regime_paths = _abs_regime_paths(_attachments())
     with pytest.raises(RegimeViolationError, match="composing path"):
         _refuse_composing_shape([{"op": "set", "path": ["a", "items"], "value": []}], regime_paths)
     with pytest.raises(RegimeViolationError):
@@ -57,7 +57,7 @@ def test_composing_shape_refuses_whole_path_set() -> None:
 
 
 def test_composing_shape_allows_keyed_and_append() -> None:
-    regime_paths = _abs_regime_paths(_mounts())
+    regime_paths = _abs_regime_paths(_attachments())
     # a keyed op and an append set are the legitimate composing writers — no refusal
     _refuse_composing_shape(
         [{"op": "set_by_key", "path": ["a", "items"], "key_field": "id", "value": {"id": 1}}], regime_paths
@@ -68,7 +68,7 @@ def test_composing_shape_allows_keyed_and_append() -> None:
 
 
 def test_composing_shape_ignores_non_mutating_and_pathless_ops() -> None:
-    regime_paths = _abs_regime_paths(_mounts())
+    regime_paths = _abs_regime_paths(_attachments())
     # an op with no list path is skipped (nothing to refuse) …
     _refuse_composing_shape([{"op": "set", "path": None, "value": 1}], regime_paths)
     # … and an op whose kind is neither a keyed op nor a whole-path set/remove is skipped,
@@ -94,8 +94,8 @@ def test_stamp_trace_object_set_and_keyed_items() -> None:
 def test_stamp_trace_leaves_scalars_and_untraced_untouched() -> None:
     traced = (("a",),)
     ops = [
-        {"op": "set", "path": ["a", "n"], "value": 5},  # scalar under a traced mount — untouched
-        {"op": "set", "path": ["b", "obj"], "value": {"k": 1}},  # object under an UNTRACED mount — untouched
+        {"op": "set", "path": ["a", "n"], "value": 5},  # scalar under a traced attach — untouched
+        {"op": "set", "path": ["b", "obj"], "value": {"k": 1}},  # object under an UNTRACED attach — untouched
         {"op": "remove", "path": ["a", "gone"]},  # remove carries no value
     ]
     stamp_trace(ops, traced, _STAMP)

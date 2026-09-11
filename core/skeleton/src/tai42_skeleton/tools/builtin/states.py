@@ -223,7 +223,7 @@ async def state_apply(
 
     Raises:
         InvalidPathError: ``ops`` is not a list or an op path is malformed.
-        RegimeViolationError: An op's shape violates a mounted path's regime.
+        RegimeViolationError: An op's shape violates an attached path's regime.
         ValueValidationError: The document fails the schema after the ops.
         SubjectRefusedError: No subject is in scope, or the subject is refused.
         StateNotFoundError: No state is declared under ``state``.

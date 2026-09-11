@@ -1,4 +1,4 @@
-"""The states service: the feature gate, the declaration lifecycle, the mount-validator
+"""The states service: the feature gate, the declaration lifecycle, the attach-validator
 seam (run BEFORE any write), subject validation, and the write-provenance chokepoint —
 all against an in-memory fake store so the validate+apply logic is pinned without a live
 Postgres (the store SQL is exercised in ``test_store_integration.py``)."""
@@ -46,24 +46,24 @@ class FakeStatesStore:
     def __init__(self) -> None:
         self.declarations: dict[str, dict[str, Any]] = {}
         self.modules: dict[str, dict[str, Any]] = {}
-        self.mounts: dict[tuple[str, str], dict[str, Any]] = {}
+        self.attachments: dict[tuple[str, str], dict[str, Any]] = {}
         self.records: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.write_rows: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = {}
         self.applied_origins: list[Any] = []
-        self.upsert_mount_calls = 0
+        self.upsert_attach_calls = 0
         self.update_decl_calls = 0
         self.upsert_module_calls = 0
 
     @asynccontextmanager
     async def begin(self):
         """A transaction boundary: snapshot the tables on enter, restore them on any
-        exception (a real rollback), so a reconcile + mount write commit or roll back as
+        exception (a real rollback), so a reconcile + attach write commit or roll back as
         one — the atomicity the real store gives through a shared connection."""
-        snapshot = (copy.deepcopy(self.records), copy.deepcopy(self.mounts), copy.deepcopy(self.declarations))
+        snapshot = (copy.deepcopy(self.records), copy.deepcopy(self.attachments), copy.deepcopy(self.declarations))
         try:
             yield object()
         except BaseException:
-            self.records, self.mounts, self.declarations = snapshot
+            self.records, self.attachments, self.declarations = snapshot
             raise
 
     # declarations
@@ -121,7 +121,7 @@ class FakeStatesStore:
 
     async def attached_template_counts(self):
         counts: dict[str, int] = {}
-        for _s, module in self.mounts:
+        for _s, module in self.attachments:
             counts[module] = counts.get(module, 0) + 1
         return counts
 
@@ -139,22 +139,22 @@ class FakeStatesStore:
     async def delete_template(self, name):
         return self.modules.pop(name, None) is not None
 
-    # mounts
+    # attachments
     async def get_attachment(self, state, module):
-        return self.mounts.get((state, module))
+        return self.attachments.get((state, module))
 
     async def list_attachments_for_state(self, state):
-        return [v for (s, _m), v in self.mounts.items() if s == state]
+        return [v for (s, _m), v in self.attachments.items() if s == state]
 
     async def list_attachments_of_template(self, module):
-        return [v for (_s, m), v in self.mounts.items() if m == module]
+        return [v for (_s, m), v in self.attachments.items() if m == module]
 
     async def list_all_attachments(self):
-        return list(self.mounts.values())
+        return list(self.attachments.values())
 
     async def upsert_attachment(self, state, module, path, parameters, declarations, *, effective_schema, conn=None):
-        self.upsert_mount_calls += 1
-        self.mounts[(state, module)] = {
+        self.upsert_attach_calls += 1
+        self.attachments[(state, module)] = {
             "state": state,
             "template": module,
             "path": path,
@@ -166,17 +166,17 @@ class FakeStatesStore:
 
     async def update_attachment_declarations(self, state, module, declarations, *, effective_schema, conn=None):
         self.update_decl_calls += 1
-        self.mounts[(state, module)]["declarations"] = declarations
+        self.attachments[(state, module)]["declarations"] = declarations
         self.declarations[state]["effective_schema"] = effective_schema
         return True
 
     async def update_attachment_parameters(self, state, module, parameters, *, effective_schema):
-        self.mounts[(state, module)]["parameters"] = parameters
+        self.attachments[(state, module)]["parameters"] = parameters
         self.declarations[state]["effective_schema"] = effective_schema
         return True
 
     async def delete_attachment(self, state, module, *, effective_schema):
-        self.mounts.pop((state, module), None)
+        self.attachments.pop((state, module), None)
         self.declarations[state]["effective_schema"] = effective_schema
         return True
 
@@ -190,15 +190,15 @@ class FakeStatesStore:
     async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, retention_days, conn=None):
         self.applied_origins.append(origin)
         # Mirror the store's chokepoint so the service-level provenance test is end to
-        # end: compose the state's traced paths from its mounts + modules and stamp
+        # end: compose the state's traced paths from its attachments + modules and stamp
         # ``_trace`` from the COMPLETED origin (the stamping mechanics themselves are pinned
-        # in test_store.py). A state with no traced mount leaves the ops untouched.
-        mount_rows = [
+        # in test_store.py). A state with no traced attach leaves the ops untouched.
+        attach_rows = [
             {"template": m["template"], "path": m["path"], "body": self.modules[m["template"]]["body"]}
-            for (s, _module), m in self.mounts.items()
+            for (s, _module), m in self.attachments.items()
             if s == state and m["template"] in self.modules
         ]
-        traced = _traced_paths(mount_rows)
+        traced = _traced_paths(attach_rows)
         if traced:
             stamp = {
                 "meta": origin.meta,
@@ -370,7 +370,7 @@ async def test_delete_refused_while_a_hook_binds_the_state(svc: StatesService) -
         return [ConsumerRow(kind="hook", name="on-alert", detail="supplies kind thread")]
 
     svc.register_consumer_lister("hook", hook_lister)
-    # A state referenced only by a hook (no record, no mount) is still in use — the
+    # A state referenced only by a hook (no record, no attach) is still in use — the
     # DeclarationInUseError guard reads the consumer union, so the hook blocks the delete.
     with pytest.raises(DeclarationInUseError, match="hook:on-alert"):
         await svc.delete_declaration("alerts")
@@ -388,7 +388,7 @@ async def test_delete_allowed_when_only_an_unavailable_family_is_listed(svc: Sta
     assert await svc.get_declaration("alerts") is None
 
 
-async def test_mount_validator_runs_before_write(svc: StatesService) -> None:
+async def test_attach_validator_runs_before_write(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     module_doc = StateTemplateDocument.model_validate(
         {
@@ -404,15 +404,15 @@ async def test_mount_validator_runs_before_write(svc: StatesService) -> None:
         raise TemplateValidationError("consumer says no")
 
     svc.register_attach_validator(refusing)
-    before = store.upsert_mount_calls
+    before = store.upsert_attach_calls
     with pytest.raises(TemplateValidationError, match="consumer says no"):
         await svc.attach("alerts", "mod", AttachBody(path=["sub"]))
-    # the validator ran BEFORE the write — no mount row was stored
-    assert store.upsert_mount_calls == before
-    assert ("alerts", "mod") not in store.mounts
+    # the validator ran BEFORE the write — no attach row was stored
+    assert store.upsert_attach_calls == before
+    assert ("alerts", "mod") not in store.attachments
 
 
-async def test_mount_and_unmount_recompose_effective(svc: StatesService) -> None:
+async def test_attach_and_detach_recompose_effective(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     module_doc = StateTemplateDocument.model_validate(
         {
@@ -534,7 +534,7 @@ def _door_ctx(door, actor, turn_id, inbound_id) -> StateContext:
 # The four door contexts the plan names: a completed origin per door, plus the
 # no-context ``api`` fallback (``ctx is None`` → the bound request principal supplies the
 # actor). Each carries the door's actor/turn_id/inbound_id that the write ledger and, under
-# a traced mount, the ``_trace`` stamp are built from.
+# a traced attach, the ``_trace`` stamp are built from.
 _PROVENANCE_DOORS = [
     pytest.param(
         _door_ctx("conversation", "user-7", "turn-9", "inb-3"),
@@ -550,9 +550,9 @@ _PROVENANCE_DOORS = [
 ]
 
 
-async def _mount_traced(svc: StatesService, store: FakeStatesStore) -> None:
-    """A traced mount on ``alerts`` so an ``apply`` also exercises the ``_trace`` stamp
-    at the fake store, populated directly (the mount lifecycle is pinned elsewhere)."""
+async def _attach_traced(svc: StatesService, store: FakeStatesStore) -> None:
+    """A traced attach on ``alerts`` so an ``apply`` also exercises the ``_trace`` stamp
+    at the fake store, populated directly (the attach lifecycle is pinned elsewhere)."""
     await svc.put_declaration(_STATE)
     store.modules["traced_m"] = {
         "name": "traced_m",
@@ -565,7 +565,7 @@ async def _mount_traced(svc: StatesService, store: FakeStatesStore) -> None:
         "shipped_hash": None,
         "updated_at": 1,
     }
-    store.mounts[("alerts", "traced_m")] = {
+    store.attachments[("alerts", "traced_m")] = {
         "state": "alerts",
         "template": "traced_m",
         "path": ["a"],
@@ -586,7 +586,7 @@ async def test_write_provenance_completed_per_door(
     exp_inbound: str | None,
 ) -> None:
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
-    await _mount_traced(svc, store)
+    await _attach_traced(svc, store)
     if ctx is None:
         # no ambient context ⇒ door ``api`` + the bound request principal as actor
         import tai42_skeleton.access_control.user as user_mod
@@ -610,7 +610,7 @@ async def test_write_provenance_completed_per_door(
     assert origin.turn_id == exp_turn
     assert origin.inbound_id == exp_inbound
     assert (origin.consumer, origin.meta, origin.run_id) == ("consumer-x", {"node": "node1"}, "run2")
-    # a traced mount stamps ``_trace`` end to end carrying the SAME door's fields
+    # a traced attach stamps ``_trace`` end to end carrying the SAME door's fields
     stamp = ops[0]["value"]["_trace"]
     assert stamp["meta"] == {"node": "node1"}
     assert stamp["run"] == "run2"
@@ -637,21 +637,21 @@ _REGIME_MODULE = {
 }
 
 
-async def test_get_declaration_serves_regimes_for_a_mount_and_empty_for_none(svc: StatesService) -> None:
+async def test_get_declaration_serves_regimes_for_a_attach_and_empty_for_none(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
-    # no mounts ⇒ the platform serves an empty regime list, never None-on-the-wire noise
-    unmounted = await svc.get_declaration("alerts")
-    assert unmounted is not None
-    assert unmounted.regimes == []
-    # mount a module declaring a composing regime; the served regime is ABSOLUTE (mount
+    # no attachments ⇒ the platform serves an empty regime list, never None-on-the-wire noise
+    detached = await svc.get_declaration("alerts")
+    assert detached is not None
+    assert detached.regimes == []
+    # attach a module declaring a composing regime; the served regime is ABSOLUTE (attach
     # path prefixed onto the module's regime path) and matches served_declaration
     await svc.put_template(StateTemplateDocument.model_validate(_REGIME_MODULE), replace=False)
     await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
-    mounted = await svc.get_declaration("alerts")
-    assert mounted is not None
-    assert mounted.regimes == [{"path": ["sub", "tags"], "regime": "composing"}]
+    attached = await svc.get_declaration("alerts")
+    assert attached is not None
+    assert attached.regimes == [{"path": ["sub", "tags"], "regime": "composing"}]
     served = await svc.served_declaration("alerts")
-    assert mounted.regimes == served["regimes"]
+    assert attached.regimes == served["regimes"]
 
 
 async def test_list_declarations_serves_composed_regimes(svc: StatesService) -> None:
@@ -764,7 +764,7 @@ async def test_list_templates_catalog_adds_attached_to_and_shipped_default(svc: 
     await svc.put_declaration(_STATE)
     await svc.put_template(StateTemplateDocument.model_validate(_REGIME_MODULE), replace=False)
     await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
-    # A second, operator-uploaded module (no shipped_hash) that is mounted nowhere.
+    # A second, operator-uploaded module (no shipped_hash) that is attached nowhere.
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
     store.modules["loose"] = {
         "name": "loose",
@@ -772,7 +772,7 @@ async def test_list_templates_catalog_adds_attached_to_and_shipped_default(svc: 
         "shipped_hash": None,
         "updated_at": 1,
     }
-    # Mark the mounted module as an unedited shipped default.
+    # Mark the attached module as an unedited shipped default.
     store.modules["tagmod"]["shipped_hash"] = "abc123"
     catalog = {row["name"]: row for row in await svc.list_templates_catalog()}
     assert catalog["tagmod"]["attached_to"] == 1

@@ -176,7 +176,7 @@ class FakeStatesPg:
     def __init__(self) -> None:
         self.declarations: dict[str, dict[str, Any]] = {}  # name -> row
         self.modules: dict[str, dict[str, Any]] = {}  # name -> row
-        self.mounts: dict[tuple[str, str], dict[str, Any]] = {}  # (state, module) -> row
+        self.attachments: dict[tuple[str, str], dict[str, Any]] = {}  # (state, module) -> row
         self.records: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.aliases: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.applied_ops: dict[str, datetime] = {}  # op_id -> applied_at
@@ -202,7 +202,7 @@ class FakeStatesPg:
         return {
             "declarations": copy.deepcopy(self.declarations),
             "modules": copy.deepcopy(self.modules),
-            "mounts": copy.deepcopy(self.mounts),
+            "attachments": copy.deepcopy(self.attachments),
             "records": copy.deepcopy(self.records),
             "aliases": copy.deepcopy(self.aliases),
             "applied_ops": dict(self.applied_ops),
@@ -212,7 +212,7 @@ class FakeStatesPg:
     def restore(self, snap: dict[str, Any]) -> None:
         self.declarations = snap["declarations"]
         self.modules = snap["modules"]
-        self.mounts = snap["mounts"]
+        self.attachments = snap["attachments"]
         self.records = snap["records"]
         self.aliases = snap["aliases"]
         self.applied_ops = snap["applied_ops"]
@@ -373,16 +373,16 @@ def _lock_effective_schema(cur, pg, norm, params):
     r"SELECT m\.template, m\.path, mo\.body FROM state_attachments m JOIN state_templates mo ON mo\.name = m\.template "
     r"WHERE m\.state = %s$"
 )
-def _apply_mount_rows(cur, pg, norm, params):
+def _apply_attach_rows(cur, pg, norm, params):
     (state,) = params
     rows = []
-    for (s, module), mount in pg.mounts.items():
+    for (s, module), attach in pg.attachments.items():
         if s != state:
             continue
         mod = pg.modules.get(module)
         if mod is None:
             continue
-        rows.append({"template": module, "path": mount["path"], "body": mod["body"]})
+        rows.append({"template": module, "path": attach["path"], "body": mod["body"]})
     rows.sort(key=lambda r: r["template"])
     cur._all = rows
 
@@ -408,9 +408,9 @@ def _del_records_state(cur, pg, norm, params):
 
 
 @_on(r"DELETE FROM state_attachments WHERE state = %s$")
-def _del_mounts_state(cur, pg, norm, params):
+def _del_attachments_state(cur, pg, norm, params):
     (state,) = params
-    pg.mounts = {k: v for k, v in pg.mounts.items() if v["state"] != state}
+    pg.attachments = {k: v for k, v in pg.attachments.items() if v["state"] != state}
 
 
 @_on(r"DELETE FROM state_declarations WHERE name = %s$")
@@ -459,9 +459,9 @@ def _list_modules(cur, pg, norm, params):
 
 
 @_on(r"SELECT template, count\(\*\) AS n FROM state_attachments GROUP BY template$")
-def _mounted_counts(cur, pg, norm, params):
+def _attached_counts(cur, pg, norm, params):
     counts: dict[str, int] = {}
-    for _state, module in pg.mounts:
+    for _state, module in pg.attachments:
         counts[module] = counts.get(module, 0) + 1
     cur._all = [{"template": m, "n": n} for m, n in counts.items()]
 
@@ -483,26 +483,26 @@ def _delete_module(cur, pg, norm, params):
     cur.rowcount = 1 if pg.modules.pop(name, None) is not None else 0
 
 
-# -- mounts ------------------------------------------------------------------
-_MOUNT_COLS = ("state", "template", "path", "parameters", "declarations", "updated_at")
+# -- attachments ------------------------------------------------------------------
+_ATTACH_COLS = ("state", "template", "path", "parameters", "declarations", "updated_at")
 
 
 @_on(
     r"SELECT state, template, path, parameters, declarations, updated_at FROM state_attachments "
     r"WHERE state = %s AND template = %s$"
 )
-def _get_mount(cur, pg, norm, params):
+def _get_attach(cur, pg, norm, params):
     state, module = params
-    cur._one = pg.mounts.get((state, module))
+    cur._one = pg.attachments.get((state, module))
 
 
 @_on(
     r"SELECT state, template, path, parameters, declarations, updated_at FROM state_attachments WHERE state = %s "
     r"ORDER BY template$"
 )
-def _list_mounts_for_state(cur, pg, norm, params):
+def _list_attachments_for_state(cur, pg, norm, params):
     (state,) = params
-    rows = [v for (s, _m), v in pg.mounts.items() if s == state]
+    rows = [v for (s, _m), v in pg.attachments.items() if s == state]
     cur._all = sorted(rows, key=lambda r: r["template"])
 
 
@@ -510,9 +510,9 @@ def _list_mounts_for_state(cur, pg, norm, params):
     r"SELECT state, template, path, parameters, declarations, updated_at FROM state_attachments WHERE template = %s "
     r"ORDER BY state$"
 )
-def _list_mounts_of_module(cur, pg, norm, params):
+def _list_attachments_of_module(cur, pg, norm, params):
     (module,) = params
-    rows = [v for (_s, m), v in pg.mounts.items() if m == module]
+    rows = [v for (_s, m), v in pg.attachments.items() if m == module]
     cur._all = sorted(rows, key=lambda r: r["state"])
 
 
@@ -520,12 +520,12 @@ def _list_mounts_of_module(cur, pg, norm, params):
     r"SELECT state, template, path, parameters, declarations, updated_at FROM state_attachments "
     r"ORDER BY state, template$"
 )
-def _list_all_mounts(cur, pg, norm, params):
-    cur._all = sorted(pg.mounts.values(), key=lambda r: (r["state"], r["template"]))
+def _list_all_attachments(cur, pg, norm, params):
+    cur._all = sorted(pg.attachments.values(), key=lambda r: (r["state"], r["template"]))
 
 
 @_on(r"INSERT INTO state_attachments \(state, template, path, parameters, declarations, updated_at\)")
-def _upsert_mount(cur, pg, norm, params):
+def _upsert_attach(cur, pg, norm, params):
     state, module, path, parameters, declarations = params
     key = (state, module)
     values = {
@@ -536,16 +536,16 @@ def _upsert_mount(cur, pg, norm, params):
         "declarations": _unwrap(declarations),
         "updated_at": pg.now(),
     }
-    if key in pg.mounts:
-        pg.mounts[key].update(values)
+    if key in pg.attachments:
+        pg.attachments[key].update(values)
     else:
-        pg.mounts[key] = values
+        pg.attachments[key] = values
 
 
 @_on(r"UPDATE state_attachments SET declarations = %s, updated_at = now\(\) WHERE state = %s AND template = %s$")
-def _update_mount_declarations(cur, pg, norm, params):
+def _update_attach_declarations(cur, pg, norm, params):
     declarations, state, module = params
-    row = pg.mounts.get((state, module))
+    row = pg.attachments.get((state, module))
     if row is not None:
         row["declarations"] = _unwrap(declarations)
         row["updated_at"] = pg.now()
@@ -553,9 +553,9 @@ def _update_mount_declarations(cur, pg, norm, params):
 
 
 @_on(r"UPDATE state_attachments SET parameters = %s, updated_at = now\(\) WHERE state = %s AND template = %s$")
-def _update_mount_parameters(cur, pg, norm, params):
+def _update_attach_parameters(cur, pg, norm, params):
     parameters, state, module = params
-    row = pg.mounts.get((state, module))
+    row = pg.attachments.get((state, module))
     if row is not None:
         row["parameters"] = _unwrap(parameters)
         row["updated_at"] = pg.now()
@@ -563,9 +563,9 @@ def _update_mount_parameters(cur, pg, norm, params):
 
 
 @_on(r"DELETE FROM state_attachments WHERE state = %s AND template = %s$")
-def _delete_mount(cur, pg, norm, params):
+def _delete_attach(cur, pg, norm, params):
     state, module = params
-    cur.rowcount = 1 if pg.mounts.pop((state, module), None) is not None else 0
+    cur.rowcount = 1 if pg.attachments.pop((state, module), None) is not None else 0
 
 
 @_on(r"UPDATE state_declarations SET effective_schema = %s, updated_at = now\(\) WHERE name = %s$")

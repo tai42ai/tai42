@@ -128,10 +128,10 @@ def test_delete_hits_the_module_door(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
 
 
-def test_delete_surfaces_a_mounted_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_delete_surfaces_an_attached_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return error_response("module 'counters' is mounted on state 'status'", 409)
+        return error_response("module 'counters' is attached on state 'status'", 409)
 
     result = run_cli(monkeypatch, handler, ["state-templates", "delete", "counters"])
     assert result.exit_code != 0
-    assert "is mounted on state" in visible(result.output)
+    assert "is attached on state" in visible(result.output)

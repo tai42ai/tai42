@@ -491,10 +491,10 @@ async def test_run_once_schedule_deposits_binding_and_does_not_inject_it(install
 
     import tai42_skeleton.tools.state_binding as sb_mod
 
-    async def _noop_mount(app, b) -> None:
+    async def _noop_attach(app, b) -> None:
         return None
 
-    monkeypatch.setattr(sb_mod, "validate_and_mount_binding", _noop_mount)
+    monkeypatch.setattr(sb_mod, "validate_and_attach_binding", _noop_attach)
 
     async def _noop_authz(name, args) -> None:
         return None

@@ -410,7 +410,7 @@ async def _extract_hook_params(request: Request) -> dict:
         raise BadRequestError(f"invalid hook params: {exc}") from exc
     flat = params.model_dump()
     # ``model_dump`` lowers the binding to a plain dict, but the operation's
-    # ``state_binding`` parameter (and its mount-on-use) needs the parsed model — pass the
+    # ``state_binding`` parameter (and its attach-on-use) needs the parsed model — pass the
     # instance so a body binding is not dropped/mishandled at the route edge.
     flat["state_binding"] = params.state_binding
     return flat

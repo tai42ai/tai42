@@ -148,10 +148,10 @@ def test_route_answers_501_body_with_the_stable_code_when_unbound() -> None:
 # The error -> status chokepoint (_states_door + _ERROR_MAP) and the flat      #
 # operation surface, exercised through a fake facet so no database is needed.  #
 # --------------------------------------------------------------------------- #
-# The message a consumer-registered mount validator raises with; the door must relay it verbatim.
+# The message a consumer-registered attach validator raises with; the door must relay it verbatim.
 _VALIDATOR_REFUSAL = (
-    "module 'planner' compiled view 'standing' reads a bare `.data`, but its input is the flow "
-    "root; read the mounted subtree as `$mount.data`"
+    "template 'planner' input program 'standing' reads a bare `.data`, but its input is the "
+    "attached subtree at the attachment path `[planner]` — read the member off `.` directly"
 )
 
 
@@ -312,8 +312,8 @@ def test_module_listing_serves_the_catalog_columns(monkeypatch: pytest.MonkeyPat
     ],
     ids=["attach", "update_attachment_declarations", "put_template"],
 )
-def test_mount_validator_refusal_is_422_on_every_door(monkeypatch: pytest.MonkeyPatch, door) -> None:
-    # Every door that runs the registered mount validators (mount / update_attachment_declarations /
+def test_attach_validator_refusal_is_422_on_every_door(monkeypatch: pytest.MonkeyPatch, door) -> None:
+    # Every door that runs the registered attach validators (attach / update_attachment_declarations /
     # put_template) funnels through ``_states_door``; a consumer validator's contract
     # ``TemplateValidationError`` maps to a 422 with the validator's message verbatim, never a 500.
     _install_fake_states(monkeypatch)
@@ -323,7 +323,7 @@ def test_mount_validator_refusal_is_422_on_every_door(monkeypatch: pytest.Monkey
     assert str(excinfo.value) == _VALIDATOR_REFUSAL
 
 
-_MOUNT_ROW: dict[str, Any] = {
+_ATTACHMENT_ROW: dict[str, Any] = {
     "state": "alerts",
     "template": "tagmod",
     "path": ["sub"],
@@ -332,55 +332,55 @@ _MOUNT_ROW: dict[str, Any] = {
 }
 
 
-class _MountReads:
-    """A facet stand-in whose ``list_attachments`` serves one known mount, so the single read and
+class _AttachmentReads:
+    """A facet stand-in whose ``list_attachments`` serves one known attachment, so the single read and
     the collection read draw from the same row."""
 
     async def list_attachments(self, name: str, *, template: str | None = None) -> list[dict[str, Any]]:
         if template is None:
-            return [_MOUNT_ROW]
-        return [_MOUNT_ROW] if template == _MOUNT_ROW["template"] else []
+            return [_ATTACHMENT_ROW]
+        return [_ATTACHMENT_ROW] if template == _ATTACHMENT_ROW["template"] else []
 
 
-def test_get_mount_serves_the_envelope_and_agrees_with_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ops, "_states", _MountReads)
+def test_get_attachment_serves_the_envelope_and_agrees_with_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ops, "_states", _AttachmentReads)
     single = asyncio.run(ops.get_state_attachment("alerts", "tagmod"))
     listed = asyncio.run(ops.list_state_attachments("alerts"))
     # The single GET returns the same envelope row the list serves — same shape, same values.
-    assert single == _MOUNT_ROW
+    assert single == _ATTACHMENT_ROW
     assert single == listed[0]
 
 
-def test_get_mount_absent_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ops, "_states", _MountReads)
+def test_get_attachment_absent_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ops, "_states", _AttachmentReads)
     with pytest.raises(NotFoundError) as excinfo:
         asyncio.run(ops.get_state_attachment("alerts", "nope"))
     assert excinfo.value.status == 404
 
 
-class _RecordingMountStates:
-    """Records the mount options the door threads through."""
+class _RecordingAttachStates:
+    """Records the attach options the door threads through."""
 
     def __init__(self) -> None:
-        self.mount_options: dict | None = None
+        self.attach_options: dict | None = None
         self.update_options: dict | None = None
 
     async def attach(self, state, template, body):
-        self.mount_options = dict(body.options)
+        self.attach_options = dict(body.options)
 
     async def update_attachment_declarations(self, state, template, declarations, *, options=None):
         self.update_options = options
 
 
-def test_mount_operation_threads_options_into_the_mount_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    facet = _RecordingMountStates()
+def test_attach_operation_threads_options_into_the_attach_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    facet = _RecordingAttachStates()
     monkeypatch.setattr(ops, "_states", lambda: facet)
     asyncio.run(ops.attach_state_template("alerts", "m", {"path": ["sub"], "options": {"on_orphan": "close"}}))
-    assert facet.mount_options == {"on_orphan": "close"}
+    assert facet.attach_options == {"on_orphan": "close"}
 
 
-def test_update_mount_operation_threads_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    facet = _RecordingMountStates()
+def test_update_attachment_operation_threads_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    facet = _RecordingAttachStates()
     monkeypatch.setattr(ops, "_states", lambda: facet)
     asyncio.run(ops.update_state_attachment("alerts", "m", {"n": 2}, {"on_orphan": "refuse"}))
     assert facet.update_options == {"on_orphan": "refuse"}

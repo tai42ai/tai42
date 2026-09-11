@@ -1,5 +1,5 @@
 """The door-layer binding runtime: merge/precedence, subject resolution, inject-before,
-update-after, and the save-time validate-and-mount seam — driven against a lightweight fake
+update-after, and the save-time validate-and-attach seam — driven against a lightweight fake
 ``states`` facet (the real jq engine runs; only the store is faked)."""
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from tai42_skeleton.tools.state_binding import (
     apply_binding_injections,
     apply_binding_updates,
     merge_bindings,
-    validate_and_mount_binding,
+    validate_and_attach_binding,
     validate_binding,
 )
 
@@ -309,8 +309,8 @@ async def test_named_update_adapts_input_and_custom_update_authors_ops() -> None
     assert origin2.consumer == "door:preset-x"
 
 
-# -- mount-on-use / validate at save -----------------------------------------
-async def test_mount_on_use_attaches_absent_and_skips_present_idempotently() -> None:
+# -- attach-on-use / validate at save -----------------------------------------
+async def test_attach_on_use_attaches_absent_and_skips_present_idempotently() -> None:
     tpl = StateTemplateDocument.model_validate(
         {"name": "planner", "schema": {"type": "object"}, "template_jq": {"v": {"purpose": "input", "jq": "."}}}
     )
@@ -319,11 +319,11 @@ async def test_mount_on_use_attaches_absent_and_skips_present_idempotently() -> 
     tpl2 = StateTemplateDocument.model_validate({"name": "other", "schema": {"type": "object"}, "template_jq": {}})
     states._templates["other"] = tpl2
     b = StateBinding(states=[StateAttach(state="status", subject_expr=".id", templates=["planner", "other"])])
-    await validate_and_mount_binding(_app(states), b)
+    await validate_and_attach_binding(_app(states), b)
     assert states.attached_now == [("status", "other", ["other"])]
 
 
-async def test_mount_failure_or_occupied_path_fails_the_save() -> None:
+async def test_attach_failure_or_occupied_path_fails_the_save() -> None:
     # attach raising (an occupied path / conflict) propagates loudly.
     class BoomStates(FakeStates):
         async def attach(self, state, template, body):
@@ -331,7 +331,7 @@ async def test_mount_failure_or_occupied_path_fails_the_save() -> None:
 
     b = StateBinding(states=[StateAttach(state="status", subject_expr=".id", templates=["dup"])])
     with pytest.raises(AttachConflictError):
-        await validate_and_mount_binding(_app(BoomStates(attached={"status": []})), b)
+        await validate_and_attach_binding(_app(BoomStates(attached={"status": []})), b)
 
 
 async def test_named_update_without_adapter_but_declared_params_is_refused_at_save() -> None:
@@ -345,12 +345,12 @@ async def test_named_update_without_adapter_but_declared_params_is_refused_at_sa
     states = FakeStates(attached={"status": ["planner"]}, templates={"planner": tpl})
     b = StateBinding(states=[StateAttach(state="status", subject_expr=".id", updates=[StateUpdate(template_jq="put")])])
     with pytest.raises(ValueValidationError, match="no adapter"):
-        await validate_and_mount_binding(_app(states), b)
+        await validate_and_attach_binding(_app(states), b)
 
 
-async def test_validate_binding_resolves_a_declared_template_without_mounting() -> None:
+async def test_validate_binding_resolves_a_declared_template_without_attaching() -> None:
     # The dry-run (validate) seam performs NO attach: a named program in a template the
-    # binding declares to mount resolves against the declared set, and nothing is attached.
+    # binding declares to attach resolves against the declared set, and nothing is attached.
     tpl = StateTemplateDocument.model_validate(
         {"name": "planner", "schema": {"type": "object"}, "template_jq": {"v": {"purpose": "input", "jq": "."}}}
     )
@@ -366,11 +366,11 @@ async def test_validate_binding_resolves_a_declared_template_without_mounting() 
         ]
     )
     await validate_binding(_app(states), b)
-    assert states.attached_now == []  # dry run mounts nothing
+    assert states.attached_now == []  # dry run attaches nothing
 
 
 async def test_validate_binding_compiles_scope_custom_and_qualified_named_exprs() -> None:
-    # One binding exercising every validate branch WITHOUT mounting: scope_expr, a custom-jq
+    # One binding exercising every validate branch WITHOUT attaching: scope_expr, a custom-jq
     # injection, a custom-jq update with an op_id, and a qualified named update carrying an
     # adapter — the named one resolved against a declared (un-attached) template while an
     # unrelated attached template is skipped.
@@ -432,7 +432,7 @@ async def test_validate_binding_purpose_mismatch_is_refused() -> None:
 
 
 async def test_validate_binding_missing_declared_template_is_a_loud_refusal() -> None:
-    # A declared template that does not exist cannot be mounted — the dry run refuses it,
+    # A declared template that does not exist cannot be attached — the dry run refuses it,
     # the SAME rejection the save seam's attach would raise, without attaching.
     states = FakeStates(attached={"status": []}, templates={})
     b = StateBinding(states=[StateAttach(state="status", subject_expr=".id", templates=["ghost"])])
@@ -452,4 +452,4 @@ async def test_named_injection_referencing_unknown_program_is_refused_at_save() 
         ]
     )
     with pytest.raises(StateNotFoundError):
-        await validate_and_mount_binding(_app(states), b)
+        await validate_and_attach_binding(_app(states), b)

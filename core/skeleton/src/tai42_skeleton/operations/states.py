@@ -312,7 +312,7 @@ async def detach_state_template(name: str, template: str) -> dict[str, Any]:
 
     Consults the detach referees FIRST: a template still named by a live door binding (a
     preset version, a conversation config, a hook, a schedule) is a 409 that detaches nothing
-    and lists the referencing bindings — the mount-at-save contract's referee, so a binding
+    and lists the referencing bindings — the attach-at-save contract's referee, so a binding
     never faults at run time on a template detached out from under it."""
     referenced = await _detach_referees(name, template)
     if referenced:

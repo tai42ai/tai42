@@ -193,7 +193,7 @@ def register_platform_rename_referees() -> None:
 # --------------------------------------------------------------------------- #
 def _binding_names_template(binding: StateBinding | None, state: str, template: str) -> bool:
     """Whether ``binding`` still names ``template`` on ``state`` — a live reference a detach
-    of that template would strand (the named template_jq/mount would vanish)."""
+    of that template would strand (the named template_jq/attachment would vanish)."""
     return binding is not None and any(
         attach.state == state and template in attach.templates for attach in binding.states
     )
@@ -201,7 +201,7 @@ def _binding_names_template(binding: StateBinding | None, state: str, template: 
 
 async def _preset_detach_referee(state: str, template: str) -> list[str]:
     # EVERY version of every live preset is a strandable reference: a rollback re-activates
-    # (and re-mounts) a historical version's binding, so a version that can be rolled back
+    # (and re-attaches) a historical version's binding, so a version that can be rolled back
     # to counts exactly like the active one. Feature-off (no configured store) holds none.
     from tai42_contract.presets import PresetBody
     from tai42_kit.db import component_store_configured

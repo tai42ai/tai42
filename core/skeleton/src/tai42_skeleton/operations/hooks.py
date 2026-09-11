@@ -264,11 +264,11 @@ async def register_hook(
         )
         if state_binding is not None:
             from tai42_skeleton.app import instance
-            from tai42_skeleton.tools.state_binding import validate_and_mount_binding
+            from tai42_skeleton.tools.state_binding import validate_and_attach_binding
 
-            # Mount-on-use + validate the binding at SAVE (the hook upsert) — a bad binding
+            # Attach-on-use + validate the binding at SAVE (the hook upsert) — a bad binding
             # is a 400 that stores no hook.
-            await validate_and_mount_binding(instance.app, state_binding)
+            await validate_and_attach_binding(instance.app, state_binding)
         registered = await get_hooks_manager().register(params)
     except ValueError as exc:
         # The manager compiles the condition/expr jq at registration; a bad

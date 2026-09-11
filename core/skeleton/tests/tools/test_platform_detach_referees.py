@@ -44,7 +44,7 @@ def _patch_preset_store(monkeypatch, versions_by_name: dict[str, list[tuple[int,
 
 async def test_preset_referee_blocks_on_a_version_binding_the_template(monkeypatch) -> None:
     # An OLDER version binding the template blocks the detach even when the active version
-    # does not — a rollback re-activates (and re-mounts) it, so it is a live reference.
+    # does not — a rollback re-activates (and re-attaches) it, so it is a live reference.
     _patch_preset_store(
         monkeypatch,
         {

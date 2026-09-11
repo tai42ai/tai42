@@ -338,11 +338,11 @@ async def create_schedule(
     recurring = dispatch_name.endswith(_SCHEDULE_BRANCH_SUFFIX) or _EXPERT_SCHEDULE_KEY in arguments
     if state_binding is not None:
         from tai42_skeleton.app import instance
-        from tai42_skeleton.tools.state_binding import validate_and_mount_binding
+        from tai42_skeleton.tools.state_binding import validate_and_attach_binding
 
-        # Mount-on-use + validate the binding at SAVE (create), before persisting the
+        # Attach-on-use + validate the binding at SAVE (create), before persisting the
         # schedule — a bad binding fails the create loudly, never a schedule that fires broken.
-        await validate_and_mount_binding(instance.app, state_binding)
+        await validate_and_attach_binding(instance.app, state_binding)
         if recurring:
             arguments["state_binding"] = state_binding.model_dump(mode="json")
     # The recurring firing has no live caller, so this creation is the ONLY edge the inner

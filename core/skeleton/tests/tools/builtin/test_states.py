@@ -40,11 +40,11 @@ from tai42_skeleton.tools.builtin import states as builtin_states
 class _FakeStore:
     """An in-memory stand-in for :class:`PostgresStatesStore` covering the record methods
     the service drives from the state tools (read / replace / apply / writes) plus the
-    mount lookup its effective-schema composition reads."""
+    attach lookup its effective-schema composition reads."""
 
     def __init__(self) -> None:
         self.declarations: dict[str, dict[str, Any]] = {}
-        self.mounts: dict[tuple[str, str], dict[str, Any]] = {}
+        self.attachments: dict[tuple[str, str], dict[str, Any]] = {}
         self.records: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.write_rows: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = {}
         self._seq = 0.0
@@ -60,7 +60,7 @@ class _FakeStore:
         return self.declarations.get(name)
 
     async def list_attachments_for_state(self, state: str) -> list[dict[str, Any]]:
-        return [row for (mounted_state, _module), row in self.mounts.items() if mounted_state == state]
+        return [row for (attached_state, _module), row in self.attachments.items() if attached_state == state]
 
     async def read_record_view(self, state: str, subject: StateSubject, *, conn: Any = None) -> dict[str, Any] | None:
         row = self.records.get(self._key(state, subject))

@@ -2744,16 +2744,16 @@ def test_create_and_save_version_thread_the_state_binding_over_http(pg, emit):
     asyncio.run(run())
 
 
-# -- rollback mounts the target version's state binding ----------------------
+# -- rollback re-attaches the target version's state binding ----------------------
 
 
 _TEMPLATED_BINDING = {"states": [{"state": "status", "subject_expr": ".x", "templates": ["t1"]}]}
 
 
 def _patch_fake_states(monkeypatch, *, existing: set[str], attached: set[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Patch the live states facet with a minimal fake the binding mount seam drives: it
+    """Patch the live states facet with a minimal fake the binding attach seam drives: it
     tracks attached ``(state, template)`` pairs and which template DEFINITIONS ``existing``,
-    so a rollback's re-mount either re-attaches a detached template or refuses loudly when the
+    so a rollback's re-attach either re-attaches a detached template or refuses loudly when the
     definition is gone. Returns the list of attach calls the test asserts against."""
     from tai42_contract.states.errors import StateNotFoundError
 
@@ -2777,8 +2777,8 @@ def _patch_fake_states(monkeypatch, *, existing: set[str], attached: set[tuple[s
     return calls
 
 
-def test_rollback_remounts_the_target_version_binding(pg, emit, monkeypatch) -> None:
-    # A rollback ACTIVATES the target version's binding, so it re-mounts (re-attaches) the
+def test_rollback_reattaches_the_target_version_binding(pg, emit, monkeypatch) -> None:
+    # A rollback ACTIVATES the target version's binding, so it re-attaches the
     # binding's templates exactly as create/save do — a template detached since the version
     # was authored is restored, so the rolled-back binding is live again rather than faulting
     # at every run.
@@ -2788,7 +2788,7 @@ def test_rollback_remounts_the_target_version_binding(pg, emit, monkeypatch) -> 
             calls = _patch_fake_states(monkeypatch, existing={"t1"}, attached=attached)
 
             await _create_versioned("wv", base_tool="echo", fixed_kwargs={}, state_binding=_TEMPLATED_BINDING)
-            assert ("status", "t1") in attached  # create mounted it
+            assert ("status", "t1") in attached  # create attached it
             r2 = await router.save_version(
                 _request("POST", "/api/presets/wv/versions", name="wv", body={"state_binding": None})
             )
@@ -2803,7 +2803,7 @@ def test_rollback_remounts_the_target_version_binding(pg, emit, monkeypatch) -> 
                 _request("POST", "/api/presets/wv/rollback", name="wv", body={"version": 1})
             )
             assert resp.status_code == 200, _err(resp)
-            # The rollback re-mounted the detached template.
+            # The rollback re-attached the detached template.
             assert ("status", "t1") in attached
             assert ("status", "t1") in calls
             record = await instance.app.presets.store.get_preset("wv")
@@ -2814,7 +2814,7 @@ def test_rollback_remounts_the_target_version_binding(pg, emit, monkeypatch) -> 
 
 def test_rollback_refuses_when_target_binding_template_is_gone(pg, emit, monkeypatch) -> None:
     # A rollback to a version whose binding names a template whose DEFINITION is gone cannot
-    # re-mount it — a loud 400 that re-points nothing, never a bricked preset that faults at
+    # re-attach it — a loud 400 that re-points nothing, never a bricked preset that faults at
     # every run.
     async def run():
         async with instance.app.app_context(_manifest()):

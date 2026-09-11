@@ -96,7 +96,7 @@ def test_stats_reads_the_counts(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "total" in result.output
 
 
-# -- mounts -------------------------------------------------------------------
+# -- attachments -------------------------------------------------------------------
 
 
 def test_attachments_lists_the_templates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,7 +122,7 @@ def test_get_attachment_reads_one_attachment(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_attach_puts_the_body_from_a_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    body = tmp_path / "mount.json"
+    body = tmp_path / "attach.json"
     body.write_text('{"path": "/c", "parameters": {}}')
 
     def handler(request: httpx.Request) -> httpx.Response:

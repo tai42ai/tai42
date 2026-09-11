@@ -7,7 +7,7 @@ repeated per NODE by a flow engine consuming the platform. Tools stay PURE — t
 the binding; the door applies it around them at the shared dispatch chokepoint.
 
 Only the SHAPE lives here (a contract holds models, never logic): the resolve/merge/apply
-seam and the save-time validate-and-mount live in the skeleton, and the wire shape mirrors
+seam and the save-time validate-and-attach live in the skeleton, and the wire shape mirrors
 the Studio api-client ``stateBinding`` schema exactly.
 """
 
@@ -67,8 +67,8 @@ class StateUpdate(BaseModel):
 
 
 class StateAttach(BaseModel):
-    """One state attached by a binding: the ``state`` name, the ``templates`` to mount on it
-    (mount-on-use, idempotent at save), the ``subject_expr`` (a jq over the run input → a full
+    """One state attached by a binding: the ``state`` name, the ``templates`` to attach on it
+    (attach-on-use, idempotent at save), the ``subject_expr`` (a jq over the run input → a full
     subject object or the record KEY, its scope taken from the ambient door context and its
     kind from the state's declared subject kind), an optional ``scope_expr`` (a BOOLEAN
     predicate over the run input evaluated first — ``false`` skips this state for the run, a
