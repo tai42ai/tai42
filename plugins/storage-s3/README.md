@@ -28,7 +28,7 @@ Its only tai-* dependencies are `tai42-contract` (the `Storage` ABC, `ObjectStat
 `TaiBaseSettings`, and the settings cache). Beyond those it depends on its S3
 driver (`aioboto3`, `botocore`) and `pydantic` / `pydantic-settings`.
 
-The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
 
 ## Install
 

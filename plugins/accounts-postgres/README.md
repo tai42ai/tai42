@@ -195,7 +195,7 @@ and a Redis reachable through the injected access-control Redis. Apply the schem
 `tai db migrate` before first serve; an out-of-date schema is caught loudly at
 boot.
 
-The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
 
 ## Install
 

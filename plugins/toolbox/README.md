@@ -14,7 +14,7 @@ interfaces it registers through) and `tai42-kit` (the curl client, the jq
 compiler, and the llm/embedding factories the heavier modules wire to). It
 **never** imports the skeleton — the toolbox is contract-facing.
 
-The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
 
 ## Install
 

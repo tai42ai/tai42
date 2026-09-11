@@ -28,7 +28,7 @@ the `tai42_app` handle) and `tai42-kit` (`TaiBaseSettings` and the settings cach
 Beyond those it depends on the `langfuse` SDK, `langchain`, the OpenTelemetry
 API, and `pydantic` / `pydantic-settings`.
 
-The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
 
 ## Install
 

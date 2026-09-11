@@ -28,7 +28,7 @@ platform-level story:
 - Build a backend (author guide): https://tai42.ai/guides/authors/backend
 - Ecosystem catalog: https://tai42.ai/reference/catalog
 
-The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
 
 ## Install
 

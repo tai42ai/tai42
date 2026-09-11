@@ -31,7 +31,7 @@ settings cache). Beyond those it depends on `httpx`, `starlette`, and
 `httpx`, and webhook signature validation is ~30 lines of stdlib
 `hmac`/`hashlib`/`base64`.
 
-The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
 
 ## Install
 

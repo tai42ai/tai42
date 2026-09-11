@@ -33,7 +33,7 @@ settings cache). Beyond those it depends on `httpx`, `starlette`, and
 Bearer-auth JSON POST over `httpx`, and webhook signature validation is a few
 lines of stdlib `hmac`/`hashlib`.
 
-The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
 
 ## Install
 

@@ -7,6 +7,7 @@ preservation, and no untouched descriptors."""
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from pathlib import Path
 from textwrap import dedent
@@ -414,6 +415,8 @@ def test_warnings_do_not_make_report_dirty():
         preserved=[("core/kit", range_sync.Preserved("tai42-contract", ">=1.2,<2"))],
         warnings=[("core/kit", range_sync.SpecChange("tai42-contract", "a", "b"))],
         descriptor_untouched=[("plugins/demo/tai-plugin.yml", ">1.2")],
+        readme_changes=[],
+        readme_untouched=[("plugins/demo/README.md", "7.x contract")],
     )
     assert report.dirty is False
 
@@ -495,7 +498,7 @@ def test_malformed_pin_raises_via_check(tmp_path: Path):
 def test_tracked_workspace_declares_no_preserved_pins():
     """Outside the pending-re-pin window the tracked workspace declares no preserved
     pins, so ``check`` reports no warnings, no preserved ranges, and no untouched
-    descriptors. During that window (a release-please train branch or the main push
+    descriptors or READMEs. During that window (a release-please train branch or the main push
     that opens it) first-party caps are deliberately stale until the post-tag
     release-repin, so the assertions are skipped then — mirroring test_fleet's
     window-aware cap admission. Range drift between derived and declared ranges is
@@ -506,6 +509,7 @@ def test_tracked_workspace_declares_no_preserved_pins():
     assert report.warnings == []
     assert report.preserved == []
     assert report.descriptor_untouched == []
+    assert report.readme_untouched == []
 
 
 # ---------------------------------------- guarded rewrite: widened cap / compat
@@ -813,6 +817,123 @@ def test_check_detects_descriptor_only_connector_drift(tmp_path: Path):
     )
 
 
+# ----------------------------------------- shipped scaffolds follow the global
+
+
+def _build_scaffold_tree(root: Path) -> None:
+    """A workspace whose CLI member ships plugin SCAFFOLDS as package data under
+    its ``src/`` tree: one scaffold declaring a ``contract:`` range, one declaring
+    none. Beside them sit copies that are NOT shipped — a build output and a test
+    fixture, under the CLI and under a packaged plugin. The released contract is
+    2.0.0 (global derived ``>=2.0,<3``) while every descriptor on disk advertises a
+    stale ``>=1.1,<2``."""
+    _write(
+        root / "pyproject.toml",
+        """
+        [tool.uv.workspace]
+        members = ["core/*", "plugins/*"]
+        """,
+    )
+    _write(
+        root / "core/contract/pyproject.toml",
+        """
+        [project]
+        name = "tai42-contract"
+        version = "2.0.0"
+        dependencies = []
+        """,
+    )
+    _write(
+        root / "core/cli/pyproject.toml",
+        """
+        [project]
+        name = "tai42-cli"
+        version = "2.0.0"
+        dependencies = ["tai42-contract>=2.0,<3"]
+        """,
+    )
+    _write(
+        root / "plugins/demo/pyproject.toml",
+        """
+        [project]
+        name = "tai42-demo"
+        version = "1.0.0"
+        dependencies = ["tai42-contract>=2.0,<3"]
+        """,
+    )
+    stale_yaml = """
+        spec_version: 1
+        namespace: acme
+        name: demo
+        version: 1.0.0
+        contract: '>=1.1,<2'
+        """
+    _write(root / "core/cli/src/tai42_cli/templates/connector/tai-plugin.yml", stale_yaml)
+    _write(
+        root / "core/cli/src/tai42_cli/templates/server/tai-plugin.yml",
+        """
+        spec_version: 1
+        namespace: acme
+        name: server
+        version: 1.0.0
+        """,
+    )
+    _write(root / "core/cli/build/lib/tai42_cli/templates/connector/tai-plugin.yml", stale_yaml)
+    _write(root / "core/cli/tests/fixtures/tai-plugin.yml", stale_yaml)
+    _write(root / "plugins/demo/tai-plugin.yml", stale_yaml)
+    _write(root / "plugins/demo/src/tai42_demo/tai-plugin.yml", stale_yaml)
+    _write(root / "plugins/demo/build/lib/tai42_demo/tai-plugin.yml", stale_yaml)
+
+
+_SCAFFOLD_YML = "core/cli/src/tai42_cli/templates/connector/tai-plugin.yml"
+_CONTRACTLESS_SCAFFOLD_YML = "core/cli/src/tai42_cli/templates/server/tai-plugin.yml"
+_UNSHIPPED_YMLS = (
+    "core/cli/build/lib/tai42_cli/templates/connector/tai-plugin.yml",
+    "core/cli/tests/fixtures/tai-plugin.yml",
+    "plugins/demo/build/lib/tai42_demo/tai-plugin.yml",
+)
+
+
+def test_discover_scaffold_and_shipped_files(tmp_path: Path):
+    _build_scaffold_tree(tmp_path)
+    members = range_sync.discover_members(tmp_path)
+
+    scaffolds = [p.relative_to(tmp_path).as_posix() for p in range_sync.scaffold_descriptor_files(members, tmp_path)]
+    assert scaffolds == [_SCAFFOLD_YML, _CONTRACTLESS_SCAFFOLD_YML]
+
+    # a plugin member contributes its root copy and its packaged copy, in that order
+    plugin_files = [
+        yml.relative_to(tmp_path).as_posix() for _, yml in range_sync.plugin_descriptor_files(members, tmp_path)
+    ]
+    assert plugin_files == ["plugins/demo/tai-plugin.yml", "plugins/demo/src/tai42_demo/tai-plugin.yml"]
+
+
+def test_apply_rewrites_scaffold_to_global_range(tmp_path: Path):
+    _build_scaffold_tree(tmp_path)
+    before = {rel: (tmp_path / rel).read_bytes() for rel in (*_UNSHIPPED_YMLS, _CONTRACTLESS_SCAFFOLD_YML)}
+    report = range_sync.apply(tmp_path)
+
+    assert "contract: '>=2.0,<3'" in (tmp_path / _SCAFFOLD_YML).read_text()
+    assert any(
+        y == _SCAFFOLD_YML and old == ">=1.1,<2" and new == ">=2.0,<3" for y, old, new in report.contract_changes
+    )
+
+    # a scaffold with no contract range, and every copy the member does not ship,
+    # are byte-identical afterwards
+    for rel, original in before.items():
+        assert (tmp_path / rel).read_bytes() == original, rel
+
+    assert range_sync.check(tmp_path).dirty is False
+
+
+def test_check_detects_scaffold_drift(tmp_path: Path):
+    _build_scaffold_tree(tmp_path)
+    report = range_sync.check(tmp_path)
+    drifted = {y for y, _, _ in report.contract_changes}
+    assert _SCAFFOLD_YML in drifted
+    assert drifted.isdisjoint(_UNSHIPPED_YMLS)
+
+
 # ------------------------------------------------- stray pin table is loud
 
 
@@ -853,3 +974,584 @@ def test_apply_cli_suppresses_warnings_on_unpinned_cross_major(tmp_path: Path, c
     # the unpinned cross-major cap is synced but its warning is not printed in apply mode
     assert "WARNING" not in out
     assert rc == 0
+
+
+# ------------------------------------------- shipped README contract statements
+
+
+_STATEMENT = "The current release line tracks the **1.x contract** (`tai42-contract>=1.1,<2`).\n"
+_STATEMENT_SYNCED = "The current release line tracks the **2.x contract** (`tai42-contract>=2.0,<3`).\n"
+
+
+def _build_readme_tree(root: Path) -> None:
+    """A workspace whose shipped READMEs state the contract line: a PLUGIN member's
+    package page (which must carry the statement), a core README carrying the
+    parenthetical shape beside a fenced diagram, the README beside a
+    descriptor-only connector, and the README beside a shipped scaffold. Beside
+    them sit READMEs nothing ships — a build output and a test fixture — and one
+    member README whose prose states no contract line at all. The released
+    contract is 2.0.0 (global derived ``>=2.0,<3``) while every statement on disk
+    says 1.x."""
+    _write(
+        root / "pyproject.toml",
+        """
+        [tool.uv.workspace]
+        members = ["core/*", "plugins/*"]
+        exclude = ["plugins/connector-demo"]
+        """,
+    )
+    _write(
+        root / "core/contract/pyproject.toml",
+        """
+        [project]
+        name = "tai42-contract"
+        version = "2.0.0"
+        readme = "README.md"
+        dependencies = []
+        """,
+    )
+    # version-like prose that states no contract line: must survive byte-for-byte
+    _write(
+        root / "core/contract/README.md",
+        """
+        # tai42-contract
+
+        Requires **Python 3.13+** and ships `pydantic>=2.12`. The 8.x dotted event
+        spellings are gone, and the 1.x correlation helpers with them.
+        """,
+    )
+    _write(
+        root / "core/cli/pyproject.toml",
+        """
+        [project]
+        name = "tai42-cli"
+        version = "2.0.0"
+        readme = "README.md"
+        dependencies = ["tai42-contract>=2.0,<3"]
+        """,
+    )
+    _write(
+        root / "core/cli/README.md",
+        """
+        ```text
+        tai42-contract  <--  tai42-cli
+        ```
+
+        `tai42-cli` obeys the leaf rule: its only tai-* dependency is `tai42-contract`
+        (the 1.x contract line).
+        """,
+    )
+    stale_yaml = """
+        spec_version: 1
+        namespace: acme
+        name: demo
+        version: 1.0.0
+        contract: '>=1.1,<2'
+        """
+    _write(root / "core/cli/src/tai42_cli/templates/connector/tai-plugin.yml", stale_yaml)
+    _write(root / "core/cli/src/tai42_cli/templates/connector/README.md", _STATEMENT)
+    _write(root / "core/cli/build/lib/tai42_cli/templates/connector/README.md", _STATEMENT)
+    _write(root / "core/cli/tests/fixtures/README.md", _STATEMENT)
+    _write(
+        root / "plugins/demo/pyproject.toml",
+        """
+        [project]
+        name = "tai42-demo"
+        version = "1.0.0"
+        readme = "README.md"
+        dependencies = ["tai42-contract>=2.0,<3"]
+        """,
+    )
+    _write(root / "plugins/demo/README.md", _STATEMENT)
+    _write(root / "plugins/demo/tai-plugin.yml", stale_yaml)
+    _write(root / "plugins/demo/src/tai42_demo/tai-plugin.yml", stale_yaml)
+    _write(root / "plugins/connector-demo/tai-plugin.yml", stale_yaml)
+    _write(root / "plugins/connector-demo/README.md", _STATEMENT)
+
+
+# The governed READMEs of that tree: path -> (member whose range it follows, is
+# the statement mandatory). None = the global range, as its descriptor follows.
+_GOVERNED_READMES = {
+    "core/cli/README.md": ("core/cli", False),
+    "core/cli/src/tai42_cli/templates/connector/README.md": (None, False),
+    "core/contract/README.md": ("core/contract", False),
+    "plugins/connector-demo/README.md": (None, False),
+    "plugins/demo/README.md": ("plugins/demo", True),
+}
+_UNSHIPPED_READMES = (
+    "core/cli/build/lib/tai42_cli/templates/connector/README.md",
+    "core/cli/tests/fixtures/README.md",
+)
+_DRIFTED_READMES = {rel for rel in _GOVERNED_READMES if rel != "core/contract/README.md"}
+
+
+def test_readme_contract_files_governed(tmp_path: Path):
+    _build_readme_tree(tmp_path)
+    members = range_sync.discover_members(tmp_path)
+    governed = {
+        g.path.relative_to(tmp_path).as_posix(): (g.member_path, g.required)
+        for g in range_sync.readme_contract_files(members, tmp_path)
+    }
+    assert governed == _GOVERNED_READMES
+
+
+def test_apply_rewrites_shipped_readme_statements(tmp_path: Path):
+    _build_readme_tree(tmp_path)
+    untouched = {rel: (tmp_path / rel).read_bytes() for rel in (*_UNSHIPPED_READMES, "core/contract/README.md")}
+    report = range_sync.apply(tmp_path)
+
+    # the plugin's package page, the scaffold's README and the descriptor-only
+    # connector's all state the released major
+    for rel in (
+        "plugins/demo/README.md",
+        "core/cli/src/tai42_cli/templates/connector/README.md",
+        "plugins/connector-demo/README.md",
+    ):
+        assert (tmp_path / rel).read_text() == _STATEMENT_SYNCED, rel
+
+    # the parenthetical shape moves in its own wording, and the fenced diagram
+    # beside it is untouched
+    cli_readme = (tmp_path / "core/cli/README.md").read_text()
+    assert "(the 2.x contract line)." in cli_readme
+    assert "tai42-contract  <--  tai42-cli" in cli_readme
+
+    # a README stating no contract line, and every README nothing ships, are
+    # byte-identical afterwards
+    for rel, original in untouched.items():
+        assert (tmp_path / rel).read_bytes() == original, rel
+
+    assert ("plugins/demo/README.md", _STATEMENT.strip(), _STATEMENT_SYNCED.strip()) in report.readme_changes
+
+    # idempotent: re-applying finds nothing and writes nothing
+    snapshot = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert not range_sync.apply(tmp_path).dirty
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == snapshot
+
+
+def test_check_detects_readme_drift(tmp_path: Path):
+    _build_readme_tree(tmp_path)
+    report = range_sync.check(tmp_path)
+    assert report.dirty
+
+    drifted = {path for path, _, _ in report.readme_changes}
+    assert drifted == _DRIFTED_READMES
+    assert drifted.isdisjoint(_UNSHIPPED_READMES)
+    assert ("plugins/demo/README.md", _STATEMENT.strip(), _STATEMENT_SYNCED.strip()) in report.readme_changes
+
+
+def test_readme_follows_preserved_pin(tmp_path: Path):
+    """A member whose contract dep a pin preserves states the PINNED major in its
+    README, exactly as its descriptor does — never the global released one."""
+    _build_descriptor_pin_tree(tmp_path)
+    _write(tmp_path / "plugins/demo/README.md", _STATEMENT_SYNCED)  # the global >=2.0,<3
+
+    range_sync.apply(tmp_path)
+
+    assert (tmp_path / "plugins/demo/README.md").read_text() == (
+        "The current release line tracks the **1.x contract** (`tai42-contract>=1.2,<2`).\n"
+    )
+    assert range_sync.check(tmp_path).dirty is False
+
+
+def test_underivable_pin_leaves_readme_untouched(tmp_path: Path, capsys):
+    """A pin with no derivable floor leaves the README alone, loudly — the same
+    leave-alone its descriptor gets, never a guessed major."""
+    _build_underivable_pin_tree(tmp_path)
+    pinned = "The current release line tracks the **1.x contract** (`tai42-contract>=1.2,<2`).\n"
+    _write(tmp_path / "plugins/demo/README.md", pinned)
+    before = (tmp_path / "plugins/demo/README.md").read_bytes()
+
+    rc = range_sync.main(["--root", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert (tmp_path / "plugins/demo/README.md").read_bytes() == before
+    assert "plugins/demo/README.md: contract statement left untouched (pinned, underivable floor)" in out
+    assert rc == 0
+
+    report = range_sync.check(tmp_path)
+    assert report.readme_changes == []
+    assert report.readme_untouched == [("plugins/demo/README.md", pinned.strip())]
+    assert report.dirty is False
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # the release-line sentence
+        (
+            "The current release line tracks the **1.x contract** (`tai42-contract>=1.1,<2`).",
+            "The current release line tracks the **2.x contract** (`tai42-contract>=2.0,<3`).",
+        ),
+        # extras on the literal are carried over
+        (
+            "The current release line tracks the **1.x contract** (`tai42-contract[all]>=1.1,<2`).",
+            "The current release line tracks the **2.x contract** (`tai42-contract[all]>=2.0,<3`).",
+        ),
+        # a version-less literal keeps its missing specifier
+        (
+            "The current release line tracks the **1.x contract** (`tai42-contract`).",
+            "The current release line tracks the **2.x contract** (`tai42-contract`).",
+        ),
+        # the parenthetical shape, which carries no range of its own
+        (
+            "its only dependency is `tai42-contract` (the 1.x contract line).",
+            "its only dependency is `tai42-contract` (the 2.x contract line).",
+        ),
+        # already current
+        (
+            "The current release line tracks the **2.x contract** (`tai42-contract>=2.0,<3`).",
+            "The current release line tracks the **2.x contract** (`tai42-contract>=2.0,<3`).",
+        ),
+    ],
+)
+def test_rewrite_readme_contract_preserves_shape(text: str, expected: str):
+    assert range_sync.rewrite_readme_contract(text, ">=2.0,<3")[0] == expected
+
+
+def test_rewrite_readme_contract_reports_the_statement():
+    new_text, changes = range_sync.rewrite_readme_contract(
+        _STATEMENT, ">=2.0,<3", "plugins/demo/README.md", required=True
+    )
+    assert changes == [(_STATEMENT.strip(), _STATEMENT_SYNCED.strip())]
+    assert new_text == _STATEMENT_SYNCED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # a fenced block showing a package page's wording
+        "```markdown\nThe current release line tracks the **1.x contract** (`tai42-contract>=1.1,<2`).\n```\n",
+        # a fenced block of the requirement itself
+        '```toml\ndependencies = ["tai42-contract>=1.1,<2"]\n```\n',
+        # an inline code span quoting the phrase
+        "Write it as ``the 1.x contract`` in the header.\n",
+        # an HTML comment
+        "<!-- the 1.x contract line -->\n",
+    ],
+)
+def test_quoted_contract_majors_are_never_rewritten(text: str):
+    """Quoted material states nothing: a fence, a code span and an HTML comment
+    come back byte-identical with no change recorded."""
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    assert new_text == text
+    assert changes == []
+
+
+def test_wide_fence_is_not_closed_by_a_narrower_run():
+    """A fence closes on a run of its own character that is at least as long as
+    the opening one: a shorter run inside a wider fence is body text, so the whole
+    block stays quoted — statement-shaped lines and contract facts alike."""
+    text = (
+        "````text\n"
+        "The current release line tracks the **1.x contract** (`tai42-contract>=1.1,<2`).\n"
+        "```\n"
+        "Pin tai42-contract>=1.1,<2 by hand.\n"
+        "````\n"
+    )
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    assert new_text == text
+    assert changes == []
+
+
+def test_indented_code_block_is_quoted():
+    """A chunk indented four columns after a blank line is a code block: the
+    statement-shaped line in it is an example, not a claim."""
+    text = "Every package page carries:\n\n    " + _STATEMENT
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    assert new_text == text, "rewrote a statement inside an indented code block"
+    assert changes == []
+
+
+def test_tab_indented_code_block_is_quoted():
+    """A tab indents four columns, so a tab-indented chunk is a code block too."""
+    text = "Every package page carries:\n\n\t" + _STATEMENT
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    assert new_text == text, "rewrote a statement inside a tab-indented code block"
+    assert changes == []
+
+
+def test_indented_continuation_of_a_paragraph_is_prose():
+    """An indented chunk cannot interrupt a paragraph: with no blank line before
+    it, it is a wrapped sentence and the statement in it is governed."""
+    text = "The line to know:\n    " + _STATEMENT
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    assert new_text == "The line to know:\n    " + _STATEMENT_SYNCED
+    assert changes == [(_STATEMENT.strip(), _STATEMENT_SYNCED.strip())]
+
+
+@pytest.mark.parametrize(
+    ("prefix", "quoted"),
+    [
+        # a tab is four columns BEFORE a blockquote marker as much as after one,
+        # so each of these indents a code block rather than opening a quote
+        ("\t> ", True),
+        ("\t\t> ", True),
+        (" \t> ", True),
+        ("  \t> ", True),
+        ("\t>> ", True),
+        ("   \t> ", True),  # three spaces already exhaust a marker's indentation
+        ("\t", True),  # the plain tab-indented block
+        # a marker at three columns or fewer opens a quote, whose content is prose
+        (">\t", False),  # a tab AFTER the marker is padding, not indentation
+        ("> ", False),
+        ("   > ", False),
+        ("    > ", True),  # four columns is a code block, marker or not
+    ],
+)
+def test_tab_columns_decide_quote_or_code(prefix: str, quoted: bool):
+    """Columns, not characters, decide whether a line opens a quote or indents a
+    code block — the same count on both sides of a blockquote marker."""
+    text = "para\n\n" + prefix + _STATEMENT
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    if quoted:
+        assert new_text == text, f"rewrote a statement in a code block prefixed {prefix!r}"
+        assert changes == []
+    else:
+        assert new_text == "para\n\n" + prefix + _STATEMENT_SYNCED, f"left quoted prose ungoverned: {prefix!r}"
+        assert changes == [(_STATEMENT.strip(), _STATEMENT_SYNCED.strip())]
+
+
+def test_code_inside_a_blockquote_is_quoted():
+    """Blockquote markers are stripped before blocks are read, so a fence one
+    level in is a fence — with no backticks of its own to pair by luck."""
+    text = "> ~~~\n> " + _STATEMENT.replace("`", "'") + "> ~~~\n"
+    statement = "The current release line tracks the **1.x contract** ('tai42-contract>=1.1,<2')."
+    assert statement in text  # the fenced body is the sentence with plain quotes
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    assert new_text == text, "read a blockquoted code block as prose"
+    assert changes == []
+
+
+def test_code_indented_under_a_list_item_is_quoted():
+    """A fenced example indented under a list item sits at four columns, so it is
+    read as a code block — quoted, as a renderer shows it."""
+    text = "- Example:\n\n      ~~~\n      " + _STATEMENT + "      ~~~\n"
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    assert new_text == text, "rewrote a statement inside a list item's code block"
+    assert changes == []
+
+
+def test_escaped_backtick_does_not_delimit_a_code_span():
+    """A backslash escapes the backtick it precedes, so it never pairs with a real
+    delimiter and leaves the statement that follows governed."""
+    text = "Escaped \\` and `code` here.\n\n" + _STATEMENT
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    assert new_text == "Escaped \\` and `code` here.\n\n" + _STATEMENT_SYNCED, (
+        "an escaped backtick left the statement ungoverned"
+    )
+    assert changes == [(_STATEMENT.strip(), _STATEMENT_SYNCED.strip())]
+
+
+def test_closing_fence_may_not_carry_an_info_string():
+    """A run carrying an info string opens a nested example rather than closing
+    the block, so the block's body — a statement-shaped line included — stays
+    quoted until the bare run that really closes it."""
+    text = (
+        "```markdown\n"
+        "```python\n"
+        "The current release line tracks the **1.x contract** (`tai42-contract>=1.1,<2`).\n"
+        "```\n"
+    )
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+    assert new_text == text, "rewrote a statement inside a fenced block"
+    assert changes == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # the idiom about a past line, with no dependency in front of it
+        "Topics moved in 9.0 (the 9.x contract line).\n",
+        # the idiom about another package's line
+        "Extensions follow `tai42-kit` (the 3.x contract line).\n",
+        # a blank line between: a new paragraph, not the dependency's qualifier
+        "`tai42-contract` is the leaf.\n\n(the 9.x contract line) was dropped.\n",
+    ],
+)
+def test_parenthetical_without_its_antecedent_is_refused(text: str):
+    """The parenthetical names the line of the ``tai42-contract`` dependency right
+    before it; with no such antecedent it is not a statement, and the version it
+    states is refused rather than restated."""
+    with pytest.raises(RuntimeError, match="sits outside the contract statement"):
+        range_sync.rewrite_readme_contract(text, ">=2.0,<3", "core/kit/README.md")
+
+
+def test_parenthetical_rewrites_across_its_line_break():
+    """The antecedent may sit on the line above; only the parenthetical moves."""
+    text = "its only tai-* dependency is `tai42-contract`\n(the 1.x contract line). It\n"
+    new_text, changes = range_sync.rewrite_readme_contract(text, ">=2.0,<3", "core/kit/README.md")
+    assert new_text == "its only tai-* dependency is `tai42-contract`\n(the 2.x contract line). It\n"
+    assert changes == [("(the 1.x contract line)", "(the 2.x contract line)")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # a compatibility table: two majors a noun-phrase rewrite would flatten
+        "| plugin | contract |\n| --- | --- |\n| 3.x | 9.x contract |\n| 4.x | 10.x contract |\n",
+        # an upgrade note naming both ends
+        "Upgrading from the 9.x contract to the 10.x contract renames the topics.\n",
+        # a possessive historical clause
+        "The 9.x contract's dotted spellings were unregisterable.\n",
+        # a major belonging to a different package
+        "Extensions follow the 3.x contract of `tai42-kit`.\n",
+        # the article's tail inside a word is not the article
+        "(lathe 1.x contract line)\n",
+        # a requirement stated in prose rather than in the sentence
+        "Pin tai42-contract>=1.1,<2 by hand.\n",
+    ],
+)
+def test_prose_contract_majors_outside_the_statement_are_refused(text: str):
+    """A contract version in prose that is not the governed sentence is refused,
+    naming the file — never rewritten to the current major."""
+    with pytest.raises(RuntimeError, match="sits outside the contract statement"):
+        range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # reworded out of the shape, still publishing a version
+        "The release line tracks contract major 1.\n",
+        # the requirement moved into a fenced block
+        "The release line requires:\n\n```toml\ntai42-contract>=1.1,<2\n```\n",
+        # the sentence reflowed across two lines
+        "The current release line tracks the **1.x\ncontract** (`tai42-contract>=1.1,<2`).\n",
+        # deleted outright
+        "# tai42-demo\n\nA plugin.\n",
+    ],
+)
+def test_plugin_readme_losing_its_statement_raises(text: str):
+    """A plugin's package page must carry its statement: rewording, fencing,
+    reflowing or deleting it is loud, never a silently ungoverned surface."""
+    with pytest.raises(RuntimeError, match="no contract statement") as excinfo:
+        range_sync.rewrite_readme_contract(text, ">=2.0,<3", "plugins/demo/README.md", required=True)
+    assert "plugins/demo/README.md" in str(excinfo.value)
+
+
+def test_reflowed_statement_raises_on_an_optional_readme():
+    """Where the statement is not mandatory, a reflow still surfaces: the version
+    it leaves behind in prose is a fact outside the governed sentence."""
+    text = "its only tai-* dependency is `tai42-contract`\n(the 1.x\ncontract line).\n"
+    with pytest.raises(RuntimeError, match="sits outside the contract statement"):
+        range_sync.rewrite_readme_contract(text, ">=2.0,<3", "core/kit/README.md")
+
+
+def test_two_statements_raise():
+    with pytest.raises(RuntimeError, match="2 contract statements"):
+        range_sync.rewrite_readme_contract(_STATEMENT + "\n" + _STATEMENT, ">=2.0,<3", "plugins/demo/README.md")
+
+
+def test_ungoverned_contract_fact_raises_via_check(tmp_path: Path):
+    _build_readme_tree(tmp_path)
+    _write(tmp_path / "core/cli/README.md", "Pin tai42-contract>=1.1,<2 by hand.\n")
+    with pytest.raises(RuntimeError, match=re.escape("core/cli/README.md")):
+        range_sync.check(tmp_path)
+
+
+def test_plugin_readme_deletion_raises_via_check(tmp_path: Path):
+    _build_readme_tree(tmp_path)
+    _write(tmp_path / "plugins/demo/README.md", "# tai42-demo\n\nA plugin.\n")
+    with pytest.raises(RuntimeError, match=re.escape("plugins/demo/README.md")):
+        range_sync.check(tmp_path)
+
+
+def _build_pending_writes_tree(root: Path) -> None:
+    """A workspace with a pending write on EVERY surface at once: one plugin whose
+    pyproject specifier, whose two descriptor pins and whose README statement all
+    trail the released contract (2.0.0, global derived ``>=2.0,<3``). A second
+    plugin carries its statement plus a contract version in prose — the refusal,
+    reached after the first plugin's three writes are pending because its path
+    sorts later."""
+    _write(
+        root / "pyproject.toml",
+        """
+        [tool.uv.workspace]
+        members = ["core/*", "plugins/*"]
+        """,
+    )
+    _write(
+        root / "core/contract/pyproject.toml",
+        """
+        [project]
+        name = "tai42-contract"
+        version = "2.0.0"
+        dependencies = []
+        """,
+    )
+    _write(
+        root / "plugins/demo/pyproject.toml",
+        """
+        [project]
+        name = "tai42-demo"
+        version = "1.0.0"
+        readme = "README.md"
+        dependencies = ["tai42-contract>=1.1,<2"]
+        """,
+    )
+    stale_yaml = """
+        spec_version: 1
+        namespace: acme
+        name: demo
+        version: 1.0.0
+        contract: '>=1.1,<2'
+        """
+    _write(root / "plugins/demo/tai-plugin.yml", stale_yaml)
+    _write(root / "plugins/demo/src/tai42_demo/tai-plugin.yml", stale_yaml)
+    _write(root / "plugins/demo/README.md", _STATEMENT)
+    _write(
+        root / "plugins/other/pyproject.toml",
+        """
+        [project]
+        name = "tai42-other"
+        version = "1.0.0"
+        readme = "README.md"
+        dependencies = ["tai42-contract>=2.0,<3"]
+        """,
+    )
+    _write(root / "plugins/other/README.md", _STATEMENT_SYNCED)
+
+
+_PENDING_PYPROJECT = "plugins/demo/pyproject.toml"
+_PENDING_DESCRIPTORS = ("plugins/demo/tai-plugin.yml", "plugins/demo/src/tai42_demo/tai-plugin.yml")
+_PENDING_README = "plugins/demo/README.md"
+
+
+def test_pending_writes_tree_drifts_on_every_surface(tmp_path: Path):
+    """The fixture the write-nothing test relies on: a specifier, both descriptor
+    pins and a README statement are all pending at once, so all three write paths
+    are exercised there."""
+    _build_pending_writes_tree(tmp_path)
+    report = range_sync.check(tmp_path)
+
+    assert [f"{member}/pyproject.toml" for member, _ in report.spec_changes] == [_PENDING_PYPROJECT]
+    assert {path for path, _, _ in report.contract_changes} == set(_PENDING_DESCRIPTORS)
+    assert {path for path, _, _ in report.readme_changes} == {_PENDING_README}
+
+
+def test_apply_writes_nothing_when_a_readme_is_refused(tmp_path: Path):
+    """A refused README aborts the whole apply before ANY file is written: the
+    pyproject specifier, both descriptor pins and the README statement that were
+    all pending stay byte-for-byte as they were."""
+    _build_pending_writes_tree(tmp_path)
+    poisoned = tmp_path / "plugins/other/README.md"
+    poisoned.write_text(poisoned.read_text() + "\nPin tai42-contract>=1.1,<2 by hand.\n")
+    pending = (_PENDING_PYPROJECT, *_PENDING_DESCRIPTORS, _PENDING_README)
+    before = {rel: (tmp_path / rel).read_bytes() for rel in pending}
+    before_tree = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    with pytest.raises(RuntimeError, match=re.escape("plugins/other/README.md")):
+        range_sync.apply(tmp_path)
+
+    assert (tmp_path / _PENDING_PYPROJECT).read_bytes() == before[_PENDING_PYPROJECT], "pyproject specifier written"
+    for rel in _PENDING_DESCRIPTORS:
+        assert (tmp_path / rel).read_bytes() == before[rel], f"descriptor pin written: {rel}"
+    assert (tmp_path / _PENDING_README).read_bytes() == before[_PENDING_README], "README statement written"
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before_tree
+
+
+def test_declared_readme_missing_raises(tmp_path: Path):
+    _build_readme_tree(tmp_path)
+    (tmp_path / "plugins/demo/README.md").unlink()
+    with pytest.raises(RuntimeError, match=r"\[project\].readme points at a missing file"):
+        range_sync.check(tmp_path)
