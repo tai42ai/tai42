@@ -441,6 +441,10 @@ services:
         set -eu
         log() { echo "[dind-egress-firewall] $$*" >&2; }
         fail() { log "FATAL: $$*"; exit 1; }
+        # Clear any marker a prior boot left in the writable layer: a restart recreates
+        # the netns (DOCKER-USER rules gone) but the file persists, and the healthcheck
+        # must gate on THIS boot's completed install, never a stale one.
+        rm -f /tmp/dind-egress-firewall.ready
         # Full private + link-local ranges denied to inner sessions.
         PRIVATE_CIDRS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16"
         # Select the dockerd whose netns actually holds the DOCKER-USER chain. During
@@ -463,11 +467,28 @@ services:
         done
         in_netns() { nsenter -t "$$DOCKERD_PID" -n "$$@"; }
         # The daemon's OWN connected subnets INSIDE its netns — the inner-session
-        # bridge (docker0) and the rootless vpnkit uplink (tap0, e.g. 192.168.65.0/24).
-        # These carry the sandbox's own egress + DNS plumbing and fall inside the
-        # private ranges above, so they are ACCEPTed first. Derived from the daemon's
-        # routes so they track whatever docker0/vpnkit actually use.
-        ALLOW_CIDRS="$$(in_netns ip -o route show scope link 2>/dev/null | awk '{print $$1}' | grep -E '^[0-9]+\.' || true)"
+        # bridge (docker0) and the rootless vpnkit uplink (tap0, e.g. 192.168.65.0/24) —
+        # carry the sandbox's own egress + DNS plumbing and fall inside the private
+        # ranges denied below, so they are ACCEPTed first (above the DROPs) or egress +
+        # DNS die. The uplink is the DEFAULT ROUTE's device, and rootlesskit finishes
+        # configuring it AFTER dockerd first answers, so a single snapshot taken the
+        # instant the DOCKER-USER chain appears can catch docker0 alone and then DROP
+        # the session's own resolver on the still-unconfigured uplink. WAIT until the
+        # default-route uplink's on-link subnet exists, THEN take the allow-set (both
+        # subnets), so the ACCEPT for the resolver's subnet is never missed. Derived
+        # from the routes so the set tracks whatever docker0/vpnkit actually use.
+        i=0
+        ALLOW_CIDRS=""
+        while : ; do
+          UPLINK_DEV="$$(in_netns ip -o route show default 2>/dev/null | awk '{for (k=1;k<NF;k++) if ($$k=="dev") {print $$(k+1); exit}}')"
+          if [ -n "$$UPLINK_DEV" ] && in_netns ip -o route show scope link dev "$$UPLINK_DEV" 2>/dev/null | grep -qE '^[0-9]+\.'; then
+            ALLOW_CIDRS="$$(in_netns ip -o route show scope link 2>/dev/null | awk '{print $$1}' | grep -E '^[0-9]+\.' || true)"
+            break
+          fi
+          i=$$((i + 1))
+          [ "$$i" -gt 120 ] && fail "the daemon's default-route uplink subnet never appeared within 120s"
+          sleep 1
+        done
         [ -n "$$ALLOW_CIDRS" ] || fail "could not resolve the daemon's own subnets to allow"
         log "dockerd pid=$$DOCKERD_PID; allow(own) -> $$ALLOW_CIDRS; deny(private) -> $$PRIVATE_CIDRS"
         # Insert at an incrementing position so rules land ABOVE docker's default
@@ -486,6 +507,10 @@ services:
         for cidr in $$ALLOW_CIDRS; do add_rule ACCEPT "$$cidr"; done
         for cidr in $$PRIVATE_CIDRS; do add_rule DROP "$$cidr"; done
         log "egress firewall active: private ranges + metadata denied (own bridge/uplink allowed), internet OPEN"
+        # Signal the full ruleset is in place. The healthcheck gates the tests on this
+        # marker, so no session is created until BOTH the own-subnet ACCEPTs and the
+        # private-range DROPs are installed — never against a half-built chain.
+        : > /tmp/dind-egress-firewall.ready
         FW
         chmod +x /tmp/dind-egress-firewall.sh
         /tmp/dind-egress-firewall.sh &
@@ -496,12 +521,15 @@ services:
         exec su rootless -c 'DOCKER_TLS_CERTDIR=/certs exec dockerd-entrypoint.sh'
       - sh
     # Ready when the daemon answers over its TLS socket using the client certs it
-    # generated into /certs/client. Generous start_period covers first-boot cert
-    # generation. Byte-identical probe to the reference compose.
+    # generated into /certs/client AND the inner-bridge egress firewall has installed
+    # its full ruleset (the ready marker the entrypoint writes last). Gating readiness
+    # on the marker keeps a session from being created against a half-built chain.
+    # Byte-identical probe to the reference compose. Generous start_period covers
+    # first-boot cert generation.
     healthcheck:
       test:
         - "CMD-SHELL"
-        - "docker --tlsverify --tlscacert /certs/client/ca.pem --tlscert /certs/client/cert.pem --tlskey /certs/client/key.pem -H tcp://127.0.0.1:2376 info >/dev/null 2>&1"
+        - "docker --tlsverify --tlscacert /certs/client/ca.pem --tlscert /certs/client/cert.pem --tlskey /certs/client/key.pem -H tcp://127.0.0.1:2376 info >/dev/null 2>&1 && test -f /tmp/dind-egress-firewall.ready"
       interval: 10s
       timeout: 10s
       retries: 30
