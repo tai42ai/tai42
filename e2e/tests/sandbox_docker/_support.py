@@ -147,9 +147,6 @@ def egress_spec(*, workspace_key: str) -> SandboxSessionSpec:
 # -- in-session network probes ---------------------------------------------------
 
 _PROBE_WAIT = 4
-# A lookup goes to the session's own resolver and is answered from the engine's view
-# of its networks; the ceiling only has to outlast the resolver's own retransmissions.
-_DNS_WAIT = 20
 
 
 async def tcp_dials(session: ManagedSandboxSession, host: str, port: int, *, payload: bytes = b"") -> bool:
@@ -178,16 +175,22 @@ async def http_over_tcp(session: ManagedSandboxSession, host: str, port: int, pa
     return result.stdout
 
 
-async def dns_answer(session: ManagedSandboxSession, name: str) -> str:
-    """The session resolver's answer for ``name``, as busybox ``nslookup`` printed it.
+async def session_resolver(session: ManagedSandboxSession) -> str:
+    """The address of the session's own DNS resolver — the first ``nameserver`` in its
+    ``/etc/resolv.conf``.
 
-    The answer TEXT is the signal, never the exit code: ``nslookup`` reports failure
-    whenever any of the queries it sends misses, and a name with an A record but no
-    AAAA record is such a partial miss. The caller asserts on the address it expects,
-    which also keeps a resolver that answers with something else from passing.
+    On the rootless-dind engine this is the daemon's vpnkit uplink gateway, which sits
+    INSIDE the private range the egress firewall DROPs and is reachable from a session
+    only because the firewall ACCEPTs the daemon's own connected subnets ABOVE those
+    DROPs. Reaching it is therefore a statement about that ACCEPT-above-DROP ordering —
+    the egress policy — and nothing about a resolver's answer.
     """
-    result = await session.exec(["nslookup", name], stdin=b"", timeout_seconds=_DNS_WAIT)
-    return result.stdout
+    resolv = await sh(session, "cat /etc/resolv.conf")
+    for line in resolv.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "nameserver":
+            return parts[1]
+    raise AssertionError(f"no nameserver in the session's /etc/resolv.conf: {resolv!r}")
 
 
 async def default_gateway(session: ManagedSandboxSession) -> str:
@@ -214,11 +217,11 @@ __all__ = [
     "ManagedSandbox",
     "ManagedSandboxSession",
     "default_gateway",
-    "dns_answer",
     "egress_spec",
     "http_over_tcp",
     "open_sandbox",
     "requires_engine",
+    "session_resolver",
     "sh",
     "tcp_dials",
 ]

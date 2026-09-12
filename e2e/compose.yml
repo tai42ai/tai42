@@ -285,9 +285,8 @@ services:
   # can prove. Off unless `--profile sandbox`; the process-based fake
   # `sandbox_provider` fixture carries the sandbox surface on every other leg.
   #
-  # BYTE-FAITHFUL to the deployment reference compose's `sandbox-engine` service
-  # (the sibling distribution repo's compose/docker-compose.yml): the SAME pinned
-  # rootless-dind image digest, the SAME DOCKER_TLS_CERTDIR + client cert
+  # BYTE-FAITHFUL to the deployment reference compose's `sandbox-engine`
+  # service: the SAME pinned rootless-dind image digest, the SAME DOCKER_TLS_CERTDIR + client cert
   # filenames/path (/certs/client → cert.pem/key.pem/ca.pem), the SAME
   # `sandbox-ctrl` network split (the engine off the datastore network so an
   # inner session — a container of this daemon — reaches nothing of the
@@ -538,11 +537,9 @@ services:
   # subnets it allows, so a session's dial to it takes the identical
   # FORWARD/DOCKER-USER path an internet dial takes and is decided by the same rule.
   # That makes the positive a statement about the egress POLICY alone — no third
-  # party has to be up for it to hold. Its compose service name is also the name the
-  # DNS half resolves: the answer comes from the engine's own resolver view of this
-  # network, so the session's resolver path (private-range, allowed above the denies)
-  # is proven without a public resolver. E2E test scaffolding — NOT a deployment
-  # service.
+  # party has to be up for it to hold. The positive dials it by its STATIC address
+  # (the DNS half of that leg is a TCP connect to the session's own resolver, not a
+  # name lookup of this peer). E2E test scaffolding — NOT a deployment service.
   sandbox-egress-peer:
     image: alpine:3.20
     profiles: ["sandbox"]

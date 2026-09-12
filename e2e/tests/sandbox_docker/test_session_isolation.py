@@ -13,10 +13,12 @@ assert:
    sandbox-ctrl / RFC1918 control-plane or compose-service address is DROPPED by the
    egress firewall on the FORWARD/POSTROUTING path;
 2. cloud metadata (``169.254.169.254``) is BLOCKED;
-3. egress + DNS to a destination the firewall does NOT deny SUCCEED (egress default
-   open) — proved against the harness's own listening peer on the documentation-range
-   ``sandbox-public`` segment, which the firewall treats exactly as it treats the
-   internet, so the policy is the only thing the leg can fail on;
+3. egress to a destination the firewall does NOT deny SUCCEEDS, and the session's own
+   DNS resolver — a host inside the private range the firewall DROPs — stays reachable
+   because the firewall ACCEPTs the daemon's own subnets ABOVE those DROPs (egress
+   default open, DNS not collateral-blocked). Both are proved with TCP connects, so a
+   lost packet is retransmitted rather than failing the leg, and the only thing the
+   leg can fail on is the egress policy;
 4. the session carries NO engine credential and mounts ONLY its own ``/workspace``, and
    two sessions are workspace-isolated from each other.
 
@@ -37,11 +39,11 @@ from ._support import (
     DockerSandbox,
     ManagedSandboxSession,
     default_gateway,
-    dns_answer,
     egress_spec,
     http_over_tcp,
     open_sandbox,
     requires_engine,
+    session_resolver,
     sh,
     tcp_dials,
 )
@@ -53,14 +55,17 @@ pytestmark = requires_engine
 # address the firewall must DROP are deployment coordinates, and BOTH are hosts that
 # genuinely LISTEN, so a DROP is distinguishable from a dead route and a pass from a
 # vacuous one: the egress peer is the harness's own `sandbox-egress-peer` service
-# (its compose service name, static address and port are the defaults here), and the
-# blocked address is supplied by the harness or its leg skips loudly.
+# (its static address and port are the defaults here), and the blocked address is
+# supplied by the harness or its leg skips loudly.
 _METADATA_HOST = "169.254.169.254"
 _METADATA_PORT = 80
 
-_EGRESS_PEER_NAME = os.environ.get("SANDBOX_DOCKER_EGRESS_PEER_NAME", "sandbox-egress-peer")
 _EGRESS_PEER_ADDR = os.environ.get("SANDBOX_DOCKER_EGRESS_PEER_ADDR", "192.0.2.9")
 _EGRESS_PEER_PORT = int(os.environ.get("SANDBOX_DOCKER_EGRESS_PEER_PORT", "9000"))
+
+# DNS listens here on every resolver; the session reaching its resolver on this port
+# is the egress firewall's own-subnet ACCEPT (above its private-range DROPs) in force.
+_DNS_PORT = 53
 
 _CONTROL_API_PORT = int(os.environ.get("SANDBOX_DOCKER_CONTROL_API_PORT", "2376"))
 _BLOCKED_ADDR = os.environ.get("SANDBOX_DOCKER_BLOCKED_ADDR")
@@ -79,15 +84,25 @@ async def egress_session(sandbox: DockerSandbox) -> ManagedSandboxSession:
 
 
 async def test_egress_open(egress_session: ManagedSandboxSession) -> None:
-    """The egress default is OPEN: the session resolves a name through its own resolver
-    and opens a TCP connection to an address the firewall does not deny — the positive
-    that makes the blocks below meaningful. Both halves address the harness's egress
-    peer, which sits where the internet sits relative to the firewall's rules, so what
-    this leg can fail on is the egress policy and nothing else."""
-    answer = await dns_answer(egress_session, _EGRESS_PEER_NAME)
-    assert _EGRESS_PEER_ADDR in answer, (
-        f"the egress session's resolver did not answer {_EGRESS_PEER_NAME!r} with "
-        f"{_EGRESS_PEER_ADDR}: DNS egress is not open. nslookup said: {answer!r}"
+    """The egress default is OPEN, proved with deterministic TCP connects so what this
+    leg can fail on is the egress policy and nothing else:
+
+    * the session reaches its OWN DNS resolver — a host inside the private range the
+      firewall DROPs, reachable only because the firewall ACCEPTs the daemon's own
+      subnets ABOVE those DROPs, so DNS egress is not collateral-blocked; and
+    * the session opens a connection to the harness egress peer, a genuinely-listening
+      host outside every denied range that sits where the internet sits relative to
+      the firewall's rules.
+
+    Both are TCP, so a lost packet is retransmitted by the kernel instead of failing
+    the leg: a firewall that dropped either destination fails every attempt, while a
+    transient packet loss fails none. (An in-session name lookup would ride a
+    best-effort UDP path — the resolver's answer, not the egress policy — and cannot
+    be the signal here.)"""
+    resolver = await session_resolver(egress_session)
+    assert await tcp_dials(egress_session, resolver, _DNS_PORT), (
+        f"the egress session could not reach its own resolver {resolver}:{_DNS_PORT}: the egress "
+        "firewall's own-subnet ACCEPT is not letting DNS egress through above its private-range DROPs"
     )
     assert await tcp_dials(egress_session, _EGRESS_PEER_ADDR, _EGRESS_PEER_PORT), (
         f"the egress session could not reach {_EGRESS_PEER_ADDR}:{_EGRESS_PEER_PORT}: egress is not open"
