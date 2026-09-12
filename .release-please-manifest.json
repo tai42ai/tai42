@@ -33,5 +33,5 @@
   "plugins/tools-whatsapp": "1.1.7",
   "plugins/webhook-verifier-github": "1.2.5",
   "plugins/webhook-verifier-stripe": "1.2.5",
-  "e2e": "10.0.2"
+  "e2e": "10.0.3"
 }
