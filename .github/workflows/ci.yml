@@ -75,6 +75,7 @@ jobs:
       browser_engines: ${{ steps.assemble.outputs.browser_engines }}
       browser_lane: ${{ steps.assemble.outputs.browser_lane }}
       needs_heavy: ${{ steps.assemble.outputs.needs_heavy }}
+      is_train: ${{ steps.assemble.outputs.is_train }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # Full history so the version-only classifier can diff the base...head
@@ -138,6 +139,9 @@ jobs:
           WIDEN: ${{ github.event_name != 'workflow_dispatch' || inputs.browsers != 'chromium' }}
           HEAD_REF: ${{ github.head_ref }}
           REF_NAME: ${{ github.ref_name }}
+          # The head commit's message on a push (empty otherwise): the train-detection
+          # below reads its title to recognise release-please's merge commit on main.
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
           # The range the version-only classifier diffs: a PR's base/head, or a
           # push's before/after. Empty on an event that carries neither, which
           # leaves needs_heavy true (the heavy lanes run) — the safe default.
@@ -169,6 +173,7 @@ jobs:
               echo "browser_engines=$(engine_list "$WIDEN")"
               echo 'browser_lane=true'
               echo 'needs_heavy=true'
+              echo 'is_train=false'
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -289,10 +294,25 @@ jobs:
           # off any version-only diff; a forced-full dispatch and the weekly schedule
           # keep them on unconditionally (handled above by FORCE_FULL / the ui lane).
           needs_heavy=true
+          # A release-please train carries only version bumps; it is detected once here
+          # and surfaced as the is_train output. The train enters through two doors: the
+          # train PR (its head_ref, or a push to that same release-please-- branch) and
+          # the merge commit release-please lands on main (a push whose ref is main and
+          # whose title is release-please's own — the default `chore: release main`,
+          # squash-merged as `chore: release main (#N)`). The merge push opens the same
+          # pending-re-pin window the PR does, so the same gating must hold across it; no
+          # other main push is a train. A forced-full dispatch and the weekly schedule
+          # leave is_train false so every gate runs unconditionally.
+          is_train=false
           if [ "$FORCE_FULL" != "true" ]; then
-            is_train=false
             case "${HEAD_REF:-}" in release-please--*) is_train=true ;; esac
             case "${REF_NAME:-}" in release-please--*) is_train=true ;; esac
+            if [ "${REF_NAME:-}" = "main" ]; then
+              title=${HEAD_COMMIT_MSG%%$'\n'*}
+              if [[ "$title" =~ ^chore:\ release\ main(\ \(#[0-9]+\))?$ ]]; then
+                is_train=true
+              fi
+            fi
             version_only=false
             if [ "$is_train" != "true" ] && [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
               if python3 scripts/version_only_diff.py --base "$BASE_SHA" --head "$HEAD_SHA"; then
@@ -317,6 +337,7 @@ jobs:
             echo "browser_engines=$(engine_list "$run_browsers")"
             echo "browser_lane=false"
             echo "needs_heavy=$needs_heavy"
+            echo "is_train=$is_train"
           } >> "$GITHUB_OUTPUT"
 
   check:
@@ -371,13 +392,55 @@ jobs:
       - name: Pyright
         working-directory: ${{ matrix.dir }}
         run: uv run --no-sync pyright
+      - name: Contract admission
+        # Whether this member's declared tai42-contract range admits the workspace
+        # contract version. On a release train the contract member is bumped ahead of
+        # its dependents' ranges, so a dependent's code quarantines its own routers at
+        # runtime and its suite cannot pass until the post-merge re-pin widens the
+        # range; the Pytest steps below read this to skip exactly those members. The
+        # contract member declares no such range and always admits.
+        id: admit
+        run: |
+          set -euo pipefail
+          uv run --no-sync python - "${{ matrix.dir }}" <<'PY'
+          import os
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          from packaging.requirements import Requirement
+          from packaging.specifiers import SpecifierSet
+          from packaging.utils import canonicalize_name
+
+          member = Path(sys.argv[1])
+          contract_version = tomllib.loads(
+              Path("core/contract/pyproject.toml").read_text()
+          )["project"]["version"]
+          project = tomllib.loads((member / "pyproject.toml").read_text())["project"]
+          requirements = list(project.get("dependencies", []))
+          for group in project.get("optional-dependencies", {}).values():
+              requirements.extend(group)
+          admits = True
+          for raw in requirements:
+              req = Requirement(raw)
+              if canonicalize_name(req.name) == "tai42-contract" and not SpecifierSet(
+                  str(req.specifier)
+              ).contains(contract_version, prereleases=True):
+                  admits = False
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"admits={'true' if admits else 'false'}\n")
+          print(f"member={member} contract={contract_version} admits={admits}")
+          PY
       - name: Pytest
         # The e2e member's suite is infra-bound; here it is collect-only (imports +
         # plugin registration, no live Redis/Postgres). Its live pytest is the
         # services-backed e2e job. Every other member runs the full suite with cov.
         # The skeleton, kit, and accounts-postgres members are handled by the two-pass
         # steps below (each needs its real-Postgres integration suite for its floor).
-        if: ${{ matrix.dir != 'core/skeleton' && matrix.dir != 'core/kit' && matrix.dir != 'plugins/accounts-postgres' }}
+        # On a release train a member whose declared range runs behind the bumped
+        # contract skips its suite (its code was proven on main; it reloads once the
+        # post-merge re-pin widens the range); a member that still admits runs it.
+        if: ${{ (matrix.dir != 'core/skeleton' && matrix.dir != 'core/kit' && matrix.dir != 'plugins/accounts-postgres') && (needs.changes.outputs.is_train != 'true' || steps.admit.outputs.admits == 'true') }}
         working-directory: ${{ matrix.dir }}
         run: >-
           uv run --no-sync pytest ${{ matrix.pytest_mode == 'collect' && '--collect-only -q' || '--cov --cov-report=term-missing' }}
@@ -404,7 +467,10 @@ jobs:
         # pytest-cov aggregates the workers' data so the combined floor is enforced
         # unchanged. The integration pass stays serial: it is small and shares the one
         # Postgres/Redis service, so worker fan-out buys nothing there.
-        if: ${{ matrix.dir == 'core/skeleton' }}
+        # Skipped on a release train while the skeleton's declared contract range runs
+        # behind the bumped contract (its routers quarantine at runtime until the
+        # post-merge re-pin widens the range); its code was proven on main.
+        if: ${{ matrix.dir == 'core/skeleton' && (needs.changes.outputs.is_train != 'true' || steps.admit.outputs.admits == 'true') }}
         working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
@@ -423,7 +489,10 @@ jobs:
         # coverage accumulated (--cov-append); the final report applies the package's
         # fail_under against the COMBINED data. The service starts each job empty, and the
         # integration fixtures apply their schema and use per-run unique keys.
-        if: ${{ matrix.dir == 'core/kit' }}
+        # Skipped on a release train while the kit's declared contract range runs behind
+        # the bumped contract; its code was proven on main and runs again once the
+        # post-merge re-pin widens the range.
+        if: ${{ matrix.dir == 'core/kit' && (needs.changes.outputs.is_train != 'true' || steps.admit.outputs.admits == 'true') }}
         working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
@@ -442,7 +511,10 @@ jobs:
         # report applies the package's fail_under against the COMBINED data. The service
         # starts each job empty; the integration fixtures apply the plugin's own shipped
         # migration chain through the kit runner and TRUNCATE the account tables per test.
-        if: ${{ matrix.dir == 'plugins/accounts-postgres' }}
+        # Skipped on a release train while the plugin's declared contract range runs
+        # behind the bumped contract; its code was proven on main and runs again once
+        # the post-merge re-pin widens the range.
+        if: ${{ matrix.dir == 'plugins/accounts-postgres' && (needs.changes.outputs.is_train != 'true' || steps.admit.outputs.admits == 'true') }}
         working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
