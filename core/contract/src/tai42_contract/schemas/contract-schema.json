@@ -615,7 +615,7 @@
       "type": "object"
     }
   },
-  "contract_version": "10.0.0",
+  "contract_version": "11.0.0",
   "documents": {
     "AccessPolicy": {
       "description": "Schema for data stored at 'ac:policy:{user_id}'. Represents WHAT the user\ncan do (permissions & logic).",
