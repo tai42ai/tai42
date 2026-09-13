@@ -29,7 +29,7 @@ from tai42_skeleton.app import kind_status as ks
 from tai42_skeleton.app import lifecycle as lifecycle_module
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
-from tai42_skeleton.app.route_defaults import DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
+from tai42_skeleton.app.route_defaults import CORE_API_ROUTERS, DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
 from tai42_skeleton.app.server import ServingCore
 from tai42_skeleton.connectors.runtime.resolver import ManagedAuth
 from tai42_skeleton.connectors.token_injection import _prepare_request
@@ -1609,16 +1609,17 @@ def _effective(default_routers=None, routers_modules=None) -> list[str]:
     return m._effective_router_modules()
 
 
-def test_all_with_empty_list_is_defaults_then_catch_all_last():
-    # "all" is the default when default_routers is omitted.
+def test_all_with_empty_list_is_core_then_defaults_then_catch_all_last():
+    # "all" is the default when default_routers is omitted. The core tier leads,
+    # then the default API routers, then the catch-all last.
     eff = _effective(routers_modules=[])
-    assert eff == [*DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER]
+    assert eff == [*CORE_API_ROUTERS, *DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER]
     assert eff[-1] == STUDIO_SPA_ROUTER
 
 
 def test_all_with_extra_appends_extra_before_catch_all():
     eff = _effective(default_routers="all", routers_modules=["some.extra.router"])
-    assert eff == [*DEFAULT_API_ROUTERS, "some.extra.router", STUDIO_SPA_ROUTER]
+    assert eff == [*CORE_API_ROUTERS, *DEFAULT_API_ROUTERS, "some.extra.router", STUDIO_SPA_ROUTER]
 
 
 def test_all_dedups_a_redundantly_listed_core_router_no_double_mount():
@@ -1627,7 +1628,7 @@ def test_all_dedups_a_redundantly_listed_core_router_no_double_mount():
     eff = _effective(default_routers="all", routers_modules=[core])
     assert eff.count(core) == 1
     assert eff[-1] == STUDIO_SPA_ROUTER
-    assert eff == [*DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER]
+    assert eff == [*CORE_API_ROUTERS, *DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER]
 
 
 def test_all_never_double_appends_an_explicitly_listed_catch_all():
@@ -1635,12 +1636,12 @@ def test_all_never_double_appends_an_explicitly_listed_catch_all():
     # once, still last — never in the middle, never twice.
     eff = _effective(default_routers="all", routers_modules=[STUDIO_SPA_ROUTER])
     assert eff.count(STUDIO_SPA_ROUTER) == 1
-    assert eff == [*DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER]
+    assert eff == [*CORE_API_ROUTERS, *DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER]
 
 
-def test_api_mounts_defaults_without_catch_all():
+def test_api_mounts_core_and_defaults_without_catch_all():
     eff = _effective(default_routers="api", routers_modules=["some.extra.router"])
-    assert eff == [*DEFAULT_API_ROUTERS, "some.extra.router"]
+    assert eff == [*CORE_API_ROUTERS, *DEFAULT_API_ROUTERS, "some.extra.router"]
     assert STUDIO_SPA_ROUTER not in eff
 
 
@@ -1648,20 +1649,22 @@ def test_api_honors_an_explicitly_listed_catch_all_last():
     # Under "api" the loader never adds the catch-all, but an operator who lists it
     # explicitly is honored — placed last.
     eff = _effective(default_routers="api", routers_modules=[STUDIO_SPA_ROUTER])
-    assert eff == [*DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER]
+    assert eff == [*CORE_API_ROUTERS, *DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER]
 
 
-def test_none_is_the_verbatim_manual_surface_with_catch_all_last():
+def test_none_is_the_core_tier_then_the_verbatim_manual_surface_with_catch_all_last():
     eff = _effective(
         default_routers="none",
         routers_modules=["a.router", STUDIO_SPA_ROUTER, "b.router"],
     )
-    # No defaults; the operator list is authoritative, catch-all moved to last.
-    assert eff == ["a.router", "b.router", STUDIO_SPA_ROUTER]
+    # No defaults; the core tier still leads, the operator list is authoritative
+    # after it, catch-all moved to last.
+    assert eff == [*CORE_API_ROUTERS, "a.router", "b.router", STUDIO_SPA_ROUTER]
 
 
-def test_none_with_empty_list_is_empty_mcp_only():
-    assert _effective(default_routers="none", routers_modules=[]) == []
+def test_none_with_empty_list_is_the_core_tier_only():
+    # Even the leanest boot mounts the always-on core tier.
+    assert _effective(default_routers="none", routers_modules=[]) == [*CORE_API_ROUTERS]
 
 
 def test_effective_router_modules_requires_started():

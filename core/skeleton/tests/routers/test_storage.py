@@ -1,10 +1,11 @@
-"""Storage router: identity + CRUD over a fake in-memory ``Storage`` provider,
+"""Storage management router: CRUD over a fake in-memory ``Storage`` provider,
 plus the honest 501 when none is registered.
 
 Handlers are driven directly (the router-test pattern). The provider is installed
 by setting the process app's storage-registry provider to a stateful fake; the
-absent case sets it to ``None`` so every door but ``GET /api/storage`` answers a
-loud 501.
+absent case sets it to ``None`` so every management door answers a loud 501. The
+presence read ``GET /api/storage`` lives in the core presence router and is covered
+by ``test_storage_presence.py``.
 """
 
 from __future__ import annotations
@@ -101,26 +102,6 @@ def _body_req(body: bytes) -> Request:
 
 def _json(resp) -> dict:
     return json.loads(bytes(resp.body))
-
-
-# -- identity ----------------------------------------------------------------
-
-
-async def test_info_present(install):
-    fake = install(_FakeStorage())
-    resp = await router.storage_info(_req())
-    assert resp.status_code == 200
-    data = _json(resp)["data"]
-    assert data["present"] is True
-    assert data["provider"] == "_FakeStorage"
-    assert data["module"] == type(fake).__module__
-
-
-async def test_info_absent_is_200_present_false(install):
-    install(None)
-    resp = await router.storage_info(_req())
-    assert resp.status_code == 200
-    assert _json(resp) == {"data": {"present": False, "provider": None, "module": None}}
 
 
 # -- 501 when no provider ----------------------------------------------------

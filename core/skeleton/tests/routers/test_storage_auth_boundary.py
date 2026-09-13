@@ -1,8 +1,9 @@
-"""The storage router's auth boundary, pinned with access control ENABLED.
+"""The storage doors' auth boundary, pinned with access control ENABLED.
 
 Every ``/api/storage*`` door reads or mutates the deployment's content store, so
-all are AUTHED (no public door). Each asserts an unauthenticated request is denied
-before the handler runs.
+all are AUTHED (no public door) — including the always-mounted presence read
+``GET /api/storage``, whose body carries provider identity. Each asserts an
+unauthenticated request is denied before the handler runs.
 """
 
 from __future__ import annotations
@@ -10,11 +11,12 @@ from __future__ import annotations
 from starlette.routing import Route
 
 import tai42_skeleton.routers.storage as router
+import tai42_skeleton.routers.storage_presence as presence
 
 from ._auth_boundary import AUTHED, boundary_client
 
 _ROUTES = [
-    Route("/api/storage", router.storage_info, methods=["GET"]),
+    Route("/api/storage", presence.storage_info, methods=["GET"]),
     Route("/api/storage/resources", router.list_resources, methods=["GET"]),
     Route("/api/storage/resources", router.upload_resource, methods=["POST"]),
     Route("/api/storage/resources/{resource_id:path}/stat", router.stat_resource, methods=["GET"]),

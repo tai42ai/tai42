@@ -18,7 +18,7 @@ import sys
 
 import tai42_skeleton.routers as _routers_pkg
 from tai42_skeleton.app.http import HttpSurface
-from tai42_skeleton.app.route_defaults import DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
+from tai42_skeleton.app.route_defaults import CORE_API_ROUTERS, DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
 from tai42_skeleton.app.route_registry import _SpecLifecycle
 
 
@@ -79,10 +79,17 @@ def test_default_api_routers_has_no_duplicates() -> None:
     assert len(DEFAULT_API_ROUTERS) == len(set(DEFAULT_API_ROUTERS))
 
 
+def test_core_api_routers_disjoint_from_defaults_and_exclude_the_catch_all() -> None:
+    # The core tier is its own membership: never doubled into the default set and
+    # never the SPA catch-all (which the loader always force-appends last).
+    assert set(CORE_API_ROUTERS).isdisjoint(DEFAULT_API_ROUTERS)
+    assert STUDIO_SPA_ROUTER not in CORE_API_ROUTERS
+
+
 def test_default_set_equals_the_discovered_route_registering_package() -> None:
-    # The DE-CIRCULARIZING assertion: the default set + the catch-all EQUALS every
-    # route-registering module discovered from the package. A new router missing
-    # from DEFAULT_API_ROUTERS fails here; a route-less helper is excluded because
-    # it registered nothing, not by a skip list.
+    # The DE-CIRCULARIZING assertion: the default set + the core tier + the catch-all
+    # EQUALS every route-registering module discovered from the package. A new router
+    # missing from both DEFAULT_API_ROUTERS and CORE_API_ROUTERS fails here; a
+    # route-less helper is excluded because it registered nothing, not by a skip list.
     discovered = _route_registering_modules()
-    assert set(DEFAULT_API_ROUTERS) | {STUDIO_SPA_ROUTER} == discovered
+    assert set(DEFAULT_API_ROUTERS) | set(CORE_API_ROUTERS) | {STUDIO_SPA_ROUTER} == discovered

@@ -1,11 +1,11 @@
-"""HTTP surface for the storage provider — ``/api/storage*`` (all AUTHED).
+"""HTTP surface for the storage MANAGEMENT operations — ``/api/storage/resources*``
+and ``/api/storage/dirs*`` (all AUTHED).
 
 AUTHED thin adapters over operations in ``tai42_skeleton.operations.storage`` — a thin
 skin over the registered :class:`~tai42_contract.storage.Storage` provider (the app's
 content store). Storage is dead by default (the skeleton ships no provider); a
 backend registers one as a manifest-loaded plugin:
 
-- ``GET /api/storage`` — provider identity (or ``present: false``, 200).
 - ``GET /api/storage/resources`` — the sorted resource ids.
 - ``GET /api/storage/resources/{id}/stat`` — the object's inferred content type.
 - ``GET /api/storage/resources/{id}/content`` — the raw object bytes, as a file
@@ -15,9 +15,14 @@ backend registers one as a manifest-loaded plugin:
 - ``DELETE /api/storage/resources/{id}`` — remove one object.
 - ``DELETE /api/storage/dirs/{path}`` — remove a directory subtree.
 
-With no provider registered every door except ``GET /api/storage`` answers a loud
-501. Success bodies are ``{"data": ...}`` (or the raw download for content); failures
-are ``{"error": "<message>"}``. The id/path containment guard and the provider-error
+This router is optional (mounted under ``default_routers`` ``"all"``/``"api"`` or an
+operator's ``routers_modules``). The presence read ``GET /api/storage`` is served by
+the always-mounted core presence router (``routers.storage_presence``), so "is a
+provider installed?" is answerable even where this management surface is absent.
+
+With no provider registered every management door answers a loud 501. Success bodies
+are ``{"data": ...}`` (or the raw download for content); failures are
+``{"error": "<message>"}``. The id/path containment guard and the provider-error
 mapping live in the operations (so the MCP tool edge and the CLI carry them too).
 """
 
@@ -43,7 +48,6 @@ from tai42_skeleton.operations.storage import delete_dir as _delete_dir_op
 from tai42_skeleton.operations.storage import delete_resource as _delete_resource_op
 from tai42_skeleton.operations.storage import list_resources as _list_resources_op
 from tai42_skeleton.operations.storage import stat_resource as _stat_resource_op
-from tai42_skeleton.operations.storage import storage_info as _storage_info_op
 from tai42_skeleton.operations.storage import upload_resource as _upload_resource_op
 
 
@@ -66,14 +70,6 @@ async def _extract_upload(request: Request) -> dict:
         "content_base64": body.get("content_base64"),
     }
 
-
-storage_info = register_operation_route(
-    tai42_app,
-    operation_metadata_of(_storage_info_op),
-    path="/api/storage",
-    method="GET",
-    action="read",
-)
 
 list_resources = register_operation_route(
     tai42_app,
