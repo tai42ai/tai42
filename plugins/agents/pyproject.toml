@@ -83,7 +83,7 @@ dev = [
     "pyright>=1.1.389",
     # In-memory Redis double for the async-park index resume tests. The lua extra
     # pulls lupa so the lease/barrier EVAL scripts execute under the double.
-    "fakeredis[lua]>=2.21",
+    "fakeredis[lua]>=2.38.0",
     # The plugin-spec test parses tai-plugin.yml.
     "pyyaml>=6",
     # Test-only: the skeleton-boot e2e integration test (tests/test_skeleton_e2e.py)
