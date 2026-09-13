@@ -1,8 +1,8 @@
 {
-  "core/contract": "10.0.0",
+  "core/contract": "11.0.0",
   "core/kit": "4.0.2",
   "core/cli": "7.0.2",
-  "core/skeleton": "14.0.2",
+  "core/skeleton": "15.0.0",
   "plugins/accounts-oidc": "1.2.6",
   "plugins/accounts-postgres": "2.4.6",
   "plugins/agents": "6.0.2",
@@ -21,7 +21,7 @@
   "plugins/identity-oidc": "1.1.7",
   "plugins/identity-redis": "1.2.7",
   "plugins/monitoring-langfuse": "2.2.7",
-  "plugins/sandbox-docker": "1.1.7",
+  "plugins/sandbox-docker": "1.2.0",
   "plugins/sandbox-local": "1.1.7",
   "plugins/storage-github": "1.1.8",
   "plugins/storage-local": "1.1.8",
@@ -33,5 +33,5 @@
   "plugins/tools-whatsapp": "1.1.7",
   "plugins/webhook-verifier-github": "1.2.5",
   "plugins/webhook-verifier-stripe": "1.2.5",
-  "e2e": "10.0.3"
+  "e2e": "10.1.0"
 }
