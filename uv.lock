@@ -5535,7 +5535,7 @@ provides-extras = ["dev", "api-gate"]
 
 [[package]]
 name = "tai42-contract"
-version = "10.0.0"
+version = "11.0.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5569,7 +5569,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "10.0.3"
+version = "10.1.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6020,7 +6020,7 @@ dev = [
 
 [[package]]
 name = "tai42-sandbox-docker"
-version = "1.1.7"
+version = "1.2.0"
 source = { editable = "plugins/sandbox-docker" }
 dependencies = [
     { name = "aiodocker" },
@@ -6100,7 +6100,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "14.0.2"
+version = "15.0.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
