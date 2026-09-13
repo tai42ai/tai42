@@ -45,7 +45,7 @@ dependencies = [
     "makefun~=1.16.0",
     # Imported directly: the worker CLI options and the listener thread's
     # dedicated sync connection (also transitive deps of rq itself).
-    "click>=8",
+    "click>=8.5.0",
     "redis>=5.2.1,<7.0.0",
     # Settings models and the ScheduleRecord round-trip model.
     "pydantic>=2.12",
