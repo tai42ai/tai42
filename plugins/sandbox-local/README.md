@@ -54,5 +54,3 @@ The `SANDBOX_LOCAL_` env group: `SANDBOX_LOCAL_ROOT` (the host workspace root) a
 `SANDBOX_LOCAL_EXEC_DEFAULT_TIMEOUT_SECONDS`). See
 [`docs/index.mdx`](src/tai42_sandbox_local/docs/index.mdx) for the full table and
 the durability model.
-
-The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).

@@ -23,8 +23,6 @@ tools' own full doc home, and the documentation site covers the platform-level s
 - Build a tool (author guide): https://tai42.ai/guides/authors/tool
 - Ecosystem catalog: https://tai42.ai/reference/catalog
 
-The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
-
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the

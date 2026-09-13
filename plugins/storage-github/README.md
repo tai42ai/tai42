@@ -21,8 +21,6 @@ home, and the documentation site covers the platform-level story:
 - Build a storage provider (author guide): https://tai42.ai/guides/authors/storage-provider
 - Ecosystem catalog: https://tai42.ai/reference/catalog
 
-The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
-
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the

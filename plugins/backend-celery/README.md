@@ -39,8 +39,6 @@ it depends on its broker stack: `celery`, `kombu`, `celery-redbeat`, `redis`,
 tool substrate) for FastMCP-context handling when composing dispatch-branch
 signatures.
 
-The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
-
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the

@@ -195,8 +195,6 @@ and a Redis reachable through the injected access-control Redis. Apply the schem
 `tai db migrate` before first serve; an out-of-date schema is caught loudly at
 boot.
 
-The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
-
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the

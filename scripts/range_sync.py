@@ -2,7 +2,7 @@
 """Derive first-party ``tai42-*`` version ranges from the released member
 versions and rewrite them in place, so ranges never go stale by hand.
 
-Three surfaces are kept in lockstep with the released versions:
+Two surfaces are kept in lockstep with the released versions:
 
   (A) first-party ``tai42-*`` dependency ranges in every workspace member's
       ``pyproject.toml`` (``[project].dependencies`` +
@@ -17,24 +17,6 @@ Three surfaces are kept in lockstep with the released versions:
       descriptor follows the GLOBAL derived contract range exactly like an
       unpinned member's; a scaffold describes a descriptor-only plugin its author
       will publish, so it follows the global range too.
-  (C) the contract-line statement in every SHIPPED README: the README a member
-      declares as ``[project].readme`` (the package page of its published wheel)
-      and the README beside every descriptor of (B). Two whole sentences are
-      owned, each written on ONE line — the release-line sentence ``The current
-      release line tracks the **<major>.x contract**
-      (`tai42-contract<extras><range>`).`` and the parenthetical ``(the <major>.x
-      contract line)`` qualifying the ``tai42-contract`` mention right before it
-      (whitespace only, at most one line break, between). Nothing else in the
-      file is a rewrite target: a ``<major>.x contract`` noun phrase in a table,
-      an upgrade note or a sentence about another package is never matched, and
-      quoted material (fenced blocks, inline code spans, HTML comments) is
-      neither rewritten nor scanned — showing the wording is not stating it.
-      Within the sentence only the major and the range move; extras are carried
-      over. A governed README carries AT MOST one statement (a second raises) and
-      a plugin's package page carries EXACTLY one (zero raises, so a deleted,
-      reflowed or reworded sentence is loud); a contract version fact in its
-      prose outside that sentence raises. A README follows the same range its
-      descriptor does.
 
 The version source of truth is each member's ``[project].version``. The range
 for a released version ``V`` is derived by a single rule (patch is ignored):
@@ -81,7 +63,6 @@ from __future__ import annotations
 import argparse
 import re
 import tomllib
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -109,43 +90,6 @@ _REQ_RE = re.compile(
 
 # A ``contract:`` line in a tai-plugin.yml, e.g. ``contract: '>=0.3,<0.4'``.
 _CONTRACT_RE = re.compile(r"^(?P<indent>\s*)contract:\s*(?P<q>['\"])(?P<val>.*?)(?P=q)(?P<trail>\s*)$")
-
-# The two contract-line statements a shipped README may carry, each matched WHOLE
-# and each written on one line: the release-line sentence of a package page, and
-# the parenthetical qualifying a ``tai42-contract`` dependency. Matching the whole
-# sentence — not a floating ``<major>.x contract`` noun phrase — is what keeps
-# every other passage in the file out of reach of a rewrite. The parenthetical
-# names the line of the dependency right before it, so that antecedent (with only
-# whitespace, at most one line break, between) is part of its shape; the same
-# idiom about a past line or another package has no antecedent and is not a
-# statement. The ``statement`` group is the span that is rewritten — the
-# antecedent stays verbatim — and the span that decides whether the candidate sits
-# in quoted material.
-_RELEASE_LINE_RE = re.compile(
-    r"(?P<statement>The current release line tracks the \*\*(?P<major>\d+)\.x contract\*\* "
-    r"\(`tai42-contract(?P<extras>\[[^\]]*\])?(?P<spec>[^`\s]*)`\)\.)"
-)
-_CONTRACT_LINE_RE = re.compile(r"`tai42-contract`[ \t]*\n?[ \t]*(?P<statement>\(the (?P<major>\d+)\.x contract line\))")
-
-# A contract version FACT in README prose: the ``<major>.x contract`` shorthand
-# however it is wrapped, or a ``tai42-contract`` requirement carrying a
-# specifier. Outside the governed statement and outside quoted material, such a
-# fact states a version this script cannot keep current.
-_CONTRACT_FACT_RE = re.compile(r"\d+\.x\s+contract\b|tai42-contract(?:\[[^\]]*\])?(?:>=|<|~=|==)\s*\d")
-
-# Markdown material that quotes rather than states: a fence line opening or
-# closing a code block, an HTML comment, a run of backticks bounding a code span.
-_FENCE_RE = re.compile(r"`{3,}|~{3,}")
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-_BACKTICK_RUN_RE = re.compile(r"`+")
-
-# A fence may be indented up to three columns; content at four is a code block of
-# its own. A tab advances four columns EVERYWHERE a column is counted — before a
-# blockquote marker as much as after one — so a tab-indented line is a code block
-# and never a quote.
-FENCE_INDENT_LIMIT = 3
-INDENTED_CODE_COLUMN = 4
-TAB_WIDTH = 4
 
 # The integer major of a ``>=<major>...`` floor and a ``<<major>...`` cap. The
 # derived range always carries both; a hand-written spec may carry either, both,
@@ -580,318 +524,6 @@ def descriptor_only_contract_files(root: Path) -> list[Path]:
 
 
 # --------------------------------------------------------------------------- #
-# README rewriting                                                            #
-# --------------------------------------------------------------------------- #
-
-
-def _floor_major(range_spec: str) -> int:
-    """The integer major of a derived range's ``>=`` floor. Raises when the range
-    carries no floor major — the README shorthand has nothing to state then."""
-    m = _FLOOR_RE.search(range_spec)
-    if m is None:
-        raise RuntimeError(f"no floor major in contract range {range_spec!r}")
-    return int(m.group(1))
-
-
-def _render_release_line(major: int, new_range: str, m: re.Match[str]) -> str:
-    """The release-line sentence restated at *major* / *new_range*, carrying over
-    the literal's extras and a version-less literal's missing specifier."""
-    spec = new_range if m.group("spec") else ""
-    extras = m.group("extras") or ""
-    return f"The current release line tracks the **{major}.x contract** (`tai42-contract{extras}{spec}`)."
-
-
-def _render_contract_line(major: int, new_range: str, m: re.Match[str]) -> str:
-    """The parenthetical restated at *major*; it carries no range of its own."""
-    return f"(the {major}.x contract line)"
-
-
-# Each owned sentence with the renderer that restates it at a given range.
-_README_STATEMENTS: tuple[tuple[re.Pattern[str], Callable[[int, str, re.Match[str]], str]], ...] = (
-    (_RELEASE_LINE_RE, _render_release_line),
-    (_CONTRACT_LINE_RE, _render_contract_line),
-)
-
-
-def _within(index: int, spans: list[tuple[int, int]]) -> bool:
-    return any(start <= index < end for start, end in spans)
-
-
-def _escaped(text: str, index: int) -> bool:
-    """True when the character at *index* carries a backslash escape: an odd run
-    of backslashes before it."""
-    backslashes = 0
-    while index - backslashes - 1 >= 0 and text[index - backslashes - 1] == "\\":
-        backslashes += 1
-    return backslashes % 2 == 1
-
-
-def _inline_code_spans(text: str, blocks: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """The code spans of *text* outside *blocks*: equal-width backtick runs paired
-    in order, as markdown pairs them. A backslash escapes the backtick it precedes,
-    so an escaped run delimits with one backtick fewer (none, if that empties it).
-    An unpaired run opens nothing."""
-    runs: list[tuple[int, int]] = []
-    for m in _BACKTICK_RUN_RE.finditer(text):
-        if _within(m.start(), blocks):
-            continue
-        start = m.start() + 1 if _escaped(text, m.start()) else m.start()
-        if start < m.end():
-            runs.append((start, m.end()))
-    spans: list[tuple[int, int]] = []
-    index = 0
-    while index < len(runs):
-        start, end = runs[index]
-        width = end - start
-        closer = next((j for j in range(index + 1, len(runs)) if runs[j][1] - runs[j][0] == width), None)
-        if closer is None:
-            index += 1
-            continue
-        spans.append((start, runs[closer][1]))
-        index = closer + 1
-    return spans
-
-
-def _indent_columns(text: str, limit: int | None = None) -> tuple[int, int]:
-    """The (columns, characters) of leading whitespace in *text*, a tab counting
-    ``TAB_WIDTH`` columns. Scanning stops once *limit* columns are exceeded, so a
-    caller can ask 'no more than three columns of indentation' without measuring
-    the rest."""
-    columns = characters = 0
-    for char in text:
-        if char not in " \t":
-            break
-        columns += TAB_WIDTH if char == "\t" else 1
-        characters += 1
-        if limit is not None and columns > limit:
-            break
-    return columns, characters
-
-
-def _line_shape(line: str) -> tuple[str, int, bool]:
-    """A line's content after any blockquote markers, the column that content
-    starts at, and whether the line is blank. Stripping the markers first is what
-    lets a fenced or indented block inside a quote be read as one — but a marker
-    is only a marker when at most ``FENCE_INDENT_LIMIT`` COLUMNS of whitespace
-    precede it, so a tab before ``>`` indents a code block instead of opening a
-    quote."""
-    index = 0
-    while True:
-        columns, characters = _indent_columns(line[index:], FENCE_INDENT_LIMIT)
-        marker = index + characters
-        if columns > FENCE_INDENT_LIMIT or marker >= len(line) or line[marker] != ">":
-            break
-        index = marker + 1
-        if index < len(line) and line[index] in " \t":
-            index += 1  # one space or tab of padding after the marker
-    rest = line[index:]
-    column, characters = _indent_columns(rest)
-    return rest[characters:], column, not rest.strip()
-
-
-def _quoted_spans(text: str) -> list[tuple[int, int]]:
-    """The spans of *text* that quote rather than state: fenced code blocks,
-    indented code blocks, HTML comments and inline code spans. Quoted material is
-    never rewritten and never scanned for facts — an author showing the wording is
-    not claiming it.
-
-    Where the model is not exact it is conservative, and always in the same
-    direction: a chunk indented four columns under a list item is read as a code
-    block, where a renderer keeps it as list content until the item's own content
-    column plus four; an unpaired backtick quotes to the next one; an HTML comment
-    is honoured inside a code span. Each errs towards quoting, which can only
-    leave a statement ungoverned — loudly, on a page that must carry one — and
-    never rewrites text a renderer shows as code.
-    """
-    spans: list[tuple[int, int]] = []
-    offset = 0
-    marker: tuple[str, int] | None = None  # the open fence's character and width
-    fence_start = 0
-    indent_start: int | None = None  # the open indented block, and its last line
-    indent_end = 0
-    blank_before = True  # an indented code block never interrupts a paragraph
-    for line in text.splitlines(keepends=True):
-        body, column, blank = _line_shape(line)
-        fence = _FENCE_RE.match(body) if column <= FENCE_INDENT_LIMIT else None
-        if marker is not None:
-            if (
-                fence is not None
-                and fence.group(0)[0] == marker[0]
-                and len(fence.group(0)) >= marker[1]
-                and not body[fence.end() :].strip()
-            ):
-                # a closing fence is the same character, at least as long as the
-                # opening run, and carries nothing after it; a shorter run and a
-                # run with an info string (a nested opener) are both body text
-                spans.append((fence_start, offset + len(line)))
-                marker = None
-        elif indent_start is not None:
-            # an indented block runs through blank lines and ends at the first
-            # non-blank line that is not indented
-            if blank:
-                pass
-            elif column >= INDENTED_CODE_COLUMN:
-                indent_end = offset + len(line)
-            else:
-                spans.append((indent_start, indent_end))
-                indent_start = None
-                if fence is not None:
-                    marker, fence_start = (fence.group(0)[0], len(fence.group(0))), offset
-        elif fence is not None:
-            marker, fence_start = (fence.group(0)[0], len(fence.group(0))), offset
-        elif blank_before and not blank and column >= INDENTED_CODE_COLUMN:
-            indent_start, indent_end = offset, offset + len(line)
-        blank_before = blank
-        offset += len(line)
-    if marker is not None:
-        spans.append((fence_start, len(text)))  # an unclosed fence quotes to the end
-    if indent_start is not None:
-        spans.append((indent_start, indent_end))
-    spans.extend(m.span() for m in _HTML_COMMENT_RE.finditer(text))
-    spans.extend(_inline_code_spans(text, spans))
-    return spans
-
-
-def _assert_statement_presence(count: int, *, required: bool, label: str) -> None:
-    """A governed README states the contract line at most once, and a plugin's
-    package page states it exactly once. Anything else raises: a statement
-    deleted, reflowed or reworded out of its shape must be loud, never a surface
-    that silently drops out of governance."""
-    if count > 1:
-        raise RuntimeError(f"{label}: {count} contract statements; a shipped README states the contract line once")
-    if required and count == 0:
-        raise RuntimeError(
-            f"{label}: no contract statement; a plugin's README states, on one line, "
-            f"'The current release line tracks the **<major>.x contract** (`tai42-contract<range>`).'"
-        )
-
-
-def _assert_contract_facts_governed(
-    text: str, statements: list[tuple[int, int]], quoted: list[tuple[int, int]], label: str
-) -> None:
-    """Raise when a contract version fact sits in prose outside the governed
-    statement: that version is one this script cannot keep current, and it would
-    go stale at the next contract major with nothing to report it."""
-    for fact in _CONTRACT_FACT_RE.finditer(text):
-        if _within(fact.start(), statements) or _within(fact.start(), quoted):
-            continue
-        raise RuntimeError(
-            f"{label}: the contract version fact {fact.group(0)!r} sits outside the contract statement; "
-            f"a shipped README states a contract version only in that statement"
-        )
-
-
-def _validated_statements(
-    text: str, label: str, required: bool
-) -> list[tuple[re.Match[str], Callable[[int, str, re.Match[str]], str]]]:
-    """The governed statements of *text*, in order, after asserting that the
-    README carries the right number of them and states no contract version fact
-    outside them. A candidate that starts inside quoted material is not a
-    statement."""
-    quoted = _quoted_spans(text)
-    statements = sorted(
-        (
-            (m, render)
-            for pattern, render in _README_STATEMENTS
-            for m in pattern.finditer(text)
-            if not _within(m.start("statement"), quoted)
-        ),
-        key=lambda found: found[0].start("statement"),
-    )
-    _assert_statement_presence(len(statements), required=required, label=label)
-    _assert_contract_facts_governed(text, [m.span("statement") for m, _ in statements], quoted, label)
-    return statements
-
-
-def readme_contract_statements(text: str, label: str = "<readme>", *, required: bool = False) -> list[str]:
-    """The governed contract statements of *text*, verbatim, validated."""
-    return [m.group("statement") for m, _ in _validated_statements(text, label, required)]
-
-
-def rewrite_readme_contract(
-    text: str, new_range: str, label: str = "<readme>", *, required: bool = False
-) -> tuple[str, list[tuple[str, str]]]:
-    """Restate the governed contract statement of *text* at *new_range*. Returns
-    (text, [(old_statement, new_statement), ...]) — the list is empty when the
-    README already states the range. Raises, without producing text, when the
-    README does not carry its statement or states a contract version outside
-    it."""
-    major = _floor_major(new_range)
-    changes: list[tuple[str, str]] = []
-    out: list[str] = []
-    pos = 0
-    for m, render in _validated_statements(text, label, required):
-        old = m.group("statement")
-        new = render(major, new_range, m)
-        if new != old:
-            changes.append((old, new))
-        out.append(text[pos : m.start("statement")])
-        out.append(new)
-        pos = m.end("statement")
-    out.append(text[pos:])
-    return "".join(out), changes
-
-
-def member_readme_file(member: Path, member_label: str) -> Path | None:
-    """The README a member ships as package metadata (``[project].readme``), or
-    None when it declares none or declares inline text. A declared path that is
-    not a file is raised, never skipped."""
-    declared = _load_toml(member / "pyproject.toml").get("project", {}).get("readme")
-    if isinstance(declared, dict):
-        declared = declared.get("file")
-    if not isinstance(declared, str) or not declared:
-        return None
-    path = member / declared
-    if not path.is_file():
-        raise RuntimeError(f"{member_label}: [project].readme points at a missing file: {declared}")
-    return path
-
-
-@dataclass(frozen=True)
-class GovernedReadme:
-    """A shipped README whose contract statement is kept current: the member whose
-    range it follows (None = the global derived range, as its descriptor does),
-    and whether the statement is mandatory — a plugin's package page states the
-    contract line, so losing it there is an error rather than an absence."""
-
-    path: Path
-    member_path: str | None
-    required: bool
-
-
-def readme_contract_files(members: list[Path], root: Path) -> list[GovernedReadme]:
-    """Every shipped README whose contract statement is governed: each member's
-    declared README (mandatory for a plugin, whose package page states the line)
-    and the README beside every governed descriptor."""
-    found: dict[str, GovernedReadme] = {}
-
-    def add(governed: GovernedReadme) -> None:
-        key = governed.path.resolve().as_posix()
-        if governed.path.is_file() and key not in found:
-            found[key] = governed
-
-    for member in members:
-        member_path = member.relative_to(root).as_posix()
-        readme = member_readme_file(member, member_path)
-        if readme is not None:
-            add(GovernedReadme(readme, member_path, member.relative_to(root).parts[0] == "plugins"))
-    for member, yml in plugin_descriptor_files(members, root):
-        add(GovernedReadme(yml.parent / "README.md", member.relative_to(root).as_posix(), False))
-    for yml in (*descriptor_only_contract_files(root), *scaffold_descriptor_files(members, root)):
-        add(GovernedReadme(yml.parent / "README.md", None, False))
-    return [found[key] for key in sorted(found)]
-
-
-def _readme_target(governed: GovernedReadme, preserved: dict[str, str | None], contract_range: str) -> str | None:
-    """The contract range a governed README must state: the range its member's
-    preserved pin allows when one applies (None when that pin has no derivable
-    floor — leave the README alone), else the global derived range."""
-    if governed.member_path is None:
-        return contract_range
-    return preserved.get(governed.member_path, contract_range)
-
-
-# --------------------------------------------------------------------------- #
 # Apply / check                                                               #
 # --------------------------------------------------------------------------- #
 
@@ -900,23 +532,20 @@ def _readme_target(governed: GovernedReadme, preserved: dict[str, str | None], c
 class SyncReport:
     """What an apply run changed / what a check run found out of sync.
 
-    ``preserved``, ``warnings``, ``descriptor_untouched`` and
-    ``readme_untouched`` are informational only: a preserved pin is not a drift,
-    a warning does not fail the gate, and a descriptor or README left untouched
-    under an underivable-floor pin is not a rewrite — so none of them feed
-    ``dirty``."""
+    ``preserved``, ``warnings`` and ``descriptor_untouched`` are informational
+    only: a preserved pin is not a drift, a warning does not fail the gate, and a
+    descriptor left untouched under an underivable-floor pin is not a rewrite — so
+    none of them feed ``dirty``."""
 
     spec_changes: list[tuple[str, SpecChange]]  # (member_path, change)
     contract_changes: list[tuple[str, str, str]]  # (yaml_path, old, new)
     preserved: list[tuple[str, Preserved]]  # (member_path, preserved)
     warnings: list[tuple[str, SpecChange]]  # (member_path, unpinned cross-major change)
     descriptor_untouched: list[tuple[str, str]]  # (yaml_path, left-at contract value)
-    readme_changes: list[tuple[str, str, str]]  # (readme_path, old statement, new statement)
-    readme_untouched: list[tuple[str, str]]  # (readme_path, left-at statement)
 
     @property
     def dirty(self) -> bool:
-        return bool(self.spec_changes or self.contract_changes or self.readme_changes)
+        return bool(self.spec_changes or self.contract_changes)
 
 
 def _contract_range(first_party: dict[str, str]) -> str:
@@ -981,15 +610,13 @@ def _empty_report() -> SyncReport:
         preserved=[],
         warnings=[],
         descriptor_untouched=[],
-        readme_changes=[],
-        readme_untouched=[],
     )
 
 
 def apply(root: Path) -> SyncReport:
-    """Rewrite every member pyproject + every governed descriptor and README in
-    place. Every surface is derived and validated BEFORE any file is written, so
-    a refused surface leaves the tree exactly as it was. Idempotent."""
+    """Rewrite every member pyproject + every governed descriptor in place. Every
+    surface is derived and validated BEFORE any file is written, so a refused
+    surface leaves the tree exactly as it was. Idempotent."""
     members = discover_members(root)
     _assert_no_stray_pin_tables(root, members)
     first_party = first_party_versions(members)
@@ -1040,20 +667,6 @@ def apply(root: Path) -> SyncReport:
             writes.append((yml, new_text))
             report.contract_changes.append((yaml_path, old or "", contract_range))
 
-    for governed in readme_contract_files(members, root):
-        readme_path = governed.path.relative_to(root).as_posix()
-        text = governed.path.read_text()
-        target = _readme_target(governed, preserved_contract, contract_range)
-        if target is None:
-            for statement in readme_contract_statements(text, readme_path, required=governed.required):
-                report.readme_untouched.append((readme_path, statement))
-            continue  # underivable-floor pin: README left untouched entirely
-        new_text, changes = rewrite_readme_contract(text, target, readme_path, required=governed.required)
-        if changes:
-            writes.append((governed.path, new_text))
-            for old_statement, new_statement in changes:
-                report.readme_changes.append((readme_path, old_statement, new_statement))
-
     for path, new_text in writes:
         path.write_text(new_text)
 
@@ -1062,18 +675,17 @@ def apply(root: Path) -> SyncReport:
 
 
 def _self_assert(root: Path) -> None:
-    """After applying, re-derive and confirm every rewritten specifier, contract
-    pin and README statement now equals the formula output. Raises on any
-    mismatch, naming every surface still out of sync."""
+    """After applying, re-derive and confirm every rewritten specifier and
+    contract pin now equals the formula output. Raises on any mismatch, naming
+    every surface still out of sync."""
     drift = check(root)
     if drift.dirty:
         raise RuntimeError(f"self-assert failed after apply:\n{_format_drift(drift)}")
 
 
 def check(root: Path) -> SyncReport:
-    """Verify every first-party specifier, contract pin and README contract
-    statement already equals the formula output. Returns a report of any drift
-    (does not modify files)."""
+    """Verify every first-party specifier and contract pin already equals the
+    formula output. Returns a report of any drift (does not modify files)."""
     members = discover_members(root)
     _assert_no_stray_pin_tables(root, members)
     first_party = first_party_versions(members)
@@ -1113,18 +725,6 @@ def check(root: Path) -> SyncReport:
         if current is not None and current != contract_range:
             report.contract_changes.append((yaml_path, current, contract_range))
 
-    for governed in readme_contract_files(members, root):
-        readme_path = governed.path.relative_to(root).as_posix()
-        text = governed.path.read_text()
-        target = _readme_target(governed, preserved_contract, contract_range)
-        if target is None:
-            for statement in readme_contract_statements(text, readme_path, required=governed.required):
-                report.readme_untouched.append((readme_path, statement))
-            continue  # underivable-floor pin: README not flagged, left untouched
-        _, changes = rewrite_readme_contract(text, target, readme_path, required=governed.required)
-        for old_statement, new_statement in changes:
-            report.readme_changes.append((readme_path, old_statement, new_statement))
-
     return report
 
 
@@ -1148,19 +748,12 @@ def _print_descriptor_untouched(report: SyncReport) -> None:
         print(f"range-sync: {yaml_path}: descriptor left untouched (pinned, underivable floor), at {kept!r}")
 
 
-def _print_readme_untouched(report: SyncReport) -> None:
-    for readme_path, kept in report.readme_untouched:
-        print(f"range-sync: {readme_path}: contract statement left untouched (pinned, underivable floor), at {kept!r}")
-
-
 def _format_drift(report: SyncReport) -> str:
     lines: list[str] = []
     for member_path, change in report.spec_changes:
         lines.append(f"  {member_path}/pyproject.toml: {change.old_req!r} -> {change.new_req!r}")
     for yaml_path, old, new in report.contract_changes:
         lines.append(f"  {yaml_path}: contract {old!r} -> {new!r}")
-    for readme_path, old, new in report.readme_changes:
-        lines.append(f"  {readme_path}: contract statement {old!r} -> {new!r}")
     return "\n".join(lines)
 
 
@@ -1184,7 +777,6 @@ def main(argv: list[str] | None = None) -> int:
         report = check(root)
         _print_preserved(report)
         _print_descriptor_untouched(report)
-        _print_readme_untouched(report)
         for member_path, change in report.warnings:
             print(
                 f"range-sync: WARNING: {member_path}/pyproject.toml: cross-major rewrite of an "
@@ -1196,13 +788,12 @@ def main(argv: list[str] | None = None) -> int:
             print(_format_drift(report))
             print("\nRun `python scripts/range_sync.py` to fix.")
             return 1
-        print("range-sync: all first-party ranges, contract pins and README statements are in sync.")
+        print("range-sync: all first-party ranges and contract pins are in sync.")
         return 0
 
     report = apply(root)
     _print_preserved(report)
     _print_descriptor_untouched(report)
-    _print_readme_untouched(report)
     if report.dirty:
         print("range-sync: rewrote the derived ranges:")
         print(_format_drift(report))

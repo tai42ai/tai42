@@ -62,8 +62,6 @@ records are plain Redis hashes, so `redis`, `valkey`, or any module-less
 `redis-server` works. An unreachable or broken store is caught loudly by
 `healthcheck()` at startup rather than failing per-request.
 
-The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
-
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the

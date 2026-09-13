@@ -30,8 +30,6 @@ settings cache). Beyond those it depends on `httpx`, `starlette`, and
 `pydantic` / `pydantic-settings` — the whole Slack surface is two HTTPS POSTs
 plus stdlib `hmac`; no `slack_sdk`, no Bolt.
 
-The current release line tracks the **10.x contract** (`tai42-contract>=10.0,<11`).
-
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the

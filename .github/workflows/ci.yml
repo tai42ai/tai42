@@ -545,9 +545,8 @@ jobs:
       - name: Ruff format
         run: uv run --no-sync ruff format --check scripts tests
       - name: Range sync check
-        # Catch range, contract-pin and README contract-statement drift a person
-        # hand-authored on a development PR — including a too-wide cap that
-        # still admits the sibling.
+        # Catch first-party range and contract-pin drift a person hand-authored on
+        # a development PR — including a too-wide cap that still admits the sibling.
         # A release train deliberately runs its dependents' ranges behind the bumped
         # member until the post-merge `fix(deps)` re-pin (release-repin.yml)
         # republishes them, so this exact-match gate — which cannot pass while that

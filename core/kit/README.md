@@ -29,8 +29,7 @@ tai42-contract  <-+                  +--  tai42-skeleton
                (the remote client)
 ```
 
-`tai42-kit` obeys the leaf rule: its only tai-* dependency is `tai42-contract`
-(the 10.x contract line). It
+`tai42-kit` obeys the leaf rule: its only tai-* dependency is `tai42-contract`. It
 implements the contract's `BaseClient` Protocol and consumes its manifest types;
 among tai-* packages it depends on nothing else.
 
