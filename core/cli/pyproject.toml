@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=11.0,<12",
     "typer>=0.27.2",
     # Imported directly (TyperGroup/TyperOption plumbing, click.shell_completion).
-    "click>=8.3",
+    "click>=8.5.0",
     # The one HTTP client the remote commands talk through.
     "httpx>=0.28",
     # The notifications command adapts channel/interaction payloads through pydantic.

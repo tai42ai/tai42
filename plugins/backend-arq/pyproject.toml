@@ -44,7 +44,7 @@ dependencies = [
     # signature helpers (fastmcp is the platform's tool substrate).
     "fastmcp>=3.4.7",
     # CLI arg parsing for the worker launch (same option surface as `arq worker`).
-    "click>=8",
+    "click>=8.5.0",
     # SettingsConfigDict / to_jsonable_python used directly by settings + tasks.
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",

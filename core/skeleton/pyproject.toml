@@ -38,7 +38,7 @@ dependencies = [
     # its local/runtime commands to the CLI through the `tai.commands` entry point.
     "tai42-cli>=7.0,<8",
     # Direct third-party deps imported by the orchestrator + copied-in impl.
-    "click>=8.3",
+    "click>=8.5.0",
     # The local commands the skeleton contributes are Typer apps. Typer builds on
     # click, so they compose with the click launchers mounted as ``tai`` subcommands.
     "typer>=0.27.2",
