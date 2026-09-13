@@ -313,7 +313,14 @@ def test_manifest_sanity():
 def test_descriptor_only_plugins(plugin_dir: Path):
     """A descriptor-only plugin: a valid package-less spec, a first-party docs
     tree, the required sidecar files, version lockstep, and a contract range that
-    admits the workspace contract version."""
+    admits the workspace contract version.
+
+    A descriptor-only component carries no pyproject pin to preserve, so its
+    ``contract:`` range follows the global derived range like an unpinned member:
+    outside the pending-re-pin window the on-disk range is asserted (a hand-authored
+    pin refusing the contract is caught on a development PR); inside it the range the
+    re-pin will produce is asserted instead, so a contract major bump is not flagged
+    against the not-yet-re-pinned descriptors on the train branch and its main push."""
     spec = load_plugin_spec(plugin_dir / "tai-plugin.yml")
     assert spec.package is None, f"{plugin_dir.name}: descriptor plugin must carry no package"
 
@@ -326,8 +333,11 @@ def test_descriptor_only_plugins(plugin_dir: Path):
     assert version_txt == spec.version, f"{plugin_dir.name}: version.txt={version_txt} != yml version {spec.version}"
 
     assert spec.contract is not None, f"{plugin_dir.name}: descriptor plugin must declare a contract range"
-    assert SpecifierSet(spec.contract).contains(CONTRACT_VERSION, prereleases=True), (
-        f"{plugin_dir.name}: contract {spec.contract!r} does not admit workspace contract {CONTRACT_VERSION}"
+    effective = _effective_spec(
+        range_sync.CONTRACT_PACKAGE, spec.contract, CONTRACT_VERSION, set(), pending_repin=_PENDING_REPIN_WINDOW
+    )
+    assert SpecifierSet(effective).contains(CONTRACT_VERSION, prereleases=True), (
+        f"{plugin_dir.name}: contract {effective!r} does not admit workspace contract {CONTRACT_VERSION}"
     )
 
 
