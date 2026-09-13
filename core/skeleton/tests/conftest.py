@@ -116,6 +116,23 @@ class _FakePool:
 
 
 @pytest.fixture(autouse=True)
+def _reset_settings_caches_between_tests():
+    """Drop every cached settings accessor and settings-derived singleton around each test.
+
+    Accessors such as ``interactions_settings`` and singletons such as the
+    conversations manager snapshot their env once and cache it process-wide (only
+    ``reset_all_settings`` clears them). A test that sets an env like
+    ``INTERACTIONS_REDIS_URL`` / ``CONVERSATIONS_REDIS_URL`` and one that leaves it
+    unset then read the same stale value. Resetting before and after each test keeps
+    a value cached under one env from being read by a test running under the other —
+    the leak parallel workers hit, running tests from different files in an
+    unpredictable order within one process."""
+    reset_all_settings()
+    yield
+    reset_all_settings()
+
+
+@pytest.fixture(autouse=True)
 def _offline_connector_categories(monkeypatch: pytest.MonkeyPatch) -> None:
     @asynccontextmanager
     async def fake_client_ctx(client_cls, settings=None, **kwargs):

@@ -280,17 +280,6 @@ jobs:
           if [ "$WIDEN" = "true" ] && { [ "$FORCE_FULL" = "true" ] || [ "$BROWSERS" = "true" ]; }; then
             run_browsers=true
           fi
-          echo "core=$CORE" >> "$GITHUB_OUTPUT"
-          echo "check_matrix=$(jq -c '{include: .}' <<<"$entries")" >> "$GITHUB_OUTPUT"
-          echo "frontend_matrix=$(jq -c '{include: .}' <<<"$frontends")" >> "$GITHUB_OUTPUT"
-          echo "run_e2e=$run_e2e" >> "$GITHUB_OUTPUT"
-          echo "e2e_backends=$backends" >> "$GITHUB_OUTPUT"
-          echo "run_monitoring=$run_monitoring" >> "$GITHUB_OUTPUT"
-          # Outside the browser lane the ui suite follows the python e2e gate.
-          echo "run_ui=$run_e2e" >> "$GITHUB_OUTPUT"
-          echo "run_browsers=$run_browsers" >> "$GITHUB_OUTPUT"
-          echo "browser_engines=$(engine_list "$run_browsers")" >> "$GITHUB_OUTPUT"
-          echo "browser_lane=false" >> "$GITHUB_OUTPUT"
           # The heavy lanes — the e2e backend matrix and the ui-e2e browser matrix,
           # the jobs that boot service stacks or browsers — carry the CI cost. They
           # add no signal to a commit that only carries release version bumps, so
@@ -314,7 +303,21 @@ jobs:
               needs_heavy=false
             fi
           fi
-          echo "needs_heavy=$needs_heavy" >> "$GITHUB_OUTPUT"
+          # Every assembled output goes out in one grouped redirect.
+          {
+            echo "core=$CORE"
+            echo "check_matrix=$(jq -c '{include: .}' <<<"$entries")"
+            echo "frontend_matrix=$(jq -c '{include: .}' <<<"$frontends")"
+            echo "run_e2e=$run_e2e"
+            echo "e2e_backends=$backends"
+            echo "run_monitoring=$run_monitoring"
+            # Outside the browser lane the ui suite follows the python e2e gate.
+            echo "run_ui=$run_e2e"
+            echo "run_browsers=$run_browsers"
+            echo "browser_engines=$(engine_list "$run_browsers")"
+            echo "browser_lane=false"
+            echo "needs_heavy=$needs_heavy"
+          } >> "$GITHUB_OUTPUT"
 
   check:
     needs: [reuse, changes]
@@ -390,11 +393,16 @@ jobs:
         # empty; the integration fixtures apply the shipped schema chain through the
         # migration runner, and per-run unique ``state``/token keys keep the shared
         # tables collision-free.
+        # The offline pass is the long half; it is distributed across worker
+        # processes with pytest-xdist (``-n auto`` = the runner's core count), and
+        # pytest-cov aggregates the workers' data so the combined floor is enforced
+        # unchanged. The integration pass stays serial: it is small and shares the one
+        # Postgres/Redis service, so worker fan-out buys nothing there.
         if: ${{ matrix.dir == 'core/skeleton' }}
         working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
-          uv run --no-sync pytest -m "not integration" --cov --cov-report= --cov-fail-under=0
+          uv run --no-sync pytest -m "not integration" -n auto --cov --cov-report= --cov-fail-under=0
           TAI42_SKELETON_REAL_PG=1 \
           TAI_DATABASE_DEFAULT_PG_HOST=localhost \
           TAI_DATABASE_DEFAULT_PG_PASSWORD=postgres \
@@ -585,10 +593,11 @@ jobs:
         # workspace sync is needed to run it.
         run: uv run --no-project --python 3.13 python scripts/stable_resolution.py
 
-  # Each backend leg is split 3 ways by pytest-split using the committed
+  # Each backend leg is split 10 ways by pytest-split using the committed
   # per-test durations in e2e/.test_durations; unknown/new tests get the
-  # average duration. Refresh that file from CI junit data when the shards drift
-  # out of balance.
+  # average duration. Ten shards drive the heaviest shard down to the single
+  # longest test's own runtime — the floor no split count can beat. Refresh that
+  # file from CI junit data when the shards drift out of balance.
   e2e:
     needs: [reuse, changes]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.run_e2e == 'true' && needs.changes.outputs.needs_heavy == 'true' }}
@@ -599,7 +608,7 @@ jobs:
       fail-fast: false
       matrix:
         backend: ${{ fromJSON(needs.changes.outputs.e2e_backends) }}
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     services:
       redis:
         image: redis:7-alpine
@@ -699,7 +708,7 @@ jobs:
         run: >-
           uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit.xml -o log_cli=true
           ${{ matrix.backend != 'arq' && '-m "not backendless"' || '' }}
-          --splits 3 --group ${{ matrix.shard }} --durations-path .test_durations --splitting-algorithm least_duration
+          --splits 10 --group ${{ matrix.shard }} --durations-path .test_durations --splitting-algorithm least_duration
       - name: Run the fixture identity/storage axis (default leg)
         # The second value on each of the identity and storage axes, so the plugin
         # switch itself is exercised rather than pinned to one provider. Only the
