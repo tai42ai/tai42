@@ -2366,7 +2366,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-checkpoint-postgres"
-version = "3.1.1"
+version = "3.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "langgraph-checkpoint" },
@@ -2374,9 +2374,9 @@ dependencies = [
     { name = "psycopg" },
     { name = "psycopg-pool" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/06/92/1e8959f8cd1b56e672fde3227f6fd642be85af6c5fd662d73921074aa39d/langgraph_checkpoint_postgres-3.1.1.tar.gz", hash = "sha256:d320e147ddad8c374cd546df0b52b532dd54d0541dd9fd23fc738cbd5de76f41", size = 150413, upload-time = "2026-07-30T19:15:39.014Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9d/52/6e732f7bf702ef4918b64ea4107e7da21d4276b808f9a651fe34be9b0abe/langgraph_checkpoint_postgres-3.1.2.tar.gz", hash = "sha256:1cd404803ff895a2b79f3ac04ce92b775e6b999715f8333fce674c6d927bba95", size = 155091, upload-time = "2026-08-07T20:40:00.049Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/32/ba457698a48a0e18d786caa770033067049fbe36d6846f8e50f13b594b51/langgraph_checkpoint_postgres-3.1.1-py3-none-any.whl", hash = "sha256:6e353aecd8150de144fef8e51a49076f58b7d6830d4cf51392b7ad4d79832ba7", size = 50778, upload-time = "2026-07-30T19:15:37.405Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/62/8899c9f4d9b97d5b3eb0c07c13cdf5f63342f15f5ef93eaf3477958df602/langgraph_checkpoint_postgres-3.1.2-py3-none-any.whl", hash = "sha256:6a7e38ef16985b54e356cba7bdaf447943aae33d5aaf290026c593bb6b4a6264", size = 52084, upload-time = "2026-08-07T20:39:58.994Z" },
 ]
 
 [[package]]
@@ -5645,7 +5645,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.4.7,<4" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "joserfc", specifier = ">=1.7,<2" },
-    { name = "langgraph-checkpoint-postgres", specifier = ">=3,<4" },
+    { name = "langgraph-checkpoint-postgres", specifier = ">=3.1.2,<4" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3,<4" },
     { name = "prometheus-client", specifier = ">=0.24" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
@@ -5924,7 +5924,7 @@ requires-dist = [
     { name = "langchain-xai", marker = "extra == 'xai'", specifier = ">=1.2" },
     { name = "langgraph", marker = "extra == 'llm'", specifier = ">=1.1,<2" },
     { name = "langgraph-checkpoint", marker = "extra == 'llm'", specifier = ">=4.2.0" },
-    { name = "langgraph-checkpoint-postgres", marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.0.5" },
+    { name = "langgraph-checkpoint-postgres", marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.1.2" },
     { name = "langgraph-checkpoint-redis", marker = "extra == 'llm'", specifier = ">=0.5" },
     { name = "langgraph-checkpoint-sqlite", marker = "extra == 'langgraph-checkpoint-sqlite'", specifier = ">=3.0.3" },
     { name = "mcp", specifier = ">=1" },

@@ -99,7 +99,7 @@ huggingface = [
 # llm/store/store.py inside the per-backend match branches.
 langgraph-checkpoint-postgres = [
     "tai42-kit[llm]",
-    "langgraph-checkpoint-postgres>=3.0.5",
+    "langgraph-checkpoint-postgres>=3.1.2",
     "psycopg[pool]>=3.3.2",
 ]
 langgraph-checkpoint-sqlite = [

@@ -102,7 +102,7 @@ dependencies = [
     # (the harness IS the checkpoint client) — the Postgres and SQLite backends plus
     # the async SQLite driver. Pinned to the installed langgraph-checkpoint 4.x line's
     # 3.x saver releases; psycopg/psycopg-pool are already present above.
-    "langgraph-checkpoint-postgres>=3,<4",
+    "langgraph-checkpoint-postgres>=3.1.2,<4",
     "langgraph-checkpoint-sqlite>=3,<4",
     "aiosqlite>=0.20",
     # The dynamic Postgres MCP server the mcp-mount stack mounts as a subprocess
