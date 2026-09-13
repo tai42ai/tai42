@@ -26,6 +26,11 @@ dependencies = [
     "pydantic>=2.12",
 ]
 
+[project.scripts]
+# Emits or freshness-checks the served-document JSON-schema bundle. Pure and
+# offline (pydantic only), so it runs in the contract's own test job.
+tai42-contract-schemas = "tai42_contract.schema_export.cli:main"
+
 [project.urls]
 Homepage = "https://tai42.ai"
 Repository = "https://github.com/tai42ai/tai42/tree/main/core/contract"
@@ -55,7 +60,7 @@ where = ["src"]
 include = ["tai42_contract*"]
 
 [tool.setuptools.package-data]
-tai42_contract = ["py.typed"]
+tai42_contract = ["py.typed", "schemas/*.json"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]

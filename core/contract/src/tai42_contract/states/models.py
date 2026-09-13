@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.locale import normalize_optional_locale
@@ -245,6 +245,75 @@ class StateDeclaration(BaseModel):
         return self
 
 
+class StateTemplateDeclarations(BaseModel):
+    """The ``declarations`` section of a state-template document: the JSON ``schema`` (wire
+    key ``schema``, attribute ``schema_``) of the static values an attachment stores, and an
+    OPTIONAL ``check`` — a :class:`~tai42_contract.template.TemplatedText` carrying a jq
+    predicate over those values. Structural validation (the check's jq, the schema's shape)
+    lives at the store; this model pins the served wire shape.
+
+    The wire key ``schema`` is the attribute ``schema_`` (alias) because a ``schema`` field
+    would shadow ``BaseModel.schema``."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, serialize_by_alias=True)
+
+    schema_: dict[str, Any] = Field(alias="schema")
+    check: TemplatedText | None = None
+
+
+class StateTemplateJq(BaseModel):
+    """One named jq program on a state template. ``purpose`` is ``input`` — a read over the
+    record returning a value — or ``update`` — a program over ``{record, input}`` returning a
+    template-relative op batch. ``jq`` is the program body as a
+    :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).
+    ``params`` names the keys the program takes; ``reads``/``writes`` are the
+    template-relative record paths an ``update`` program declares and are absent on an
+    ``input`` program. Structural checks (jq compilation, path resolution) live at the store;
+    this model pins the served wire shape."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    purpose: Literal["input", "update"]
+    jq: TemplatedText
+    description: str = ""
+    params: list[str] = Field(default_factory=list)
+    reads: list[list[str]] = Field(default_factory=list[list[str]])
+    writes: list[list[str]] = Field(default_factory=list[list[str]])
+
+    @model_validator(mode="after")
+    def _reads_writes_only_on_update(self) -> StateTemplateJq:
+        if self.purpose == "input" and (self.reads or self.writes):
+            raise ValueError("an 'input' template_jq program declares no reads or writes")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_by_purpose(self, handler: Any) -> dict[str, Any]:
+        """An ``input`` program carries no ``reads``/``writes`` on the wire; an ``update``
+        program carries both (each defaulting to an empty list). Dropping them for an input
+        program keeps the served shape purpose-exact rather than padding it with empty
+        record-path lists that only an update program means."""
+        data = handler(self)
+        if self.purpose == "input":
+            data.pop("reads", None)
+            data.pop("writes", None)
+        return data
+
+
+class StateTemplateReconcile(BaseModel):
+    """The ``reconcile`` section of a state-template document: three jq programs the store
+    runs to settle a state's OPEN records on a declarations edit — ``orphans`` names the items
+    a record subtree orphans against the new declarations, ``resolutions`` names the
+    not-done resolutions a close may name, and ``close`` returns the op batch that closes one
+    orphan. Each is a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a
+    stored ``id``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    orphans: TemplatedText
+    close: TemplatedText
+    resolutions: TemplatedText
+
+
 class StateTemplateDocument(BaseModel):
     """A state-template document: the reusable schema fragment plus the parameters, write
     regimes, attach-time ``declarations`` and ``trace`` switch the platform owns, plus
@@ -255,10 +324,11 @@ class StateTemplateDocument(BaseModel):
     generically, so a template is usable through the API with no other engine.
     ``extra="forbid"`` refuses any key outside these.
 
-    The wire key ``schema`` is the attribute ``schema_`` (alias). Structural validation of
-    the fragment, regime paths, declarations, template_jq and reconcile lives at the store
-    — ``template_jq``/``reconcile`` travel as free ``dict`` objects here (matching
-    ``declarations``/``regimes``) and are parsed and checked in the skeleton."""
+    The wire key ``schema`` is the attribute ``schema_`` (alias). The ``declarations``,
+    ``template_jq`` and ``reconcile`` sections carry their served sub-shapes
+    (:class:`StateTemplateDeclarations`, :class:`StateTemplateJq`,
+    :class:`StateTemplateReconcile`); the skeleton store does the semantic validation (jq
+    compilation, regime/record path resolution against the fragment) these models do not."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, serialize_by_alias=True)
 
@@ -268,16 +338,11 @@ class StateTemplateDocument(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     schema_: TemplatedText | dict[str, Any] = Field(default_factory=dict, alias="schema")
     regimes: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
-    declarations: dict[str, Any] | None = None
+    declarations: StateTemplateDeclarations | None = None
     trace: dict[str, Any] = Field(default_factory=dict)
-    #: ``name -> {description, purpose, ...}`` — each a named jq program. An ``input``-purpose
-    #: entry (with ``params``) reads the record → a value; an ``update``-purpose entry (with
-    #: ``reads``/``writes``) maps ``{record, input}`` → a template-relative op batch.
-    template_jq: dict[str, Any] | None = None
-    #: ``{orphans, close, resolutions}`` — named jq programs the skeleton runs to settle open
-    #: records on a declarations edit: ``orphans`` receives ``{previous, new, data}``,
-    #: ``resolutions`` receives ``{new}``, and ``close`` receives ``{data, id, resolution}``.
-    reconcile: dict[str, Any] | None = None
+    #: ``name -> program`` — each a named jq program keyed by its handle.
+    template_jq: dict[str, StateTemplateJq] | None = None
+    reconcile: StateTemplateReconcile | None = None
 
     @field_validator("name")
     @classmethod

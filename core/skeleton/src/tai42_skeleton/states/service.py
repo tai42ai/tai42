@@ -66,6 +66,7 @@ from tai42_contract.states.models import (
     StateRecord,
     StateSubject,
     StateTemplateDocument,
+    StateTemplateReconcile,
     TemplateJqApplyResult,
     TemplateJqResult,
     WriteEntry,
@@ -89,7 +90,6 @@ from tai42_skeleton.states.templates import (
     DECLARATIONS_CHECK_VARIABLES,
     MEMBER_JQ_VARIABLES,
     StateTemplate,
-    TemplateReconcile,
     compose_effective_schema,
     regime_for,
     template_jq_prelude,
@@ -1605,7 +1605,7 @@ class StatesService:
         raise RuntimeError(f"reconcile: template {template_name!r} is not attached on state {state!r}")
 
     async def _run_reconcile(
-        self, context: AttachReconcileContext, reconcile: TemplateReconcile, path: list[str]
+        self, context: AttachReconcileContext, reconcile: StateTemplateReconcile, path: list[str]
     ) -> None:
         previous = context.previous_declarations or {}
         new = context.new_declarations
@@ -1658,7 +1658,7 @@ class StatesService:
 
     async def _reconcile_orphans(
         self,
-        reconcile: TemplateReconcile,
+        reconcile: StateTemplateReconcile,
         subtree: dict[str, Any],
         *,
         previous: dict[str, Any],
@@ -1678,7 +1678,7 @@ class StatesService:
         return result
 
     async def _reconcile_guard_resolution(
-        self, context: AttachReconcileContext, reconcile: TemplateReconcile, new: dict[str, Any], resolution: Any
+        self, context: AttachReconcileContext, reconcile: StateTemplateReconcile, new: dict[str, Any], resolution: Any
     ) -> None:
         if not isinstance(resolution, str) or not resolution.strip():
             raise TemplateValidationError(
@@ -1830,7 +1830,7 @@ class StatesService:
                 )
             return
         try:
-            Draft202012Validator(template.declarations.schema).validate(declarations)
+            Draft202012Validator(template.declarations.schema_).validate(declarations)
         except jsonschema.ValidationError as exc:
             raise TemplateValidationError(
                 f"attach declarations are invalid under template {template.name!r}: {exc.message}"

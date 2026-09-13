@@ -23,6 +23,7 @@ from tai42_contract.states import (
     StateAttach,
     StateBinding,
     StateSubject,
+    StateTemplateJq,
     WriteOrigin,
 )
 from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
@@ -287,16 +288,16 @@ async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bo
                 )
                 if update.adapter is not None:
                     compile_check(await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter))
-                elif program.get("params"):
+                elif program.params:
                     raise ValueValidationError(
                         f"state binding update {update.template_jq!r} on state {attach.state!r} declares params "
-                        f"{program['params']} but the binding carries no adapter to fill its input"
+                        f"{program.params} but the binding carries no adapter to fill its input"
                     )
 
 
 async def _require_program(
     app: TaiMCP, state: str, name: str, purpose: str, *, declared: Iterable[str] = ()
-) -> dict[str, Any]:
+) -> StateTemplateJq:
     """Resolve a named ``template_jq`` across ``state``'s attachments and assert its purpose;
     return its document entry (so the caller can read declared ``params``). An unknown or
     ambiguous name, or a wrong purpose, is a loud refusal. ``declared`` names the binding's own
@@ -306,7 +307,7 @@ async def _require_program(
     attachments = await app.states.list_attachments(state)
     templates = {row["template"] for row in attachments} | set(declared)
     target, program_name = name.split(".", 1) if "." in name else (None, name)
-    matches: list[dict[str, Any]] = []
+    matches: list[StateTemplateJq] = []
     for template_name in templates:
         if target is not None and template_name != target:
             continue
@@ -321,8 +322,8 @@ async def _require_program(
     if len(matches) > 1:
         raise ValueValidationError(f"template_jq {name!r} is declared by more than one template on state {state!r}")
     entry = matches[0]
-    if entry.get("purpose") != purpose:
+    if entry.purpose != purpose:
         raise ValueValidationError(
-            f"template_jq {name!r} on state {state!r} has purpose {entry.get('purpose')!r}, needs {purpose!r}"
+            f"template_jq {name!r} on state {state!r} has purpose {entry.purpose!r}, needs {purpose!r}"
         )
     return entry

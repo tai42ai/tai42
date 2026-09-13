@@ -1,0 +1,2164 @@
+{
+  "$defs": {
+    "HookSubject": {
+      "additionalProperties": false,
+      "description": "The optional state subject a hook fire targets: the conversation-target scope\n``(target_kind, target_name)``, the subject ``kind`` (matching\n:data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text\ncarrying (inline or by stored id) a jq program evaluated over the event payload at\nfire — it must yield a non-empty string, else the fire fails loudly like any hook\nerror. Frozen; deposited as the ambient state context so a state write during the fire\nis keyed and attributed to the hook.",
+      "properties": {
+        "key_expr": {
+          "$ref": "#/$defs/TemplatedText"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": [
+            "agent",
+            "tool"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "target_name": {
+          "minLength": 1,
+          "title": "Target Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "target_name",
+        "kind",
+        "key_expr"
+      ],
+      "title": "HookSubject",
+      "type": "object"
+    },
+    "MediaItem": {
+      "description": "One media item shown WITH a message — a display element, and inbound the shape a participant's\nsent media takes.\n\n``kind`` selects how it renders: an ``image`` inline, a ``document``/``video``/``audio`` as\nthe matching file bubble, a ``link`` as a labelled anchor. ``url`` is the source. A file\nkind (``image``/``document``/``video``/``audio``) must be an absolute ``https`` URL, a\nsame-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to media the skeleton serves by id, or an\nabsolute ``http(s)`` served reference of that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a\nchannel send mints from ``public_base_url`` (remote file media is https-only: the inbox CSP\n``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an ``http:``\nremote source would be an unrenderable record); ``image`` ADDITIONALLY admits an inline\n``data:image/*`` URI — that inline form is image-only, a ``data:`` URI on any other file\nkind is refused. A ``link`` must be an absolute ``http(s)`` URL (anchors are not governed by\n``img-src``; the human clicks through). A remote url names a host directly — an ASCII DNS\nname, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply punycode); an embedded\n``user@`` credential form is rejected as it spoofs the authority — and is always a single\nline — raw whitespace and control/format characters are rejected. ``caption`` is the\naccessibility text — the image's alt text, a file's label, or the link's display label.\n``filename`` is the document's suggested display name; it is meaningful ONLY for a\n``document`` item and is refused on every other kind.",
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "filename": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Filename"
+        },
+        "kind": {
+          "$ref": "#/$defs/MediaKind"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "url"
+      ],
+      "title": "MediaItem",
+      "type": "object"
+    },
+    "MediaKind": {
+      "enum": [
+        "image",
+        "link",
+        "document",
+        "video",
+        "audio"
+      ],
+      "title": "MediaKind",
+      "type": "string"
+    },
+    "PresetSeedToolMeta": {
+      "description": "The optional display metadata a :class:`PresetSeed` seeds onto its preset's\ntool_meta. Each field is applied only where the preset's tool_meta leaves it\nabsent — a seed never overwrites an operator-set display value.\n\n``display_name`` is the human tool title; ``tags`` label it in listings;\n``folder_path`` is a ``/``-style path the applier resolves into the tool_meta\nfolder tree (creating missing segments), never a raw stored string.",
+      "properties": {
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Name"
+        },
+        "folder_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Folder Path"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        }
+      },
+      "title": "PresetSeedToolMeta",
+      "type": "object"
+    },
+    "PresetSpec": {
+      "description": "A base tool bound to fixed kwargs, resolved into a ``StructuredTool`` at\nrun time (see ``resolve_tools``). A base tool that interprets its fixed kwargs\nas a nested document carries that document opaquely here.",
+      "properties": {
+        "base_tool": {
+          "title": "Base Tool",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "fixed_kwargs": {
+          "additionalProperties": true,
+          "title": "Fixed Kwargs",
+          "type": "object"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "base_tool"
+      ],
+      "title": "PresetSpec",
+      "type": "object"
+    },
+    "QuickReplyButtonParam": {
+      "description": "The runtime argument for one QUICK-REPLY button of a template's buttons component:\n``payload`` is the string the medium returns when the human taps the button. Frozen.",
+      "properties": {
+        "kind": {
+          "const": "quick_reply",
+          "default": "quick_reply",
+          "title": "Kind",
+          "type": "string"
+        },
+        "payload": {
+          "title": "Payload",
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "title": "QuickReplyButtonParam",
+      "type": "object"
+    },
+    "StateAttach": {
+      "additionalProperties": false,
+      "description": "One state attached by a binding: the ``state`` name, the ``templates`` to attach on it\n(attach-on-use, idempotent at save), the ``subject_expr`` (a templated text rendering to a\njq over the run input → a full subject object or the record KEY, its scope taken from the\nambient door context and its kind from the state's declared subject kind), an optional\n``scope_expr`` (a templated text rendering to a BOOLEAN predicate over the run input\nevaluated first — ``false`` skips this state for the run, a non-boolean is a loud error,\nabsent engages), and the ordered ``input_injections`` / ``updates``. Frozen.",
+      "properties": {
+        "input_injections": {
+          "items": {
+            "$ref": "#/$defs/StateInjection"
+          },
+          "title": "Input Injections",
+          "type": "array"
+        },
+        "scope_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "subject_expr": {
+          "$ref": "#/$defs/TemplatedText"
+        },
+        "templates": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Templates",
+          "type": "array"
+        },
+        "updates": {
+          "items": {
+            "$ref": "#/$defs/StateUpdate"
+          },
+          "title": "Updates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "state",
+        "subject_expr"
+      ],
+      "title": "StateAttach",
+      "type": "object"
+    },
+    "StateBinding": {
+      "additionalProperties": false,
+      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and repeated per node by a flow engine.",
+      "properties": {
+        "states": {
+          "items": {
+            "$ref": "#/$defs/StateAttach"
+          },
+          "minItems": 1,
+          "title": "States",
+          "type": "array"
+        }
+      },
+      "required": [
+        "states"
+      ],
+      "title": "StateBinding",
+      "type": "object"
+    },
+    "StateInjection": {
+      "additionalProperties": false,
+      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for\nan injection — the run-input field the value lands under. Frozen.",
+      "properties": {
+        "into": {
+          "minLength": 1,
+          "title": "Into",
+          "type": "string"
+        },
+        "jq": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "template_jq": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template Jq"
+        }
+      },
+      "required": [
+        "into"
+      ],
+      "title": "StateInjection",
+      "type": "object"
+    },
+    "StateTemplateDeclarations": {
+      "additionalProperties": false,
+      "description": "The ``declarations`` section of a state-template document: the JSON ``schema`` (wire\nkey ``schema``, attribute ``schema_``) of the static values an attachment stores, and an\nOPTIONAL ``check`` — a :class:`~tai42_contract.template.TemplatedText` carrying a jq\npredicate over those values. Structural validation (the check's jq, the schema's shape)\nlives at the store; this model pins the served wire shape.\n\nThe wire key ``schema`` is the attribute ``schema_`` (alias) because a ``schema`` field\nwould shadow ``BaseModel.schema``.",
+      "properties": {
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "schema": {
+          "additionalProperties": true,
+          "title": "Schema",
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema"
+      ],
+      "title": "StateTemplateDeclarations",
+      "type": "object"
+    },
+    "StateTemplateJq": {
+      "additionalProperties": false,
+      "description": "One named jq program on a state template. ``purpose`` is ``input`` — a read over the\nrecord returning a value — or ``update`` — a program over ``{record, input}`` returning a\ntemplate-relative op batch. ``jq`` is the program body as a\n:class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).\n``params`` names the keys the program takes; ``reads``/``writes`` are the\ntemplate-relative record paths an ``update`` program declares and are absent on an\n``input`` program. Structural checks (jq compilation, path resolution) live at the store;\nthis model pins the served wire shape.",
+      "properties": {
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "jq": {
+          "$ref": "#/$defs/TemplatedText"
+        },
+        "params": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Params",
+          "type": "array"
+        },
+        "purpose": {
+          "enum": [
+            "input",
+            "update"
+          ],
+          "title": "Purpose",
+          "type": "string"
+        },
+        "reads": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Reads",
+          "type": "array"
+        },
+        "writes": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Writes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "purpose",
+        "jq"
+      ],
+      "title": "StateTemplateJq",
+      "type": "object"
+    },
+    "StateTemplateReconcile": {
+      "additionalProperties": false,
+      "description": "The ``reconcile`` section of a state-template document: three jq programs the store\nruns to settle a state's OPEN records on a declarations edit — ``orphans`` names the items\na record subtree orphans against the new declarations, ``resolutions`` names the\nnot-done resolutions a close may name, and ``close`` returns the op batch that closes one\norphan. Each is a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a\nstored ``id``).",
+      "properties": {
+        "close": {
+          "$ref": "#/$defs/TemplatedText"
+        },
+        "orphans": {
+          "$ref": "#/$defs/TemplatedText"
+        },
+        "resolutions": {
+          "$ref": "#/$defs/TemplatedText"
+        }
+      },
+      "required": [
+        "orphans",
+        "close",
+        "resolutions"
+      ],
+      "title": "StateTemplateReconcile",
+      "type": "object"
+    },
+    "StateUpdate": {
+      "additionalProperties": false,
+      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over ``{output, input}``) shapes from the run's\noutput/input; or ``jq`` is a templated text rendering to a custom program over ``{record,\noutput, input}`` authoring the whole op batch itself (a custom update carries no adapter).\n``op_id`` is an optional templated text rendering to an idempotency-key expression.\nFrozen.",
+      "properties": {
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "jq": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "op_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "template_jq": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template Jq"
+        }
+      },
+      "title": "StateUpdate",
+      "type": "object"
+    },
+    "SubAgentSpec": {
+      "description": "Neutral sub-agent descriptor — the in-process, live-tools shape.\n\nCarries name/description/system_prompt/tool_names/tools(live)/presets/skills/\ninline_skills/response_format/strategy/subagents — the fields a live sub-agent\n(e.g. the mcp-finder) needs. ``inline_skills`` items are plain dicts\n(``{\"name\", \"content\"}``). JSON callers use the richer ``DeepSubAgentSpec``\n(full field set) instead of this type.\n\n``tools`` is ``list[Any]`` in the contract (live ``StructuredTool`` objects in\nthe impl) — a vendor type cannot be a runtime pydantic field here.\n\n``response_format`` is a live pydantic class (in-process), the ``TemplatedText | dict``\nauthored-schema union (a JSON caller's forced-output schema — inline, or named by stored\n``id`` and rendered/parsed to its schema at the point of use), or unset.",
+      "properties": {
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "inline_skills": {
+          "default": [],
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Inline Skills",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "presets": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PresetSpec"
+          },
+          "title": "Presets",
+          "type": "array"
+        },
+        "response_format": {
+          "anyOf": [
+            {},
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Format"
+        },
+        "skills": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Skills",
+          "type": "array"
+        },
+        "strategy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strategy"
+        },
+        "subagents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SubAgentSpec"
+          },
+          "title": "Subagents",
+          "type": "array"
+        },
+        "system_prompt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tool Names",
+          "type": "array"
+        },
+        "tools": {
+          "default": [],
+          "items": {},
+          "title": "Tools",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "SubAgentSpec",
+      "type": "object"
+    },
+    "TemplatedText": {
+      "additionalProperties": false,
+      "description": "A renderable text: its source plus the parameters its render takes.\n\nEXACTLY ONE source is set — ``content`` (the text inline) or ``id`` (the id of a\nstored resource holding the text); neither and both are refused at construction.\n``kwargs`` are the render parameters for the TEXT and apply either way, so moving a\ntext from inline to stored (or back) leaves its parameters untouched.",
+      "properties": {
+        "content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "kwargs": {
+          "additionalProperties": true,
+          "title": "Kwargs",
+          "type": "object"
+        }
+      },
+      "title": "TemplatedText",
+      "type": "object",
+      "x-tai42-templated-text": {
+        "language": "jinja"
+      }
+    },
+    "UrlButtonParam": {
+      "description": "The runtime argument for one URL button of a template's buttons component:\n``url_parameter`` is the dynamic suffix substituted into the button's pre-approved URL.\nFrozen.",
+      "properties": {
+        "kind": {
+          "const": "url",
+          "default": "url",
+          "title": "Kind",
+          "type": "string"
+        },
+        "url_parameter": {
+          "title": "Url Parameter",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url_parameter"
+      ],
+      "title": "UrlButtonParam",
+      "type": "object"
+    }
+  },
+  "contract_version": "10.0.0",
+  "documents": {
+    "AccessPolicy": {
+      "description": "Schema for data stored at 'ac:policy:{user_id}'. Represents WHAT the user\ncan do (permissions & logic).",
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the auth context (a dumped JqAuthContext)",
+            "keys": [
+              {
+                "gloss": "the caller's subject id",
+                "name": "sub"
+              },
+              {
+                "gloss": "the caller's granted scopes",
+                "name": "scopes"
+              },
+              {
+                "gloss": "who the caller is — the token's identity claims",
+                "name": "identity"
+              },
+              {
+                "gloss": "the caller's static policy data",
+                "name": "policy"
+              },
+              {
+                "gloss": "dynamic environment data for this decision",
+                "name": "context"
+              },
+              {
+                "gloss": "the operation being authorized",
+                "name": "request"
+              },
+              {
+                "gloss": "caller-supplied time/constants (e.g. the current epoch)",
+                "name": "system"
+              }
+            ],
+            "label": "condition",
+            "language": "jq",
+            "returns": "EXACTLY boolean true to allow; any other value — including any other truthy result — DENIES"
+          }
+        },
+        "policy_data": {
+          "additionalProperties": true,
+          "title": "Policy Data",
+          "type": "object"
+        },
+        "scopes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        }
+      },
+      "title": "AccessPolicy",
+      "type": "object"
+    },
+    "CallbackSchema": {
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the backend task's tool result",
+            "keys": [],
+            "label": "condition",
+            "language": "jq",
+            "returns": "truthy to run the callback",
+            "sample": {}
+          }
+        },
+        "expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the backend task's tool result",
+            "caveats": [
+              "an empty expression, or a jq pipeline producing no output, yields {} (the follow-up tool runs with empty kwargs) — not an error"
+            ],
+            "keys": [],
+            "label": "expression",
+            "language": "jq",
+            "returns": "an object — the follow-up tool's kwargs",
+            "sample": {}
+          }
+        },
+        "tool": {
+          "default": "",
+          "title": "Tool",
+          "type": "string"
+        }
+      },
+      "title": "CallbackSchema",
+      "type": "object"
+    },
+    "ChannelTemplate": {
+      "description": "A pre-approved, named template a channel sends outside its freeform window.\n\nSome media only accept arbitrary text inside a bounded conversation window (e.g. WhatsApp's\n24-hour customer-service window); outside it, the sole accepted send is an operator-authored\ntemplate referenced by ``name`` in an approved ``language`` — both required and non-blank.\n\nThe template's runtime arguments are its NAMED components (never one flat positional list):\n\n* ``header_media`` — the media argument for a media HEADER component (a display item:\n  image/document/video/audio, never a ``link``); ``None`` when the template has no media\n  header (or a static/text header needing no argument).\n* ``body_parameters`` — the POSITIONAL body-text values substituted into the body's\n  placeholders in order; empty when the body has no placeholders. Typed values (currency,\n  date-time) ride as their pre-formatted STRING here — the contract does not model the type.\n* ``buttons`` — the POSITIONAL per-button arguments of the buttons component\n  (:data:`TemplateButtonParam`: a :class:`QuickReplyButtonParam` payload or a\n  :class:`UrlButtonParam` url suffix); the i-th entry parameterises the i-th button, at most\n  ``TEMPLATE_BUTTONS_MAX``. Empty when no button needs a runtime argument.",
+      "properties": {
+        "body_parameters": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Body Parameters",
+          "type": "array"
+        },
+        "buttons": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "quick_reply": "#/$defs/QuickReplyButtonParam",
+                "url": "#/$defs/UrlButtonParam"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/QuickReplyButtonParam"
+              },
+              {
+                "$ref": "#/$defs/UrlButtonParam"
+              }
+            ]
+          },
+          "title": "Buttons",
+          "type": "array"
+        },
+        "header_media": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MediaItem"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "language": {
+          "title": "Language",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "language"
+      ],
+      "title": "ChannelTemplate",
+      "type": "object"
+    },
+    "ConversationRoute": {
+      "description": "The stored routing row: :class:`ConversationRouteCreate` plus the two\nserver-derived fields. What the manager persists and backup restore validates.\n\n``callback_secret`` (present only on an ``api`` row that declares a ``callback_url``)\nsigns the delivery callback; it is excluded from export and re-minted per row on import,\nso callbacks signed with the pre-import secret no longer verify.\n``execution_key_fingerprint`` is the bound key's per-mint\nidentity: a turn matches it against the live key, so a revoke+remint of the same\n``user_id`` fails closed.",
+      "properties": {
+        "callback_secret": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Callback Secret"
+        },
+        "callback_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Callback Url"
+        },
+        "channel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Channel"
+        },
+        "door": {
+          "enum": [
+            "api",
+            "channel"
+          ],
+          "title": "Door",
+          "type": "string"
+        },
+        "error_reply_text": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Reply Text"
+        },
+        "execution_key": {
+          "description": "The api-key ``user_id`` the turn runs AS; its live stored grants authorize the agent run or tool dispatch and every tool call the turn makes.",
+          "minLength": 1,
+          "title": "Execution Key",
+          "type": "string"
+        },
+        "execution_key_fingerprint": {
+          "description": "The bound key's per-mint identity the turn resolves against, derived server-side at create and never client-supplied.",
+          "minLength": 1,
+          "title": "Execution Key Fingerprint",
+          "type": "string"
+        },
+        "initial_mode": {
+          "default": "agent",
+          "enum": [
+            "agent",
+            "manual"
+          ],
+          "title": "Initial Mode",
+          "type": "string"
+        },
+        "locale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locale"
+        },
+        "our_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Our Identity"
+        },
+        "payload_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the inbound turn payload the route maps to the tool/flow kwargs",
+            "keys": [
+              {
+                "gloss": "the inbound message text",
+                "name": "message"
+              },
+              {
+                "gloss": "the sending address",
+                "name": "sender"
+              },
+              {
+                "gloss": "door=channel: the medium address we are texted at",
+                "name": "our_identity"
+              },
+              {
+                "gloss": "door=channel: the registry channel name",
+                "name": "channel"
+              },
+              {
+                "gloss": "the turn's canonical thread id (the thread doors' id)",
+                "name": "thread_id"
+              },
+              {
+                "gloss": "multichannel only: the linked person's id",
+                "name": "person_id"
+              },
+              {
+                "gloss": "multichannel only: the person's known addresses",
+                "name": "person_addresses"
+              },
+              {
+                "gloss": "non-empty entry params, nested under this key",
+                "name": "params"
+              },
+              {
+                "gloss": "a structured form submission, present only when the inbound carried one",
+                "name": "form"
+              },
+              {
+                "gloss": "inbound media the participant sent, present only when the inbound carried some",
+                "name": "attachments"
+              },
+              {
+                "gloss": "a geographic point the participant shared, present only when the inbound carried one",
+                "name": "location"
+              },
+              {
+                "gloss": "the turn ids: {id, inbound: {id, kind, source}}",
+                "name": "turn"
+              },
+              {
+                "gloss": "an event turn's structured payload {id, kind, payload}; absent on a message turn",
+                "name": "event"
+              }
+            ],
+            "label": "payload expression",
+            "language": "jq",
+            "returns": "the JSON object dispatched as the tool/flow kwargs"
+          }
+        },
+        "reply_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the tool/flow result (the SUCCESS shape) the route maps to the participant reply",
+            "label": "reply expression",
+            "language": "jq",
+            "returns": "the reply: null (silent), a string, or a list of answer parts"
+          }
+        },
+        "route_name": {
+          "title": "Route Name",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": [
+            "agent",
+            "tool"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "target_name": {
+          "minLength": 1,
+          "title": "Target Name",
+          "type": "string"
+        },
+        "turns_per_hour_override": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turns Per Hour Override"
+        }
+      },
+      "required": [
+        "route_name",
+        "door",
+        "target_kind",
+        "target_name",
+        "execution_key",
+        "execution_key_fingerprint"
+      ],
+      "title": "ConversationRoute",
+      "type": "object"
+    },
+    "ConversationRouteCreate": {
+      "description": "The client-facing create/edit body for a conversation route: the fields a caller\nsupplies.\n\nBinds a ``(target_kind, target_name)`` — an ``agent`` run or a ``tool`` dispatch — to\nan ``execution_key`` the turn runs AS (bound with pass-role at create). A ``tool``\ntarget may carry a ``payload_expr`` (jq mapping the inbound message to the tool's\nkwargs) and a ``reply_expr`` (jq mapping the tool's result to the reply); both are\ntool-only. ``api`` rows MAY carry an https ``callback_url`` (the answer sink; when absent\nthe caller reads its answer back from the poll door); ``channel`` rows carry the\nregistry ``channel`` plus the ``our_identity`` the medium is texted at (N rows may\nshare a channel, each its own identity). The server-derived ``callback_secret`` and\n``execution_key_fingerprint`` are deliberately absent; :class:`ConversationRoute` is\nthis shape plus those. Frozen.",
+      "properties": {
+        "callback_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Callback Url"
+        },
+        "channel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Channel"
+        },
+        "door": {
+          "enum": [
+            "api",
+            "channel"
+          ],
+          "title": "Door",
+          "type": "string"
+        },
+        "error_reply_text": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Reply Text"
+        },
+        "execution_key": {
+          "description": "The api-key ``user_id`` the turn runs AS; its live stored grants authorize the agent run or tool dispatch and every tool call the turn makes.",
+          "minLength": 1,
+          "title": "Execution Key",
+          "type": "string"
+        },
+        "initial_mode": {
+          "default": "agent",
+          "enum": [
+            "agent",
+            "manual"
+          ],
+          "title": "Initial Mode",
+          "type": "string"
+        },
+        "locale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locale"
+        },
+        "our_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Our Identity"
+        },
+        "payload_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the inbound turn payload the route maps to the tool/flow kwargs",
+            "keys": [
+              {
+                "gloss": "the inbound message text",
+                "name": "message"
+              },
+              {
+                "gloss": "the sending address",
+                "name": "sender"
+              },
+              {
+                "gloss": "door=channel: the medium address we are texted at",
+                "name": "our_identity"
+              },
+              {
+                "gloss": "door=channel: the registry channel name",
+                "name": "channel"
+              },
+              {
+                "gloss": "the turn's canonical thread id (the thread doors' id)",
+                "name": "thread_id"
+              },
+              {
+                "gloss": "multichannel only: the linked person's id",
+                "name": "person_id"
+              },
+              {
+                "gloss": "multichannel only: the person's known addresses",
+                "name": "person_addresses"
+              },
+              {
+                "gloss": "non-empty entry params, nested under this key",
+                "name": "params"
+              },
+              {
+                "gloss": "a structured form submission, present only when the inbound carried one",
+                "name": "form"
+              },
+              {
+                "gloss": "inbound media the participant sent, present only when the inbound carried some",
+                "name": "attachments"
+              },
+              {
+                "gloss": "a geographic point the participant shared, present only when the inbound carried one",
+                "name": "location"
+              },
+              {
+                "gloss": "the turn ids: {id, inbound: {id, kind, source}}",
+                "name": "turn"
+              },
+              {
+                "gloss": "an event turn's structured payload {id, kind, payload}; absent on a message turn",
+                "name": "event"
+              }
+            ],
+            "label": "payload expression",
+            "language": "jq",
+            "returns": "the JSON object dispatched as the tool/flow kwargs"
+          }
+        },
+        "reply_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the tool/flow result (the SUCCESS shape) the route maps to the participant reply",
+            "label": "reply expression",
+            "language": "jq",
+            "returns": "the reply: null (silent), a string, or a list of answer parts"
+          }
+        },
+        "route_name": {
+          "title": "Route Name",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": [
+            "agent",
+            "tool"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "target_name": {
+          "minLength": 1,
+          "title": "Target Name",
+          "type": "string"
+        },
+        "turns_per_hour_override": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turns Per Hour Override"
+        }
+      },
+      "required": [
+        "route_name",
+        "door",
+        "target_kind",
+        "target_name",
+        "execution_key"
+      ],
+      "title": "ConversationRouteCreate",
+      "type": "object"
+    },
+    "HookParams": {
+      "description": "The stored hook record: :class:`HookRegister` plus the server-derived\n``execution_key_fingerprint``. Managers persist this shape, never the request body.",
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the declaring surface's input document",
+            "label": "condition",
+            "language": "jq",
+            "returns": "truthy to proceed; a falsy result gates the surface's action off"
+          }
+        },
+        "execution_key": {
+          "description": "The api-key ``user_id`` the hook fires as; its live stored grants authorize every tool call the fire makes.",
+          "minLength": 1,
+          "title": "Execution Key",
+          "type": "string"
+        },
+        "execution_key_fingerprint": {
+          "description": "The bound key's per-mint identity, derived server-side at bind and never client-supplied. The fire matches it against the live key, so a revoke+remint of the same ``user_id`` fails closed.",
+          "minLength": 1,
+          "title": "Execution Key Fingerprint",
+          "type": "string"
+        },
+        "expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the declaring surface's input document",
+            "label": "expression",
+            "language": "jq",
+            "returns": "the transformed value the declaring surface consumes"
+          }
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "state_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HookSubject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool": {
+          "minLength": 1,
+          "title": "Tool",
+          "type": "string"
+        },
+        "tool_kwargs": {
+          "additionalProperties": true,
+          "title": "Tool Kwargs",
+          "type": "object"
+        },
+        "topic": {
+          "minLength": 1,
+          "title": "Topic",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "topic",
+        "tool",
+        "execution_key",
+        "execution_key_fingerprint"
+      ],
+      "title": "HookParams",
+      "type": "object"
+    },
+    "HookRegister": {
+      "description": "The client-facing register-a-hook request body: the fields a caller supplies.\n\n``execution_key_fingerprint`` is server-derived at bind and deliberately absent\nhere; :class:`HookParams` is this shape plus that one stored field.",
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the declaring surface's input document",
+            "label": "condition",
+            "language": "jq",
+            "returns": "truthy to proceed; a falsy result gates the surface's action off"
+          }
+        },
+        "execution_key": {
+          "description": "The api-key ``user_id`` the hook fires as; its live stored grants authorize every tool call the fire makes.",
+          "minLength": 1,
+          "title": "Execution Key",
+          "type": "string"
+        },
+        "expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the declaring surface's input document",
+            "label": "expression",
+            "language": "jq",
+            "returns": "the transformed value the declaring surface consumes"
+          }
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "state_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HookSubject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool": {
+          "minLength": 1,
+          "title": "Tool",
+          "type": "string"
+        },
+        "tool_kwargs": {
+          "additionalProperties": true,
+          "title": "Tool Kwargs",
+          "type": "object"
+        },
+        "topic": {
+          "minLength": 1,
+          "title": "Topic",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "topic",
+        "tool",
+        "execution_key"
+      ],
+      "title": "HookRegister",
+      "type": "object"
+    },
+    "HookSubject": {
+      "additionalProperties": false,
+      "description": "The optional state subject a hook fire targets: the conversation-target scope\n``(target_kind, target_name)``, the subject ``kind`` (matching\n:data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text\ncarrying (inline or by stored id) a jq program evaluated over the event payload at\nfire — it must yield a non-empty string, else the fire fails loudly like any hook\nerror. Frozen; deposited as the ambient state context so a state write during the fire\nis keyed and attributed to the hook.",
+      "properties": {
+        "key_expr": {
+          "$ref": "#/$defs/TemplatedText"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": [
+            "agent",
+            "tool"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "target_name": {
+          "minLength": 1,
+          "title": "Target Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "target_name",
+        "kind",
+        "key_expr"
+      ],
+      "title": "HookSubject",
+      "type": "object"
+    },
+    "PresetBody": {
+      "description": "The persisted body of a versioned preset.\n\n``base_tool`` is the tool the preset binds; ``description`` is the preset's\nhuman description; ``fixed_kwargs`` are the baked kwargs (each becomes a\nhidden, fixed constant on the bound tool). ``extensions`` is a list of\nextension COMBOS — the SAME shape as a manifest ``extensions`` map value,\neach combo element an extension name or a ``{\"name\", \"config\"}`` mapping\nbinding author config (e.g. an ``ask_external`` verifier) — fed unconverted\nto the structured runtime-attach API at register (an empty outer list means\nno extensions; an empty INNER combo is rejected by the validating view).\n``output_schema`` is an optional author-set OUTPUT JSON Schema (an object\nschema): on an AGENT base it is baked into the run tool's ``response_format``\nso the agent FORCES a structured output matching it; on a plain tool it is\nadvertised as the bound tool's output schema and every result is validated\nagainst it at run time. ``input_schema`` is an optional author-set INPUT JSON\nSchema: it becomes the exposed named tool's input contract, and the caller's\nvalidated object is routed into the base tool's declared payload argument (see\n:class:`PresetInputSchemaSupport`). Only a base tool that DECLARES input-schema\nsupport accepts one; otherwise a set ``input_schema`` is a loud authoring error.\n\nEach schema is the ``TemplatedText | dict`` union: an inline ``dict`` is the JSON\nSchema document itself; a :class:`~tai42_contract.template.TemplatedText` names a stored\nschema by ``id`` (or carries it inline as ``content``), rendered and parsed as JSON to the\nsame schema at the point of use and save.\n\nEvery field must survive carry-forward on a version save: dropping\n``extensions`` would make the branch tools vanish on reload, dropping\n``base_tool`` would break the bind, dropping ``description`` would strip the\ntool's description, dropping ``output_schema`` would silently un-enforce the\nstructured output, and dropping ``input_schema`` would silently un-enforce the\nstructured input.",
+      "properties": {
+        "base_tool": {
+          "title": "Base Tool",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "extensions": {
+          "items": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "title": "Extensions",
+          "type": "array"
+        },
+        "fixed_kwargs": {
+          "additionalProperties": true,
+          "title": "Fixed Kwargs",
+          "type": "object"
+        },
+        "input_schema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Schema"
+        },
+        "output_schema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Schema"
+        },
+        "state_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "base_tool"
+      ],
+      "title": "PresetBody",
+      "type": "object"
+    },
+    "PresetSeed": {
+      "description": "A declared default preset a plugin ships for import-time seeding.\n\nA seed names the preset (``name``), its human ``description``, the\n``base_tool`` it binds, and the ``fixed_kwargs`` baked in — the same body a\n:class:`PresetBody` carries — plus the optional author ``input_schema`` /\n``output_schema`` and optional ``tool_meta`` display seed. The applier creates\nor upgrades the preset from this shape; the contract holds only the SHAPE,\nnever the applier logic.",
+      "properties": {
+        "base_tool": {
+          "title": "Base Tool",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "fixed_kwargs": {
+          "additionalProperties": true,
+          "title": "Fixed Kwargs",
+          "type": "object"
+        },
+        "input_schema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Schema"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "output_schema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Schema"
+        },
+        "state_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_meta": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PresetSeedToolMeta"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "base_tool"
+      ],
+      "title": "PresetSeed",
+      "type": "object"
+    },
+    "RoleDefinition": {
+      "description": "An operator-authored role: the ONE validated shape the enforcer /\nmembership-check, the management operations, and the generated Studio SDK all\nshare.\n\nA role composes TWO layers. Layer 1 is a KEPT jq security base — carried on\nthe ``condition`` field (from ``ConditionMixin``) so the body round-trips it,\nbut NEVER authored through the grant map: the seed sets it (admin → ``None``,\neditor/viewer → their base jq) and a new role inherits it from its\n``base_tier``. Layer 2 is the editable ``grants`` — a per-tag ACCESS LEVEL\nmap (feature-group TAG name → ``none``/``read``/``write``) naming the role's\nlevel on each feature group. An absent tag means level ``none`` (deny).",
+      "properties": {
+        "allow_all": {
+          "default": false,
+          "title": "Allow All",
+          "type": "boolean"
+        },
+        "base_tier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Tier"
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the auth context (a dumped JqAuthContext)",
+            "keys": [
+              {
+                "gloss": "the caller's subject id",
+                "name": "sub"
+              },
+              {
+                "gloss": "the caller's granted scopes",
+                "name": "scopes"
+              },
+              {
+                "gloss": "who the caller is — the token's identity claims",
+                "name": "identity"
+              },
+              {
+                "gloss": "the caller's static policy data",
+                "name": "policy"
+              },
+              {
+                "gloss": "dynamic environment data for this decision",
+                "name": "context"
+              },
+              {
+                "gloss": "the operation being authorized",
+                "name": "request"
+              },
+              {
+                "gloss": "caller-supplied time/constants (e.g. the current epoch)",
+                "name": "system"
+              }
+            ],
+            "label": "condition",
+            "language": "jq",
+            "returns": "EXACTLY boolean true to allow; any other value — including any other truthy result — DENIES"
+          }
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "grants": {
+          "additionalProperties": {
+            "enum": [
+              "none",
+              "read",
+              "write"
+            ],
+            "type": "string"
+          },
+          "title": "Grants",
+          "type": "object"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "scopes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "grants"
+      ],
+      "title": "RoleDefinition",
+      "type": "object"
+    },
+    "StateAttach": {
+      "additionalProperties": false,
+      "description": "One state attached by a binding: the ``state`` name, the ``templates`` to attach on it\n(attach-on-use, idempotent at save), the ``subject_expr`` (a templated text rendering to a\njq over the run input → a full subject object or the record KEY, its scope taken from the\nambient door context and its kind from the state's declared subject kind), an optional\n``scope_expr`` (a templated text rendering to a BOOLEAN predicate over the run input\nevaluated first — ``false`` skips this state for the run, a non-boolean is a loud error,\nabsent engages), and the ordered ``input_injections`` / ``updates``. Frozen.",
+      "properties": {
+        "input_injections": {
+          "items": {
+            "$ref": "#/$defs/StateInjection"
+          },
+          "title": "Input Injections",
+          "type": "array"
+        },
+        "scope_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "subject_expr": {
+          "$ref": "#/$defs/TemplatedText"
+        },
+        "templates": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Templates",
+          "type": "array"
+        },
+        "updates": {
+          "items": {
+            "$ref": "#/$defs/StateUpdate"
+          },
+          "title": "Updates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "state",
+        "subject_expr"
+      ],
+      "title": "StateAttach",
+      "type": "object"
+    },
+    "StateBinding": {
+      "additionalProperties": false,
+      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and repeated per node by a flow engine.",
+      "properties": {
+        "states": {
+          "items": {
+            "$ref": "#/$defs/StateAttach"
+          },
+          "minItems": 1,
+          "title": "States",
+          "type": "array"
+        }
+      },
+      "required": [
+        "states"
+      ],
+      "title": "StateBinding",
+      "type": "object"
+    },
+    "StateDeclaration": {
+      "additionalProperties": false,
+      "description": "A declared state: its ``name``, human ``description``, base JSON ``schema``\n(wire key ``schema``, attribute ``schema_``), the ``subject_kinds`` it serves\n(≥1, unique, each matching :data:`SUBJECT_KIND_RE`), the ``default_subject_kind``\na door's ambient subject resolves to (one of ``subject_kinds``), and an optional\n``retention_days`` (a positive INT4, or unset to keep records forever).\n\n``effective_schema`` is the base ``schema`` composed with every attached template's\nfragment, and ``regimes`` are the absolute write-regime rules composed over the\nattachments (each ``{path, regime}``, the attachment path prefixed onto the template's regime\npaths). ``updated_at`` is the row's last-write timestamp. The platform computes all\nthree and serves them on every read; a client that supplies a non-``None`` value for\nany of them on a write is refused (``… is set/computed by the platform``), so none can\nbe forged across the wire.",
+      "properties": {
+        "default_subject_kind": {
+          "title": "Default Subject Kind",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "effective_schema": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effective Schema"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "regimes": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Regimes"
+        },
+        "retention_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 2147483647,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retention Days"
+        },
+        "schema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            }
+          ],
+          "title": "Schema"
+        },
+        "subject_kinds": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Subject Kinds",
+          "type": "array"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Updated At"
+        }
+      },
+      "required": [
+        "name",
+        "subject_kinds",
+        "default_subject_kind"
+      ],
+      "title": "StateDeclaration",
+      "type": "object"
+    },
+    "StateInjection": {
+      "additionalProperties": false,
+      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for\nan injection — the run-input field the value lands under. Frozen.",
+      "properties": {
+        "into": {
+          "minLength": 1,
+          "title": "Into",
+          "type": "string"
+        },
+        "jq": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "template_jq": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template Jq"
+        }
+      },
+      "required": [
+        "into"
+      ],
+      "title": "StateInjection",
+      "type": "object"
+    },
+    "StateTemplateDocument": {
+      "additionalProperties": false,
+      "description": "A state-template document: the reusable schema fragment plus the parameters, write\nregimes, attach-time ``declarations`` and ``trace`` switch the platform owns, plus\n``template_jq`` (named jq programs — ``input``-purpose reads and ``update``-purpose\nrecord operations) and ``reconcile`` (how a declarations edit settles open records)\nthat give the record its meaning. A template is data end to end: the states API serves\nan input-purpose result for a subject and applies an update-purpose program to a subject\ngenerically, so a template is usable through the API with no other engine.\n``extra=\"forbid\"`` refuses any key outside these.\n\nThe wire key ``schema`` is the attribute ``schema_`` (alias). The ``declarations``,\n``template_jq`` and ``reconcile`` sections carry their served sub-shapes\n(:class:`StateTemplateDeclarations`, :class:`StateTemplateJq`,\n:class:`StateTemplateReconcile`); the skeleton store does the semantic validation (jq\ncompilation, regime/record path resolution against the fragment) these models do not.",
+      "properties": {
+        "declarations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateTemplateDeclarations"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "kind": {
+          "const": "state-template",
+          "default": "state-template",
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "title": "Parameters",
+          "type": "object"
+        },
+        "reconcile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateTemplateReconcile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "regimes": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Regimes",
+          "type": "array"
+        },
+        "schema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            }
+          ],
+          "title": "Schema"
+        },
+        "template_jq": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/StateTemplateJq"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template Jq"
+        },
+        "trace": {
+          "additionalProperties": true,
+          "title": "Trace",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "StateTemplateDocument",
+      "type": "object"
+    },
+    "StateUpdate": {
+      "additionalProperties": false,
+      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over ``{output, input}``) shapes from the run's\noutput/input; or ``jq`` is a templated text rendering to a custom program over ``{record,\noutput, input}`` authoring the whole op batch itself (a custom update carries no adapter).\n``op_id`` is an optional templated text rendering to an idempotency-key expression.\nFrozen.",
+      "properties": {
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "jq": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "op_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "template_jq": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template Jq"
+        }
+      },
+      "title": "StateUpdate",
+      "type": "object"
+    },
+    "SubAgentSpec": {
+      "$ref": "#/$defs/SubAgentSpec"
+    },
+    "TargetConversationConfig": {
+      "description": "Per-target configuration for the conversation bridge, keyed by\n``(target_kind, target_name)`` — the agent or tool an inbound turn is routed to.\n\n``multichannel`` opts the target into person linking; ``greeting_template`` is the\nfirst-contact greeting, which may reference at most the ``{pairing_code}`` placeholder\n(minted at greeting time). The row carries no server-derived fields, so it IS its own\ncreate payload — no Create/stored split. An unknown ``{...}`` placeholder is refused so\na typo cannot render literally; a blank template string is refused, because ``None`` is\nthe explicit spelling for \"no greeting\". Frozen.",
+      "properties": {
+        "greeting_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Greeting Template"
+        },
+        "multichannel": {
+          "default": false,
+          "title": "Multichannel",
+          "type": "boolean"
+        },
+        "state_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target_kind": {
+          "enum": [
+            "agent",
+            "tool"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "target_name": {
+          "minLength": 1,
+          "title": "Target Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "target_name"
+      ],
+      "title": "TargetConversationConfig",
+      "type": "object"
+    }
+  }
+}

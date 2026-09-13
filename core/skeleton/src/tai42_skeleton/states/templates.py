@@ -30,7 +30,12 @@ from typing import Any
 
 from pydantic import ValidationError
 from tai42_contract.states.errors import AttachConflictError, TemplateValidationError
-from tai42_contract.states.models import TEMPLATE_NAME_RE
+from tai42_contract.states.models import (
+    TEMPLATE_NAME_RE,
+    StateTemplateDeclarations,
+    StateTemplateJq,
+    StateTemplateReconcile,
+)
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.jq_util import compile_check
 
@@ -61,9 +66,15 @@ _TRACE_SCHEMA: dict[str, Any] = {
 
 
 # --------------------------------------------------------------------------- #
-# Document model (frozen dataclasses — a pydantic model with a ``schema`` field  #
-# would shadow ``BaseModel.schema`` and warn, and the suite turns warnings into  #
-# errors).                                                                       #
+# Document model. The document's sub-shapes — its declarations, ``template_jq``  #
+# programs and ``reconcile`` programs — are the contract models                  #
+# (:class:`StateTemplateDeclarations` / :class:`StateTemplateJq` /               #
+# :class:`StateTemplateReconcile`), the single published source of their wire    #
+# shape; the parsers below build them and carry the semantic checks the store    #
+# owns. The remaining shapes stay frozen dataclasses because a pydantic model    #
+# with a field literally named ``schema`` shadows ``BaseModel.schema`` and warns,#
+# and the suite turns warnings into errors (the contract models sidestep this    #
+# with the ``schema_`` alias).                                                    #
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class TemplateParameter:
@@ -88,75 +99,6 @@ class RegimeRule:
 
 
 @dataclass(frozen=True, slots=True)
-class TemplateDeclarations:
-    """The declarations section: the ``schema`` of the static values an attachment stores,
-    and an OPTIONAL ``check`` — a templated text carrying (inline or by stored id) a jq
-    predicate over those values returning ``true`` or a message. The check stays platform —
-    its rendered jq is evaluated at attach over the declaration values, which are its input,
-    with the attachment's EFFECTIVE parameters (template defaults overlaid by supplied
-    values) bound as the named jq variable ``$parameters``. A check may therefore constrain
-    a declaration against a parameter (e.g. against a parameter-declared enum) at attach, the
-    earliest point both are known. Every evaluator of a check MUST supply ``$parameters``; a
-    check referencing it without the binding fails loudly (jq: undefined variable
-    ``$parameters``)."""
-
-    schema: dict[str, Any]
-    check: TemplatedText | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class TemplateJq:
-    """A named jq program on a template, of one of two purposes. The program body ``jq`` is a
-    :class:`~tai42_contract.template.TemplatedText` — inline ``content`` or a stored ``id`` — so
-    an author may hold the program text inline or in a stored resource; it is rendered to its jq
-    program immediately before it is compiled or evaluated, never in a validator.
-
-    * ``input``: ``jq`` renders to a program over the record's attached subtree (``.`` = the subject's
-      document at the attach path) with the attachment's effective ``$parameters`` and
-      ``$declarations`` bound and its declared ``params`` delivered as the SINGLE object
-      ``$params`` (``{}`` when none) — a program reads a declared parameter as ``$params.<key>``.
-      Read-only; returns any JSON value. An input program may call a sibling input program as
-      ``tjq_<name>($params_object)`` (the defs are emitted dependency-first, one per input
-      program, each of arity one).
-    * ``update``: ``jq`` is a program whose input is ``{record, input}`` (``.record`` = the
-      subject's attached subtree, ``.input`` = the adapter's output) with ``$parameters`` and
-      ``$declarations`` bound; it returns an ordered op batch (template-relative paths)
-      applied through the store. ``reads``/``writes`` are template-relative record paths,
-      declared for readability; at put each is validated only to resolve structurally against
-      the template fragment, while the write regime itself is enforced at apply by the store
-      guard. An update
-      program's ``params`` names the keys its ``.input`` object carries — the contract the
-      apply seam validates the supplied ``input`` against — and it may call an input program
-      as ``tjq_<name>($params_object)``.
-
-    ``params`` defaults empty; ``reads``/``writes`` are empty for an ``input`` program."""
-
-    jq: TemplatedText
-    purpose: str
-    description: str = ""
-    params: list[str] = field(default_factory=list)
-    reads: list[list[str]] = field(default_factory=list)
-    writes: list[list[str]] = field(default_factory=list)
-
-
-@dataclass(frozen=True, slots=True)
-class TemplateReconcile:
-    """How a declarations edit settles a state's OPEN records. Three jq programs, each over
-    an input payload (no ``$`` bindings): ``orphans`` over ``{previous, new, data}`` returns
-    the ``[{id, label}]`` items a record's subtree orphans against the new declarations;
-    ``resolutions`` over ``{new}`` returns the not-done resolution names a close may name;
-    ``close`` over ``{data, id, resolution}`` returns the template-relative op batch that
-    closes one orphan. ``{orphans, close, resolutions}`` is the reconcile section's own
-    vocabulary, distinct from ``template_jq``. Each program body is a
-    :class:`~tai42_contract.template.TemplatedText` — inline ``content`` or a stored ``id`` —
-    rendered to its jq program immediately before it is compiled or evaluated."""
-
-    orphans: TemplatedText
-    close: TemplatedText
-    resolutions: TemplatedText
-
-
-@dataclass(frozen=True, slots=True)
 class TemplateTrace:
     """The trace switch: when ``enabled``, the effective schema admits ``_trace`` and the
     platform ``apply`` chokepoint stamps it on every write under an attachment of this
@@ -176,10 +118,10 @@ class StateTemplate:
     parameters: dict[str, TemplateParameter]
     schema: dict[str, Any]
     regimes: list[RegimeRule]
-    declarations: TemplateDeclarations | None
+    declarations: StateTemplateDeclarations | None
     trace: TemplateTrace
-    template_jq: dict[str, TemplateJq] = field(default_factory=dict)
-    reconcile: TemplateReconcile | None = None
+    template_jq: dict[str, StateTemplateJq] = field(default_factory=dict)
+    reconcile: StateTemplateReconcile | None = None
 
     def defaults(self) -> dict[str, Any]:
         """The parameter values applied when an attachment supplies none — only defaulted
@@ -200,7 +142,7 @@ class StateTemplate:
         if self.regimes:
             doc["regimes"] = [{"path": list(r.path), "regime": r.regime} for r in self.regimes]
         if self.declarations is not None:
-            declarations: dict[str, Any] = {"schema": self.declarations.schema}
+            declarations: dict[str, Any] = {"schema": self.declarations.schema_}
             if self.declarations.check is not None:
                 declarations["check"] = self.declarations.check.model_dump(exclude_none=True)
             doc["declarations"] = declarations
@@ -217,7 +159,7 @@ class StateTemplate:
         return doc
 
 
-def _program_to_document(program: TemplateJq) -> dict[str, Any]:
+def _program_to_document(program: StateTemplateJq) -> dict[str, Any]:
     """The canonical JSON of one ``template_jq`` entry — purpose-specific keys only. The
     program body ``jq`` is emitted as its templated-text object (inline ``content`` or a stored
     ``id``), so a by-id reference round-trips unchanged."""
@@ -566,7 +508,7 @@ def _parse_regimes(raw: Any) -> list[RegimeRule]:
     return rules
 
 
-def _parse_declarations(raw: Any) -> TemplateDeclarations:
+def _parse_declarations(raw: Any) -> StateTemplateDeclarations:
     _require_type(raw, dict, where="declarations")
     _reject_section_extra_keys(raw, frozenset({"schema", "check"}), where="declarations")
     schema = _require_type(raw.get("schema"), dict, where="declarations schema")
@@ -584,7 +526,7 @@ def _parse_declarations(raw: Any) -> TemplateDeclarations:
             if not check.content.strip():
                 raise TemplateValidationError("declarations check must be a non-empty jq predicate or omitted")
             _compile_check_jq(check.content, where="declarations check")
-    return TemplateDeclarations(schema=schema, check=check)
+    return StateTemplateDeclarations(schema=schema, check=check)
 
 
 # The named jq variables a ``template_jq`` program body may reference beyond its own
@@ -684,7 +626,7 @@ def _parse_program_body(raw: Any, *, where: str) -> TemplatedText:
     return text
 
 
-def _compile_template_jq_inline(programs: Mapping[str, TemplateJq]) -> None:
+def _compile_template_jq_inline(programs: Mapping[str, StateTemplateJq]) -> None:
     """Compile every ``template_jq`` program at upload when EVERY body is inline — the point the
     full sibling prelude is known without a fetch. A by-id body anywhere in the section defers
     the whole section's compile to the save door (:meth:`StatesService._compile_by_id_template_jq`),
@@ -708,7 +650,7 @@ def _compile_template_jq_inline(programs: Mapping[str, TemplateJq]) -> None:
             raise TemplateValidationError(f"template_jq {name!r} jq is not a valid jq expression: {exc}") from exc
 
 
-def _parse_template_jq(raw: Any) -> dict[str, TemplateJq]:
+def _parse_template_jq(raw: Any) -> dict[str, StateTemplateJq]:
     """Parse the ``template_jq`` section: each entry ``{description?, purpose, ...}`` with a
     ``purpose`` of ``input`` or ``update``. Both purposes may declare ``params``; an
     ``input`` entry carries no ``reads``/``writes``, an ``update`` entry carries them. Each
@@ -718,7 +660,7 @@ def _parse_template_jq(raw: Any) -> dict[str, TemplateJq]:
     section's compile to the save door, which can render the stored resources. ``reads``/``writes``
     are template-relative paths (checked against the fragment in :func:`validate_template`)."""
     _require_type(raw, dict, where="template_jq")
-    programs: dict[str, TemplateJq] = {}
+    programs: dict[str, StateTemplateJq] = {}
     for name, spec in raw.items():
         where = f"template_jq {name!r}"
         if not _MEMBER_NAME_RE.fullmatch(name):
@@ -732,21 +674,21 @@ def _parse_template_jq(raw: Any) -> dict[str, TemplateJq]:
         params = _parse_identifier_list(spec.get("params", []), where=f"{where} params")
         if purpose == "input":
             _reject_section_extra_keys(spec, frozenset({"description", "purpose", "params", "jq"}), where=where)
-            programs[name] = TemplateJq(jq=jq, purpose="input", description=description, params=params)
+            programs[name] = StateTemplateJq(jq=jq, purpose="input", description=description, params=params)
         else:
             _reject_section_extra_keys(
                 spec, frozenset({"description", "purpose", "params", "reads", "writes", "jq"}), where=where
             )
             reads = _parse_path_list(spec.get("reads", []), where=f"{where} reads")
             writes = _parse_path_list(spec.get("writes", []), where=f"{where} writes")
-            programs[name] = TemplateJq(
+            programs[name] = StateTemplateJq(
                 jq=jq, purpose="update", description=description, params=params, reads=reads, writes=writes
             )
     _compile_template_jq_inline(programs)
     return programs
 
 
-def _parse_reconcile(raw: Any) -> TemplateReconcile:
+def _parse_reconcile(raw: Any) -> StateTemplateReconcile:
     """Parse the ``reconcile`` section ``{orphans, close, resolutions}`` — three jq programs,
     each a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``)
     over its own input payload (no ``$`` bindings). An inline body compiles here; a by-id body
@@ -763,7 +705,9 @@ def _parse_reconcile(raw: Any) -> TemplateReconcile:
             except Exception as exc:
                 raise TemplateValidationError(f"reconcile {label} is not a valid jq expression: {exc}") from exc
         programs[label] = text
-    return TemplateReconcile(orphans=programs["orphans"], close=programs["close"], resolutions=programs["resolutions"])
+    return StateTemplateReconcile(
+        orphans=programs["orphans"], close=programs["close"], resolutions=programs["resolutions"]
+    )
 
 
 def _parse_trace(raw: Any) -> TemplateTrace:
@@ -870,10 +814,7 @@ __all__ = [
     "TEMPLATE_KIND",
     "RegimeRule",
     "StateTemplate",
-    "TemplateDeclarations",
-    "TemplateJq",
     "TemplateParameter",
-    "TemplateReconcile",
     "TemplateTrace",
     "compose_effective_schema",
     "path_overlaps",

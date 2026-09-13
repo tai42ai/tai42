@@ -358,7 +358,11 @@ async def test_named_update_adapts_input_and_custom_update_authors_ops() -> None
 # -- attach-on-use / validate at save -----------------------------------------
 async def test_attach_on_use_attaches_absent_and_skips_present_idempotently() -> None:
     tpl = StateTemplateDocument.model_validate(
-        {"name": "planner", "schema": {"type": "object"}, "template_jq": {"v": {"purpose": "input", "jq": "."}}}
+        {
+            "name": "planner",
+            "schema": {"type": "object"},
+            "template_jq": {"v": {"purpose": "input", "jq": {"content": "."}}},
+        }
     )
     states = FakeStates(attached={"status": ["planner"]}, templates={"planner": tpl})
     # 'planner' already attached → skipped; 'other' absent → attached once.
@@ -387,7 +391,7 @@ async def test_named_update_without_adapter_but_declared_params_is_refused_at_sa
         {
             "name": "planner",
             "schema": {"type": "object"},
-            "template_jq": {"put": {"purpose": "update", "params": ["id"], "writes": [], "jq": "[]"}},
+            "template_jq": {"put": {"purpose": "update", "params": ["id"], "writes": [], "jq": {"content": "[]"}}},
         }
     )
     states = FakeStates(attached={"status": ["planner"]}, templates={"planner": tpl})
@@ -406,7 +410,11 @@ async def test_validate_binding_resolves_a_declared_template_without_attaching()
     # The dry-run (validate) seam performs NO attach: a named program in a template the
     # binding declares to attach resolves against the declared set, and nothing is attached.
     tpl = StateTemplateDocument.model_validate(
-        {"name": "planner", "schema": {"type": "object"}, "template_jq": {"v": {"purpose": "input", "jq": "."}}}
+        {
+            "name": "planner",
+            "schema": {"type": "object"},
+            "template_jq": {"v": {"purpose": "input", "jq": {"content": "."}}},
+        }
     )
     states = FakeStates(attached={"status": []}, templates={"planner": tpl})
     b = StateBinding(
@@ -429,7 +437,11 @@ async def test_validate_binding_compiles_scope_custom_and_qualified_named_exprs(
     # adapter — the named one resolved against a declared (un-attached) template while an
     # unrelated attached template is skipped.
     planner = StateTemplateDocument.model_validate(
-        {"name": "planner", "schema": {"type": "object"}, "template_jq": {"mark": {"purpose": "update", "jq": "."}}}
+        {
+            "name": "planner",
+            "schema": {"type": "object"},
+            "template_jq": {"mark": {"purpose": "update", "jq": {"content": "."}}},
+        }
     )
     states = FakeStates(attached={"status": ["other"]}, templates={"planner": planner})
     b = StateBinding(
@@ -468,10 +480,18 @@ async def test_validate_binding_qualified_unknown_template_is_refused() -> None:
 
 async def test_validate_binding_ambiguous_program_is_refused() -> None:
     tpl_a = StateTemplateDocument.model_validate(
-        {"name": "a", "schema": {"type": "object"}, "template_jq": {"mark": {"purpose": "update", "jq": "."}}}
+        {
+            "name": "a",
+            "schema": {"type": "object"},
+            "template_jq": {"mark": {"purpose": "update", "jq": {"content": "."}}},
+        }
     )
     tpl_b = StateTemplateDocument.model_validate(
-        {"name": "b", "schema": {"type": "object"}, "template_jq": {"mark": {"purpose": "update", "jq": "."}}}
+        {
+            "name": "b",
+            "schema": {"type": "object"},
+            "template_jq": {"mark": {"purpose": "update", "jq": {"content": "."}}},
+        }
     )
     states = FakeStates(attached={"status": ["a", "b"]}, templates={"a": tpl_a, "b": tpl_b})
     b = StateBinding(
@@ -487,7 +507,11 @@ async def test_validate_binding_ambiguous_program_is_refused() -> None:
 
 async def test_validate_binding_purpose_mismatch_is_refused() -> None:
     tpl = StateTemplateDocument.model_validate(
-        {"name": "planner", "schema": {"type": "object"}, "template_jq": {"vin": {"purpose": "input", "jq": "."}}}
+        {
+            "name": "planner",
+            "schema": {"type": "object"},
+            "template_jq": {"vin": {"purpose": "input", "jq": {"content": "."}}},
+        }
     )
     states = FakeStates(attached={"status": ["planner"]}, templates={"planner": tpl})
     b = StateBinding(

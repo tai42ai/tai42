@@ -7,7 +7,14 @@
     "core/contract": {
       "package-name": "tai42-contract",
       "component": "tai42-contract",
-      "skip-changelog": true
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "src/tai42_contract/schemas/contract-schema.json",
+          "jsonpath": "$.contract_version"
+        }
+      ]
     },
     "core/kit": {
       "package-name": "tai42-kit",

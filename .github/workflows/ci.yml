@@ -381,6 +381,12 @@ jobs:
         working-directory: ${{ matrix.dir }}
         run: >-
           uv run --no-sync pytest ${{ matrix.pytest_mode == 'collect' && '--collect-only -q' || '--cov --cov-report=term-missing' }}
+      - name: Served-document schema freshness
+        # The committed served-document schema bundle must describe the contract's
+        # models exactly; a shape change that forgets to regenerate it reds here.
+        if: ${{ matrix.dir == 'core/contract' }}
+        working-directory: ${{ matrix.dir }}
+        run: uv run --no-sync tai42-contract-schemas --check
       - name: Pytest (skeleton — offline suite + real-Postgres integration suite)
         # The states/versioning/tool_meta/backup stores are exercised against a real
         # Postgres by the opt-in ``integration`` suite (their SQL — jsonb @>, row locks,

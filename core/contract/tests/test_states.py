@@ -193,8 +193,9 @@ def test_template_document_refuses_any_key_outside_the_platform_set():
 
 
 def test_template_document_round_trips_template_jq_and_reconcile():
-    # template_jq/reconcile travel as free dicts (parsed + checked in the skeleton) and
-    # default to None so a template document without them still validates.
+    # template_jq/reconcile carry their typed sub-shapes and default to None so a template
+    # document without them still validates. An input program carries no reads/writes; an
+    # update program carries both. Each program body is a templated text.
     bare = StateTemplateDocument.model_validate({"name": "planner", "schema": {"type": "object"}})
     assert (bare.template_jq, bare.reconcile) == (None, None)
     doc = StateTemplateDocument.model_validate(
@@ -202,16 +203,27 @@ def test_template_document_round_trips_template_jq_and_reconcile():
             "name": "planner",
             "schema": {"type": "object"},
             "template_jq": {
-                "due_set": {"purpose": "input", "description": "the work due", "params": ["run"], "jq": "."},
-                "outcome": {"purpose": "update", "reads": [["l"]], "writes": [["l"]], "jq": "[]"},
+                "due_set": {
+                    "purpose": "input",
+                    "description": "the work due",
+                    "params": ["run"],
+                    "jq": {"content": "."},
+                },
+                "outcome": {"purpose": "update", "reads": [["l"]], "writes": [["l"]], "jq": {"content": "[]"}},
             },
-            "reconcile": {"orphans": ".", "close": "[]", "resolutions": "[]"},
+            "reconcile": {
+                "orphans": {"content": "."},
+                "close": {"content": "[]"},
+                "resolutions": {"content": "[]"},
+            },
         }
     )
     dumped = doc.model_dump(by_alias=True)
-    assert dumped["template_jq"]["due_set"]["jq"] == "."
+    assert dumped["template_jq"]["due_set"]["jq"] == {"content": "."}
+    # An input program's served shape carries no record-path lists.
+    assert "reads" not in dumped["template_jq"]["due_set"]
     assert dumped["template_jq"]["outcome"]["writes"] == [["l"]]
-    assert dumped["reconcile"] == {"orphans": ".", "close": "[]", "resolutions": "[]"}
+    assert dumped["reconcile"]["orphans"] == {"content": "."}
     # Re-validating the dump is stable.
     assert StateTemplateDocument.model_validate(dumped) == doc
 
