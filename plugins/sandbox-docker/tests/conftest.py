@@ -12,6 +12,7 @@ conformance leg is gated behind the ``docker`` marker (see ``test_conformance``)
 from __future__ import annotations
 
 import tarfile
+from collections.abc import Callable
 from io import BytesIO
 from typing import Any
 
@@ -144,7 +145,17 @@ class FakeContainer:
         self.exec_frames: list[tuple[int, bytes]] = [(1, b"")]
         self.exec_exit_code = 0
         self.exec_raises = False
+        # A custom engine status for an ``exec`` create failure (e.g. 900 = the daemon
+        # went away), so the readiness reset-on-disconnect path can be exercised.
+        self.exec_error: int | None = None
+        # Per-command canned output: maps a command argv to ``(frames, exit_code)`` so
+        # the readiness probe's ``cat /etc/resolv.conf`` + two ``nc`` dials each get
+        # their own scripted result.
+        self.exec_by_cmd: Callable[[list[str]], tuple[list[tuple[int, bytes]], int]] | None = None
         self.delete_error: int | None = None
+        # When set, ``delete`` raises a connection-level ``OSError`` instead of an
+        # engine ``DockerError`` — the daemon-went-away signal a teardown can observe.
+        self.delete_conn_error = False
         self.kill_error: int | None = None
         self.get_archive_error: int | None = None
 
@@ -173,6 +184,8 @@ class FakeContainer:
         self.running = True
 
     async def delete(self, *, force: bool = False, v: bool = False) -> None:
+        if self.delete_conn_error:
+            raise OSError("connection reset by the engine")
         if self.delete_error is not None:
             raise DockerError(self.delete_error, f"delete {self._id}: engine error")
         self.delete_calls.append({"force": force, "v": v})
@@ -184,14 +197,16 @@ class FakeContainer:
         self.killed_signals.append(signal or "SIGKILL")
 
     async def exec(self, *, cmd: Any = None, **_: Any) -> FakeExec:
+        if self.exec_error is not None:
+            raise DockerError(self.exec_error, f"exec {self._id}: engine error")
         if self.exec_raises:
             raise DockerError(500, "exec create failed")
-        exec_obj = FakeExec(
-            container=self,
-            cmd=list(cmd),
-            frames=list(self.exec_frames),
-            exit_code=self.exec_exit_code,
-        )
+        cmd_list = list(cmd)
+        if self.exec_by_cmd is not None:
+            frames, exit_code = self.exec_by_cmd(cmd_list)
+        else:
+            frames, exit_code = list(self.exec_frames), self.exec_exit_code
+        exec_obj = FakeExec(container=self, cmd=cmd_list, frames=list(frames), exit_code=exit_code)
         self.execs.append(exec_obj)
         return exec_obj
 
@@ -243,9 +258,18 @@ class _Containers:
         self._docker = docker
 
     async def create(self, config: dict[str, Any], *, name: str | None = None) -> FakeContainer:
+        if self._docker.create_conn_error:
+            raise OSError("connection reset by the engine")
+        if self._docker.create_error is not None:
+            raise DockerError(self._docker.create_error, "container create failed")
         if name is not None and name in self._docker.containers_by_name:
             raise DockerError(409, f"conflict: container name {name!r} is already in use")
         container = FakeContainer(container_id=self._docker.next_id(), name=name, config=config)
+        # A newly-created container (a session OR the readiness-probe container the
+        # provider creates internally) inherits the engine's configured exec behaviour.
+        container.exec_by_cmd = self._docker.default_exec_by_cmd
+        container.block_reads = self._docker.default_block_reads
+        container.delete_error = self._docker.default_delete_error
         self._docker.store_containers.append(container)
         if name is not None:
             self._docker.containers_by_name[name] = container
@@ -330,6 +354,17 @@ class FakeDocker:
         self.network_configs: list[dict[str, Any]] = []
         self.pulled: list[str] = []
         self.volume_create_fails = False
+        # Applied to every container this engine creates (sessions and the internal
+        # readiness-probe container alike).
+        self.default_exec_by_cmd: Callable[[list[str]], tuple[list[tuple[int, bytes]], int]] | None = None
+        self.default_block_reads = False
+        # When set, the next ``containers.create`` raises ``DockerError(create_error)``
+        # (the readiness probe container is the FIRST create on a gated path).
+        self.create_error: int | None = None
+        # When set, the next ``containers.create`` raises a connection-level ``OSError``.
+        self.create_conn_error = False
+        # Applied as ``delete_error`` to every container this engine creates.
+        self.default_delete_error: int | None = None
         self._id_counter = 0
 
     def next_id(self) -> str:

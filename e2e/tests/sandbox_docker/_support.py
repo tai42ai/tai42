@@ -25,7 +25,7 @@ import contextlib
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pytest
 from tai42_contract.sandbox import SandboxError, SandboxSessionSpec
@@ -97,27 +97,36 @@ def _shared_cert_settings() -> _CertOverrides:
     return overrides
 
 
-def build_sandbox() -> DockerSandbox:
+def build_sandbox(*, readiness: bool = False) -> DockerSandbox:
     """A ``DockerSandbox`` pointed at the live engine. ``host`` comes from
     ``SANDBOX_DOCKER_TEST_HOST`` (a ``tcp://`` endpoint — the provider normalizes it
     to mTLS ``https://`` itself); the mTLS cert paths resolve to the engine's shared
     bind-mount dir (see :func:`_shared_cert_settings`); every other ``SANDBOX_DOCKER_*``
-    knob resolves from the environment, exactly as in a deployment."""
+    knob resolves from the environment, exactly as in a deployment.
+
+    ``readiness`` turns the egress-firewall readiness probe on and points its probe
+    image at :data:`TEST_IMAGE` (the busybox family carries ``nc``); the deny/allow
+    targets are DERIVED by the provider, so no target knob is supplied here."""
     assert TEST_HOST is not None  # guarded by requires_engine at the call sites
-    return DockerSandbox(settings=DockerSandboxSettings(host=TEST_HOST, **_shared_cert_settings()))
+    overrides: dict[str, Any] = dict(_shared_cert_settings())
+    if readiness:
+        overrides["readiness_probe_enabled"] = True
+        overrides["readiness_probe_image"] = TEST_IMAGE
+    return DockerSandbox(settings=DockerSandboxSettings(host=TEST_HOST, **overrides))
 
 
 @contextlib.asynccontextmanager
-async def open_sandbox() -> AsyncIterator[DockerSandbox]:
+async def open_sandbox(*, readiness: bool = False) -> AsyncIterator[DockerSandbox]:
     """Yield a policy-bound live ``DockerSandbox`` and, on exit, destroy every
     session still on its ledger and close the engine client.
 
     The bound policy is the most permissive one (egress open, no isolation floor,
     persistent allowed) so only a PROVIDER limitation — never the policy chokepoint
     — shapes what a session gets; the negatives below prove the ENGINE topology, not
-    the operator policy. The client close keeps the suite clean under the harness's
-    ``filterwarnings=error`` (an unclosed aiohttp session is a hard error)."""
-    sandbox = build_sandbox()
+    the operator policy. ``readiness`` turns on the egress-firewall readiness probe
+    (see :func:`build_sandbox`). The client close keeps the suite clean under the
+    harness's ``filterwarnings=error`` (an unclosed aiohttp session is a hard error)."""
+    sandbox = build_sandbox(readiness=readiness)
     sandbox.bind_policy(permissive_policy())
     try:
         yield sandbox

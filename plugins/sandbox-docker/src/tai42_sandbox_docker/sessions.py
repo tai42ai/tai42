@@ -37,6 +37,8 @@ from tai42_kit.sandbox import ManagedSandboxSession
 if TYPE_CHECKING:
     from tai42_kit.sandbox import ManagedSandbox
 
+    from tai42_sandbox_docker.provider import DockerSandbox
+
 # The absolute container path the session workspace mounts at. A workspace-RELATIVE
 # ``cwd`` / ``path`` resolves under here; an absolute value is passed to the engine
 # as given (the caller's own responsibility, per the contract path rule).
@@ -258,6 +260,10 @@ async def kill_exec_process(container: Any, pid: int | None) -> None:
 class DockerSandboxSession(ManagedSandboxSession):
     """One live session bound to a single engine container."""
 
+    # A Docker session's owner is always the Docker provider; the narrowed type lets a
+    # session route an engine disconnect back through it (resetting the readiness flag).
+    _sandbox: DockerSandbox
+
     def __init__(
         self,
         *,
@@ -340,7 +346,7 @@ class DockerSandboxSession(ManagedSandboxSession):
         try:
             await self._container.put_archive(base, archive)
         except DockerError as exc:
-            raise engine_error(exc) from exc
+            raise self._sandbox._engine_error(exc) from exc
 
     async def get_file(self, path: str) -> bytes:
         target = resolve_workspace_path(path)
@@ -349,7 +355,7 @@ class DockerSandboxSession(ManagedSandboxSession):
         except DockerError as exc:
             if exc.status == 404:
                 raise SandboxError(f"sandbox file {path!r} not found") from exc
-            raise engine_error(exc) from exc
+            raise self._sandbox._engine_error(exc) from exc
         member = posixpath.basename(target)
         extracted = tar.extractfile(member)
         if extracted is None:
@@ -377,7 +383,7 @@ class DockerSandboxSession(ManagedSandboxSession):
                 environment=environment,
             )
         except DockerError as exc:
-            raise engine_error(exc) from exc
+            raise self._sandbox._engine_error(exc) from exc
 
     async def _drain(self, exec_obj: Any, stdin: bytes | None, stdout: bytearray, stderr: bytearray) -> int:
         stream = exec_obj.start(detach=False)

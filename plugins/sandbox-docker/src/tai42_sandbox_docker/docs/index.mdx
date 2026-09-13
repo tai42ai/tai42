@@ -17,9 +17,9 @@ sandbox_module: tai42_sandbox_docker
 
 ## Configuration
 
-The `SANDBOX_DOCKER_` env group. `SANDBOX_DOCKER_HOST` is the only variable that
-enters the recycle-pinned app env; the mTLS client certificates are read from the
-canonical `/certs/client` mount, never from the environment.
+The `SANDBOX_DOCKER_` env group. The mTLS client certificates are read from the
+canonical `/certs/client` mount, never from the environment — the one channel a
+client identity must never leak through; every other knob below is ordinary env.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -34,6 +34,9 @@ canonical `/certs/client` mount, never from the environment.
 | `SANDBOX_DOCKER_DEFAULT_TTL_SECONDS` | `3600` | Default reap deadline for an idle session. |
 | `SANDBOX_DOCKER_REAP_INTERVAL_SECONDS` | `300` | Sweep interval for reaping expired sessions. |
 | `SANDBOX_DOCKER_EXEC_DEFAULT_TIMEOUT_SECONDS` | `300` | Default per-`exec` timeout. |
+| `SANDBOX_DOCKER_READINESS_PROBE_ENABLED` | `false` | Prove the engine's egress firewall is in force on every session create, and refuse the create loudly when it cannot. Opt-in — leave off for a `unix://` dev engine or a non-firewalled deployment. |
+| `SANDBOX_DOCKER_READINESS_PROBE_IMAGE` | `busybox:latest` | The throwaway probe container's image — a busybox-family image carrying `nc`. Ensured under `SANDBOX_DOCKER_PULL_POLICY`, so `never` refuses to pull an absent probe image. |
+| `SANDBOX_DOCKER_READINESS_PROBE_TIMEOUT_SECONDS` | `30.0` | Bound on the whole probe; on expiry the create is refused (the engine is not provably ready in time). |
 
 A session spec's `cpu` / `memory_mb` always win over the defaults; the provider
 never silently runs uncapped when a cap was requested, and rejects a cap it
@@ -57,6 +60,14 @@ cannot express rather than downgrading it.
   exfiltratable — egress is default-open by design. The egress firewall that
   drops the control plane, RFC1918 ranges, and cloud metadata is provisioned at
   the tai-distribution layer, not by this provider.
+- **Egress-firewall readiness (opt-in).** With
+  `SANDBOX_DOCKER_READINESS_PROBE_ENABLED`, a create first PROVES that engine's
+  egress firewall is in force: a throwaway, unprivileged probe container on the
+  egress tier must NOT reach the engine control address it must drop and MUST reach
+  its own DNS resolver, or the create is REFUSED loudly — never a session on an
+  unconfined engine. It is defense in depth for the window an engine restart opens
+  under a running app; both probe targets are DERIVED (the configured engine address
+  and the probe's own resolver), so there is no target to mis-set.
 
 ## Durability model
 

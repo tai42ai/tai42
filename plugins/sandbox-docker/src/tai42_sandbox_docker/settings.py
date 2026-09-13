@@ -9,10 +9,11 @@ there, under this group's own prefix.
 ``host`` is REQUIRED and has no default — a mis-wired deployment must fail loudly
 at first use rather than silently target a local socket. The mTLS client identity
 that speaks the engine control API sits under the canonical ``/certs/client``
-mount, so the certs are never env-configured and never enter the recycle-pinned
-app env; ``host`` is the ONLY ``SANDBOX_DOCKER_*`` var that does. Every spec
-credential rides ``spec.env`` as a ``SecretStr`` and is unwrapped ONLY at the
-engine call, never here.
+mount, so the certs are never env-configured and never enter the app env — the one
+channel a client identity must never leak through. The plain knobs (``host``, the
+readiness-probe switches, the resource-cap fallbacks, the pull policy) are ordinary
+env. Every spec credential rides ``spec.env`` as a ``SecretStr`` and is unwrapped
+ONLY at the engine call, never here.
 """
 
 from __future__ import annotations
@@ -55,6 +56,27 @@ class DockerSandboxSettings(SandboxDispatchSettings):
     # ``never`` is for an airgapped engine — a missing image then raises a typed
     # SandboxError rather than reaching out.
     pull_policy: Literal["missing", "never"] = "missing"
+
+    # Egress-firewall readiness probe (opt-in). When on, the provider PROVES on the
+    # session-create path that the engine's inner-bridge egress firewall is in force
+    # before it returns a session, and REFUSES the create loudly when it cannot — an
+    # actual egress probe from a throwaway container on the egress tier. The two probe
+    # targets are DERIVED, never configured, so no target knob can be mis-set: the DENY
+    # target is the configured engine control address (which a session must NOT reach
+    # across the firewall), the ALLOW target the probe container's own DNS resolver
+    # (which must stay reachable). Off by default so a ``unix://`` dev engine or a
+    # non-firewalled deployment needs no probe coordinates and sees no behaviour change.
+    readiness_probe_enabled: bool = False
+
+    # The throwaway probe container's image: a small image carrying ``nc`` (busybox
+    # family). Ensured through the same ``pull_policy`` as a session image, so under
+    # ``never`` an absent probe image raises rather than reaching out.
+    readiness_probe_image: str = "busybox:latest"
+
+    # Bound on the WHOLE probe — image ensure, container create/start, resolver
+    # discovery, and both dials. On expiry the create is refused loudly: the engine is
+    # not provably ready in time, never a session on an unproven engine.
+    readiness_probe_timeout_seconds: float = 30.0
 
 
 @settings_cache
