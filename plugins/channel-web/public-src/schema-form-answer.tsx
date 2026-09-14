@@ -32,7 +32,7 @@ function propertyOrder(schema: JsonSchema): readonly string[] {
 /** The pages to render: the per-send steps when set, else one page carrying every
  * top-level property in schema order (the whole form on one step). */
 function resolvePages(schema: JsonSchema, pages: readonly FormPage[] | null): readonly FormPage[] {
-  return pages !== null ? pages : [{ title: '', fields: propertyOrder(schema) }];
+  return pages ?? [{ title: '', fields: propertyOrder(schema) }];
 }
 
 /** The initial form value: the schema's defaults overlaid with any prefilled

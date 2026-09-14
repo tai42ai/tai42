@@ -9,7 +9,7 @@
  * A pair code carried in the page URL (`?tai_pair=…`) is submitted ONCE as the
  * visitor's first message and then stripped from the URL.
  */
-import type { RefObject } from 'react';
+import type { Dispatch, RefObject, SetStateAction } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { isSessionMissing, sendMessage } from '@/api';
@@ -94,6 +94,138 @@ export interface Outbox {
   readonly clear: () => void;
 }
 
+/** A fresh optimistic bubble for a just-composed message, its ids minted once. */
+function createOutboxItem(text: string, replyId: string | null): OutboxItem {
+  return {
+    localId: nextLocalId(),
+    text,
+    ts: new Date().toISOString(),
+    status: 'sending',
+    error: null,
+    messageId: null,
+    clientMessageId: nextClientMessageId(),
+    replyId,
+  };
+}
+
+/** The outbox with one item's fields patched, matched by `localId`. */
+function withStatus(
+  items: readonly OutboxItem[],
+  localId: string,
+  patch: Partial<OutboxItem>,
+): readonly OutboxItem[] {
+  return items.map((item) => (item.localId === localId ? { ...item, ...patch } : item));
+}
+
+/**
+ * The send/retry doors. Sending records the optimistic bubble and hands it to the
+ * delivery, which resolves it to `sent` (with the door's `message_id`) or `failed`
+ * (wearing the reason). A "new conversation" started mid-flight bumps the generation,
+ * so a stale outcome that returns afterwards is dropped and never touches the fresh
+ * session. Never touches the composer draft, so a chip tap can send while a typed
+ * draft stays put.
+ */
+function useOutboxActions(params: {
+  identity: string;
+  ended: boolean;
+  generationRef: RefObject<number>;
+  composerRef: RefObject<HTMLTextAreaElement | null>;
+  onSessionEnded: () => void;
+  markAwaitingReply: () => void;
+  clearTyping: () => void;
+  outbox: readonly OutboxItem[];
+  setOutbox: Dispatch<SetStateAction<readonly OutboxItem[]>>;
+  setPinToken: Dispatch<SetStateAction<number>>;
+}): { send: Outbox['send']; onRetry: Outbox['onRetry'] } {
+  const { identity, ended, generationRef, composerRef } = params;
+  const { onSessionEnded, markAwaitingReply, clearTyping } = params;
+  const { outbox, setOutbox, setPinToken } = params;
+
+  const deliver = useCallback(
+    (localId: string, text: string, clientMessageId: string, replyId: string | null) => {
+      // A message the visitor just sent always returns them to the tail.
+      setPinToken((current) => current + 1);
+      const generation = generationRef.current;
+      sendMessage(identity, text, clientMessageId, replyId).then(
+        (messageId) => {
+          if (generationRef.current !== generation) return;
+          setOutbox((prev) =>
+            withStatus(prev, localId, { status: 'sent', error: null, messageId }),
+          );
+          markAwaitingReply();
+        },
+        (err: unknown) => {
+          if (generationRef.current !== generation) return;
+          const message = err instanceof Error ? err.message : String(err);
+          setOutbox((prev) => withStatus(prev, localId, { status: 'failed', error: message }));
+          clearTyping();
+          if (isSessionMissing(err)) onSessionEnded();
+        },
+      );
+    },
+    [
+      identity,
+      generationRef,
+      markAwaitingReply,
+      clearTyping,
+      onSessionEnded,
+      setOutbox,
+      setPinToken,
+    ],
+  );
+
+  const send = useCallback(
+    (raw: string, replyId: string | null = null): boolean => {
+      const text = raw.trim();
+      if (text === '' || ended) return false;
+      const item = createOutboxItem(text, replyId);
+      setOutbox((prev) => [...prev, item]);
+      composerRef.current?.focus();
+      deliver(item.localId, item.text, item.clientMessageId, item.replyId);
+      return true;
+    },
+    [ended, deliver, composerRef, setOutbox],
+  );
+
+  const onRetry = useCallback(
+    (localId: string) => {
+      const item = outbox.find((candidate) => candidate.localId === localId);
+      if (item === undefined || ended) return;
+      // The SAME idempotency key as the first attempt: that is what lets the door
+      // recognise a retry of a delivery it already accepted. The tapped reply id (if
+      // any) rides the retry too, so a re-sent chip carries the same enrichment.
+      setOutbox((prev) => withStatus(prev, localId, { status: 'sending', error: null }));
+      deliver(localId, item.text, item.clientMessageId, item.replyId);
+    },
+    [outbox, ended, deliver, setOutbox],
+  );
+
+  return { send, onRetry };
+}
+
+/**
+ * A pair code carried in the page URL is submitted ONCE as the visitor's first
+ * message and then stripped, so a reload or a shared link cannot resubmit it. A
+ * `pair` that does not fully match the code shape is ignored entirely.
+ */
+function usePairCodeSubmit(send: Outbox['send']): void {
+  const pairConsumedRef = useRef(false);
+  useEffect(() => {
+    if (pairConsumedRef.current) return;
+    pairConsumedRef.current = true;
+    const pair = new URLSearchParams(window.location.search).get('tai_pair');
+    if (pair === null || !PAIR_CODE_RE.test(pair)) return;
+    send(pair);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('tai_pair');
+    window.history.replaceState(
+      window.history.state,
+      '',
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }, [send]);
+}
+
 export function useOutbox(params: {
   identity: string;
   items: readonly ChatItem[];
@@ -139,106 +271,19 @@ export function useOutbox(params: {
     });
   }, [itemIds, echoedKeys, outbox]);
 
-  const deliver = useCallback(
-    (localId: string, text: string, clientMessageId: string, replyId: string | null) => {
-      // A message the visitor just sent always returns them to the tail.
-      setPinToken((current) => current + 1);
-      // The send this outcome belongs to. A "new conversation" started while it was
-      // in flight retires the whole outbox with the session that owned it, so
-      // neither outcome may touch the fresh one.
-      const generation = generationRef.current;
-      sendMessage(identity, text, clientMessageId, replyId).then(
-        (messageId) => {
-          if (generationRef.current !== generation) return;
-          setOutbox((prev) =>
-            prev.map((item) =>
-              item.localId === localId ? { ...item, status: 'sent', error: null, messageId } : item,
-            ),
-          );
-          markAwaitingReply();
-        },
-        (err: unknown) => {
-          if (generationRef.current !== generation) return;
-          const message = err instanceof Error ? err.message : String(err);
-          setOutbox((prev) =>
-            prev.map((item) =>
-              item.localId === localId ? { ...item, status: 'failed', error: message } : item,
-            ),
-          );
-          clearTyping();
-          if (isSessionMissing(err)) onSessionEnded();
-        },
-      );
-    },
-    [identity, generationRef, markAwaitingReply, clearTyping, onSessionEnded],
-  );
-
-  // The one send door. Validates the text, records the optimistic bubble and hands
-  // it to `deliver`; it never touches the composer draft, so a chip tap can send its
-  // own text while the visitor's typed-but-unsent draft stays put.
-  const send = useCallback(
-    (raw: string, replyId: string | null = null): boolean => {
-      const text = raw.trim();
-      if (text === '' || ended) return false;
-      const localId = nextLocalId();
-      const clientMessageId = nextClientMessageId();
-      setOutbox((prev) => [
-        ...prev,
-        {
-          localId,
-          text,
-          ts: new Date().toISOString(),
-          status: 'sending',
-          error: null,
-          messageId: null,
-          clientMessageId,
-          replyId,
-        },
-      ]);
-      composerRef.current?.focus();
-      deliver(localId, text, clientMessageId, replyId);
-      return true;
-    },
-    [ended, deliver, composerRef],
-  );
-
-  const onRetry = useCallback(
-    (localId: string) => {
-      const item = outbox.find((candidate) => candidate.localId === localId);
-      if (item === undefined || ended) return;
-      setOutbox((prev) =>
-        prev.map((candidate) =>
-          candidate.localId === localId
-            ? { ...candidate, status: 'sending', error: null }
-            : candidate,
-        ),
-      );
-      // The SAME idempotency key as the first attempt: that is what lets the door
-      // recognise a retry of a delivery it already accepted. The tapped reply id (if
-      // any) rides the retry too, so a re-sent chip carries the same enrichment.
-      deliver(localId, item.text, item.clientMessageId, item.replyId);
-    },
-    [outbox, ended, deliver],
-  );
-
-  // A pair code carried in the page URL is submitted ONCE as the visitor's first
-  // message and then stripped, so a reload or a shared link cannot resubmit it. A
-  // `pair` that does not fully match the code shape is ignored entirely.
-  const pairConsumedRef = useRef(false);
-  useEffect(() => {
-    if (pairConsumedRef.current) return;
-    pairConsumedRef.current = true;
-    const pair = new URLSearchParams(window.location.search).get('tai_pair');
-    if (pair === null || !PAIR_CODE_RE.test(pair)) return;
-    send(pair);
-    const url = new URL(window.location.href);
-    url.searchParams.delete('tai_pair');
-    window.history.replaceState(
-      window.history.state,
-      '',
-      `${url.pathname}${url.search}${url.hash}`,
-    );
-  }, [send]);
+  const { send, onRetry } = useOutboxActions({
+    identity,
+    ended,
+    generationRef,
+    composerRef,
+    onSessionEnded,
+    markAwaitingReply,
+    clearTyping,
+    outbox,
+    setOutbox,
+    setPinToken,
+  });
+  usePairCodeSubmit(send);
 
   const clear = useCallback(() => {
     setOutbox([]);

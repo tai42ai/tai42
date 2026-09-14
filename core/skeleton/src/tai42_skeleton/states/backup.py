@@ -67,20 +67,18 @@ async def export_states() -> dict[str, Any]:
                 "retention_days": decl.get("retention_days"),
             }
         )
-        for attachment in await store.list_attachments_for_state(state):
-            attachments.append(
-                {
-                    "state": state,
-                    "template": attachment["template"],
-                    "path": list(attachment["path"]),
-                    "parameters": dict(attachment["parameters"] or {}),
-                    "declarations": dict(attachment["declarations"] or {}),
-                }
-            )
-        for alias in await store.list_aliases(state):
-            aliases.append({"state": state, **alias})
-        for record in await store.export_records(state):
-            records.append({"state": state, **record})
+        attachments.extend(
+            {
+                "state": state,
+                "template": attachment["template"],
+                "path": list(attachment["path"]),
+                "parameters": dict(attachment["parameters"] or {}),
+                "declarations": dict(attachment["declarations"] or {}),
+            }
+            for attachment in await store.list_attachments_for_state(state)
+        )
+        aliases.extend({"state": state, **alias} for alias in await store.list_aliases(state))
+        records.extend({"state": state, **record} for record in await store.export_records(state))
     return {
         "version": _VERSION,
         "templates": templates,

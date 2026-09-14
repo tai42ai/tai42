@@ -183,7 +183,7 @@ class _DefaultNamespaceLogSource(PydanticBaseSettingsSource):
         won = (default_emitted & frozenset(self._tai_default_fields)) - higher
         if won:
             env_prefix = self.config.get("env_prefix", "")
-            label = env_prefix if env_prefix else self.settings_cls.__name__
+            label = env_prefix or self.settings_cls.__name__
             logger.info("%s: %s ← TAI_DEFAULT_*", label, ", ".join(sorted(won)))
         return {}
 

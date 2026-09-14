@@ -581,6 +581,9 @@ jobs:
       - name: Typecheck
         working-directory: ${{ matrix.dir }}
         run: pnpm typecheck
+      - name: Lint
+        working-directory: ${{ matrix.dir }}
+        run: pnpm run lint
       - name: Format check
         working-directory: ${{ matrix.dir }}
         run: pnpm run format:check
@@ -622,6 +625,8 @@ jobs:
         run: uv run --no-sync ruff check scripts tests
       - name: Ruff format
         run: uv run --no-sync ruff format --check scripts tests
+      - name: Module length
+        run: uv run --no-sync python scripts/check_file_size.py
       - name: Range sync check
         # Catch first-party range and contract-pin drift a person hand-authored on
         # a development PR — including a too-wide cap that still admits the sibling.

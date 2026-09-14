@@ -189,10 +189,10 @@ async def list_webhooks(repo: str) -> list[dict[str, Any]]:
         status, resp_headers, text = await _http_request("GET", next_url, headers=_headers(json_body=False))
         if not 200 <= status < 300:
             raise ValueError(f"GitHub webhook list failed: HTTP {status} {text}")
-        for hook in json.loads(text):
-            hooks.append(
-                {"id": hook["id"], "url": hook["config"]["url"], "events": hook["events"], "active": hook["active"]}
-            )
+        hooks.extend(
+            {"id": hook["id"], "url": hook["config"]["url"], "events": hook["events"], "active": hook["active"]}
+            for hook in json.loads(text)
+        )
         pages += 1
         next_url = _next_page_url(resp_headers.get("link"))
     return hooks

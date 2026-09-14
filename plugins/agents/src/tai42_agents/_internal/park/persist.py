@@ -118,7 +118,7 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
     _gate_expiry_within_retention(identity.retention_bound, union)
     superstep_id = compute_superstep_id(union.keys())
     entries: dict[str, dict[str, Any]] = {}
-    for interaction_id, _expiry in union.items():
+    for interaction_id in union:
         entries[interaction_id] = {
             "agent_name": identity.agent_name,
             "thread_id": identity.thread_id,

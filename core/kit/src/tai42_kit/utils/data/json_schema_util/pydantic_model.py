@@ -125,8 +125,7 @@ def _sanitize_field_name(prop_name: str) -> str:
     ``$``, rewrite ``-``/``@``/non-alnum runs, letter-prefix a digit/underscore
     start, and suffix a reserved word so it never shadows a builtin or keyword."""
     sanitized_name = prop_name
-    if sanitized_name.startswith("$"):
-        sanitized_name = sanitized_name[1:]
+    sanitized_name = sanitized_name.removeprefix("$")
     sanitized_name = re.sub(r"^-", "neg_", sanitized_name)
     sanitized_name = re.sub(r"[@]", "at_", sanitized_name)
     sanitized_name = re.sub(r"[^a-zA-Z0-9_]", "_", sanitized_name)

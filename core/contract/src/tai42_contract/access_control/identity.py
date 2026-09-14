@@ -74,7 +74,7 @@ class IdentityProvider(ABC):
         WHATEVER provider is active (an OIDC/SAML provider that implements only this
         base class is boot-probed too), so a provider whose own backend is unusable
         fails the boot instead of the first authenticated request."""
-        return None
+        return
 
     def readiness_targets(self) -> Sequence[ReadinessTarget]:
         """Declare the backing store(s) core's ``/ready`` probe should ping for this

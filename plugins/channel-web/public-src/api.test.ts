@@ -195,7 +195,9 @@ describe('answerQuestion', () => {
   it('names the answer, not a message, when the door refuses the value', async () => {
     fetchMock.mockResolvedValue(reply(422, { error: 'answer must be a finite number' }));
 
-    await expect(answerQuestion('int-1', 1e999)).rejects.toThrow("That answer couldn't be sent.");
+    await expect(answerQuestion('int-1', Infinity)).rejects.toThrow(
+      "That answer couldn't be sent.",
+    );
   });
 });
 

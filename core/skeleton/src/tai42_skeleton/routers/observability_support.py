@@ -118,7 +118,7 @@ def _parse_instant(value: str, *, now: datetime, field: str) -> datetime:
         amount, unit = int(match.group(1)), match.group(2)
         return now - timedelta(**{_RELATIVE_UNIT[unit]: amount})
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError) as exc:
         raise RequestParseError(f"Invalid {field}: {value}") from exc
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

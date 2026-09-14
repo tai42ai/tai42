@@ -94,7 +94,10 @@ target-version = "py313"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID", "C901", "PLR0912", "PLR0915", "RET", "PERF", "FURB", "T20"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["C901", "PLR0912", "PLR0915", "RET", "PERF", "FURB", "T20"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "tai42_skeleton".msg = "tai42-toolbox is contract-facing: it never imports tai42-skeleton."

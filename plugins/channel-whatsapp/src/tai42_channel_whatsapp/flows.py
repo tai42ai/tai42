@@ -306,7 +306,7 @@ def _resolve_pages(
     """The resolved page list (defaulting to one screen carrying every property in
     schema order) and each page's field names, raising ``ChannelInputError`` for a page
     that names a property the schema does not declare."""
-    resolved_pages = pages if pages else [{"title": _SCREEN_TITLE, "fields": list(properties)}]
+    resolved_pages = pages or [{"title": _SCREEN_TITLE, "fields": list(properties)}]
     fields_by_screen: list[list[str]] = []
     for page in resolved_pages:
         page_fields = [str(field) for field in page["fields"]]

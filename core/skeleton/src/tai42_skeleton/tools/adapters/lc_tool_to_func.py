@@ -91,7 +91,7 @@ def lc_tool_to_func(
     impl: Callable[..., Any] = _impl_async if async_mode else _impl_sync
 
     module = module or __name__
-    wrapper_fn = create_function(
+    return create_function(
         func_signature=sig,
         # makefun's ``func_impl`` is annotated ``Callable[[Any], Any]`` but accepts
         # any callable, driven by ``func_signature``.
@@ -101,5 +101,3 @@ def lc_tool_to_func(
         doc=func_desc,
         module_name=module,
     )
-
-    return wrapper_fn

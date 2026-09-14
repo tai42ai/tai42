@@ -75,8 +75,7 @@ class S3Storage(Storage):
             paginator = client.get_paginator("list_objects_v2")
             keys: list[str] = []
             async for page in paginator.paginate(Bucket=bucket):
-                for obj in page.get("Contents", []):
-                    keys.append(obj["Key"])
+                keys.extend(obj["Key"] for obj in page.get("Contents", []))
             return keys
 
     async def upload(self, path: str, content: str) -> None:
@@ -105,8 +104,7 @@ class S3Storage(Storage):
         paginator = client.get_paginator("list_objects_v2")
         under: list[str] = []
         async for page in paginator.paginate(Bucket=bucket, Prefix=f"{path}/"):
-            for obj in page.get("Contents", []):
-                under.append(obj["Key"])
+            under.extend(obj["Key"] for obj in page.get("Contents", []))
         if under:
             raise StoragePathConflictError(path, sorted(under))
         for ancestor in _ancestor_keys(path):
@@ -144,8 +142,7 @@ class S3Storage(Storage):
             paginator = client.get_paginator("list_objects_v2")
             keys: list[dict[str, str]] = []
             async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                for obj in page.get("Contents", []):
-                    keys.append({"Key": obj["Key"]})
+                keys.extend({"Key": obj["Key"]} for obj in page.get("Contents", []))
 
             if not keys:
                 raise FileNotFoundError(f"Object directory not found or empty: {path}")

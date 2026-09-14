@@ -56,7 +56,7 @@ def _heartbeat_fresh(raw: bytes | str) -> bool:
     """Whether a worker's stored ``last_heartbeat`` proves it is alive. Parses the
     stored value; the freshness window is the shared contract in
     :mod:`tai42_backend_rq.liveness`."""
-    return heartbeat_fresh(datetime.fromisoformat(_text(raw).replace("Z", "+00:00")))
+    return heartbeat_fresh(datetime.fromisoformat(_text(raw)))
 
 
 def _next_run_fields(ts: float | None) -> dict[str, Any]:
@@ -545,17 +545,15 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
         def _read_jobs() -> list[dict[str, Any]]:
             # Each Job field triggers a blocking Redis fetch; materialize them all
             # here so the whole read stays off the event loop.
-            read: list[dict[str, Any]] = []
-            for job in cast("list[Any]", scheduler.get_jobs()):
-                read.append(
-                    {
-                        "id": job.id,
-                        "args": list(job.args),
-                        "kwargs": dict(job.kwargs),
-                        "meta": dict(job.meta or {}),
-                    }
-                )
-            return read
+            return [
+                {
+                    "id": job.id,
+                    "args": list(job.args),
+                    "kwargs": dict(job.kwargs),
+                    "meta": dict(job.meta or {}),
+                }
+                for job in cast("list[Any]", scheduler.get_jobs())
+            ]
 
         jobs = await asyncio.to_thread(_read_jobs)
 

@@ -104,9 +104,11 @@ def _extra_dicts(field_info: FieldInfo) -> list[dict[str, Any]]:
     if isinstance(own, dict):
         dicts.append(own)
     for member in _union_members(field_info.annotation):
-        for meta in getattr(member, "__metadata__", ()):
-            if isinstance(meta, FieldInfo) and isinstance(meta.json_schema_extra, dict):
-                dicts.append(meta.json_schema_extra)
+        dicts.extend(
+            meta.json_schema_extra
+            for meta in getattr(member, "__metadata__", ())
+            if isinstance(meta, FieldInfo) and isinstance(meta.json_schema_extra, dict)
+        )
     return dicts
 
 

@@ -757,10 +757,7 @@ class Installer:
 
     async def _upgrade_all_locked(self) -> list[dict[str, Any]]:
         contract = running_contract_version()
-        report: list[dict[str, Any]] = []
-        for row in await self._store.list_installed():
-            report.append(await self._upgrade_one(row, contract))
-        return report
+        return [await self._upgrade_one(row, contract) for row in await self._store.list_installed()]
 
     async def _upgrade_one(self, row: InstallRecord, contract: str) -> dict[str, Any]:
         """One ref's upgrade attempt → its report entry. The target is picked

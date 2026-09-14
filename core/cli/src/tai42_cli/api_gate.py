@@ -536,9 +536,9 @@ def main() -> None:
     new_modules = _top_modules_worktree(src)
     old_modules = _top_modules_ref(previous, src_rel, repo_root)
 
-    findings: list[str] = []
-    for module in sorted(old_modules - new_modules):
-        findings.append(f"{module}: shipped top-level module was removed")
+    findings: list[str] = [
+        f"{module}: shipped top-level module was removed" for module in sorted(old_modules - new_modules)
+    ]
     for module in sorted(old_modules & new_modules):
         findings.extend(_breakages(module, previous, src_rel, repo_root))
 

@@ -134,9 +134,11 @@ def _load_pptx(data: bytes, mime: str | None, source: str | None) -> str:
     with _temp_file(data, ".pptx") as path:
         lines: list[str] = []
         for slide in Presentation(path).slides:
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    lines.append(shape.text_frame.text)  # pyright: ignore[reportAttributeAccessIssue]
+            lines.extend(
+                shape.text_frame.text  # pyright: ignore[reportAttributeAccessIssue]
+                for shape in slide.shapes
+                if shape.has_text_frame
+            )
         return "\n".join(lines)
 
 

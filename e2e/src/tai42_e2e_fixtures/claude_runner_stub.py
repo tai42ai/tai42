@@ -116,7 +116,7 @@ def _session_id(start: dict[str, Any]) -> str:
     """The effective SDK session id: the resumed id off the start frame, else a fresh one."""
     options = start.get("options") or {}
     resume = options.get("resume")
-    return resume if resume else uuid.uuid4().hex
+    return resume or uuid.uuid4().hex
 
 
 # --- scripts -------------------------------------------------------------------------------

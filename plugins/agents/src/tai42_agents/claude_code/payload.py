@@ -20,10 +20,11 @@ def runner_payload_files() -> list[tuple[str, bytes]]:
     """Every runner payload file as ``(in_session_filename, content)``, the ``.tmpl`` suffix
     stripped. Sorted for a deterministic authoring order."""
     root = files(_PAYLOAD_ANCHOR).joinpath(_PAYLOAD_DIRNAME)
-    out: list[tuple[str, bytes]] = []
-    for entry in sorted(root.iterdir(), key=lambda p: p.name):
-        if entry.is_file() and entry.name.endswith(_TEMPLATE_SUFFIX):
-            out.append((entry.name[: -len(_TEMPLATE_SUFFIX)], entry.read_bytes()))
+    out: list[tuple[str, bytes]] = [
+        (entry.name[: -len(_TEMPLATE_SUFFIX)], entry.read_bytes())
+        for entry in sorted(root.iterdir(), key=lambda p: p.name)
+        if entry.is_file() and entry.name.endswith(_TEMPLATE_SUFFIX)
+    ]
     if not out:
         raise RuntimeError(f"no runner payload templates found under {_PAYLOAD_ANCHOR}/{_PAYLOAD_DIRNAME}")
     return out

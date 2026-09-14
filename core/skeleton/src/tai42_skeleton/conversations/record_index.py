@@ -39,8 +39,10 @@ class RecordIndexMixin(RecordStoreBase):
         for status in statuses:
             key = self.settings.status_index_key(status.value)
             await awaited(r.zremrangebyscore(key, "-inf", now))
-            for member in await awaited(r.zrange(key, 0, -1)):
-                ids.append(member.decode() if isinstance(member, bytes) else member)
+            ids.extend(
+                member.decode() if isinstance(member, bytes) else member
+                for member in await awaited(r.zrange(key, 0, -1))
+            )
         return ids
 
     async def _drop_orphan(self, r: AsyncRedis, message_id: str) -> None:

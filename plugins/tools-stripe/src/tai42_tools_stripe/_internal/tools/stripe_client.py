@@ -316,8 +316,7 @@ async def create_webhook_endpoint(*, url: str, enabled_events: list[str]) -> dic
     call and never again. This helper returns it inside the JSON and writes it nowhere.
     """
     pairs: list[tuple[str, str]] = [("url", url)]
-    for event in enabled_events:
-        pairs.append(("enabled_events[]", event))
+    pairs.extend(("enabled_events[]", event) for event in enabled_events)
     headers = {
         "Authorization": f"Bearer {_secret_key()}",
         "Stripe-Version": STRIPE_API_VERSION,

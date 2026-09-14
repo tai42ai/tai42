@@ -131,10 +131,10 @@ async def e2e_settings_snapshot() -> dict:
     # range stops one short of ``current``.
     stale_holders: list[dict] = []
     for retired in range(current):
-        for holder in sweep_stale_settings(retired):
-            stale_holders.append(
-                {"settings_type": holder.settings_type, "epoch": holder.epoch, "holders": list(holder.holders)}
-            )
+        stale_holders.extend(
+            {"settings_type": holder.settings_type, "epoch": holder.epoch, "holders": list(holder.holders)}
+            for holder in sweep_stale_settings(retired)
+        )
 
     # Client-pool leases per epoch across every pooled loop. ``current_client_epoch`` and
     # the pool maps share the same non-reentrant lock, so ``current`` is read ABOVE, never

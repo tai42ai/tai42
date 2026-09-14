@@ -140,7 +140,7 @@ class BackendRuntime(ABC):
 
         Concrete rather than abstract: a runtime whose engine object is built by
         ``from_args`` alone must not be forced to declare an empty override."""
-        return None
+        return
 
     # -- running -------------------------------------------------------------
 
@@ -215,4 +215,4 @@ class BackendRuntime(ABC):
 
         Concrete rather than abstract: a runtime that owns no resource must not
         be forced to declare an empty override."""
-        return None
+        return

@@ -135,7 +135,7 @@ interface Envelope<T> {
 async function readFailure(
   response: Response,
 ): Promise<{ detail: string | null; code: string | null }> {
-  let text = '';
+  let text: string;
   try {
     text = await response.text();
   } catch {

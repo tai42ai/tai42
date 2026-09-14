@@ -67,8 +67,7 @@ async def login_methods() -> dict:
     methods: list[dict] = []
     bootstrap = False
     for provider in _active_accounts_providers():
-        for method in provider.login_methods():
-            methods.append(method.model_dump(exclude_none=True))
+        methods.extend(method.model_dump(exclude_none=True) for method in provider.login_methods())
         if await provider.needs_bootstrap():
             bootstrap = True
     return {"methods": methods, "bootstrap": bootstrap}

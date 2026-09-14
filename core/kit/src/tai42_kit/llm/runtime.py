@@ -83,10 +83,10 @@ def build_user_output(state: dict[str, Any]) -> str:
     content = final_message.content
     if isinstance(content, str):
         return content
-    elif isinstance(content, list):
+    if isinstance(content, list):
         if all(isinstance(item, str) for item in content):
             return "\n".join(content)
-        elif all(isinstance(item, dict) for item in content):
+        if all(isinstance(item, dict) for item in content):
             # Pull the text out of each content dict, trying the common keys in order.
             texts = []
             for item in content:
@@ -98,12 +98,10 @@ def build_user_output(state: dict[str, Any]) -> str:
                     # No known text key; stringify the whole item.
                     texts.append(str(item))
             return "\n".join(texts)
-        else:
-            # Mixed types: serialize to JSON
-            return json.dumps(content)
-    else:
-        # Unknown type: coerce to string
-        return str(content)
+        # Mixed types: serialize to JSON
+        return json.dumps(content)
+    # Unknown type: coerce to string
+    return str(content)
 
 
 def validate_structured_output(structured: Any, response_format: Any) -> Any:

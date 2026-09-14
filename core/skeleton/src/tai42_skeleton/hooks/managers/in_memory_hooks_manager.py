@@ -77,7 +77,7 @@ class InMemoryHooksManager(BaseHooksManager):
 
     async def list_hooks(self) -> dict[str, HookParams]:
         all_hooks: dict[str, HookParams] = {}
-        for _, hooks in self._hooks.items():
+        for hooks in self._hooks.values():
             all_hooks.update(hooks)
         return all_hooks
 

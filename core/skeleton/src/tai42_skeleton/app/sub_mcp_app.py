@@ -642,7 +642,7 @@ class SubMcpAppRouter:
         else:
             if original_path.startswith(slug_prefix):
                 new_path = original_path[len(slug_prefix) :]
-                sub_scope["path"] = new_path if new_path else "/"
+                sub_scope["path"] = new_path or "/"
                 # Under the real mount, ``scope["root_path"]`` already carries the
                 # router's own mount ("/app"); only the slug segment is appended.
                 # Re-adding the full "/app/<slug>" prefix would yield

@@ -73,9 +73,11 @@ def _unresolved_required_settings() -> list[str]:
 
     unresolved: list[str] = []
     for group in registered_settings():
-        for field in group.fields:
-            if field.required and field.env_var and field.env_var not in os.environ:
-                unresolved.append(f"{group.name}.{field.name} (${field.env_var})")
+        unresolved.extend(
+            f"{group.name}.{field.name} (${field.env_var})"
+            for field in group.fields
+            if field.required and field.env_var and field.env_var not in os.environ
+        )
     return unresolved
 
 

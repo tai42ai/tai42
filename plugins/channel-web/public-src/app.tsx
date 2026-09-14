@@ -40,6 +40,35 @@ export interface ChatAppProps {
   readonly title: string;
 }
 
+interface ChatBodyFlags {
+  /** Backlog is in but the live stream is down and the session is still open. */
+  readonly reconnecting: boolean;
+  /** No usable body: the route is disabled, or the backlog failed to load. */
+  readonly bodyIsBroken: boolean;
+  /** A live stream that is up but dropped a frame mid-session. */
+  readonly frameDropped: boolean;
+  /** Backlog still loading, no error, session open — show the spinner. */
+  readonly loading: boolean;
+}
+
+/** The transcript-body view flags derived from the stream state and whether the
+ * session has ended, kept out of the component so its own branching stays small. */
+function deriveChatBodyFlags(args: {
+  backlogLoaded: boolean;
+  connected: boolean;
+  disabled: boolean;
+  hasError: boolean;
+  ended: boolean;
+}): ChatBodyFlags {
+  const { backlogLoaded, connected, disabled, hasError, ended } = args;
+  return {
+    reconnecting: backlogLoaded && !connected && !disabled && !ended,
+    bodyIsBroken: disabled || (!backlogLoaded && hasError && !ended),
+    frameDropped: backlogLoaded && connected && hasError && !ended,
+    loading: !backlogLoaded && !hasError && !ended,
+  };
+}
+
 export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -56,7 +85,9 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   // the reset hook is created before the outbox/typing hooks it clears; the ref is
   // pointed at the current setters below, and the rotate runs it synchronously so
   // the old conversation's bubbles cannot flash into the fresh one.
-  const resetLocalStateRef = useRef<() => void>(() => {});
+  const resetLocalStateRef = useRef<() => void>(() => {
+    // Pointed at the current setters below; a no-op until then.
+  });
   const reset = useConversationReset({ identity, entryCode, resetLocalStateRef });
 
   const stream = useChatStream(identity, reset.epoch);
@@ -100,10 +131,13 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
     [items, outbox.pending],
   );
 
-  const reconnecting = stream.backlogLoaded && !stream.connected && !stream.disabled && !ended;
-  const bodyIsBroken =
-    stream.disabled || (!stream.backlogLoaded && stream.error !== null && !ended);
-  const frameDropped = stream.backlogLoaded && stream.connected && stream.error !== null && !ended;
+  const { reconnecting, bodyIsBroken, frameDropped, loading } = deriveChatBodyFlags({
+    backlogLoaded: stream.backlogLoaded,
+    connected: stream.connected,
+    disabled: stream.disabled,
+    hasError: stream.error !== null,
+    ended,
+  });
 
   return (
     <div className="tcw-app" ref={rootRef}>
@@ -125,7 +159,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
           entries={entries}
           answeredIds={stream.answeredIds}
           typing={typing.typing}
-          loading={!stream.backlogLoaded && stream.error === null && !ended}
+          loading={loading}
           locked={ended}
           onAnswer={answer.onAnswer}
           onAnswered={focusComposer}

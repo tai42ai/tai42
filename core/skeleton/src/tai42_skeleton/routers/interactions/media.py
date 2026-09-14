@@ -59,7 +59,7 @@ async def media(request: Request) -> Response:
         # The remaining lifetime bounds the client cache: the bytes vanish at the key's
         # TTL (extended to the owning group's horizon), so a cache must not outlive it.
         remaining_ttl = await r.ttl(store.media_key(media_id))
-    max_age = remaining_ttl if remaining_ttl > 0 else 0
+    max_age = max(0, remaining_ttl)
     return Response(
         payload,
         media_type=mime,

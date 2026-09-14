@@ -81,14 +81,16 @@ class _ReconcileMixin(_StatesServiceBase):
                 view = await context.records.read(subject)
                 if view is None:
                     continue
-                for item in await self._reconcile_orphans(
-                    reconcile,
-                    _record_subtree(view.data, path),
-                    previous=previous,
-                    new=new,
-                    template_name=context.template.name,
-                ):
-                    orphans.append((subject, item))
+                orphans.extend(
+                    (subject, item)
+                    for item in await self._reconcile_orphans(
+                        reconcile,
+                        _record_subtree(view.data, path),
+                        previous=previous,
+                        new=new,
+                        template_name=context.template.name,
+                    )
+                )
             cursor = page.get("next_cursor")
             if cursor is None:
                 break

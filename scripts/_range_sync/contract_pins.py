@@ -72,8 +72,7 @@ def plugin_descriptor_files(members: list[Path], root: Path) -> list[tuple[Path,
     for member in members:
         if member.relative_to(root).parts[0] != "plugins":
             continue
-        for yml in shipped_descriptor_files(member):
-            files.append((member, yml))
+        files.extend((member, yml) for yml in shipped_descriptor_files(member))
     return files
 
 
@@ -102,9 +101,11 @@ def descriptor_only_contract_files(root: Path) -> list[Path]:
     follows the GLOBAL derived contract range exactly like an unpinned member."""
     files: list[Path] = []
     for pattern in workspace_globs(root):
-        for hit in sorted(root.glob(pattern)):
-            if hit.is_dir() and (hit / "tai-plugin.yml").is_file() and not (hit / "pyproject.toml").is_file():
-                files.append(hit / "tai-plugin.yml")
+        files.extend(
+            hit / "tai-plugin.yml"
+            for hit in sorted(root.glob(pattern))
+            if hit.is_dir() and (hit / "tai-plugin.yml").is_file() and not (hit / "pyproject.toml").is_file()
+        )
     return sorted(set(files))
 
 

@@ -183,14 +183,14 @@ class McpReloadMixin(LifecycleState):
                 # results — log the trace loudly, then surface this one coarsely.
                 logger.error("reload_failed_mcps: applying reloaded MCP %r failed after probe", title, exc_info=True)
                 out.append({"title": title, "status": "error"})
-        for title in unknown:
-            out.append(
-                {
-                    "title": title,
-                    "status": "error",
-                    "error": f"Unknown MCP '{title}' — not present in the current manifest.",
-                }
-            )
+        out.extend(
+            {
+                "title": title,
+                "status": "error",
+                "error": f"Unknown MCP '{title}' — not present in the current manifest.",
+            }
+            for title in unknown
+        )
         return out
 
     def _raise_if_on_serving_loop(self, op: str) -> None:

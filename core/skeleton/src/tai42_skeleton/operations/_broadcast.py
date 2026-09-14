@@ -110,10 +110,10 @@ def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
     fresh: list[dict[str, Any]] = []
     recycle = outcome.recycle
     if recycle is not None:
-        for row in recycle.rows:
-            entries.append(
-                {"name": row.name, "kind": row.kind, "status": row.status, "generation_before": row.generation_before}
-            )
+        entries.extend(
+            {"name": row.name, "kind": row.kind, "status": row.status, "generation_before": row.generation_before}
+            for row in recycle.rows
+        )
         fresh = [{"name": life.name, "kind": life.kind, "generation": life.generation} for life in recycle.fresh]
     if outcome.serve_affecting:
         # The applier's own recycle is a post-response self-exit it cannot confirm — a

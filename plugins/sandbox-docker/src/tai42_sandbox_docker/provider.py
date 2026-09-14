@@ -608,8 +608,9 @@ class DockerSandbox(ManagedSandbox):
                 handled.append(f"retained orphan persistent container {name} (adopted on next create)")
 
         volumes = await docker.volumes.list(filters={"label": [f"{LABEL_SANDBOX}=1"]})
-        for volume in volumes.get("Volumes") or []:
-            handled.append(f"retained orphan persistent workspace volume {volume['Name']}")
+        handled.extend(
+            f"retained orphan persistent workspace volume {volume['Name']}" for volume in volumes.get("Volumes") or []
+        )
         return handled
 
     @staticmethod

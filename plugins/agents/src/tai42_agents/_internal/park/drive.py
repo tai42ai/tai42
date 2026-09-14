@@ -157,8 +157,7 @@ def collect_pending_interrupts(snapshot: Any) -> list[tuple[str, Any]]:
 
     def _walk(snap: Any) -> None:
         for task in snap.tasks or []:
-            for item in task.interrupts:
-                pending.append((item.id, item.value))
+            pending.extend((item.id, item.value) for item in task.interrupts)
             if isinstance(task.state, StateSnapshot):
                 _walk(task.state)
 

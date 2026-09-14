@@ -69,7 +69,7 @@ class _SpecApp:
         """No deployment is served under the spec harness, so the enumeration
         universe is the whole ``tai42_skeleton.routers`` package — signalled by
         ``None`` (never a curated started-manifest set)."""
-        return None
+        return
 
 
 class _RouterUniverseSource(Protocol):

@@ -50,8 +50,7 @@ def collect_consumers(wheels: list[str], reqs: list[str]) -> list[Consumer]:
             _fail(f"consumer wheel not found at {wheel} — a failed download must not read as a pass")
         name, version = wheel_name_version(wheel)
         consumers.append(Consumer(dist_name=name, label=f"{name} {version}", install_arg=str(wheel.resolve())))
-    for req in reqs:
-        consumers.append(Consumer(dist_name=_req_dist_name(req), label=req, install_arg=req))
+    consumers.extend(Consumer(dist_name=_req_dist_name(req), label=req, install_arg=req) for req in reqs)
     return consumers
 
 

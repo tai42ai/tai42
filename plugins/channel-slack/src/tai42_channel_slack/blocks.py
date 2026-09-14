@@ -351,9 +351,9 @@ def flat_options_text_lines(options: list[Option]) -> str:
 
 def sections_text_lines(sections: list[OptionSection]) -> str:
     """The sectioned options as titled bulleted lines for the message text fallback."""
-    blocks: list[str] = []
-    for section in sections:
-        blocks.append(f"{_escape_mrkdwn(section.title)}:\n{_typed_option_lines(section.rows)}")
+    blocks: list[str] = [
+        f"{_escape_mrkdwn(section.title)}:\n{_typed_option_lines(section.rows)}" for section in sections
+    ]
     return "\n".join(blocks)
 
 

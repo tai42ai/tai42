@@ -268,8 +268,6 @@ def _collect_material(resolved: object) -> dict[str, SecretStr]:
     token = getattr(resolved, "access_token", None)
     if token is not None:
         material["Authorization"] = SecretStr(f"Bearer {token.get_secret_value()}")
-    for name, value in dict(getattr(resolved, "env", {})).items():
-        material[name] = value
-    for name, value in dict(getattr(resolved, "headers", {})).items():
-        material[name] = value
+    material.update(dict(getattr(resolved, "env", {})))
+    material.update(dict(getattr(resolved, "headers", {})))
     return material

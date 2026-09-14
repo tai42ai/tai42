@@ -123,19 +123,19 @@ def resolved_routes(spec: PluginSpec, mounts: Mapping[str, str]) -> list[Resolve
             continue
         base = mounts[item.name]
         default_base = item.routes.base
-        for route in item.routes.paths:
-            out.append(
-                ResolvedRoute(
-                    item=item.name,
-                    kind=item.kind.value,
-                    base=base,
-                    default_base=default_base,
-                    path=route.path,
-                    full_path=f"{_API_ROOT}{base}{route.path}",
-                    methods=tuple(route.methods),
-                    public=route.public,
-                )
+        out.extend(
+            ResolvedRoute(
+                item=item.name,
+                kind=item.kind.value,
+                base=base,
+                default_base=default_base,
+                path=route.path,
+                full_path=f"{_API_ROOT}{base}{route.path}",
+                methods=tuple(route.methods),
+                public=route.public,
             )
+            for route in item.routes.paths
+        )
     return out
 
 

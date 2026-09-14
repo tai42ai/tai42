@@ -26,8 +26,10 @@ def _abs_regime_paths(attachment_rows: list[dict[str, Any]]) -> list[tuple[list[
     for row in attachment_rows:
         base_path = list(row["path"] or [])
         body = row["body"] or {}
-        for rule in body.get("regimes", []) or []:
-            out.append(([*base_path, *rule.get("path", [])], rule.get("regime"), body.get("name", row["template"])))
+        out.extend(
+            ([*base_path, *rule.get("path", [])], rule.get("regime"), body.get("name", row["template"]))
+            for rule in body.get("regimes", []) or []
+        )
     return out
 
 

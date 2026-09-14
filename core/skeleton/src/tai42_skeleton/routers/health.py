@@ -82,8 +82,7 @@ def _auth_connections() -> list[tuple[str, type, ClientSettings]]:
     conns: list[tuple[str, type, ClientSettings]] = []
     for name in ac.auth_providers:
         provider = get_identity_provider_factory(name)(ac)
-        for target in provider.readiness_targets():
-            conns.append((target.name, target.client, target.settings))
+        conns.extend((target.name, target.client, target.settings) for target in provider.readiness_targets())
     return conns
 
 

@@ -113,7 +113,7 @@ def _is_valid_host(host: str, *, bracketed: bool) -> bool:
         return True
     except ValueError:
         pass
-    name = host[:-1] if host.endswith(".") else host
+    name = host.removesuffix(".")
     if not name or len(name) > 253:
         return False
     labels = name.split(".")

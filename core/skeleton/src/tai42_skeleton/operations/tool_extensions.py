@@ -70,14 +70,15 @@ def _owning_configs(manifest: Manifest, name: str) -> list[tuple[str, str]]:
     if instance.app.tools.is_branch(name):
         return []
     owners: list[tuple[str, str]] = []
-    for cfg in manifest.tools:
-        if name in manifest.resolved_includes.get(cfg.module, set()):
-            owners.append(("tools", cfg.module))
-    for cfg in manifest.mcp:
-        if name in manifest.resolved_includes.get(cfg.title, set()) or name in instance.app.tools.mcp_bound_names(
-            cfg.title
-        ):
-            owners.append(("mcp", cfg.title))
+    owners.extend(
+        ("tools", cfg.module) for cfg in manifest.tools if name in manifest.resolved_includes.get(cfg.module, set())
+    )
+    owners.extend(
+        ("mcp", cfg.title)
+        for cfg in manifest.mcp
+        if name in manifest.resolved_includes.get(cfg.title, set())
+        or name in instance.app.tools.mcp_bound_names(cfg.title)
+    )
     return owners
 
 
@@ -87,12 +88,16 @@ def _other_mappers(manifest: Manifest, name: str, owner: tuple[str, str]) -> lis
     would disagree with what was authored, so any such config is a 409."""
     kind, key = owner
     others: list[str] = []
-    for cfg in manifest.tools:
-        if name in cfg.extensions and not (kind == "tools" and cfg.module == key):
-            others.append(f"tools:{cfg.module}")
-    for cfg in manifest.mcp:
-        if name in cfg.extensions and not (kind == "mcp" and cfg.title == key):
-            others.append(f"mcp:{cfg.title}")
+    others.extend(
+        f"tools:{cfg.module}"
+        for cfg in manifest.tools
+        if name in cfg.extensions and not (kind == "tools" and cfg.module == key)
+    )
+    others.extend(
+        f"mcp:{cfg.title}"
+        for cfg in manifest.mcp
+        if name in cfg.extensions and not (kind == "mcp" and cfg.title == key)
+    )
     return others
 
 

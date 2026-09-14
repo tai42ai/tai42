@@ -141,7 +141,7 @@ def iter_sse_data(lines: Iterator[str]) -> Iterator[tuple[str | None, str]]:
         if line.startswith(":"):
             continue
         field, _, value = line.partition(":")
-        value = value[1:] if value.startswith(" ") else value
+        value = value.removeprefix(" ")
         if field == "data":
             data_parts.append(value)
         elif field == "event":

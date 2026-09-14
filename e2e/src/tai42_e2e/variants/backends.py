@@ -35,7 +35,7 @@ class BackendVariant(abc.ABC):
         """Extra reachability beyond the shared Redis + Postgres. The default is
         a no-op (Redis-only backends); overridden where a backend needs its own
         broker, raising :class:`InfraUnavailable` with the compose hint."""
-        return None
+        return
 
     def allocate_broker(self, infra: Infra, stack_id: str) -> BrokerLease | None:
         """Reserve this stack's isolated broker resource. The default backend

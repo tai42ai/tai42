@@ -410,8 +410,7 @@ class AccessControlVerifier(TokenVerifier):
 
     def _normalize_auto(self, path: str) -> str:
         path = UUID_PATTERN.sub("/{uuid}", path)
-        path = DIGIT_PATTERN.sub("/{id}", path)
-        return path
+        return DIGIT_PATTERN.sub("/{id}", path)
 
     async def _raw_fetch_route_versioned(self, path: str, version: int) -> str | None:
         # ``version`` participates only in the cache key (see __init__); the actual

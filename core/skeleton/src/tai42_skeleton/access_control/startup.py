@@ -93,8 +93,7 @@ async def check_always_public_routes() -> None:
     for meta in route_registry.routes():
         if not _under_prefixes(meta.path, prefixes):
             continue
-        for method in meta.methods:
-            public_routes.append(f"{method} {meta.path}")
+        public_routes.extend(f"{method} {meta.path}" for method in meta.methods)
         if meta.authed:
             authed_offenders.append(meta.path)
 
@@ -315,9 +314,9 @@ async def check_fenced_routes_resolvable() -> None:
     for meta in load_all_routes():
         if meta.action not in ("fenced", "secret"):
             continue
-        for method in meta.methods:
-            if resolve_route_meta(meta.path, method) is not meta:
-                unresolvable.append(f"{method} {meta.path}")
+        unresolvable.extend(
+            f"{method} {meta.path}" for method in meta.methods if resolve_route_meta(meta.path, method) is not meta
+        )
 
     if unresolvable:
         raise RuntimeError(

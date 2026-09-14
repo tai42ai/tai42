@@ -79,7 +79,7 @@ async def _person_target(
         match = next((row for row in person.addresses if row.address == address), None)
         if match is None:
             raise BadRequestError(f"address {address!r} is not one of the thread's person addresses")
-        route_name = named_route.route_name if named_route.route_name in match.routes else sorted(match.routes)[0]
+        route_name = named_route.route_name if named_route.route_name in match.routes else min(match.routes)
         return route_name, match.address
     newest = await store.list_person_thread_records(
         sorted(_person_routes(person)), thread_id, offset=0, limit=1, newest_first=True

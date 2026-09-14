@@ -287,8 +287,7 @@ class _AttachmentMixin(_StatesServiceBase):
         ``served_declaration`` share, so a served regime is identical across doors."""
         regimes: list[dict[str, Any]] = []
         for template, base_path, _params, _decls in attachments:
-            for rule in template.regimes:
-                regimes.append({"path": [*base_path, *rule.path], "regime": rule.regime})
+            regimes.extend({"path": [*base_path, *rule.path], "regime": rule.regime} for rule in template.regimes)
         return regimes
 
     def _validate_attach_path(self, path: Any) -> None:

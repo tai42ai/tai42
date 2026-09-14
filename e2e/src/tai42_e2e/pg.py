@@ -90,7 +90,7 @@ class PostgresAdmin:
     def _admin_conn(self) -> psycopg.Connection:
         # CREATE/DROP DATABASE cannot run inside a transaction block, so the
         # admin connection is autocommit.
-        conn = psycopg.connect(
+        return psycopg.connect(
             host=self._settings.pg_host,
             port=self._settings.pg_port,
             user=self._settings.pg_user,
@@ -98,7 +98,6 @@ class PostgresAdmin:
             dbname=self._settings.pg_admin_db,
             autocommit=True,
         )
-        return conn
 
     def _connection_settings(self, dbname: str) -> PostgresConnectionSettings:
         """DDL-privileged connection settings for the migration runner, pointing at
