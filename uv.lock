@@ -5025,7 +5025,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-accounts-postgres"
-version = "2.4.7"
+version = "2.4.8"
 source = { editable = "plugins/accounts-postgres" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -5059,7 +5059,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "6.0.3"
+version = "6.0.4"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "deepagents" },
@@ -5223,7 +5223,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "3.0.3"
+version = "3.0.4"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5278,7 +5278,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "3.3.5"
+version = "3.3.6"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -5321,7 +5321,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-telegram"
-version = "3.4.5"
+version = "3.4.6"
 source = { editable = "plugins/channel-telegram" }
 dependencies = [
     { name = "httpx" },
@@ -5407,7 +5407,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "5.0.5"
+version = "5.0.6"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5450,7 +5450,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "4.0.5"
+version = "4.0.6"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "httpx" },
@@ -5493,7 +5493,7 @@ dev = [
 
 [[package]]
 name = "tai42-cli"
-version = "7.0.3"
+version = "7.0.4"
 source = { editable = "core/cli" }
 dependencies = [
     { name = "click" },
@@ -5535,7 +5535,7 @@ provides-extras = ["dev", "api-gate"]
 
 [[package]]
 name = "tai42-contract"
-version = "11.0.0"
+version = "11.0.1"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5569,7 +5569,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "10.1.1"
+version = "10.1.2"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5764,7 +5764,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "4.0.3"
+version = "4.0.4"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -5975,7 +5975,7 @@ wheels = [
 
 [[package]]
 name = "tai42-monitoring-langfuse"
-version = "2.2.8"
+version = "2.2.9"
 source = { editable = "plugins/monitoring-langfuse" }
 dependencies = [
     { name = "langchain" },
@@ -6020,7 +6020,7 @@ dev = [
 
 [[package]]
 name = "tai42-sandbox-docker"
-version = "1.2.1"
+version = "1.2.2"
 source = { editable = "plugins/sandbox-docker" }
 dependencies = [
     { name = "aiodocker" },
@@ -6061,7 +6061,7 @@ dev = [
 
 [[package]]
 name = "tai42-sandbox-local"
-version = "1.1.8"
+version = "1.1.9"
 source = { editable = "plugins/sandbox-local" }
 dependencies = [
     { name = "pydantic" },
@@ -6100,7 +6100,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "15.0.1"
+version = "15.0.2"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
@@ -6328,7 +6328,7 @@ dev = [
 
 [[package]]
 name = "tai42-storage-s3"
-version = "1.1.9"
+version = "1.1.10"
 source = { editable = "plugins/storage-s3" }
 dependencies = [
     { name = "aioboto3" },
@@ -6371,7 +6371,7 @@ dev = [
 
 [[package]]
 name = "tai42-toolbox"
-version = "3.0.3"
+version = "3.0.4"
 source = { editable = "plugins/toolbox" }
 dependencies = [
     { name = "makefun" },
@@ -6445,7 +6445,7 @@ docs = [
 
 [[package]]
 name = "tai42-tools-github"
-version = "1.0.18"
+version = "1.0.19"
 source = { editable = "plugins/tools-github" }
 dependencies = [
     { name = "pydantic" },
@@ -6479,7 +6479,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-tools-stripe"
-version = "1.1.8"
+version = "1.1.9"
 source = { editable = "plugins/tools-stripe" }
 dependencies = [
     { name = "pydantic" },
