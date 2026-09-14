@@ -225,6 +225,61 @@ def _validate_keyed_item_list(value: Any, key_field: str, *, where: str, kind: s
         seen.append(k)
 
 
+def _check_unset_entry_key(entry: Any, key_field: str, seen: list[Any], *, where: str, index: int) -> dict[str, Any]:
+    # One unset entry's envelope: a JSON object carrying ``key_field`` (a ``str``/``int`` key,
+    # unique across entries by ``json_equal`` dedup). Appends the key to ``seen`` and returns the
+    # entry object for the fields check.
+    if not isinstance(entry, dict):
+        raise InvalidPathError(f"{where}[{index}]: an unset_by_key entry must be a JSON object, got {entry!r}")
+    obj = cast("dict[str, Any]", entry)
+    if key_field not in obj:
+        raise InvalidPathError(
+            f"{where}[{index}]: an unset_by_key entry must carry its key_field {key_field!r} (the item's own identity)"
+        )
+    k = obj[key_field]
+    _validate_key_value(k, where=f"{where}[{index}]: value[{key_field!r}]")
+    if any(json_equal(k, prev) for prev in seen):
+        raise InvalidPathError(f"{where}[{index}]: duplicate key {k!r} in the unset list; keys must be unique")
+    seen.append(k)
+    return obj
+
+
+def _check_unset_entry_fields(obj: dict[str, Any], key_field: str, *, where: str, index: int) -> None:
+    # One unset entry's ``fields`` list: non-empty string names, never ``key_field``, unique,
+    # capped, with no stray entry keys (an entry is the removal envelope, never a partial item).
+    raw_fields = obj.get("fields")
+    if not isinstance(raw_fields, list):
+        raise InvalidPathError(
+            f"{where}[{index}]: an unset_by_key entry requires a 'fields' list naming the fields to "
+            f"remove, got {raw_fields!r}"
+        )
+    fields = cast("list[Any]", raw_fields)
+    if len(fields) > MAX_REMOVE_KEYS:
+        raise InvalidPathError(
+            f"{where}[{index}]: {len(fields)} field names in one entry — the cap is {MAX_REMOVE_KEYS}"
+        )
+    for j, name in enumerate(fields):
+        if not isinstance(name, str) or not name:
+            raise InvalidPathError(
+                f"{where}[{index}]: fields[{j}]: a field name must be a non-empty string, got {name!r}"
+            )
+        if name == key_field:
+            raise InvalidPathError(
+                f"{where}[{index}]: fields[{j}]: refusing to unset the key_field {key_field!r} — "
+                "an item keeps its identity"
+            )
+        if name in fields[:j]:
+            raise InvalidPathError(
+                f"{where}[{index}]: fields[{j}]: duplicate field {name!r} in the entry; field names must be unique"
+            )
+    extra = set(obj) - {key_field, "fields"}
+    if extra:
+        raise InvalidPathError(
+            f"{where}[{index}]: an unset_by_key entry carries unknown keys {sorted(extra)} — an entry is "
+            f"{{{key_field!r}: <key>, 'fields': [<name>, …]}}, never a partial item"
+        )
+
+
 def _validate_unset_entries(value: Any, key_field: str, *, where: str) -> None:
     """``unset_by_key``'s payload: a LIST of removal ENTRIES, each EXACTLY the envelope
     ``{key_field: <key>, "fields": [<name>, …]}``.
@@ -245,49 +300,8 @@ def _validate_unset_entries(value: Any, key_field: str, *, where: str) -> None:
         raise InvalidPathError(f"{where}: {len(entries)} entries in the unset list — the cap is {MAX_REMOVE_KEYS}")
     seen: list[Any] = []
     for i, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            raise InvalidPathError(f"{where}[{i}]: an unset_by_key entry must be a JSON object, got {entry!r}")
-        obj = cast("dict[str, Any]", entry)
-        if key_field not in obj:
-            raise InvalidPathError(
-                f"{where}[{i}]: an unset_by_key entry must carry its key_field {key_field!r} (the item's own identity)"
-            )
-        k = obj[key_field]
-        _validate_key_value(k, where=f"{where}[{i}]: value[{key_field!r}]")
-        if any(json_equal(k, prev) for prev in seen):
-            raise InvalidPathError(f"{where}[{i}]: duplicate key {k!r} in the unset list; keys must be unique")
-        seen.append(k)
-        raw_fields = obj.get("fields")
-        if not isinstance(raw_fields, list):
-            raise InvalidPathError(
-                f"{where}[{i}]: an unset_by_key entry requires a 'fields' list naming the fields to "
-                f"remove, got {raw_fields!r}"
-            )
-        fields = cast("list[Any]", raw_fields)
-        if len(fields) > MAX_REMOVE_KEYS:
-            raise InvalidPathError(
-                f"{where}[{i}]: {len(fields)} field names in one entry — the cap is {MAX_REMOVE_KEYS}"
-            )
-        for j, name in enumerate(fields):
-            if not isinstance(name, str) or not name:
-                raise InvalidPathError(
-                    f"{where}[{i}]: fields[{j}]: a field name must be a non-empty string, got {name!r}"
-                )
-            if name == key_field:
-                raise InvalidPathError(
-                    f"{where}[{i}]: fields[{j}]: refusing to unset the key_field {key_field!r} — "
-                    "an item keeps its identity"
-                )
-            if name in fields[:j]:
-                raise InvalidPathError(
-                    f"{where}[{i}]: fields[{j}]: duplicate field {name!r} in the entry; field names must be unique"
-                )
-        extra = set(obj) - {key_field, "fields"}
-        if extra:
-            raise InvalidPathError(
-                f"{where}[{i}]: an unset_by_key entry carries unknown keys {sorted(extra)} — an entry is "
-                f"{{{key_field!r}: <key>, 'fields': [<name>, …]}}, never a partial item"
-            )
+        obj = _check_unset_entry_key(entry, key_field, seen, where=where, index=i)
+        _check_unset_entry_fields(obj, key_field, where=where, index=i)
 
 
 def _validate_fanout_value(value: dict[Any, Any], key_field: str, *, where: str) -> None:
@@ -313,6 +327,132 @@ def _validate_fanout_value(value: dict[Any, Any], key_field: str, *, where: str)
             )
         item_list = cast("list[Any]", items)
         _validate_keyed_item_list(item_list, key_field, where=f"{where}[{name!r}]", kind="set_by_key_each")
+
+
+def _validate_set_op(data: dict[str, Any], *, where: str) -> set[str]:
+    if "value" not in data:
+        raise InvalidPathError(f"{where}: a set op requires a 'value'")
+    return {"op", "path", "value", "guard"}
+
+
+def _validate_remove_op(data: dict[str, Any], *, where: str) -> set[str]:
+    if any(seg == APPEND for seg in data["path"]):
+        raise InvalidPathError(f"{where}: '-' (append) has no meaning in a remove path — it addresses no existing item")
+    if "value" in data:
+        # A stray value on a remove is probably a mis-built set — refused loudly,
+        # consistent with the unknown-keys refusal, never silently ignored.
+        raise InvalidPathError(f"{where}: a remove op takes no 'value'")
+    return {"op", "path", "guard"}
+
+
+def _validate_keyed_op_prefix(data: dict[str, Any], kind: str, *, where: str) -> str:
+    # A keyed op addresses the LIST — '-' (append) has no meaning; the op decides
+    # insert-vs-replace by key, never by position — and carries a non-empty string key_field.
+    if any(seg == APPEND for seg in data["path"]):
+        raise InvalidPathError(
+            f"{where}: '-' (append) has no meaning in a {kind} path — it addresses the list, not a new item"
+        )
+    key_field = data.get("key_field")
+    if not isinstance(key_field, str) or not key_field:
+        raise InvalidPathError(f"{where}: a {kind} op requires a non-empty string 'key_field'")
+    return key_field
+
+
+def _validate_set_by_key_op(data: dict[str, Any], key_field: str, *, where: str) -> set[str]:
+    if "key" in data:
+        raise InvalidPathError(f"{where}: a set_by_key op takes no 'key' — its match key is value[key_field]")
+    if "value" not in data:
+        raise InvalidPathError(f"{where}: a set_by_key op requires a 'value' (the item object to upsert)")
+    value = data["value"]
+    if isinstance(value, list):
+        # LIST form: many complete items, each doing the single-item
+        # first-match-replace-else-append.
+        _validate_keyed_item_list(value, key_field, where=f"{where}: value", kind="set_by_key")
+    elif isinstance(value, dict):
+        obj = cast("dict[str, Any]", value)
+        if key_field not in obj:
+            raise InvalidPathError(
+                f"{where}: a set_by_key 'value' must carry its key_field {key_field!r} (the item's own identity)"
+            )
+        _validate_key_value(obj[key_field], where=f"{where}: value[{key_field!r}]")
+    else:
+        raise InvalidPathError(
+            f"{where}: a set_by_key 'value' must be a JSON object or a JSON array of objects, got {value!r}"
+        )
+    return {"op", "path", "key_field", "value", "guard"}
+
+
+def _validate_set_by_key_each_op(data: dict[str, Any], key_field: str, *, where: str) -> set[str]:
+    if "key" in data:
+        raise InvalidPathError(
+            f"{where}: a set_by_key_each op takes no 'key' — each item's match key is its own key_field"
+        )
+    if "value" not in data:
+        raise InvalidPathError(
+            f"{where}: a set_by_key_each op requires a 'value' (the object mapping fan-out keys to item lists)"
+        )
+    value = data["value"]
+    if not isinstance(value, dict):
+        raise InvalidPathError(
+            f"{where}: a set_by_key_each 'value' must be a JSON object mapping fan-out keys to arrays "
+            f"of item objects, got {value!r}"
+        )
+    _validate_fanout_value(cast("dict[str, Any]", value), key_field, where=f"{where}: value")
+    return {"op", "path", "key_field", "value", "guard"}
+
+
+def _validate_merge_by_key_op(data: dict[str, Any], key_field: str, *, where: str) -> set[str]:
+    if "key" in data:
+        raise InvalidPathError(f"{where}: a merge_by_key op takes no 'key' — each partial carries its own key")
+    if "value" not in data:
+        raise InvalidPathError(f"{where}: a merge_by_key op requires a 'value' (the list of partial items to merge)")
+    value = data["value"]
+    if not isinstance(value, list):
+        raise InvalidPathError(
+            f"{where}: a merge_by_key 'value' must be a JSON array of partial item objects, got {value!r}"
+        )
+    _validate_keyed_item_list(value, key_field, where=f"{where}: value", kind="merge_by_key")
+    return {"op", "path", "key_field", "value", "guard"}
+
+
+def _validate_unset_by_key_op(data: dict[str, Any], key_field: str, *, where: str) -> set[str]:
+    if "key" in data:
+        raise InvalidPathError(f"{where}: an unset_by_key op takes no 'key' — each entry carries its own key")
+    if key_field == "fields":
+        raise InvalidPathError(
+            f"{where}: an unset_by_key op cannot use key_field 'fields' — the entry envelope reserves that name"
+        )
+    if "value" not in data:
+        raise InvalidPathError(f"{where}: an unset_by_key op requires a 'value' (the list of {{key, fields}} entries)")
+    value = data["value"]
+    if not isinstance(value, list):
+        raise InvalidPathError(
+            f"{where}: an unset_by_key 'value' must be a JSON array of "
+            f"{{{key_field!r}, 'fields'}} entries, got {value!r}"
+        )
+    _validate_unset_entries(value, key_field, where=f"{where}: value")
+    return {"op", "path", "key_field", "value", "guard"}
+
+
+def _validate_remove_by_key_op(data: dict[str, Any], key_field: str, *, where: str) -> set[str]:
+    if "value" in data:
+        raise InvalidPathError(f"{where}: a remove_by_key op takes no 'value' — it removes by 'key'")
+    if "key" not in data:
+        raise InvalidPathError(f"{where}: a remove_by_key op requires a 'key' (the value to remove by)")
+    _validate_remove_key(data["key"], where=f"{where}: key")
+    return {"op", "path", "key_field", "key", "guard"}
+
+
+# The per-kind keyed validators, each returning its allowed-keys set. Membership here is
+# the single source for dispatch; a keyed op's ``key_field`` is validated once up front by
+# :func:`_validate_keyed_op_prefix`.
+_KEYED_OP_VALIDATORS = {
+    "set_by_key": _validate_set_by_key_op,
+    "set_by_key_each": _validate_set_by_key_each_op,
+    "merge_by_key": _validate_merge_by_key_op,
+    "unset_by_key": _validate_unset_by_key_op,
+    "remove_by_key": _validate_remove_by_key_op,
+}
 
 
 def validate_op(op: Any, *, where: str = "op") -> dict[str, Any]:
@@ -357,109 +497,12 @@ def validate_op(op: Any, *, where: str = "op") -> dict[str, Any]:
     validate_path(data.get("path"), where=where)
 
     if kind == "set":
-        if "value" not in data:
-            raise InvalidPathError(f"{where}: a set op requires a 'value'")
-        allowed = {"op", "path", "value", "guard"}
+        allowed = _validate_set_op(data, where=where)
     elif kind == "remove":
-        if any(seg == APPEND for seg in data["path"]):
-            raise InvalidPathError(
-                f"{where}: '-' (append) has no meaning in a remove path — it addresses no existing item"
-            )
-        if "value" in data:
-            # A stray value on a remove is probably a mis-built set — refused loudly,
-            # consistent with the unknown-keys refusal below, never silently ignored.
-            raise InvalidPathError(f"{where}: a remove op takes no 'value'")
-        allowed = {"op", "path", "guard"}
+        allowed = _validate_remove_op(data, where=where)
     else:
-        # A keyed op addresses the LIST — '-' (append) has no meaning; the op decides
-        # insert-vs-replace by key, never by position.
-        if any(seg == APPEND for seg in data["path"]):
-            raise InvalidPathError(
-                f"{where}: '-' (append) has no meaning in a {kind} path — it addresses the list, not a new item"
-            )
-        key_field = data.get("key_field")
-        if not isinstance(key_field, str) or not key_field:
-            raise InvalidPathError(f"{where}: a {kind} op requires a non-empty string 'key_field'")
-        if kind == "set_by_key":
-            if "key" in data:
-                raise InvalidPathError(f"{where}: a set_by_key op takes no 'key' — its match key is value[key_field]")
-            if "value" not in data:
-                raise InvalidPathError(f"{where}: a set_by_key op requires a 'value' (the item object to upsert)")
-            value = data["value"]
-            if isinstance(value, list):
-                # LIST form: many complete items, each doing the single-item
-                # first-match-replace-else-append.
-                _validate_keyed_item_list(value, key_field, where=f"{where}: value", kind="set_by_key")
-            elif isinstance(value, dict):
-                obj = cast("dict[str, Any]", value)
-                if key_field not in obj:
-                    raise InvalidPathError(
-                        f"{where}: a set_by_key 'value' must carry its key_field {key_field!r} "
-                        "(the item's own identity)"
-                    )
-                _validate_key_value(obj[key_field], where=f"{where}: value[{key_field!r}]")
-            else:
-                raise InvalidPathError(
-                    f"{where}: a set_by_key 'value' must be a JSON object or a JSON array of objects, got {value!r}"
-                )
-            allowed = {"op", "path", "key_field", "value", "guard"}
-        elif kind == "set_by_key_each":
-            if "key" in data:
-                raise InvalidPathError(
-                    f"{where}: a set_by_key_each op takes no 'key' — each item's match key is its own key_field"
-                )
-            if "value" not in data:
-                raise InvalidPathError(
-                    f"{where}: a set_by_key_each op requires a 'value' (the object mapping fan-out keys to item lists)"
-                )
-            value = data["value"]
-            if not isinstance(value, dict):
-                raise InvalidPathError(
-                    f"{where}: a set_by_key_each 'value' must be a JSON object mapping fan-out keys to arrays "
-                    f"of item objects, got {value!r}"
-                )
-            _validate_fanout_value(cast("dict[str, Any]", value), key_field, where=f"{where}: value")
-            allowed = {"op", "path", "key_field", "value", "guard"}
-        elif kind == "merge_by_key":
-            if "key" in data:
-                raise InvalidPathError(f"{where}: a merge_by_key op takes no 'key' — each partial carries its own key")
-            if "value" not in data:
-                raise InvalidPathError(
-                    f"{where}: a merge_by_key op requires a 'value' (the list of partial items to merge)"
-                )
-            value = data["value"]
-            if not isinstance(value, list):
-                raise InvalidPathError(
-                    f"{where}: a merge_by_key 'value' must be a JSON array of partial item objects, got {value!r}"
-                )
-            _validate_keyed_item_list(value, key_field, where=f"{where}: value", kind="merge_by_key")
-            allowed = {"op", "path", "key_field", "value", "guard"}
-        elif kind == "unset_by_key":
-            if "key" in data:
-                raise InvalidPathError(f"{where}: an unset_by_key op takes no 'key' — each entry carries its own key")
-            if key_field == "fields":
-                raise InvalidPathError(
-                    f"{where}: an unset_by_key op cannot use key_field 'fields' — the entry envelope reserves that name"
-                )
-            if "value" not in data:
-                raise InvalidPathError(
-                    f"{where}: an unset_by_key op requires a 'value' (the list of {{key, fields}} entries)"
-                )
-            value = data["value"]
-            if not isinstance(value, list):
-                raise InvalidPathError(
-                    f"{where}: an unset_by_key 'value' must be a JSON array of "
-                    f"{{{key_field!r}, 'fields'}} entries, got {value!r}"
-                )
-            _validate_unset_entries(value, key_field, where=f"{where}: value")
-            allowed = {"op", "path", "key_field", "value", "guard"}
-        else:  # remove_by_key
-            if "value" in data:
-                raise InvalidPathError(f"{where}: a remove_by_key op takes no 'value' — it removes by 'key'")
-            if "key" not in data:
-                raise InvalidPathError(f"{where}: a remove_by_key op requires a 'key' (the value to remove by)")
-            _validate_remove_key(data["key"], where=f"{where}: key")
-            allowed = {"op", "path", "key_field", "key", "guard"}
+        key_field = _validate_keyed_op_prefix(data, cast("str", kind), where=where)
+        allowed = _KEYED_OP_VALIDATORS[cast("str", kind)](data, key_field, where=where)
 
     if data.get("guard") is not None:
         validate_guard(data["guard"], where=where)

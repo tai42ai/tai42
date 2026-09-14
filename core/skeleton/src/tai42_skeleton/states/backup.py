@@ -91,20 +91,9 @@ async def export_states() -> dict[str, Any]:
     }
 
 
-async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
-    """The section importer: upsert templates, declarations, attachments, aliases, then
-    records through the facet doors, reporting per-entity outcomes. A newer payload version
-    is refused."""
-    version = payload.get("version")
-    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        raise ValueError(f"states backup payload carries no valid version (got {version!r})")
-    if version > _VERSION:
-        raise ValueError(f"states backup payload version {version!r} is newer than this build supports ({_VERSION})")
-    if not states_store_configured():
-        raise RuntimeError(
-            "cannot import the states section: bind the 'states' component's database to enable the feature"
-        )
-    report: dict[str, Any] = {
+def _new_import_report() -> dict[str, Any]:
+    """The zeroed per-entity tally the importer fills as each entity kind lands."""
+    return {
         "templates": {"created": 0, "updated": 0, "failed": 0},
         "declarations": {"created": 0, "updated": 0, "failed": 0},
         "attachments": {"created": 0, "updated": 0, "failed": 0},
@@ -112,6 +101,9 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
         "records": {"restored": 0, "failed": 0},
         "errors": [],
     }
+
+
+async def _import_templates(payload: dict[str, Any], report: dict[str, Any]) -> None:
     for entry in payload.get("templates") or []:
         try:
             existed = await tai42_app.states.get_template(entry.get("name")) is not None
@@ -121,6 +113,9 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
             report["errors"].append(f"template {entry.get('name')!r}: {exc}")
             continue
         report["templates"]["updated" if existed else "created"] += 1
+
+
+async def _import_declarations(payload: dict[str, Any], report: dict[str, Any]) -> None:
     for entry in payload.get("declarations") or []:
         try:
             existed = await tai42_app.states.get_declaration(entry["name"]) is not None
@@ -130,6 +125,9 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
             report["errors"].append(f"declaration {entry.get('name')!r}: {exc}")
             continue
         report["declarations"]["updated" if existed else "created"] += 1
+
+
+async def _import_attachments(payload: dict[str, Any], report: dict[str, Any]) -> None:
     # A restored attachment is a snapshot, not a re-attach: it re-runs the validators (schema
     # integrity) but NOT the reconcilers (there is no live re-attach to reconcile against,
     # and attachments restore before records) — reached through the concrete skeleton facet.
@@ -158,36 +156,63 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
             report["errors"].append(f"attachment {entry.get('state')!r} ← {entry.get('template')!r}: {exc}")
             continue
         report["attachments"]["updated" if attachments else "created"] += 1
+
+
+async def _import_aliases(payload: dict[str, Any], report: dict[str, Any]) -> None:
+    # ``restore_aliases`` is the states section's own restore path (off the ``AppStates``
+    # protocol), reached through the concrete skeleton facet.
+    from tai42_skeleton.app import instance
+
     aliases_by_state: dict[str, list[dict[str, Any]]] = {}
     for entry in payload.get("aliases") or []:
         aliases_by_state.setdefault(entry["state"], []).append({k: v for k, v in entry.items() if k != "state"})
     for state, rows in aliases_by_state.items():
         try:
-            # ``restore_aliases`` is the states section's own restore path (off the
-            # ``AppStates`` protocol), reached through the concrete skeleton facet.
-            from tai42_skeleton.app import instance
-
             await instance.app.states.restore_aliases(state, rows, origin=_RESTORE_ORIGIN)
         except _ENTITY_ERRORS as exc:
             report["aliases"]["failed"] += len(rows)
             report["errors"].append(f"aliases for state {state!r}: {exc}")
             continue
         report["aliases"]["restored"] += len(rows)
+
+
+async def _import_records(payload: dict[str, Any], report: dict[str, Any]) -> None:
+    # ``restore_records`` is the states section's own restore path (off the ``AppStates``
+    # protocol), reached through the concrete skeleton facet.
+    from tai42_skeleton.app import instance
+
     records_by_state: dict[str, list[dict[str, Any]]] = {}
     for entry in payload.get("records") or []:
         records_by_state.setdefault(entry["state"], []).append({k: v for k, v in entry.items() if k != "state"})
     for state, rows in records_by_state.items():
         try:
-            # ``restore_records`` is the states section's own restore path (off the
-            # ``AppStates`` protocol), reached through the concrete skeleton facet.
-            from tai42_skeleton.app import instance
-
             await instance.app.states.restore_records(state, rows, origin=_RESTORE_ORIGIN)
         except _ENTITY_ERRORS as exc:
             report["records"]["failed"] += len(rows)
             report["errors"].append(f"records for state {state!r}: {exc}")
             continue
         report["records"]["restored"] += len(rows)
+
+
+async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
+    """The section importer: upsert templates, declarations, attachments, aliases, then
+    records through the facet doors, reporting per-entity outcomes. A newer payload version
+    is refused."""
+    version = payload.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise ValueError(f"states backup payload carries no valid version (got {version!r})")
+    if version > _VERSION:
+        raise ValueError(f"states backup payload version {version!r} is newer than this build supports ({_VERSION})")
+    if not states_store_configured():
+        raise RuntimeError(
+            "cannot import the states section: bind the 'states' component's database to enable the feature"
+        )
+    report = _new_import_report()
+    await _import_templates(payload, report)
+    await _import_declarations(payload, report)
+    await _import_attachments(payload, report)
+    await _import_aliases(payload, report)
+    await _import_records(payload, report)
     return report
 
 

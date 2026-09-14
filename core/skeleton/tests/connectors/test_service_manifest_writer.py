@@ -4,7 +4,7 @@
 document in place and return the titles they touched. The read-modify-write
 transaction, validation, reload, and fleet broadcast belong to
 :class:`~tai42_skeleton.config.service.ConfigService`, exercised in
-``tests/config/test_service.py``; here we assert only the mutation semantics on a
+``tests/config/test_config_service_apply.py``; here we assert only the mutation semantics on a
 plain document.
 """
 

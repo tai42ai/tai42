@@ -60,3 +60,157 @@ def test_delete_then_upload_at_freed_id(monkeypatch: pytest.MonkeyPatch, tmp_pat
     uploaded = run_cli(monkeypatch, store, ["templates", "upload", "a/b", "--file", str(source)])
     assert uploaded.exit_code == 0, uploaded.output
     assert store.keys["a/b"] == "i am the new a/b"
+
+
+def test_templates_render_requires_a_text_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        return data_response({})
+
+    result = run_cli(monkeypatch, handler, ["templates", "render"])
+    assert result.exit_code != 0
+    assert "--text" in result.output
+
+
+def test_templates_render_by_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["text"] == {"id": "greet", "kwargs": {"name": "Ada"}}
+        return data_response({"rendered": "hi Ada"})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["templates", "render", "--text", '{"id": "greet", "kwargs": {"name": "Ada"}}'],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_templates_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/templates"
+        return data_response({"templates": ["prompts/greeting.md"]})
+
+    result = run_cli(monkeypatch, handler, ["templates", "list"])
+    assert result.exit_code == 0, result.output
+    assert "greeting" in result.output
+
+
+def test_templates_get_posts_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/template"
+        assert json.loads(request.content) == {"template_id": "prompts/greeting.md"}
+        return data_response({"content": "Hi {{ name }}"})
+
+    result = run_cli(monkeypatch, handler, ["templates", "get", "prompts/greeting.md"])
+    assert result.exit_code == 0, result.output
+
+
+def test_templates_upload_sends_file_content(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    local = tmp_path / "greeting.md"
+    local.write_text("Hello {{ name }}", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/upload-template"
+        assert json.loads(request.content) == {"path": "prompts/greeting.md", "content": "Hello {{ name }}"}
+        return data_response({"written": True})
+
+    result = run_cli(monkeypatch, handler, ["templates", "upload", "prompts/greeting.md", "--file", str(local)])
+    assert result.exit_code == 0, result.output
+
+
+def test_templates_delete_posts_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/delete-template"
+        assert json.loads(request.content) == {"path": "prompts/greeting.md"}
+        return data_response({"deleted": True})
+
+    result = run_cli(monkeypatch, handler, ["templates", "delete", "prompts/greeting.md"])
+    assert result.exit_code == 0, result.output
+
+
+def test_templates_delete_dir_posts_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/delete-template-dir"
+        assert json.loads(request.content) == {"path": "prompts/archive"}
+        return data_response({"path": "prompts/archive", "deleted": True})
+
+    result = run_cli(monkeypatch, handler, ["templates", "delete-dir", "prompts/archive"])
+    assert result.exit_code == 0, result.output
+
+
+def test_templates_render_by_inline_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["text"] == {"content": "Hi {{ name }}", "kwargs": {"name": "Ada"}}
+        return data_response({"rendered": "Hi Ada"})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["templates", "render", "--text", '{"content": "Hi {{ name }}", "kwargs": {"name": "Ada"}}'],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_templates_clear_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/clear-templates-cache"
+        return data_response({"cleared": True})
+
+    result = run_cli(monkeypatch, handler, ["templates", "clear-cache"])
+    assert result.exit_code == 0, result.output
+
+
+def _capture_render_template(seen: dict):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/render-template"
+        seen.update(json.loads(request.content))
+        return data_response({"rendered": "hi"})
+
+    return handler
+
+
+def test_templates_render_reads_text_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    text_file = tmp_path / "t.json"
+    text_file.write_text('{"id": "prompts/greeting.md", "kwargs": {"name": "secret"}}')
+    seen: dict = {}
+    result = run_cli(
+        monkeypatch,
+        _capture_render_template(seen),
+        ["templates", "render", "--text-file", str(text_file)],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["text"] == {"id": "prompts/greeting.md", "kwargs": {"name": "secret"}}
+
+
+def test_templates_render_reads_text_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+    result = run_cli(
+        monkeypatch,
+        _capture_render_template(seen),
+        ["templates", "render", "--text-file", "-"],
+        stdin='{"id": "prompts/greeting.md", "kwargs": {"name": "secret"}}',
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["text"] == {"id": "prompts/greeting.md", "kwargs": {"name": "secret"}}
+
+
+def test_templates_render_rejects_both_text_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    text_file = tmp_path / "t.json"
+    text_file.write_text('{"content": "hi"}')
+    result = run_cli(
+        monkeypatch,
+        _capture_render_template({}),
+        [
+            "templates",
+            "render",
+            "--text",
+            '{"content": "hi"}',
+            "--text-file",
+            str(text_file),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--text-file" in result.output

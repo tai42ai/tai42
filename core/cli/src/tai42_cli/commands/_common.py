@@ -51,6 +51,16 @@ def covers(*routes: tuple[str, str]):
     return decorator
 
 
+def compact(pairs: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``pairs`` with every ``None``-valued entry dropped.
+
+    The single home for the "assemble a query/body from optional inputs" pattern:
+    a caller maps each optional flag to its value (or ``None`` when unset) and this
+    keeps only the ones that carry a value, so an omitted flag never reaches the
+    wire as an empty parameter."""
+    return {key: value for key, value in pairs.items() if value is not None}
+
+
 def seg(value: Any) -> str:
     """A user-supplied value percent-encoded as ONE path segment (``safe=""`` encodes
     ``/`` too), so a value that carries a reserved character — a state record ``key``

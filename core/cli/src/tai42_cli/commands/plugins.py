@@ -25,6 +25,7 @@ from tai42_contract.plugins import LISTING_SLUG_RE, PluginSpec
 
 from tai42_cli.commands._common import (
     app_context,
+    compact,
     covers,
     echo_stderr,
     emit_records,
@@ -32,6 +33,7 @@ from tai42_cli.commands._common import (
     parse_assignment_arg,
     seg,
 )
+from tai42_cli.context import AppContext
 from tai42_cli.render import print_json
 
 app = typer.Typer(
@@ -71,29 +73,22 @@ def search(
     Example: ``tai plugins search uuid --kind tool``
     """
     ctx_obj = app_context(ctx)
-    params: dict[str, Any] = {}
-    if query is not None:
-        params["q"] = query
-    if kind is not None:
-        params["kind"] = kind
-    if category is not None:
-        params["category"] = category
-    if tag:
-        # Each ``--tag`` becomes its own repeated ``tags`` query param — the client
-        # encodes a list value as repeated params, never comma-joined.
-        params["tags"] = tag
-    if namespace is not None:
-        params["namespace"] = namespace
-    if tier is not None:
-        params["tier"] = tier
-    if contract is not None:
-        params["contract"] = contract
-    if sort is not None:
-        params["sort"] = sort
-    if page is not None:
-        params["page"] = page
-    if page_size is not None:
-        params["page_size"] = page_size
+    # Each ``--tag`` becomes its own repeated ``tags`` query param — the client encodes
+    # a list value as repeated params, never comma-joined; an empty/absent list drops.
+    params: dict[str, Any] = compact(
+        {
+            "q": query,
+            "kind": kind,
+            "category": category,
+            "tags": tag or None,
+            "namespace": namespace,
+            "tier": tier,
+            "contract": contract,
+            "sort": sort,
+            "page": page,
+            "page_size": page_size,
+        }
+    )
     with ctx_obj.client() as client:
         data = client.get("/api/marketplace/search", params=params)
     # /api/marketplace/search returns an opaque passthrough body (OpaqueJson), so
@@ -256,6 +251,73 @@ def _render_preview_table(preview: dict[str, Any]) -> None:
             typer.echo(f"  {methods} {row.get('full_path')}")
 
 
+def _preview_body(ref: str, version: str | None, overrides: dict[str, str]) -> dict[str, Any]:
+    """The ``install/preview`` request body: the ref plus an optional pinned version
+    and route-mount overrides. Shared by ``install`` and ``update``."""
+    body: dict[str, Any] = {"ref": ref}
+    if version is not None:
+        body["version"] = version
+    if overrides:
+        body["route_mounts"] = overrides
+    return body
+
+
+def _run_dry_run(ctx_obj: AppContext, preview_body: dict[str, Any]) -> None:
+    """POST the preview and render it (``print_json`` under ``--json``, else the
+    human table), raising ``typer.Exit(1)`` on any route collision so a scripted
+    dry-run gates on it. Shared by ``install`` and ``update``."""
+    with ctx_obj.client() as client:
+        preview = client.post("/api/marketplace/install/preview", json=preview_body)
+    if ctx_obj.json_output:
+        print_json(preview)
+    else:
+        _render_preview_table(preview)
+    if isinstance(preview, dict) and preview.get("collisions"):
+        raise typer.Exit(code=1)
+
+
+def _install_body(
+    ref: str,
+    version: str | None,
+    overrides: dict[str, str],
+    accept_public_routes: bool,
+    env_values: dict[str, str],
+    secret: list[str] | None,
+) -> dict[str, Any]:
+    """The ``install`` request body: ref, optional version/route-mounts, the
+    public-route acknowledgement, and any supplied env values / secret keys."""
+    body: dict[str, Any] = {"ref": ref}
+    if version is not None:
+        body["version"] = version
+    if overrides:
+        body["route_mounts"] = overrides
+    if accept_public_routes:
+        body["accept_public_routes"] = True
+    if env_values:
+        body["env"] = env_values
+    if secret:
+        body["secret_keys"] = list(secret)
+    return body
+
+
+def _update_body(
+    ref: str,
+    version: str | None,
+    env_values: dict[str, str],
+    secret: list[str] | None,
+) -> dict[str, Any]:
+    """The ``update`` request body: ref, optional target version, and any supplied
+    env values / secret keys."""
+    body: dict[str, Any] = {"ref": ref}
+    if version is not None:
+        body["version"] = version
+    if env_values:
+        body["env"] = env_values
+    if secret:
+        body["secret_keys"] = list(secret)
+    return body
+
+
 @app.command("install")
 @covers(("POST", "/api/marketplace/install"), ("POST", "/api/marketplace/install/preview"))
 def install(
@@ -305,33 +367,11 @@ def install(
     ctx_obj = app_context(ctx)
     overrides = _mount_overrides(mount)
     env_values = _env_map(env)
-    preview_body: dict[str, Any] = {"ref": ref}
-    if version is not None:
-        preview_body["version"] = version
-    if overrides:
-        preview_body["route_mounts"] = overrides
+    preview_body = _preview_body(ref, version, overrides)
     if dry_run:
-        with ctx_obj.client() as client:
-            preview = client.post("/api/marketplace/install/preview", json=preview_body)
-        if ctx_obj.json_output:
-            print_json(preview)
-        else:
-            _render_preview_table(preview)
-        # A collision is a non-zero exit so a scripted dry-run gates on it.
-        if isinstance(preview, dict) and preview.get("collisions"):
-            raise typer.Exit(code=1)
+        _run_dry_run(ctx_obj, preview_body)
         return
-    body: dict[str, Any] = {"ref": ref}
-    if version is not None:
-        body["version"] = version
-    if overrides:
-        body["route_mounts"] = overrides
-    if accept_public_routes:
-        body["accept_public_routes"] = True
-    if env_values:
-        body["env"] = env_values
-    if secret:
-        body["secret_keys"] = list(secret)
+    body = _install_body(ref, version, overrides, accept_public_routes, env_values, secret)
     with ctx_obj.client() as client:
         # The preview reports the server-computed ``missing_env`` (required minus the
         # store and process env); refuse before posting when a name is still unsupplied.
@@ -384,26 +424,11 @@ def update(
     """
     ctx_obj = app_context(ctx)
     env_values = _env_map(env)
-    preview_body: dict[str, Any] = {"ref": ref}
-    if version is not None:
-        preview_body["version"] = version
+    preview_body = _preview_body(ref, version, {})
     if dry_run:
-        with ctx_obj.client() as client:
-            preview = client.post("/api/marketplace/install/preview", json=preview_body)
-        if ctx_obj.json_output:
-            print_json(preview)
-        else:
-            _render_preview_table(preview)
-        if isinstance(preview, dict) and preview.get("collisions"):
-            raise typer.Exit(code=1)
+        _run_dry_run(ctx_obj, preview_body)
         return
-    body: dict[str, Any] = {"ref": ref}
-    if version is not None:
-        body["version"] = version
-    if env_values:
-        body["env"] = env_values
-    if secret:
-        body["secret_keys"] = list(secret)
+    body = _update_body(ref, version, env_values, secret)
     with ctx_obj.client() as client:
         preview = client.post("/api/marketplace/install/preview", json=preview_body)
         _refuse_missing_env(preview, set(env_values))

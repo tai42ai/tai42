@@ -328,6 +328,47 @@ def read_wheel_docs(wheel_path: Path) -> dict[str, bytes]:
     return files
 
 
+def _resolve_docs_root(plugin_dir: Path) -> Path:
+    """The resolved real ``docs/`` root of ``plugin_dir``, or a :class:`PluginDocsError`.
+
+    Plugin-provided paths are an untrusted boundary and a symlinked member
+    resolves/reads through to its target, so containment is anchored on the
+    plugin dir: ``docs/`` must be a real directory inside it (a symlinked root
+    would resolve to an external tree whose files then look contained). A missing
+    or symlinked/escaping root raises.
+    """
+    docs_root = plugin_dir / PLUGIN_DOCS_DIRNAME
+    if not docs_root.is_dir():
+        raise PluginDocsError(f"{plugin_dir} has no {PLUGIN_DOCS_DIRNAME}/ directory at {docs_root}")
+    plugin_dir_real = plugin_dir.resolve()
+    docs_root_real = docs_root.resolve()
+    if docs_root.is_symlink() or not docs_root_real.is_relative_to(plugin_dir_real):
+        raise PluginDocsError(f"{docs_root} is not a real {PLUGIN_DOCS_DIRNAME}/ directory inside {plugin_dir_real}")
+    return docs_root_real
+
+
+def _read_capped_docs_member(path: Path, docs_root_real: Path) -> bytes:
+    """One docs member's bytes: recheck it resolves inside ``docs_root_real``, refuse
+    an over-cap file by ``stat`` before reading, then bounded-read at the per-file
+    ceiling. Any escape, unreadable file, or over-cap file raises :class:`PluginDocsError`."""
+    if not path.resolve().is_relative_to(docs_root_real):
+        raise PluginDocsError(f"{path} resolves outside the {PLUGIN_DOCS_DIRNAME}/ tree at {docs_root_real}")
+    # ``stat`` first refuses an over-cap file before any bytes are read; the
+    # bounded read then caps at MAX + 1 so a file that grew after the stat is
+    # still refused by the length check below rather than slurped whole.
+    try:
+        size = path.stat().st_size
+        if size > MAX_DOCS_FILE_BYTES:
+            raise PluginDocsError(f"{path} is {size} bytes, past the {MAX_DOCS_FILE_BYTES}-byte per-file limit")
+        with path.open("rb") as fh:
+            data = fh.read(MAX_DOCS_FILE_BYTES + 1)
+    except OSError as exc:
+        raise PluginDocsError(f"cannot read docs member {path}: {exc}") from exc
+    if len(data) > MAX_DOCS_FILE_BYTES:
+        raise PluginDocsError(f"{path} is past the {MAX_DOCS_FILE_BYTES}-byte per-file limit")
+    return data
+
+
 def read_dir_docs(plugin_dir: Path) -> dict[str, bytes]:
     """Read the ``docs/`` tree sitting beside ``tai-plugin.yml`` in a plugin dir.
 
@@ -340,43 +381,18 @@ def read_dir_docs(plugin_dir: Path) -> dict[str, bytes]:
     missing ``docs/`` directory, an empty one, or an unreadable file also raises
     :class:`PluginDocsError`. Never returns a partial tree.
     """
+    docs_root_real = _resolve_docs_root(plugin_dir)
     docs_root = plugin_dir / PLUGIN_DOCS_DIRNAME
-    if not docs_root.is_dir():
-        raise PluginDocsError(f"{plugin_dir} has no {PLUGIN_DOCS_DIRNAME}/ directory at {docs_root}")
     try:
         members = sorted(path for path in docs_root.rglob("*") if path.is_file())
     except OSError as exc:
         raise PluginDocsError(f"cannot read docs tree at {docs_root}: {exc}") from exc
     if not members:
         raise PluginDocsError(f"{plugin_dir} packages no {PLUGIN_DOCS_DIRNAME}/ tree at {docs_root}")
-    # Plugin-provided paths are an untrusted boundary and a symlinked member
-    # resolves/reads through to its target, so containment is anchored on the
-    # plugin dir: ``docs/`` must be a real directory inside it (a symlinked root
-    # would resolve to an external tree whose files then look contained), and no
-    # member may resolve outside that real root. Any escape raises (never a
-    # partial tree).
-    plugin_dir_real = plugin_dir.resolve()
-    docs_root_real = docs_root.resolve()
-    if docs_root.is_symlink() or not docs_root_real.is_relative_to(plugin_dir_real):
-        raise PluginDocsError(f"{docs_root} is not a real {PLUGIN_DOCS_DIRNAME}/ directory inside {plugin_dir_real}")
     files: dict[str, bytes] = {}
     total = 0
     for path in members:
-        if not path.resolve().is_relative_to(docs_root_real):
-            raise PluginDocsError(f"{path} resolves outside the {PLUGIN_DOCS_DIRNAME}/ tree at {docs_root_real}")
-        # ``stat`` first refuses an over-cap file before any bytes are read; the
-        # bounded read then caps at MAX + 1 so a file that grew after the stat is
-        # still refused by the length check below rather than slurped whole.
-        try:
-            size = path.stat().st_size
-            if size > MAX_DOCS_FILE_BYTES:
-                raise PluginDocsError(f"{path} is {size} bytes, past the {MAX_DOCS_FILE_BYTES}-byte per-file limit")
-            with path.open("rb") as fh:
-                data = fh.read(MAX_DOCS_FILE_BYTES + 1)
-        except OSError as exc:
-            raise PluginDocsError(f"cannot read docs member {path}: {exc}") from exc
-        if len(data) > MAX_DOCS_FILE_BYTES:
-            raise PluginDocsError(f"{path} is past the {MAX_DOCS_FILE_BYTES}-byte per-file limit")
+        data = _read_capped_docs_member(path, docs_root_real)
         total += len(data)
         if total > MAX_DOCS_TOTAL_BYTES:
             raise PluginDocsError(f"{docs_root} docs tree is past the {MAX_DOCS_TOTAL_BYTES}-byte total limit")

@@ -115,11 +115,11 @@ def _mount_registry(monkeypatch):
     recording a mounted surface — or records it public — leaves the SPA catch-all
     claiming those paths and turns the test red."""
     from tai42_skeleton.app import http as app_http
-    from tai42_skeleton.app import server as app_server
+    from tai42_skeleton.app import serving_core
     from tai42_skeleton.app.route_registry import RouteRegistry
 
     registry = RouteRegistry()
-    monkeypatch.setattr(app_server, "route_registry", registry)
+    monkeypatch.setattr(serving_core, "route_registry", registry)
     monkeypatch.setattr(app_http, "route_registry", registry)
     return registry
 
@@ -136,11 +136,11 @@ def _transport_surface(monkeypatch):
     """``_SURFACE`` plus the records the APP ITSELF lays down as it mounts its MCP
     transports and its sub-MCP router, for the STATEFUL gated deployment."""
     from tai42_skeleton.app import http as app_http
-    from tai42_skeleton.app import server as app_server
+    from tai42_skeleton.app import serving_core
 
     registry = _mount_registry(monkeypatch)
-    app_server.record_streamable_http_surface("/mcp", stateless=False)
-    app_server.record_sse_surface("/sse", "/messages")
+    serving_core.record_streamable_http_surface("/mcp", stateless=False)
+    serving_core.record_sse_surface("/sse", "/messages")
     app_http.record_sub_mcp_mount("/app")
     _match_against_mounts(monkeypatch, registry)
     yield
@@ -302,10 +302,10 @@ def test_a_stateless_transport_leaves_its_get_to_the_public_catch_all(monkeypatc
     # fastmcp binds no GET on a STATELESS endpoint — there is no session to stream from —
     # so the recorder must claim none either. A phantom authed GET door outranks the SPA
     # catch-all and would leave GET/HEAD /mcp unthrottled on a surface nothing serves.
-    from tai42_skeleton.app import server as app_server
+    from tai42_skeleton.app import serving_core
 
     registry = _mount_registry(monkeypatch)
-    app_server.record_streamable_http_surface("/mcp", stateless=True)
+    serving_core.record_streamable_http_surface("/mcp", stateless=True)
     _match_against_mounts(monkeypatch, registry)
     client = _build_client(monkeypatch, _settings(), FakeRedis())
 
@@ -324,11 +324,11 @@ def test_an_epoch_mounting_a_narrower_method_set_leaves_no_wider_door_behind(mon
     # well as the path would ACCUMULATE across a settings change: the stateful epoch's
     # GET,POST,DELETE door would survive the stateless rebuild, outrank the SPA catch-all
     # and leave GET /mcp unthrottled on a surface this deployment no longer serves.
-    from tai42_skeleton.app import server as app_server
+    from tai42_skeleton.app import serving_core
 
     registry = _mount_registry(monkeypatch)
-    app_server.record_streamable_http_surface("/mcp", stateless=False)
-    app_server.record_streamable_http_surface("/mcp", stateless=True)
+    serving_core.record_streamable_http_surface("/mcp", stateless=False)
+    serving_core.record_streamable_http_surface("/mcp", stateless=True)
     assert [meta.methods for meta in registry.routes()] == [("DELETE", "POST")]
 
     _match_against_mounts(monkeypatch, registry)

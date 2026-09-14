@@ -73,7 +73,7 @@ async def test_purge_atomically_spares_revived_group(fake_redis):
     dead = _req("i1", "g", store, created_offset=-120, timeout_offset=-60)
     await store.add(fake_redis, dead, idle_ttl=100)
 
-    now_ms = store_module._now_ms()
+    now_ms = store_module.ttl._now_ms()
     # g's deadline is in the past: it is currently in the expired set the purge
     # would act on.
     expired_before = await fake_redis.zrangebyscore(store.pending_deadline_key, 0, now_ms)
@@ -82,23 +82,23 @@ async def test_purge_atomically_spares_revived_group(fake_redis):
     # Revive g BEFORE the delete step, exactly as a concurrent add() would: extend
     # its deadline (ZADD GT into the future), re-add it to the pending index, bump
     # its count. Its earlier position in the expired set is now stale.
-    future_ms = store_module._now_ms() + 60_000
+    future_ms = store_module.ttl._now_ms() + 60_000
     await fake_redis.zadd(store.pending_deadline_key, {"g": future_ms}, gt=True)
-    await fake_redis.zadd(store.pending_key, {"g": store_module._now_ms()})
+    await fake_redis.zadd(store.pending_key, {"g": store_module.ttl._now_ms()})
     fake_redis._incr(store.count_key("g"))
     # The CURRENT expired set is empty — an eval-time re-read is what spares g.
-    assert await fake_redis.zrangebyscore(store.pending_deadline_key, 0, store_module._now_ms()) == []
+    assert await fake_redis.zrangebyscore(store.pending_deadline_key, 0, store_module.ttl._now_ms()) == []
 
     # Run the purge with a non-matching skip group ("__none__") so the current-add
     # skip branch cannot be what spares g; only the eval-time re-read of the
     # deadline set can. The fake re-reads that set before deleting (emulating the
     # script), so g — no longer expired — is left intact.
     purged = await fake_redis.eval(
-        store_module._PENDING_PURGE_LUA,
+        store_module.scripts._PENDING_PURGE_LUA,
         2,
         store.pending_deadline_key,
         store.pending_key,
-        store_module._now_ms(),
+        store_module.ttl._now_ms(),
         "__none__",
     )
     assert purged == 0
@@ -119,17 +119,17 @@ async def test_purge_skips_current_add_group(fake_redis):
     # residue a group carries when its recorded deadline has already passed.
     dead = _req("i1", "g", store, created_offset=-120, timeout_offset=-60)
     await store.add(fake_redis, dead, idle_ttl=100)
-    assert await fake_redis.zrangebyscore(store.pending_deadline_key, 0, store_module._now_ms()) == ["g"]
+    assert await fake_redis.zrangebyscore(store.pending_deadline_key, 0, store_module.ttl._now_ms()) == ["g"]
     count_before = fake_redis._strings[store.count_key("g")]
 
     # Invoke the purge exactly as add() does for a NEW question in group g:
     # current == "g", so the skip branch must spare g despite its past deadline.
     purged = await fake_redis.eval(
-        store_module._PENDING_PURGE_LUA,
+        store_module.scripts._PENDING_PURGE_LUA,
         2,
         store.pending_deadline_key,
         store.pending_key,
-        store_module._now_ms(),
+        store_module.ttl._now_ms(),
         "g",
     )
     assert purged == 0

@@ -17,7 +17,6 @@ from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
-from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.mode import (
     ConversationModeStore,
     NoBridgeTurnError,
@@ -28,6 +27,7 @@ from tai42_skeleton.conversations.mode import (
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
 from tai42_skeleton.operations.errors import NotSupportedError
 
@@ -190,7 +190,7 @@ async def test_effective_mode_prefers_the_override_then_the_route_default(fake) 
 
 async def test_set_current_thread_mode_writes_the_turn_contexts_thread(fake, monkeypatch) -> None:
     monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: FakeManager(_route()))
-    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": _MemoryAgent()})
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": _MemoryAgent()})
     with bridge_turn_context(_turn_context("bridge:line:+15550002222")):
         stored = await set_current_thread_mode("manual")
 

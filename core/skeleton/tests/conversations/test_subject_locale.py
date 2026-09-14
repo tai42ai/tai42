@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
 
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
-from tai42_skeleton.conversations.turn import (
+from tai42_skeleton.conversations.turn.context import (
     _conversation_state_context,
     _resolved_locale,
     _turn_block,

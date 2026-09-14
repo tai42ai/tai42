@@ -11,7 +11,7 @@ from typing import Annotated
 
 import typer
 
-from tai42_cli.commands._common import app_context, covers, emit_records, emit_result
+from tai42_cli.commands._common import app_context, compact, covers, emit_records, emit_result
 
 app = typer.Typer(
     name="runs",
@@ -57,27 +57,20 @@ def list_runs(
     Example: ``tai runs list --preset support --outcome error``
     """
     ctx_obj = app_context(ctx)
-    params: dict[str, str] = {}
-    if preset is not None:
-        params["preset"] = preset
-    if version is not None:
-        params["version"] = str(version)
-    if user is not None:
-        params["user"] = user
-    if session is not None:
-        params["session"] = session
-    if interaction is not None:
-        params["interaction"] = interaction
-    if outcome is not None:
-        params["outcome"] = outcome
-    if from_ is not None:
-        params["from"] = from_
-    if to is not None:
-        params["to"] = to
-    if page is not None:
-        params["page"] = str(page)
-    if page_size is not None:
-        params["pageSize"] = str(page_size)
+    params: dict[str, str] = compact(
+        {
+            "preset": preset,
+            "version": str(version) if version is not None else None,
+            "user": user,
+            "session": session,
+            "interaction": interaction,
+            "outcome": outcome,
+            "from": from_,
+            "to": to,
+            "page": str(page) if page is not None else None,
+            "pageSize": str(page_size) if page_size is not None else None,
+        }
+    )
     with ctx_obj.client() as client:
         data = client.get("/api/runs", params=params or None)
     emit_records(ctx_obj, data, route=("GET", "/api/runs"))

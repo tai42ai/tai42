@@ -55,16 +55,9 @@ class BodyLimitMiddleware:
 
         # Up-front reject: a declared Content-Length already over the cap is
         # refused before a single body byte is read.
-        headers = Headers(scope=scope)
-        declared = headers.get("content-length")
-        if declared is not None:
-            try:
-                declared_len = int(declared)
-            except ValueError:
-                declared_len = None
-            if declared_len is not None and declared_len > cap:
-                await self._reject(cap, scope, receive, send)
-                return
+        if self._declared_length_over_cap(scope, cap):
+            await self._reject(cap, scope, receive, send)
+            return
 
         received = 0
 
@@ -93,6 +86,20 @@ class BodyLimitMiddleware:
                 # un-sent, so surface the over-cap loudly rather than truncate.
                 raise
             await self._reject(cap, scope, receive, send)
+
+    @staticmethod
+    def _declared_length_over_cap(scope: Scope, cap: int) -> bool:
+        """Whether the advisory ``Content-Length`` header already declares a body over
+        the cap. The header is advisory, so this only powers the up-front reject; the
+        real bound is the running total of body bytes actually read."""
+        declared = Headers(scope=scope).get("content-length")
+        if declared is None:
+            return False
+        try:
+            declared_len = int(declared)
+        except ValueError:
+            return False
+        return declared_len > cap
 
     @staticmethod
     async def _reject(cap: int, scope: Scope, receive: Receive, send: Send) -> None:

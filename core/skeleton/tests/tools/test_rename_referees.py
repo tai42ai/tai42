@@ -25,7 +25,7 @@ from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.interactions import InteractionStore
-from tai42_skeleton.interactions.store import _PENDING_LIST_DEFAULT_LIMIT
+from tai42_skeleton.interactions.store.reads import _PENDING_LIST_DEFAULT_LIMIT
 from tai42_skeleton.tools import platform_referees
 from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
 

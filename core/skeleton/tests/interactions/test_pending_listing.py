@@ -145,7 +145,7 @@ async def test_limit_caps_the_slice_soonest_first(fake_redis):
 
 
 async def test_question_truncated_to_preview_length(fake_redis):
-    from tai42_skeleton.interactions.store import _PENDING_QUESTION_PREVIEW_CHARS
+    from tai42_skeleton.interactions.store.reads import _PENDING_QUESTION_PREVIEW_CHARS
 
     store = InteractionStore("i:")
     now = datetime.now(UTC)

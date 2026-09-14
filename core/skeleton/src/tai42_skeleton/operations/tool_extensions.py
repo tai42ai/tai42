@@ -240,6 +240,20 @@ async def set_tool_extensions(name: str, combos: list[list[ExtensionElement]]) -
     return apply_response(result)
 
 
+def _merge_combo_edits(current: list[Any], add_combos: list[Any], remove_combos: list[Any], name: str) -> list[Any]:
+    """The merged combo list — ``current`` plus ``add_combos`` minus ``remove_combos`` —
+    with the two membership guards: an add already attached is a loud 400, a remove not
+    attached a loud 404 (each naming the combo). Returns kept combos (removals dropped)
+    then the additions, in order."""
+    for combo in add_combos:
+        if combo in current:
+            raise BadRequestError(f"combo {json.dumps(combo)} is already attached to tool {name!r}")
+    for combo in remove_combos:
+        if combo not in current:
+            raise NotFoundError(f"combo {json.dumps(combo)} is not attached to tool {name!r}")
+    return [combo for combo in current if combo not in remove_combos] + add_combos
+
+
 @operation(
     summary="Add or remove single extension combos on a tool",
     tags=["extensions"],
@@ -282,14 +296,7 @@ async def modify_tool_extension_combos(
     add_combos = _normalized_combos(name, add)
     remove_combos = _normalized_combos(name, remove)
 
-    for combo in add_combos:
-        if combo in current:
-            raise BadRequestError(f"combo {json.dumps(combo)} is already attached to tool {name!r}")
-    for combo in remove_combos:
-        if combo not in current:
-            raise NotFoundError(f"combo {json.dumps(combo)} is not attached to tool {name!r}")
-
-    merged = [combo for combo in current if combo not in remove_combos] + add_combos
+    merged = _merge_combo_edits(current, add_combos, remove_combos, name)
     _validate_combos_against_registry(merged)
 
     def mutator(document: dict[str, Any]) -> None:

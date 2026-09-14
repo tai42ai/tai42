@@ -35,7 +35,7 @@ from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations._broadcast import SELF_DEFERRED, profile_apply_response
 
 from .._fakes.bus import FakeBus
-from .test_service import FakeConfigStore, FakeReloadAdmin
+from .fake_pipeline import FakeConfigStore, FakeReloadAdmin
 
 # ---------------------------------------------------------------------------
 # Helpers

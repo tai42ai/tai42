@@ -29,6 +29,7 @@ from tai42_contract.states import (
 from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import run_jq_first
+from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
 
@@ -249,50 +250,65 @@ async def validate_binding(app: TaiMCP, binding: StateBinding) -> None:
     await _validate_binding(app, binding, do_attach=False)
 
 
+async def _validate_templates(app: TaiMCP, attach: StateAttach, *, do_attach: bool) -> None:
+    """Per declared template of ``attach``: attach it idempotently (the SAVE seam,
+    ``do_attach``) or assert it exists and is attachable (the dry-run seam).
+
+    Attach-on-use, idempotent: skip an already-attached template (``attach`` would 409).
+    A dry run performs no attach — it only asserts the template exists (is attachable)."""
+    for template in attach.templates:
+        already = await app.states.list_attachments(attach.state, template=template)
+        if already:
+            continue
+        if do_attach:
+            await app.states.attach(attach.state, template, AttachBody(path=[template]))
+        elif await app.states.get_template(template) is None:
+            raise StateNotFoundError(f"template {template!r} to attach on state {attach.state!r} does not exist")
+
+
+async def _validate_injections(app: TaiMCP, attach: StateAttach) -> None:
+    """Compile each injection's custom jq, or resolve each named ``template_jq`` to a
+    program of purpose ``"input"``."""
+    for injection in attach.input_injections:
+        if injection.jq is not None:
+            compile_check(await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq))
+        else:
+            assert injection.template_jq is not None  # the model sets exactly one source
+            await _require_program(app, attach.state, injection.template_jq, "input", declared=attach.templates)
+
+
+async def _validate_updates(app: TaiMCP, attach: StateAttach) -> None:
+    """Compile op_id/custom-jq, resolve each named update ``template_jq`` to a program of
+    purpose ``"update"``, and enforce the adapter-vs-declared-params rule."""
+    for update in attach.updates:
+        if update.op_id is not None:
+            compile_check(await _render_slot(app, f"op_id expression for state {attach.state!r}", update.op_id))
+        if update.jq is not None:
+            compile_check(await _render_slot(app, f"update jq for state {attach.state!r}", update.jq))
+        else:
+            assert update.template_jq is not None  # the model sets exactly one source
+            program = await _require_program(app, attach.state, update.template_jq, "update", declared=attach.templates)
+            if update.adapter is not None:
+                compile_check(await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter))
+            elif program.params:
+                raise ValueValidationError(
+                    f"state binding update {update.template_jq!r} on state {attach.state!r} declares params "
+                    f"{program.params} but the binding carries no adapter to fill its input"
+                )
+
+
 async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bool) -> None:
     """Shared binding validation. With ``do_attach`` the named templates are attached
     idempotently (the SAVE seam); without it they are only verified to exist (the dry-run
     seam) — the one difference between the two doors, so neither drifts from the other's
     verdict."""
-    from tai42_kit.utils.data.jq_util import compile_check
-
     for attach in binding.states:
-        # Attach-on-use, idempotent: skip an already-attached template (``attach`` would 409).
-        # A dry run performs no attach — it only asserts the template exists (is attachable).
-        for template in attach.templates:
-            already = await app.states.list_attachments(attach.state, template=template)
-            if already:
-                continue
-            if do_attach:
-                await app.states.attach(attach.state, template, AttachBody(path=[template]))
-            elif await app.states.get_template(template) is None:
-                raise StateNotFoundError(f"template {template!r} to attach on state {attach.state!r} does not exist")
+        await _validate_templates(app, attach, do_attach=do_attach)
         compile_check(await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr))
         if attach.scope_expr is not None:
             compile_check(await _render_slot(app, f"scope_expr for state {attach.state!r}", attach.scope_expr))
-        for injection in attach.input_injections:
-            if injection.jq is not None:
-                compile_check(await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq))
-            else:
-                assert injection.template_jq is not None  # the model sets exactly one source
-                await _require_program(app, attach.state, injection.template_jq, "input", declared=attach.templates)
-        for update in attach.updates:
-            if update.op_id is not None:
-                compile_check(await _render_slot(app, f"op_id expression for state {attach.state!r}", update.op_id))
-            if update.jq is not None:
-                compile_check(await _render_slot(app, f"update jq for state {attach.state!r}", update.jq))
-            else:
-                assert update.template_jq is not None  # the model sets exactly one source
-                program = await _require_program(
-                    app, attach.state, update.template_jq, "update", declared=attach.templates
-                )
-                if update.adapter is not None:
-                    compile_check(await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter))
-                elif program.params:
-                    raise ValueValidationError(
-                        f"state binding update {update.template_jq!r} on state {attach.state!r} declares params "
-                        f"{program.params} but the binding carries no adapter to fill its input"
-                    )
+        await _validate_injections(app, attach)
+        await _validate_updates(app, attach)
 
 
 async def _require_program(

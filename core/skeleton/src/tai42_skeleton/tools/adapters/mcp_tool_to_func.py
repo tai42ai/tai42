@@ -183,6 +183,94 @@ def _detect_transport(inner: MCPConfig) -> str:
 # -- Call wrapper -------------------------------------------------------------
 
 
+async def _dispatch_once(
+    config: TaiMCPConfig,
+    transport: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    mcp_client: FastMCPClient,
+):
+    """Resolve auth, dispatch the call, and drive the token-expired retry.
+
+    Re-runnable end to end: auth is re-resolved on every call so a reconnect
+    re-run picks up a token rotated in the meantime and opens a fresh pooled
+    session (the prior one was already evicted on disconnect).
+    """
+    auth = await resolve_managed_auth_for_config(config)
+
+    response = await call_with_auth(
+        config,
+        auth,
+        transport,
+        tool_name,
+        arguments,
+        mcp_client,
+    )
+
+    # Only an OAuth managed entry (resolved a token) can token-expire; a no-auth
+    # entry has no token to refresh, so a forged token_expired must not drive
+    # force_refresh (which raises for no-auth).
+    if config.is_managed and auth is not None and auth.access_token:
+        payload = extract_connector_error_payload(response)
+        if is_token_expired(payload):
+            response = await handle_token_expired(
+                config,
+                transport,
+                tool_name,
+                arguments,
+                mcp_client,
+                auth,
+                failed_access_token=auth.access_token,
+            )
+    return response
+
+
+async def _dispatch_with_reconnect(
+    config: TaiMCPConfig,
+    transport: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    mcp_client: FastMCPClient,
+):
+    """Dispatch through :func:`_dispatch_once` with a single fresh-session retry on a
+    lost/unbuildable session, recording the health outcome.
+
+    An unavailable pooled session — a mid-run disconnect (downstream MCP restarted,
+    evicting the dead session) OR a connect/init failure building the session
+    (ClientConnectError, e.g. a down upstream on cold start) — gets exactly ONE
+    fresh-session retry. A retry that still cannot reach the upstream converts to a
+    structured unavailable result so the raw fastmcp text never reaches the consumer;
+    any other dispatch failure propagates raw to the caller."""
+    try:
+        response = await _dispatch_once(config, transport, tool_name, arguments, mcp_client)
+    except ClientDisconnectedError:
+        logger.warning(
+            "MCP dispatch lost its session or could not connect — retrying once (mcp='%s' tool='%s')",
+            config.title,
+            _log_safe(tool_name),
+        )
+        try:
+            response = await _dispatch_once(config, transport, tool_name, arguments, mcp_client)
+        except ClientDisconnectedError as exc:
+            # The retry also failed (dead session again or a connect that still
+            # could not build): the upstream MCP is unavailable. Convert to a
+            # structured tool-error result so the raw fastmcp disconnect/connect
+            # text never reaches the tool-call consumer — it lands in this log
+            # line and the health store's last_error, both operator surfaces.
+            logger.error(
+                "MCP reconnect failed — upstream unavailable (mcp='%s' tool='%s')",
+                config.title,
+                _log_safe(tool_name),
+                exc_info=True,
+            )
+            mcp_health.record_failure(config.title, exc)
+            return upstream_mcp_unavailable_result(config)
+        mcp_health.record_success(config.title)
+        return response
+    mcp_health.record_success(config.title)
+    return response
+
+
 async def mcp_tool_call_wrapper(
     config: TaiMCPConfig,
     tool_name: str,
@@ -203,74 +291,8 @@ async def mcp_tool_call_wrapper(
     transport = _detect_transport(config.config)
     check_managed_transport(config, transport)
 
-    async def _dispatch():
-        """Resolve auth, dispatch the call, and drive the token-expired retry.
-
-        Re-runnable end to end: auth is re-resolved on every call so a reconnect
-        re-run picks up a token rotated in the meantime and opens a fresh pooled
-        session (the prior one was already evicted on disconnect).
-        """
-        auth = await resolve_managed_auth_for_config(config)
-
-        response = await call_with_auth(
-            config,
-            auth,
-            transport,
-            tool_name,
-            arguments,
-            mcp_client,
-        )
-
-        # Only an OAuth managed entry (resolved a token) can token-expire; a no-auth
-        # entry has no token to refresh, so a forged token_expired must not drive
-        # force_refresh (which raises for no-auth).
-        if config.is_managed and auth is not None and auth.access_token:
-            payload = extract_connector_error_payload(response)
-            if is_token_expired(payload):
-                response = await handle_token_expired(
-                    config,
-                    transport,
-                    tool_name,
-                    arguments,
-                    mcp_client,
-                    auth,
-                    failed_access_token=auth.access_token,
-                )
-        return response
-
     try:
-        try:
-            response = await _dispatch()
-        except ClientDisconnectedError:
-            # An unavailable pooled session — a mid-run disconnect (downstream MCP
-            # restarted, evicting the dead session) OR a connect/init failure
-            # building the session (ClientConnectError, e.g. a down upstream on
-            # cold start) — gets exactly ONE fresh-session retry.
-            logger.warning(
-                "MCP dispatch lost its session or could not connect — retrying once (mcp='%s' tool='%s')",
-                config.title,
-                _log_safe(tool_name),
-            )
-            try:
-                response = await _dispatch()
-            except ClientDisconnectedError as exc:
-                # The retry also failed (dead session again or a connect that still
-                # could not build): the upstream MCP is unavailable. Convert to a
-                # structured tool-error result so the raw fastmcp disconnect/connect
-                # text never reaches the tool-call consumer — it lands in this log
-                # line and the health store's last_error, both operator surfaces.
-                logger.error(
-                    "MCP reconnect failed — upstream unavailable (mcp='%s' tool='%s')",
-                    config.title,
-                    _log_safe(tool_name),
-                    exc_info=True,
-                )
-                mcp_health.record_failure(config.title, exc)
-                response = upstream_mcp_unavailable_result(config)
-            else:
-                mcp_health.record_success(config.title)
-        else:
-            mcp_health.record_success(config.title)
+        response = await _dispatch_with_reconnect(config, transport, tool_name, arguments, mcp_client)
     except (ConnectorConnectionError, ConnectorAuthExpiredError) as exc:
         # A managed call blocked on user action — invalid_grant (reconnect),
         # refresh budget exhausted, or auth still expired after a forced refresh —

@@ -13,13 +13,28 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from tai42_cli.commands.fleet import (
-    _WORKER_COLUMNS,
-    _relative_since,
-    _worker_display_row,
-)
+import httpx
+import pytest
+
+from tai42_cli.commands.fleet import _WORKER_COLUMNS, _relative_since, _worker_display_row
 
 from .remote_harness import data_response, run_cli, strip_ansi
+
+_ENVELOPE = {
+    "workers": [
+        {
+            "name": "serve-1",
+            "kind": "serve",
+            "pid": 11,
+            "generation": 3,
+            "joined_at": "2026-08-08T00:00:00+00:00",
+            "beat_at": "2026-08-08T00:00:00+00:00",
+            "state": "ready",
+            "stale": True,
+            "last_op": {"op": "recycle", "outcome": "applied"},
+        }
+    ]
+}
 
 
 def _worker(**overrides: Any) -> dict[str, Any]:
@@ -36,9 +51,6 @@ def _worker(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
-
-
-# -- _worker_display_row projection ------------------------------------------
 
 
 def test_display_row_projects_the_fixed_columns() -> None:
@@ -85,25 +97,6 @@ def test_relative_since_dash_vs_ago() -> None:
     assert rendered.endswith("ago")
 
 
-# -- the workers command: human table vs --json ------------------------------
-
-_ENVELOPE = {
-    "workers": [
-        {
-            "name": "serve-1",
-            "kind": "serve",
-            "pid": 11,
-            "generation": 3,
-            "joined_at": "2026-08-08T00:00:00+00:00",
-            "beat_at": "2026-08-08T00:00:00+00:00",
-            "state": "ready",
-            "stale": True,
-            "last_op": {"op": "recycle", "outcome": "applied"},
-        }
-    ]
-}
-
-
 def test_workers_human_table_shows_columns_and_server_stale_suffix(monkeypatch) -> None:
     result = run_cli(monkeypatch, lambda request: data_response(_ENVELOPE), ["fleet", "workers"])
     assert result.exit_code == 0, result.output
@@ -126,3 +119,72 @@ def test_workers_json_emits_raw_envelope_unprojected(monkeypatch) -> None:
     assert "seen-since" not in out
     assert "gen" not in {key for row in payload["workers"] for key in row}
     assert "(stale)" not in out
+
+
+def test_fleet_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/backend"
+        return data_response({"installed": False})
+
+    assert run_cli(monkeypatch, handler, ["fleet", "info"]).exit_code == 0
+
+
+def test_fleet_workers_table_projects_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/fleet/workers"
+        return data_response(
+            {
+                "workers": [
+                    {
+                        "name": "serve-1",
+                        "kind": "serve",
+                        "pid": 10,
+                        "generation": 2,
+                        "state": "up",
+                        "stale": True,
+                        "beat_at": "2000-01-01T00:00:00+00:00",
+                        "last_op": {"op": "reload", "outcome": "ok"},
+                    }
+                ]
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["fleet", "workers"])
+    assert result.exit_code == 0, result.output
+    assert "serve-1" in result.output
+    assert "(stale)" in result.output
+    assert "reload:ok" in result.output
+
+
+def test_fleet_workers_json_emits_raw_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response({"workers": [{"name": "serve-1"}]})
+
+    result = run_cli(monkeypatch, handler, ["fleet", "workers"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"workers": [{"name": "serve-1"}]}
+
+
+def test_fleet_workers_missing_beat_and_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response({"workers": [{"name": "serve-1", "beat_at": None, "last_op": None}]})
+
+    result = run_cli(monkeypatch, handler, ["fleet", "workers"])
+    assert result.exit_code == 0, result.output
+    assert "—" in result.output
+
+
+def test_fleet_workers_unparseable_beat(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response({"workers": [{"name": "serve-1", "beat_at": "not-a-date"}]})
+
+    assert run_cli(monkeypatch, handler, ["fleet", "workers"]).exit_code == 0
+
+
+def test_fleet_reload_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/fleet/reload-config"
+        assert json.loads(request.content) == {"targets": ["serve-1"]}
+        return data_response({"report": []})
+
+    assert run_cli(monkeypatch, handler, ["fleet", "reload-config", "--target", "serve-1"]).exit_code == 0

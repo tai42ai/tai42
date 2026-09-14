@@ -20,12 +20,13 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from jinja2 import TemplateError
 from starlette.authentication import AuthenticationError
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
-from tai42_contract.access_control.models import JqAuthContext
+from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 from tai42_kit.settings import register_settings_reset
@@ -260,22 +261,11 @@ async def _authorize_pinned_route(
     # below, so no layer serves a pre-bump cached copy while another serves a post-bump
     # one. A read fault denies fail-closed.
     enforcer = PolicyEnforcer(ac_settings)
-    try:
-        version = await enforcer.current_policy_version()
-    except Exception as exc:
-        logger.warning("authz: policy version read failed for %s — denying", user_id, exc_info=True)
-        raise PermissionDenied("access denied") from exc
+    version = await _read_pinned_policy_version(enforcer, user_id)
 
     # 1. Route -> resource ids, through the edge's one memoized verifier.
     verifier = _tool_edge_verifier(ac_settings)
-    try:
-        resource_ids = await verifier.resolve_resource_ids(path, policy_version=version)
-    except Exception as exc:
-        logger.warning("authz: route resolution failed for %s — denying", path, exc_info=True)
-        raise PermissionDenied("access denied") from exc
-
-    if not resource_ids:
-        raise PermissionDenied(f"access denied: no resource configured for {method} {path}")
+    resource_ids = await _resolve_pinned_resource_ids(verifier, path, method, version)
 
     # The pre-auth login surface is public regardless of the policy layers and
     # short-circuits ahead of every one of them, as it does at the HTTP edge; running them
@@ -289,6 +279,65 @@ async def _authorize_pinned_route(
     is_public = set(resource_ids) == {public}
 
     # 2. Policy + live context + scopes, pinned to ``version``.
+    principal = await _resolve_principal_policies(enforcer, caller_identity, user_id, version, is_execution_fire)
+
+    scopes = _pinned_scope_set(caller_identity, principal.policy, principal.owner_policy, is_execution_fire)
+    if not is_public:
+        _assert_scope_covers(resource_ids, scopes, public)
+
+    # 3. The jq policy fences over the synthesized path.
+    await _enforce_pinned_conditions(enforcer, user_id, path, method, principal, scopes, is_execution_fire)
+
+    # 4. The per-tag LEVEL pass over the pinned route.
+    await _enforce_pinned_tag_level(principal.policy, principal.owner_policy, route, method, version, user_id, path)
+
+
+@dataclass
+class _PinnedPrincipal:
+    """The principal resolved for a pinned tool-edge decision: the caller's policy, the
+    fresh live context, the owner's policy (for an owned key, else ``None``), and the
+    caller's verified token claims."""
+
+    policy: AccessPolicy
+    context: dict[str, Any]
+    owner_policy: AccessPolicy | None
+    claims: dict[str, Any]
+
+
+async def _read_pinned_policy_version(enforcer: PolicyEnforcer, user_id: str) -> int:
+    """The single versioned read every downstream layer is pinned to; a read fault denies
+    fail-closed."""
+    try:
+        return await enforcer.current_policy_version()
+    except Exception as exc:
+        logger.warning("authz: policy version read failed for %s — denying", user_id, exc_info=True)
+        raise PermissionDenied("access denied") from exc
+
+
+async def _resolve_pinned_resource_ids(
+    verifier: AccessControlVerifier, path: str, method: str, version: int
+) -> list[str]:
+    """Route→resource resolution through the edge's one memoized verifier, plus the
+    "no resource configured" deny. A read fault denies fail-closed."""
+    try:
+        resource_ids = await verifier.resolve_resource_ids(path, policy_version=version)
+    except Exception as exc:
+        logger.warning("authz: route resolution failed for %s — denying", path, exc_info=True)
+        raise PermissionDenied("access denied") from exc
+    if not resource_ids:
+        raise PermissionDenied(f"access denied: no resource configured for {method} {path}")
+    return resource_ids
+
+
+async def _resolve_principal_policies(
+    enforcer: PolicyEnforcer,
+    caller_identity: CallerIdentity,
+    user_id: str,
+    version: int,
+    is_execution_fire: bool,
+) -> _PinnedPrincipal:
+    """Fetch policy + live context pinned to ``version``, deny a disabled/deleted principal,
+    re-assert a fire's bound fingerprint, then fetch + validate the owner's policy."""
     try:
         policy = await enforcer.get_policy_at(user_id, version)
         context = await enforcer.get_live_context(user_id)
@@ -340,27 +389,59 @@ async def _authorize_pinned_route(
         if policy_is_empty(owner_policy):
             raise PermissionDenied("access denied: owner has no policy")
 
-    # The scope set. On the request path this CONSUMES the auth backend's already-decided
-    # effective scopes (owner-attenuated), never re-deriving the attenuation; it falls back
-    # to the caller's own policy scopes only when none was carried. A background fire
-    # carries no attenuation decision, so the set is derived here from the policies just
-    # read live — narrowing a running key's scopes denies its very next dispatch.
-    if is_execution_fire:
-        scopes = effective_scopes(policy.scopes, owner_policy.scopes) if owner_policy is not None else policy.scopes
-    elif caller_identity.effective_scopes is not None:
-        scopes = list(caller_identity.effective_scopes)
-    else:
-        scopes = policy.scopes
-    if not is_public:
-        protected_ids = [rid for rid in resource_ids if rid != public]
-        has_permission = "*" in scopes or all(rid in scopes for rid in protected_ids)
-        if not has_permission:
-            raise PermissionDenied("access denied: insufficient scope")
+    return _PinnedPrincipal(policy=policy, context=context, owner_policy=owner_policy, claims=claims)
 
-    # 3. The jq policy fences over the synthesized path, keyed on {"method", "path"}: the
-    # key's condition, then — for an owned key — the owner's as a SEPARATE enforce pass
-    # over a context built from the OWNER's policy_data + scopes. Two sequential enforce
-    # calls are semantically AND; never concatenate the jq strings.
+
+def _pinned_scope_set(
+    caller_identity: CallerIdentity,
+    policy: AccessPolicy,
+    owner_policy: AccessPolicy | None,
+    is_execution_fire: bool,
+) -> list[str]:
+    """The scope set. On the request path this CONSUMES the auth backend's already-decided
+    effective scopes (owner-attenuated), never re-deriving the attenuation; it falls back
+    to the caller's own policy scopes only when none was carried. A background fire carries
+    no attenuation decision, so the set is derived here from the policies just read live —
+    narrowing a running key's scopes denies its very next dispatch."""
+    if is_execution_fire:
+        return effective_scopes(policy.scopes, owner_policy.scopes) if owner_policy is not None else policy.scopes
+    if caller_identity.effective_scopes is not None:
+        return list(caller_identity.effective_scopes)
+    return policy.scopes
+
+
+def _assert_scope_covers(resource_ids: list[str], scopes: list[str], public: str) -> None:
+    """The caller must hold EVERY protected resource id (or ``"*"``); the public id carries
+    no scope requirement. Skipped by the caller when the id set is public-alone."""
+    protected_ids = [rid for rid in resource_ids if rid != public]
+    has_permission = "*" in scopes or all(rid in scopes for rid in protected_ids)
+    if not has_permission:
+        raise PermissionDenied("access denied: insufficient scope")
+
+
+async def _enforce_pinned_conditions(
+    enforcer: PolicyEnforcer,
+    user_id: str,
+    path: str,
+    method: str,
+    principal: _PinnedPrincipal,
+    scopes: list[str],
+    is_execution_fire: bool,
+) -> None:
+    """The jq policy fences over the synthesized path, keyed on {"method", "path"}: the
+    key's condition, then — for an owned key — the owner's as a SEPARATE enforce pass over a
+    context built from the OWNER's policy_data + scopes. Two sequential enforce calls are
+    semantically AND; never concatenate the jq strings.
+
+    A fire presents no token, so its ``.identity`` carries only the stored owner claim; each
+    rendered condition is re-asserted token-free-evaluable before being enforced. An ordinary
+    request carries full claims and skips this."""
+    policy = principal.policy
+    owner_policy = principal.owner_policy
+    claims = principal.claims
+    context = principal.context
+    owner = claims.get(OWNER_USER_ID_CLAIM)
+
     jq_context = JqAuthContext(
         sub=user_id,
         scopes=scopes,
@@ -371,9 +452,6 @@ async def _authorize_pinned_route(
         system={"time": time.time()},
     )
     condition_configured = policy.condition is not None
-    # A fire presents no token, so its ``.identity`` carries only the stored owner claim;
-    # each rendered condition is re-asserted token-free-evaluable before being enforced.
-    # An ordinary request carries full claims and skips this.
     try:
         condition = ""
         if policy.condition is not None:
@@ -408,10 +486,20 @@ async def _authorize_pinned_route(
         logger.warning("authz: policy enforcement failed for %s — denying", user_id, exc_info=True)
         raise PermissionDenied("access denied") from exc
 
-    # 4. The per-tag LEVEL pass over the pinned route — never re-resolved from the
-    # caller-influenced path — with the policies already read above and keyed on the SAME
-    # version, so the grant cache answers from their generation. It fences a
-    # fenced/secret operation to an admin. An infra fault fails closed.
+
+async def _enforce_pinned_tag_level(
+    policy: AccessPolicy,
+    owner_policy: AccessPolicy | None,
+    route: RouteMetadata,
+    method: str,
+    version: int,
+    user_id: str,
+    path: str,
+) -> None:
+    """The per-tag LEVEL pass over the pinned route — never re-resolved from the
+    caller-influenced path — with the policies already read and keyed on the SAME version,
+    so the grant cache answers from their generation. It fences a fenced/secret operation to
+    an admin. An infra fault fails closed."""
     try:
         allowed, cause = await role_level_decision_for_route(policy, owner_policy, route, method, version)
     except Exception as exc:

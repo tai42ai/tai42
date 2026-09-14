@@ -109,7 +109,7 @@ def test_validation_wrapper_is_cached_per_resolved_fn_and_offload():
     # TypeAdapter cache keeps hitting instead of thrashing on a per-call throwaway.
     from fastmcp.server.dependencies import without_injected_parameters
 
-    from tai42_skeleton.tools.binding import _validation_wrapper
+    from tai42_skeleton.tools.binding.arguments import _validation_wrapper
 
     def f(a: int) -> int:
         """f"""

@@ -284,38 +284,74 @@ def _emit_in(items: list[tuple[Any, Any]]) -> str | None:
     return _first_member_char(members)
 
 
-def _emit_node(name: str, arg: Any) -> str | None:
-    if name == "LITERAL":
-        return chr(arg)
-    if name == "NOT_LITERAL":
-        return "a" if arg != ord("a") else "b"
-    if name == "ANY":
-        return "x"
-    if name == "IN":
-        return _emit_in(arg)
-    if name in ("MAX_REPEAT", "MIN_REPEAT"):
-        minimum, _maximum, subpattern = arg
-        sub = _emit_seq(subpattern)
-        if sub is None:
-            return None
-        return sub * (minimum if minimum > 0 else 1)
-    if name == "SUBPATTERN":
-        return _emit_seq(arg[3])
-    if name == "BRANCH":
-        for branch in arg[1]:
-            emitted = _emit_seq(branch)
-            if emitted is not None:
-                return emitted
+def _emit_literal(arg: Any) -> str | None:
+    return chr(arg)
+
+
+def _emit_not_literal(arg: Any) -> str | None:
+    return "a" if arg != ord("a") else "b"
+
+
+def _emit_any(arg: Any) -> str | None:
+    return "x"
+
+
+def _emit_repeat(arg: Any) -> str | None:
+    minimum, _maximum, subpattern = arg
+    sub = _emit_seq(subpattern)
+    if sub is None:
         return None
-    if name == "AT":
-        return ""
-    if name == "CATEGORY":
-        return _category_sample(arg.name)
-    if name == "RANGE":
-        return chr(arg[0])
-    # Backreferences, look-arounds, and any opcode without a concrete sample are
-    # unsupported: the pattern is excluded rather than guessed.
+    return sub * (minimum if minimum > 0 else 1)
+
+
+def _emit_subpattern(arg: Any) -> str | None:
+    return _emit_seq(arg[3])
+
+
+def _emit_branch(arg: Any) -> str | None:
+    for branch in arg[1]:
+        emitted = _emit_seq(branch)
+        if emitted is not None:
+            return emitted
     return None
+
+
+def _emit_at(arg: Any) -> str | None:
+    return ""
+
+
+def _emit_category(arg: Any) -> str | None:
+    return _category_sample(arg.name)
+
+
+def _emit_range(arg: Any) -> str | None:
+    return chr(arg[0])
+
+
+# regex opcode name → the sampler that produces one matching character/run for it.
+# MAX_REPEAT and MIN_REPEAT share a sampler; IN delegates to the member-set sampler.
+_OPCODE_SAMPLERS: Mapping[str, Callable[[Any], str | None]] = {
+    "LITERAL": _emit_literal,
+    "NOT_LITERAL": _emit_not_literal,
+    "ANY": _emit_any,
+    "IN": _emit_in,
+    "MAX_REPEAT": _emit_repeat,
+    "MIN_REPEAT": _emit_repeat,
+    "SUBPATTERN": _emit_subpattern,
+    "BRANCH": _emit_branch,
+    "AT": _emit_at,
+    "CATEGORY": _emit_category,
+    "RANGE": _emit_range,
+}
+
+
+def _emit_node(name: str, arg: Any) -> str | None:
+    sampler = _OPCODE_SAMPLERS.get(name)
+    if sampler is None:
+        # Backreferences, look-arounds, and any opcode without a concrete sample are
+        # unsupported: the pattern is excluded rather than guessed.
+        return None
+    return sampler(arg)
 
 
 def _emit_seq(seq: Any) -> str | None:
@@ -523,10 +559,48 @@ async def _build_uncached(
     # One point-in-time live-context read for every jq pass in this build.
     live_ctx = await enforcer.get_live_context(user_id)
 
-    # Render each condition and build each jq-context body ONCE per build (they are
-    # invariant across every path/method probe — only ``.request`` varies), then reuse
-    # them for every probe. The owner pass exists only for an owned key whose owner
-    # carries a condition, matching the backend's key-then-owner two-pass enforce.
+    admits = await _build_admits(
+        enforcer, policy, owner_policy, effective_scopes, claims, live_ctx, user_id, admin, version
+    )
+
+    routes, projected_pairs = await _project_routes(verifier, settings, scope_set, carve_out, version, admits)
+    route_patterns = await _project_route_patterns(verifier, settings, scope_set, carve_out, version, admits)
+    sub_mcp = await _project_sub_mcp(verifier, settings, scope_set, carve_out, version, admits)
+    tools = await _project_tools(projected_pairs, sub_mcp)
+    agents = await _project_agents(verifier, settings, scope_set, carve_out, version, admits)
+
+    return ProjectionResult(
+        user_id=user_id,
+        owner_user_id=owner_from_claims,
+        admin=admin,
+        scopes=effective_scopes,
+        routes=routes,
+        route_patterns=route_patterns,
+        sub_mcp=sub_mcp,
+        tools=tools,
+        agents=agents,
+        mintable=_mintable(),
+    )
+
+
+async def _build_admits(
+    enforcer: PolicyEnforcer,
+    policy: AccessPolicy,
+    owner_policy: AccessPolicy | None,
+    effective_scopes: list[str],
+    claims: Mapping[str, Any],
+    live_ctx: dict[str, Any],
+    user_id: str,
+    admin: bool,
+    version: int,
+) -> Callable[[str, str], Awaitable[bool]]:
+    """Build the ``admits(path, method)`` predicate — the jq two-pass ∧ per-tag LEVEL
+    decision the request gate runs, so ``projection ⊆ gate`` holds.
+
+    Render each condition and build each jq-context body ONCE per build (they are
+    invariant across every path/method probe — only ``.request`` varies), then reuse them
+    for every probe. The owner pass exists only for an owned key whose owner carries a
+    condition, matching the backend's key-then-owner two-pass enforce."""
     now = time.time()
     key_pass: _PreparedPass | None = None
     owner_pass: _PreparedPass | None = None
@@ -548,8 +622,19 @@ async def _build_uncached(
         allowed, _cause = await role_level_decision(policy, owner_policy, path, method, version)
         return allowed
 
-    # Routes: every registry route whose resolution+scope gate admits it, then jq-filtered
-    # per method.
+    return admits
+
+
+async def _project_routes(
+    verifier: AccessControlVerifier,
+    settings: AccessControlSettings,
+    scope_set: set[str],
+    carve_out: frozenset[str],
+    version: int,
+    admits: Callable[[str, str], Awaitable[bool]],
+) -> tuple[list[RouteEntry], set[tuple[str, str]]]:
+    """Every registry route whose resolution+scope gate admits it, then jq-filtered per
+    method. Returns the entries and the projected ``(method, path)`` pairs."""
     routes: list[RouteEntry] = []
     projected_pairs: set[tuple[str, str]] = set()
     for meta in _registry_routes():
@@ -567,9 +652,20 @@ async def _build_uncached(
             routes.append(RouteEntry(path=meta.path, methods=sorted(allowed)))
             projected_pairs.update((method, meta.path) for method in allowed)
     routes.sort(key=lambda entry: entry.path)
+    return routes, projected_pairs
 
-    # Route patterns: scope- AND jq-filtered exactly like routes, via a representative
-    # path. A pattern with no derivable representative is excluded (logged), never leaked.
+
+async def _project_route_patterns(
+    verifier: AccessControlVerifier,
+    settings: AccessControlSettings,
+    scope_set: set[str],
+    carve_out: frozenset[str],
+    version: int,
+    admits: Callable[[str, str], Awaitable[bool]],
+) -> list[PatternEntry]:
+    """Dynamic route patterns, scope- AND jq-filtered exactly like routes via a
+    representative path. A pattern with no derivable representative is excluded (logged),
+    never leaked."""
     patterns = await management.get_all_existing_patterns()
     mappings = await management.get_all_route_mappings()
     route_patterns: list[PatternEntry] = []
@@ -586,11 +682,21 @@ async def _build_uncached(
         if not await admits(representative, "GET"):
             continue
         route_patterns.append(PatternEntry(pattern=regex, scope_id=scope_id))
+    return route_patterns
 
-    # Sub-MCP mounts: scope- AND jq-filtered exactly like every other surface — coverage
-    # on the mount root the gate resolves PLUS a jq GET-probe of the mount root the gate
-    # would see, so a mount whose jq condition denies it is not topology-leaked. Only a
-    # mount admitted by BOTH is projected, and only its tools fold into the union below.
+
+async def _project_sub_mcp(
+    verifier: AccessControlVerifier,
+    settings: AccessControlSettings,
+    scope_set: set[str],
+    carve_out: frozenset[str],
+    version: int,
+    admits: Callable[[str, str], Awaitable[bool]],
+) -> list[SubMcpEntry]:
+    """Sub-MCP mounts, scope- AND jq-filtered exactly like every other surface — coverage
+    on the mount root the gate resolves PLUS a jq GET-probe of the mount root, so a mount
+    whose jq condition denies it is not topology-leaked. Only a mount admitted by BOTH is
+    projected, and only its tools fold into the tool union."""
     sub_mcp: list[SubMcpEntry] = []
     sub_routes = await _sub_mcp_routes()
     for slug in sorted(sub_routes):
@@ -601,19 +707,30 @@ async def _build_uncached(
         if not await admits(f"{mount_root}/", "GET"):
             continue
         sub_mcp.append(SubMcpEntry(slug=slug, tools=list(config.tools), transport=config.transport))
+    return sub_mcp
 
-    # Tools: every registry tool iff a global tool-run door is projected; otherwise the
-    # union of the allowed sub-MCP mounts' tools. No per-tool ACL exists or is invented.
+
+async def _project_tools(projected_pairs: set[tuple[str, str]], sub_mcp: list[SubMcpEntry]) -> list[str]:
+    """Every registry tool iff a global tool-run door is projected; otherwise the union of
+    the allowed sub-MCP mounts' tools. No per-tool ACL exists or is invented."""
     if any(door in projected_pairs for door in _TOOL_RUN_DOORS):
-        tools = await _all_registry_tools()
-    else:
-        tool_names: set[str] = set()
-        for entry in sub_mcp:
-            tool_names.update(entry.tools)
-        tools = sorted(tool_names)
+        return await _all_registry_tools()
+    tool_names: set[str] = set()
+    for entry in sub_mcp:
+        tool_names.update(entry.tools)
+    return sorted(tool_names)
 
-    # Agents: each agent whose per-agent run door passes the gate (resolution + jq POST),
-    # so a path-specific jq fence projects per-agent truthfully.
+
+async def _project_agents(
+    verifier: AccessControlVerifier,
+    settings: AccessControlSettings,
+    scope_set: set[str],
+    carve_out: frozenset[str],
+    version: int,
+    admits: Callable[[str, str], Awaitable[bool]],
+) -> list[str]:
+    """Each agent whose per-agent run door passes the gate (resolution + jq POST), so a
+    path-specific jq fence projects per-agent truthfully."""
     agents: list[str] = []
     for name in _all_agent_names():
         run_path = f"/api/agents/{name}/runs"
@@ -621,19 +738,7 @@ async def _build_uncached(
             run_path, "POST"
         ):
             agents.append(name)
-
-    return ProjectionResult(
-        user_id=user_id,
-        owner_user_id=owner_from_claims,
-        admin=admin,
-        scopes=effective_scopes,
-        routes=routes,
-        route_patterns=route_patterns,
-        sub_mcp=sub_mcp,
-        tools=tools,
-        agents=agents,
-        mintable=_mintable(),
-    )
+    return agents
 
 
 def _mintable() -> bool:

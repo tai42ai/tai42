@@ -23,7 +23,10 @@ operator genuinely composed is left untouched.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # The prefix of an ``!ENV`` marker string in the preserved manifest view (kept in
 # sync with the config manager's preserved-view convention).
@@ -212,3 +215,38 @@ def _contains_secret(node: Any, secrets: set[str]) -> bool:
     if isinstance(node, list):
         return any(_contains_secret(item, secrets) for item in node)
     return False
+
+
+def _oauth_secret_names(manifest: Mapping[str, Any]) -> set[str]:
+    """Every ``connectors[*].client_secret_env`` NAME in a manifest dict whose connector
+    is ``kind == "oauth"`` — the env key names whose values the platform masks by
+    derivation. A missing/malformed ``connectors`` key contributes nothing."""
+    names: set[str] = set()
+    connectors = manifest.get("connectors")
+    if isinstance(connectors, list):
+        for connector in connectors:
+            if isinstance(connector, dict) and connector.get("kind") == "oauth":
+                var = connector.get("client_secret_env")
+                if isinstance(var, str) and var:
+                    names.add(var)
+    return names
+
+
+def _leaving_connector_secrets(
+    preserved_manifest: Mapping[str, Any], candidate_manifest: Mapping[str, Any]
+) -> set[str]:
+    """The oauth ``client_secret_env`` NAMES the change DROPS from the manifest: present in
+    ``preserved`` (before), absent from ``candidate`` (after). A set difference of NAMES, not
+    of connector ids — an ``oauth -> none`` update keeps the connector id but drops the name.
+
+    When a connector leaves, its secret env VALUE is not deleted (mcp-server parity), so its
+    name must stay masked: the pipeline persists these names into the stored
+    ``TAI_ENV_SECRET_KEYS`` through the one locked env+manifest seam so the value keeps its
+    mask even though it is no longer a live ``client_secret_env`` derivation."""
+    return _oauth_secret_names(preserved_manifest) - _oauth_secret_names(candidate_manifest)
+
+
+def _parse_marks(value: str | None) -> list[str]:
+    """The comma-separated ``TAI_ENV_SECRET_KEYS`` value as an ordered, de-duplicated,
+    whitespace-trimmed list (empty segments dropped)."""
+    return list(dict.fromkeys(mark.strip() for mark in (value or "").split(",") if mark.strip()))

@@ -221,7 +221,7 @@ def test_media_ids_of_reads_both_relative_and_absolute_served_forms():
     # A channel ask stores the ABSOLUTE ``public_base_url``-minted served url, an inbox-only
     # ask stores the RELATIVE same-origin reference — ``_media_ids_of`` extracts the id from
     # either, and returns nothing for an off-origin https image or a plain link.
-    from tai42_skeleton.interactions.store import _media_ids_of
+    from tai42_skeleton.interactions.store.ttl import _media_ids_of
 
     store = InteractionStore("t:")
     rel_id, abs_id = "a" * 43, "b" * 43

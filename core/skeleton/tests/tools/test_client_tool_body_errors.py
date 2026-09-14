@@ -45,7 +45,7 @@ def test_tool_body_exception_becomes_tool_exception(caplog):
             runnable = app._tool_binding._client_runnable(tool_obj)
 
             with (
-                caplog.at_level(logging.WARNING, logger="tai42_skeleton.tools.binding"),
+                caplog.at_level(logging.WARNING, logger="tai42_skeleton.tools.binding.client_tools"),
                 pytest.raises(ToolException, match=r"Error calling tool 'boom': kaboom"),
             ):
                 await runnable(q="x")
@@ -53,7 +53,9 @@ def test_tool_body_exception_becomes_tool_exception(caplog):
             # The server-side trace is not silenced: the binding logs the failure
             # naming the tool and the error.
             assert any(
-                r.name == "tai42_skeleton.tools.binding" and "boom" in r.getMessage() and "kaboom" in r.getMessage()
+                r.name == "tai42_skeleton.tools.binding.client_tools"
+                and "boom" in r.getMessage()
+                and "kaboom" in r.getMessage()
                 for r in caplog.records
             )
 

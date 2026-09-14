@@ -159,7 +159,7 @@ async def test_baked_partial_binds_positional_through_presented_signature():
     # signature (1->a, 3->c), never onto the hidden baked slot.
     from fastmcp.tools.tool_transform import TransformedTool
 
-    from tai42_skeleton.tools.binding import _baked_partial
+    from tai42_skeleton.tools.binding.baked_partial import _baked_partial
 
     def base(a: int, b: int = 0, c: int = 0) -> dict:
         """base"""

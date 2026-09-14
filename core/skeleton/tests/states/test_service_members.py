@@ -20,7 +20,7 @@ from tai42_contract.template import TemplatedText
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
 
-from .test_service import _STATE, FakeStatesStore, _subject
+from .fake_service_store import _STATE, FakeStatesStore, _subject
 
 _ORIGIN = WriteOrigin(consumer="c")
 

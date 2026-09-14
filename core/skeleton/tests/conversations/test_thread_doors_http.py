@@ -44,10 +44,13 @@ def _router():
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
-    # An operation leaf is popped and re-imported by the reload suites, so both seams are
-    # patched where the REGISTERED handler resolves them: the operation function's own
-    # globals, and the records module sys.modules currently holds (what the operation body
-    # imports at call time).
+    # The doors read ``get_conversations_manager`` and ``resolve_caller`` through the
+    # ``operations.conversations`` package they were imported as part of (their module-level
+    # ``_pkg`` binding), so both are patched on THAT package object — the one the registered
+    # handler reads through. Reaching it via the handler's own ``__globals__`` keeps the patch
+    # on the handler's package generation even after an operation-leaf reload swaps the package
+    # in sys.modules. The records module is patched where sys.modules holds it (what the door
+    # body imports at call time).
     fake = FakeRecordRedis()
     # The create writes the thread indexes only while the route still routes.
     fake.seed_route("chat")
@@ -61,9 +64,9 @@ def client(monkeypatch) -> TestClient:
     async def _resolve():
         return _Caller("root", is_admin=True)
 
-    op_globals = router._list_conversation_threads_op.__globals__
-    monkeypatch.setitem(op_globals, "get_conversations_manager", lambda: _DictManager())
-    monkeypatch.setitem(op_globals, "resolve_caller", _resolve)
+    seam_pkg = router._list_conversation_threads_op.__globals__["_pkg"]
+    monkeypatch.setattr(seam_pkg, "get_conversations_manager", lambda: _DictManager())
+    monkeypatch.setattr(seam_pkg, "resolve_caller", _resolve)
     routes = [
         Route("/api/conversations/{route_name}/threads", router.list_conversation_threads, methods=["GET"]),
         Route("/api/conversations/{route_name}/transcript", router.get_conversation_thread, methods=["GET"]),

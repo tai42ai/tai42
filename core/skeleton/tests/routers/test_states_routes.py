@@ -473,7 +473,7 @@ def _real_states_door(monkeypatch: pytest.MonkeyPatch):
     from tai42_skeleton.states import service as service_mod
     from tai42_skeleton.states.service import StatesService
 
-    from ..states.test_service import FakeStatesStore
+    from ..states.fake_service_store import FakeStatesStore
 
     class _App:
         storage = type("_S", (), {"resource_manager": _ProgramResourceManager()})()

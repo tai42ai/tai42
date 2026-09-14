@@ -41,7 +41,7 @@ from tai42_skeleton.tool_meta.store import PostgresToolMetaStore
 from .._fakes.advisory_locks import FakeAdvisoryLocks
 from ..versioning.conftest import FakeVersioningPg
 
-_SEED_LOGGER = "tai42_skeleton.operations.presets"
+_SEED_LOGGER = "tai42_skeleton.operations.presets.create"
 
 _MANIFEST = {
     "extensions_modules": ["tests.presets._ext_fixtures"],

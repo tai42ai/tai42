@@ -69,73 +69,101 @@ async def health_check(request):
     return PlainTextResponse("OK")
 
 
-def _wired_connections() -> list[tuple[str, type, ClientSettings]]:
-    """Return ``(subsystem, client class, connection settings)`` for every backing
-    store THIS deployment has wired, reusing each subsystem's existing gate.
-
-    A subsystem may contribute more than one connection (``connectors`` uses both
-    Redis and Postgres); its check is ``ok`` only when all of them ping clean.
-    """
-    conns: list[tuple[str, type, ClientSettings]] = []
-
+def _auth_connections() -> list[tuple[str, type, ClientSettings]]:
+    """The readiness targets every configured identity provider declares through the
+    IdentityProvider ABC — core enumerates them generically instead of naming a
+    concrete provider or its store. A provider with no pingable backing store declares
+    none. Resolved through the module-level registry, the same deferred path the auth
+    adapter and boot probe use; identical connections across providers are deduped
+    downstream. Empty when access control is off."""
     ac = access_control_settings()
-    if ac.enable:
-        # Each configured identity provider declares its OWN readiness target(s) through
-        # the IdentityProvider ABC; core enumerates them generically instead of naming a
-        # concrete provider or its store. A provider with no pingable backing store
-        # declares none. Resolved through the module-level registry, the same deferred
-        # path the auth adapter and boot probe use; identical connections across
-        # providers are deduped downstream.
-        for name in ac.auth_providers:
-            provider = get_identity_provider_factory(name)(ac)
-            for target in provider.readiness_targets():
-                conns.append((target.name, target.client, target.settings))
+    if not ac.enable:
+        return []
+    conns: list[tuple[str, type, ClientSettings]] = []
+    for name in ac.auth_providers:
+        provider = get_identity_provider_factory(name)(ac)
+        for target in provider.readiness_targets():
+            conns.append((target.name, target.client, target.settings))
+    return conns
 
+
+def _tool_runs_connections() -> list[tuple[str, type, ClientSettings]]:
     tr = tool_runs_settings()
     if tr.redis.redis_url:
-        conns.append(("tool_runs", RedisClient, tr.redis))
+        return [("tool_runs", RedisClient, tr.redis)]
+    return []
 
+
+def _interactions_connections() -> list[tuple[str, type, ClientSettings]]:
     inter = interactions_settings()
     if inter.redis.redis_url:
-        conns.append(("interactions", RedisClient, inter.redis))
+        return [("interactions", RedisClient, inter.redis)]
+    return []
 
+
+def _rate_limit_connections() -> list[tuple[str, type, ClientSettings]]:
     # The limiter's coverage is derived from the route registry, so the readiness row
     # rides the ENABLE posture alone: a configured counter store is a wired dependency
     # unless every door family is switched off.
     rl = rate_limit_settings()
     if rl.any_family_enabled() and rl.redis.redis_url:
-        conns.append(("rate_limit", RedisClient, rl.redis))
+        return [("rate_limit", RedisClient, rl.redis)]
+    return []
 
+
+def _hooks_connections() -> list[tuple[str, type, ClientSettings]]:
     hooks = HooksSettings()
     if not hooks.in_memory:
-        conns.append(("hooks", RedisClient, hooks.redis))
+        return [("hooks", RedisClient, hooks.redis)]
+    return []
 
+
+def _sub_mcp_connections() -> list[tuple[str, type, ClientSettings]]:
     # The durable sub-MCP registration store: Redis-backed whenever SUB_MCP_REDIS_URL
     # is set (its rehydrate handler runs on every boot/reload and every registration
     # writes to it), in-memory otherwise — the same gate shape as hooks.
     sub_mcp = sub_mcp_settings()
     if not sub_mcp.in_memory:
-        conns.append(("sub_mcp", RedisClient, sub_mcp.redis))
+        return [("sub_mcp", RedisClient, sub_mcp.redis)]
+    return []
 
-    # Every durable skeleton store lives in the skeleton component's bound
-    # database; the readiness probe pings that database once per feature label when
-    # it is configured. The connector Redis cache is an additional ping, ridden only
-    # when a connector-store Redis URL resolves, so a Postgres-only deploy readies on
-    # the PG row alone rather than 503ing on a Redis it never wired.
+
+def _component_store_connections() -> list[tuple[str, type, ClientSettings]]:
+    """Every durable skeleton store lives in the skeleton component's bound database;
+    the readiness probe pings that database once per feature label when it is
+    configured. The connector Redis cache is an additional ping, ridden only when a
+    connector-store Redis URL resolves, so a Postgres-only deploy readies on the PG row
+    alone rather than 503ing on a Redis it never wired."""
+    conns: list[tuple[str, type, ClientSettings]] = []
     if component_store_configured(SKELETON_COMPONENT):
         conns.append(("connectors", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
         connector_redis = connector_store_settings().redis
         if connector_redis.redis_url:
             conns.append(("connectors", RedisClient, connector_redis))
-
     if instance.versioned_store_in_use():
         conns.append(("versioning", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
-
     if component_store_configured(SKELETON_COMPONENT):
         conns.append(("marketplace", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
         conns.append(("tool_meta", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
-
     return conns
+
+
+def _wired_connections() -> list[tuple[str, type, ClientSettings]]:
+    """Return ``(subsystem, client class, connection settings)`` for every backing
+    store THIS deployment has wired, concatenating each subsystem's own contributor.
+
+    A subsystem may contribute more than one connection (``connectors`` uses both
+    Redis and Postgres); its check is ``ok`` only when all of them ping clean.
+    """
+    return [
+        *_auth_connections(),
+        *_tool_runs_connections(),
+        *_interactions_connections(),
+        *_rate_limit_connections(),
+        *_hooks_connections(),
+        *_sub_mcp_connections(),
+        *_component_store_connections(),
+    ]
 
 
 async def _ping_redis(settings: ClientSettings) -> None:

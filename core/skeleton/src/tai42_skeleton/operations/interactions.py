@@ -17,6 +17,7 @@ already-parsed ``answer`` value.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,6 +28,7 @@ from tai42_contract.interactions import (
     AnswerFormat,
     InteractionRequest,
     InteractionResponse,
+    InteractionState,
 )
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -131,41 +133,64 @@ def _schema_mismatch(answer: Any, schema: dict) -> tuple[str, str | None] | None
     return None
 
 
+def _validate_text_answer(answer: Any) -> str:
+    """A TEXT answer must be a string."""
+    if not isinstance(answer, str):
+        raise _AnswerInvalid("answer must be a string")
+    return answer
+
+
+def _validate_confirm_answer(answer: Any) -> bool:
+    """A CONFIRM answer must be a boolean."""
+    if not isinstance(answer, bool):
+        raise _AnswerInvalid("answer must be a boolean")
+    return answer
+
+
+def _validate_select_answer(request: InteractionRequest, answer: Any) -> Any:
+    """A SELECT answer must be one of the question's offered options."""
+    options = (request.format_payload or {}).get("options", [])
+    if answer not in options:
+        raise _AnswerInvalid(f"answer must be one of {options}")
+    return answer
+
+
+def _validate_form_answer(request: InteractionRequest, answer: Any) -> Any:
+    """A FORM answer must be an object conforming to the question's stored schema."""
+    if not isinstance(answer, dict):
+        raise _AnswerInvalid("answer must be an object")
+    payload = request.format_payload or {}
+    schema = payload.get("schema")
+    if not isinstance(schema, dict):
+        raise _AnswerInvalid("question schema is invalid: missing or non-object schema")
+    # Per-send option lists replace a property's enum for THIS send, so the answer is
+    # judged against the choices the human was shown (the union of all pages' fields).
+    schema = effective_answer_schema(schema, payload.get("data"))
+    mismatch = _schema_mismatch(answer, schema)
+    if mismatch is not None:
+        message, field = mismatch
+        raise _AnswerInvalid(message, field=field)
+    return answer
+
+
+# Per-format answer validators, keyed by ``AnswerFormat`` — one contract each. EXTERNAL
+# is rejected by the answer door before validation runs, so it is absent here.
+_ANSWER_VALIDATORS: dict[AnswerFormat, Callable[[InteractionRequest, Any], Any]] = {
+    AnswerFormat.TEXT: lambda _request, answer: _validate_text_answer(answer),
+    AnswerFormat.CONFIRM: lambda _request, answer: _validate_confirm_answer(answer),
+    AnswerFormat.SELECT: _validate_select_answer,
+    AnswerFormat.FORM: _validate_form_answer,
+}
+
+
 def _validate_answer(request: InteractionRequest, answer: Any) -> Any:
     """Validate ``answer`` against the stored format; raise ``_AnswerInvalid``
-    (mapped to 400) on mismatch. Returns the validated value."""
-    fmt = request.answer_format
-    if fmt is AnswerFormat.TEXT:
-        if not isinstance(answer, str):
-            raise _AnswerInvalid("answer must be a string")
-        return answer
-    if fmt is AnswerFormat.CONFIRM:
-        if not isinstance(answer, bool):
-            raise _AnswerInvalid("answer must be a boolean")
-        return answer
-    if fmt is AnswerFormat.SELECT:
-        options = (request.format_payload or {}).get("options", [])
-        if answer not in options:
-            raise _AnswerInvalid(f"answer must be one of {options}")
-        return answer
-    if fmt is AnswerFormat.FORM:
-        if not isinstance(answer, dict):
-            raise _AnswerInvalid("answer must be an object")
-        payload = request.format_payload or {}
-        schema = payload.get("schema")
-        if not isinstance(schema, dict):
-            raise _AnswerInvalid("question schema is invalid: missing or non-object schema")
-        # Per-send option lists replace a property's enum for THIS send, so the answer is
-        # judged against the choices the human was shown (the union of all pages' fields).
-        schema = effective_answer_schema(schema, payload.get("data"))
-        mismatch = _schema_mismatch(answer, schema)
-        if mismatch is not None:
-            message, field = mismatch
-            raise _AnswerInvalid(message, field=field)
-        return answer
-    # EXTERNAL is rejected by the answer door before validation runs; any other
-    # member reaching here is a server bug, never a client error.
-    raise RuntimeError(f"unhandled answer_format: {fmt}")
+    (mapped to 400) on mismatch. Returns the validated value. An answer_format with no
+    validator (EXTERNAL, or a new member) is a server bug, never a client error."""
+    validator = _ANSWER_VALIDATORS.get(request.answer_format)
+    if validator is None:
+        raise RuntimeError(f"unhandled answer_format: {request.answer_format}")
+    return validator(request, answer)
 
 
 async def _claim_or_serialization_error(
@@ -206,6 +231,31 @@ async def _claim_or_serialization_error(
         return None
 
 
+async def _load_answerable_state(store: InteractionStore, r: Any, interaction_id: str) -> InteractionState:
+    """Read the interaction state and run the pre-audience guards: a missing state is a
+    404, an EXTERNAL question a 400 (answered via its callback URL), an already-answered
+    question a 409. Returns the answerable state."""
+    state = await store.get_state(r, interaction_id)
+    if state is None:
+        raise NotFoundError("Interaction not found")
+    if state.request.answer_format is AnswerFormat.EXTERNAL:
+        raise BadRequestError("external interactions are answered via their callback URL")
+    if state.status == "answered":
+        raise ConflictError("Interaction already answered")
+    return state
+
+
+def _authorize_answerer(state: InteractionState, restricted: str | None) -> None:
+    """The audience gate: a restricted caller may answer ONLY a question addressed to its
+    identity (an unaddressed question, or one addressed elsewhere, is a loud 403); an
+    unrestricted caller may answer anything."""
+    if restricted is not None:
+        if state.request.audience is None:
+            raise ForbiddenError("restricted identities may answer only interactions addressed to them")
+        if state.request.audience != restricted:
+            raise ForbiddenError("interaction is addressed to another identity")
+
+
 @operation(
     name="answer_interaction",
     summary="Answer a pending interaction",
@@ -236,20 +286,8 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
     user_id, restricted = request_identity()
 
     async with client_ctx(RedisClient, settings.redis) as r:
-        state = await store.get_state(r, interaction_id)
-        if state is None:
-            raise NotFoundError("Interaction not found")
-        if state.request.answer_format is AnswerFormat.EXTERNAL:
-            raise BadRequestError("external interactions are answered via their callback URL")
-        if state.status == "answered":
-            raise ConflictError("Interaction already answered")
-        # A restricted caller may answer ONLY a question addressed to its identity;
-        # an unrestricted caller may answer anything.
-        if restricted is not None:
-            if state.request.audience is None:
-                raise ForbiddenError("restricted identities may answer only interactions addressed to them")
-            if state.request.audience != restricted:
-                raise ForbiddenError("interaction is addressed to another identity")
+        state = await _load_answerable_state(store, r, interaction_id)
+        _authorize_answerer(state, restricted)
         try:
             validated = _validate_answer(state.request, answer)
         except _AnswerInvalid as exc:

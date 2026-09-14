@@ -215,6 +215,80 @@ def _prefix_plugin_spec_paths() -> dict[str, Path]:
     return found
 
 
+async def _collect_store_sources() -> dict[str, tuple[PluginSpec, Path | None]]:
+    """The marketplace install-attribution store's rows as source slots, keyed
+    ``store:{index}``.
+
+    Each row's stored ``PluginSpec`` is validated; an invalid stored spec is a
+    loud :class:`MigrationDiscoveryError`. A missing ``marketplace_installs``
+    table (a database not yet migrated to the skeleton baseline that creates it)
+    yields no rows, never a discovery crash. Store rows carry no package root —
+    their chains resolve against the running environment's installed metadata.
+    """
+    from psycopg.errors import UndefinedTable
+
+    from tai42_skeleton.marketplace.store import MarketplaceInstallStore
+
+    try:
+        records = await MarketplaceInstallStore().list_installed()
+    except UndefinedTable:
+        # The skeleton baseline creates the table; before it, there are no
+        # marketplace-attributed installs to read.
+        records = []
+    sources: dict[str, tuple[PluginSpec, Path | None]] = {}
+    for index, record in enumerate(records):
+        try:
+            spec = PluginSpec.model_validate(record.spec)
+        except ValidationError as exc:
+            package = record.spec.get("package") if isinstance(record.spec, dict) else None
+            raise MigrationDiscoveryError(
+                f"invalid plugin spec in the marketplace install store for distribution {package!r}: {exc}"
+            ) from exc
+        sources[f"store:{index}"] = (spec, None)
+    return sources
+
+
+def _merge_prefix_sources(
+    sources: dict[str, tuple[PluginSpec, Path | None]],
+) -> dict[str, tuple[PluginSpec, Path | None]]:
+    """Fold every prefix-scanned ``tai-plugin.yml`` into ``sources`` as a
+    ``prefix:{dist}`` slot, resolving its chain from the prefix filesystem.
+
+    A prefix hit for a distribution a ``store:`` slot also names is the SAME
+    installed artifact: the store slot is dropped so the distribution yields one
+    entry, resolved from the prefix. An invalid prefix spec is a loud
+    :class:`MigrationDiscoveryError`. Returns the combined map.
+    """
+    for dist_name, spec_path in _prefix_plugin_spec_paths().items():
+        for key, (stored, _) in list(sources.items()):
+            if stored.package is not None and _normalize_dist(stored.package) == dist_name:
+                del sources[key]
+        try:
+            spec = parse_plugin_spec(spec_path.read_bytes(), source=str(spec_path))
+        except (OSError, PluginSpecLoadError, ValidationError) as exc:
+            raise MigrationDiscoveryError(
+                f"invalid plugin spec at {spec_path} (distribution {dist_name!r} in the plugins prefix): {exc}"
+            ) from exc
+        sources[f"prefix:{dist_name}"] = (spec, spec_path.parent)
+    return sources
+
+
+def _resolve_chain_entries(sources: dict[str, tuple[PluginSpec, Path | None]]) -> list[MigrationEntry]:
+    """Map each source's ``_plugin_chain`` outcome to entries: surface and omit a
+    :class:`_ChainSkip` (DISTINCT from the ``None`` no-migrations outcome, so
+    ``tai db migrate`` reports WHICH declared chain did not run rather than
+    silently dropping it), drop ``None``, keep each :class:`MigrationEntry`."""
+    entries: list[MigrationEntry] = []
+    for spec, package_root in sources.values():
+        outcome = _plugin_chain(spec, package_root=package_root)
+        if isinstance(outcome, _ChainSkip):
+            _log_chain_skip(outcome)
+            continue
+        if outcome is not None:
+            entries.append(outcome)
+    return entries
+
+
 async def installed_plugin_entries() -> list[MigrationEntry]:
     """Runner entries for every installed plugin that declares a chain, from BOTH
     install sources, one entry per distribution:
@@ -228,61 +302,17 @@ async def installed_plugin_entries() -> list[MigrationEntry]:
     A plugin present in both sources (a marketplace install into a configured
     prefix) is the same installed artifact and yields ONE entry; the prefix copy
     resolves the chain directly from the prefix filesystem, which needs no
-    ``sys.path`` activation in a CLI process. A missing ``marketplace_installs``
-    table (a database not yet migrated to the skeleton baseline that creates it)
-    means no store rows, never a discovery crash. Empty when the skeleton database
+    ``sys.path`` activation in a CLI process. Empty when the skeleton database
     is not configured — with no database there is nowhere to migrate. Each plugin
     chain runs under its own component's bound migrator identity.
     """
-    from psycopg.errors import UndefinedTable
     from tai42_kit.db import component_store_configured
-
-    from tai42_skeleton.marketplace.store import MarketplaceInstallStore
 
     if not component_store_configured(SKELETON_COMPONENT):
         return []
-    try:
-        records = await MarketplaceInstallStore().list_installed()
-    except UndefinedTable:
-        # The skeleton baseline creates the table; before it, there are no
-        # marketplace-attributed installs to read.
-        records = []
-    # One slot per source hit, store rows first. A prefix hit for a distribution a
-    # store row also names is the SAME installed artifact: the store slot is dropped
-    # and the distribution yields one entry, resolved from the prefix filesystem.
-    sources: dict[str, tuple[PluginSpec, Path | None]] = {}
-    for index, record in enumerate(records):
-        try:
-            spec = PluginSpec.model_validate(record.spec)
-        except ValidationError as exc:
-            package = record.spec.get("package") if isinstance(record.spec, dict) else None
-            raise MigrationDiscoveryError(
-                f"invalid plugin spec in the marketplace install store for distribution {package!r}: {exc}"
-            ) from exc
-        sources[f"store:{index}"] = (spec, None)
-    for dist_name, spec_path in _prefix_plugin_spec_paths().items():
-        for key, (stored, _) in list(sources.items()):
-            if stored.package is not None and _normalize_dist(stored.package) == dist_name:
-                del sources[key]
-        try:
-            spec = parse_plugin_spec(spec_path.read_bytes(), source=str(spec_path))
-        except (OSError, PluginSpecLoadError, ValidationError) as exc:
-            raise MigrationDiscoveryError(
-                f"invalid plugin spec at {spec_path} (distribution {dist_name!r} in the plugins prefix): {exc}"
-            ) from exc
-        sources[f"prefix:{dist_name}"] = (spec, spec_path.parent)
-    entries: list[MigrationEntry] = []
-    for spec, package_root in sources.values():
-        outcome = _plugin_chain(spec, package_root=package_root)
-        if isinstance(outcome, _ChainSkip):
-            # DISTINCT from the ``None`` no-migrations outcome: surface the skip and
-            # omit the chain, so ``tai db migrate`` reports WHICH declared chain did
-            # not run rather than silently dropping it.
-            _log_chain_skip(outcome)
-            continue
-        if outcome is not None:
-            entries.append(outcome)
-    return entries
+    sources = await _collect_store_sources()
+    sources = _merge_prefix_sources(sources)
+    return _resolve_chain_entries(sources)
 
 
 async def all_migration_entries() -> list[MigrationEntry]:

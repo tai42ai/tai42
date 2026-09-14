@@ -24,13 +24,11 @@ from tai42_kit.utils.data.jq_util import get_compiled_jq
 
 from tai42_skeleton.access_control.roles import EDITOR_JQ, VIEWER_JQ
 from tai42_skeleton.authz.token_free import (
-    _MAX_NESTING_DEPTH,
-    _MAX_TOKENS,
     TokenFreeConditionError,
-    _Budget,
-    _lex,
     assert_token_free_evaluable,
 )
+from tai42_skeleton.authz.token_free.budget import _MAX_NESTING_DEPTH, _MAX_TOKENS, _Budget
+from tai42_skeleton.authz.token_free.lexer import _lex
 
 # Conditions a fire CAN evaluate: every context field but ``identity``, plus the exact
 # owner reference — the one identity claim readable from the execution key's policy.

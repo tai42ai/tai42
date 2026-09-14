@@ -21,6 +21,7 @@ from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.builtin.ask_external import ask_external
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions import helper as helper_module
+from tai42_skeleton.interactions.ask import validate as validate_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.plugins.quarantine import quarantined_plugins
 
@@ -318,7 +319,7 @@ async def test_author_bound_verifier_lands_in_format_payload(monkeypatch, fake_r
                 return object()
             raise KeyError(name)
 
-    monkeypatch.setattr(helper_module, "tai42_app", SimpleNamespace(webhook_verifiers=_Registry()))
+    monkeypatch.setattr(validate_module, "tai42_app", SimpleNamespace(webhook_verifiers=_Registry()))
 
     async def make_url(*, callback_url: str) -> str:
         return f"https://ext.example/go?cb={callback_url}"
@@ -384,7 +385,7 @@ async def test_verifier_rejected_at_ask_time_when_malformed_or_unknown(monkeypat
         def get(self, name: str) -> object:
             raise KeyError(name)
 
-    monkeypatch.setattr(helper_module, "tai42_app", SimpleNamespace(webhook_verifiers=_Empty()))
+    monkeypatch.setattr(validate_module, "tai42_app", SimpleNamespace(webhook_verifiers=_Empty()))
 
     with pytest.raises(ValueError, match="verifier must be a dict"):
         await ask_user(

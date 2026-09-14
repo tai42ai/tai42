@@ -1,9 +1,11 @@
 import logging
 import time
+from dataclasses import dataclass
+from typing import Any
 
 from starlette.authentication import AuthCredentials, AuthenticationBackend, AuthenticationError, UnauthenticatedUser
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
-from tai42_contract.access_control.models import JqAuthContext
+from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
 
 # The auth gate renders a policy's jq condition through the live template
 # manager via this interface.
@@ -19,6 +21,18 @@ from tai42_skeleton.access_control.verifier import AccessControlVerifier, is_alw
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, reload_gate
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _AuthorizedPolicy:
+    """The principal's policy resolved for a request: the caller's policy, the owner's
+    policy (for an owned key, else ``None``), the fresh live context, and the effective
+    owner-attenuated scopes the request is enforced and finalized with."""
+
+    policy: AccessPolicy
+    owner_policy: AccessPolicy | None
+    dynamic_context: dict[str, Any]
+    resolved_scopes: list[str]
 
 
 def extract_credential_candidates(conn) -> list[str]:
@@ -194,6 +208,35 @@ class AccessControlAuthBackend(AuthenticationBackend):
             logger.warning("access_control: denied principal %s — malformed request path", user_id)
             raise AuthorizationError("Access Denied")
 
+        authorized = await self._resolve_authorized_policy(access_token, user_id)
+
+        await self._enforce_conditions(
+            conn,
+            user_id,
+            access_token,
+            authorized.policy,
+            authorized.owner_policy,
+            authorized.dynamic_context,
+            authorized.resolved_scopes,
+        )
+
+        await self._enforce_tag_level(
+            authorized.policy, authorized.owner_policy, canonical_path, conn.scope.get("method"), user_id
+        )
+
+        # 6. Finalize with the effective scopes, stamping the admin discriminator so the
+        # resource guard can admit a super-admin to a not-yet-configured route. The owner
+        # is read from the STORED ``policy.policy_data`` (the management dual-home), NOT
+        # the request token claim — the contract ``is_admin_policy`` and its other callers
+        # (the projection, key management) all share, so the guard's admin verdict is
+        # byte-identical to theirs and an owned condition-free ``["*"]`` key fails CLOSED.
+        access_token.scopes = authorized.resolved_scopes
+        stored_owner = authorized.policy.policy_data.get(OWNER_USER_ID_CLAIM)
+        return AuthCredentials(scopes=authorized.resolved_scopes), TaiUser(
+            access_token, is_admin=is_admin_policy(authorized.policy, stored_owner)
+        )
+
+    async def _resolve_authorized_policy(self, access_token, user_id: str) -> _AuthorizedPolicy:
         # 2 & 3. Fetch Policy (Cached) and Live Context (Fresh)
         # A backend error here (redis down, etc.) must fail closed as a clean
         # deny, not leak out as a raw 500: wrap it into AuthenticationError so the
@@ -238,6 +281,23 @@ class AccessControlAuthBackend(AuthenticationBackend):
             logger.exception("access_control: policy/context fetch failed for user %s", user_id)
             raise AuthorizationError("Access Denied") from e
 
+        return _AuthorizedPolicy(
+            policy=policy,
+            owner_policy=owner_policy,
+            dynamic_context=dynamic_context,
+            resolved_scopes=resolved_scopes,
+        )
+
+    async def _enforce_conditions(
+        self,
+        conn,
+        user_id: str,
+        access_token,
+        policy: AccessPolicy,
+        owner_policy: AccessPolicy | None,
+        dynamic_context: dict[str, Any],
+        resolved_scopes: list[str],
+    ) -> None:
         # 4. Build Unified Context (with the effective, owner-attenuated scopes)
         context = JqAuthContext(
             sub=user_id,
@@ -284,12 +344,19 @@ class AccessControlAuthBackend(AuthenticationBackend):
             logger.exception("access_control: policy enforcement failed for user %s", user_id)
             raise AuthorizationError("Access Denied") from e
 
+    async def _enforce_tag_level(
+        self,
+        policy: AccessPolicy,
+        owner_policy: AccessPolicy | None,
+        canonical_path: str,
+        method: str | None,
+        user_id: str,
+    ) -> None:
         # 5b. The per-tag LEVEL pass — Layer 2 of the (resource-x-action) model,
         # INTERSECTED with the base-tier jq above (fail-closed AND). Skipped for an admin
         # governing role; a fenced/secret route is admin-only; a grantable route needs
         # the governing role's per-tag level (the OWNER's role for an owned key — keys
         # inherit the owner). A resolution/infra fault fails closed as a clean deny.
-        method = conn.scope.get("method")
         try:
             version = await self.enforcer.current_policy_version()
             allowed, cause = await role_level_decision(policy, owner_policy, canonical_path, method, version)
@@ -305,15 +372,3 @@ class AccessControlAuthBackend(AuthenticationBackend):
                 cause.value if cause else "deny",
             )
             raise AuthorizationError("Access Denied", cause=cause)
-
-        # 6. Finalize with the effective scopes, stamping the admin discriminator so the
-        # resource guard can admit a super-admin to a not-yet-configured route. The owner
-        # is read from the STORED ``policy.policy_data`` (the management dual-home), NOT
-        # the request token claim — the contract ``is_admin_policy`` and its other callers
-        # (the projection, key management) all share, so the guard's admin verdict is
-        # byte-identical to theirs and an owned condition-free ``["*"]`` key fails CLOSED.
-        access_token.scopes = resolved_scopes
-        stored_owner = policy.policy_data.get(OWNER_USER_ID_CLAIM)
-        return AuthCredentials(scopes=resolved_scopes), TaiUser(
-            access_token, is_admin=is_admin_policy(policy, stored_owner)
-        )

@@ -180,6 +180,47 @@ class UpdateTargets:
     incompatible_newer: str | None
 
 
+def _published_version(row: Any) -> Version | None:
+    """The published version of one registry version row, or ``None`` when the row
+    is not a ``published`` one.
+
+    A non-object element or a published row whose version is missing / non-PEP440 is
+    garbled registry data → the typed registry-data fault (502), never a silent skip.
+    """
+    if not isinstance(row, dict):
+        raise RegistryResponseError("registry versions response contains a non-object element", status=None)
+    if row.get("status") != "published":
+        return None
+    raw_version = row.get("version")
+    try:
+        return Version(raw_version)  # pyright: ignore[reportArgumentType] — the except is the type guard
+    except (InvalidVersion, TypeError) as exc:
+        raise RegistryResponseError(
+            f"registry served an unusable published version {raw_version!r}: {exc}", status=None
+        ) from exc
+
+
+def _row_compatible(row: dict[str, Any], version: Version, contract_version: str) -> bool:
+    """Whether one published row supports the running contract, by its
+    ``contract_range``: an absent (``None``) range counts compatible, a present one
+    is checked with ``prereleases=True``. A non-string or malformed range is garbled
+    registry data → the typed registry-data fault (502)."""
+    contract_range = row.get("contract_range")
+    if contract_range is None:
+        return True
+    if not isinstance(contract_range, str):
+        raise RegistryResponseError(
+            f"registry versions response contract_range for {version} is not a string", status=None
+        )
+    try:
+        return SpecifierSet(contract_range).contains(contract_version, prereleases=True)
+    except InvalidSpecifier as exc:
+        raise RegistryResponseError(
+            f"registry served an unusable contract_range {contract_range!r} for version {version}: {exc}",
+            status=None,
+        ) from exc
+
+
 def update_targets(version_rows: list[Any], *, installed_version: str, contract_version: str) -> UpdateTargets:
     """Compute :class:`UpdateTargets` from the registry's version rows.
 
@@ -200,32 +241,10 @@ def update_targets(version_rows: list[Any], *, installed_version: str, contract_
     latest_compatible: Version | None = None
     incompatible_newer: Version | None = None
     for row in version_rows:
-        if not isinstance(row, dict):
-            raise RegistryResponseError("registry versions response contains a non-object element", status=None)
-        if row.get("status") != "published":
+        version = _published_version(row)
+        if version is None:
             continue
-        raw_version = row.get("version")
-        try:
-            version = Version(raw_version)  # pyright: ignore[reportArgumentType] — the except is the type guard
-        except (InvalidVersion, TypeError) as exc:
-            raise RegistryResponseError(
-                f"registry served an unusable published version {raw_version!r}: {exc}", status=None
-            ) from exc
-        contract_range = row.get("contract_range")
-        if contract_range is None:
-            compatible = True
-        elif isinstance(contract_range, str):
-            try:
-                compatible = SpecifierSet(contract_range).contains(contract_version, prereleases=True)
-            except InvalidSpecifier as exc:
-                raise RegistryResponseError(
-                    f"registry served an unusable contract_range {contract_range!r} for version {version}: {exc}",
-                    status=None,
-                ) from exc
-        else:
-            raise RegistryResponseError(
-                f"registry versions response contract_range for {version} is not a string", status=None
-            )
+        compatible = _row_compatible(row, version, contract_version)
         if latest is None or version > latest:
             latest = version
         if compatible and (latest_compatible is None or version > latest_compatible):

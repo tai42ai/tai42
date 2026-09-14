@@ -12,6 +12,7 @@ import typer
 
 from tai42_cli.commands._common import (
     app_context,
+    compact,
     covers,
     emit_records,
     emit_result,
@@ -58,23 +59,18 @@ def list_runs(
     Example: ``tai traces list --status error --sort cost``
     """
     ctx_obj = app_context(ctx)
-    params: dict[str, str] = {}
-    if from_ is not None:
-        params["from"] = from_
-    if to is not None:
-        params["to"] = to
-    if status is not None:
-        params["status"] = status
-    if user is not None:
-        params["user"] = user
-    if session is not None:
-        params["session"] = session
-    if version is not None:
-        params["version"] = version
-    if sort is not None:
-        params["sort"] = sort
-    if direction is not None:
-        params["dir"] = direction
+    params: dict[str, str] = compact(
+        {
+            "from": from_,
+            "to": to,
+            "status": status,
+            "user": user,
+            "session": session,
+            "version": version,
+            "sort": sort,
+            "dir": direction,
+        }
+    )
     if export:
         params["format"] = fmt
         typer.echo(fetch_download(ctx_obj, "GET", "/api/observability/runs/export", params=params or None))

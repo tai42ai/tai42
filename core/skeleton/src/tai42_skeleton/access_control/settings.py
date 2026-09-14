@@ -202,12 +202,22 @@ class AccessControlSettings(TaiBaseSettings):
     compiled_always_public_route_patterns: list[Pattern] = []  # noqa: RUF012
 
     def model_post_init(self, __context):
+        self._check_provider_present()
+        self._check_prefix_sets_disjoint()
+        self._check_authenticated_allowed_paths()
+        self._check_operational_entries()
+        self._check_claim_ttl()
+        self._compile_path_patterns()
+        self._compile_always_public_route_patterns()
+
+    def _check_provider_present(self) -> None:
         if self.enable and not self.auth_providers:
             raise ValueError(
                 "auth_providers is empty while access control is enabled — an enabled gate "
                 "with no identity provider is a misconfiguration; set ACCESS_CONTROL_AUTH_PROVIDERS"
             )
 
+    def _check_prefix_sets_disjoint(self) -> None:
         # A path cannot be both never-public (reserved) and always-public: the two
         # prefix sets must be disjoint, where a prefix equal to or nested under a member
         # of the other set is an overlap. This is what lets ``resolve_resource_ids``
@@ -221,6 +231,7 @@ class AccessControlSettings(TaiBaseSettings):
                         f"{reserved!r} — a path cannot be both never-public and always-public"
                     )
 
+    def _check_authenticated_allowed_paths(self) -> None:
         # Every authenticated-always-allowed path must be an absolute path, and none may
         # fall under an always-public prefix: a path cannot be both public-anonymous and
         # authenticated-only. (An entry under a reserved prefix is EXPECTED — the route
@@ -238,6 +249,7 @@ class AccessControlSettings(TaiBaseSettings):
                         f"{always!r} — a path cannot be both public-anonymous and authenticated-only"
                     )
 
+    def _check_operational_entries(self) -> None:
         # The SPA-shell reserved supplement and the acknowledged-public allowlist are
         # compared against the SAME canonical path form the resolver classifies in, so a
         # non-canonical entry could never match and would silently mis-gate. Reject any
@@ -250,40 +262,42 @@ class AccessControlSettings(TaiBaseSettings):
             ("acknowledged_public_routes", self.acknowledged_public_routes),
         ):
             for entry in entries:
-                if not entry.startswith("/"):
-                    raise ValueError(f"{field_name} entry {entry!r} must be an absolute path starting with '/'")
-                try:
-                    canonical = canonicalize_path(entry)
-                except MalformedPathError as exc:
-                    raise ValueError(f"{field_name} entry {entry!r} is malformed: {exc}") from exc
-                if canonical != entry:
-                    raise ValueError(
-                        f"{field_name} entry {entry!r} is not canonical (it canonicalizes to {canonical!r}) — "
-                        "supply the canonical form (no '.'/'..', no double slash, no percent-encoding)"
-                    )
-                if "%" in canonical:
-                    # The canonical form keeps a data ``/`` or ``%`` as ``%2F``/``%25``; such an
-                    # escape is legitimate only inside a raw-path-matched route's key, never in a
-                    # reserved/acknowledged operational path (which the router serves on the
-                    # decoded form). An encoded byte here could match nothing — reject it.
-                    raise ValueError(
-                        f"{field_name} entry {entry!r} carries a percent-encoded byte — a reserved/acknowledged "
-                        "path must be a plain canonical path (no encoded slash or percent)"
-                    )
-                for always in self.always_public_path_prefixes:
-                    if _prefix_overlaps(entry, always):
-                        raise ValueError(
-                            f"{field_name} entry {entry!r} overlaps always-public prefix {always!r} — "
-                            "a reserved/acknowledged path cannot also be always-public"
-                        )
-                if field_name == "acknowledged_public_routes" and (
-                    under_prefix(entry, "/api") or under_prefix(entry, "/mcp")
-                ):
-                    raise ValueError(
-                        f"acknowledged_public_routes entry {entry!r} is under '/api'/'/mcp' — an acknowledged "
-                        "PUBLIC control-plane route is a contradiction; the control plane is never shell-public"
-                    )
+                self._check_operational_entry(field_name, entry)
 
+    def _check_operational_entry(self, field_name: str, entry: str) -> None:
+        if not entry.startswith("/"):
+            raise ValueError(f"{field_name} entry {entry!r} must be an absolute path starting with '/'")
+        try:
+            canonical = canonicalize_path(entry)
+        except MalformedPathError as exc:
+            raise ValueError(f"{field_name} entry {entry!r} is malformed: {exc}") from exc
+        if canonical != entry:
+            raise ValueError(
+                f"{field_name} entry {entry!r} is not canonical (it canonicalizes to {canonical!r}) — "
+                "supply the canonical form (no '.'/'..', no double slash, no percent-encoding)"
+            )
+        if "%" in canonical:
+            # The canonical form keeps a data ``/`` or ``%`` as ``%2F``/``%25``; such an
+            # escape is legitimate only inside a raw-path-matched route's key, never in a
+            # reserved/acknowledged operational path (which the router serves on the
+            # decoded form). An encoded byte here could match nothing — reject it.
+            raise ValueError(
+                f"{field_name} entry {entry!r} carries a percent-encoded byte — a reserved/acknowledged "
+                "path must be a plain canonical path (no encoded slash or percent)"
+            )
+        for always in self.always_public_path_prefixes:
+            if _prefix_overlaps(entry, always):
+                raise ValueError(
+                    f"{field_name} entry {entry!r} overlaps always-public prefix {always!r} — "
+                    "a reserved/acknowledged path cannot also be always-public"
+                )
+        if field_name == "acknowledged_public_routes" and (under_prefix(entry, "/api") or under_prefix(entry, "/mcp")):
+            raise ValueError(
+                f"acknowledged_public_routes entry {entry!r} is under '/api'/'/mcp' — an acknowledged "
+                "PUBLIC control-plane route is a contradiction; the control plane is never shell-public"
+            )
+
+    def _check_claim_ttl(self) -> None:
         # A claim record holds raw key material, so its lifetime must be a bounded,
         # positive window: the default is rejected if it is non-positive or exceeds the
         # hard ceiling (the two numbers a creation request is clamped against).
@@ -293,11 +307,13 @@ class AccessControlSettings(TaiBaseSettings):
                 f"claim_link_max_ttl_seconds ({self.claim_link_max_ttl_seconds})"
             )
 
+    def _compile_path_patterns(self) -> None:
         if self.path_patterns:
             self.compiled_patterns = [
                 (re.compile(pattern), template) for pattern, template in self.path_patterns.items()
             ]
 
+    def _compile_always_public_route_patterns(self) -> None:
         # Compile the always-public route patterns; an invalid regex fails loudly. The
         # reserved probes below are a SHALLOW best-effort pre-filter: they full-match each
         # reserved prefix and one child, rejecting an obviously-reserved pattern at load. A

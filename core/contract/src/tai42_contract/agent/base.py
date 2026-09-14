@@ -60,6 +60,38 @@ class AgentInterruptedError(Exception):
         super().__init__(f"agent run interrupted (pending: {ids or 'unknown'})")
 
 
+def _resolve_drain_terminal(
+    *,
+    suspended: SuspendedFinal | None,
+    interrupts: list[InterruptFinal],
+    structured: StructuredFinal | None,
+    message: MessageFinal | None,
+    response_format: Any,
+) -> Any:
+    """The terminal rule of a drained event stream — the final value from the collected
+    terminals. A park wins first (a clean, non-error receipt), then an interrupt raises, then
+    the requested-but-absent ``response_format`` raises, else the last structured/message
+    payload, else ``""`` for an empty run. Never returns a partial."""
+    if suspended is not None:
+        return {
+            "status": "suspended",
+            "interaction_ids": suspended.interaction_ids,
+            "thread_id": suspended.thread_id,
+            "expiry_at": suspended.expiry_at,
+        }
+    if interrupts:
+        raise AgentInterruptedError(interrupts)
+    if response_format is not None:
+        if structured is None:
+            raise RuntimeError("agent run requested a response_format but produced no structured output")
+        return structured.data
+    if structured is not None:
+        return structured.data
+    if message is not None:
+        return message.text
+    return ""
+
+
 class PresetSpec(BaseModel):
     """A base tool bound to fixed kwargs, resolved into a ``StructuredTool`` at
     run time (see ``resolve_tools``). A base tool that interprets its fixed kwargs
@@ -257,21 +289,10 @@ class Agent(ABC):
                 structured = event
             elif isinstance(event, MessageFinal):
                 message = event
-        if suspended is not None:
-            return {
-                "status": "suspended",
-                "interaction_ids": suspended.interaction_ids,
-                "thread_id": suspended.thread_id,
-                "expiry_at": suspended.expiry_at,
-            }
-        if interrupts:
-            raise AgentInterruptedError(interrupts)
-        if response_format is not None:
-            if structured is None:
-                raise RuntimeError("agent run requested a response_format but produced no structured output")
-            return structured.data
-        if structured is not None:
-            return structured.data
-        if message is not None:
-            return message.text
-        return ""
+        return _resolve_drain_terminal(
+            suspended=suspended,
+            interrupts=interrupts,
+            structured=structured,
+            message=message,
+            response_format=response_format,
+        )

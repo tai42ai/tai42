@@ -126,9 +126,9 @@ def test_disabled_api_tools_still_fires_the_completion_continuation_via_run_tool
     machine, keeping the focus on what is under test: the mechanism is fireable through
     ``run_tool`` with api_tools disabled. Unregistering it to empty the surface would
     strand every async turn that parked while api_tools was off."""
-    import tai42_skeleton.conversations.turn as turn_module
     from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
     from tai42_skeleton.authz.identity import INTERNAL_PRINCIPAL
+    from tai42_skeleton.conversations.turn import accessors as accessors_module
 
     class _AlreadyCommittedStore:
         async def get_record(self, completion_id: str) -> object:
@@ -136,7 +136,7 @@ def test_disabled_api_tools_still_fires_the_completion_continuation_via_run_tool
 
     async def run():
         async with app.app_context(Manifest.model_validate({"api_tools": {"enabled": False}})):
-            monkeypatch.setattr(turn_module, "_store", lambda: _AlreadyCommittedStore())
+            monkeypatch.setattr(accessors_module, "_store", lambda: _AlreadyCommittedStore())
             token = set_execution_identity(INTERNAL_PRINCIPAL)
             try:
                 out = await app.tools.run_tool(

@@ -22,12 +22,15 @@ from tai42_skeleton.conversations import ledger as ledger_module
 from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
-from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.caps import ThreadBusyError
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import OperatorAppendError, operator_send
+from tai42_skeleton.conversations.turn import accessors as accessors_module
+from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
+from tai42_skeleton.conversations.turn import schedule as schedule_module
+from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
 from .conftest import rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
@@ -132,7 +135,8 @@ def env(monkeypatch):
     fake = FakeRecordRedis()
     for module in (records_module, ledger_module, mode_module, thread_lease_module):
         monkeypatch.setattr(module, "client_ctx", make_record_client_ctx(fake))
-    monkeypatch.setattr(turn_module, "bind_execution_identity", _fake_bind)
+    monkeypatch.setattr(agent_turn_module, "bind_execution_identity", _fake_bind)
+    monkeypatch.setattr(tool_turn_module, "bind_execution_identity", _fake_bind)
     fake.seed_route("line")
     return fake
 
@@ -144,13 +148,13 @@ def _store() -> ConversationRecordStore:
 async def _settle(timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
+        tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
         if not tasks:
             await asyncio.sleep(0)
             # Recompute after the yield: a task can appear between the two checks, so wait on
             # the fresh list (asyncio.wait raises on an empty set), and return only when it
             # is still empty.
-            tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
+            tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
             if not tasks:
                 return
         await asyncio.wait(tasks, timeout=0.05)
@@ -160,7 +164,7 @@ def _wire(monkeypatch, manager: FakeManager, agent: Agent | None, channel: FakeC
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
     if agent is not None:
-        monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
+        monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
 
 async def test_operator_send_agent_appends_creates_and_delivers(env, monkeypatch):
@@ -348,7 +352,7 @@ async def test_operator_send_with_template_stores_a_rich_part_and_delivers_it(en
         route=route,
         thread_id="bridge:line:+15550002222",
         client_address="+15550002222",
-        text="your order shipped",
+        text="your update is ready",
         operator_principal="op-1",
         template=template,
     )
@@ -356,11 +360,11 @@ async def test_operator_send_with_template_stores_a_rich_part_and_delivers_it(en
 
     record = await _store().get_record(message_id)
     assert record is not None
-    assert record.answer == "your order shipped"
+    assert record.answer == "your update is ready"
     assert record.answer_parts is not None
     assert record.answer_parts[0].template == template
     # The delivered notification carries the operator's template (final chunk of the part).
-    assert channel.sends[0].message == "your order shipped"
+    assert channel.sends[0].message == "your update is ready"
     assert channel.sends[0].template == template
     assert record.delivery_status is DeliveryStatus.DELIVERED
 
@@ -435,7 +439,7 @@ async def test_operator_send_template_to_incapable_channel_fails_the_record(env,
         route=route,
         thread_id="bridge:line:+15550002222",
         client_address="+15550002222",
-        text="your order shipped",
+        text="your update is ready",
         operator_principal="op-1",
         template=template,
     )
@@ -542,7 +546,7 @@ async def test_operator_send_unregistered_agent_appends_nothing_and_delivers(env
     channel = FakeChannel()
     route = _channel_route()
     _wire(monkeypatch, FakeManager(route), None, channel)
-    monkeypatch.setattr(turn_module, "_agent_registry", dict)
+    monkeypatch.setattr(accessors_module, "_agent_registry", dict)
 
     message_id = await operator_send(
         route=route,

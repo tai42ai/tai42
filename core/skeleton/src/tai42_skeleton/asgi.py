@@ -35,7 +35,9 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Literal, get_args
 from uuid import uuid4
 
@@ -68,6 +70,168 @@ _ENV_RESOLVED_MARKER = "<env-resolved manifest>"
 _guard_lock = threading.Lock()
 _app_active = False
 _active_manifest_marker = ""
+
+
+def _claim_app_token(manifest_path: str | None) -> str | None:
+    """Claim the one-app token and stamp the manifest env under ``_guard_lock``.
+
+    Returns the saved ``TAI_MANIFEST_PATH`` (``None`` when unset or no manifest path)
+    for the release to restore. Made and stamped under the one lock so two lifespans
+    cannot both pass the check; a stamp failure rolls the claim back and re-raises so
+    it never wedges the guard, leaving the untouched env with nothing to restore.
+    """
+    global _app_active, _active_manifest_marker
+
+    saved_manifest_env: str | None = None
+    with _guard_lock:
+        if _app_active:
+            raise RuntimeError(
+                "a tai app lifespan is already active in this process; the tai42_app handle "
+                "and the built app are process-global singletons (one app per process). "
+                f"The active app's manifest is {_active_manifest_marker}."
+            )
+        _app_active = True
+        _active_manifest_marker = manifest_path if manifest_path is not None else _ENV_RESOLVED_MARKER
+        if manifest_path is not None:
+            saved_manifest_env = os.environ.get("TAI_MANIFEST_PATH")
+            try:
+                os.environ["TAI_MANIFEST_PATH"] = manifest_path
+            except Exception:
+                _app_active = False
+                _active_manifest_marker = ""
+                raise
+    return saved_manifest_env
+
+
+def _release_app_token(manifest_path: str | None, saved_manifest_env: str | None) -> None:
+    """Release the one-app token and restore the manifest env under ``_guard_lock``, so
+    a failed boot never wedges the process and a later no-param app resolves the
+    config-dir default rather than this app's path."""
+    global _app_active, _active_manifest_marker
+    with _guard_lock:
+        if manifest_path is not None:
+            if saved_manifest_env is not None:
+                os.environ["TAI_MANIFEST_PATH"] = saved_manifest_env
+            else:
+                os.environ.pop("TAI_MANIFEST_PATH", None)
+        _app_active = False
+        _active_manifest_marker = ""
+
+
+def _build_inner_app(app, transport: Transport, stateless_http: bool):
+    """Build the inner serving app for the selected transport."""
+    if transport == "sse":
+        logger.info("Initializing Legacy SSE App")
+        return app.sse_app()
+    if stateless_http:
+        logger.info("Initializing stateless Streamable HTTP App")
+        return app.http_app(stateless_http=True)
+    logger.info("Initializing Streamable HTTP App")
+    return app.http_app()
+
+
+async def _enter_boot_serving_app(inner_app, app_state: dict) -> None:
+    """Enter the boot epoch's FastMCP lifespan and point the dispatch slot at it.
+
+    The lifespan is entered through a dedicated-task supervisor (not a hand-entered
+    ``async with``): the FastMCP lifespan initialises the streamable-http
+    session-manager task group, the mounted dispatch swallows the lifespan scope, and
+    a profile apply must be able to close THIS lifespan from the swap task — which only
+    the supervisor's one-task/one-context pattern allows. ``finalize`` records the
+    lifespan-bearing FastMCP app as ``mcp_lifespan_app`` so the lifespan is entered even
+    when middleware wraps ``inner_app``. The boot serving app is attached wrapped in this
+    generation's admission counter so a later retire drains its work.
+    """
+    boot_epoch = epoch.current_epoch()
+    lifespan_app = getattr(inner_app, "mcp_lifespan_app", inner_app)
+    if getattr(lifespan_app, "lifespan", None) is not None:
+        supervisor = SubAppLifespan(lifespan_app)
+        await supervisor.start()
+        boot_epoch.supervisor = supervisor
+    epoch.attach_boot_serving_app(EpochAdmissionApp(inner_app, boot_epoch), app_state)
+
+
+@asynccontextmanager
+async def _worker_lifespan(
+    manifest_path: str | None,
+    transport: Transport,
+    stateless_http: bool,
+    app_state: dict,
+    _app: Starlette,
+) -> AsyncIterator[None]:
+    """The worker lifespan: claim the one-app token, build the app singleton, enter
+    ``app_context`` and the inner FastMCP lifespan, and release the token on exit."""
+    saved_manifest_env = _claim_app_token(manifest_path)
+    try:
+        app = instance.build_app()
+        logger.info("Configuration mode: %s", config_mode())
+        # Bridge the persisted env store into ``os.environ`` and resolve the
+        # manifest under it in one seam, so a store-only ``!ENV ${VAR}`` marker
+        # resolves to its real value before ``start()`` probes any mount.
+        manifest = app.lifecycle.read_boot_manifest()
+        async with app.app_context(manifest):
+            inner_app = _build_inner_app(app, transport, stateless_http)
+            await _enter_boot_serving_app(inner_app, app_state)
+            yield
+    except Exception:
+        logger.exception("Worker application lifespan failed")
+        raise
+    finally:
+        # The serving generation (and its FastMCP lifespan) is dropped by
+        # ``app_context`` on its own exit, above.
+        _release_app_token(manifest_path, saved_manifest_env)
+
+
+class _DispatchApp:
+    """The mounted sub-app that forwards requests to the built inner app, answering 503
+    until the lifespan populates the shared ``app_state`` it holds."""
+
+    def __init__(self, app_state: dict) -> None:
+        self._app_state = app_state
+
+    async def __call__(self, scope, receive, send) -> None:
+        # The outer Starlette app owns the lifespan (``_worker_lifespan``). If a
+        # server delivers a lifespan scope to this mounted sub-app anyway, swallow
+        # it here: the request paths below speak HTTP and would emit an invalid
+        # response against a lifespan scope.
+        if scope["type"] == "lifespan":
+            return
+
+        if "app" not in self._app_state:
+            response = JSONResponse({"error": "Service Unavailable", "detail": "Initializing..."}, status_code=503)
+            await response(scope, receive, send)
+            return
+
+        try:
+            await self._app_state["app"](scope, receive, send)
+        except Exception as exc:
+            # A normal API exception is caught by the base app's own
+            # ServerErrorMiddleware, which commits the generic {"error",
+            # "error_id"} envelope and stamps that id on the exception before
+            # re-raising it here. When that id is present the response is already
+            # sent and logged under it — do not re-log or attempt a second send.
+            handled_id = getattr(exc, "error_id", None)
+            if handled_id is not None:
+                return
+            # Backstop for an exception raised OUTSIDE the base app's handler (an
+            # outer finalize wrapper, or dispatch itself): mint a correlation id,
+            # log the traceback under it, and commit the same generic envelope.
+            error_id = uuid4().hex
+            logger.exception("Error processing request in mcp app [error_id=%s]", error_id)
+            try:
+                # Fixed generic body: internal exception text (hosts,
+                # paths) must never reach the client.
+                response = JSONResponse({"error": "Internal Server Error", "error_id": error_id}, status_code=500)
+                await response(scope, receive, send)
+            except RuntimeError:
+                # The response already started before the failure — nothing
+                # more can be sent on this connection. The original error is
+                # logged above; record the double-fault too.
+                logger.warning(
+                    "could not send the 500 response; response already started [error_id=%s]",
+                    error_id,
+                    exc_info=True,
+                )
 
 
 def create_app(
@@ -106,143 +270,10 @@ def create_app(
         )
 
     app_state: dict = {}
-
-    @asynccontextmanager
-    async def worker_lifespan(_app):
-        global _app_active, _active_manifest_marker
-
-        saved_manifest_env: str | None = None
-
-        # Claim the one-app token and stamp the manifest env under the same lock,
-        # BEFORE the try whose finally releases the token — a failed claim must
-        # raise without touching the active holder's token or environment.
-        with _guard_lock:
-            if _app_active:
-                raise RuntimeError(
-                    "a tai app lifespan is already active in this process; the tai42_app handle "
-                    "and the built app are process-global singletons (one app per process). "
-                    f"The active app's manifest is {_active_manifest_marker}."
-                )
-            _app_active = True
-            _active_manifest_marker = manifest_path if manifest_path is not None else _ENV_RESOLVED_MARKER
-            if manifest_path is not None:
-                saved_manifest_env = os.environ.get("TAI_MANIFEST_PATH")
-                try:
-                    os.environ["TAI_MANIFEST_PATH"] = manifest_path
-                except Exception:
-                    # The stamp raised after the token was claimed (e.g. a manifest
-                    # path with an embedded NUL byte). Roll the claim back under the
-                    # same lock so a stamp failure never wedges the one-app guard,
-                    # then re-raise loudly. The failed assignment left the env
-                    # untouched, so there is nothing to restore.
-                    _app_active = False
-                    _active_manifest_marker = ""
-                    raise
-
-        try:
-            app = instance.build_app()
-            logger.info("Configuration mode: %s", config_mode())
-            # Bridge the persisted env store into ``os.environ`` and resolve the
-            # manifest under it in one seam, so a store-only ``!ENV ${VAR}`` marker
-            # resolves to its real value before ``start()`` probes any mount.
-            manifest = app.lifecycle.read_boot_manifest()
-
-            # Initialize the core app context
-            async with app.app_context(manifest):
-                # Select the appropriate transport mode
-                if transport == "sse":
-                    logger.info("Initializing Legacy SSE App")
-                    inner_app = app.sse_app()
-                elif stateless_http:
-                    logger.info("Initializing stateless Streamable HTTP App")
-                    inner_app = app.http_app(stateless_http=True)
-                else:
-                    logger.info("Initializing Streamable HTTP App")
-                    inner_app = app.http_app()
-
-                # Enter the boot epoch's FastMCP lifespan through a dedicated-task
-                # supervisor (not a hand-entered ``async with`` here): the FastMCP
-                # lifespan initialises the streamable-http session-manager task group,
-                # the mounted dispatch below swallows the lifespan scope, and a profile
-                # apply must be able to close THIS lifespan from the swap task — which
-                # only the supervisor's one-task/one-context pattern allows.
-                # ``finalize`` records the lifespan-bearing FastMCP app as
-                # ``mcp_lifespan_app`` so the lifespan is entered even when middleware
-                # wraps ``inner_app``.
-                boot_epoch = epoch.current_epoch()
-                lifespan_app = getattr(inner_app, "mcp_lifespan_app", inner_app)
-                if getattr(lifespan_app, "lifespan", None) is not None:
-                    supervisor = SubAppLifespan(lifespan_app)
-                    await supervisor.start()
-                    boot_epoch.supervisor = supervisor
-                # Point the dispatch slot at the boot serving app, wrapped in this
-                # generation's admission counter so a later retire drains its work.
-                epoch.attach_boot_serving_app(EpochAdmissionApp(inner_app, boot_epoch), app_state)
-                yield
-
-        except Exception:
-            logger.exception("Worker application lifespan failed")
-            raise
-        finally:
-            # The serving generation (and its FastMCP lifespan) is dropped by
-            # ``app_context`` on its own exit, above.
-            # Release the token and restore the manifest env under the same lock
-            # so a failed boot never wedges the process and a later no-param app
-            # resolves the config-dir default rather than this app's path.
-            with _guard_lock:
-                if manifest_path is not None:
-                    if saved_manifest_env is not None:
-                        os.environ["TAI_MANIFEST_PATH"] = saved_manifest_env
-                    else:
-                        os.environ.pop("TAI_MANIFEST_PATH", None)
-                _app_active = False
-                _active_manifest_marker = ""
-
-    async def dispatch(scope, receive, send):
-        """Forward requests to the inner app."""
-        # The outer Starlette app owns the lifespan (worker_lifespan). If a
-        # server delivers a lifespan scope to this mounted sub-app anyway,
-        # swallow it here: the request paths below speak HTTP and would emit an
-        # invalid response against a lifespan scope.
-        if scope["type"] == "lifespan":
-            return
-
-        if "app" in app_state:
-            try:
-                await app_state["app"](scope, receive, send)
-            except Exception as exc:
-                # A normal API exception is caught by the base app's own
-                # ServerErrorMiddleware, which commits the generic {"error",
-                # "error_id"} envelope and stamps that id on the exception before
-                # re-raising it here. When that id is present the response is already
-                # sent and logged under it — do not re-log or attempt a second send.
-                handled_id = getattr(exc, "error_id", None)
-                if handled_id is not None:
-                    return
-                # Backstop for an exception raised OUTSIDE the base app's handler (an
-                # outer finalize wrapper, or dispatch itself): mint a correlation id,
-                # log the traceback under it, and commit the same generic envelope.
-                error_id = uuid4().hex
-                logger.exception("Error processing request in mcp app [error_id=%s]", error_id)
-                try:
-                    # Fixed generic body: internal exception text (hosts,
-                    # paths) must never reach the client.
-                    response = JSONResponse({"error": "Internal Server Error", "error_id": error_id}, status_code=500)
-                    await response(scope, receive, send)
-                except RuntimeError:
-                    # The response already started before the failure — nothing
-                    # more can be sent on this connection. The original error is
-                    # logged above; record the double-fault too.
-                    logger.warning(
-                        "could not send the 500 response; response already started [error_id=%s]",
-                        error_id,
-                        exc_info=True,
-                    )
-        else:
-            response = JSONResponse({"error": "Service Unavailable", "detail": "Initializing..."}, status_code=503)
-            await response(scope, receive, send)
-
-    return Starlette(lifespan=worker_lifespan, routes=[Mount("/", app=dispatch)])
+    return Starlette(
+        lifespan=partial(_worker_lifespan, manifest_path, transport, stateless_http, app_state),
+        routes=[Mount("/", app=_DispatchApp(app_state))],
+    )
 
 
 def lifespan(app: Starlette):

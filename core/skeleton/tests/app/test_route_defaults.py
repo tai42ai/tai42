@@ -52,6 +52,15 @@ def _route_registering_modules() -> set[str]:
 
     app = _RecordingApp()
     module_names = [info.name for info in pkgutil.iter_modules(_routers_pkg.__path__, _routers_pkg.__name__ + ".")]
+
+    def _drop(name: str) -> None:
+        # Drop the module and, when it is a route-registering PACKAGE, its already-imported
+        # submodules, so a re-import re-runs the submodule bodies that register the routes
+        # (a package's ``__init__`` re-import alone would rebind cached submodules and
+        # register nothing). A plain module has no submodules and is dropped as before.
+        for mod in [name, *(m for m in list(sys.modules) if m.startswith(name + "."))]:
+            sys.modules.pop(mod, None)
+
     try:
         # The recording app is bound only for the probe, so the prior binding is back
         # as soon as it ends.
@@ -59,7 +68,7 @@ def _route_registering_modules() -> set[str]:
             registering: set[str] = set()
             for name in module_names:
                 before = len(app._fast_mcp.paths)
-                sys.modules.pop(name, None)
+                _drop(name)
                 importlib.import_module(name)
                 if len(app._fast_mcp.paths) > before:
                     registering.add(name)
@@ -68,7 +77,7 @@ def _route_registering_modules() -> set[str]:
         # Drop the recording-bound router modules so the next consumer re-imports them
         # fresh, as the loader does on every boot.
         for name in module_names:
-            sys.modules.pop(name, None)
+            _drop(name)
 
 
 def test_default_api_routers_excludes_the_spa_catch_all() -> None:

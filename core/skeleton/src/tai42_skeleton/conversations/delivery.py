@@ -1,54 +1,41 @@
-"""The delivery executor — sends a produced answer back and drives its record to a
-terminal state, exactly once.
+"""The delivery executor — sends a produced answer back and drives its record to a terminal
+state, exactly once.
 
-``door=channel`` chunks the answer through the channel's ``notify``, resuming an interrupted
-send from the per-chunk ledger; ``door=api`` POSTs it to the row's ``callback_url`` under an
-HMAC ``X-Tai-Signature``, retried with backoff, or — for a poll-only row that declares no
-callback — drives the record terminal-readable for the poll door without a POST. Every send
-is guarded by an atomic per-record leased claim, and a periodic sweep re-drives the records
-whose lease has lapsed.
+``door=channel`` chunks the answer through the channel's ``notify`` (:mod:`.delivery_channel`),
+``door=api`` POSTs it under an HMAC signature or serves a poll-only row (:mod:`.delivery_api`).
+Every send is guarded by an atomic per-record leased claim. This module owns the per-record
+entrypoint (:func:`deliver`), the out-of-band receipt sink, task spawning, and the two
+boot/recovery operations (:func:`redrive_pending`, :func:`sweep_stalled_deliveries`) that
+re-drive individual stranded records; the process-wide periodic task that invokes them lives in
+:mod:`.delivery_sweep`.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import hmac
 import logging
 import time
 from uuid import uuid4
 
-import httpx
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import Channel, ChannelDeliveryError, ChannelInputError, ChannelNotification
-from tai42_contract.conversations import AnswerPart, DeliveryReceipt
+from tai42_contract.conversations import DeliveryReceipt
 
 from tai42_skeleton.conversations.cache import get_conversations_manager
-from tai42_skeleton.conversations.ledger import ChannelSendLedger, LedgerInconsistentError, SentChunk
-from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
-from tai42_skeleton.conversations.records import PRUNE_START, ConversationRecordStore, PruneCursor
+from tai42_skeleton.conversations.delivery_api import _deliver_api, _post_callback
+from tai42_skeleton.conversations.delivery_channel import _deliver_channel
+from tai42_skeleton.conversations.models import DeliveryStatus
+from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
 logger = logging.getLogger(__name__)
 
-# Signed api-door callback header: ``HMAC-SHA256(callback_secret, raw_body)`` in hex.
-_SIGNATURE_HEADER = "X-Tai-Signature"
+# Signed api-door callback signature prefix: ``sha256=<hex digest>``.
 _SIGNATURE_PREFIX = "sha256="
-
-# Client-safe reply when an answer splits into more provider messages than the fan-out cap
-# allows; the whole answer is refused rather than fanned out or silently truncated.
-_OVERSIZED_ANSWER_TEXT = "Sorry, the answer was too long to send here. Please ask for a shorter response."
 
 # Strong references to in-flight delivery / grace tasks so they are not GC'd mid-flight.
 _DELIVERY_TASKS: set[asyncio.Task[None]] = set()
-
-# The periodic stalled-delivery sweep, held so the lifespan can cancel it at shutdown.
-_sweep_task: asyncio.Task[None] | None = None
-
-# Where the last index-prune pass stopped. Carried between passes so each one resumes the
-# walk instead of re-reading the head of the same indexes forever.
-_prune_cursor: PruneCursor = PRUNE_START
 
 
 def _store() -> ConversationRecordStore:
@@ -89,117 +76,6 @@ def split_message(text: str, max_chars: int) -> list[str]:
     if remaining:
         chunks.append(remaining)
     return chunks
-
-
-def _remaining_parts(parts: list[AnswerPart], sent: list[SentChunk]) -> list[tuple[int, str]]:
-    """The still-unsent portion of each answer part, as ``(part_index, remaining_text)`` in
-    order — the resume plan the send loop chunks and delivers. A TEXT part yields its unsent
-    tail; a MEDIA-ONLY part (blank ``message``) yields one ``(part_index, "")`` entry — a single
-    zero-text send carrying the part's media — but ONLY until it has a ledger entry, after which
-    it is complete and contributes nothing. A single-part text answer degenerates to
-    ``[(0, text[chars_sent:])]``, byte-identical to the old per-answer resume.
-
-    The ledger is append-only in send order, so its entries are all of part 0's chunks, then
-    part 1's, and so on. This validates that invariant and raises :class:`LedgerInconsistentError`
-    on anything that cannot describe ``parts`` — a part index past the answer, a part with more
-    characters ledgered than it holds, or a gap where an earlier part is not fully sent under a
-    later part that has already started (for a media-only earlier part, "fully sent" means it has
-    a ledger entry, since its char count is always zero). Corrupt state a resume must never send
-    the wrong content from, distinct from a transient store fault (which the caller lets
-    propagate)."""
-    sent_by_part: dict[int, int] = {}
-    seen_parts: set[int] = set()
-    for chunk in sent:
-        sent_by_part[chunk.part] = sent_by_part.get(chunk.part, 0) + chunk.chars
-        seen_parts.add(chunk.part)
-    for part_index, chars in sent_by_part.items():
-        if not 0 <= part_index < len(parts):
-            raise LedgerInconsistentError(
-                f"channel send ledger names part {part_index}, but the answer has {len(parts)} part(s)"
-            )
-        if chars > len(parts[part_index].message):
-            raise LedgerInconsistentError(
-                f"channel send ledger claims {chars} character(s) already sent of part {part_index} that is "
-                f"{len(parts[part_index].message)} character(s) long"
-            )
-    if seen_parts:
-        highest = max(seen_parts)
-        for earlier in range(highest):
-            # An earlier part must be COMPLETE before a later part starts: a text part when its
-            # ledgered chars equal its length, a media-only part when it has a ledger entry at
-            # all (its length is zero, so a char count cannot distinguish sent from unsent).
-            expected = len(parts[earlier].message)
-            done = earlier in seen_parts and sent_by_part.get(earlier, 0) == expected
-            if not done:
-                raise LedgerInconsistentError(
-                    f"channel send ledger resumes at part {highest} but part {earlier} is only "
-                    f"{sent_by_part.get(earlier, 0)}/{expected} character(s) sent"
-                )
-    plan: list[tuple[int, str]] = []
-    for part_index, part in enumerate(parts):
-        text = part.message
-        remaining = text[sent_by_part.get(part_index, 0) :]
-        if remaining:
-            plan.append((part_index, remaining))
-        elif not text.strip() and part_index not in seen_parts:
-            # A media-only part carries no text but still owes one zero-text send of its media;
-            # it is planned only until its ledger entry marks it delivered.
-            plan.append((part_index, ""))
-    return plan
-
-
-def _part_notification(part: AnswerPart, chunk: str, record: ConversationRecord, *, final: bool) -> ChannelNotification:
-    """The :class:`ChannelNotification` for one chunk of ``part``. The part's rich fields
-    (media, location, template, options, sections, header, footer, schema, and a form part's
-    per-send data/pages) ride the FINAL chunk of the part — its completed message — so a
-    multi-chunk part's earlier chunks are plain text and the media/buttons/form land with the last.
-    A CONTENT-ONLY part (media- or location-only) has a single final chunk of ``""``: the
-    notification then carries a blank message plus that content, which the contract admits exactly
-    because the content is present. ``recipient``/``sender_identity`` are the per-delivery routing
-    the record carries, never per-part. The mapping is 1:1 — every AnswerPart content/interactive
-    field maps to its identically-named ChannelNotification field."""
-    return ChannelNotification(
-        message=chunk,
-        recipient=record.client_address,
-        sender_identity=record.our_identity,
-        media=part.media if final else None,
-        location=part.location if final else None,
-        template=part.template if final else None,
-        options=part.options if final else None,
-        sections=part.sections if final else None,
-        header=part.header if final else None,
-        footer=part.footer if final else None,
-        schema=part.schema if final else None,
-        data=part.data if final else None,
-        pages=part.pages if final else None,
-    )
-
-
-def _unsupported_rich_capability(channel: Channel, parts: list[AnswerPart]) -> str | None:
-    """The name of the FIRST richer-send capability a part needs that ``channel`` does not
-    advertise, or ``None`` when every part is renderable. The capability flags are the same
-    OPTIONAL class attributes ``notify_user`` guards on, read defensively with ``getattr`` —
-    a text-only channel (the answer path's historical shape) advertises none, so a plain-text
-    answer always passes. A part that needs an unadvertised capability can never be rendered,
-    so the executor refuses the record loudly rather than handing the channel a field it drops."""
-    for part in parts:
-        if part.media is not None and not getattr(channel, "supports_media_notifications", False):
-            return "media"
-        if part.location is not None and not getattr(channel, "supports_location_notifications", False):
-            return "location"
-        if part.template is not None and not getattr(channel, "supports_template_notifications", False):
-            return "template"
-        if part.options is not None and not getattr(channel, "supports_interactive_notifications", False):
-            return "interactive options"
-        if part.sections is not None and not getattr(channel, "supports_interactive_notifications", False):
-            # A sectioned list IS an interactive choice surface, same capability as flat options.
-            return "interactive sections"
-        if part.schema is not None and not getattr(channel, "supports_form_notifications", False):
-            return "form"
-        # A header/footer is a pure enhancement of an already-gated interactive message (it rides
-        # options/sections), so a channel that renders the choice surface but not the header/footer
-        # simply omits them — no capability gate, mirroring a media caption a channel may drop.
-    return None
 
 
 # -- one-record delivery -----------------------------------------------------
@@ -259,395 +135,6 @@ async def deliver(message_id: str) -> None:
         await _deliver_api(store, record, token)
 
 
-async def _deliver_channel(store: ConversationRecordStore, record: ConversationRecord, token: str) -> None:
-    settings = store.settings
-    channel_name = record.channel
-    if channel_name is None:
-        raise RuntimeError(f"channel record {record.message_id!r} carries no channel to deliver on")
-    if record.answer_status == "silent":
-        # A channel-door silent turn is terminal ``silent`` and never reaches delivery; a
-        # ``silent`` answer_status on a channel record is an impossible state, raised loudly.
-        raise RuntimeError(
-            f"channel record {record.message_id!r} carries a silent outcome; the channel door never delivers one"
-        )
-    answer = record.answer
-    if answer is None:
-        raise RuntimeError(
-            f"channel record {record.message_id!r} is {record.delivery_status.value} and carries no answer to send"
-        )
-    max_chars = settings.max_message_chars.get(channel_name)
-    if max_chars is None:
-        # Config error: fail the record so the outcome is visible, then raise loudly.
-        await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
-        raise RuntimeError(
-            f"channel {channel_name!r} has no max_message_chars entry; add it to CONVERSATIONS_MAX_MESSAGE_CHARS"
-        )
-
-    try:
-        channel = tai42_app.channels.get(channel_name)
-    except KeyError as exc:
-        # Same config-error treatment: fail the record so the sweep stops re-driving a
-        # send that could never complete, then raise loudly.
-        await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
-        raise RuntimeError(
-            f"channel {channel_name!r} is routed but is not registered on this deployment; load its channel "
-            "plugin or remove the route"
-        ) from exc
-
-    # A single plain-text answer is one text-only part; a richer or multi-message answer
-    # delivers each part as its own message, in order, carrying its media/options. The loop
-    # below is IDENTICAL either way — it iterates ``(part_index, chunk, final)`` and a single
-    # part just yields one part index — so the single-part path stays byte-exact with the old
-    # per-answer send. ``part_texts`` drives the chunking/resume arithmetic; the rich fields
-    # ride the send.
-    parts = record.answer_parts or [AnswerPart(message=answer)]
-    part_texts = [part.message for part in parts]
-    ledger = ChannelSendLedger(settings)
-    # Account the attempt BEFORE the first fallible step, so every fault below is bounded
-    # by ``delivery_max_attempts`` instead of leaving the record pending_delivery forever.
-    attempts = await store.bump_attempt(record.message_id)
-    try:
-        sent = await ledger.sent_chunks(record.message_id)
-        plan = _remaining_parts(parts, sent)
-    except LedgerInconsistentError:
-        # A ledger that cannot describe the answer can never resume, so the record is
-        # failed here — as a config error is — before the refusal is raised. A transient
-        # store fault instead propagates, leaving the record for the sweep to re-drive.
-        failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
-        if failed == 1:
-            # Clear only under this worker's own terminal write: a foreign takeover owns the
-            # ledger it is resuming from.
-            await ledger.clear(record.message_id)
-        raise
-
-    if not sent:
-        # Refuse — before any chunk goes out — a part whose media/template/options the channel
-        # cannot render, so the executor never hands a channel a field it silently drops and
-        # never re-drives an unrenderable record forever.
-        missing = _unsupported_rich_capability(channel, parts)
-        if missing is not None:
-            await _refuse_unrenderable_parts(store, record, missing, attempts, token)
-            return
-        # Fan-out cap is an ADMISSION decision, never retroactive: refuse an oversized answer
-        # ONLY before any chunk has gone out. A resume (sent non-empty) always completes —
-        # a human has seen part of the answer and it cannot be un-sent. The cap counts the
-        # chunks of EVERY part (each part is chunked independently — its boundaries are
-        # message boundaries), so the whole ordered answer is bounded by one knob.
-        answer_chunks = sum(len(split_message(text, max_chars)) for text in part_texts)
-        if answer_chunks > settings.max_outbound_chunks:
-            await _refuse_oversized_answer(store, record, channel, answer_chunks, attempts, token)
-            return
-
-    outbound_ids = [outbound_id for chunk in sent for outbound_id in chunk.outbound_ids]
-    chars_sent = sum(chunk.chars for chunk in sent)
-    if sent:
-        # Re-index the ledger's ids: a chunk accepted just before a crash may never have
-        # reached the reverse index, and a receipt naming an unindexed id resolves to nothing.
-        await store.index_outbound(channel_name, outbound_ids, record.message_id)
-        logger.info(
-            "conversations: resuming channel delivery of record %s on %r at character %d/%d (%d chunk(s) already "
-            "accepted by the provider)",
-            record.message_id,
-            channel_name,
-            chars_sent,
-            len(answer),
-            len(sent),
-        )
-    # The remaining sends, flattened to ``(part_index, chunk, final)`` in send order: each
-    # still-unsent part portion is chunked at the channel width, the part index rides each ledger
-    # entry so a resume tells one part's chunks from the next's, and ``final`` marks the chunk
-    # that carries the part's media/options — the last NON-BLANK chunk of a text part (a trailing
-    # whitespace split-boundary chunk is ledger-only and rides no rich fields), or the single
-    # blank chunk of a MEDIA-ONLY part (whose whole deliverable IS the media). A text part's
-    # non-blank ``message`` always yields exactly one such chunk; a media-only part yields one
-    # ``[""]`` chunk that is itself final. An answer already fully out yields none.
-    pending: list[tuple[int, str, bool]] = []
-    for part_index, remaining in plan:
-        remaining_chunks = split_message(remaining, max_chars)
-        non_blank = [i for i, chunk in enumerate(remaining_chunks) if chunk.strip()]
-        if non_blank:
-            # The normal case: the part's rich fields ride its last NON-BLANK chunk.
-            rich_at: int | None = non_blank[-1]
-        elif not parts[part_index].message.strip():
-            # A genuine MEDIA-ONLY part (blank ``message``): its single ``""`` chunk IS the
-            # deliverable and carries the media, so it is final and sends below.
-            rich_at = len(remaining_chunks) - 1
-        else:
-            # A RESUME whose remaining is an all-whitespace TAIL of a TEXT part: the part's
-            # non-blank content — and the rich fields that rode its final non-blank chunk —
-            # already went out before the crash, and only the trailing split-boundary
-            # whitespace is left. Marking any of it ``final`` would either send a blank
-            # ``ChannelNotification`` (uncaught ValidationError → the record wedges) or
-            # DOUBLE-SEND the part's media. No chunk here is final: every remaining
-            # whitespace chunk stays ledger-skip, exactly as it would on a fresh send.
-            rich_at = None
-        for offset, chunk in enumerate(remaining_chunks):
-            pending.append((part_index, chunk, offset == rich_at))
-    total_chunks = len(sent) + len(pending)
-    accepted_chunks = len(sent)
-    try:
-        for part_index, chunk, final in pending:
-            # Refresh the lease BEFORE each send, and bound the send strictly under it, so
-            # the whole notify window is covered by a claim this worker holds — an accepted
-            # chunk is never ledgered by a worker that has already been taken over.
-            held = await store.claim_delivery(
-                record.message_id, time.time(), token, settings.delivery_claim_lease_seconds
-            )
-            if held != 1:
-                # Lease lost: stop sending. The ledger tells the new holder where to resume.
-                logger.warning(
-                    "conversations: lost the delivery lease on record %s after %d/%d chunk(s) (claim returned %d); "
-                    "leaving the remainder to the worker that holds it now",
-                    record.message_id,
-                    accepted_chunks,
-                    total_chunks,
-                    held,
-                )
-                return
-            if not chunk.strip() and not final:
-                # A split boundary can leave a chunk of pure whitespace WITHIN a text part: it
-                # is ledgered as sent, so the resume arithmetic stays exact, and no provider call
-                # is made for it (a whitespace-only, non-final chunk carries neither text nor a
-                # part's rich fields). A media-only part's single blank chunk is instead FINAL —
-                # it carries the media — so it falls through to the send below, where the contract
-                # admits a blank message when media is present.
-                await ledger.append(record.message_id, len(chunk), [], part=part_index)
-                accepted_chunks += 1
-                continue
-            try:
-                # Send-outcome monitoring, tier 1: NO ambient ``send:<channel>`` span here by
-                # design. This runs in a detached spawned delivery task (``spawn_delivery`` /
-                # the stalled-delivery sweep / a post-restart re-drive), where the turn's trace
-                # has closed — a ``current_trace_id()``-gated span would silently no-op. Carrying
-                # the turn's trace explicitly would need it stamped onto ``ConversationRecord``
-                # by the turn engine (``conversations/turn.py``), which the send-outcome path
-                # does not own. So bridge sends get RECEIPTS-tier coverage only: the record's own
-                # ledger + ``record_delivery_status`` receipt path is the authoritative
-                # delivered-vs-accepted signal for bridge messages (a ConversationRecord flow
-                # sends never run), and the tier-2 flow-send index deliberately covers only what
-                # that path does not.
-                async with asyncio.timeout(settings.delivery_send_timeout_seconds):
-                    ids = await channel.notify(_part_notification(parts[part_index], chunk, record, final=final))
-            except TimeoutError:
-                # Indeterminate: the provider may have taken the chunk. It is deliberately
-                # NOT ledgered, so a re-drive re-sends it — the same asymmetry the ledger
-                # ordering takes, where a duplicate message is the cheaper side of a loss.
-                logger.error(
-                    "conversations: channel %r did not answer within %ss for chunk %d/%d of record %s; the chunk is "
-                    "indeterminate and is left unledgered for a re-drive to re-send",
-                    channel_name,
-                    settings.delivery_send_timeout_seconds,
-                    accepted_chunks + 1,
-                    total_chunks,
-                    record.message_id,
-                )
-                return
-            # ``None`` from a channel off the id-returning contract is an accepted send
-            # with no correlatable id, not a dropped one.
-            accepted = list(ids or [])
-            # Ledger BEFORE the reverse index: a crash between the two costs an
-            # unresolvable receipt, a crash before the ledger entry costs a duplicate message.
-            await ledger.append(record.message_id, len(chunk), accepted, part=part_index)
-            await store.index_outbound(channel_name, accepted, record.message_id)
-            outbound_ids.extend(accepted)
-            accepted_chunks += 1
-    except ChannelDeliveryError:
-        # No blind retry: the medium offers no idempotency key, so a retry would re-send
-        # the chunks already accepted. A mid-sequence failure is terminal ``failed``.
-        failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
-        if failed == 1:
-            await ledger.clear(record.message_id)
-        logger.error(
-            "conversations: channel delivery of record %s on %r failed after %d/%d chunk(s) (failed write returned %d)",
-            record.message_id,
-            channel_name,
-            accepted_chunks,
-            total_chunks,
-            failed,
-            exc_info=True,
-        )
-        return
-    except ChannelInputError:
-        # A permanent refusal of the input's shape — retrying cannot succeed, so the record
-        # is terminal ``failed`` at once, never re-driven, exactly as a delivery failure is.
-        failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
-        if failed == 1:
-            await ledger.clear(record.message_id)
-        logger.error(
-            "conversations: channel %r permanently refused the input for record %s after %d/%d chunk(s) "
-            "(failed write returned %d)",
-            channel_name,
-            record.message_id,
-            accepted_chunks,
-            total_chunks,
-            failed,
-            exc_info=True,
-        )
-        return
-
-    outcome = await store.mark_provisional(record.message_id, outbound_ids, attempts, time.time(), token)
-    if outcome != 1:
-        # The record left this worker's hands; its ledger belongs to whoever holds it now.
-        logger.warning(
-            "conversations: record %s was not moved to provisional after a full send (provisional write returned "
-            "%d); the send ledger is left for the worker that owns it now",
-            record.message_id,
-            outcome,
-        )
-        return
-    await ledger.clear(record.message_id)
-    # Fallback confirmation for a medium whose receipt never arrives.
-    _spawn(_confirm_after_grace(record.message_id, settings.delivery_grace_seconds))
-
-
-async def _refuse_oversized_answer(
-    store: ConversationRecordStore,
-    record: ConversationRecord,
-    channel: Channel,
-    chunk_count: int,
-    attempts: int,
-    token: str,
-) -> None:
-    """Refuse an answer past the fan-out cap: send ONE client-safe reply and fail the record
-    loudly. A best-effort provider refusal is suppressed — the record still fails."""
-    settings = store.settings
-    logger.error(
-        "conversations: record %s answer splits into %d chunk(s), over the max_outbound_chunks cap of %d on "
-        "channel %r; refusing with a client-safe reply and failing the record",
-        record.message_id,
-        chunk_count,
-        settings.max_outbound_chunks,
-        record.channel,
-    )
-    # No ambient send span here either (detached delivery task, closed trace) — the same
-    # receipts-tier scoping as the main channel send above.
-    with contextlib.suppress(ChannelDeliveryError, TimeoutError):
-        async with asyncio.timeout(settings.delivery_send_timeout_seconds):
-            await channel.notify(
-                ChannelNotification(
-                    message=_OVERSIZED_ANSWER_TEXT,
-                    recipient=record.client_address,
-                    sender_identity=record.our_identity,
-                )
-            )
-    await store.mark_failed(record.message_id, attempts, time.time(), token)
-
-
-async def _refuse_unrenderable_parts(
-    store: ConversationRecordStore, record: ConversationRecord, missing: str, attempts: int, token: str
-) -> None:
-    """Fail a record whose parts need a richer-send capability the channel does not advertise.
-    A route/tool misconfiguration (a media/template/options/schema part routed to a text-only
-    channel):
-    the record fails loudly and terminally so it is never re-driven, and no half-rendered send
-    goes out. No client-safe reply is sent — the missing capability is an operator's business,
-    not a participant-facing size hint."""
-    logger.error(
-        "conversations: record %s carries a part needing %s, which channel %r does not advertise support for; "
-        "failing the record (a media/template/options/schema part cannot be routed to a text-only channel)",
-        record.message_id,
-        missing,
-        record.channel,
-    )
-    await store.mark_failed(record.message_id, attempts, time.time(), token)
-
-
-async def _deliver_api(store: ConversationRecordStore, record: ConversationRecord, token: str) -> None:
-    settings = store.settings
-    if record.callback_url is None:
-        # A poll-only api route declares no callback: its answer is served by the poll door
-        # (GET /api/conversations/{route}/messages/{message_id}), so delivery is terminal the
-        # moment the outcome is written — nothing is POSTed and no send attempt is spent.
-        delivered = await store.mark_delivered(record.message_id, [], record.attempts, time.time(), token)
-        if delivered != 1:
-            logger.warning(
-                "conversations: api record %s is poll-only; the delivered write returned %d; the record's "
-                "outcome stands as another writer left it",
-                record.message_id,
-                delivered,
-            )
-        return
-    route = await get_conversations_manager().get_route(record.route_name)
-    if route is None or route.callback_secret is None:
-        await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
-        logger.error(
-            "conversations: api record %s cannot be delivered — route %r is gone or carries no callback secret; "
-            "marked failed",
-            record.message_id,
-            record.route_name,
-        )
-        return
-
-    # ``exclude_none`` omits the ``answer`` field entirely for a silent outcome, so the
-    # callback body is ``{message_id, thread_id, status: "silent"}`` with no answer key.
-    body = record.answer_payload().model_dump_json(exclude_none=True).encode()
-    signature = _sign(route.callback_secret, body)
-    while True:
-        attempt = await store.bump_attempt(record.message_id)
-        status = await _post_callback(record.callback_url, body, signature, settings.delivery_callback_timeout_seconds)
-        if status is not None and 200 <= status < 300:
-            delivered = await store.mark_delivered(record.message_id, [], attempt, time.time(), token)
-            if delivered != 1:
-                logger.warning(
-                    "conversations: api callback for record %s succeeded but the delivered write returned %d; "
-                    "the record's outcome stands as another writer left it",
-                    record.message_id,
-                    delivered,
-                )
-            return
-        if attempt >= settings.delivery_max_attempts:
-            failed = await store.mark_failed(record.message_id, attempt, time.time(), token)
-            logger.error(
-                "conversations: api callback for record %s to %s exhausted %d attempts (last status %s; failed write "
-                "returned %d)",
-                record.message_id,
-                record.callback_url,
-                attempt,
-                status,
-                failed,
-            )
-            return
-        backoff = _backoff_seconds(settings, attempt)
-        # Extend the lease over the upcoming backoff, or a re-drive reclaims a record this
-        # worker is still retrying.
-        held = await store.claim_delivery(
-            record.message_id, time.time(), token, backoff + settings.delivery_claim_lease_seconds
-        )
-        if held != 1:
-            # Lease lost: stop retrying rather than POST a second callback for a record
-            # another worker now drives.
-            logger.warning(
-                "conversations: lost the delivery lease on record %s after attempt %d (claim returned %d); "
-                "leaving the retry to the worker that holds it now",
-                record.message_id,
-                attempt,
-                held,
-            )
-            return
-        await asyncio.sleep(backoff)
-
-
-async def _post_callback(url: str, body: bytes, signature: str, timeout_seconds: float) -> int | None:
-    """POST the signed answer body, returning the HTTP status, or ``None`` when the request
-    never completed — a transport error or a timeout is a retryable non-2xx, logged not raised.
-
-    ``timeout_seconds`` is a hard total-request deadline (validated below the delivery lease), not
-    httpx's per-phase timeout, so a slow receiver cannot keep the POST in flight past the lease.
-    """
-    try:
-        async with asyncio.timeout(timeout_seconds):
-            async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False) as client:
-                response = await client.post(
-                    url,
-                    content=body,
-                    headers={"Content-Type": "application/json", _SIGNATURE_HEADER: signature},
-                )
-            return response.status_code
-    except (httpx.HTTPError, TimeoutError):
-        logger.warning("conversations: callback POST to %s failed or timed out; will retry", url)
-        return None
-
-
 async def _confirm_after_grace(message_id: str, grace_seconds: float) -> None:
     """Confirm a still-``provisional`` record ``delivered`` once its grace window elapses.
     The atomic ingest is a no-op on a record a receipt already made terminal."""
@@ -705,7 +192,7 @@ async def mark_wait_delivered(message_id: str) -> bool:
     return outcome == 1
 
 
-# -- startup re-drive + periodic sweep ---------------------------------------
+# -- boot re-drive + per-record stall recovery -------------------------------
 
 
 async def redrive_pending() -> None:
@@ -749,104 +236,6 @@ async def sweep_stalled_deliveries() -> None:
             await store.ingest_receipt(work.message_id, DeliveryReceipt.DELIVERED, now)
 
 
-def start_delivery_sweep() -> None:
-    """(Re)start the periodic recovery sweep — stalled deliveries and lapsed intakes —
-    the post-swap establisher body. Must be called ON the serving loop (the post-swap
-    hook runs there at boot and after every epoch swap), so the task attaches to the loop
-    its deliveries run on and retires with its generation. Cancels any previous task."""
-    global _sweep_task
-    task = _sweep_task
-    if task is not None and not task.done():
-        task.cancel()
-    interval = ConversationsSettings().delivery_sweep_interval_seconds
-    logger.info("conversations: sweeping for stalled deliveries and lapsed intakes every %ss", interval)
-    _sweep_task = asyncio.create_task(_sweep_loop(interval), name="tai-conversations-delivery-sweep")
-    _sweep_task.add_done_callback(_on_sweep_done)
-    _register_sweep_with_epoch(_sweep_task)
-
-
-def _register_sweep_with_epoch(task: asyncio.Task[None]) -> None:
-    """Register this sweep task's cancel with the epoch under construction, so the epoch
-    retire cancels exactly the generation's own sweep and no timer outlives its epoch. A
-    no-op when no epoch is installed. The cancel awaits only a task on the retire's own
-    loop, so a task left on a torn-down build loop is cancelled without a cross-loop await."""
-    from tai42_skeleton.app.epoch import epoch_under_construction_or_none
-
-    epoch = epoch_under_construction_or_none()
-    if epoch is None:
-        return
-
-    async def _cancel() -> None:
-        if task.done():
-            return
-        task.cancel()
-        if task.get_loop() is asyncio.get_running_loop():
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-    epoch.register_periodic_loop(_cancel)
-
-
-async def stop_delivery_sweep() -> None:
-    """Cancel and await the sweep task. Must be called ON the serving loop the task lives
-    on, so the await is loop-safe. Only ``CancelledError`` is suppressed."""
-    global _sweep_task
-    task = _sweep_task
-    _sweep_task = None
-    if task is not None and not task.done():
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
-async def _redrive_lapsed_intakes() -> None:
-    """Adopt and resolve records whose turn worker died, through the turn engine's
-    lease-gated re-drive. Imported inside the call: the turn engine imports this module."""
-    from tai42_skeleton.conversations.turn import redrive_accepted
-
-    await redrive_accepted()
-
-
-async def _prune_terminal_indexes() -> None:
-    """Drop the expired members of the terminal-status indexes that no listing reads, and
-    the reclaimable members of every route's thread indexes, so neither can outgrow the
-    retained keyspace it names.
-
-    Every LIVE route is handed to the pass: a thread index the pass is not given is walked
-    by nothing, so its members would grow forever. The pass is bounded, so it stops where
-    the budget runs out and the cursor it returns is what the next one resumes from."""
-    global _prune_cursor
-    routes = await get_conversations_manager().list_routes()
-    _prune_cursor = await _store().prune_expired_terminal_indexes(routes.keys(), _prune_cursor)
-
-
-async def _sweep_loop(interval_seconds: float) -> None:
-    """Run every recovery pass every ``interval_seconds`` for the life of the process. A
-    failing pass is logged at ERROR and the others still run — a dead sweep is the silent
-    abandonment it exists to prevent."""
-    passes = (
-        ("stalled-delivery sweep", sweep_stalled_deliveries),
-        ("lapsed-intake re-drive", _redrive_lapsed_intakes),
-        ("terminal-index prune", _prune_terminal_indexes),
-    )
-    while True:
-        await asyncio.sleep(interval_seconds)
-        for name, run_pass in passes:
-            try:
-                await run_pass()
-            except Exception:
-                logger.error("conversations: %s pass failed; retrying in %ss", name, interval_seconds, exc_info=True)
-
-
-def _on_sweep_done(task: asyncio.Task[None]) -> None:
-    """Surface an unexpected death of the sweep task at ERROR; a cancellation is silent."""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("conversations: stalled-delivery sweep task died unexpectedly", exc_info=exc)
-
-
 # -- task spawning -----------------------------------------------------------
 
 
@@ -871,13 +260,14 @@ def _on_task_done(task: asyncio.Task[None]) -> None:
 
 
 __all__ = [
+    "_post_callback",
     "deliver",
+    "get_conversations_manager",
     "mark_wait_delivered",
     "record_delivery_status",
     "redrive_pending",
     "spawn_delivery",
     "split_message",
-    "start_delivery_sweep",
-    "stop_delivery_sweep",
     "sweep_stalled_deliveries",
+    "tai42_app",
 ]

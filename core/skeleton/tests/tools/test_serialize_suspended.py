@@ -18,7 +18,7 @@ from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.tools.binding import _serialize_result
+from tai42_skeleton.tools.binding.result import _serialize_result
 
 _MOD = "tests.app._fixtures.suspend_tool"
 

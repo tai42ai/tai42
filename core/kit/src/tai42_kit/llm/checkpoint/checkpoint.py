@@ -97,6 +97,138 @@ REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE = (
 )
 
 
+async def _create_memory_checkpoint() -> tuple[Resource, CleanupFn]:
+    memory = InMemorySaver()
+
+    async def close_memory():
+        pass
+
+    return memory, close_memory
+
+
+async def _create_sqlite_checkpoint(conn_string: str | None) -> tuple[Resource, CleanupFn]:
+    # WARNING: SQLITE CONCURRENCY
+    # This implementation shares a SINGLE connection across the entire application.
+    # It is NOT production-ready for high concurrency.
+    # Use this strictly for local development or testing.
+
+    if conn_string is None:
+        raise ValueError("sqlite checkpoint provider requires a conn_string")
+
+    import aiosqlite  # pyright: ignore[reportMissingImports]
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # pyright: ignore[reportMissingImports]
+
+    conn = await aiosqlite.connect(conn_string)
+    try:
+        temp_saver = AsyncSqliteSaver(conn)
+        await temp_saver.setup()
+    except BaseException:
+        # setup failed: close the connection we just opened so it is
+        # not leaked (no cleanup fn is returned on this path).
+        await conn.close()
+        raise
+
+    async def close_sqlite():
+        await conn.close()
+
+    return conn, close_sqlite
+
+
+async def _create_postgres_checkpoint(conn_string: str | None) -> tuple[Resource, CleanupFn]:
+    if conn_string is None:
+        # An unset conn string means the base Postgres namespace; the DSN
+        # builder raises a named error if that identity is also unset.
+        conn_string = PostgresConnectionSettings().pg_dsn
+
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # pyright: ignore[reportMissingImports]
+    from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
+
+    # AsyncPostgresSaver needs connections that autocommit, skip prepared
+    # statements, and yield dict rows; the pool applies these to every
+    # connection it hands out (matching the store pool and langgraph's
+    # documented AsyncPostgresSaver setup).
+    pool = AsyncConnectionPool(
+        conn_string,
+        open=False,
+        min_size=1,
+        max_size=20,
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+    )
+    try:
+        await pool.open()
+        async with pool.connection() as conn:
+            temp_saver = AsyncPostgresSaver(conn)
+            await temp_saver.setup()
+    except BaseException:
+        # open/setup failed: close the pool so its connections are not
+        # leaked (no cleanup fn is returned on this path).
+        await pool.close()
+        raise
+
+    async def close_postgres():
+        await pool.close()
+
+    return pool, close_postgres
+
+
+async def _create_redis_checkpoint(conn_string: str | None) -> tuple[Resource, CleanupFn]:
+    if conn_string is None:
+        # An unset conn string means the base Redis namespace.
+        conn_string = RedisConnectionSettings().redis_url
+    if conn_string is None:
+        raise ValueError(REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE)
+
+    from langgraph.checkpoint.redis import AsyncRedisSaver
+    from redis.asyncio import Redis as AsyncRedis
+
+    from tai42_kit.llm.settings import llm_provider_settings
+
+    # refresh_on_read makes the TTL measure idle time; None sets no TTL.
+    ttl_minutes = llm_provider_settings().checkpoint_ttl_minutes
+    ttl_config = {"default_ttl": ttl_minutes, "refresh_on_read": True} if ttl_minutes is not None else None
+
+    # The client is injected, never left to the saver: handed a URL, the
+    # saver builds its own client, marks itself the owner, and its teardown
+    # then clears the redisvl search indexes' client reference — after which
+    # those indexes re-resolve a connection from the BARE ``REDIS_URL``
+    # environment variable, blind to the URL resolved above (which may have
+    # come from TAI_DEFAULT_REDIS_URL or the conn-string setting). Injecting
+    # the client keeps the saver a non-owner, so that env fallback is
+    # unreachable. ``connection_args`` is deliberately not passed: the saver
+    # consults it only while building a client of its own.
+    client = AsyncRedis.from_url(conn_string)
+    saver = AsyncRedisSaver(redis_client=client, ttl=ttl_config)
+
+    async def close_redis():
+        # Ownership is explicit and one-way: the kit built the client, so the
+        # kit closes it. The saver's teardown runs first — for a non-owner
+        # that call is inert (the whole body is ownership-gated), kept so a
+        # version that does release state still gets it, and so there is no
+        # double-close — and the client closes even if that teardown raises.
+        try:
+            await saver.__aexit__(None, None, None)
+        finally:
+            await client.aclose()
+
+    try:
+        try:
+            await saver.asetup()
+        except Exception as e:
+            # asetup() is idempotent; only the benign "already exists" race
+            # is safe to ignore — any other setup failure must surface.
+            if "already exists" not in str(e).lower():
+                raise
+            logger.debug("Redis checkpoint setup already applied; ignoring: %s", e)
+    except BaseException:
+        # setup failed (or was cancelled): run the same cleanup path so the
+        # saver and the client are not leaked. No cleanup fn is returned here.
+        await close_redis()
+        raise
+
+    return saver, close_redis
+
+
 async def create_checkpoint_resource(
     provider: str,
     conn_string: str | None = None,
@@ -116,133 +248,13 @@ async def create_checkpoint_resource(
     """
     match provider:
         case "memory":
-            memory = InMemorySaver()
-
-            async def close_memory():
-                pass
-
-            return memory, close_memory
-
+            return await _create_memory_checkpoint()
         case "sqlite":
-            # WARNING: SQLITE CONCURRENCY
-            # This implementation shares a SINGLE connection across the entire application.
-            # It is NOT production-ready for high concurrency.
-            # Use this strictly for local development or testing.
-
-            if conn_string is None:
-                raise ValueError("sqlite checkpoint provider requires a conn_string")
-
-            import aiosqlite  # pyright: ignore[reportMissingImports]
-            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # pyright: ignore[reportMissingImports]
-
-            conn = await aiosqlite.connect(conn_string)
-            try:
-                temp_saver = AsyncSqliteSaver(conn)
-                await temp_saver.setup()
-            except BaseException:
-                # setup failed: close the connection we just opened so it is
-                # not leaked (no cleanup fn is returned on this path).
-                await conn.close()
-                raise
-
-            async def close_sqlite():
-                await conn.close()
-
-            return conn, close_sqlite
-
+            return await _create_sqlite_checkpoint(conn_string)
         case "postgres":
-            if conn_string is None:
-                # An unset conn string means the base Postgres namespace; the DSN
-                # builder raises a named error if that identity is also unset.
-                conn_string = PostgresConnectionSettings().pg_dsn
-
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # pyright: ignore[reportMissingImports]
-            from psycopg.rows import dict_row
-            from psycopg_pool import AsyncConnectionPool
-
-            # AsyncPostgresSaver needs connections that autocommit, skip prepared
-            # statements, and yield dict rows; the pool applies these to every
-            # connection it hands out (matching the store pool and langgraph's
-            # documented AsyncPostgresSaver setup).
-            pool = AsyncConnectionPool(
-                conn_string,
-                open=False,
-                min_size=1,
-                max_size=20,
-                kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
-            )
-            try:
-                await pool.open()
-                async with pool.connection() as conn:
-                    temp_saver = AsyncPostgresSaver(conn)
-                    await temp_saver.setup()
-            except BaseException:
-                # open/setup failed: close the pool so its connections are not
-                # leaked (no cleanup fn is returned on this path).
-                await pool.close()
-                raise
-
-            async def close_postgres():
-                await pool.close()
-
-            return pool, close_postgres
-
+            return await _create_postgres_checkpoint(conn_string)
         case "redis":
-            if conn_string is None:
-                # An unset conn string means the base Redis namespace.
-                conn_string = RedisConnectionSettings().redis_url
-            if conn_string is None:
-                raise ValueError(REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE)
-
-            from langgraph.checkpoint.redis import AsyncRedisSaver
-            from redis.asyncio import Redis as AsyncRedis
-
-            from tai42_kit.llm.settings import llm_provider_settings
-
-            # refresh_on_read makes the TTL measure idle time; None sets no TTL.
-            ttl_minutes = llm_provider_settings().checkpoint_ttl_minutes
-            ttl_config = {"default_ttl": ttl_minutes, "refresh_on_read": True} if ttl_minutes is not None else None
-
-            # The client is injected, never left to the saver: handed a URL, the
-            # saver builds its own client, marks itself the owner, and its teardown
-            # then clears the redisvl search indexes' client reference — after which
-            # those indexes re-resolve a connection from the BARE ``REDIS_URL``
-            # environment variable, blind to the URL resolved above (which may have
-            # come from TAI_DEFAULT_REDIS_URL or the conn-string setting). Injecting
-            # the client keeps the saver a non-owner, so that env fallback is
-            # unreachable. ``connection_args`` is deliberately not passed: the saver
-            # consults it only while building a client of its own.
-            client = AsyncRedis.from_url(conn_string)
-            saver = AsyncRedisSaver(redis_client=client, ttl=ttl_config)
-
-            async def close_redis():
-                # Ownership is explicit and one-way: the kit built the client, so the
-                # kit closes it. The saver's teardown runs first — for a non-owner
-                # that call is inert (the whole body is ownership-gated), kept so a
-                # version that does release state still gets it, and so there is no
-                # double-close — and the client closes even if that teardown raises.
-                try:
-                    await saver.__aexit__(None, None, None)
-                finally:
-                    await client.aclose()
-
-            try:
-                try:
-                    await saver.asetup()
-                except Exception as e:
-                    # asetup() is idempotent; only the benign "already exists" race
-                    # is safe to ignore — any other setup failure must surface.
-                    if "already exists" not in str(e).lower():
-                        raise
-                    logger.debug("Redis checkpoint setup already applied; ignoring: %s", e)
-            except BaseException:
-                # setup failed (or was cancelled): run the same cleanup path so the
-                # saver and the client are not leaked. No cleanup fn is returned here.
-                await close_redis()
-                raise
-
-            return saver, close_redis
-
+            return await _create_redis_checkpoint(conn_string)
         case _:
             raise ValueError(f"Unsupported checkpoint provider: {provider}")
 

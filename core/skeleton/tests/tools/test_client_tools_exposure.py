@@ -31,7 +31,7 @@ from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools import sampling_bridge
-from tai42_skeleton.tools.binding import _named_call_arguments
+from tai42_skeleton.tools.binding.arguments import _named_call_arguments
 
 
 class _FakeModel:

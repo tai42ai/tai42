@@ -43,6 +43,64 @@ def parse_crontab_expr(expr: str) -> dict[str, Any]:
     }
 
 
+def _interval_from_seconds(value: int | float) -> dict[str, Any]:
+    """A raw numeric seconds count as a RedBeat interval (raises on ``<= 0``)."""
+    if value <= 0:
+        raise ValueError("interval 'every' must be > 0 seconds")
+    return {"__type__": "interval", "every": float(value), "relative": False}
+
+
+def _canonical_schedule(spec: dict[str, Any]) -> dict[str, Any]:
+    """An already-``__type__`` dict, float-coercing ``every`` and defaulting
+    ``relative`` for an interval (raises on ``<= 0``)."""
+    out = dict(spec)
+    if out["__type__"] == "interval":
+        out["every"] = float(out["every"])
+        if out["every"] <= 0:
+            raise ValueError("interval 'every' must be > 0 seconds")
+        out.setdefault("relative", False)
+    return out
+
+
+def _interval_from_friendly(spec: dict[str, Any]) -> dict[str, Any]:
+    """A friendly interval schema (``every``/``run_every`` times the ``period``
+    multiplier) as a RedBeat interval (raises on missing/unsupported/``<= 0``)."""
+    every = spec.get("every") or spec.get("run_every")
+    if every is None:
+        raise ValueError("interval schedule requires 'every'")
+    period = (spec.get("period") or "seconds").strip().lower()
+    mult = _PERIODS.get(period)
+    if mult is None:
+        raise ValueError(f"Unsupported period: {period!r}")
+    every_sec = float(every) * mult
+    if every_sec <= 0:
+        raise ValueError("interval 'every' must be > 0 seconds")
+    return {"__type__": "interval", "every": every_sec, "relative": bool(spec.get("relative", False))}
+
+
+def _crontab_from_friendly(spec: dict[str, Any]) -> dict[str, Any]:
+    """A friendly crontab schema as RedBeat crontab: an ``expression`` parsed with
+    per-field overrides, else the per-field values defaulting to ``*``."""
+    if "expression" in spec:
+        base = parse_crontab_expr(spec["expression"])
+        base["__type__"] = base.pop("type", "crontab")
+        # allow explicit field overrides
+        base["minute"] = spec.get("minute", base["minute"])
+        base["hour"] = spec.get("hour", base["hour"])
+        base["day_of_month"] = spec.get("day_of_month", base["day_of_month"])
+        base["month_of_year"] = spec.get("month_of_year", base["month_of_year"])
+        base["day_of_week"] = spec.get("day_of_week", base["day_of_week"])
+        return base
+    return {
+        "__type__": "crontab",
+        "minute": spec.get("minute", "*"),
+        "hour": spec.get("hour", "*"),
+        "day_of_month": spec.get("day_of_month", "*"),
+        "month_of_year": spec.get("month_of_year", "*"),
+        "day_of_week": spec.get("day_of_week", "*"),
+    }
+
+
 def normalize_schedule(s: int | float | str | dict[str, Any]) -> dict[str, Any]:
     """
     Normalize to RedBeat-native JSON:
@@ -52,19 +110,11 @@ def normalize_schedule(s: int | float | str | dict[str, Any]) -> dict[str, Any]:
     """
     # numeric => interval seconds
     if isinstance(s, (int, float)):
-        if s <= 0:
-            raise ValueError("interval 'every' must be > 0 seconds")
-        return {"__type__": "interval", "every": float(s), "relative": False}
+        return _interval_from_seconds(s)
 
     # already-canonical dict
     if isinstance(s, dict) and s.get("__type__") in {"interval", "crontab"}:
-        out = dict(s)
-        if out["__type__"] == "interval":
-            out["every"] = float(out["every"])
-            if out["every"] <= 0:
-                raise ValueError("interval 'every' must be > 0 seconds")
-            out.setdefault("relative", False)
-        return out
+        return _canonical_schedule(s)
 
     # bare string => crontab expression
     if isinstance(s, str):
@@ -76,37 +126,8 @@ def normalize_schedule(s: int | float | str | dict[str, Any]) -> dict[str, Any]:
     if isinstance(s, dict):
         t = s.get("type")
         if t == "interval":
-            every = s.get("every") or s.get("run_every")
-            if every is None:
-                raise ValueError("interval schedule requires 'every'")
-            period = (s.get("period") or "seconds").strip().lower()
-            mult = _PERIODS.get(period)
-            if mult is None:
-                raise ValueError(f"Unsupported period: {period!r}")
-            every_sec = float(every) * mult
-            if every_sec <= 0:
-                raise ValueError("interval 'every' must be > 0 seconds")
-            return {"__type__": "interval", "every": every_sec, "relative": bool(s.get("relative", False))}
-
+            return _interval_from_friendly(s)
         if t == "crontab":
-            if "expression" in s:
-                base = parse_crontab_expr(s["expression"])
-                base["__type__"] = base.pop("type", "crontab")
-                # allow explicit field overrides
-                base["minute"] = s.get("minute", base["minute"])
-                base["hour"] = s.get("hour", base["hour"])
-                base["day_of_month"] = s.get("day_of_month", base["day_of_month"])
-                base["month_of_year"] = s.get("month_of_year", base["month_of_year"])
-                base["day_of_week"] = s.get("day_of_week", base["day_of_week"])
-            else:
-                base = {
-                    "__type__": "crontab",
-                    "minute": s.get("minute", "*"),
-                    "hour": s.get("hour", "*"),
-                    "day_of_month": s.get("day_of_month", "*"),
-                    "month_of_year": s.get("month_of_year", "*"),
-                    "day_of_week": s.get("day_of_week", "*"),
-                }
-            return base
+            return _crontab_from_friendly(s)
 
     raise ValueError(f"Unsupported schedule format: {s!r}")

@@ -9,7 +9,7 @@ mutex that serializes ACROSS workers.
 It is a token-fenced Redis lease in the conversations Redis, held for the whole
 ``run_reserved`` span and heartbeat-refreshed while the turn runs; a crashed holder is
 recovered by TTL expiry. The idiom mirrors the intake lease
-(:data:`~tai42_skeleton.conversations.records._CLAIM_INTAKE_LUA` and its refresher).
+(:data:`~tai42_skeleton.conversations.record_scripts._CLAIM_INTAKE_LUA` and its refresher).
 """
 
 from __future__ import annotations

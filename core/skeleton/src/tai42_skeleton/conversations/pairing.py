@@ -97,7 +97,8 @@ async def mint_pairing_code(channel: str, our_identity: str, sender: str) -> tup
         MultichannelDisabledError: The resolved target has multichannel turned off.
     """
     # Imported inside the call to break a module-level cycle: the turn engine imports
-    # ``classify`` from this module, so this module must not import turn at load time.
+    # ``classify`` from this module, so this module must not import turn at load time. Read
+    # through the ``turn`` package (which re-exports it), so it stays overridable at that alias.
     from tai42_skeleton.conversations.turn import _resolve_channel_route
 
     for name, value in (("channel", channel), ("our_identity", our_identity), ("sender", sender)):

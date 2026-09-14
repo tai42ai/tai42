@@ -25,10 +25,14 @@ from __future__ import annotations
 
 import os
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from tai42_skeleton.app.bus import WorkerKind
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 SUPERVISION_MARKER_ENV = "TAI_SUPERVISED"
 
@@ -197,3 +201,43 @@ def capability_report() -> CapabilityReport:
         refused_keys=sorted(refused_keys(shape)),
         census_kinds=list(CENSUS_TARGET_KINDS),
     )
+
+
+def _replace_diff_keys(stored: Mapping[str, str], proposed: Mapping[str, str]) -> set[str]:
+    """The env key NAMES a whole-env replace changes: added, removed, or value-changed.
+    Names only — the caller classifies them; a diff never carries a value off this seam."""
+    added = {key for key in proposed if key not in stored}
+    removed = {key for key in stored if key not in proposed}
+    changed = {key for key in proposed if key in stored and stored[key] != proposed[key]}
+    return added | removed | changed
+
+
+def _refuse_unrecyclable(diff_keys: set[str], recycle_diff_keys: list[str], report: CapabilityReport) -> None:
+    """Refuse a profile apply whose diff cannot be carried on this deployment shape.
+
+    A diff key the shape PINS (``refused_keys`` — a pod/container respawn re-injects it,
+    or it reaches the worker bus itself) is refused upfront naming the key: a recycle can
+    never make it stick. A recycle-class diff on a BARE (unsupervised) deployment is
+    refused wholesale — no supervisor exists to respawn a worker under the new env. Both
+    are loud ``ValueError``s the operations layer maps to a 400. Names only."""
+    pinned = sorted(diff_keys & set(report.refused_keys))
+    if pinned:
+        raise ValueError(
+            f"Refusing to apply this settings profile on a {report.shape.value!r} deployment: it changes "
+            f"deployment-pinned key(s) a recycle cannot carry (a pod/container respawn re-injects them, or "
+            f"they reach the worker bus itself): {', '.join(pinned)}. Change them in the deployment manifest."
+        )
+    if recycle_diff_keys and not report.recycle_supported:
+        raise ValueError(
+            "Refusing to apply this settings profile on a bare (unsupervised) deployment: it changes "
+            f"recycle-class key(s) that require a worker recycle, and no supervisor is present to respawn "
+            f"workers under the new env: {', '.join(recycle_diff_keys)}. Run under a supervised deployment."
+        )
+
+
+def _recycle_step_timeout() -> float:
+    """The per-step recycle budget — the same drain budget a retire uses, so a recycled
+    worker's replacement gets the shutdown-drain window to boot and rejoin the census."""
+    from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
+
+    return tool_runs_settings().shutdown_drain_seconds
