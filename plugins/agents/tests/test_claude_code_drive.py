@@ -43,7 +43,10 @@ from tests._claude_stubs import (
 )
 
 import tai42_agents.claude_code.agent as agent_module
-from tai42_agents.claude_code.agent import ClaudeCodeAgent, ClaudeCodeError, SubagentSpecShape
+import tai42_agents.claude_code.workspace as workspace_module
+from tai42_agents.claude_code.agent import ClaudeCodeAgent
+from tai42_agents.claude_code.errors import ClaudeCodeError
+from tai42_agents.claude_code.inputs import SubagentSpecShape
 from tai42_agents.claude_code.protocol import ProtocolError
 from tai42_agents.claude_code.settings import ClaudeCodeSettings, ConnectionCred, StaticCred
 
@@ -75,7 +78,7 @@ def _run(app: LocalApp, **kwargs: Any) -> list[Any]:
 
 def test_message_drive_yields_delta_and_final(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     events = _run(build_local_app(), user_message=TemplatedText(content="hi"))
     assert any(isinstance(e, MessageDelta) and e.text == "hello world" for e in events)
     finals = [e for e in events if isinstance(e, MessageFinal)]
@@ -85,7 +88,7 @@ def test_message_drive_yields_delta_and_final(monkeypatch: pytest.MonkeyPatch) -
 
 def test_structured_drive_yields_structured_final(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(STRUCTURED))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(STRUCTURED))
     events = _run(
         build_local_app(), user_message=TemplatedText(content="hi"), response_format={"title": "Ans", "type": "object"}
     )
@@ -96,7 +99,7 @@ def test_structured_drive_yields_structured_final(monkeypatch: pytest.MonkeyPatc
 
 def test_sync_ask_is_answered_adapter_side(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(SYNC_ASK))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(SYNC_ASK))
     asked: list[str] = []
 
     async def ask_user(question: str, **_: Any) -> Any:
@@ -110,7 +113,7 @@ def test_sync_ask_is_answered_adapter_side(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_proxied_tool_call_runs_under_run_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(TOOL_CALL))
     app = build_local_app(tool_runners={"mytool": lambda **kw: {"echo": kw}})
     token = set_request_user_id("user-1")
     try:
@@ -122,7 +125,7 @@ def test_proxied_tool_call_runs_under_run_tool(monkeypatch: pytest.MonkeyPatch) 
 
 def test_tool_call_outside_allowlist_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL_UNGRANTED))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(TOOL_CALL_UNGRANTED))
     app = build_local_app(tool_runners={"granted": lambda **kw: 1})
     token = set_request_user_id("user-1")
     try:
@@ -134,7 +137,7 @@ def test_tool_call_outside_allowlist_is_rejected(monkeypatch: pytest.MonkeyPatch
 
 def test_usage_emits_into_active_trace_via_span_update(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, model="claude-x")
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     writer = RecordingWriter()
     writer.trace_id = "trace-1"
     _run(build_local_app(writer=writer), user_message=TemplatedText(content="hi"))
@@ -149,7 +152,7 @@ def test_usage_emits_into_active_trace_via_span_update(monkeypatch: pytest.Monke
 
 def test_usage_not_emitted_without_active_trace(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     writer = RecordingWriter()  # trace_id stays None
     _run(build_local_app(writer=writer), user_message=TemplatedText(content="hi"))
     assert writer.spans == []
@@ -157,7 +160,7 @@ def test_usage_not_emitted_without_active_trace(monkeypatch: pytest.MonkeyPatch)
 
 def test_async_ask_on_ephemeral_run_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ASYNC_ASK))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
     events = _run(build_local_app(), user_message=TemplatedText(content="hi"))
     # No park on a thread-less run; the model got a tool error instead.
     assert not any(isinstance(e, SuspendedFinal) for e in events)
@@ -166,21 +169,21 @@ def test_async_ask_on_ephemeral_run_is_refused(monkeypatch: pytest.MonkeyPatch) 
 
 def test_ephemeral_run_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     _run(build_local_app(), user_message=TemplatedText(content="hi"))
     assert agent_module._LIVE_SESSIONS == {}
 
 
 def test_sdk_version_mismatch_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(VERSION_MISMATCH))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(VERSION_MISMATCH))
     with pytest.raises(ProtocolError, match="version"):
         _run(build_local_app(), user_message=TemplatedText(content="hi"))
 
 
 def test_tool_names_without_identity_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     with pytest.raises(ClaudeCodeError, match="no bound execution identity"):
         _run(build_local_app(), user_message=TemplatedText(content="hi"), tool_names=["t"])
 
@@ -188,7 +191,7 @@ def test_tool_names_without_identity_refused(monkeypatch: pytest.MonkeyPatch) ->
 def test_fatal_frame_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     """A runner ``fatal`` up-frame is a loud protocol error, never a silent terminal."""
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(FATAL))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(FATAL))
     with pytest.raises(ProtocolError, match="fatal error"):
         _run(build_local_app(), user_message=TemplatedText(content="hi"))
 
@@ -197,7 +200,7 @@ def test_proxied_tool_exception_round_trips_as_error_result(monkeypatch: pytest.
     """A proxied tool that RAISES is returned to the runner as an ``is_error`` result frame
     carrying the exception text — never swallowed, never crashing the drive."""
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(TOOL_CALL))
 
     def boom(**_kw: Any) -> Any:
         raise RuntimeError("tool boom")
@@ -216,7 +219,7 @@ def test_non_text_events_map_to_contract_steps(monkeypatch: pytest.MonkeyPatch) 
     """The runner's ``thinking`` / ``tool_use`` / ``tool_result`` events map to
     ReasoningStep / ToolCallStep / ToolResultStep; a blank ``thinking`` is dropped."""
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(EVENTS_RICH))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(EVENTS_RICH))
     events = _run(build_local_app(), user_message=TemplatedText(content="hi"))
     reasoning = [e for e in events if isinstance(e, ReasoningStep)]
     assert [e.text for e in reasoning] == ["pondering"]  # the whitespace-only thinking is skipped
@@ -236,15 +239,15 @@ def test_subagent_system_prompt_renders_by_id(monkeypatch: pytest.MonkeyPatch) -
     """A subagent's by-id system prompt resolves through the resource manager and the RENDERED
     text is what reaches the options payload the runner receives."""
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     captured: dict[str, Any] = {}
-    real = agent_module.build_options_payload
+    real = workspace_module.build_options_payload
 
     def _capture(**kwargs: Any) -> Any:
         captured["subagents"] = kwargs["subagents"]
         return real(**kwargs)
 
-    monkeypatch.setattr(agent_module, "build_options_payload", _capture)
+    monkeypatch.setattr(workspace_module, "build_options_payload", _capture)
     app = build_local_app(templates={"sp-id": "stored instructions"})
     _run(
         app,
@@ -285,7 +288,7 @@ def test_static_and_env_connection_creds_reach_the_clean_session_env(monkeypatch
             ),
         ],
     )
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ENV_CRED_ECHO))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ENV_CRED_ECHO))
     app = build_local_app(resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("resolved-env-val")))
     events = _run(app, user_message=TemplatedText(content="hi"))
     finals = [e for e in events if isinstance(e, MessageFinal)]

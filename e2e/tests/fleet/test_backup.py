@@ -18,9 +18,10 @@ from collections.abc import Callable, Iterator
 import pytest
 import yaml
 
+from tai42_e2e import Infra
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.llmstub import LlmStub
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e.stack import TaiStack
 
 from ._fleet import (
     build_backup_populated_stack,

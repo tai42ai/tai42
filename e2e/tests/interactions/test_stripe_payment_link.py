@@ -18,9 +18,9 @@ from collections.abc import Callable
 
 import pytest
 
-from tai42_e2e.netfixtures import FakeStripe
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.stripe_stub import FakeStripe
 
 # This asserts against the in-process FakeStripe stub (session mint + money metadata), so it
 # is the stripe MOCK leg. A real stripe selection points the tool at the live Stripe host; the
@@ -37,9 +37,9 @@ _CURRENCY = "usd"
 
 
 async def test_create_stripe_payment_link_mints_a_session(
-    payments_stack: tuple[TaiStack, str], fake_stripe: FakeStripe, uniq: Callable[[str], str]
+    stripe_stack: tuple[TaiStack, str], fake_stripe: FakeStripe, uniq: Callable[[str], str]
 ) -> None:
-    stack, root_token = payments_stack
+    stack, root_token = stripe_stack
     ref = uniq("external_ref")
     async with stack.mcp(port=stack.port_a, auth=root_token) as mcp:
         result = await mcp.call_tool(

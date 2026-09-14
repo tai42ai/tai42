@@ -29,8 +29,8 @@ import { Badge, Markdown } from '@tai42/studio-sdk';
 
 import { isFormGone } from '@/api';
 import { LocationPin, MediaItems } from '@/media-card';
-import { SchemaFormAnswer } from '@/question-card';
-import type { ChatItem } from '@/use-chat-stream';
+import { SchemaFormAnswer } from '@/schema-form-answer';
+import type { ChatItem } from '@/transcript-model';
 
 /** The transcript item this card renders. */
 export type FormCardItem = Extract<ChatItem, { kind: 'form' }>;

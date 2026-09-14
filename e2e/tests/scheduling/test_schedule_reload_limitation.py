@@ -33,9 +33,9 @@ from typing import Any
 import pytest
 from fastmcp.exceptions import ToolError
 
-from tai42_e2e import wait_for_async
+from tai42_e2e import Infra, StackConfig, StackResources, wait_for_async
 from tai42_e2e.manifests import PROBE_TOOLS_TITLE, build_replicas_stack
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import Variants
 
 # How long the final dispatch is given to land. A healthy pool answers in well under

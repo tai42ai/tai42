@@ -43,16 +43,13 @@ from tai42_contract.channels import (
 )
 from tai42_contract.interactions.models import FormData, FormOption, FormPage, LocationElement, MediaItem
 
-from tai42_channel_web.store import (
-    FormRecord,
-    QuestionRecord,
+from tai42_channel_web.store.forms import FormRecord, store_form_record
+from tai42_channel_web.store.questions import QuestionRecord, release_question, reserve_question
+from tai42_channel_web.store.transcript import (
     append_form,
     append_media,
     append_message,
     append_question,
-    release_question,
-    reserve_question,
-    store_form_record,
     transcript_order,
 )
 

@@ -373,6 +373,50 @@ def _is_subsequence(old: list[str], new: list[str]) -> bool:
     return all(elem in it for elem in old)
 
 
+def _dict_is_additive(old_inner: ast.Dict, new_inner: ast.Dict) -> bool:
+    """True when ``new_inner`` is a strict superset of ``old_inner``: every old key
+    is preserved with an unchanged value and at least one key was added. A ``**``
+    expansion (a ``None`` key node) or a duplicate key makes the mapping ambiguous
+    and fails closed."""
+    old_pairs = [
+        (ast.dump(k), ast.dump(v)) for k, v in zip(old_inner.keys, old_inner.values, strict=True) if k is not None
+    ]
+    new_pairs = [
+        (ast.dump(k), ast.dump(v)) for k, v in zip(new_inner.keys, new_inner.values, strict=True) if k is not None
+    ]
+    if len(old_pairs) != len(old_inner.keys) or len(new_pairs) != len(new_inner.keys):
+        return False  # a ``**expansion`` has a None key node — not a plain literal
+    old_keys = [k for k, _ in old_pairs]
+    new_keys = [k for k, _ in new_pairs]
+    if len(set(old_keys)) != len(old_keys) or len(set(new_keys)) != len(new_keys):
+        return False  # a duplicate key dump makes the mapping ambiguous
+    new_by_key = dict(new_pairs)
+    for key, value in old_pairs:
+        if new_by_key.get(key) != value:
+            return False  # a missing key or a changed value for a preserved key
+    return len(new_pairs) > len(old_pairs)
+
+
+def _set_is_additive(old_inner: ast.Set, new_inner: ast.Set) -> bool:
+    """True when ``new_inner`` is a strict multiset-superset of ``old_inner`` and
+    grew; a ``*`` unpack element fails closed."""
+    if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
+        return False
+    old_dumps = [ast.dump(e) for e in old_inner.elts]
+    new_dumps = [ast.dump(e) for e in new_inner.elts]
+    return Counter(old_dumps) <= Counter(new_dumps) and len(new_dumps) > len(old_dumps)
+
+
+def _sequence_is_additive(old_inner: ast.Tuple | ast.List, new_inner: ast.Tuple | ast.List) -> bool:
+    """True when the new tuple/list grew and keeps the old elements as an ordered
+    subsequence; a ``*`` unpack element fails closed."""
+    if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
+        return False
+    old_dumps = [ast.dump(e) for e in old_inner.elts]
+    new_dumps = [ast.dump(e) for e in new_inner.elts]
+    return len(new_dumps) > len(old_dumps) and _is_subsequence(old_dumps, new_dumps)
+
+
 def _is_additive_collection_growth(old_expr: str, new_expr: str) -> bool:
     """True only when both value expressions are same-typed collection constants
     and the new one is a STRICT SUPERSET of the old — a purely additive growth
@@ -395,35 +439,11 @@ def _is_additive_collection_growth(old_expr: str, new_expr: str) -> bool:
     if type(old_inner) is not type(new_inner):
         return False
     if isinstance(old_inner, ast.Dict) and isinstance(new_inner, ast.Dict):
-        old_pairs = [
-            (ast.dump(k), ast.dump(v)) for k, v in zip(old_inner.keys, old_inner.values, strict=True) if k is not None
-        ]
-        new_pairs = [
-            (ast.dump(k), ast.dump(v)) for k, v in zip(new_inner.keys, new_inner.values, strict=True) if k is not None
-        ]
-        if len(old_pairs) != len(old_inner.keys) or len(new_pairs) != len(new_inner.keys):
-            return False  # a ``**expansion`` has a None key node — not a plain literal
-        old_keys = [k for k, _ in old_pairs]
-        new_keys = [k for k, _ in new_pairs]
-        if len(set(old_keys)) != len(old_keys) or len(set(new_keys)) != len(new_keys):
-            return False  # a duplicate key dump makes the mapping ambiguous
-        new_by_key = dict(new_pairs)
-        for key, value in old_pairs:
-            if new_by_key.get(key) != value:
-                return False  # a missing key or a changed value for a preserved key
-        return len(new_pairs) > len(old_pairs)
+        return _dict_is_additive(old_inner, new_inner)
     if isinstance(old_inner, ast.Set) and isinstance(new_inner, ast.Set):
-        old_dumps = [ast.dump(e) for e in old_inner.elts]
-        new_dumps = [ast.dump(e) for e in new_inner.elts]
-        if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
-            return False
-        return Counter(old_dumps) <= Counter(new_dumps) and len(new_dumps) > len(old_dumps)
+        return _set_is_additive(old_inner, new_inner)
     if isinstance(old_inner, ast.Tuple | ast.List) and isinstance(new_inner, ast.Tuple | ast.List):
-        if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
-            return False
-        old_dumps = [ast.dump(e) for e in old_inner.elts]
-        new_dumps = [ast.dump(e) for e in new_inner.elts]
-        return len(new_dumps) > len(old_dumps) and _is_subsequence(old_dumps, new_dumps)
+        return _sequence_is_additive(old_inner, new_inner)
     return False
 
 

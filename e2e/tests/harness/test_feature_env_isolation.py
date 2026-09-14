@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from dataclasses import fields, replace
 
+from tai42_e2e import StackResources
 from tai42_e2e.manifests import _redis_feature_env
-from tai42_e2e.stack import StackResources
 
 
 def _resources(*, bus_namespace: str, broker_url: str | None = None) -> StackResources:

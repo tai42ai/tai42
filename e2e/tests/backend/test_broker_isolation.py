@@ -11,9 +11,10 @@ from collections.abc import Callable
 
 import pytest
 
+from tai42_e2e import Infra
 from tai42_e2e.manifests import build_core_stack
 from tai42_e2e.rabbitx import RabbitAdmin
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e.stack import TaiStack
 
 
 def test_concurrent_stacks_get_isolated_vhosts_that_die_with_them(

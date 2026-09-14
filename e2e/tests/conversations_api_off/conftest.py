@@ -16,6 +16,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from tai42_e2e import Infra, StackConfig, StackResources, Topology
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.manifests import (
     _CORE_ROUTERS,
@@ -26,7 +27,7 @@ from tai42_e2e.manifests import (
     _probe_tools_entry,
     _toolbox_tools_entry,
 )
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack, Topology
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import Variants
 
 # The api-door turn runs its tool target IN-PROCESS on the serve worker, so this profile

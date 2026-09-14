@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import consumer_boot_gate as gate
+from _consumer_boot_gate import consumers as cbg_consumers
 
 # ------------------------------------------------------------------ bump verdict
 
@@ -333,9 +334,11 @@ def test_enumerate_first_party_excludes_bump_set_and_skips_unpublished(tmp_path:
         plugins={"plug-a": "tai42-plug-a", "plug-b": "tai42-plug-b", "plug-c": "tai42-plug-c"},
         manifest={"plugins/plug-a": "1.2.0", "plugins/plug-b": "2.0.0", "plugins/plug-c": "0.1.0"},
     )
-    monkeypatch.setattr(gate, "release_bump_set", lambda _root: {"tai42-plug-b"})
+    # enumerate_first_party calls these within its own module, so patch the definition
+    # module (a facade-level patch would not reach the intra-module call).
+    monkeypatch.setattr(cbg_consumers, "release_bump_set", lambda _root: {"tai42-plug-b"})
     pypi = {"tai42-plug-a": "1.2.0", "tai42-plug-c": None}
-    monkeypatch.setattr(gate, "latest_pypi_version", lambda name: pypi[name])
+    monkeypatch.setattr(cbg_consumers, "latest_pypi_version", lambda name: pypi[name])
     consumers, notices = gate.enumerate_first_party(repo)
     # plug-b excluded (bump set); plug-c skipped (no PyPI, a notice not a failure); plug-a booted.
     assert [c.install_arg for c in consumers] == ["tai42-plug-a==1.2.0"]

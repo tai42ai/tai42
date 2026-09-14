@@ -16,7 +16,8 @@ import json
 import httpx
 import pytest
 
-from tai42_e2e.marketplace import (
+from tai42_e2e.catalog_seed import seed_iota_listing, seed_iota_monorepo_listing
+from tai42_e2e.fixture_catalog import (
     DELTA_PACKAGE,
     DELTA_REF,
     DELTA_REPOSITORY_URL,
@@ -31,11 +32,9 @@ from tai42_e2e.marketplace import (
     IOTA_VERSION_V1,
     IOTA_VERSION_V2,
     FixtureArtifacts,
-    MarketplaceService,
     render_iota_descriptor,
-    seed_iota_listing,
-    seed_iota_monorepo_listing,
 )
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.waiting import wait_for_async

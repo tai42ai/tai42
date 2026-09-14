@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tai42_e2e import StackConfig, StackResources, Topology
 from tai42_e2e.manifests import (
     _CORE_ROUTERS,
     _EXTENSION_MODULES,
@@ -19,7 +20,6 @@ from tai42_e2e.manifests import (
     _builtin_entries,
     _probe_tools_entry,
 )
-from tai42_e2e.stack import StackConfig, StackResources, Topology
 from tai42_e2e.variants import Variants
 
 # A positive idle-TTL in minutes (``checkpoint_ttl_minutes`` must be > 0). The spec

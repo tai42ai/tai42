@@ -22,10 +22,11 @@ from collections.abc import Callable
 
 import pytest
 
+from tai42_e2e import StackConfig, StackResources
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import build_agents_stack
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import StackConfig, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import Variants
 
 # The agents stack runs no backend worker; skip this module on non-default

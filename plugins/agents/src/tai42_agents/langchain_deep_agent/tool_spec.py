@@ -13,11 +13,13 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.reject import resolve_response_format
+from tai42_agents._internal.resolve_tools import resolve_tools
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
 
@@ -116,3 +118,50 @@ async def resolve_subagent_specs(specs: list[DeepSubAgentSpec] | None) -> list[R
     if not specs:
         return []
     return [await _resolve_subagent_spec(spec) for spec in specs]
+
+
+async def _to_internal(spec: NeutralSubAgentSpec | DeepSubAgentSpec) -> ResolvedSubAgentSpec:
+    """Resolve either subagent shape into the core spec.
+
+    A programmatic caller passes :class:`NeutralSubAgentSpec` (live tools), the JSON
+    door :class:`DeepSubAgentSpec` (tool names); both faces accept both.
+    """
+    if isinstance(spec, DeepSubAgentSpec):
+        return (await resolve_subagent_specs([spec]))[0]
+    return await _neutral_to_internal(spec)
+
+
+async def _neutral_to_internal(spec: NeutralSubAgentSpec) -> ResolvedSubAgentSpec:
+    """Map a neutral (live-tools) sub-agent spec to the internal deepagents spec.
+
+    Resolves the spec's ``tools`` / ``tool_names`` / ``presets`` into a flat
+    ``StructuredTool`` list. The internal spec has no ``strategy`` field, so a
+    neutral ``strategy`` is rejected rather than dropped silently.
+    """
+    if spec.strategy is not None:
+        raise ValueError(
+            f"sub-agent {spec.name!r} sets strategy={spec.strategy!r}, which the "
+            "deepagents sub-agent spec cannot carry; pass response_format as a "
+            "ToolStrategy on the parent instead."
+        )
+    if spec.system_prompt is None:
+        raise ValueError(
+            f"sub-agent {spec.name!r} has no system_prompt; the deepagents sub-agent spec "
+            "requires one, so a neutral spec that omits it is refused here rather than run "
+            "with empty instructions."
+        )
+    tools = await resolve_tools(tai42_app.tools, list(spec.tool_names), list(spec.tools), list(spec.presets))
+    subagents = [await _neutral_to_internal(child) for child in spec.subagents]
+    # Neutral inline_skills are plain dicts; coerce to InlineSkill for the factory.
+    resolved_response_format = await resolve_response_format(f"subagent {spec.name!r}", spec.response_format)
+    inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (spec.inline_skills or [])]
+    return ResolvedSubAgentSpec(
+        name=spec.name,
+        description=spec.description,
+        system_prompt=spec.system_prompt,
+        tools=tools,
+        skills=list(spec.skills) or None,
+        inline_skills=inline_skills or None,
+        response_format=resolved_response_format,
+        subagents=subagents,
+    )

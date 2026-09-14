@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from pydantic import SecretStr
 from tai42_contract.connectors.errors import ConnectorError
 from tai42_contract.connectors.models import AuthHealthState, ConnectionRecord
+from tai42_contract.connectors.providers import ProviderDescriptor
 
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth import crypto
@@ -229,24 +230,7 @@ async def _refresh(record: ConnectionRecord, started_blob: bytes) -> ManagedAuth
     record instead of clobbering it (see :func:`_serve_rotated_peer`).
     """
     connection_id = record.connection_id
-    if record.refresh_token is None:
-        # An oauth record without a refresh token cannot be refreshed — corrupt
-        # state fails loudly instead of dispatching a bogus upstream call.
-        raise ConnectorConnectionError(
-            f"oauth record {connection_id} has no refresh_token",
-            connection_id=connection_id,
-        )
-    refresh_token = record.refresh_token.get_secret_value()
-    try:
-        descriptor = get_provider(record.provider_id)
-    except KeyError as exc:
-        # The provider plugin was removed since this connection was created — there
-        # is no descriptor to drive the refresh. Surface the typed connection error
-        # (matching resolve_managed_auth's no-auth branch) rather than a raw KeyError.
-        raise ConnectorConnectionError(
-            f"connection {connection_id} references unknown provider {record.provider_id!r}",
-            connection_id=connection_id,
-        ) from exc
+    descriptor, refresh_token = _refresh_prerequisites(record)
     transient_attempts = 0
     while True:
         try:
@@ -297,23 +281,53 @@ async def _refresh(record: ConnectionRecord, started_blob: bytes) -> ManagedAuth
             continue
 
         # Success. Write the new access token and any rotated refresh token in
-        # the same record (rotation-style providers like Atlassian). The write is
-        # a compare-and-set: if a peer already rotated the record while ours was
-        # in flight, serve the peer's record rather than overwrite it with our
-        # (now superseded) tokens.
-        record.access_token = SecretStr(token_resp.access_token)
-        record.access_token_expires_at = token_resp.expires_at
-        if token_resp.refresh_token:
-            record.refresh_token = SecretStr(token_resp.refresh_token)
-        record.auth_health_state = AuthHealthState.HEALTHY
-        if token_resp.granted_scopes:
-            record.granted_scopes = list(token_resp.granted_scopes)
+        # the same record. The write is a compare-and-set: if a peer already
+        # rotated the record while ours was in flight, serve the peer's record
+        # rather than overwrite it with our (now superseded) tokens.
+        _apply_refreshed_tokens(record, token_resp)
         if not await _persist(record, expected_blob=started_blob):
             return await _serve_rotated_peer(connection_id)
         # Recovery: drop any breaker a prior failing run left so a fresh token
         # already inside the safety margin is not fast-failed by a live cooldown.
         await clear_refresh_cooldown(connection_id)
         return _managed_auth(record)
+
+
+def _refresh_prerequisites(record: ConnectionRecord) -> tuple[ProviderDescriptor, str]:
+    """Assert the record can be refreshed — a refresh token is present and the provider
+    descriptor still resolves — returning the descriptor and the refresh token, or raising
+    the typed :class:`ConnectorConnectionError`."""
+    connection_id = record.connection_id
+    if record.refresh_token is None:
+        # An oauth record without a refresh token cannot be refreshed — corrupt
+        # state fails loudly instead of dispatching a bogus upstream call.
+        raise ConnectorConnectionError(
+            f"oauth record {connection_id} has no refresh_token",
+            connection_id=connection_id,
+        )
+    try:
+        descriptor = get_provider(record.provider_id)
+    except KeyError as exc:
+        # The provider plugin was removed since this connection was created — there
+        # is no descriptor to drive the refresh. Surface the typed connection error
+        # (matching resolve_managed_auth's no-auth branch) rather than a raw KeyError.
+        raise ConnectorConnectionError(
+            f"connection {connection_id} references unknown provider {record.provider_id!r}",
+            connection_id=connection_id,
+        ) from exc
+    return descriptor, record.refresh_token.get_secret_value()
+
+
+def _apply_refreshed_tokens(record: ConnectionRecord, token_resp: oauth_client.TokenResponse) -> None:
+    """Write the refreshed access token, any rotated refresh token (rotation-style
+    providers), HEALTHY state, and any newly granted scopes onto the record."""
+    record.access_token = SecretStr(token_resp.access_token)
+    record.access_token_expires_at = token_resp.expires_at
+    if token_resp.refresh_token:
+        record.refresh_token = SecretStr(token_resp.refresh_token)
+    record.auth_health_state = AuthHealthState.HEALTHY
+    if token_resp.granted_scopes:
+        record.granted_scopes = list(token_resp.granted_scopes)
 
 
 # -- Public API -----------------------------------------------------------
@@ -359,21 +373,7 @@ async def resolve_managed_auth(
         )
 
     if record.kind == "none":
-        if not record.config_values:
-            return None
-        try:
-            descriptor = get_provider(record.provider_id)
-            server = resolve_mcp_server(descriptor, sub_service)
-        except KeyError as exc:
-            raise ConnectorConnectionError(
-                f"connection {connection_id} references unknown provider "
-                f"{record.provider_id!r} or sub-service {sub_service!r}",
-                connection_id=connection_id,
-            ) from exc
-        values = {key: value.get_secret_value() for key, value in record.config_values.items()}
-        if server.type == "stdio":
-            return ManagedAuth(env=values)
-        return ManagedAuth(headers=values)
+        return _resolve_no_auth(record, connection_id, sub_service)
 
     if not allow_refresh:
         # Read-only OAuth resolution: serve a still-fresh token or None. A stale /
@@ -390,10 +390,36 @@ async def resolve_managed_auth(
     if _is_fresh(record):
         return _managed_auth(record)
 
-    # Slow path. A refresh that recently exhausted its retry budget leaves a
-    # cooldown breaker; fast-fail here (before even queueing on the lock) so a
-    # failing connection cannot re-burn the full retry budget on every call and
-    # stampede the lock-timeout waiters behind it.
+    return await _resolve_oauth_refresh(connection_id)
+
+
+def _resolve_no_auth(record: ConnectionRecord, connection_id: str, sub_service: str) -> ManagedAuth | None:
+    """The ``kind == "none"`` resolution: no lock, no freshness gate, no refresh. Returns
+    None when the connection carries no client config (inject nothing), else a credential
+    carrying the config_values on the sub-service's transport channel (env for stdio,
+    headers for http)."""
+    if not record.config_values:
+        return None
+    try:
+        descriptor = get_provider(record.provider_id)
+        server = resolve_mcp_server(descriptor, sub_service)
+    except KeyError as exc:
+        raise ConnectorConnectionError(
+            f"connection {connection_id} references unknown provider {record.provider_id!r} or sub-service "
+            f"{sub_service!r}",
+            connection_id=connection_id,
+        ) from exc
+    values = {key: value.get_secret_value() for key, value in record.config_values.items()}
+    if server.type == "stdio":
+        return ManagedAuth(env=values)
+    return ManagedAuth(headers=values)
+
+
+async def _resolve_oauth_refresh(connection_id: str) -> ManagedAuth:
+    """The OAuth slow path: fast-fail on a live refresh-cooldown breaker before even
+    queueing on the lock (so a failing connection cannot re-burn the full retry budget on
+    every call and stampede the lock-timeout waiters behind it), then under the lock re-load
+    and re-check freshness/cooldown/reconnect before driving :func:`_refresh`."""
     if await refresh_cooldown_active(connection_id):
         raise ConnectorRefreshFailingError(
             f"connection {connection_id} is in refresh cooldown after a failing refresh",

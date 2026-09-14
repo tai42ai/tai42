@@ -77,6 +77,137 @@ def _resolve_channel(channel: str) -> Channel:
         raise ValueError(f"unknown channel: {channel!r}") from exc
 
 
+def _guard_channel_capabilities(
+    channel_obj: Channel,
+    channel: str,
+    *,
+    media: list[MediaItem] | None,
+    location: LocationElement | None,
+    template: ChannelTemplate | None,
+    options: list[Option] | None,
+    sections: list[OptionSection] | None,
+    schema: dict[str, Any] | None,
+) -> None:
+    """Central capability gate — a channel that does not advertise the matching flag
+    receives neither field. The flags are OPTIONAL class attributes (absent = False),
+    read defensively so a text-only sibling channel is a valid target and never forced
+    to declare them. Raises ``NotImplementedError`` naming the field for any
+    advertised-capability miss. Runs BEFORE any feed write so a refused rich send leaves
+    no phantom feed entry. A sectioned list IS an interactive choice surface (the SAME
+    flag flat options ride); ``header``/``footer`` ride that already-gated choice
+    surface, so they carry NO gate of their own."""
+    if media is not None and not getattr(channel_obj, "supports_media_notifications", False):
+        raise NotImplementedError(f"channel {channel!r} does not support media notifications")
+    if location is not None and not getattr(channel_obj, "supports_location_notifications", False):
+        raise NotImplementedError(f"channel {channel!r} does not support location notifications")
+    if template is not None and not getattr(channel_obj, "supports_template_notifications", False):
+        raise NotImplementedError(f"channel {channel!r} does not support template notifications")
+    if options is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
+        raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
+    if sections is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
+        raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
+    if schema is not None and not getattr(channel_obj, "supports_form_notifications", False):
+        raise NotImplementedError(f"channel {channel!r} does not support form notifications")
+
+
+def _validate_channel_form(channel_obj: Channel, schema: dict[str, Any], message: str) -> None:
+    """Refuse a form schema the channel could never render, BEFORE any feed write or
+    send. The shared channel-deliverable subset walk (``validate_channel_form_schema`` —
+    the ONE definition the ask path's form delivery uses) refuses an unrenderable schema
+    loudly (``ValueError`` → 400); then the channel's OPTIONAL ``validate_form_schema``
+    hook enforces its own medium-specific limits (reserved names, per-medium caps) with
+    the notification's MESSAGE as the question, exactly as the ask path calls it."""
+    validate_channel_form_schema(schema)
+    validate_form_schema = getattr(channel_obj, "validate_form_schema", None)
+    if validate_form_schema is not None:
+        validate_form_schema(schema, message)
+
+
+async def _prepare_channel_media(media: list[Any], settings: Any) -> list[MediaItem]:
+    """Rewrite the send's media for a channel, mirroring the ask path
+    (``substitute_media``). The operation door hands plain dicts, so coerce each to
+    ``MediaItem`` ONCE up front (the contract shape validation raising loudly on bad
+    input, a ``ValueError`` the door maps to a 400). Then: a ``data:`` image is stored by
+    reference and its url swapped for an ABSOLUTE served reference, and an ALREADY-STORED
+    same-origin route reference (``{MEDIA_ROUTE_PREFIX}{id}``, ANY media kind) is made
+    absolute against the public base url — both because a channel vendor fetches media
+    from its OWN servers, so a relative same-origin url is unfetchable off-origin. A
+    ``data:`` image with no public base is a loud ``ChannelInputError`` naming the setting
+    (the door maps it to a 400), never a silent drop. Redis is touched only when a rewrite
+    is actually needed, so a plain https-media send still needs no Redis."""
+    items = [item if isinstance(item, MediaItem) else MediaItem.model_validate(item) for item in media]
+    has_data_image = any(item.kind is MediaKind.IMAGE and item.url.startswith("data:image/") for item in items)
+    if has_data_image and settings.public_base_url is None:
+        raise ChannelInputError(
+            "a data: image on a channel notification requires INTERACTIONS_PUBLIC_BASE_URL to be set"
+        )
+    has_route_ref = any(item.url.startswith(MEDIA_ROUTE_PREFIX) for item in items)
+    # With no data: image AND no absolutizable route reference (either no route ref, or no
+    # public base url to absolutize it with) nothing touches the store.
+    if has_data_image or (has_route_ref and settings.public_base_url is not None):
+        store = InteractionStore(settings.key_prefix)
+        async with client_ctx(RedisClient, settings.redis) as r:
+            items = await substitute_media(
+                store, r, items, settings.idle_ttl_seconds, base_url=settings.public_base_url
+            )
+    return items
+
+
+async def _record_feed(notification: ChannelNotification, audience: str | None) -> None:
+    """Write the in-app feed record (shared + per-identity feed) from a validated
+    ``ChannelNotification`` and ``audience``. The single home for the field mapping the
+    sink path and the addressed-channel path share — the record carries the same rich
+    fields the channel receives (feed parity)."""
+    await record_notification(
+        notification.message,
+        recipient=notification.recipient,
+        audience=audience,
+        media=notification.media,
+        template=notification.template,
+        options=notification.options,
+        location=notification.location,
+        sections=notification.sections,
+        header=notification.header,
+        footer=notification.footer,
+        schema=notification.schema,
+    )
+
+
+async def _send_with_telemetry(
+    channel_obj: Channel, channel: str, notification: ChannelNotification, recipient: str | None
+) -> list[str]:
+    """Send on the channel inside the send-outcome monitoring span and return the accepted
+    per-message ids.
+
+    Tier 1: one structured ``send:<channel>`` span around the single send seam (a no-op
+    outside a flow trace); on failure the span is marked ERROR with the typed detail and
+    the error re-raised unchanged. Tier 2, AFTER the span closes SUCCESS-shaped: index each
+    accepted id to this trace/span so a later out-of-band delivery receipt can be posted
+    back onto this run. The provider has already ACCEPTED the send, so this best-effort
+    telemetry write is caught-and-logged, never raised — an interactions-Redis outage here
+    must not raise a FALSE send failure (risking a double-send). ``None`` means accepted but
+    no correlatable per-message id — an empty id set, not an error and not a dropped id."""
+    with send_span(channel, recipient=recipient) as span:
+        outbound_ids = await channel_obj.notify(notification)
+        if span is not None and outbound_ids:
+            span.update(output={"messaging.message.id": outbound_ids})
+    if span is not None and outbound_ids:
+        trace_id = active_trace_id()
+        if trace_id is not None:
+            try:
+                await index_flow_send(channel, outbound_ids, trace_id=trace_id, span_id=span.id)
+            except Exception:
+                logger.warning(
+                    "flow-send receipt indexing failed for channel %r ids %r; the send succeeded, "
+                    "only later delivery-receipt correlation is lost",
+                    channel,
+                    outbound_ids,
+                )
+    if outbound_ids is None:
+        return []
+    return outbound_ids
+
+
 async def notify_user(
     message: str,
     *,
@@ -232,85 +363,25 @@ async def notify_user(
             header=header,
             footer=footer,
         )
-        await record_notification(
-            sink_notification.message,
-            recipient=sink_notification.recipient,
-            audience=audience,
-            media=sink_notification.media,
-            template=sink_notification.template,
-            options=sink_notification.options,
-            location=sink_notification.location,
-            sections=sink_notification.sections,
-            header=sink_notification.header,
-            footer=sink_notification.footer,
-        )
+        await _record_feed(sink_notification, audience)
         return []
     channel_obj = _resolve_channel(channel)
-    # Central capability guard — a channel that does not advertise the matching flag
-    # receives neither field. The flags are OPTIONAL class attributes (absent = False),
-    # read defensively so a text-only sibling channel is a valid target and never forced
-    # to declare them. This fires BEFORE the in-app feed record below: a refused rich send
-    # must leave no phantom feed entry.
-    if media is not None and not getattr(channel_obj, "supports_media_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support media notifications")
-    if location is not None and not getattr(channel_obj, "supports_location_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support location notifications")
-    if template is not None and not getattr(channel_obj, "supports_template_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support template notifications")
-    if options is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
-    # A sectioned list IS an interactive choice surface — the SAME capability flag flat options
-    # ride, mirroring the delivery path (``_unsupported_rich_capability``). ``header``/``footer``
-    # ride the already-gated choice surface, so they carry NO gate of their own.
-    if sections is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
-    if schema is not None and not getattr(channel_obj, "supports_form_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support form notifications")
+    # Capability gate, form validation and media rewrite all run BEFORE the feed record:
+    # a refused rich send must leave no phantom feed entry.
+    _guard_channel_capabilities(
+        channel_obj,
+        channel,
+        media=media,
+        location=location,
+        template=template,
+        options=options,
+        sections=sections,
+        schema=schema,
+    )
     if schema is not None:
-        # The shared channel-deliverable subset walk — the ONE definition the ask path's
-        # form delivery uses — refuses an unrenderable schema loudly (ValueError → 400),
-        # then the channel's OPTIONAL ``validate_form_schema`` hook enforces its own
-        # medium-specific limits (reserved names, per-medium caps) with the notification's
-        # MESSAGE as the question, exactly as the ask path calls it. Both run BEFORE any
-        # feed write or send, so a form the channel could never render leaves no trace.
-        validate_channel_form_schema(schema)
-        validate_form_schema = getattr(channel_obj, "validate_form_schema", None)
-        if validate_form_schema is not None:
-            validate_form_schema(schema, message)
+        _validate_channel_form(channel_obj, schema, message)
     if media is not None:
-        # The operation door hands this seam the request model's ``media`` as plain dicts
-        # (``model_dump`` of the validated body), so coerce each to ``MediaItem`` ONCE up
-        # front before any ``.kind``/``.url`` inspection — the contract shape validation
-        # raising loudly on bad input (a ``ValueError`` the operation door maps to a 400).
-        # The coerced items feed the data: scan, the public-base-url check and substitution.
-        media = [item if isinstance(item, MediaItem) else MediaItem.model_validate(item) for item in media]
-    if media is not None:
-        # Two rewrites reach a channel, mirroring the ask path (``substitute_media``): a
-        # ``data:`` image is stored by reference and its url swapped for an ABSOLUTE served
-        # reference; and an ALREADY-STORED same-origin route reference
-        # (``{MEDIA_ROUTE_PREFIX}{id}``, ANY media kind) is made absolute against the public
-        # base url. Both are because a channel vendor fetches media from its OWN servers, so a
-        # relative same-origin url is unfetchable off-origin.
-        has_data_image = any(item.kind is MediaKind.IMAGE and item.url.startswith("data:image/") for item in media)
-        settings = interactions_settings()
-        if has_data_image and settings.public_base_url is None:
-            # A ``data:`` image REQUIRES the public base url to mint its absolute served url;
-            # its absence is a loud channel-input refusal naming the setting (the operation
-            # door maps it to a 400), never a silent drop.
-            raise ChannelInputError(
-                "a data: image on a channel notification requires INTERACTIONS_PUBLIC_BASE_URL to be set"
-            )
-        has_route_ref = any(item.url.startswith(MEDIA_ROUTE_PREFIX) for item in media)
-        # Store a data: image, or absolutize a relative route reference when the public base
-        # url is set. With no data: image AND no absolutizable route reference (either no
-        # route ref, or no public base url to absolutize it with — pass-through as before)
-        # nothing touches the store, so a plain https-media send still needs no Redis.
-        if has_data_image or (has_route_ref and settings.public_base_url is not None):
-            store = InteractionStore(settings.key_prefix)
-            async with client_ctx(RedisClient, settings.redis) as r:
-                media = await substitute_media(
-                    store, r, media, settings.idle_ttl_seconds, base_url=settings.public_base_url
-                )
+        media = await _prepare_channel_media(media, interactions_settings())
     # Construct (and thereby validate) the notification BEFORE the in-app feed record.
     # The contract's exclusivity validators (media+template, options+template) and the
     # present-but-empty ``media``/``options`` validators raise here as a pydantic
@@ -338,51 +409,5 @@ async def notify_user(
     # post-substitution value, so a ``data:`` image is recorded as the served absolute
     # reference the channel was handed, one value for both surfaces.
     if audience is not None:
-        await record_notification(
-            notification.message,
-            recipient=notification.recipient,
-            audience=audience,
-            media=notification.media,
-            template=notification.template,
-            options=notification.options,
-            location=notification.location,
-            sections=notification.sections,
-            header=notification.header,
-            footer=notification.footer,
-            schema=notification.schema,
-        )
-    # Tier 1 of the send-outcome monitoring layer: one structured ``send:<channel>`` span
-    # around the single send seam. A no-op outside a flow trace; on failure the span is
-    # marked ERROR with the typed ``ChannelDeliveryError``/``ChannelInputError`` detail and
-    # the error re-raised unchanged (this door still raises loudly). The recipient rides the
-    # span input, not metadata (see ``send_span``).
-    with send_span(channel, recipient=recipient) as span:
-        outbound_ids = await channel_obj.notify(notification)
-        if span is not None and outbound_ids:
-            # Success: stamp the accepted provider ids on the span. Gated on a live trace by
-            # ``span is not None``. The tier-2 index write is deliberately kept OUT of this
-            # block (see below): it is post-send monitoring bookkeeping, not part of the send.
-            span.update(output={"messaging.message.id": outbound_ids})
-    # Tier 2, AFTER the send span has closed SUCCESS-shaped: index each accepted id to this
-    # trace/span so a later out-of-band delivery receipt for the id can be posted back onto
-    # this run. The provider has already ACCEPTED the send, so this best-effort telemetry
-    # write must never alter control flow or the span outcome — an interactions-Redis outage
-    # here would otherwise raise a FALSE send failure (risking a double-send) and mark the
-    # span ERROR with a misleading Redis error. It is caught-and-logged, never raised.
-    if span is not None and outbound_ids:
-        trace_id = active_trace_id()
-        if trace_id is not None:
-            try:
-                await index_flow_send(channel, outbound_ids, trace_id=trace_id, span_id=span.id)
-            except Exception:
-                logger.warning(
-                    "flow-send receipt indexing failed for channel %r ids %r; the send succeeded, "
-                    "only later delivery-receipt correlation is lost",
-                    channel,
-                    outbound_ids,
-                )
-    # ``None`` means accepted but no correlatable per-message id — an empty id set, not an
-    # error and not a dropped id.
-    if outbound_ids is None:
-        return []
-    return outbound_ids
+        await _record_feed(notification, audience)
+    return await _send_with_telemetry(channel_obj, channel, notification, recipient)

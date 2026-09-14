@@ -181,48 +181,57 @@ class ProviderDescriptor(BaseModel):
                 raise ValueError(f"sub_services key {key!r} must match sub.id {sub.id!r}")
         return value
 
-    @model_validator(mode="after")
-    def _check_kind_invariants(self) -> ProviderDescriptor:
+    def _check_entry_point_launcher(self) -> None:
         # A pkg-launched stdio sub-service (entry_point, no mcp_server) needs the
         # provider's launcher to synthesize its command.
         if any(sub.entry_point for sub in self.sub_services.values()) and not self.pkg_manager:
             raise ValueError("provider with a pkg-launched (entry_point) sub-service requires pkg_manager")
-        if self.kind == "oauth":
-            if self.oauth is None:
-                raise ValueError("oauth provider requires oauth endpoints")
-            if not self.client_id_env or not self.client_secret_env:
-                raise ValueError("oauth provider requires client_id_env + client_secret_env")
-            if self.config_fields:
-                raise ValueError("oauth provider must not declare config_fields")
-            for sub in self.sub_services.values():
-                if not sub.scopes:
-                    raise ValueError(f"oauth sub-service {sub.id!r} scopes must be non-empty")
-        else:  # kind == "none"
-            if self.oauth is not None:
-                raise ValueError("no-auth provider must not set oauth endpoints")
-            if self.client_id_env or self.client_secret_env:
-                raise ValueError("no-auth provider must not set client creds envs")
-            # config_fields.target must match the transport channel of EVERY
-            # sub-service (stdio->env, http/ws->header). A no-auth provider with
-            # config_fields must therefore expose a single transport channel.
-            keys = [field.key for field in self.config_fields]
-            if len(keys) != len(set(keys)):
-                raise ValueError("config_fields keys must be unique")
-            channels = {
-                "env" if (sub.mcp_server is None or sub.mcp_server.type == "stdio") else "header"
-                for sub in self.sub_services.values()
-            }
-            if self.config_fields:
-                if len(channels) != 1:
+
+    def _check_oauth_invariants(self) -> None:
+        if self.oauth is None:
+            raise ValueError("oauth provider requires oauth endpoints")
+        if not self.client_id_env or not self.client_secret_env:
+            raise ValueError("oauth provider requires client_id_env + client_secret_env")
+        if self.config_fields:
+            raise ValueError("oauth provider must not declare config_fields")
+        for sub in self.sub_services.values():
+            if not sub.scopes:
+                raise ValueError(f"oauth sub-service {sub.id!r} scopes must be non-empty")
+
+    def _check_noauth_invariants(self) -> None:
+        if self.oauth is not None:
+            raise ValueError("no-auth provider must not set oauth endpoints")
+        if self.client_id_env or self.client_secret_env:
+            raise ValueError("no-auth provider must not set client creds envs")
+        # config_fields.target must match the transport channel of EVERY
+        # sub-service (stdio->env, http/ws->header). A no-auth provider with
+        # config_fields must therefore expose a single transport channel.
+        keys = [field.key for field in self.config_fields]
+        if len(keys) != len(set(keys)):
+            raise ValueError("config_fields keys must be unique")
+        channels = {
+            "env" if (sub.mcp_server is None or sub.mcp_server.type == "stdio") else "header"
+            for sub in self.sub_services.values()
+        }
+        if self.config_fields:
+            if len(channels) != 1:
+                raise ValueError(
+                    "no-auth provider with config_fields must use one transport "
+                    f"channel across sub-services (got {sorted(channels)})"
+                )
+            channel = next(iter(channels))
+            for field in self.config_fields:
+                if field.target != channel:
                     raise ValueError(
-                        "no-auth provider with config_fields must use one transport "
-                        f"channel across sub-services (got {sorted(channels)})"
+                        f"config_field {field.key!r} target {field.target!r} must "
+                        f"match the transport channel {channel!r}"
                     )
-                channel = next(iter(channels))
-                for field in self.config_fields:
-                    if field.target != channel:
-                        raise ValueError(
-                            f"config_field {field.key!r} target {field.target!r} must "
-                            f"match the transport channel {channel!r}"
-                        )
+
+    @model_validator(mode="after")
+    def _check_kind_invariants(self) -> ProviderDescriptor:
+        self._check_entry_point_launcher()
+        if self.kind == "oauth":
+            self._check_oauth_invariants()
+        else:  # kind == "none"
+            self._check_noauth_invariants()
         return self

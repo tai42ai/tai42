@@ -23,7 +23,7 @@ from typing import Any, ClassVar
 
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
@@ -45,14 +45,15 @@ from tai42_agents._internal.park import (
     ParkIdentity,
     bind_resume_per_step,
     build_park_identity,
+    collect_pending_interrupts,
     detach_dead_chains,
     finalize_drive,
+    is_suspended_receipt,
     park_drive,
     park_step_binding,
     register_agent_resume_tool,
     register_chained_park_tool,
 )
-from tai42_agents._internal.park.driver import _collect_pending_interrupts, _is_suspended_receipt
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
@@ -61,144 +62,19 @@ from tai42_agents._internal.reject import (
     resolve_response_format,
 )
 from tai42_agents._internal.render import render_message
-from tai42_agents._internal.resolve_tools import resolve_tools
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
+from tai42_agents.langchain_deep_agent.park_identity import build_astream_park, build_rebuild_kwargs
+from tai42_agents.langchain_deep_agent.run_input import (
+    _UNHONORED_COLLECTION_PARAMS,
+    _UNHONORED_REASONS,
+    DeepAgentInput,
+)
 from tai42_agents.langchain_deep_agent.session import DeepAgentSession
 from tai42_agents.langchain_deep_agent.settings import langchain_deep_agent_crash_resume
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
-from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec, resolve_subagent_specs
-
-# The two ABC ``run``/``astream`` parameters ``langchain_deep_agent`` cannot honor on the
-# main agent, mapped to the reason named in the raised error (the keys define this
-# agent's unhonored set). ``presets`` is truthiness-checked, ``strategy`` set when
-# not ``None``.
-_UNHONORED_REASONS: dict[str, str] = {
-    "presets": (
-        "its tool set is composed from tool_names and live tools on the main agent, not presets, "
-        "and it will not silently ignore one"
-    ),
-    "strategy": "the deepagents runtime applies no composition strategy and will not silently ignore one",
-    "system_content_kwargs": (
-        "its system prompt is handed to the deepagents factory, never built as a content block through "
-        "build_system_message, so it cannot carry content-block keys; use user_content_kwargs instead"
-    ),
-    "resume_checkpoint_id": (
-        "the durable sandbox WORKSPACE volume cannot be forked alongside the LangGraph checkpoint, so "
-        "forking the checkpoint past an aborted turn would run a forked graph over post-abort workspace "
-        "state — a silent divergence; it is unhonored on the durable deep agent"
-    ),
-}
-_UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"presets"})
-
-
-class DeepAgentInput(BaseModel):
-    """JSON tool-face parameters for ``langchain_deep_agent``. Live ``tools=`` are absent
-    from this JSON schema (a live ``StructuredTool`` is not JSON-serializable), but
-    both in-process faces — :meth:`DeepAgent.run` and :meth:`DeepAgent.astream` —
-    accept them directly.
-
-    The schema advertises exactly the composable fields ``langchain_deep_agent``'s runtime
-    honors — ``subagents``, ``skills``, ``inline_skills``, ``interrupt_on``,
-    ``response_format`` alongside the ``tool_names`` / message / provider plumbing.
-    It carries no ``strategy`` field: the deepagents runtime has no composition
-    strategy to apply (its sub-agent path rejects a per-sub ``strategy`` outright),
-    so advertising one would be a schema lie. ``extra="forbid"`` rejects any
-    unknown key loudly at validation rather than letting a typo at the run door
-    vanish silently.
-
-    ``base_url``/``api_key`` in ``llm_kwargs`` legitimately route to a caller-chosen
-    model endpoint; expose any agent or tool carrying these kwargs only to trusted
-    callers — an injected parent agent could redirect the model call to a hostile
-    endpoint and leak the key/context.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    tool_names: list[str] = Field(default_factory=list, description="Client tool names to load.")
-    subagents: list[DeepSubAgentSpec] | None = Field(
-        default=None, description="Subagents the main agent can invoke via its task tool."
-    )
-    skills: list[str] | None = Field(default=None, description="Skill source paths under SKILLS_ROOT.")
-    inline_skills: list[InlineSkill] | None = Field(
-        default=None, description="Skills supplied inline (name + SKILL.md content)."
-    )
-    system_message: TemplatedText | None = None
-    user_message: TemplatedText | None = None
-    interrupt_on: dict[str, Any] | None = None
-    response_format: TemplatedText | dict[str, Any] | None = Field(
-        default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
-    )
-    user_content_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Content-block keys merged into the user message's text block (e.g. cache_control "
-            "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
-            "On a checkpointed thread the model call keeps only the newest mark (older marks are "
-            "stripped), so per-turn marking stays within the provider's breakpoint cap (Anthropic: 4)."
-        ),
-    )
-    llm_provider: str | None = None
-    checkpoint_provider: str | None = None
-    store_provider: str | None = None
-    llm_kwargs: dict[str, Any] | None = None
-    langgraph_config: dict[str, Any] | None = None
-
-    @field_validator("user_content_kwargs")
-    @classmethod
-    def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """An empty dict carries no content-block keys — normalize {} to None so it
-        reads as unset, matching the builders that treat {} as no mark."""
-        return value or None
-
-
-async def _to_internal(spec: NeutralSubAgentSpec | DeepSubAgentSpec) -> ResolvedSubAgentSpec:
-    """Resolve either subagent shape into the core spec.
-
-    A programmatic caller passes :class:`NeutralSubAgentSpec` (live tools), the JSON
-    door :class:`DeepSubAgentSpec` (tool names); both faces accept both.
-    """
-    if isinstance(spec, DeepSubAgentSpec):
-        return (await resolve_subagent_specs([spec]))[0]
-    return await _neutral_to_internal(spec)
-
-
-async def _neutral_to_internal(spec: NeutralSubAgentSpec) -> ResolvedSubAgentSpec:
-    """Map a neutral (live-tools) sub-agent spec to the internal deepagents spec.
-
-    Resolves the spec's ``tools`` / ``tool_names`` / ``presets`` into a flat
-    ``StructuredTool`` list. The internal spec has no ``strategy`` field, so a
-    neutral ``strategy`` is rejected rather than dropped silently.
-    """
-    if spec.strategy is not None:
-        raise ValueError(
-            f"sub-agent {spec.name!r} sets strategy={spec.strategy!r}, which the "
-            "deepagents sub-agent spec cannot carry; pass response_format as a "
-            "ToolStrategy on the parent instead."
-        )
-    if spec.system_prompt is None:
-        raise ValueError(
-            f"sub-agent {spec.name!r} has no system_prompt; the deepagents sub-agent spec "
-            "requires one, so a neutral spec that omits it is refused here rather than run "
-            "with empty instructions."
-        )
-    tools = await resolve_tools(tai42_app.tools, list(spec.tool_names), list(spec.tools), list(spec.presets))
-    subagents = [await _neutral_to_internal(child) for child in spec.subagents]
-    # Neutral inline_skills are plain dicts; coerce to InlineSkill for the factory.
-    resolved_response_format = await resolve_response_format(f"subagent {spec.name!r}", spec.response_format)
-    inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (spec.inline_skills or [])]
-    return ResolvedSubAgentSpec(
-        name=spec.name,
-        description=spec.description,
-        system_prompt=spec.system_prompt,
-        tools=tools,
-        skills=list(spec.skills) or None,
-        inline_skills=inline_skills or None,
-        response_format=resolved_response_format,
-        subagents=subagents,
-    )
-
+from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec, _to_internal, resolve_subagent_specs
 
 # A parking agent binds the hidden ``agent_resume`` continuation from its OWN registration:
 # the park package no longer binds it as a module-import side effect. Per-epoch idempotent, so
@@ -363,7 +239,7 @@ class DeepAgent(Agent):
                     config=config,
                     checkpoint_provider=checkpoint_provider,
                     has_live_tools=bool(tools),
-                    rebuild_kwargs=self._rebuild_kwargs(
+                    rebuild_kwargs=build_rebuild_kwargs(
                         tool_names=tool_names,
                         subagents=subagents,
                         skills=skills,
@@ -396,7 +272,7 @@ class DeepAgent(Agent):
                     )
                 # A park-suspend is still a LIVE run: skip the credential scrub so the bearer file
                 # stays for the door-less expiry resume (its own terminal exit scrubs it).
-                suspended = _is_suspended_receipt(result)
+                suspended = is_suspended_receipt(result)
                 return result
             finally:
                 if not suspended:
@@ -592,45 +468,29 @@ class DeepAgent(Agent):
                     assert rendered_user is not None
                     agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
 
-                # The streaming face returns its stream to a caller that cannot receive a late
-                # answer, so it binds a resume path — and lets an async ask park — ONLY when a
-                # completion tool is bound in context (the conversation turn binds one to deliver
-                # the resumed answer). The completion tool is stored on the park entry and fired
-                # with the final answer on a clean terminal drive. A run carrying live tools or
-                # neutral (live) subagents is not rebuildable, so it never parks; with no
-                # completion bound, an async ask refuses loudly pre-persist. The retention bound is
-                # min(checkpoint, workspace). The binding's opaque context is stored beside
-                # the tool name and merged into the completion fire, so the delivery tool receives
-                # the address it routes by.
-                completion_tool, completion_context = get_park_completion()
-                park: ParkIdentity | None = None
-                park_rebuildable = not tools and all(isinstance(s, DeepSubAgentSpec) for s in (subagents or []))
-                if completion_tool is not None and park_rebuildable:
-                    park = build_park_identity(
-                        agent_name=self.tool_name,
-                        config=config,
-                        checkpoint_provider=checkpoint_provider,
-                        has_live_tools=bool(tools),
-                        rebuild_kwargs=self._rebuild_kwargs(
-                            tool_names=tool_names,
-                            subagents=[s for s in (subagents or []) if isinstance(s, DeepSubAgentSpec)],
-                            skills=skills,
-                            inline_skills=coerced_inline_skills,
-                            rendered_system=rendered_system,
-                            interrupt_on=interrupt_on,
-                            response_format=response_format,
-                            llm_provider=llm_provider,
-                            store_provider=store_provider,
-                            llm_kwargs=llm_kwargs,
-                            langgraph_config=langgraph_config,
-                            workspace_key=drive.workspace_key,
-                        ),
-                        recursion_limit=recursion_limit,
-                        completion_tool=completion_tool,
-                        completion_context=completion_context,
-                        bind=True,
-                        extra_retention_horizon=drive.workspace_retention_horizon,
-                    )
+                # Assemble the park identity for this streaming turn: it parks only when a
+                # completion tool is bound AND the turn is rebuildable (no live tools, JSON
+                # subagents only). See :func:`build_astream_park`.
+                park: ParkIdentity | None = build_astream_park(
+                    agent_name=self.tool_name,
+                    config=config,
+                    tools=tools,
+                    subagents=subagents,
+                    tool_names=tool_names,
+                    skills=skills,
+                    inline_skills=coerced_inline_skills,
+                    rendered_system=rendered_system,
+                    interrupt_on=interrupt_on,
+                    response_format=response_format,
+                    llm_provider=llm_provider,
+                    store_provider=store_provider,
+                    llm_kwargs=llm_kwargs,
+                    langgraph_config=langgraph_config,
+                    checkpoint_provider=checkpoint_provider,
+                    recursion_limit=recursion_limit,
+                    workspace_key=drive.workspace_key,
+                    workspace_retention_horizon=drive.workspace_retention_horizon,
+                )
 
                 # Bind the resume continuation and the chained-park claims ledger around each
                 # drive step, NOT in this generator's body: a ``with`` wrapping the ``yield``
@@ -798,50 +658,6 @@ class DeepAgent(Agent):
         config = self._run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
         return agent, config
 
-    @staticmethod
-    def _rebuild_kwargs(
-        *,
-        tool_names: Sequence[str],
-        subagents: list[DeepSubAgentSpec] | None,
-        skills: list[str] | None,
-        inline_skills: list[InlineSkill],
-        rendered_system: str,
-        interrupt_on: dict[str, Any] | None,
-        response_format: Any,
-        llm_provider: str | None,
-        store_provider: str | None,
-        llm_kwargs: dict[str, Any] | None,
-        langgraph_config: dict[str, Any] | None,
-        workspace_key: str,
-    ) -> dict[str, Any]:
-        """The JSON-serializable subset of a run's inputs that determines graph
-        compilation — the identity a cross-worker resume recompiles the same graph from.
-
-        Every DeepAgentInput value is a ``DeepAgentInput`` field name (subagents/inline_skills
-        dumped to JSON, the system message the already-RENDERED text carried as a
-        ``TemplatedText`` inline ``content`` so resume never re-renders differently), so
-        :meth:`aresume_park` reconstructs the run inputs with ``ToolInput.model_validate``. The checkpoint
-        provider and ``recursion_limit`` are pinned separately by
-        :func:`~tai42_agents._internal.park.build_park_identity`, so they are deliberately absent here.
-
-        ``workspace_key`` is the engine extra a cross-worker resume needs to REATTACH THE SAME
-        durable volume; like ``recursion_limit`` it is NOT a ``DeepAgentInput`` field, so
-        :meth:`aresume_park` pops it out before the JSON inputs validate."""
-        return {
-            "tool_names": list(tool_names),
-            "subagents": [spec.model_dump(mode="json") for spec in (subagents or [])],
-            "skills": list(skills) if skills else None,
-            "inline_skills": [skill.model_dump(mode="json") for skill in inline_skills],
-            "system_message": {"content": rendered_system},
-            "interrupt_on": interrupt_on,
-            "response_format": response_format,
-            "llm_provider": llm_provider,
-            "store_provider": store_provider,
-            "llm_kwargs": llm_kwargs,
-            "langgraph_config": langgraph_config,
-            "workspace_key": workspace_key,
-        }
-
     async def aresume_park(
         self,
         *,
@@ -909,7 +725,7 @@ class DeepAgent(Agent):
                 config = self._run_config(validated.langgraph_config, thread_id, None, recursion_limit)
 
                 snapshot = await agent.aget_state(config, subgraphs=True)
-                pending_ids = {iid for iid, _ in _collect_pending_interrupts(snapshot)}
+                pending_ids = {iid for iid, _ in collect_pending_interrupts(snapshot)}
                 missing = [interrupt_id for interrupt_id in resume_map if interrupt_id not in pending_ids]
                 if missing:
                     if pending_ids:
@@ -955,7 +771,7 @@ class DeepAgent(Agent):
                         ),
                         response_format=response_format,
                     )
-                suspended = _is_suspended_receipt(result)
+                suspended = is_suspended_receipt(result)
                 return result
             finally:
                 if not suspended:

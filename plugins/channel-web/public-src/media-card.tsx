@@ -33,7 +33,7 @@ import type {
   MediaItem,
   OptionSection,
   ReplyOption,
-} from '@/use-chat-stream';
+} from '@/transcript-model';
 
 /** The transcript item this card renders. */
 export type MediaCardItem = Extract<ChatItem, { kind: 'media' }>;

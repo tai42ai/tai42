@@ -98,32 +98,36 @@ class LlmStub:
             raise _Unscripted()
         return self._queue.popleft()
 
+    async def _serve_completion(self, body: dict[str, Any]) -> Any:
+        """Serve one scripted chat-completion turn (streaming or whole), tracking
+        in-flight concurrency and refusing loudly when the script queue is empty."""
+        self._in_flight_completions += 1
+        self._max_in_flight_completions = max(self._max_in_flight_completions, self._in_flight_completions)
+        try:
+            self._requests.append(body)
+            try:
+                turn = self._next_turn()
+            except _Unscripted:
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": {"message": "llmstub: no scripted turn for this call"}},
+                )
+            if self._response_delay_seconds > 0:
+                # Server-side response latency, not a client poll — holds the completion
+                # open so concurrent turns overlap.
+                await asyncio.sleep(self._response_delay_seconds)  # noqa: TID251
+            if body.get("stream"):
+                return StreamingResponse(_stream(turn, body), media_type="text/event-stream")
+            return JSONResponse(content=_completion(turn, body))
+        finally:
+            self._in_flight_completions -= 1
+
     def _build_app(self) -> FastAPI:
         app = FastAPI()
 
         @app.post("/v1/chat/completions")
         async def chat_completions(request: Request) -> Any:
-            body = await request.json()
-            self._in_flight_completions += 1
-            self._max_in_flight_completions = max(self._max_in_flight_completions, self._in_flight_completions)
-            try:
-                self._requests.append(body)
-                try:
-                    turn = self._next_turn()
-                except _Unscripted:
-                    return JSONResponse(
-                        status_code=500,
-                        content={"error": {"message": "llmstub: no scripted turn for this call"}},
-                    )
-                if self._response_delay_seconds > 0:
-                    # Server-side response latency, not a client poll — holds the completion
-                    # open so concurrent turns overlap.
-                    await asyncio.sleep(self._response_delay_seconds)  # noqa: TID251
-                if body.get("stream"):
-                    return StreamingResponse(_stream(turn, body), media_type="text/event-stream")
-                return JSONResponse(content=_completion(turn, body))
-            finally:
-                self._in_flight_completions -= 1
+            return await self._serve_completion(await request.json())
 
         @app.post("/v1/embeddings")
         async def embeddings(request: Request) -> Any:
@@ -160,11 +164,15 @@ class LlmStub:
                 }
             )
 
-        # Out-of-process control plane: a standalone runner (the browser-e2e
-        # studio stack) boots this stub, and a Playwright spec in a separate Node
-        # process scripts it and reads its request log over these routes rather
-        # than through the in-process `script`/`requests` API the pytest suite
-        # uses.
+        self._install_control_routes(app)
+        return app
+
+    def _install_control_routes(self, app: FastAPI) -> None:
+        """The out-of-process control plane: a standalone runner (the browser-e2e
+        studio stack) boots this stub, and a Playwright spec in a separate Node
+        process scripts it and reads its request log over these routes rather than
+        through the in-process ``script``/``requests`` API the pytest suite uses."""
+
         @app.post("/_script")
         async def script_turns(request: Request) -> Any:
             body = await request.json()
@@ -182,8 +190,6 @@ class LlmStub:
         @app.get("/_requests")
         async def recorded_requests() -> Any:
             return JSONResponse(content={"count": len(self._requests), "requests": self.requests})
-
-        return app
 
 
 class _Unscripted(Exception):

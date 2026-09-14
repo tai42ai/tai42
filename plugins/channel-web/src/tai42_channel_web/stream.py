@@ -35,8 +35,8 @@ from contextlib import contextmanager
 
 from starlette.requests import Request
 
-from tai42_channel_web import store
 from tai42_channel_web.settings import WebSettings
+from tai42_channel_web.store import connection, transcript
 
 
 class StreamLimitError(RuntimeError):
@@ -120,9 +120,9 @@ async def stream_transcript(request: Request, identity: str, address: str, setti
     only checked that one was available (``check_stream_admission``)."""
     with _stream_slot(address):
         batch = settings.backlog_batch_entries
-        async with store.pooled_redis_ctx() as redis:
-            cursor = await store.capture_cursor(redis, identity, address)
-            start, frames = await store.read_backlog_batch(redis, identity, address, "-", cursor, batch)
+        async with connection.pooled_redis_ctx() as redis:
+            cursor = await transcript.capture_cursor(redis, identity, address)
+            start, frames = await transcript.read_backlog_batch(redis, identity, address, "-", cursor, batch)
         while True:
             for entry in frames:
                 yield entry
@@ -132,21 +132,21 @@ async def stream_transcript(request: Request, identity: str, address: str, setti
             # the page is yielded: no yield may ever sit inside that ``async with``.
             # The captured cursor bounds every page, so an entry written during a
             # slow replay is left for the tail rather than emitted by both.
-            async with store.pooled_redis_ctx() as redis:
-                start, frames = await store.read_backlog_batch(redis, identity, address, start, cursor, batch)
-        yield store.frame("chat.backlog_done", {})
+            async with connection.pooled_redis_ctx() as redis:
+                start, frames = await transcript.read_backlog_batch(redis, identity, address, start, cursor, batch)
+        yield transcript.frame("chat.backlog_done", {})
 
         # The tail blocks per iteration; a fresh dedicated connection keeps it off
         # the shared pool. The outer wait_for bounds a black-holed Redis.
         next_keepalive = _now() + settings.keepalive_seconds
-        async with store.tail_redis_ctx() as tail_conn:
+        async with connection.tail_redis_ctx() as tail_conn:
             while True:
                 if await request.is_disconnected():
                     break
                 block_seconds = max(0.0, next_keepalive - _now())
                 try:
                     cursor, frames = await asyncio.wait_for(
-                        store.read_tail(tail_conn, identity, address, cursor, max(1, int(block_seconds * 1000))),
+                        transcript.read_tail(tail_conn, identity, address, cursor, max(1, int(block_seconds * 1000))),
                         timeout=block_seconds + settings.blocking_grace_seconds,
                     )
                 except TimeoutError as exc:

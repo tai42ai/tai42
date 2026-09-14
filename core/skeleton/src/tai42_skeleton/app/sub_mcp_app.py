@@ -475,51 +475,52 @@ class SubMcpAppRouter:
         await app_lifespan.start()
         return sub_app, app_lifespan
 
-    async def _get_or_build_app(self, slug: str):
-        # Fast path under the loop-agnostic state lock — no await, no cross-loop
-        # hazard. A present cache KEY means "built" even when its value is None
-        # (stdio has no ASGI surface), so membership distinguishes cached-None
-        # from not-yet-built without a sentinel.
+    def _cached_or_known(self, slug: str) -> tuple[bool, Any, bool]:
+        """Fast-path read under the loop-agnostic state lock — no await, no cross-loop
+        hazard. A present cache KEY means "built" even when its value is ``None`` (stdio
+        has no ASGI surface), so membership distinguishes cached-None from not-yet-built
+        without a sentinel. Returns ``(cache_hit, cached_value, known)``."""
         with self._state_lock:
             if slug in self._server_cache:
-                return self._server_cache[slug]
-            known = slug in self._routes
+                return True, self._server_cache[slug], True
+            return False, None, slug in self._routes
 
-        if not known:
-            # Cross-worker read path: this worker never registered the slug,
-            # but a sibling may have persisted it durably. Consult the store — we are
-            # on the owner loop, so awaiting is fine. This costs one Redis ``HGET``
-            # per unknown-slug request (same class as serving the 404) and NOTHING on
-            # the known-slug fast path above, which never reaches here. ``None`` → the
-            # 404 below; found → bind it into this worker's router and fall through to
-            # the build path (register directly, NOT through the write service — the
-            # store is already the source of this config, so re-writing it is wrong).
-            # Residual: a slug DELETED on a sibling stays served by workers that
-            # already built it until their next reload (stale-positive); the
-            # store-backed ``GET`` list is already correct. ``reset()`` clears this
-            # cache — this fallback + rehydrate repopulate it.
-            config = await get_sub_mcp_store().get_route(slug)
-            if config is None:
-                return None
-            await self.register_sub_mcp_app(slug, config.tools, config.transport)
+    async def _rehydrate_from_store(self, slug: str) -> bool:
+        """Cross-worker read path: this worker never registered the slug, but a sibling
+        may have persisted it durably. Consult the store — we are on the owner loop, so
+        awaiting is fine. This costs one Redis ``HGET`` per unknown-slug request (same
+        class as serving the 404) and NOTHING on the known-slug fast path, which never
+        reaches here. Register a found config directly, NOT through the write service —
+        the store is already the source of this config, so re-writing it is wrong.
 
-        # Build path: serialize concurrent builds of the same slug on the owner
-        # loop. _build_lock is only ever taken here (single loop), so it stays a
-        # safe asyncio.Lock; route/cache mutation stays under _state_lock.
-        #
-        # Retry loop: capture the slug's generation token with its
-        # config, build against that captured config, then cache the result ONLY if
-        # the token still matches. A concurrent REPLACE bumps the token, so a build
-        # that ran against a superseded config is discarded (its stack closed) and
-        # retried against the newest registration. A slug stays registered across a
-        # REPLACE (only its config changes), so matching on mere slug-membership would
-        # wrongly accept a stale build — the token match is what distinguishes a
-        # superseded config. The loop is UNBOUNDED by design:
-        # each retry serves the newest registration, so a client hammering REPLACE on
-        # a slug delays first-time builds — its own and any other not-yet-cached slug,
-        # since ``_build_lock`` serializes builds router-wide. Cached slugs and the
-        # register/unregister/dispatch/reset paths never take this lock, so they are
-        # unaffected; the delay is self-limited to the REPLACE rate.
+        Residual: a slug DELETED on a sibling stays served by workers that already built
+        it until their next reload (stale-positive); the store-backed ``GET`` list is
+        already correct. ``reset()`` clears the cache — this rehydrate repopulates it.
+        Returns whether the slug now exists in this worker's router."""
+        config = await get_sub_mcp_store().get_route(slug)
+        if config is None:
+            return False
+        await self.register_sub_mcp_app(slug, config.tools, config.transport)
+        return True
+
+    async def _build_with_generation(self, slug: str):
+        """Build the slug's sub-app against the newest live registration, serializing
+        concurrent builds of the same slug on the owner loop. ``_build_lock`` is only
+        ever taken here (single loop), so it stays a safe ``asyncio.Lock``; route/cache
+        mutation stays under ``_state_lock``.
+
+        Retry loop: capture the slug's generation token with its config, build against
+        that captured config, then cache the result ONLY if the token still matches. A
+        concurrent REPLACE bumps the token, so a build that ran against a superseded
+        config is discarded (its stack closed) and retried against the newest
+        registration. A slug stays registered across a REPLACE (only its config
+        changes), so matching on mere slug-membership would wrongly accept a stale build
+        — the token match is what distinguishes a superseded config. The loop is
+        UNBOUNDED by design: each retry serves the newest registration, so a client
+        hammering REPLACE on a slug delays first-time builds — its own and any other
+        not-yet-cached slug, since ``_build_lock`` serializes builds router-wide. Cached
+        slugs and the register/unregister/dispatch/reset paths never take this lock, so
+        they are unaffected; the delay is self-limited to the REPLACE rate."""
         async with self._build_lock:
             while True:
                 with self._state_lock:
@@ -550,6 +551,14 @@ class SubMcpAppRouter:
                     await self._aclose_on_owner(slug, stack)
                 if vanished:
                     return None
+
+    async def _get_or_build_app(self, slug: str):
+        cache_hit, cached, known = self._cached_or_known(slug)
+        if cache_hit:
+            return cached
+        if not known and not await self._rehydrate_from_store(slug):
+            return None
+        return await self._build_with_generation(slug)
 
     @asynccontextmanager
     async def lifespan(self, app: Starlette) -> AsyncIterator[None]:

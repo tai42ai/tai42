@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import httpx
 
+from tai42_e2e import StackResources
+from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.manifests import build_auth_stack, build_bare_stack, build_channel_stack
-from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import StackResources
 from tai42_e2e.variants import resolve_variants
 
 

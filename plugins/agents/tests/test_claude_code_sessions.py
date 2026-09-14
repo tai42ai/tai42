@@ -46,11 +46,13 @@ from tests._sandbox_fake import FakeSandboxSession
 import tai42_agents._internal.park.index as idx
 import tai42_agents._internal.park.lease as lease_mod
 import tai42_agents.claude_code.agent as agent_module
+import tai42_agents.claude_code.workspace as workspace_module
 from tai42_agents._internal.park import agent_resume, workspace_lease
 from tai42_agents._internal.park.errors import WorkspaceLeaseHeldError
 from tai42_agents._internal.park.index import compute_superstep_id
 from tai42_agents._internal.sandbox_util import workspace_key_for
-from tai42_agents.claude_code.agent import ClaudeCodeAgent, ClaudeCodeError
+from tai42_agents.claude_code.agent import ClaudeCodeAgent
+from tai42_agents.claude_code.errors import ClaudeCodeError
 from tai42_agents.claude_code.protocol import ProtocolError
 from tai42_agents.claude_code.settings import ClaudeCodeSettings, ConnectionCred
 
@@ -124,7 +126,7 @@ def _bearer_cred() -> ConnectionCred:
 @pytest.mark.usefixtures("fake_redis")
 def test_threaded_turn_captures_and_persists_the_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     events = _run(build_local_app(), user_message=TemplatedText(content="hi"), thread_id="t1")
     assert any(isinstance(e, MessageFinal) for e in events)
     session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
@@ -135,7 +137,7 @@ def test_threaded_turn_captures_and_persists_the_session_id(monkeypatch: pytest.
 @pytest.mark.usefixtures("fake_redis")
 def test_second_threaded_turn_reuses_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     app = build_local_app()
     key = workspace_key_for("claude_code", "t1")
 
@@ -155,7 +157,7 @@ def test_second_threaded_turn_reuses_and_resumes(monkeypatch: pytest.MonkeyPatch
 @pytest.mark.usefixtures("fake_redis")
 def test_bearer_file_refreshes_across_turns(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, creds=[_bearer_cred()])
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(CRED_ECHO))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(CRED_ECHO))
     tokens = iter(["tok1", "tok2"])
 
     def resolver(*_a: str) -> ResolvedConnectionAuth:
@@ -182,7 +184,7 @@ def test_bearer_file_refreshes_across_turns(monkeypatch: pytest.MonkeyPatch) -> 
 @pytest.mark.usefixtures("fake_redis")
 def test_terminal_exit_scrubs_the_bearer_file(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, creds=[_bearer_cred()])
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     app = build_local_app(resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("tok1")))
     token = set_request_user_id("user-1")
     try:
@@ -197,7 +199,7 @@ def test_terminal_exit_scrubs_the_bearer_file(monkeypatch: pytest.MonkeyPatch) -
 @pytest.mark.usefixtures("fake_redis")
 def test_required_connection_cred_resolving_to_nothing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, creds=[_bearer_cred()])
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     app = build_local_app(resolver=lambda *_a: None)
     token = set_request_user_id("user-1")
     try:
@@ -210,7 +212,7 @@ def test_required_connection_cred_resolving_to_nothing_raises(monkeypatch: pytes
 @pytest.mark.usefixtures("fake_redis")
 def test_held_lease_busy_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     app = build_local_app()
 
     async def _drive_while_held() -> None:
@@ -230,7 +232,7 @@ def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatc
     # _on_tool_call recognizes it by TYPE and drives the SAME park tail the agent's own ask
     # takes — persist the durable index, stop the runner, surface one SuspendedFinal.
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL_PARK))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(TOOL_CALL_PARK))
     deadline = datetime.now(UTC) + timedelta(minutes=5)
 
     def parking_tool(**_kwargs: Any) -> SuspendedInteraction:
@@ -271,7 +273,7 @@ def test_proxied_tool_dispatch_is_delivery_scoped(monkeypatch: pytest.MonkeyPatc
     # a proxied tool must not read the completion binding addressing that answer off the
     # contextvar (``_internal.nested_dispatch``). The binding is restored around the dispatch.
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(TOOL_CALL))
     bound = ("conversation_deliver", {"thread_id": "bridge:acme:alice"})
     seen: list[tuple[str | None, Any]] = []
 
@@ -304,7 +306,7 @@ def test_proxied_tool_park_this_session_does_not_own_is_refused_to_the_model(
     # door the thread-less refusal takes) and the turn runs on to its own terminal, with
     # nothing of this session's parked.
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(TOOL_CALL))
 
     def nested_driver_tool(**_kwargs: Any) -> SuspendedInteraction:
         return SuspendedInteraction(interaction_id="i-nested", resume_owner="nested_driver_resume")
@@ -337,7 +339,7 @@ def test_proxied_tool_park_this_session_does_not_own_is_refused_to_the_model(
 @pytest.mark.usefixtures("fake_redis")
 def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, creds=[_bearer_cred()])
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ASYNC_ASK))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
 
     async def ask_user(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
         # Stamp the resume owner the real platform ask does — the continuation bound by the
@@ -373,7 +375,7 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
     # to a clean terminal. Without the drive's continuation binding the ask would refuse loudly
     # ("async ask requires a resuming driver") and no park would ever be produced.
     _settings(monkeypatch, creds=[_bearer_cred()])
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ASYNC_ASK))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
     deadline = datetime.now(UTC) + timedelta(hours=1)
 
     async def real_ask_user(_question: str, *, expiry_at: datetime | None = None, mode: str = "sync", **_: Any) -> Any:
@@ -403,7 +405,7 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
             # The REAL async ask actually parked: the interaction is durable and resumable.
             assert await idx.read_park_entry("int-e2e") is not None
             # Resume drives a fresh session to a clean terminal (swap in the resume stub).
-            monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(RESUME_ONCE))
+            monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_ONCE))
             result = await agent_resume("int-e2e", "yes ship it")
             entry = await idx.read_park_entry("int-e2e")
             return events, result, entry
@@ -428,7 +430,7 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
 @pytest.mark.usefixtures("fake_redis")
 def test_park_persists_a_resumable_index_entry(monkeypatch: pytest.MonkeyPatch, fake_redis: Any) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ASYNC_ASK))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
 
     async def ask_user(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
         deadline = expiry_at or datetime.now(UTC) + timedelta(hours=1)
@@ -465,10 +467,10 @@ def test_resume_terminal_record_dedups_a_redelivery(monkeypatch: pytest.MonkeyPa
     async def _drive_twice() -> tuple[Any, Any]:
         agent = ClaudeCodeAgent()
         with tai42_app.bound(app):
-            monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(RESUME_ONCE))
+            monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_ONCE))
             first = await agent.aresume_park(rebuild_kwargs=rebuild, thread_id="tr", resume_map=resume_map)
             # Redelivery: a stub that WOULD terminate with a different value if the SDK re-drove.
-            monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(RESUME_REDRIVE))
+            monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_REDRIVE))
             second = await agent.aresume_park(rebuild_kwargs=rebuild, thread_id="tr", resume_map=resume_map)
         return first, second
 
@@ -492,7 +494,7 @@ def test_transcript_content_is_redacted_when_scrub_on(monkeypatch: pytest.Monkey
     transcript so every injected-credential VALUE (here the model credential) is replaced by the
     fixed marker — the transcript FILE survives (resume needs it), only its secret strings go."""
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(REDACT_TRANSCRIPT))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(REDACT_TRANSCRIPT))
     app = build_local_app(policy=_scrub_on_policy())
     _run(app, user_message=TemplatedText(content="hi"), thread_id="tscrub")
 
@@ -507,7 +509,7 @@ def test_transcript_redaction_failure_raises_loudly(monkeypatch: pytest.MonkeyPa
     """A transcript-redaction pass that cannot rewrite the transcript raises LOUDLY (never a
     silent leave-behind of secret material) — the same loudness as the credential-file scrub."""
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(REDACT_TRANSCRIPT))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(REDACT_TRANSCRIPT))
     app = build_local_app(policy=_scrub_on_policy())
 
     original_exec = FakeSandboxSession.exec
@@ -535,10 +537,10 @@ def test_resume_session_id_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> N
     app = build_local_app()
 
     async def _two_turns() -> None:
-        monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+        monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
         await _astream(app, user_message=TemplatedText(content="turn1"), thread_id="t1")  # persists sess-1
         # Turn 2 reports sess-2 in its hello — mismatched against the resumed sess-1.
-        monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE_SESSION_OTHER))
+        monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE_SESSION_OTHER))
         await _astream(app, user_message=TemplatedText(content="turn2"), thread_id="t1")
 
     with pytest.raises(ProtocolError, match="resumed id"):
@@ -552,7 +554,7 @@ def test_malformed_persisted_session_id_raises(monkeypatch: pytest.MonkeyPatch, 
     empty id, or a missing key) is a loud protocol error rather than a silent fresh session
     (agent.py ~716-719)."""
     _settings(monkeypatch)
-    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(MESSAGE))
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     app = build_local_app()
     key = workspace_key_for("claude_code", "t1")
 
@@ -593,13 +595,13 @@ def test_forged_terminal_record_is_ignored_and_redrives(monkeypatch: pytest.Monk
     async def _drive() -> tuple[Any, Any]:
         agent = ClaudeCodeAgent()
         with tai42_app.bound(app):
-            monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(RESUME_ONCE))
+            monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_ONCE))
             first = await agent.aresume_park(rebuild_kwargs=rebuild, thread_id="tf", resume_map=resume_map)
             # Overwrite the legit record with a forged one; the redelivery must reject it.
             session = agent_module._LIVE_SESSIONS[key]
             body = forge % superstep_id.encode("utf-8") if b"%s" in forge else forge
             await session.put_file(f".runner/terminal/{superstep_id}.json", body)
-            monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(RESUME_REDRIVE))
+            monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_REDRIVE))
             second = await agent.aresume_park(rebuild_kwargs=rebuild, thread_id="tf", resume_map=resume_map)
         return first, second
 

@@ -77,16 +77,12 @@ def _general_purpose_subagent(skills: list[str] | None = None) -> SubAgent:
     return sub
 
 
-def _validate(
-    tools: list[StructuredTool],
-    subagents: list[ResolvedSubAgentSpec],
-    skills: list[str] | None,
-) -> None:
-    """Reject ambiguous configs before they reach deepagents.
+def _validate_subagent_names(subagents: list[ResolvedSubAgentSpec]) -> None:
+    """Reject duplicate subagent names, over-deep nesting, and subagent names that
+    collide with deepagents built-in tool names.
 
-    The harness dispatches tools and subagents by name and loads skills by path;
-    duplicate names or off-root skill paths would fail silently inside the harness
-    (ambiguous routing, or a skill loading nothing).
+    The harness routes to subagents by name, so a duplicate or a built-in collision
+    would be ambiguous. Nesting is supported one level deep only.
     """
     sub_names = [spec.name for spec in subagents]
     dup_subs = sorted({name for name in sub_names if sub_names.count(name) > 1})
@@ -123,6 +119,13 @@ def _validate(
             f"langchain_deep_agent subagent names collide with built-in tool names: {sub_builtin}. Rename them."
         )
 
+
+def _validate_tool_names(tools: list[StructuredTool]) -> None:
+    """Reject duplicate tool names and tools that clobber a deepagents built-in.
+
+    Tools dispatch by name, so a duplicate or a built-in collision would route
+    ambiguously.
+    """
     tool_names = [tool.name for tool in tools]
     dup_tools = sorted({name for name in tool_names if tool_names.count(name) > 1})
     if dup_tools:
@@ -134,8 +137,14 @@ def _validate(
             f"langchain_deep_agent tools collide with deepagents built-in tools: {clobbered}. Rename them."
         )
 
-    # Only the reference ``skills`` list is path-checked (source paths rooted under
-    # SKILLS_ROOT). Inline skills are names, validated separately.
+
+def _validate_skill_paths(subagents: list[ResolvedSubAgentSpec], skills: list[str] | None) -> None:
+    """Reject reference skill paths not rooted under :data:`SKILLS_ROOT`.
+
+    Only the reference ``skills`` list (main agent + every subagent + nested) is
+    path-checked; an off-root path routes to the scratch backend and loads no
+    skills. Inline skills are names, validated separately.
+    """
     all_skills = list(skills or [])
     for spec in subagents:
         all_skills.extend(spec.skills or [])
@@ -147,6 +156,22 @@ def _validate(
             f"langchain_deep_agent skill paths must start with {SKILLS_ROOT!r}: {off_root}. "
             f"Off-root paths route to the scratch backend and load no skills."
         )
+
+
+def _validate(
+    tools: list[StructuredTool],
+    subagents: list[ResolvedSubAgentSpec],
+    skills: list[str] | None,
+) -> None:
+    """Reject ambiguous configs before they reach deepagents.
+
+    The harness dispatches tools and subagents by name and loads skills by path;
+    duplicate names or off-root skill paths would fail silently inside the harness
+    (ambiguous routing, or a skill loading nothing).
+    """
+    _validate_subagent_names(subagents)
+    _validate_tool_names(tools)
+    _validate_skill_paths(subagents, skills)
 
 
 def _inline_skill_source(name: str) -> str:

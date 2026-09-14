@@ -59,7 +59,7 @@ from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
 from tai42_agents._internal.nested_dispatch import nested_tool_dispatch, scope_nested_dispatch
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, CHAINED_PARK_DELIVERY_TOOL_NAME, agent_resume
-from tai42_agents._internal.park import driver as drv
+from tai42_agents._internal.park import capability as cap
 from tai42_agents._internal.park import index as idx
 from tai42_agents.langchain_deep_agent import agent as deep_mod
 
@@ -127,7 +127,7 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     settings = SimpleNamespace(redis_url="redis://fake")
     monkeypatch.setattr(idx, "_park_client", fake_park_client)
     monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(drv, "agents_park_redis_settings", lambda: settings)
+    monkeypatch.setattr(cap, "agents_park_redis_settings", lambda: settings)
     return redis
 
 
@@ -141,7 +141,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemory
     monkeypatch.setattr(base_mod, "llm_settings", _LlmSettings)
     monkeypatch.setattr(base_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
     monkeypatch.setattr(tools_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
-    monkeypatch.setattr(drv, "llm_provider_settings", _ProviderSettings)
+    monkeypatch.setattr(cap, "llm_provider_settings", _ProviderSettings)
 
 
 def _agent() -> tools_mod.ToolsAgent:
@@ -265,7 +265,7 @@ def test_nested_tool_sees_no_binding_on_the_deep_agent_resume_drive(
     monkeypatch.setattr(deep_mod, "llm_provider_settings", _ProviderSettings)
     monkeypatch.setattr(deep_mod, "llm_settings", _LlmSettings)
     monkeypatch.setattr(deep_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
-    monkeypatch.setattr(drv, "llm_provider_settings", _ProviderSettings)
+    monkeypatch.setattr(cap, "llm_provider_settings", _ProviderSettings)
 
     app_tools.client_tools["peek"] = nested.tool()
     app_tools.client_tools["ask"] = _ParkingAsk("i1", expiry_at=datetime.now(UTC) + timedelta(hours=1)).tool()

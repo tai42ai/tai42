@@ -20,8 +20,8 @@ from collections.abc import Callable
 
 import pytest
 
+from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.manifests import build_channel_stack
-from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.stack import TaiStack
 
 from ._support import CASE_CLASSES, ChannelCase, is_pending, tool_content_text

@@ -65,6 +65,72 @@ class State(MessagesState):
     selected_tool_ids: Annotated[list[str], _merged_selected_tools]
 
 
+def _route_tool_calls(
+    tool_calls: list[dict],
+    *,
+    retrieve_tool_name: str,
+    select_node: str,
+    execute_node: str,
+) -> list[Send]:
+    """Route a model turn's pending tool calls to the select/execute nodes.
+
+    ``retrieve_tools`` calls go to the select node, every other call to the execute
+    node; a turn mixing both fans out to both.
+    """
+    retrieve_calls = [c for c in tool_calls if c["name"] == retrieve_tool_name]
+    other_calls = [c for c in tool_calls if c["name"] != retrieve_tool_name]
+    destinations: list[Send] = []
+    if retrieve_calls:
+        destinations.append(Send(select_node, retrieve_calls))
+    if other_calls:
+        destinations.append(Send(execute_node, other_calls))
+    return destinations
+
+
+def _terminal_message_text(last: Any) -> str:
+    """Flatten a terminal message's content to its stripped text.
+
+    A content list is joined from its ``text`` parts; a non-string content yields "".
+    """
+    content = getattr(last, "content", "")
+    if isinstance(content, list):
+        texts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    texts.append(part.get("text", ""))
+            elif isinstance(part, str):
+                texts.append(part)
+        content = "".join(texts)
+    return content.strip() if isinstance(content, str) else ""
+
+
+def _terminal_status(content: str) -> str:
+    """Parse a terminal status JSON string and return its ``status`` value.
+
+    Empty text, non-JSON, a non-object payload, or a status outside
+    continue/success/error each raises — the agent never produced its required
+    contract output, so the run fails loudly rather than ending silently.
+    """
+    if not content:
+        raise ValueError(
+            "retrieval agent produced a terminal message with no text content; "
+            "the required status JSON was never emitted"
+        )
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"retrieval agent terminal message is not valid status JSON: {content!r}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"retrieval agent terminal payload is not a JSON object: {content!r}")
+    status = parsed.get("status")
+    if status not in ("continue", "success", "error"):
+        raise ValueError(
+            f"retrieval agent terminal status must be one of continue/success/error, got {status!r} in {content!r}"
+        )
+    return status
+
+
 class RetrievalToolsGraph:
     """Builds the retrieval-tools ``StateGraph``.
 
@@ -290,53 +356,21 @@ class RetrievalToolsGraph:
             # 1) any pending tool_calls are dispatched to the matching node first.
             tool_calls = getattr(last, "tool_calls", None) or []
             if tool_calls:
-                retrieve_calls = [c for c in tool_calls if c["name"] == self.retrieve_tools_tool_name]
-                other_calls = [c for c in tool_calls if c["name"] != self.retrieve_tools_tool_name]
-                destinations: list[Send] = []
-                if retrieve_calls:
-                    destinations.append(Send(self.select_tools_node_name, retrieve_calls))
-                if other_calls:
-                    destinations.append(Send(self.execute_tools_node_name, other_calls))
-                return destinations
+                return _route_tool_calls(
+                    tool_calls,
+                    retrieve_tool_name=self.retrieve_tools_tool_name,
+                    select_node=self.select_tools_node_name,
+                    execute_node=self.execute_tools_node_name,
+                )
 
             # 2) no tool calls left: the message MUST be the terminal status JSON.
-            # A missing or malformed terminal payload means the agent never
-            # produced its required contract output — a real failure, so it
-            # raises rather than silently ending the run.
-            content = getattr(last, "content", "")
-            if isinstance(content, list):
-                texts: list[str] = []
-                for part in content:
-                    if isinstance(part, dict):
-                        if part.get("type") == "text":
-                            texts.append(part.get("text", ""))
-                    elif isinstance(part, str):
-                        texts.append(part)
-                content = "".join(texts)
-            content = content.strip() if isinstance(content, str) else ""
-
-            if not content:
-                raise ValueError(
-                    "retrieval agent produced a terminal message with no text content; "
-                    "the required status JSON was never emitted"
-                )
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"retrieval agent terminal message is not valid status JSON: {content!r}") from exc
-            if not isinstance(parsed, dict):
-                raise ValueError(f"retrieval agent terminal payload is not a JSON object: {content!r}")
-
-            status = parsed.get("status")
-            if status in ("success", "error"):
-                return END
+            status = _terminal_status(_terminal_message_text(last))
             if status == "continue":
                 # No tool_calls left; loop back through the context node so the
                 # history is reduced before the next agent turn.
                 return self.context_node_name
-            raise ValueError(
-                f"retrieval agent terminal status must be one of continue/success/error, got {status!r} in {content!r}"
-            )
+            # continue/success/error are the only statuses _terminal_status returns.
+            return END
 
         self._should_continue_node = node
         return self._should_continue_node

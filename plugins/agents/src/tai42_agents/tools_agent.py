@@ -58,12 +58,12 @@ from tai42_agents._internal.config_util import build_run_config, init_langgraph_
 from tai42_agents._internal.park import (
     ParkIdentity,
     build_park_identity,
+    collect_pending_interrupts,
     finalize_drive,
     park_drive,
     register_agent_resume_tool,
     register_chained_park_tool,
 )
-from tai42_agents._internal.park.driver import _collect_pending_interrupts
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
@@ -683,7 +683,7 @@ class ToolsAgent(Agent):
         config = init_langgraph_config(build_run_config(validated.langgraph_config, thread_id, None, recursion_limit))
         await _repair_dangling_tool_calls(agent, config)
         snapshot = await agent.aget_state(config, subgraphs=True)
-        pending_ids = {iid for iid, _ in _collect_pending_interrupts(snapshot)}
+        pending_ids = {iid for iid, _ in collect_pending_interrupts(snapshot)}
         missing = [interrupt_id for interrupt_id in resume_map if interrupt_id not in pending_ids]
         if missing:
             if pending_ids:

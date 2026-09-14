@@ -12,7 +12,8 @@ from collections.abc import Callable
 
 import pytest
 
-from tai42_e2e.marketplace import ALPHA_PACKAGE, ALPHA_REF, MarketplaceService
+from tai42_e2e.fixture_catalog import ALPHA_PACKAGE, ALPHA_REF
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 

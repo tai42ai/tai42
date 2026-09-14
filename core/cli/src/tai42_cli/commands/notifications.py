@@ -11,45 +11,18 @@ omitted) into the sink.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 import typer
-from pydantic import BaseModel, TypeAdapter, ValidationError
-from tai42_contract.channels import ChannelTemplate, Option, OptionSection
-from tai42_contract.interactions.models import LocationElement, MediaItem
 
-from tai42_cli.commands._common import app_context, covers, emit_records, emit_result, parse_json_value
-
-_MEDIA_ADAPTER = TypeAdapter(list[MediaItem])
-_OPTIONS_ADAPTER = TypeAdapter(list[Option])
-_SECTIONS_ADAPTER = TypeAdapter(list[OptionSection])
+from tai42_cli.commands._common import app_context, covers, emit_records, emit_result
+from tai42_cli.commands._notification_body import build_notify_body
 
 app = typer.Typer(
     name="notifications",
     help="Read and send internal notifications.",
     no_args_is_help=True,
 )
-
-
-def _reject_unknown_keys(raw: object, model: type[BaseModel], *, param_hint: str) -> dict[str, Any]:
-    """Refuse a JSON object carrying keys the contract model does not declare.
-
-    The contract's channel models do not set ``extra="forbid"``, so an unknown key
-    (e.g. the pre-7 template ``parameters``) would be silently DROPPED by
-    ``model_validate`` and the caller would never learn their input was ignored. The
-    CLI guards its own seam: it validates the raw object's keys against the model's
-    fields FIRST and rejects any stray key loudly, naming the accepted keys.
-    """
-    if not isinstance(raw, dict):
-        raise typer.BadParameter("must be a JSON object", param_hint=param_hint)
-    unknown = sorted(set(raw) - set(model.model_fields))
-    if unknown:
-        allowed = ", ".join(sorted(model.model_fields))
-        raise typer.BadParameter(
-            f"unknown key(s): {', '.join(unknown)}; accepted keys are: {allowed}",
-            param_hint=param_hint,
-        )
-    return raw
 
 
 @app.command("list")
@@ -174,65 +147,9 @@ def notify(
     Example: ``tai notifications notify "Deploy finished" --channel telegram``
     """
     ctx_obj = app_context(ctx)
-    body: dict[str, object] = {"message": message}
-    if channel is not None:
-        body["channel"] = channel
-    if recipient is not None:
-        body["recipient"] = recipient
-    if media is not None:
-        parsed_media = parse_json_value(media, param_hint="--media")
-        try:
-            items = _MEDIA_ADAPTER.validate_python(parsed_media)
-        except ValidationError as exc:
-            raise typer.BadParameter(f"invalid media item(s): {exc}", param_hint="--media") from exc
-        body["media"] = _MEDIA_ADAPTER.dump_python(items, mode="json")
-    if template is not None:
-        parsed_template = parse_json_value(template, param_hint="--template")
-        raw_template = _reject_unknown_keys(parsed_template, ChannelTemplate, param_hint="--template")
-        try:
-            model = ChannelTemplate.model_validate(raw_template)
-        except ValidationError as exc:
-            raise typer.BadParameter(f"invalid template: {exc}", param_hint="--template") from exc
-        body["template"] = model.model_dump(mode="json")
-    if options is not None:
-        parsed_options = parse_json_value(options, param_hint="--options")
-        try:
-            option_list = _OPTIONS_ADAPTER.validate_python(parsed_options)
-        except ValidationError as exc:
-            raise typer.BadParameter(f"invalid options: {exc}", param_hint="--options") from exc
-        body["options"] = _OPTIONS_ADAPTER.dump_python(option_list, mode="json")
-    if sections is not None:
-        parsed_sections = parse_json_value(sections, param_hint="--sections")
-        try:
-            section_list = _SECTIONS_ADAPTER.validate_python(parsed_sections)
-        except ValidationError as exc:
-            raise typer.BadParameter(f"invalid sections: {exc}", param_hint="--sections") from exc
-        body["sections"] = _SECTIONS_ADAPTER.dump_python(section_list, mode="json")
-    if location is not None:
-        parsed_location = parse_json_value(location, param_hint="--location")
-        raw_location = _reject_unknown_keys(parsed_location, LocationElement, param_hint="--location")
-        try:
-            location_model = LocationElement.model_validate(raw_location)
-        except ValidationError as exc:
-            raise typer.BadParameter(f"invalid location: {exc}", param_hint="--location") from exc
-        body["location"] = location_model.model_dump(mode="json")
-    if header is not None:
-        parsed_header = parse_json_value(header, param_hint="--header")
-        raw_header = _reject_unknown_keys(parsed_header, MediaItem, param_hint="--header")
-        try:
-            header_model = MediaItem.model_validate(raw_header)
-        except ValidationError as exc:
-            raise typer.BadParameter(f"invalid header: {exc}", param_hint="--header") from exc
-        body["header"] = header_model.model_dump(mode="json")
-    if footer is not None:
-        body["footer"] = footer
-    if schema is not None:
-        parsed_schema = parse_json_value(schema, param_hint="--schema")
-        if not isinstance(parsed_schema, dict):
-            # The form's answer schema is a JSON object by contract; the server owns the
-            # deeper subset walk, this shape check is the flag's whole local validation.
-            raise typer.BadParameter("invalid schema: must be a JSON object", param_hint="--schema")
-        body["schema"] = parsed_schema
+    body = build_notify_body(
+        message, channel, recipient, media, template, options, sections, location, header, footer, schema
+    )
     with ctx_obj.client() as client:
         data = client.post("/api/notifications", json=body)
     emit_result(ctx_obj, data)

@@ -119,52 +119,11 @@ class RoutingSocket(socket.socket):
                 self.settimeout(max(0.0, deadline - time.monotonic()))
                 context = ssl.create_default_context()
                 sock = context.wrap_socket(self, server_hostname=route.proxy_host)
-            connect_str = f"CONNECT {dest_host}:{dest_port} HTTP/1.1\r\nHost: {dest_host}:{dest_port}\r\n"
-            if route.username and route.password:
-                auth = f"{route.username}:{route.password}"
-                auth_b64 = base64.b64encode(auth.encode()).decode()
-                connect_str += f"Proxy-Authorization: Basic {auth_b64}\r\n"
-            connect_str += "\r\n"
-            sock.sendall(connect_str.encode())
-            response = b""
-            while True:
-                # Bound each recv by the time left; a non-positive remaining makes recv raise promptly.
-                sock.settimeout(max(0.0, deadline - time.monotonic()))
-                data = sock.recv(4096)
-                if not data:
-                    raise OSError("Connection closed by proxy")
-                response += data
-                if b"\r\n\r\n" in response:
-                    break
-                if len(response) > _MAX_PROXY_HEADER_BYTES:
-                    raise OSError(f"Proxy response headers exceeded {_MAX_PROXY_HEADER_BYTES} bytes")
-            header = response.split(b"\r\n\r\n")[0]
-            status = header.split(b"\r\n")[0]
-            parts = status.split()
-            if len(parts) < 2:
-                raise OSError(f"Malformed proxy CONNECT response: {status!r}")
-            try:
-                code = int(parts[1])
-            except ValueError as exc:
-                raise OSError(f"Malformed proxy CONNECT response: {status!r}") from exc
-            if code != 200:
-                raise OSError(f"Proxy rejected connection: {status!r}")
+            sock.sendall(_build_connect_request(dest_host, dest_port, route))
+            _parse_connect_status(_read_connect_response(sock, deadline))
             if sock is not self:
-                # A TLS wrap replaced ``sock`` and took this instance's fd; forward the wrapped
-                # socket's I/O onto this instance so callers keep using the object they were handed.
-                self.send = sock.send
-                self.sendto = sock.sendto
-                self.sendall = sock.sendall
-                self.recv = sock.recv
-                self.recvfrom = sock.recvfrom
-                self.recv_into = sock.recv_into if hasattr(sock, "recv_into") else self.recv_into
-                self.close = sock.close
-                self.makefile = sock.makefile
-
-                def dummy(*args, **kwargs):
-                    raise NotImplementedError("Method not supported in proxied socket")
-
-                self.connect = dummy
+                # A TLS wrap replaced ``sock`` and took this instance's fd.
+                self._adopt_wrapped_socket(sock)
         except BaseException:
             # Close the descriptor-owning socket on failure so a half-open tunnel never leaks its fd.
             # A failed TLS wrap detaches this instance's fd (``fileno() == -1``); skip closing that.
@@ -175,6 +134,70 @@ class RoutingSocket(socket.socket):
             # Restore the caller's timeout on the fd-owning socket; a detached instance has none.
             if sock.fileno() != -1:
                 sock.settimeout(original_timeout)
+
+    def _adopt_wrapped_socket(self, sock: socket.socket) -> None:
+        """Forward the wrapped socket's I/O onto this instance so callers keep using the
+        object they were handed after a TLS wrap replaced ``sock`` and took this fd."""
+        self.send = sock.send
+        self.sendto = sock.sendto
+        self.sendall = sock.sendall
+        self.recv = sock.recv
+        self.recvfrom = sock.recvfrom
+        self.recv_into = sock.recv_into if hasattr(sock, "recv_into") else self.recv_into
+        self.close = sock.close
+        self.makefile = sock.makefile
+
+        def dummy(*args, **kwargs):
+            raise NotImplementedError("Method not supported in proxied socket")
+
+        self.connect = dummy
+
+
+def _build_connect_request(dest_host: str, dest_port: int, route: RouteConfig) -> bytes:
+    """The encoded ``CONNECT`` request line + headers, with Basic proxy auth when the
+    route carries credentials."""
+    connect_str = f"CONNECT {dest_host}:{dest_port} HTTP/1.1\r\nHost: {dest_host}:{dest_port}\r\n"
+    if route.username and route.password:
+        auth = f"{route.username}:{route.password}"
+        auth_b64 = base64.b64encode(auth.encode()).decode()
+        connect_str += f"Proxy-Authorization: Basic {auth_b64}\r\n"
+    connect_str += "\r\n"
+    return connect_str.encode()
+
+
+def _read_connect_response(sock: socket.socket, deadline: float) -> bytes:
+    """Read the proxy's ``CONNECT`` response up to the header terminator, each recv
+    bounded by the time left to ``deadline`` and the buffer capped at
+    ``_MAX_PROXY_HEADER_BYTES``."""
+    response = b""
+    while True:
+        # Bound each recv by the time left; a non-positive remaining makes recv raise promptly.
+        sock.settimeout(max(0.0, deadline - time.monotonic()))
+        data = sock.recv(4096)
+        if not data:
+            raise OSError("Connection closed by proxy")
+        response += data
+        if b"\r\n\r\n" in response:
+            break
+        if len(response) > _MAX_PROXY_HEADER_BYTES:
+            raise OSError(f"Proxy response headers exceeded {_MAX_PROXY_HEADER_BYTES} bytes")
+    return response
+
+
+def _parse_connect_status(response: bytes) -> None:
+    """Raise ``OSError`` unless the proxy's ``CONNECT`` response status line is a well-formed
+    ``200``."""
+    header = response.split(b"\r\n\r\n")[0]
+    status = header.split(b"\r\n")[0]
+    parts = status.split()
+    if len(parts) < 2:
+        raise OSError(f"Malformed proxy CONNECT response: {status!r}")
+    try:
+        code = int(parts[1])
+    except ValueError as exc:
+        raise OSError(f"Malformed proxy CONNECT response: {status!r}") from exc
+    if code != 200:
+        raise OSError(f"Proxy rejected connection: {status!r}")
 
 
 def _routing_socks_socket() -> type[RoutingSocket]:

@@ -24,6 +24,7 @@ from tai42_skeleton.conversations.mode import ConversationModeStore
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, NotFoundError, NotSupportedError
 
@@ -97,7 +98,7 @@ def wired(monkeypatch):
     manager = FakeManager(_channel_route())
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
     # The route's ``relay`` agent holds thread memory by default, so manual mode is permitted.
-    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"relay": _MemoryAgent()})
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"relay": _MemoryAgent()})
 
     async def _caller():
         return SimpleNamespace(caller_id="op-1", is_admin=True)
@@ -212,7 +213,7 @@ async def test_send_template_threads_through_as_channel_template(wired, monkeypa
     result = await ops.send_conversation_thread_message(
         "chat",
         _ROUTE_THREAD,
-        "your order shipped",
+        "your update is ready",
         template={"name": "status_update", "language": "en_US", "body_parameters": ["A-42"]},
     )
 
@@ -525,7 +526,7 @@ async def test_set_manual_on_a_memoryless_agent_is_allowed(wired, monkeypatch):
     # Manual is valid for EVERY target: the set-mode door writes the override without inspecting
     # the target's thread memory. A memoryless agent (leaves append_thread_messages the ABC
     # default) is accepted for manual just the same — its manual inbound records silently later.
-    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"relay": _MemorylessAgent()})
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"relay": _MemorylessAgent()})
     result = await ops.set_conversation_thread_mode("chat", _ROUTE_THREAD, "manual")
     assert result["mode"] == "manual"
     assert await _mode_store().get_mode(_ROUTE_THREAD) == "manual"
@@ -534,7 +535,7 @@ async def test_set_manual_on_a_memoryless_agent_is_allowed(wired, monkeypatch):
 async def test_set_agent_mode_needs_no_memory_check(wired, monkeypatch):
     # Setting a thread's mode never checks the target's thread memory — agent mode has nothing
     # to check, and manual is valid for every target too.
-    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"relay": _MemorylessAgent()})
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"relay": _MemorylessAgent()})
     result = await ops.set_conversation_thread_mode("chat", _ROUTE_THREAD, "agent")
     assert result["mode"] == "agent"
 

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from tai42_e2e import wait_for_async
+from tai42_e2e import Infra, wait_for_async
 from tai42_e2e.manifests import build_replicas_stack
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import short_presence_ttl_env
 
 

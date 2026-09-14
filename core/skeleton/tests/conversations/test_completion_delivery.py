@@ -24,17 +24,19 @@ from pydantic import BaseModel
 from tai42_contract.conversations import ConversationRoute
 from tai42_contract.interactions import PARK_COMPLETION_SUCCEEDED
 
+from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
 from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
-from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import CompletionDeliveryError, deliver_agent_completion
+from tai42_skeleton.conversations.turn import outcome as outcome_module
+from tai42_skeleton.conversations.turn import schedule as schedule_module
 
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
@@ -108,20 +110,20 @@ def _store() -> ConversationRecordStore:
 async def _settle(timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
+        tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
         if not tasks:
             await asyncio.sleep(0)
             # Recompute after the yield: a task can appear between the two checks, so wait on
             # the fresh list (asyncio.wait raises on an empty set), and return only when it
             # is still empty.
-            tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
+            tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
             if not tasks:
                 return
         await asyncio.wait(tasks, timeout=0.05)
 
 
 def _wire(monkeypatch, manager: FakeManager, channel: FakeChannel) -> None:
-    monkeypatch.setattr(turn_module, "get_conversations_manager", lambda: manager)
+    monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
 
@@ -247,9 +249,9 @@ async def test_completion_success_with_no_result_delivers_the_notice_and_warns(e
     assert out == {"message_id": "cmpl-no-result"}
     record = await _store().get_record("cmpl-no-result")
     assert record is not None
-    assert record.answer == turn_module._ERROR_ANSWER_TEXT
+    assert record.answer == outcome_module._ERROR_ANSWER_TEXT
     assert record.answer != "null"
-    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+    assert [n.message for n in channel.sends] == [outcome_module._ERROR_ANSWER_TEXT]
     warnings = _completion_warnings(caplog, "cmpl-no-result")
     assert len(warnings) == 1
     assert "no result" in warnings[0]
@@ -312,8 +314,8 @@ async def test_completion_non_success_delivers_the_uniform_error_notice(env, mon
     record = await _store().get_record("cmpl-fail")
     assert record is not None
     assert record.answer_status == "answered"
-    assert record.answer == turn_module._ERROR_ANSWER_TEXT
-    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+    assert record.answer == outcome_module._ERROR_ANSWER_TEXT
+    assert [n.message for n in channel.sends] == [outcome_module._ERROR_ANSWER_TEXT]
     # The internal detail never reaches the client.
     assert "boom" not in record.answer
 
@@ -353,7 +355,7 @@ async def test_completion_unstamped_fire_delivers_the_notice_and_warns(env, monk
     assert out == {"message_id": "cmpl-unstamped"}
     record = await _store().get_record("cmpl-unstamped")
     assert record is not None
-    assert record.answer == turn_module._ERROR_ANSWER_TEXT
+    assert record.answer == outcome_module._ERROR_ANSWER_TEXT
     warnings = _completion_warnings(caplog, "cmpl-unstamped")
     assert len(warnings) == 1
     assert "NO status" in warnings[0]
@@ -374,7 +376,7 @@ async def test_completion_unrecognized_status_delivers_the_notice_and_warns(env,
     assert out == {"message_id": "cmpl-weird"}
     record = await _store().get_record("cmpl-weird")
     assert record is not None
-    assert record.answer == turn_module._ERROR_ANSWER_TEXT
+    assert record.answer == outcome_module._ERROR_ANSWER_TEXT
     warnings = _completion_warnings(caplog, "cmpl-weird")
     assert len(warnings) == 1
     assert "'weird'" in warnings[0]

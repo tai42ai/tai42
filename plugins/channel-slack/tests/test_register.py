@@ -20,7 +20,11 @@ def _import_register_module(stub_app) -> None:
     stub_app.http.routes.clear()
     stub_app.lifecycle.startup_hooks.clear()
     sys.modules.pop("tai42_channel_slack.register", None)
-    sys.modules.pop("tai42_channel_slack.inbound", None)
+    # ``inbound`` is a package; evict it AND every submodule so the door modules
+    # re-execute their ``@custom_route`` decorators and the routes re-register.
+    prefix = "tai42_channel_slack.inbound"
+    for name in [n for n in sys.modules if n == prefix or n.startswith(prefix + ".")]:
+        sys.modules.pop(name, None)
     importlib.import_module("tai42_channel_slack.register")
 
 

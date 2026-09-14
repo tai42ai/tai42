@@ -12,6 +12,7 @@ out of the resolution chain fails the boot rather than minting dead sessions.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 
 from tai42_contract.access_control.registry import get_identity_provider_factory_staged
 from tai42_contract.accounts import iter_accounts_provider_factories_staged
@@ -143,9 +144,8 @@ async def check_spa_shell_public() -> None:
     segment-under the excluded prefixes, so the GET fallback can never open the control
     plane. (Exercised end-to-end by the terminal-deny + route-walk tests.)
     """
-    from tai42_skeleton.access_control.path_canon import canonicalize_path, under_prefix
+    from tai42_skeleton.access_control.path_canon import under_prefix
     from tai42_skeleton.access_control.verifier import registered_reserved_get_paths
-    from tai42_skeleton.app.route_registry import route_registry
 
     settings = access_control_settings()
     derived = registered_reserved_get_paths()
@@ -157,10 +157,44 @@ async def check_spa_shell_public() -> None:
         ", ".join(sorted(derived)) or "(none)",
     )
 
-    invisible_authed: list[str] = []
-    unacknowledged: list[str] = []
-    acknowledged_present: list[str] = []
-    acknowledged_but_authed: list[str] = []
+    audit = _classify_spa_shell_routes(acknowledged, derived)
+    _assert_spa_shell_audit_clean(audit)
+
+    if audit.acknowledged_present:
+        logger.info(
+            "access_control: acknowledged public-by-declaration non-/api GET routes: %s",
+            ", ".join(sorted(set(audit.acknowledged_present))),
+        )
+
+    # Terminal-deny confirmation: the resolver structurally excludes the control plane
+    # from the shell tier, so no unmatched /api or /mcp path can ever reach the SPA shell.
+    for probe in ("/api/__boot_probe__", "/mcp/__boot_probe__"):
+        if not (under_prefix(probe, "/api") or under_prefix(probe, "/mcp")):
+            raise RuntimeError(
+                f"access_control: control-plane probe {probe!r} is not excluded from the SPA-shell tier — "
+                "the terminal-deny invariant is broken"
+            )
+
+
+@dataclass
+class _SpaShellAudit:
+    """The four buckets every registered non-/api GET route is sorted into by the
+    SPA-shell audit: consciously acknowledged, acknowledged-yet-authed (a contradiction),
+    authed-but-invisible-to-the-fallback, and public-by-declaration-yet-unacknowledged."""
+
+    acknowledged_present: list[str] = field(default_factory=list)
+    acknowledged_but_authed: list[str] = field(default_factory=list)
+    invisible_authed: list[str] = field(default_factory=list)
+    unacknowledged: list[str] = field(default_factory=list)
+
+
+def _classify_spa_shell_routes(acknowledged: frozenset[str], derived: frozenset[str]) -> _SpaShellAudit:
+    """Bucket every registered non-mounted, non-/api GET route against the SPA-shell
+    fallback (see :func:`check_spa_shell_public` for the rule each bucket encodes)."""
+    from tai42_skeleton.access_control.path_canon import canonicalize_path, under_prefix
+    from tai42_skeleton.app.route_registry import route_registry
+
+    audit = _SpaShellAudit()
     for meta in route_registry.routes():
         if "GET" not in meta.methods:
             continue
@@ -180,13 +214,13 @@ async def check_spa_shell_public() -> None:
         # templated route — is an ordinary key compared against acknowledged_public_routes.
         # A consciously-public route passes here whatever its concrete/templated shape.
         if registered in acknowledged:
-            acknowledged_present.append(registered)
+            audit.acknowledged_present.append(registered)
             # An acknowledged route is served public at runtime (resolve_resource_ids grants
             # it the public resource id), so an authed=True declaration on the same route is a
             # contradiction: the acknowledgment silently strips its gate. Refuse boot rather
             # than let the operator believe the route is protected.
             if meta.authed:
-                acknowledged_but_authed.append(registered)
+                audit.acknowledged_but_authed.append(registered)
             continue
         if meta.authed:
             # Gated by authz ONLY if the fallback derivation can SEE it. A CONCRETE authed
@@ -194,48 +228,38 @@ async def check_spa_shell_public() -> None:
             # route is structurally not derivable, so a concrete request matching its pattern
             # with no route row would be served the public shell — the boot must refuse it.
             if templated or canonicalize_path(registered) not in derived:
-                invisible_authed.append(registered)
+                audit.invisible_authed.append(registered)
         else:
             # authed=False and not acknowledged: public by declaration with no conscious review.
-            unacknowledged.append(registered)
+            audit.unacknowledged.append(registered)
+    return audit
 
-    if acknowledged_but_authed:
+
+def _assert_spa_shell_audit_clean(audit: _SpaShellAudit) -> None:
+    """Fail the boot closed on any non-clean SPA-shell bucket."""
+    if audit.acknowledged_but_authed:
         raise RuntimeError(
             "access_control: acknowledged_public_routes names authed=True registered route(s): "
-            f"{sorted(set(acknowledged_but_authed))} — an acknowledged route is served public at runtime "
+            f"{sorted(set(audit.acknowledged_but_authed))} — an acknowledged route is served public at runtime "
             "(the resolver grants it the public resource id), so a gated authed=True declaration is "
             "contradictory and would be silently stripped: either remove it from "
             "ACCESS_CONTROL_ACKNOWLEDGED_PUBLIC_ROUTES or set authed=False on the route"
         )
-    if invisible_authed:
+    if audit.invisible_authed:
         raise RuntimeError(
             "access_control: authed=True non-/api GET route(s) would be served the public SPA shell — they are "
-            f"not visible in the derived reserved set: {sorted(set(invisible_authed))}. A concrete route must "
+            f"not visible in the derived reserved set: {sorted(set(audit.invisible_authed))}. A concrete route must "
             "register so it joins the derived set; a TEMPLATED route is structurally not derivable, so /api-prefix "
             "it (control-plane excluded) or add its registered template to ACCESS_CONTROL_ACKNOWLEDGED_PUBLIC_ROUTES "
             "if it is genuinely public"
         )
-    if unacknowledged:
+    if audit.unacknowledged:
         raise RuntimeError(
             "access_control: authed=False non-/api GET route(s) are public by declaration but not acknowledged: "
-            f"{sorted(set(unacknowledged))} — add each (the registered path, or the template string for a templated "
-            "route) to ACCESS_CONTROL_ACKNOWLEDGED_PUBLIC_ROUTES if it is intentionally public, else set authed=True "
-            "or remove the route"
+            f"{sorted(set(audit.unacknowledged))} — add each (the registered path, or the template string for a "
+            "templated route) to ACCESS_CONTROL_ACKNOWLEDGED_PUBLIC_ROUTES if it is intentionally public, else set "
+            "authed=True or remove the route"
         )
-    if acknowledged_present:
-        logger.info(
-            "access_control: acknowledged public-by-declaration non-/api GET routes: %s",
-            ", ".join(sorted(set(acknowledged_present))),
-        )
-
-    # Terminal-deny confirmation: the resolver structurally excludes the control plane
-    # from the shell tier, so no unmatched /api or /mcp path can ever reach the SPA shell.
-    for probe in ("/api/__boot_probe__", "/mcp/__boot_probe__"):
-        if not (under_prefix(probe, "/api") or under_prefix(probe, "/mcp")):
-            raise RuntimeError(
-                f"access_control: control-plane probe {probe!r} is not excluded from the SPA-shell tier — "
-                "the terminal-deny invariant is broken"
-            )
 
 
 async def check_route_actions() -> None:

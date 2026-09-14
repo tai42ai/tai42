@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from tai42_e2e.marketplace import (
+from tai42_e2e.catalog_seed import forge_zeta_wheel
+from tai42_e2e.fixture_catalog import (
     RUNNING_CONTRACT_MAJOR,
     ZETA_COMPAT_VERSION,
     ZETA_INCOMPAT_VERSION,
@@ -25,9 +26,8 @@ from tai42_e2e.marketplace import (
     ZETA_PACKAGE,
     ZETA_REF,
     ZETA_WIDE_CONTRACT_RANGE,
-    MarketplaceService,
-    forge_zeta_wheel,
 )
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.pkgsource import BuiltWheel, FixturePackageIndex
 
 from ._market_support import resolve_path

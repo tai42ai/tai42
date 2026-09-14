@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from tai42_e2e import StackConfig, StackResources, Topology
+from tai42_e2e.binaries import tai_bin
 from tai42_e2e.manifests import (
     _CORE_ROUTERS,
     _EXTENSION_MODULES,
@@ -27,7 +29,7 @@ from tai42_e2e.manifests import (
     _probe_tools_entry,
     _toolbox_tools_entry,
 )
-from tai42_e2e.stack import StackConfig, StackResources, TaiStack, Topology, tai_bin
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import Variants
 
 

@@ -351,6 +351,73 @@ async def _bridge(
     return JSONResponse({"data": {"status": "accepted"}}, status_code=200)
 
 
+def _verify_secret(request: Request, settings: TelegramSettings) -> Response | None:
+    """Transport auth for the inbound door, FAILING CLOSED.
+
+    Returns a 500 when the webhook secret is unconfigured, a constant 401 deny when
+    the ``X-Telegram-Bot-Api-Secret-Token`` header is absent or wrong, or ``None``
+    when the request is authenticated.
+    """
+    configured = settings.webhook_secret.get_secret_value() if settings.webhook_secret else ""
+    if not configured:
+        return _misconfigured("CHANNEL_TELEGRAM_WEBHOOK_SECRET")
+
+    provided = request.headers.get(_SECRET_HEADER)
+    # Hash both sides before the constant-time compare so an unequal-length raw
+    # input can't leak the secret's length; sha256 fixes both at 32 bytes.
+    if provided is None or not hmac.compare_digest(
+        hashlib.sha256(provided.encode()).digest(),
+        hashlib.sha256(configured.encode()).digest(),
+    ):
+        return _denied()
+    return None
+
+
+class _UpdateRejected(Exception):
+    """A bounded-read or parse failure carrying the webhook response to return."""
+
+    def __init__(self, response: Response) -> None:
+        super().__init__()
+        self.response = response
+
+
+async def _read_update(request: Request) -> dict[str, object]:
+    """Read the bounded request body and parse it into an update dict.
+
+    Raises :class:`_UpdateRejected` carrying a 413 (over the byte cap), or a 400
+    (unparseable body, or a body that is not a JSON object).
+    """
+    try:
+        body = await read_bounded_body(request, _MAX_BODY_BYTES)
+    except PayloadTooLarge:
+        raise _UpdateRejected(JSONResponse({"error": "payload too large"}, status_code=413)) from None
+    try:
+        update = json.loads(body)
+    except ValueError:
+        raise _UpdateRejected(JSONResponse({"error": "body must be a JSON object"}, status_code=400)) from None
+    if not isinstance(update, dict):
+        raise _UpdateRejected(JSONResponse({"error": "body must be a JSON object"}, status_code=400))
+    return update
+
+
+def _message_fields(message: dict[str, object]) -> tuple[dict[str, object], int, str] | Response:
+    """The ``(chat, chat_id, text)`` a text message must carry to be bridgeable.
+
+    Returns an acked-ignored 200 (naming the missing field) for a message with no
+    chat, no numeric chat id, or no text (a media message is not bridgeable).
+    """
+    chat = message.get("chat")
+    if not isinstance(chat, dict):
+        return _ignored("message carries no chat id")
+    chat_id = chat.get("id")
+    if not isinstance(chat_id, int):
+        return _ignored("message carries no chat id")
+    text = message.get("text")
+    if not isinstance(text, str):
+        return _ignored("message carries no text (a media message is not bridgeable)")
+    return chat, chat_id, text
+
+
 @tai42_app.http.custom_route(
     "/inbound",
     methods=["POST"],
@@ -366,29 +433,15 @@ async def inbound(request: Request) -> Response:
     an expired reply — is bridged to the conversation route.
     """
     settings = telegram_settings()
-    configured = settings.webhook_secret.get_secret_value() if settings.webhook_secret else ""
-    if not configured:
-        return _misconfigured("CHANNEL_TELEGRAM_WEBHOOK_SECRET")
 
-    provided = request.headers.get(_SECRET_HEADER)
-    # Hash both sides before the constant-time compare so an unequal-length raw
-    # input can't leak the secret's length; sha256 fixes both at 32 bytes.
-    if provided is None or not hmac.compare_digest(
-        hashlib.sha256(provided.encode()).digest(),
-        hashlib.sha256(configured.encode()).digest(),
-    ):
-        return _denied()
+    denied = _verify_secret(request, settings)
+    if denied is not None:
+        return denied
 
     try:
-        body = await read_bounded_body(request, _MAX_BODY_BYTES)
-    except PayloadTooLarge:
-        return JSONResponse({"error": "payload too large"}, status_code=413)
-    try:
-        update = json.loads(body)
-    except ValueError:
-        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
-    if not isinstance(update, dict):
-        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        update = await _read_update(request)
+    except _UpdateRejected as rejected:
+        return rejected.response
 
     # An inline-keyboard button tap arrives as a callback_query, not a message: it
     # maps the tapped option's index back to its text and resolves/bridges it.
@@ -398,15 +451,10 @@ async def inbound(request: Request) -> Response:
     message = update.get("message")
     if not isinstance(message, dict):
         return _ignored("update carries no message")
-    chat = message.get("chat")
-    if not isinstance(chat, dict):
-        return _ignored("message carries no chat id")
-    chat_id = chat.get("id")
-    if not isinstance(chat_id, int):
-        return _ignored("message carries no chat id")
-    text = message.get("text")
-    if not isinstance(text, str):
-        return _ignored("message carries no text (a media message is not bridgeable)")
+    fields = _message_fields(message)
+    if isinstance(fields, Response):
+        return fields
+    chat, chat_id, text = fields
 
     # Signal "working on it" the moment a processable message lands — a typing
     # action shown BEFORE the ask/bridge split so it covers both paths. A delivery

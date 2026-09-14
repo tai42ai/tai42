@@ -344,17 +344,15 @@ def test_descriptor_only_plugins(plugin_dir: Path):
 # --------------------------------------------------- 5. harness API presence
 
 HARNESS_API = {
-    "tai42_e2e.stack": [
-        "TaiStack",
+    "tai42_e2e.stack": ["TaiStack"],
+    "tai42_e2e.topology": [
         "Infra",
         "StackConfig",
         "StackResources",
         "Topology",
         "InfraUnavailable",
-        "tai_bin",
-        "uvicorn_bin",
-        "spawn_expect_refusal",
     ],
+    "tai42_e2e.binaries": ["tai_bin", "uvicorn_bin", "spawn_expect_refusal"],
     "tai42_e2e.booting": ["allocate_and_build", "boot_stack"],
     "tai42_e2e.manifests": [
         "build_replicas_stack",

@@ -214,30 +214,39 @@ class ConversationRecord(BaseModel):
         its ``inbound_event`` and an empty ``inbound_text``, while a ``message`` inbound
         carries no ``inbound_event``."""
         if self.origin == "operator":
-            if self.inbound_kind != "message":
-                raise ValueError("an operator record is a message send, never an event")
-            if self.inbound_text != "":
-                raise ValueError("an operator record carries no inbound_text (must be '')")
-            if self.inbound_form is not None:
-                raise ValueError("an operator record carries no inbound_form (it answers, it does not submit)")
-            if self.inbound_attachments is not None or self.inbound_location is not None:
-                raise ValueError(
-                    "an operator record carries no inbound attachments/location (it answers, it does not submit)"
-                )
-            if self.answer_status != "answered":
-                raise ValueError(f"an operator record is always answered, got answer_status {self.answer_status!r}")
-            if not (self.caller_principal or "").strip():
-                raise ValueError("an operator record must name the operator that sent it in caller_principal")
+            self._check_operator_inbound()
         elif self.inbound_kind == "event":
-            if self.inbound_text != "":
-                raise ValueError("an event record carries no inbound_text (must be '')")
-            if self.inbound_event is None:
-                raise ValueError("an event record carries its structured inbound_event")
+            self._check_event_inbound()
         elif not self.inbound_text.strip():
             raise ValueError("a client record carries non-blank inbound_text")
         if self.inbound_kind == "message" and self.inbound_event is not None:
             raise ValueError("a message record carries no inbound_event")
         return self
+
+    def _check_operator_inbound(self) -> None:
+        """An operator record is a message send carrying no inbound (text/form/media/event)
+        and is always an ``answered`` outcome that names the operator that sent it."""
+        if self.inbound_kind != "message":
+            raise ValueError("an operator record is a message send, never an event")
+        if self.inbound_text != "":
+            raise ValueError("an operator record carries no inbound_text (must be '')")
+        if self.inbound_form is not None:
+            raise ValueError("an operator record carries no inbound_form (it answers, it does not submit)")
+        if self.inbound_attachments is not None or self.inbound_location is not None:
+            raise ValueError(
+                "an operator record carries no inbound attachments/location (it answers, it does not submit)"
+            )
+        if self.answer_status != "answered":
+            raise ValueError(f"an operator record is always answered, got answer_status {self.answer_status!r}")
+        if not (self.caller_principal or "").strip():
+            raise ValueError("an operator record must name the operator that sent it in caller_principal")
+
+    def _check_event_inbound(self) -> None:
+        """An event record carries its structured ``inbound_event`` and no human text."""
+        if self.inbound_text != "":
+            raise ValueError("an event record carries no inbound_text (must be '')")
+        if self.inbound_event is None:
+            raise ValueError("an event record carries its structured inbound_event")
 
     def answer_payload(self) -> ConversationAnswer:
         """The :class:`ConversationAnswer` this record delivers — the one shape both the

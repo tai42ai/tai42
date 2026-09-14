@@ -14,13 +14,8 @@ from tai42_contract.conversations import AnswerPart
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 
 from tai42_skeleton.conversations.address import canonical_address
-from tai42_skeleton.conversations.delivery import (
-    _backoff_seconds,
-    _part_notification,
-    _sign,
-    _unsupported_rich_capability,
-    split_message,
-)
+from tai42_skeleton.conversations.delivery import _backoff_seconds, _sign, split_message
+from tai42_skeleton.conversations.delivery_channel import _part_notification, _unsupported_rich_capability
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
@@ -137,7 +132,7 @@ def test_part_notification_form_prefill_rides_the_final_chunk():
 def test_reply_part_bad_prefill_is_refused_loudly():
     # A flow's tool reply array whose form part carries a prefill value that fails the
     # schema is refused at the parse seam, so a partly filled form is never stored or sent.
-    from tai42_skeleton.conversations.turn import _checked_reply_parts
+    from tai42_skeleton.conversations.turn.tool_turn import _checked_reply_parts
 
     with pytest.raises(ValueError, match="must be a string"):
         _checked_reply_parts([{"message": "fill this in", "schema": _FORM_SCHEMA, "data": {"values": {"name": 42}}}])

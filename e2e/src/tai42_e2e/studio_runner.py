@@ -53,22 +53,22 @@ import httpx
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tai42_e2e import ports
+from tai42_e2e.catalog_seed import seed_epsilon_listing, seed_fixture_catalog
+from tai42_e2e.fixture_catalog import forge_fixture_artifacts
 from tai42_e2e.harness import allocate_resources, connect_infra, release_resources, seed_studio_auth
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import build_studio_stack
 from tai42_e2e.marketplace import (
     MarketplaceService,
     declared_routes_dispatch_failure,
-    forge_fixture_artifacts,
     registry_supports_declared_routes,
-    seed_epsilon_listing,
-    seed_fixture_catalog,
 )
-from tai42_e2e.netfixtures import OAuthIdp
+from tai42_e2e.oidc_idp import OAuthIdp
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.procs import ProcessHandle
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
+from tai42_e2e.topology import Infra, StackConfig, StackResources
 from tai42_e2e.variants import Variants
 from tai42_e2e.waiting import WaitTimeout, wait_for
 
@@ -147,13 +147,9 @@ def _remove_stack_handoff() -> None:
         _STACK_HANDOFF.unlink()
 
 
-def _pids_listening_on(port: int) -> set[int]:
-    """PIDs holding a LISTEN socket on the loopback ``port``, via ``/proc``.
-
-    Maps the port to its listening socket inodes from ``/proc/net/tcp[6]`` (state
-    ``0A`` = LISTEN), then finds every process whose ``/proc/<pid>/fd`` points at a
-    ``socket:[inode]`` for one of them. Pure ``/proc``, no external tool or
-    dependency — the same read-only introspection the harness already relies on."""
+def _listen_socket_inodes(port: int) -> set[str]:
+    """The socket inodes LISTENing on the loopback ``port``, read from
+    ``/proc/net/tcp[6]`` (state ``0A`` = TCP_LISTEN)."""
     inodes: set[str] = set()
     for proc_net in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
@@ -169,9 +165,12 @@ def _pids_listening_on(port: int) -> set[int]:
                 continue
             if int(local_addr.rsplit(":", 1)[1], 16) == port:
                 inodes.add(inode)
-    if not inodes:
-        return set()
-    targets = {f"socket:[{inode}]" for inode in inodes}
+    return inodes
+
+
+def _pids_holding_sockets(targets: set[str]) -> set[int]:
+    """Every PID whose ``/proc/<pid>/fd`` points at one of the ``socket:[inode]``
+    ``targets`` — read-only ``/proc`` introspection, no external tool."""
     holders: set[int] = set()
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
@@ -187,6 +186,20 @@ def _pids_listening_on(port: int) -> set[int]:
                     holders.add(int(entry))
                     break
     return holders
+
+
+def _pids_listening_on(port: int) -> set[int]:
+    """PIDs holding a LISTEN socket on the loopback ``port``, via ``/proc``.
+
+    Maps the port to its listening socket inodes from ``/proc/net/tcp[6]``, then
+    finds every process whose ``/proc/<pid>/fd`` points at a ``socket:[inode]`` for
+    one of them. Pure ``/proc``, no external tool or dependency — the same read-only
+    introspection the harness already relies on."""
+    inodes = _listen_socket_inodes(port)
+    if not inodes:
+        return set()
+    targets = {f"socket:[{inode}]" for inode in inodes}
+    return _pids_holding_sockets(targets)
 
 
 def _free_pinned_ports(pinned: list[int]) -> None:
@@ -444,6 +457,106 @@ def _start_marketplace(infra: Infra, root: Path, runner: StudioRunnerSettings) -
         raise
 
 
+def _start_ancillary(runner: StudioRunnerSettings) -> tuple[LlmStub, OAuthIdp]:
+    """Start the ancillary services the studio stack points at: the scripted LLM
+    stub and the pinned stub OAuth IdP (pinned so a Playwright spec can flip its
+    denial knob over HTTP, and reachable server-side by the connect flow)."""
+    stub = LlmStub(port=runner.ui_llm_port)
+    stub.start()
+    idp = OAuthIdp(port=runner.ui_idp_port)
+    idp.start()
+    return stub, idp
+
+
+def _boot_studio_stack(
+    runner: StudioRunnerSettings,
+    infra: Infra,
+    stub: LlmStub,
+    idp: OAuthIdp,
+    dist: Path,
+    build_stack: Callable[[StackResources, Variants], StackConfig],
+    root: Path,
+    mp_bundle: _MarketplaceBundle | None,
+) -> None:
+    """Allocate the stack's resources (wired at the ancillary services + any
+    marketplace bundle), build and boot the access-controlled studio stack, block
+    until a shutdown signal, then tear the stack down."""
+    stop = threading.Event()
+
+    def _handle_signal(signum: int, frame: object) -> None:
+        _ = frame
+        print(f"tai42-e2e-studio-stack received signal {signum}; tearing down", flush=True)
+        stop.set()
+
+    mp_kwargs: dict[str, Any] = (
+        {"marketplace_url": mp_bundle.service.base_url, "package_index_url": mp_bundle.index.url}
+        if mp_bundle is not None
+        else {}
+    )
+    resources = allocate_resources(
+        infra,
+        root,
+        # TAI_E2E_STUDIO_CHECKPOINT_DB reserves a module-capable Redis DB for an
+        # external profile whose engine needs langgraph checkpointing.
+        allocate_checkpoint_db=runner.studio_checkpoint_db,
+        llm_base_url=stub.base_url,
+        gh_webhook_secret=secrets.token_hex(16),
+        studio_dist_path=str(dist),
+        idp_base_url=idp.base_url,
+        # The connector crypto settings decode these with STANDARD base64
+        # (the KEK to exactly 32 bytes), so mint padded standard-base64 keys.
+        connectors_kek=base64.b64encode(secrets.token_bytes(32)).decode(),
+        connectors_state_hmac_key=base64.b64encode(secrets.token_bytes(32)).decode(),
+        **mp_kwargs,
+    )
+    try:
+        config = build_stack(resources, infra.variants)
+    except BaseException:
+        # A builder raise (a missing prerequisite) must not leak the Redis index,
+        # the Postgres clone and the broker lease just allocated.
+        release_resources(infra, resources)
+        raise
+    stack = TaiStack(config, infra, resources, root, app_port=runner.ui_port)
+    # Publish the per-run coordinates BEFORE boot: Playwright gates the suite on the
+    # app URL responding, which a readiness probe can satisfy before ``boot()`` returns,
+    # so a post-boot write would race the first spec that reads the handoff.
+    _write_stack_handoff(resources)
+    try:
+        # The readiness probes hit /health and /metrics, which access control
+        # denies until the route table pins them public, so the seed must land
+        # before the processes answer their first request.
+        seed_studio_auth(infra, resources, api_key=runner.ui_api_key)
+        # Readiness drains the boot reload gate through the MCP probe, which this
+        # access-controlled stack fences; the probe runs under the seeded root key.
+        stack.auth_token = runner.ui_api_key
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+        stack.boot()
+        _print_ready(f"http://{stack.host}:{stack.port_a}", runner.ui_api_key)
+        stop.wait()
+    finally:
+        _remove_stack_handoff()
+        stack.teardown()
+
+
+def _teardown_ancillary(mp_bundle: _MarketplaceBundle | None, idp: OAuthIdp, stub: LlmStub, infra: Infra) -> None:
+    """Tear down every ancillary surface even if one raises, aggregating the
+    failures so none is hidden. The marketplace bundle goes first (the stack is
+    already down, so its poll no longer targets the registry)."""
+    teardowns: list[tuple[str, Callable[[], object]]] = []
+    if mp_bundle is not None:
+        teardowns.append(("marketplace", mp_bundle.teardown))
+    teardowns += [("idp", idp.stop), ("llm stub", stub.stop), ("redis", infra.redis.close)]
+    errors: list[str] = []
+    for label, fn in teardowns:
+        try:
+            fn()
+        except Exception as exc:
+            errors.append(f"{label}: {exc!r}")
+    if errors:
+        raise RuntimeError("studio runner teardown found errors:\n  " + "\n  ".join(errors))
+
+
 def main() -> None:
     settings = HarnessSettings()
     runner = StudioRunnerSettings()
@@ -461,23 +574,11 @@ def main() -> None:
     _free_pinned_ports(pinned_ports)
 
     infra = connect_infra(settings)
-    stub = LlmStub(port=runner.ui_llm_port)
-    stub.start()
-    # The stub OAuth IdP the connectors spec drives: pinned so the spec can flip
-    # its denial knob over HTTP, and reachable server-side by the connect flow.
-    idp = OAuthIdp(port=runner.ui_idp_port)
-    idp.start()
+    stub, idp = _start_ancillary(runner)
     # Root the stack dir inside the repo so a CI failure run (TAI_E2E_KEEP_STACKS)
     # keeps the per-process logs where the ``tai-e2e/**/tai-e2e-studio-*/`` upload
     # glob can find them; a system-tmp dir would fall outside the workspace.
     root = Path(tempfile.mkdtemp(prefix="tai-e2e-studio-", dir=Path(__file__).resolve().parents[2]))
-    stop = threading.Event()
-
-    def _handle_signal(signum: int, frame: object) -> None:
-        _ = frame
-        print(f"tai42-e2e-studio-stack received signal {signum}; tearing down", flush=True)
-        stop.set()
-
     # Only booted under the opt-in gate; when off, this stays None and the studio
     # stack is wired exactly as it is today (marketplace_url/package_index_url unset).
     mp_bundle: _MarketplaceBundle | None = None
@@ -487,71 +588,9 @@ def main() -> None:
         # the stack (whose advisories poll targets the registry).
         if settings.marketplace:
             mp_bundle = _start_marketplace(infra, root, runner)
-        mp_kwargs: dict[str, Any] = (
-            {"marketplace_url": mp_bundle.service.base_url, "package_index_url": mp_bundle.index.url}
-            if mp_bundle is not None
-            else {}
-        )
-        resources = allocate_resources(
-            infra,
-            root,
-            # TAI_E2E_STUDIO_CHECKPOINT_DB reserves a module-capable Redis DB for an
-            # external profile whose engine needs langgraph checkpointing.
-            allocate_checkpoint_db=runner.studio_checkpoint_db,
-            llm_base_url=stub.base_url,
-            gh_webhook_secret=secrets.token_hex(16),
-            studio_dist_path=str(dist),
-            idp_base_url=idp.base_url,
-            # The connector crypto settings decode these with STANDARD base64
-            # (the KEK to exactly 32 bytes), so mint padded standard-base64 keys.
-            connectors_kek=base64.b64encode(secrets.token_bytes(32)).decode(),
-            connectors_state_hmac_key=base64.b64encode(secrets.token_bytes(32)).decode(),
-            **mp_kwargs,
-        )
-        try:
-            config = build_stack(resources, infra.variants)
-        except BaseException:
-            # A builder raise (a missing prerequisite) must not leak the Redis index,
-            # the Postgres clone and the broker lease just allocated.
-            release_resources(infra, resources)
-            raise
-        stack = TaiStack(config, infra, resources, root, app_port=runner.ui_port)
-        # Publish the per-run coordinates BEFORE boot: Playwright gates the suite on the
-        # app URL responding, which a readiness probe can satisfy before ``boot()`` returns,
-        # so a post-boot write would race the first spec that reads the handoff.
-        _write_stack_handoff(resources)
-        try:
-            # The readiness probes hit /health and /metrics, which access control
-            # denies until the route table pins them public, so the seed must land
-            # before the processes answer their first request.
-            seed_studio_auth(infra, resources, api_key=runner.ui_api_key)
-            # Readiness drains the boot reload gate through the MCP probe, which this
-            # access-controlled stack fences; the probe runs under the seeded root key.
-            stack.auth_token = runner.ui_api_key
-            signal.signal(signal.SIGTERM, _handle_signal)
-            signal.signal(signal.SIGINT, _handle_signal)
-            stack.boot()
-            _print_ready(f"http://{stack.host}:{stack.port_a}", runner.ui_api_key)
-            stop.wait()
-        finally:
-            _remove_stack_handoff()
-            stack.teardown()
+        _boot_studio_stack(runner, infra, stub, idp, dist, build_stack, root, mp_bundle)
     finally:
-        # Tear down every surface even if one raises, aggregating the failures so
-        # none is hidden. The marketplace bundle goes first (the stack is already
-        # down, so its poll no longer targets the registry).
-        teardowns: list[tuple[str, Callable[[], object]]] = []
-        if mp_bundle is not None:
-            teardowns.append(("marketplace", mp_bundle.teardown))
-        teardowns += [("idp", idp.stop), ("llm stub", stub.stop), ("redis", infra.redis.close)]
-        errors: list[str] = []
-        for label, fn in teardowns:
-            try:
-                fn()
-            except Exception as exc:
-                errors.append(f"{label}: {exc!r}")
-        if errors:
-            raise RuntimeError("studio runner teardown found errors:\n  " + "\n  ".join(errors))
+        _teardown_ancillary(mp_bundle, idp, stub, infra)
 
 
 if __name__ == "__main__":

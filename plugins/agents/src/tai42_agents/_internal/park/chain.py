@@ -43,9 +43,10 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_SUCCEEDED,
 )
 
-from tai42_agents._internal.park.driver import agent_resume, chained_park_horizon
 from tai42_agents._internal.park.index import extend_park_horizon, is_resolved_tombstone, read_park_entry
 from tai42_agents._internal.park.middleware import park_error_answer
+from tai42_agents._internal.park.persist import chained_park_horizon
+from tai42_agents._internal.park.resume import agent_resume
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ async def _extend_horizon(chain_token: str, expiry_at: str | None) -> dict[str, 
     """Move a chained park's inherited horizon out to the run's NEW deadline.
 
     The park entry is re-clamped through the SAME rule the persist used
-    (:func:`~tai42_agents._internal.park.driver.chained_park_horizon`), against the retention
+    (:func:`~tai42_agents._internal.park.persist.chained_park_horizon`), against the retention
     bound the entry recorded — so an extension can never carry a park past the window its own
     state survives, and never past the configured cap.
 

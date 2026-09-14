@@ -12,7 +12,7 @@ Always release via :func:`reset_execution_identity` on the matching token in a `
 
 Release is per-CONTEXT, not global: a task created inside the block runs on a COPY and
 keeps the identity for its own lifetime. That is load-bearing —
-:func:`~tai42_skeleton.operations.tool_runs._spawn_supervisor` detaches such a task, and
+:func:`~tai42_skeleton.operations.tool_runs.supervisor._spawn_supervisor` detaches such a task, and
 the inherited identity is what keeps the tool it later runs authorized as the submitter.
 """
 

@@ -437,3 +437,10 @@ def signed_headers(body: bytes, secret: str, timestamp: int | None = None) -> di
         "X-Slack-Request-Timestamp": str(ts),
         "X-Slack-Signature": f"v0={digest}",
     }
+
+
+def _ok_response(ts: str | None = "1712345678.000100") -> httpx.Response:
+    body: dict[str, object] = {"ok": True}
+    if ts is not None:
+        body["ts"] = ts
+    return httpx.Response(200, json=body)

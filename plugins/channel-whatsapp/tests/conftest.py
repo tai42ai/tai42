@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -18,11 +18,14 @@ from typing import Any
 import httpx
 import pytest
 from starlette.requests import Request
+from starlette.responses import Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
+
+from tai42_channel_whatsapp.correlation import reserve_pending
 
 
 class _ClientCtx:
@@ -521,3 +524,176 @@ def response(
     if headers is not None:
         kwargs["headers"] = headers
     return httpx.Response(status_code, **kwargs)
+
+
+# --- Inbound webhook fixtures + payload helpers (shared across the split suites) ----
+
+_PATH = "/inbound"
+_WAMID = "wamid.TESTID"
+_CALLBACK = "https://app.example/api/interactions/callback/ticket-1"
+_SEEN_KEY = f"channel:whatsapp:seen:{_WAMID}"
+_PENDING_KEY = f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{WA_ID}"
+_CONTACT_KEY = f"channel:whatsapp:known-contact:{PHONE_NUMBER_ID}:{WA_ID}"
+
+_FORM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "note": {"type": "string"},
+        "qty": {"type": "integer"},
+        "amount": {"type": "number"},
+        "agree": {"type": "boolean"},
+    },
+    "required": ["note"],
+}
+
+_FORM_QUESTION = "Deploy to prod?"
+
+
+@pytest.fixture
+def handler(stub_app: _StubApp) -> Callable[..., Awaitable[Response]]:
+    routes = [route for route in stub_app.http.routes if route.path == _PATH]
+    assert len(routes) == 1
+    route = routes[0]
+    assert route.methods == ["GET", "POST"]
+    assert route.authed is None
+    return route.handler
+
+
+async def _pending_intact(fake_redis: FakeRedis) -> bool:
+    return _PENDING_KEY in fake_redis.store
+
+
+async def _seed_pending(callback_url: str = _CALLBACK) -> None:
+    delivery = make_delivery(callback_url=callback_url)
+    await reserve_pending(PHONE_NUMBER_ID, WA_ID, delivery.callback_url, delivery.timeout_at)
+
+
+async def _seed_pending_select(
+    options: list[str], interaction_id: str = "int-1", callback_url: str = _CALLBACK
+) -> None:
+    delivery = make_delivery(callback_url=callback_url)
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        delivery.callback_url,
+        delivery.timeout_at,
+        options=options,
+        interaction_id=interaction_id,
+    )
+
+
+async def _seed_pending_form(
+    interaction_id: str = "int-1", callback_url: str = _CALLBACK, question: str = _FORM_QUESTION
+) -> None:
+    delivery = make_delivery(callback_url=callback_url, question=question)
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        delivery.callback_url,
+        delivery.timeout_at,
+        interaction_id=interaction_id,
+        schema=_FORM_SCHEMA,
+        question=delivery.question,
+    )
+
+
+def interactive_payload(
+    *,
+    wamid: str = _WAMID,
+    phone_number_id: str = PHONE_NUMBER_ID,
+    wa_id: str = WA_ID,
+    reply_type: str = "button_reply",
+    reply_id: str = "int-1:0",
+    title: str = "staging",
+    description: str | None = None,
+    interactive: dict | None = None,
+) -> dict:
+    """A signed-inbound envelope carrying one interactive (button/list) reply.
+
+    ``interactive`` overrides the whole interactive object (for malformed-shape
+    tests); otherwise a ``{reply_type: {id, title[, description]}}`` is built.
+    """
+    if interactive is None:
+        reply: dict = {"id": reply_id, "title": title}
+        if description is not None:
+            reply["description"] = description
+        interactive = {"type": reply_type, reply_type: reply}
+    message = {"id": wamid, "from": wa_id, "type": "interactive", "interactive": interactive}
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"display_phone_number": "15551112222", "phone_number_id": phone_number_id},
+                            "messages": [message],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def form_reply_payload(response: dict, *, wamid: str = _WAMID, wa_id: str = WA_ID) -> dict:
+    """A signed-inbound envelope carrying one completed Flow form (``nfm_reply``);
+    ``response`` is serialized into ``response_json`` exactly as Meta delivers it."""
+    interactive = {"type": "nfm_reply", "nfm_reply": {"response_json": json.dumps(response)}}
+    message = {"id": wamid, "from": wa_id, "type": "interactive", "interactive": interactive}
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"display_phone_number": "15551112222", "phone_number_id": PHONE_NUMBER_ID},
+                            "messages": [message],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _params_envelope(message: dict, *, phone_number_id: str = PHONE_NUMBER_ID) -> dict:
+    """A signed-inbound envelope carrying one arbitrary message object — for the message
+    shapes (``button`` type, ``referral``, ``context``, ``errors``) the shared
+    ``message_payload``/``interactive_payload`` helpers do not build."""
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"display_phone_number": "15551112222", "phone_number_id": phone_number_id},
+                            "messages": [message],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+# --- Outbound send helpers (shared across the channel split suites) ----------------
+
+_MESSAGES_URL = f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
+_UNLISTED = "15559999999"
+
+
+def _accepted(wamid: str = "wamid.OUT") -> httpx.Response:
+    """A Cloud-API accept carrying one message id."""
+    return response(200, json={"messages": [{"id": wamid}]})

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ChatApiError } from '@/api';
 import { FormCard, type FormCardItem } from '@/form-card';
-import type { FormPage, FormPrefill, JsonSchema, MediaItem } from '@/use-chat-stream';
+import type { FormPage, FormPrefill, JsonSchema, MediaItem } from '@/transcript-model';
 
 afterEach(() => {
   cleanup();

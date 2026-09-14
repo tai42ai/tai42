@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from tai42_accounts_postgres.stores import UsersStore, _AdminGuard
 
 from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
@@ -241,6 +244,87 @@ async def change_own_password(request: Request) -> Response:
     return JSONResponse({"data": {"changed": True}})
 
 
+async def _apply_role_under_lock(
+    guard: _AdminGuard,
+    admin: Any,
+    user_id: str,
+    requested_role: str | None,
+    current_role: str,
+    locked_disabled: bool,
+) -> tuple[JSONResponse | None, str]:
+    """Apply a requested role change under the advisory lock. Returns the first
+    error (or ``None``) and the role in effect after the call. The last enabled
+    admin cannot be demoted (409); an unknown role name writes nothing (400)."""
+    if requested_role is None or requested_role == current_role:
+        return None, current_role
+    demote = current_role == ADMIN_ROLE and requested_role != ADMIN_ROLE
+    if demote and not locked_disabled and await guard.count_other_enabled_admins(user_id) == 0:
+        return _error("cannot demote the last enabled admin", 409), current_role
+    try:
+        await admin.apply_role(user_id, requested_role)
+    except KeyError:
+        # Unknown role name; ``apply_role`` wrote nothing → clean 400.
+        return _error(f"unknown role: {requested_role!r}", 400), current_role
+    await guard.set_role(user_id, requested_role)
+    return None, requested_role
+
+
+async def _apply_disable_under_lock(
+    guard: _AdminGuard,
+    admin: Any,
+    user_id: str,
+    current_role: str,
+) -> JSONResponse | None:
+    """Disable a user under the advisory lock, credentials-die-first (marker +
+    sessions, then the row). The last enabled admin cannot be disabled (409)."""
+    if current_role == ADMIN_ROLE and await guard.count_other_enabled_admins(user_id) == 0:
+        return _error("cannot disable the last enabled admin", 409)
+    await admin.set_user_disabled(user_id, True)
+    await guard.delete_sessions_for_user(user_id)
+    await guard.set_disabled(user_id, True)
+    return None
+
+
+async def _apply_under_lock(
+    store: UsersStore,
+    admin: Any,
+    user_id: str,
+    body: UpdateUserBody,
+    disable_requested: bool,
+) -> JSONResponse | None:
+    """Apply a role change and/or a disable inside one advisory-locked transaction, then
+    run any post-commit re-enable. The target's role/disabled are re-read from committed
+    state under the lock, so concurrent last-admin removals cannot both pass. Returns the
+    first non-None error, else ``None``."""
+    reenable_after_commit = False
+    async with store.admin_guard_txn() as guard:
+        locked = await guard.read_target(user_id)
+        if locked is None:
+            return _error("user not found", 404)
+        current_role = locked["role"]
+
+        error, current_role = await _apply_role_under_lock(
+            guard, admin, user_id, body.role, current_role, locked["disabled"]
+        )
+        if error is not None:
+            return error
+
+        if body.disabled and not locked["disabled"]:
+            # DISABLE. Credentials die first (marker + sessions), then the row.
+            error = await _apply_disable_under_lock(guard, admin, user_id, current_role)
+            if error is not None:
+                return error
+        elif disable_requested and body.disabled is False and locked["disabled"]:
+            # RE-ENABLE (combined with a role change): row first, marker after
+            # commit (mirror of disable); adding an admin needs no orphan check.
+            await guard.set_disabled(user_id, False)
+            reenable_after_commit = True
+
+    if reenable_after_commit:
+        await admin.set_user_disabled(user_id, False)
+    return None
+
+
 @tai42_app.http.custom_route(
     "/users/{user_id}",
     methods=["PUT"],
@@ -282,40 +366,9 @@ async def update_user(request: Request) -> Response:
     # lock. A re-enable combined with a role change enters here too (on
     # ``role_requested``) and is applied in both directions.
     if role_requested or (disable_requested and body.disabled):
-        reenable_after_commit = False
-        async with store.admin_guard_txn() as guard:
-            locked = await guard.read_target(user_id)
-            if locked is None:
-                return _error("user not found", 404)
-            current_role = locked["role"]
-
-            if body.role is not None and body.role != current_role:
-                demote = current_role == ADMIN_ROLE and body.role != ADMIN_ROLE
-                if demote and not locked["disabled"] and await guard.count_other_enabled_admins(user_id) == 0:
-                    return _error("cannot demote the last enabled admin", 409)
-                try:
-                    await admin.apply_role(user_id, body.role)
-                except KeyError:
-                    # Unknown role name; ``apply_role`` wrote nothing → clean 400.
-                    return _error(f"unknown role: {body.role!r}", 400)
-                await guard.set_role(user_id, body.role)
-                current_role = body.role
-
-            if body.disabled and not locked["disabled"]:
-                # DISABLE. Credentials die first (marker + sessions), then the row.
-                if current_role == ADMIN_ROLE and await guard.count_other_enabled_admins(user_id) == 0:
-                    return _error("cannot disable the last enabled admin", 409)
-                await admin.set_user_disabled(user_id, True)
-                await guard.delete_sessions_for_user(user_id)
-                await guard.set_disabled(user_id, True)
-            elif disable_requested and body.disabled is False and locked["disabled"]:
-                # RE-ENABLE (combined with a role change): row first, marker after
-                # commit (mirror of disable); adding an admin needs no orphan check.
-                await guard.set_disabled(user_id, False)
-                reenable_after_commit = True
-
-        if reenable_after_commit:
-            await admin.set_user_disabled(user_id, False)
+        error = await _apply_under_lock(store, admin, user_id, body, disable_requested)
+        if error is not None:
+            return error
     elif disable_requested:
         # Pure re-enable: row first, marker last (the mirror of disable).
         await store.set_disabled(user_id, False)

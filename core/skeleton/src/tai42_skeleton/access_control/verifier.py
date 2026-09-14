@@ -197,37 +197,64 @@ class AccessControlVerifier(TokenVerifier):
             )
             return []
 
-        # Fail-closed on an encoded slash that is NOT a raw-path-matched route's key: the
-        # ASGI router decodes ``%2F`` to a real ``/`` and matches a DIFFERENT (decoded) path
-        # than this canonical form, so resolving resource ids here would authorize a path the
-        # router never serves (the ``/api%2Fsecret`` bypass). Only a raw-path-matched route (a
-        # record ``{key}``) keeps the encoded slash to one segment on the router too. Skipped
-        # when no method is carried (the tool edge, which pins its own route first).
-        if method is not None and ENCODED_SLASH in path:
-            # Imported at call time: ``role_gate`` triggers the router-import universe, which
-            # this foundational module is imported ahead of.
-            from tai42_skeleton.access_control.role_gate import resolve_route_meta
+        if self._reject_encoded_slash(path, method):
+            return []
 
-            try:
-                raw_route = resolve_route_meta(path, method)
-            except MalformedPathError:
-                raw_route = None
-            if raw_route is None:
-                logger.warning(
-                    "access_control: rejected %s %r — an encoded slash resolves to no raw-path-matched route; "
-                    "the router would serve a different decoded path — denying",
-                    method,
-                    path,
-                )
-                return []
+        settings_public = self._settings_public_tier(path, method)
+        if settings_public is not None:
+            return [settings_public]
 
+        # Read the current policy version once (a single cheap GET) and thread it
+        # through every cached route/pattern read below, so a management route
+        # re-point that bumped the version is a cross-worker cache miss here and is
+        # visible immediately rather than up to the ttl later. A caller that already
+        # snapshotted the version for a whole batch (the projection build resolving
+        # many paths against one version) passes it in to skip the redundant per-path
+        # read; the request-path gate omits it and reads once per request.
+        version = policy_version if policy_version is not None else await self._current_policy_version()
+
+        found_ids = await self._accumulate_route_ids(path, version)
+        self._apply_public_fallbacks(path, method, found_ids)
+        return list(found_ids)
+
+    def _reject_encoded_slash(self, path: str, method: str | None) -> bool:
+        """Fail-closed on an encoded slash that is NOT a raw-path-matched route's key: the
+        ASGI router decodes ``%2F`` to a real ``/`` and matches a DIFFERENT (decoded) path
+        than this canonical form, so resolving resource ids here would authorize a path the
+        router never serves (the ``/api%2Fsecret`` bypass). Only a raw-path-matched route (a
+        record ``{key}``) keeps the encoded slash to one segment on the router too. Skipped
+        when no method is carried (the tool edge, which pins its own route first). Returns
+        whether to deny."""
+        if method is None or ENCODED_SLASH not in path:
+            return False
+        # Imported at call time: ``role_gate`` triggers the router-import universe, which
+        # this foundational module is imported ahead of.
+        from tai42_skeleton.access_control.role_gate import resolve_route_meta
+
+        try:
+            raw_route = resolve_route_meta(path, method)
+        except MalformedPathError:
+            raw_route = None
+        if raw_route is None:
+            logger.warning(
+                "access_control: rejected %s %r — an encoded slash resolves to no raw-path-matched route; "
+                "the router would serve a different decoded path — denying",
+                method,
+                path,
+            )
+            return True
+        return False
+
+    def _settings_public_tier(self, path: str, method: str | None) -> str | None:
+        """The three store-free public tiers, in precedence order, returning the public
+        resource id or ``None`` to fall through to the route table."""
         # Always-public prefixes short-circuit BEFORE any route-table read: the
         # pre-auth login surface answers the public resource id unconditionally, so it
         # is reachable on a fresh deployment with no route rows. The always-public and
         # reserved prefix sets are validated disjoint at settings construction, so such a
         # path is never also reserved and the reserved-drop below can never contradict this.
         if is_always_public_prefix(path, self.settings):
-            return [self.settings.public_resource_id]
+            return self.settings.public_resource_id
 
         # Always-public route patterns (e.g. the plugin studio-asset door) are
         # AUTHORITATIVE for a non-reserved path: the pattern tier resolves the public id
@@ -240,7 +267,7 @@ class AccessControlVerifier(TokenVerifier):
         # path grants nothing: it falls through to the tiers and the reserved-drop below, so
         # the control plane is never public.
         if matches_always_public_route_pattern(path, self.settings) and not self._is_reserved_prefix(path):
-            return [self.settings.public_resource_id]
+            return self.settings.public_resource_id
 
         # Declared-public route tier (per-method, deny-safe): a request that resolves
         # to a registered route DECLARED public — ``authed=False`` at registration,
@@ -260,17 +287,11 @@ class AccessControlVerifier(TokenVerifier):
         if method is not None and not self._is_reserved_prefix(path):
             matched = route_registry.match(path, method)
             if matched is not None and matched.public:
-                return [self.settings.public_resource_id]
+                return self.settings.public_resource_id
 
-        # Read the current policy version once (a single cheap GET) and thread it
-        # through every cached route/pattern read below, so a management route
-        # re-point that bumped the version is a cross-worker cache miss here and is
-        # visible immediately rather than up to the ttl later. A caller that already
-        # snapshotted the version for a whole batch (the projection build resolving
-        # many paths against one version) passes it in to skip the redundant per-path
-        # read; the request-path gate omits it and reads once per request.
-        version = policy_version if policy_version is not None else await self._current_policy_version()
+        return None
 
+    async def _accumulate_route_ids(self, path: str, version: int) -> set[str]:
         # Accumulate matches from EVERY tier (exact, auto-normalized, explicit and
         # dynamic patterns) into one set. Deny wins across tiers: a path that is
         # both a public exact/auto match AND covered by a protected pattern must
@@ -301,6 +322,12 @@ class AccessControlVerifier(TokenVerifier):
                 if pattern.fullmatch(path) and (route := await self._fetch_route_data(template, version)):
                     found_ids.add(route)
 
+        return found_ids
+
+    def _apply_public_fallbacks(self, path: str, method: str | None, found_ids: set[str]) -> None:
+        """Mutate ``found_ids`` with the reserved-prefix public drop and the two GET/HEAD
+        public fallbacks (acknowledged-public, then the SPA-shell shell), each lowest
+        precedence and deny-wins."""
         public = self.settings.public_resource_id
 
         # The reserved management prefixes are never public: drop the public marker
@@ -312,48 +339,46 @@ class AccessControlVerifier(TokenVerifier):
         if public in found_ids and self._is_reserved_prefix(path):
             found_ids.discard(public)
 
-        # Acknowledged-public tier (GET/HEAD, deny-wins, lowest precedence): a GET/HEAD to a
-        # concrete registered non-/api route in ``acknowledged_public_routes`` resolves public,
-        # so the app serves /health,/ready by their own route-level declaration without an
-        # always-public prefix. HEAD rides with GET (a public GET route must answer HEAD
-        # probes). Fires only when the route table resolved nothing, so an operator's protected
-        # pin still wins. The control plane can never enter it: the registered set and the
-        # acknowledged validation both exclude /api,/mcp, and ``_is_reserved_prefix`` drops any
-        # reserved path.
-        if (
+        if not found_ids and self._is_acknowledged_public_get(path, method):
+            found_ids.add(public)
+
+        if not found_ids and self._is_spa_shell_fallback(path, method):
+            found_ids.add(public)
+
+    def _is_acknowledged_public_get(self, path: str, method: str | None) -> bool:
+        """Acknowledged-public tier (GET/HEAD, deny-wins, lowest precedence): a GET/HEAD to
+        a concrete registered non-/api route in ``acknowledged_public_routes`` resolves
+        public, so the app serves /health,/ready by their own route-level declaration
+        without an always-public prefix. HEAD rides with GET (a public GET route must answer
+        HEAD probes). The control plane can never enter it: the registered set and the
+        acknowledged validation both exclude /api,/mcp, and ``_is_reserved_prefix`` drops
+        any reserved path."""
+        return (
             method in ("GET", "HEAD")
-            and not found_ids
             and path in registered_reserved_get_paths_cached()
             and path in self.settings.acknowledged_public_routes
             and not self._is_reserved_prefix(path)
-        ):
-            found_ids.add(public)
+        )
 
-        # SPA-shell public fallback (GET-only, last tier): a GET to an UNMAPPED,
-        # non-/api, non-/mcp canonical path that is NOT a registered route is served by
-        # the SPA catch-all as the dataless index.html shell — treat it as public so a
-        # deep-link refresh reaches the shell. Deny wins: this fires ONLY when the route
-        # table resolved NOTHING and the path is not a registered route, so an explicit
-        # protected mapping OR any registered operational route still wins, and it never
-        # opens a mutation (GET only) nor the API/control-plane surface. ``path`` is the
-        # single canonical form computed at the top of this method.
-        #
-        # The registered-route check below is CONCRETE-only:
-        # ``registered_reserved_get_paths_cached()`` holds the canonical paths of concrete
-        # non-/api GET routes, so a concrete request matching a TEMPLATED route's pattern
-        # (e.g. ``/reports/5`` for ``/reports/{id}``) is not seen here and — absent a route
-        # row — would be served the shell. The boot
-        # audit (``check_spa_shell_public``) closes that gap by construction: it refuses to
-        # start when any templated ``authed=True`` non-/api GET route exists that is neither
-        # /api-prefixed (control-plane-excluded above) nor consciously acknowledged, so no
-        # such route can reach this tier. This fallback's safety for templated routes rests
-        # on that audit; the code deliberately does not build a second (shadow) matcher.
-        if (
+    def _is_spa_shell_fallback(self, path: str, method: str | None) -> bool:
+        """SPA-shell public fallback (GET-only, last tier): a GET to an UNMAPPED, non-/api,
+        non-/mcp canonical path that is NOT a registered route is served by the SPA catch-all
+        as the dataless index.html shell — treat it as public so a deep-link refresh reaches
+        the shell. It never opens a mutation (GET only) nor the API/control-plane surface.
+
+        The registered-route check is CONCRETE-only:
+        ``registered_reserved_get_paths_cached()`` holds the canonical paths of concrete
+        non-/api GET routes, so a concrete request matching a TEMPLATED route's pattern
+        (e.g. ``/reports/5`` for ``/reports/{id}``) is not seen here and — absent a route
+        row — would be served the shell. The boot audit (``check_spa_shell_public``) closes
+        that gap by construction: it refuses to start when any templated ``authed=True``
+        non-/api GET route exists that is neither /api-prefixed (control-plane-excluded) nor
+        consciously acknowledged, so no such route can reach this tier. This fallback's
+        safety for templated routes rests on that audit; the code deliberately does not build
+        a second (shadow) matcher."""
+        return (
             self.settings.spa_shell_public
             and method == "GET"
-            # ``not found_ids`` is the deny-wins guard: an operator who explicitly mapped
-            # this path to a protected scope keeps it protected.
-            and not found_ids
             # Segment-aware, mirroring ``serve_spa``'s own /api,/mcp 404 guard, so the
             # public surface is exactly the shell surface: the control plane never opens.
             and not under_prefix(path, "/api")
@@ -366,10 +391,7 @@ class AccessControlVerifier(TokenVerifier):
             and path not in self.settings.reserved_operational_supplement
             # Belt-and-suspenders: keeps ``/api/auth`` (and any reserved prefix) gated.
             and not self._is_reserved_prefix(path)
-        ):
-            found_ids.add(public)
-
-        return list(found_ids)
+        )
 
     def _is_reserved_prefix(self, path: str) -> bool:
         """Whether ``path`` is the access-control management surface that must never

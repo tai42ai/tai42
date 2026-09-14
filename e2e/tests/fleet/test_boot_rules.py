@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from tai42_e2e.stack import TaiStack, spawn_expect_refusal, tai_bin, uvicorn_bin
+from tai42_e2e.binaries import spawn_expect_refusal, tai_bin, uvicorn_bin
+from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.backendless
 

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MediaCard, type MediaCardItem, type SendReply } from '@/media-card';
-import type { CardOption, LocationPoint, MediaItem, OptionSection } from '@/use-chat-stream';
+import type { CardOption, LocationPoint, MediaItem, OptionSection } from '@/transcript-model';
 
 afterEach(() => {
   cleanup();

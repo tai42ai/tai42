@@ -27,7 +27,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio
+from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async

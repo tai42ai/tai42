@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from tai42_e2e import Infra
 from tai42_e2e.harness import allocate_resources
 from tai42_e2e.manifests import build_core_stack
-from tai42_e2e.stack import Infra
 
 # Pure harness self-test: it renders env, boots nothing, and exercises no backend
 # seam, so running it under every backend leg buys nothing.

@@ -42,11 +42,8 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.template import TemplatedText
 
-from tai42_agents._internal.park.driver import (
-    AGENT_RESUME_TOOL_NAME,
-    _collect_pending_interrupts,
-    _park_interactions,
-)
+from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, collect_pending_interrupts
+from tai42_agents._internal.park.drive import _park_interactions
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware, resuming_park_interaction_ids
 from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 
@@ -125,7 +122,7 @@ def _park_interrupt(snapshot: Any) -> tuple[str, dict[str, Any]]:
     """The single pending park interrupt's ``(id, interactions)`` from a snapshot."""
     parks = [
         (iid, interactions)
-        for iid, value in _collect_pending_interrupts(snapshot)
+        for iid, value in collect_pending_interrupts(snapshot)
         if (interactions := _park_interactions(value)) is not None
     ]
     assert len(parks) == 1, parks
@@ -342,7 +339,7 @@ def test_hitl_interrupt_and_async_park_coexist_by_id() -> None:
     asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="go")]}, config))
     # First pause: the HITL approval interrupt (not a park).
     snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
-    pending = _collect_pending_interrupts(snapshot)
+    pending = collect_pending_interrupts(snapshot)
     assert all(_park_interactions(value) is None for _, value in pending)
     hitl_id = pending[0][0]
 
@@ -453,7 +450,7 @@ def test_two_parallel_subagent_parks_surface_and_resume_by_id() -> None:
     snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
     parks = [
         (iid, interactions)
-        for iid, value in _collect_pending_interrupts(snapshot)
+        for iid, value in collect_pending_interrupts(snapshot)
         if (interactions := _park_interactions(value)) is not None
     ]
     # TWO distinct park interrupts, each carrying its own single interaction.

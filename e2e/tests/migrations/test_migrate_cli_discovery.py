@@ -35,9 +35,9 @@ import psycopg
 import pytest
 from tai42_skeleton.marketplace.prefix import prefix_site_dirs
 
+from tai42_e2e.binaries import tai_bin
 from tai42_e2e.pg import PostgresAdmin
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import tai_bin
 
 _ACCOUNTS_DISTRIBUTION = "tai42-accounts-postgres"
 _ACCOUNTS_IMPORT_PACKAGE = "tai42_accounts_postgres"

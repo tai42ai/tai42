@@ -10,21 +10,21 @@ leg is READY, not run (real runs only on the e2e host with the filled creds file
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
+from tai42_e2e import StackConfig, StackResources, Topology
+from tai42_e2e.child_env import origin_allowlist_env
 from tai42_e2e.manifests import (
     _STRIPE_TEST_SECRET_KEY,
     ATLASSIAN_CLIENT_ID,
     GOOGLE_CLIENT_ID,
     _llm_env,
-    build_payments_stack,
     build_shipped_connectors_stack,
+    build_stripe_stack,
 )
 from tai42_e2e.marketplace import _marketplace_source_env
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import InfraUnavailable, StackConfig, StackResources, TaiStack, Topology
+from tai42_e2e.topology import InfraUnavailable
 from tai42_e2e.variants import STORAGES, resolve_variants
 
 
@@ -114,21 +114,21 @@ def test_llm_real_unknown_provider_raises(monkeypatch: pytest.MonkeyPatch) -> No
 # ---- stripe seam (env-swap manifest builder) ----------------------------
 
 
-def test_payments_mock_default_points_at_the_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stripe_mock_default_points_at_the_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TAI_E2E_REAL", raising=False)
-    cfg = build_payments_stack(_res(stripe_stub_base="http://127.0.0.1:9/stripe"), _VARIANTS)
+    cfg = build_stripe_stack(_res(stripe_stub_base="http://127.0.0.1:9/stripe"), _VARIANTS)
     assert cfg.env["STRIPE_API_BASE"] == "http://127.0.0.1:9/stripe"
     assert cfg.env["STRIPE_SECRET_KEY"] == _STRIPE_TEST_SECRET_KEY
     assert cfg.public_base_url_env_keys == []
     assert cfg.public_base_url is None
 
 
-def test_payments_real_drops_the_stub_and_routes_public(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stripe_real_drops_the_stub_and_routes_public(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TAI_E2E_REAL", "stripe")
     monkeypatch.setenv("E2E_PUBLIC_BASE_URL", "https://e2e.example")
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_live0000")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_live0000")
-    cfg = build_payments_stack(_res(stripe_stub_base="http://127.0.0.1:9/stripe"), _VARIANTS)
+    cfg = build_stripe_stack(_res(stripe_stub_base="http://127.0.0.1:9/stripe"), _VARIANTS)
     # the stub override is gone (plugin default = real api.stripe.com)
     assert "STRIPE_API_BASE" not in cfg.env
     assert cfg.env["STRIPE_SECRET_KEY"] == "sk_test_live0000"
@@ -257,30 +257,24 @@ def _allowlist_cfg(*, public: bool) -> StackConfig:
 
 def test_origin_allowlist_engine_hook_public_vs_loopback() -> None:
     # The stack-level fill: a public-listed key carries the public origin; an unlisted key
-    # (the mock default) carries this stack's loopback app origins. Mirrors _replica_b_origin_env.
-    public_stub = SimpleNamespace(config=_allowlist_cfg(public=True), host="127.0.0.1", app_ports=[8001, 8002])
-    assert TaiStack._origin_allowlist_env(public_stub) == {  # type: ignore[arg-type]
+    # (the mock default) carries this stack's loopback app origins. Mirrors replica_b_origin_env.
+    assert origin_allowlist_env(_allowlist_cfg(public=True), "127.0.0.1", [8001, 8002]) == {
         "CONNECTORS_REDIRECT_URI_ALLOWLIST": "https://e2e.example"
     }
-    loopback_stub = SimpleNamespace(config=_allowlist_cfg(public=False), host="127.0.0.1", app_ports=[8001, 8002])
-    assert TaiStack._origin_allowlist_env(loopback_stub) == {  # type: ignore[arg-type]
+    assert origin_allowlist_env(_allowlist_cfg(public=False), "127.0.0.1", [8001, 8002]) == {
         "CONNECTORS_REDIRECT_URI_ALLOWLIST": "http://127.0.0.1:8001,http://127.0.0.1:8002"
     }
 
 
 def test_origin_allowlist_public_without_base_url_raises() -> None:
-    stub = SimpleNamespace(
-        config=StackConfig(
-            name="c",
-            topology=Topology.MULTIWORKER,
-            manifest={},
-            env={},
-            origin_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
-            public_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
-            public_base_url=None,
-        ),
-        host="127.0.0.1",
-        app_ports=[8001],
+    cfg = StackConfig(
+        name="c",
+        topology=Topology.MULTIWORKER,
+        manifest={},
+        env={},
+        origin_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
+        public_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
+        public_base_url=None,
     )
     with pytest.raises(RuntimeError, match="public_base_url is unset"):
-        TaiStack._origin_allowlist_env(stub)  # type: ignore[arg-type]
+        origin_allowlist_env(cfg, "127.0.0.1", [8001])

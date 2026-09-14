@@ -1,7 +1,7 @@
 """Registration side-effects: the channel and its inbound door.
 
 Importing this module registers :class:`SlackChannel` under ``"slack"`` and
-imports :mod:`tai42_channel_slack.inbound` so the Events API route registers too.
+imports :mod:`tai42_channel_slack.inbound` so both inbound doors register too.
 The manifest names this package in ``channel_modules``; importing the package
 ``__init__`` alone does NOT register (library use).
 

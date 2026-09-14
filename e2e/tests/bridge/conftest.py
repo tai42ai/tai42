@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import pytest
 
+from tai42_e2e.channel_stubs import FakeTwilio, FakeWhatsApp
 from tai42_e2e.llmstub import LlmStub
-from tai42_e2e.netfixtures import FakeTwilio, FakeWhatsApp
 from tai42_e2e.stack import TaiStack
 
 from ._bridge_support import BridgeHarness

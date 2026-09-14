@@ -31,7 +31,7 @@ raises from validation.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 from langchain.agents.structured_output import ToolStrategy
@@ -196,6 +196,151 @@ async def astream_tools_agent_events(
         await detach_dead_chains(claims)
 
 
+def _split_stream_item(item: Any) -> tuple[str, Any]:
+    """Split one ``astream`` item into ``(mode, chunk)``. With a list ``stream_mode`` LangGraph
+    yields ``(mode, chunk)``; anything that is not that pair is a bare single-mode chunk,
+    treated as an update."""
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
+        return item[0], item[1]
+    return "updates", item
+
+
+def _message_delta_text(chunk: Any) -> str | None:
+    """The token delta of a ``messages``-mode chunk (``(AIMessageChunk, metadata)``), or
+    ``None`` when the chunk carries no text delta. A chunk that is not a (message, metadata)
+    pair raises rather than being skipped."""
+    if not (isinstance(chunk, tuple) and len(chunk) == 2):
+        raise ValueError(f"messages-mode stream chunk is not a (message, metadata) pair: {chunk!r}")
+    message_chunk, _metadata = chunk
+    if isinstance(message_chunk, AIMessageChunk):
+        return text_of(message_chunk) or None
+    return None
+
+
+def _normalize_node_updates(chunk: Any) -> list[dict[str, Any]]:
+    """The channel-write mappings of an ``updates``-mode chunk (``{node: update, ...}``).
+
+    A node update value is normally a channel-write mapping (or a list of them when a node
+    writes the same channel twice). ``None`` (node wrote nothing) and the ``__interrupt__``
+    tuple (read from the snapshot by the resume path) are benign and skipped; any other shape
+    raises."""
+    if not isinstance(chunk, dict):
+        raise ValueError(f"updates-mode stream chunk is not a node->update mapping: {chunk!r}")
+    normalized: list[dict[str, Any]] = []
+    for node, update in chunk.items():
+        if update is None or node == "__interrupt__":
+            continue
+        for one in update if isinstance(update, list) else [update]:
+            if not isinstance(one, dict):
+                raise ValueError(f"updates-mode node update for {node!r} is not a mapping: {one!r}")
+            normalized.append(one)
+    return normalized
+
+
+class _ToolCallDedup:
+    """De-duplicates tool-call ids across a run and synthesizes one when a provider omits it.
+
+    The ``__synthetic_tool_call_`` prefix is outside every provider's id namespace and the
+    counter keeps a synthesized id unique. :meth:`call_id` returns the id to surface a tool
+    call under, or ``None`` when that id was already seen (the call is a duplicate to skip)."""
+
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+        self.synthetic = 0
+
+    def call_id(self, tool_call: dict[str, Any]) -> str | None:
+        call_id = tool_call.get("id")
+        if not call_id:
+            call_id = f"__synthetic_tool_call_{self.synthetic}"
+            self.synthetic += 1
+        if call_id in self.seen:
+            return None
+        self.seen.add(call_id)
+        return call_id
+
+
+def _ai_message_events(
+    message: AIMessage, structured_tools: frozenset[str], dedup: _ToolCallDedup
+) -> Iterator[StreamEvent]:
+    """The step events an ``updates``-channel ``AIMessage`` surfaces: a reasoning block, each
+    non-synthetic tool call (deduped), then the run-usage event. The synthetic structured-output
+    tool call is routing mechanics and never surfaces."""
+    reasoning = _reasoning_text(message)
+    if reasoning:
+        yield ReasoningStep(text=reasoning)
+    for tool_call in getattr(message, "tool_calls", None) or []:
+        if tool_call.get("name") in structured_tools:
+            continue
+        call_id = dedup.call_id(tool_call)
+        if call_id is None:
+            continue
+        yield ToolCallStep(
+            tool=tool_call.get("name", ""),
+            args=tool_call.get("args", {}) or {},
+            call_id=call_id,
+        )
+    usage = usage_event(message)
+    if usage is not None:
+        yield usage
+
+
+def _tool_message_event(message: ToolMessage, structured_tools: frozenset[str]) -> StreamEvent | None:
+    """The :class:`ToolResultStep` a ``ToolMessage`` surfaces, or ``None`` when it is the
+    synthetic structured-output tool's echo (routing mechanics kept out of the step events)."""
+    if getattr(message, "name", "") in structured_tools:
+        return None
+    return ToolResultStep(
+        tool=getattr(message, "name", "") or "",
+        call_id=getattr(message, "tool_call_id", "") or "",
+        result=getattr(message, "content", ""),
+        is_error=getattr(message, "status", None) == "error",
+    )
+
+
+class _Projection:
+    """The accumulating state of one projection run: the tool-call dedup, the concatenated
+    answer deltas, the last ``updates``-channel AIMessage text (the fallback final), and the
+    latest structured-output payload seen on the updates channel."""
+
+    def __init__(self, structured_tools: frozenset[str]) -> None:
+        self.structured_tools = structured_tools
+        self.dedup = _ToolCallDedup()
+        self.answer_parts: list[str] = []
+        self.last_update_text = ""
+        self.structured_response: Any = None
+
+
+def _project_update_events(update: dict[str, Any], projection: _Projection) -> Iterator[StreamEvent]:
+    """The step events one ``updates``-channel node update surfaces, keeping the latest
+    structured-output payload and the fallback final text on ``projection``."""
+    if update.get("structured_response") is not None:
+        projection.structured_response = update["structured_response"]
+    for message in _channel_value(update.get("messages")) or []:
+        if isinstance(message, AIMessage):
+            text = text_of(message)
+            if text:
+                projection.last_update_text = text
+            yield from _ai_message_events(message, projection.structured_tools, projection.dedup)
+        elif isinstance(message, ToolMessage):
+            tool_event = _tool_message_event(message, projection.structured_tools)
+            if tool_event is not None:
+                yield tool_event
+
+
+def _terminal_events(projection: _Projection, response_format: Any) -> Iterator[StreamEvent]:
+    """The terminal events a drained projection ends on: the assembled :class:`MessageFinal`
+    (the concatenated deltas, falling back to the last AIMessage text) and, when a structured
+    response was produced, the validated :class:`StructuredFinal`."""
+    final_text = "".join(projection.answer_parts).strip() or projection.last_update_text.strip()
+    if final_text:
+        yield MessageFinal(text=final_text)
+    if projection.structured_response is not None:
+        data = projection.structured_response
+        if response_format is not None:
+            data = validate_structured_output(data, response_format)
+        yield StructuredFinal(data=data)
+
+
 async def aproject_agent_events(
     agent: Any,
     agent_input: Any,
@@ -225,106 +370,28 @@ async def aproject_agent_events(
     across the whole run, falling back to the last ``updates``-channel AIMessage
     text when nothing streamed. ``asyncio.CancelledError`` propagates out unchanged.
     """
-    seen_tool_calls: set[str] = set()
-    synthetic_call_count = 0
-    answer_parts: list[str] = []
-    last_update_text = ""
-    structured_response: Any = None
     # The synthetic structured-output tool is routing mechanics, keyed by the same
     # name langchain routes it by; its call/result never surface as steps. The names
     # come from the strategy object the graph bound (identity, not re-derivation);
     # a caller that did not thread it falls back to the raw schema.
-    structured_tools = _structured_tool_names(
-        structured_strategy if structured_strategy is not None else response_format
+    projection = _Projection(
+        _structured_tool_names(structured_strategy if structured_strategy is not None else response_format)
     )
 
     async for item in agent.astream(agent_input, config, stream_mode=["updates", "messages"]):
-        # With a list ``stream_mode`` LangGraph yields ``(mode, chunk)``; anything
-        # that is not that pair is a bare single-mode chunk, treated as an update.
-        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
-            mode, chunk = item
-        else:
-            mode, chunk = "updates", item
+        mode, chunk = _split_stream_item(item)
 
         if mode == "messages":
-            # chunk == (AIMessageChunk, metadata): token deltas of the reply.
-            if not (isinstance(chunk, tuple) and len(chunk) == 2):
-                raise ValueError(f"messages-mode stream chunk is not a (message, metadata) pair: {chunk!r}")
-            message_chunk, _metadata = chunk
-            if isinstance(message_chunk, AIMessageChunk):
-                delta = text_of(message_chunk)
-                if delta:
-                    answer_parts.append(delta)
-                    yield MessageDelta(text=delta)
+            delta = _message_delta_text(chunk)
+            if delta:
+                projection.answer_parts.append(delta)
+                yield MessageDelta(text=delta)
             continue
 
         # mode == "updates": chunk == {node_name: {"messages": [...], ...}, ...}
-        if not isinstance(chunk, dict):
-            raise ValueError(f"updates-mode stream chunk is not a node->update mapping: {chunk!r}")
-        # A node update value is normally a channel-write mapping (or a list of them
-        # when a node writes the same channel twice). ``None`` (node wrote nothing)
-        # and the ``__interrupt__`` tuple (read from the snapshot by the resume path)
-        # are benign and skipped; any other shape raises.
-        normalized_updates: list[dict[str, Any]] = []
-        for node, update in chunk.items():
-            if update is None or node == "__interrupt__":
-                continue
-            for one in update if isinstance(update, list) else [update]:
-                if not isinstance(one, dict):
-                    raise ValueError(f"updates-mode node update for {node!r} is not a mapping: {one!r}")
-                normalized_updates.append(one)
-        for update in normalized_updates:
-            # Structured output surfaces on the updates channel; keep the latest.
-            if update.get("structured_response") is not None:
-                structured_response = update["structured_response"]
-            for message in _channel_value(update.get("messages")) or []:
-                if isinstance(message, AIMessage):
-                    reasoning = _reasoning_text(message)
-                    if reasoning:
-                        yield ReasoningStep(text=reasoning)
-                    text = text_of(message)
-                    if text:
-                        last_update_text = text
-                    for tool_call in getattr(message, "tool_calls", None) or []:
-                        if tool_call.get("name") in structured_tools:
-                            continue
-                        call_id = tool_call.get("id")
-                        if not call_id:
-                            # Synthesize an id when the provider omits one; the
-                            # ``__synthetic_tool_call_`` prefix is outside every
-                            # provider's id namespace and the counter keeps it unique.
-                            call_id = f"__synthetic_tool_call_{synthetic_call_count}"
-                            synthetic_call_count += 1
-                        if call_id in seen_tool_calls:
-                            continue
-                        seen_tool_calls.add(call_id)
-                        yield ToolCallStep(
-                            tool=tool_call.get("name", ""),
-                            args=tool_call.get("args", {}) or {},
-                            call_id=call_id,
-                        )
-                    usage = usage_event(message)
-                    if usage is not None:
-                        yield usage
-                elif isinstance(message, ToolMessage):
-                    if getattr(message, "name", "") in structured_tools:
-                        continue
-                    yield ToolResultStep(
-                        tool=getattr(message, "name", "") or "",
-                        call_id=getattr(message, "tool_call_id", "") or "",
-                        result=getattr(message, "content", ""),
-                        is_error=getattr(message, "status", None) == "error",
-                    )
+        for update in _normalize_node_updates(chunk):
+            for event in _project_update_events(update, projection):
+                yield event
 
-    final_text = "".join(answer_parts).strip()
-    if not final_text:
-        # No token-streamed answer: fall back to the last AIMessage text so the
-        # stream still ends with a MessageFinal.
-        final_text = last_update_text.strip()
-    if final_text:
-        yield MessageFinal(text=final_text)
-
-    if structured_response is not None:
-        if response_format is not None:
-            structured_response = validate_structured_output(structured_response, response_format)
-        yield StructuredFinal(data=structured_response)
+    for event in _terminal_events(projection, response_format):
+        yield event

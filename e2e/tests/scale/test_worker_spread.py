@@ -28,9 +28,9 @@ import json
 from collections.abc import Callable
 from dataclasses import replace
 
-from tai42_e2e import wait_for_async
+from tai42_e2e import StackConfig, StackResources, wait_for_async
 from tai42_e2e.manifests import build_core_stack
-from tai42_e2e.stack import StackConfig, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import Variants
 
 _WORKERS = 4

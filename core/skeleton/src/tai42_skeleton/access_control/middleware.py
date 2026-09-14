@@ -141,6 +141,21 @@ class ResourceGuardMiddleware:
             await self._deny(scope, receive, send, 403, "Forbidden: Route not configured", _REASON_RESOLVE_ERROR)
             return
 
+        await self._authorize_resolved(scope, receive, send, resource_ids, user, auth, path_to_check)
+
+    async def _authorize_resolved(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        resource_ids: list[str],
+        user,
+        auth,
+        path_to_check: str,
+    ):
+        """Decide a resolved resource-id set: CASE A (unknown route + super-admin
+        carve-out), CASE B (public deny-wins), CASE C (protected/auth), CASE D (scope
+        coverage), then run the app on success."""
         # CASE A: Unknown Route (403) — with a SUPER-ADMIN carve-out. A route with no
         # configured resource fails closed for every ordinary identity, but the admin
         # discriminator (a condition-free "*" policy that is not an owned key, stamped on

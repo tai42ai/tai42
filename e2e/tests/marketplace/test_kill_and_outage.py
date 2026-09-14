@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from tai42_e2e.marketplace import GAMMA_PACKAGE, GAMMA_REF, MarketplaceService
+from tai42_e2e.fixture_catalog import GAMMA_PACKAGE, GAMMA_REF
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.stack import TaiStack
 
 from ._market_support import api_tool_names, distribution_absent, installed_refs

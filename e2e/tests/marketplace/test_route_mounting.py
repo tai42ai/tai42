@@ -28,19 +28,17 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from tai42_e2e.httpapi import ApiClient
-from tai42_e2e.marketplace import (
+from tai42_e2e.catalog_seed import seed_epsilon_listing, seed_epsilon_v2_listing, seed_theta_listing
+from tai42_e2e.fixture_catalog import (
     EPSILON_PACKAGE,
     EPSILON_REF,
     EPSILON_V2_VERSION,
     THETA_PACKAGE,
     THETA_REF,
     FixtureArtifacts,
-    MarketplaceService,
-    seed_epsilon_listing,
-    seed_epsilon_v2_listing,
-    seed_theta_listing,
 )
+from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async

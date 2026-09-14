@@ -33,6 +33,12 @@ from tai42_skeleton.conversations.mode import ConversationModeStore
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.turn import accessors as accessors_module
+from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
+from tai42_skeleton.conversations.turn import record as record_module
+from tai42_skeleton.conversations.turn import schedule as schedule_module
+from tai42_skeleton.conversations.turn import target as target_module
+from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
 from .conftest import rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
@@ -182,12 +188,13 @@ def env(monkeypatch):
         thread_lease_module,
     ):
         monkeypatch.setattr(module, "client_ctx", make_record_client_ctx(fake))
-    monkeypatch.setattr(turn_module, "bind_execution_identity", _fake_bind)
+    monkeypatch.setattr(agent_turn_module, "bind_execution_identity", _fake_bind)
+    monkeypatch.setattr(tool_turn_module, "bind_execution_identity", _fake_bind)
 
     async def _allow(identity, agent_name, **kwargs):
         return None
 
-    monkeypatch.setattr(turn_module, "authorize_execution_agent_run", _allow)
+    monkeypatch.setattr(agent_turn_module, "authorize_execution_agent_run", _allow)
     return fake
 
 
@@ -198,24 +205,24 @@ def _store() -> ConversationRecordStore:
 async def _settle(timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
+        tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
         if not tasks:
             await asyncio.sleep(0)
             # Recompute after the yield: a task can appear between the two checks, so wait on
             # the fresh list (asyncio.wait raises on an empty set), and return only when it
             # is still empty.
-            tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
+            tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
             if not tasks:
                 return
         await asyncio.wait(tasks, timeout=0.05)
 
 
 def _wire(monkeypatch, manager: FakeManager, agent: Agent | None = None, channel: FakeChannel | None = None) -> None:
-    monkeypatch.setattr(turn_module, "get_conversations_manager", lambda: manager)
+    monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
     if agent is not None:
-        monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
+        monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     if channel is not None:
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
 
@@ -250,7 +257,7 @@ async def test_manual_channel_tool_appends_nothing_and_dispatches_no_tool(env, m
             dispatched.append((key, arguments))
             return "unexpected"
 
-    monkeypatch.setattr(turn_module, "_tools", lambda: _Tools())
+    monkeypatch.setattr(accessors_module, "_tools", lambda: _Tools())
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="manual", target_kind="tool")), channel=channel)
 
@@ -340,7 +347,7 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="agent"), line_b), agent)
     route = _channel_route(initial_mode="agent")
     person_thread = "bridge:@person:p9"
-    intake = turn_module._new_record(
+    intake = record_module._new_record(
         route=route,
         message_id="pm1",
         thread_id=person_thread,
@@ -352,7 +359,7 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
     )
     await _store().create_record(intake, intake_token="tok")
 
-    completed = await turn_module._complete_turn(route=route, intake=intake, text="help")
+    completed = await target_module._complete_turn(route=route, intake=intake, text="help")
 
     # The folded manual mode suppressed the turn; the memoryless target fed nothing and the
     # record is terminal silent, never an error.

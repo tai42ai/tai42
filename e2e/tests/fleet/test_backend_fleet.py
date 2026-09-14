@@ -39,11 +39,11 @@ import httpx
 import pytest
 from fastmcp.client.client import CallToolResult
 
-from tai42_e2e import wait_for_async
+from tai42_e2e import Infra, StackConfig, StackResources, wait_for_async
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import build_core_stack
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import BusWorker
 
 if TYPE_CHECKING:

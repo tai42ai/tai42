@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 import pytest
 
-from tai42_e2e import ports
+from tai42_e2e import StackConfig, StackResources, ports
 from tai42_e2e.manifests import (
     build_agents_redis_stack,
     build_agents_stack,
@@ -21,13 +21,13 @@ from tai42_e2e.manifests import (
     build_extensions_stack,
     build_minimal_stack,
     build_monitoring_stack,
-    build_payments_stack,
     build_replicas_stack,
     build_schedule_stack,
+    build_stripe_stack,
     build_studio_stack,
 )
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import StackConfig, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import Variants, resolve_variants
 
 # Every ``build_*_stack`` in ``manifests``: the multiproc-env sweep below asserts the
@@ -48,7 +48,7 @@ _ALL_BUILDERS: list[Callable[[StackResources, Variants], StackConfig]] = [
     build_extensions_stack,
     build_monitoring_stack,
     build_channel_stack,
-    build_payments_stack,
+    build_stripe_stack,
 ]
 
 

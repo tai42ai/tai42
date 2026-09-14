@@ -22,7 +22,7 @@ from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.states.db import STATES_COMPONENT, states_entry
-from tai42_skeleton.states.service import _validate_document
+from tai42_skeleton.states.schema import _validate_document
 from tai42_skeleton.states.store import PostgresStatesStore, make_cursor
 from tai42_skeleton.states.templates import compose_effective_schema, validate_template
 

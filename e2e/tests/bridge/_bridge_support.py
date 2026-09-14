@@ -21,10 +21,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from tai42_e2e.channel_stubs import FakeTwilio, FakeWhatsApp
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import BRIDGE_TWILIO_FROM
-from tai42_e2e.netfixtures import FakeTwilio, FakeWhatsApp, SignedInbound
+from tai42_e2e.provider_stub import SignedInbound
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 

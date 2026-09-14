@@ -119,28 +119,38 @@ class LocalSandboxExecHandle(SandboxExecHandle):
     async def kill(self) -> None:
         _kill_process_group(self._proc)
 
+    async def _drain_stream(
+        self,
+        reader: asyncio.StreamReader | None,
+        stream_name: str,
+        queue: asyncio.Queue[SandboxStreamChunk | None],
+    ) -> None:
+        """Drain one pipe into ``queue``, tallying its cumulative byte length."""
+        if reader is None:  # pragma: no cover - exec_start always opens both pipes
+            return
+        is_stdout = stream_name == "stdout"
+        while True:
+            chunk = await reader.read(_READ_CHUNK)
+            if not chunk:
+                break
+            if is_stdout:
+                self._stdout_len += len(chunk)
+            else:
+                self._stderr_len += len(chunk)
+            await queue.put(SandboxStreamChunk(stream="stdout" if is_stdout else "stderr", data=chunk))
+
+    async def _start_drain(self, queue: asyncio.Queue[SandboxStreamChunk | None]) -> None:
+        """Drain both pipes concurrently, await exit, then post the terminal sentinel."""
+        await asyncio.gather(
+            self._drain_stream(self._proc.stdout, "stdout", queue),
+            self._drain_stream(self._proc.stderr, "stderr", queue),
+        )
+        await self._proc.wait()
+        await queue.put(None)
+
     async def _stream_output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
         queue: asyncio.Queue[SandboxStreamChunk | None] = asyncio.Queue()
-
-        async def _reader(stream: asyncio.StreamReader | None, name: str) -> None:
-            if stream is None:  # pragma: no cover - exec_start always opens both pipes
-                return
-            while True:
-                chunk = await stream.read(_READ_CHUNK)
-                if not chunk:
-                    break
-                if name == "stdout":
-                    self._stdout_len += len(chunk)
-                else:
-                    self._stderr_len += len(chunk)
-                await queue.put(SandboxStreamChunk(stream="stdout" if name == "stdout" else "stderr", data=chunk))
-
-        async def _drive() -> None:
-            await asyncio.gather(_reader(self._proc.stdout, "stdout"), _reader(self._proc.stderr, "stderr"))
-            await self._proc.wait()
-            await queue.put(None)
-
-        driver = asyncio.ensure_future(_drive())
+        driver = asyncio.ensure_future(self._start_drain(queue))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout_seconds
         try:

@@ -15,25 +15,24 @@ from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
 if TYPE_CHECKING:
-    from tai42_skeleton.conversations.delivery import (
-        record_delivery_status,
-        redrive_pending,
-        start_delivery_sweep,
-        stop_delivery_sweep,
-    )
-    from tai42_skeleton.conversations.turn import accept, redrive_accepted, submit_api_message, submit_event
+    from tai42_skeleton.conversations.delivery import record_delivery_status, redrive_pending
+    from tai42_skeleton.conversations.delivery_sweep import start_delivery_sweep, stop_delivery_sweep
+    from tai42_skeleton.conversations.turn.api_door import submit_api_message
+    from tai42_skeleton.conversations.turn.event_door import submit_event
+    from tai42_skeleton.conversations.turn.intake import accept
+    from tai42_skeleton.conversations.turn.redrive import redrive_accepted
 
 # Lazy so importing a lightweight submodule (settings, the routing manager) does not drag
 # in the agent contract, the execution-identity authorizer and the HTTP client.
 _LAZY: dict[str, tuple[str, str]] = {
-    "accept": ("turn", "accept"),
-    "submit_api_message": ("turn", "submit_api_message"),
-    "submit_event": ("turn", "submit_event"),
+    "accept": ("turn.intake", "accept"),
+    "submit_api_message": ("turn.api_door", "submit_api_message"),
+    "submit_event": ("turn.event_door", "submit_event"),
     "record_delivery_status": ("delivery", "record_delivery_status"),
     "redrive_pending": ("delivery", "redrive_pending"),
-    "redrive_accepted": ("turn", "redrive_accepted"),
-    "start_delivery_sweep": ("delivery", "start_delivery_sweep"),
-    "stop_delivery_sweep": ("delivery", "stop_delivery_sweep"),
+    "redrive_accepted": ("turn.redrive", "redrive_accepted"),
+    "start_delivery_sweep": ("delivery_sweep", "start_delivery_sweep"),
+    "stop_delivery_sweep": ("delivery_sweep", "stop_delivery_sweep"),
 }
 
 

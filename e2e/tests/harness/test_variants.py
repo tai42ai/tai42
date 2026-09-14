@@ -9,8 +9,9 @@ import json
 
 import pytest
 
+from tai42_e2e import StackResources
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import InfraUnavailable, StackResources
+from tai42_e2e.topology import InfraUnavailable
 from tai42_e2e.variants import (
     BACKENDS,
     IDENTITIES,

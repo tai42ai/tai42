@@ -41,7 +41,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tai42_e2e import diagnostics, wait_for_async
+from tai42_e2e import Infra, diagnostics, wait_for_async
 from tai42_e2e.booting import allocate_and_build
 from tai42_e2e.manifests import (
     RESILIENCE_MCP_TITLE,
@@ -49,7 +49,7 @@ from tai42_e2e.manifests import (
     resilience_mcp_tool_name,
 )
 from tai42_e2e.ports import allocate_port
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e.stack import TaiStack
 
 # The connector-error envelope prefix the dispatch seam frames an unavailable-upstream
 # result with (``ConnectorAdapterSettings.error_prefix``); the JSON payload follows it.

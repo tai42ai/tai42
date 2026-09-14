@@ -6,6 +6,7 @@ from tai42_kit.utils.data.env_markers import (
     scalar_leaves,
     scan_env_marker_refs,
 )
+from tai42_kit.utils.data.form_text import render_form_text
 from tai42_kit.utils.data.jq_util import get_compiled_jq, run_jq_bounded, run_jq_first
 from tai42_kit.utils.data.json_schema_util import json_schema_to_pydantic_model
 from tai42_kit.utils.data.mcp_output_util import (
@@ -33,6 +34,7 @@ __all__ = [
     "load_manifest",
     "makefun_func_name",
     "merge_and_dump_manifest",
+    "render_form_text",
     "run_jq_bounded",
     "run_jq_first",
     "scalar_leaves",

@@ -34,8 +34,8 @@ import os
 import signal
 from collections.abc import Callable
 
-from tai42_e2e import wait_for_async
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e import Infra, wait_for_async
+from tai42_e2e.stack import TaiStack
 
 
 def _pid_alive(pid: int) -> bool:

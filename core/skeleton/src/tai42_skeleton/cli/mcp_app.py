@@ -163,26 +163,25 @@ def _prepare_uds_path(uds: str) -> None:
     logger.info("Removed stale Unix Domain Socket before binding: %s", uds)
 
 
-def run_mcp_app(
-    manifest_path: str,
+def _validate_serve_args(
     transport: str,
     host: str,
     port: int,
     workers: int,
-    uds: str | None = None,
-    stateless_http: bool = False,
-    uvicorn_kwargs: dict[str, Any] | None = None,
-) -> int:
-    # Configure logging for this served process: the multi-worker master and the
-    # in-process stdio/debug servers this dispatches to all run through here (the
-    # shipped ``tai serve`` reaches this via ``cli``, not ``main``). Uvicorn workers
-    # are separate processes that reconfigure via ``create_app``. ``force=True`` inside
-    # ``setup_logging`` keeps a repeat call idempotent.
-    setup_logging(logging_settings())
+    uds: str | None,
+    stateless_http: bool,
+    defaults: Any,
+) -> None:
+    """Refuse an unserveable argument set with a :class:`click.BadParameter`, and run
+    the worker-bus boot rules.
 
-    if uvicorn_kwargs is None:
-        uvicorn_kwargs = {}
-
+    Guards: workers ≥ 1; uds not on Windows; uds not with stdio; host/port not set
+    with stdio or uds; ``--stateless-http`` only on an http transport; more than one
+    worker refused for stdio and for a stateful transport without ``--stateless-http``.
+    Then the bus boot rules (fail loud, naming TAI_BUS_REDIS_URL) run BEFORE any
+    config-manager construction, so a busless shared-config boot refuses on the bus var
+    rather than on the provider connection. The workers rule lives only in this CLI —
+    an external process manager driving the ASGI factory bypasses it."""
     if workers < 1:
         raise click.BadParameter("Number of workers must be at least 1.", param_hint="'-w'/'--workers'")
 
@@ -192,7 +191,6 @@ def run_mcp_app(
     if uds and transport == "stdio":
         raise click.BadParameter("'--uds' cannot be used with '--transport stdio'.")
 
-    defaults = app_args_settings()
     if (transport == "stdio" or uds) and (host != defaults.host or port != defaults.port):
         raise click.BadParameter("Host and port should not be set when using 'stdio' transport or '--uds'.")
 
@@ -227,27 +225,69 @@ def run_mcp_app(
                 param_hint="'-w'/'--workers'",
             )
 
-    # Worker-bus boot rules (fail loud, naming TAI_BUS_REDIS_URL). Run BEFORE any
-    # config-manager construction below, so a shared-config busless boot refuses on the
-    # bus var rather than failing first on the provider connection. The workers rule
-    # lives only here in our CLI — an external process manager driving the ASGI
-    # factory with its own --workers bypasses it (a documented limitation); the
-    # shared-config and backend rules also run at the app_context seam.
     require_bus_for_shared_config()
     require_bus_for_workers(workers)
 
+
+def _stamp_serve_env(manifest_path: str, transport: str, stateless_http: bool) -> None:
+    """Publish the flags the uvicorn factory worker reads (a factory import string
+    carries no arguments): the manifest path, the transport, the stateless-http flag
+    (cleared when off so a prior run cannot leak in), and a per-run metrics id inherited
+    by every forked worker so the Prometheus multiproc-dir wipe fires once per run."""
     os.environ["TAI_MANIFEST_PATH"] = manifest_path
     os.environ["TAI_TRANSPORT"] = transport
-    # The worker uvicorn factory reads this env flag (a factory import string
-    # carries no arguments); clear it otherwise so a prior run cannot leak in.
     if stateless_http:
         os.environ["TAI_STATELESS_HTTP"] = "1"
     else:
         os.environ.pop("TAI_STATELESS_HTTP", None)
-    # Stamp a per-run id inherited by every forked worker, so the Prometheus
-    # multiproc-dir wipe fires once per run and is not skipped when consecutive
-    # runs happen to share a parent pid.
     os.environ["TAI_METRICS_RUN_ID"] = uuid.uuid4().hex
+
+
+def _build_serve_config(uds: str | None, host: str, port: int, uvicorn_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The uvicorn ``config_kwargs``: the transport defaults plus a settings-backed
+    graceful-shutdown timeout (inserted BEFORE the extra-arg update so a shipped
+    ``--timeout-graceful-shutdown`` still wins), then the uds-vs-tcp binding branch.
+    Feeds both the served (``uvicorn.run``) and debug (``uvicorn.Config``) paths."""
+    config_kwargs: dict[str, Any] = {
+        "ws": "wsproto",
+        "loop": "auto",
+        "http": "auto",
+        "timeout_graceful_shutdown": app_args_settings().timeout_graceful_shutdown,
+    }
+    config_kwargs.update(uvicorn_kwargs)
+    if uds:
+        _prepare_uds_path(uds)
+        logger.info(f"Binding to Unix Domain Socket: {uds}")
+        config_kwargs["uds"] = uds
+    else:
+        logger.info(f"Binding to TCP: {host}:{port}")
+        config_kwargs["host"] = host
+        config_kwargs["port"] = port
+    return config_kwargs
+
+
+def run_mcp_app(
+    manifest_path: str,
+    transport: str,
+    host: str,
+    port: int,
+    workers: int,
+    uds: str | None = None,
+    stateless_http: bool = False,
+    uvicorn_kwargs: dict[str, Any] | None = None,
+) -> int:
+    # Configure logging for this served process: the multi-worker master and the
+    # in-process stdio/debug servers this dispatches to all run through here (the
+    # shipped ``tai serve`` reaches this via ``cli``, not ``main``). Uvicorn workers
+    # are separate processes that reconfigure via ``create_app``. ``force=True`` inside
+    # ``setup_logging`` keeps a repeat call idempotent.
+    setup_logging(logging_settings())
+
+    if uvicorn_kwargs is None:
+        uvicorn_kwargs = {}
+
+    _validate_serve_args(transport, host, port, workers, uds, stateless_http, app_args_settings())
+    _stamp_serve_env(manifest_path, transport, stateless_http)
 
     # Publish the multiproc dir to the environment BEFORE importing anything that
     # pulls in ``prometheus_client``: the library freezes its value backend (mmap
@@ -268,27 +308,7 @@ def run_mcp_app(
     if transport == "stdio":
         return asyncio.run(run_stdio())
 
-    config_kwargs: dict[str, Any] = {
-        "ws": "wsproto",
-        "loop": "auto",
-        "http": "auto",
-        # Settings-backed default bounding uvicorn's wait for in-flight requests on
-        # SIGTERM so teardown always runs. Inserted BEFORE the extra-arg update so a
-        # shipped ``--timeout-graceful-shutdown`` CLI arg still wins. Feeds both the
-        # served (``uvicorn.run``) and debug (``uvicorn.Config``) paths.
-        "timeout_graceful_shutdown": app_args_settings().timeout_graceful_shutdown,
-    }
-    config_kwargs.update(uvicorn_kwargs)
-
-    if uds:
-        _prepare_uds_path(uds)
-        logger.info(f"Binding to Unix Domain Socket: {uds}")
-        config_kwargs["uds"] = uds
-
-    else:
-        logger.info(f"Binding to TCP: {host}:{port}")
-        config_kwargs["host"] = host
-        config_kwargs["port"] = port
+    config_kwargs = _build_serve_config(uds, host, port, uvicorn_kwargs)
 
     run_mode = (os.environ.get("TAI_RUN_MODE") or "").strip()
     if run_mode.lower() == "debug":

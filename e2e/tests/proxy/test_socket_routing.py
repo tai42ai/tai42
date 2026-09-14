@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 
 from tai42_e2e import wait_for_async
-from tai42_e2e.netfixtures import RecordingConnectProxy, TargetServer
+from tai42_e2e.recording_proxy import RecordingConnectProxy, TargetServer
 from tai42_e2e.stack import TaiStack
 
 

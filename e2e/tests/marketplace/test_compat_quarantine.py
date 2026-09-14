@@ -29,19 +29,14 @@ import pytest
 import yaml
 from psycopg.types.json import Json
 
-from tai42_e2e import diagnostics
+from tai42_e2e import Infra, StackResources, diagnostics
 from tai42_e2e.booting import allocate_and_build
+from tai42_e2e.catalog_seed import assert_zeta_ranges_bracket_running_contract, seed_zeta_listing
+from tai42_e2e.fixture_catalog import ZETA_INCOMPAT_VERSION, ZETA_REF, ZETA_TOOLS_MODULE
 from tai42_e2e.manifests import build_marketplace_quarantine_stack
-from tai42_e2e.marketplace import (
-    ZETA_INCOMPAT_VERSION,
-    ZETA_REF,
-    ZETA_TOOLS_MODULE,
-    MarketplaceService,
-    assert_zeta_ranges_bracket_running_contract,
-    seed_zeta_listing,
-)
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.pkgsource import BuiltWheel, FixturePackageIndex
-from tai42_e2e.stack import Infra, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
 
 from ._market_support import (
     api_tool_names,

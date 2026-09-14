@@ -15,9 +15,11 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from rq.exceptions import NoSuchJobError
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
@@ -333,3 +335,116 @@ class FakeAsyncRedis:
                 yield key
 
         return _gen()
+
+
+def _patch_redis(monkeypatch: pytest.MonkeyPatch, redis: Any) -> None:
+    """Make ``client_ctx(...)`` inside the tools module yield the fake."""
+    from tai42_backend_rq import tools
+
+    monkeypatch.setattr(tools, "client_ctx", make_client_ctx(redis))
+
+
+class FakeSyncRedis:
+    """Sync stand-in for the paths the scheduler-based tools run off-loop."""
+
+    def __init__(self, kv: dict[str, str] | None = None, zsets: dict[str, dict[str, float]] | None = None) -> None:
+        self.kv = kv or {}
+        self.zsets = zsets or {}
+
+    def exists(self, key: str) -> int:
+        return int(key in self.kv)
+
+    def delete(self, key: str) -> int:
+        return int(self.kv.pop(key, None) is not None)
+
+    def zscore(self, key: str, member: str) -> float | None:
+        return self.zsets.get(key, {}).get(member)
+
+
+class FakeJob:
+    def __init__(self, meta: dict[str, Any] | None = None, args: list | None = None, kwargs: dict | None = None):
+        self.meta = {"interval": 60} if meta is None else meta
+        self.args = args or []
+        self.kwargs = kwargs or {}
+        self.enqueued_at = None
+
+
+class _StatefulScheduledJob:
+    """A stored scheduled job carrying the fields the export tool reads."""
+
+    def __init__(self, job_id, func_name, args, kwargs, meta):
+        self.id = job_id
+        self.func_name = func_name
+        self.args = args
+        self.kwargs = kwargs
+        self.meta = meta
+        self.enqueued_at = None
+
+
+# Fixed stand-in for "the next time the cron fires" (the fake cannot evaluate
+# a cron expression).
+_FAKE_CRON_NEXT_TS = datetime(2032, 1, 1, tzinfo=UTC).timestamp()
+
+
+def _make_stateful_scheduler(store: dict[str, _StatefulScheduledJob], zset: dict[str, float] | None = None):
+    """Build a fake Scheduler class backed by ``store`` (name -> job).
+
+    ``schedule`` and ``cron`` mirror the real scheduler's create signatures,
+    storing the interval seconds or cron string in the job ``meta`` exactly as
+    the create path does, so an export reads back what an import wrote. When
+    ``zset`` is given, the create/cancel/change-time calls maintain it like the
+    real scheduler maintains its scheduled-jobs zset.
+    """
+    times = zset if zset is not None else {}
+
+    class FakeJobClass:
+        @staticmethod
+        def fetch(name, connection=None):
+            if name not in store:
+                raise NoSuchJobError(name)
+            return store[name]
+
+    class FakeScheduler:
+        job_class = FakeJobClass
+
+        def __init__(self, queue_name=None, connection=None):
+            self.connection = connection
+
+        def __contains__(self, name):
+            return name in store
+
+        def cancel(self, name):
+            store.pop(name, None)
+            times.pop(name, None)
+
+        def get_jobs(self, with_times=False):
+            if with_times:
+                return [(job, datetime(2030, 1, 1)) for job in store.values()]
+            return list(store.values())
+
+        def schedule(self, *, scheduled_time, func, args, kwargs, interval, id, meta, **rest):
+            store[id] = _StatefulScheduledJob(
+                id,
+                getattr(func, "__name__", "tool_execution"),
+                list(args),
+                dict(kwargs),
+                dict(meta),
+            )
+            times[id] = scheduled_time.timestamp()
+
+        def cron(self, cron_string, *, func, args, kwargs, id, meta, **rest):
+            store[id] = _StatefulScheduledJob(
+                id,
+                getattr(func, "__name__", "tool_execution"),
+                list(args),
+                dict(kwargs),
+                dict(meta),
+            )
+            times[id] = _FAKE_CRON_NEXT_TS
+
+        def change_execution_time(self, job, date_time):
+            if job.id not in times:
+                raise ValueError("Job not in scheduled jobs queue")
+            times[job.id] = date_time.timestamp()
+
+    return FakeScheduler

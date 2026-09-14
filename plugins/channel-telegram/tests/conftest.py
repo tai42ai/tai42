@@ -351,3 +351,15 @@ def make_inbound_request(
         return messages.pop(0)
 
     return Request(scope, receive)
+
+
+_TOKEN = "123456:test-token"
+
+
+def _records(*entries: tuple[str, str, str | None, str | None]) -> list[dict]:
+    """The stored option side-record shape (a list of ``StoredOption`` dumps) for the given
+    ``(callback_data, text, id, description)`` tuples — the JSON the reader parses back."""
+    return [
+        {"callback_data": cb, "text": text, "id": option_id, "description": description}
+        for cb, text, option_id, description in entries
+    ]

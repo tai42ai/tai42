@@ -27,13 +27,9 @@ import pytest
 import yaml
 
 from tai42_e2e import wait_for_async
-from tai42_e2e.marketplace import (
-    EPSILON_PACKAGE,
-    EPSILON_REF,
-    FixtureArtifacts,
-    MarketplaceService,
-    seed_epsilon_listing,
-)
+from tai42_e2e.catalog_seed import seed_epsilon_listing
+from tai42_e2e.fixture_catalog import EPSILON_PACKAGE, EPSILON_REF, FixtureArtifacts
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
 

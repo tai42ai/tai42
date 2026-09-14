@@ -11,330 +11,36 @@ Per-stack metrics-dir isolation rides on ``TMPDIR``: the skeleton's
 ``<tempfile.gettempdir()>/tai42_prometheus``, so pointing a process's ``TMPDIR`` at a
 per-run-family dir gives that family its own multiproc dir without the harness ever
 setting ``PROMETHEUS_MULTIPROC_DIR`` — stamping that env var is the entrypoint's own job.
-The harness asserts it never sets it (see :meth:`_child_env`)."""
+The harness asserts it never sets it (see :func:`tai42_e2e.child_env.child_env`).
+
+The process spawning, child-env construction, and readiness waits live in the
+:mod:`~tai42_e2e.spawning`, :mod:`~tai42_e2e.child_env`, and
+:mod:`~tai42_e2e.readiness` modules as free functions this class drives; the frozen
+config/resource/infra descriptions live in :mod:`~tai42_e2e.topology`."""
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
-import enum
 import shutil
-import sys
 import threading
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-import httpx
 import yaml
-from mcp.shared.exceptions import McpError
 
-from tai42_e2e import ports
-from tai42_e2e.httpapi import ApiClient, _is_reloading
+from tai42_e2e import child_env, ports, readiness, spawning
+from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.mcp import McpClient, mcp_url
 from tai42_e2e.metrics import Scrape, scrape
-from tai42_e2e.pg import PostgresAdmin
-from tai42_e2e.procs import ProcessHandle
-from tai42_e2e.redisx import RedisAdmin
-from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.waiting import wait_for, wait_for_async
+from tai42_e2e.topology import Infra, StackConfig, StackResources, Topology, _ProcSpec
+from tai42_e2e.waiting import wait_for
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping
+    from collections.abc import Mapping
 
+    from tai42_e2e.procs import ProcessHandle
     from tai42_e2e.tcprelay import TcpRelay
-    from tai42_e2e.variants import BrokerLease, BusWorker, Variants
-
-
-def venv_console_script(name: str) -> str:
-    """The absolute path to a console script in the active venv (next to the running
-    interpreter). An absolute command needs no PATH in a child's launch env, so a stdio
-    child resolves it regardless of how its launcher shapes that env. A missing script is
-    a mis-provisioned env (the package's wheel is not installed), caught loudly here
-    rather than as a cryptic child-spawn failure at boot."""
-    candidate = Path(sys.executable).parent / name
-    if not candidate.exists():
-        raise RuntimeError(f"console script {name!r} not found next to the interpreter at {candidate}")
-    return str(candidate)
-
-
-def tai_bin() -> str:
-    """The ``tai`` console script from the active venv — the real entrypoint
-    production runs, never ``python -c``."""
-    return venv_console_script("tai")
-
-
-def uvicorn_bin() -> str:
-    """The ``uvicorn`` console script from the active venv — the server a user runs
-    to serve their own embed host app. Ships in the skeleton dep tree."""
-    return venv_console_script("uvicorn")
-
-
-def spawn_expect_refusal(argv: list[str], env: dict[str, str], cwd: str | Path, *, timeout: float = 20.0) -> str:
-    """Spawn a process DIRECTLY (outside the stack readiness framework) and require
-    it to REFUSE to boot — a nonzero exit within ``timeout`` — returning its stderr
-    so the boot-rules scenarios can assert the refused setting is named on it.
-
-    The boot-refusal scenarios drive ``tai serve``/``tai backend`` and a
-    factory-string ``uvicorn`` against a bus-requiring config with no
-    ``TAI_BUS_REDIS_URL``: the process must exit nonzero, naming the setting. A
-    process that SERVES instead of refusing never exits — it (and its worker process
-    group) is killed and this raises loudly, since a boot that should have been
-    refused is itself the failure."""
-    import os
-    import signal
-    import subprocess
-
-    proc = subprocess.Popen(
-        argv,
-        env=env,
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        _, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        # It served instead of refusing: reap the whole process group (a serve
-        # master forks worker children) and fail loudly.
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait(timeout=5.0)
-        raise RuntimeError(f"process did not refuse to boot within {timeout}s (it served): {argv!r}") from exc
-    if proc.returncode == 0:
-        raise RuntimeError(f"process was expected to refuse to boot but exited 0: {argv!r}\nstderr:\n{stderr}")
-    return stderr
-
-
-async def _probe_tolerating_reloading[T](open_and_call: Callable[[], Awaitable[T]]) -> T | None:
-    """Await a boot/restart wait probe that opens an MCP client, returning ``None`` when
-    it raises the reload gate's retriable ``reloading`` envelope so the enclosing wait
-    keeps polling within its own deadline; any other error propagates loudly.
-
-    A worker still holding its boot/reload self-resync gate rejects the MCP initialize
-    handshake with that envelope (a ``503`` the authenticated request path answers while
-    the identity registry is mid-rebuild). The fastmcp client raises ``HTTPStatusError``
-    from ``__aenter__`` — before a session exists — so the tool-call ``retry_on_reloading``
-    path never sees it, and the reloading-vs-real decision is made here on the raised
-    response through the one canonical :func:`_is_reloading` check. ``open_and_call`` must
-    never itself return ``None``, so a ``None`` result unambiguously means "still reloading"."""
-    try:
-        return await open_and_call()
-    except httpx.HTTPStatusError as exc:
-        if _is_reloading(exc.response):
-            return None
-        raise
-    except McpError as exc:
-        # A worker that swaps its epoch mid-probe (a reload / targeted deregister settling)
-        # terminates the just-opened MCP session — the fresh epoch serves a NEW
-        # session-id space, so the session opened against the old epoch is retired and the
-        # SDK raises "Session terminated". Treat it as "not settled yet" so the enclosing
-        # wait re-polls on a fresh session against the new epoch (exactly what a real client
-        # does — re-initialise). Any other MCP error propagates loudly.
-        if "Session terminated" in str(exc):
-            return None
-        raise
-
-
-class InfraUnavailable(RuntimeError):
-    """The shared infra (Redis / Postgres / a backend's broker) could not be
-    reached, or a variant selection is unknown; carries the compose hint. Raised
-    at session start so a misconfiguration fails loudly, never cryptically
-    mid-suite."""
-
-
-class Topology(enum.Enum):
-    """How the ``tai serve`` fleet is shaped.
-
-    ``MULTIWORKER`` is one master with ``--workers N`` on one port (shared
-    run-id + mmap dir) — the model the metrics round-trip and import-order
-    probes need. ``REPLICAS`` is two ``--workers 1`` masters on two ports
-    (shared config/Redis/PG, per-replica metrics dirs) — deterministic A/B
-    addressing for every cross-worker and Redis-contention test."""
-
-    MULTIWORKER = "multiworker"
-    REPLICAS = "replicas"
-
-
-@dataclass(frozen=True)
-class Infra:
-    """Shared, session-scoped services and their admin clients, plus the one
-    variant set this process runs under (resolved once at ``connect_infra``)."""
-
-    settings: HarnessSettings
-    redis: RedisAdmin
-    pg: PostgresAdmin
-    variants: Variants
-    # The module-capable checkpoint Redis admin (RediSearch + RedisJSON), present
-    # only when ``TAI_E2E_CHECKPOINT_REDIS_URL`` is set. The langgraph redis
-    # checkpoint/store agents leg allocates its own logical DB here; ``None`` means
-    # that leg's stacks skip.
-    checkpoint_redis: RedisAdmin | None = None
-
-
-@dataclass(frozen=True)
-class StackResources:
-    """The per-stack coordinates a manifest/env builder needs: the allocated
-    Redis logical DB, the Postgres database name, the on-disk storage root, and
-    optional harness-server URLs the SUT points at."""
-
-    redis_idx: int
-    redis_url: str
-    probe_redis_url: str
-    pg_host: str
-    pg_port: int
-    pg_user: str
-    pg_password: str
-    pg_db: str
-    storage_root: str
-    # The app-owned worker bus coordinates. The bus Redis is reached through its
-    # OWN endpoint (independent of ``redis_url``, so a bus-outage scenario can sever
-    # the bus without severing auth/feature stores), and the namespace is unique
-    # per stack (bus pub/sub channels + presence keys are server-global — the
-    # per-stack logical-db isolation does NOT isolate them). Always filled by
-    # ``allocate_resources``; the empty defaults exist only for the manifest-render
-    # sentinels that never boot a bus.
-    bus_redis_url: str = ""
-    bus_namespace: str = ""
-    # The per-stack broker: the celery variant's isolated vhost AMQP URL and the
-    # lease that reaps it in teardown. ``None`` for backends that ride on Redis.
-    broker_url: str | None = None
-    broker_lease: BrokerLease | None = None
-    # The per-stack logical DB on the module-capable checkpoint Redis (the
-    # langgraph redis checkpoint/store provider's home). ``None`` on every stack
-    # that runs the in-process ``memory`` provider instead.
-    checkpoint_redis_idx: int | None = None
-    checkpoint_redis_url: str | None = None
-    llm_base_url: str | None = None
-    gh_webhook_secret: str | None = None
-    # The Stripe payments profile's three coordinates. ``stripe_webhook_secret`` is the
-    # HMAC secret the topic's ``stripe`` verifier reads and the test signs deliveries with
-    # (held test-side, so it cannot be minted inside the manifest builder the way a
-    # channel verify-token is). ``bridge_callback_secret`` is the one value BOTH the
-    # callback door's ``shared_secret`` verifier and the bridge tool read. ``stripe_stub_base``
-    # is the in-process ``FakeStripe`` origin the tools' ``STRIPE_API_BASE`` points at — a
-    # resource because the stub's port is allocated at fixture time and the builder only
-    # reads it (the two-fixture wiring ``channel_stack`` uses for its provider stubs).
-    stripe_webhook_secret: str | None = None
-    bridge_callback_secret: str | None = None
-    stripe_stub_base: str | None = None
-    # The built Studio dist the skeleton serves (STUDIO_DIST_PATH) for the
-    # browser-e2e profile.
-    studio_dist_path: str | None = None
-    connectors_kek: str | None = None
-    connectors_state_hmac_key: str | None = None
-    idp_base_url: str | None = None
-    # The in-process signing OIDC issuer's origin (the extended ``OAuthIdp``'s
-    # ``base_url``) the oidc stack points its accounts-oidc / identity-oidc issuer
-    # config at. ``None`` on every stack that runs no OIDC provider.
-    oidc_issuer_base_url: str | None = None
-    langfuse_host: str | None = None
-    langfuse_public_key: str | None = None
-    langfuse_secret_key: str | None = None
-    # The in-process channel-provider stub origins the channel profile points the
-    # plugins' outbound API base URLs at (``CHANNEL_<X>_API_BASE_URL``). ``None``
-    # on every non-channel stack.
-    telegram_api_base_url: str | None = None
-    slack_api_base_url: str | None = None
-    twilio_api_base_url: str | None = None
-    whatsapp_api_base_url: str | None = None
-    # The harness-run marketplace registry's public base URL the skeleton's
-    # marketplace client points at (``MARKETPLACE_URL``), and the fixture package
-    # index's origin the installer resolves wheels from (``PIP_INDEX_URL`` is
-    # ``{package_index_url}/simple/``). ``None`` on every non-marketplace stack.
-    marketplace_url: str | None = None
-    package_index_url: str | None = None
-
-
-@dataclass(frozen=True)
-class StackConfig:
-    """A frozen description of one stack: its shape, the rendered manifest, the
-    feature env map, and which optional processes to run. Profiles in
-    :mod:`tai42_e2e.manifests` are named presets of this."""
-
-    name: str
-    topology: Topology
-    manifest: dict
-    env: dict[str, str]
-    # A verbatim manifest document seeded to disk BYTE-for-byte instead of
-    # ``yaml.safe_dump(manifest)`` — the comment-preservation scenario seeds a
-    # ruamel-normalized commented manifest this way (``safe_dump`` cannot carry
-    # comments). ``None`` uses the dict-dump path.
-    raw_manifest: str | None = None
-    workers: int = 2
-    run_backend: bool = True
-    run_metrics: bool = True
-    auth: bool = False
-    # Serve the SUT as a user-owned embed host (uvicorn running the host FastAPI
-    # app in ``tai42_e2e_fixtures.embed_main`` that mounts ``create_app()``) instead
-    # of the ``tai serve`` fleet. One app process, in-process metrics mode; a
-    # backend worker still joins the app-owned worker bus.
-    embed: bool = False
-    # Opt-in SUPERVISED shape: stamp ``TAI_SUPERVISED=harness`` into every child's env
-    # (so the SUT resolves a recycle-supported shape, ``recycle_policy.detect_shape``) AND
-    # run a respawn-on-exit supervisor that re-launches a serve/backend process the instant
-    # it self-exits — the external supervisor a graceful recycle self-exit assumes (the
-    # applier's own deferred self-exit and each orchestrated sibling recycle). Off by default
-    # (bare): a recycle-class profile apply is then refused at the API, which is itself a test.
-    supervised: bool = False
-    # Per-process CWD overrides, keyed by process name (the shared-dir test launches
-    # the three kinds from three different working directories).
-    cwd_overrides: dict[str, str] = field(default_factory=dict)
-    # Env keys that must carry this stack's own loopback app origins
-    # (``http://host:port`` for every app port, comma-joined). The origins are
-    # only known after boot allocates the ports, so a profile names the keys and
-    # the stack fills them in at boot — e.g. the connectors profile pins
-    # ``CONNECTORS_REDIRECT_URI_ALLOWLIST`` to the origins the OAuth connect flow
-    # signs from ``request.base_url``.
-    origin_allowlist_env_keys: list[str] = field(default_factory=list)
-    # Env keys that must carry the SINGLE replica-B loopback origin
-    # (``http://host:port_b``), only known after boot allocates the ports — the
-    # channel profile pins ``INTERACTIONS_PUBLIC_BASE_URL`` (so an ask minted on
-    # replica A is answered through the callback door on replica B) and the
-    # telegram ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL`` (the setWebhook URL) at B.
-    # Only meaningful on a REPLICAS stack (two app ports).
-    replica_b_origin_env_keys: list[str] = field(default_factory=list)
-    # The REAL-inbound public-URL fill (empty on every mock leg). A real inbound
-    # leg lists here the public-base-URL env keys (e.g. ``INTERACTIONS_PUBLIC_BASE_URL``,
-    # ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``, ``TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL``)
-    # that must carry ``E2E_PUBLIC_BASE_URL`` — the origin the vendor calls back on —
-    # instead of the replica-B loopback origin (loopback is unreachable from the
-    # vendor). Keys named here OVERRIDE the loopback fill, so a leg opts a key into
-    # public mode by adding it here without touching ``replica_b_origin_env_keys``.
-    # ``public_base_url`` must be set (from ``E2E_PUBLIC_BASE_URL``) whenever this is
-    # non-empty; a real inbound leg refuses to start otherwise.
-    public_base_url_env_keys: list[str] = field(default_factory=list)
-    public_base_url: str | None = None
-    # The REAL-inbound public-origin allowlist fill (empty on every mock leg). Mirrors
-    # ``public_base_url_env_keys`` for the ``origin_allowlist_env_keys`` fill site: a real
-    # connector leg lists here the allowlist keys (e.g. ``CONNECTORS_REDIRECT_URI_ALLOWLIST``)
-    # that must carry the PUBLIC origin (``E2E_PUBLIC_BASE_URL``) — the origin the vendor
-    # redirects the OAuth consent back to — instead of this stack's loopback app origins
-    # (loopback is unreachable from the vendor). Keys named here OVERRIDE the loopback fill;
-    # every key must also appear in ``origin_allowlist_env_keys``. ``public_base_url`` must be
-    # set whenever this is non-empty; the leg refuses to start otherwise.
-    public_allowlist_env_keys: list[str] = field(default_factory=list)
-    # Env keys that must carry THIS stack's own single app origin (``http://host:port``),
-    # only known after boot — the single-port (MULTIWORKER) analogue of
-    # ``replica_b_origin_env_keys``. The studio profile pins ``INTERACTIONS_PUBLIC_BASE_URL``
-    # here so an ask_user callback ticket it mints is reachable back on its own origin (the
-    # web channel's answer door FORWARDS the answer to that callback URL — a loopback
-    # origin resolves, an off-host placeholder does not). Filled from the first app port.
-    app_origin_env_keys: list[str] = field(default_factory=list)
-
-
-@dataclass
-class _ProcSpec:
-    """Everything needed to (re)spawn one process — kept so ``restart`` can
-    rebuild an identical handle."""
-
-    name: str
-    argv: list[str]
-    cwd: Path
-    env: dict[str, str]
-    log_path: Path
+    from tai42_e2e.variants import BusWorker
 
 
 class TaiStack:
@@ -420,15 +126,15 @@ class TaiStack:
             manifest_path.write_text(self.config.raw_manifest, encoding="utf-8")
         else:
             manifest_path.write_text(yaml.safe_dump(self.config.manifest, sort_keys=False), encoding="utf-8")
-        self._render_env_file()
+        child_env.render_env_file(self)
 
         # One run family per metrics dir. REPLICAS: replica A + backend + metrics
         # share family "a"; replica B is family "b" with no scraper.
-        family_dirs = self._make_family_dirs(n_app)
+        family_dirs = spawning.make_family_dirs(self.root, n_app)
         self.metrics_dir = str(Path(family_dirs[0]) / "tai42_prometheus")
 
-        self._spawn_all(manifest_path, family_dirs)
-        self._wait_ready()
+        spawning.spawn_all(self, manifest_path, family_dirs)
+        readiness.wait_ready(self)
         # Only after the fleet is ready: a supervised stack now respawns any serve/backend
         # process that self-exits (a recycle). Before readiness, an early exit is a boot
         # failure surfaced by ``_early_exit_detail``, never a recycle — so the supervisor
@@ -443,7 +149,20 @@ class TaiStack:
         # it never re-launches a process this teardown is about to reap (a leak).
         self._stop_supervisor()
         errors: list[str] = []
-        # Stop every process group (SIGTERM -> SIGKILL) and assert reaped.
+        errors.extend(self._reap_processes())
+        errors.extend(self._release_ports())
+        errors.extend(self._release_infra())
+        errors.extend(self._reap_relays())
+
+        self._procs.clear()
+        if not self.infra.settings.keep_stacks:
+            shutil.rmtree(self.root, ignore_errors=True)
+        if errors:
+            raise RuntimeError("stack teardown found leaks:\n  " + "\n  ".join(errors))
+
+    def _reap_processes(self) -> list[str]:
+        """Stop every process group (SIGTERM -> SIGKILL) and assert each was reaped."""
+        errors: list[str] = []
         for handle in list(self._procs.values()):
             try:
                 handle.terminate()
@@ -451,17 +170,25 @@ class TaiStack:
                 errors.append(f"terminate {handle.name}: {exc!r}")
             if handle.is_running():
                 errors.append(f"process {handle.name} still running after SIGKILL (leak)")
-        # Assert every port was released. A SIGKILL closes the listen socket
-        # asynchronously (uvicorn workers hold the shared fd and die a beat after
-        # the master is reaped), so poll briefly before declaring a real leak.
+        return errors
+
+    def _release_ports(self) -> list[str]:
+        """Assert every allocated port was released. A SIGKILL closes the listen socket
+        asynchronously (uvicorn workers hold the shared fd and die a beat after the
+        master is reaped), so poll briefly before declaring a real leak."""
+        errors: list[str] = []
         for port in self._allocated_ports:
             try:
                 wait_for(lambda p=port: ports.is_free(p), deadline=5.0, message=f"port {port} never freed")
             except TimeoutError:
                 errors.append(f"port {port} still bound after teardown (leak)")
             ports.release_port(port)
-        # Drop the stack DB, release the Redis index, and reap the broker lease
-        # (a leaked vhost is a teardown error, same as a leaked database).
+        return errors
+
+    def _release_infra(self) -> list[str]:
+        """Drop the stack DB, release the Redis index(es), and reap the broker lease
+        (a leaked vhost is a teardown error, same as a leaked database)."""
+        errors: list[str] = []
         try:
             self.infra.pg.drop_stack_db(self.resources.pg_db)
         except Exception as exc:
@@ -477,8 +204,12 @@ class TaiStack:
                 self.resources.broker_lease.release()
             except Exception as exc:
                 errors.append(f"release broker vhost {self.resources.broker_lease.vhost}: {exc!r}")
-        # Stop every attached relay and assert it leaked no listener/thread — the
-        # relay is per-stack harness machinery, reaped like a port or a vhost.
+        return errors
+
+    def _reap_relays(self) -> list[str]:
+        """Stop every attached relay and assert it leaked no listener/thread — the
+        relay is per-stack harness machinery, reaped like a port or a vhost."""
+        errors: list[str] = []
         for relay in self._relays:
             try:
                 relay.stop()
@@ -487,379 +218,18 @@ class TaiStack:
             else:
                 if relay.is_leaked():
                     errors.append("relay still holds a listener/connection/thread after stop (leak)")
+        return errors
 
-        self._procs.clear()
-        if not self.infra.settings.keep_stacks:
-            shutil.rmtree(self.root, ignore_errors=True)
-        if errors:
-            raise RuntimeError("stack teardown found leaks:\n  " + "\n  ".join(errors))
-
-    # ---- spawning --------------------------------------------------------
-
-    def _tai_bin(self) -> str:
-        return tai_bin()
-
-    def _uvicorn_bin(self) -> str:
-        return uvicorn_bin()
-
-    def _make_family_dirs(self, n_app: int) -> list[str]:
-        dirs: list[str] = []
-        for i in range(n_app):
-            family = self.root / f"tmp-{chr(ord('a') + i)}"
-            (family / "tai42_prometheus").mkdir(parents=True, exist_ok=True)
-            dirs.append(str(family))
-        return dirs
-
-    def _child_env(self, tmpdir: str, cwd_override: str | None) -> dict[str, str]:
-        """A clean child env built from scratch: PATH/HOME/venv-bin, the stack's feature
-        env, and TMPDIR for the run-family metrics dir. Never an ``os.environ`` passthrough,
-        and never ``PROMETHEUS_MULTIPROC_DIR`` (the entrypoint stamps that itself)."""
-        import os
-
-        venv_bin = str(Path(sys.executable).parent)
-        env: dict[str, str] = {
-            "PATH": os.pathsep.join([venv_bin, "/usr/local/bin", "/usr/bin", "/bin"]),
-            "HOME": os.environ.get("HOME", str(self.root)),
-            "TMPDIR": tmpdir,
-            "TAI_CONFIG_MODE": "file",
-            "TAI_CONFIG_DIR_PATH": str(self._config_dir),
-            "TAI_MANIFEST_PATH": str(self._config_dir / "manifest.yml"),
-        }
-        env.update(self.config.env)
-        env.update(self._origin_allowlist_env())
-        env.update(self._replica_b_origin_env())
-        env.update(self._app_origin_env())
-        # The worker bus env lands LAST so its mandatory URL + namespace win; the bus
-        # TIMING knobs are pinned through config.env, which this never touches.
-        env.update(self._bus_env())
-        # The supervision marker is a PROCESS-env-only shape signal (never written to
-        # ``.env``): it is X-band, so a profile may not carry it, and keeping it out of the
-        # store means a profile built from the stored env never trips the X-band refusal —
-        # yet ``detect_shape`` reads it off ``os.environ`` on every (re)spawned child.
-        if self.config.supervised:
-            env["TAI_SUPERVISED"] = "harness"
-        if "PROMETHEUS_MULTIPROC_DIR" in env:
-            raise RuntimeError(
-                "the harness must never set PROMETHEUS_MULTIPROC_DIR in a child env; "
-                "the metrics dir is controlled via TMPDIR so the entrypoint stamps it"
-            )
-        # A per-process CWD override still needs load_dotenv to find .env, so the env
-        # carries the config dir explicitly.
-        _ = cwd_override
-        return env
-
-    def _spawn(self, spec: _ProcSpec) -> None:
-        handle = ProcessHandle(name=spec.name, argv=spec.argv, cwd=spec.cwd, env=spec.env, log_path=spec.log_path)
-        self._specs[spec.name] = spec
-        self._procs[spec.name] = handle
-        handle.start()
-
-    def _spawn_all(self, manifest_path: Path, family_dirs: list[str]) -> None:
-        tai = self._tai_bin()
-        if self.config.embed:
-            self._spawn_embed_host(family_dirs[0])
-        else:
-            self._spawn_serve_fleet(tai, manifest_path, family_dirs)
-
-        # The backend worker + metrics server join run-family "a".
-        if self.config.run_backend:
-            name = "backend"
-            cwd_override = self.config.cwd_overrides.get(name)
-            cwd = Path(cwd_override) if cwd_override else self._config_dir
-            self._spawn(
-                _ProcSpec(
-                    name=name,
-                    argv=[tai, "backend", "worker", "--manifest-path", str(manifest_path)],
-                    cwd=cwd,
-                    env=self._child_env(family_dirs[0], cwd_override),
-                    log_path=self._logs_dir / "backend.log",
-                )
-            )
-            # Extra backend processes the variant requires alongside the worker
-            # (celery's RedBeat / rq's rq-scheduler; arq needs none). Each is a
-            # full ``tai backend <args>`` process with its own ProcessHandle, log,
-            # and teardown leak-reap — an early exit aborts boot loudly through the
-            # shared ``_early_exit_detail`` readiness check, exactly like the worker.
-            for extra_args in self.infra.variants.backend.extra_backend_processes():
-                extra_name = f"backend-{extra_args[0]}"
-                extra_cwd = self.config.cwd_overrides.get(extra_name)
-                self._spawn(
-                    _ProcSpec(
-                        name=extra_name,
-                        argv=[tai, "backend", *extra_args, "--manifest-path", str(manifest_path)],
-                        cwd=Path(extra_cwd) if extra_cwd else self._config_dir,
-                        env=self._child_env(family_dirs[0], extra_cwd),
-                        log_path=self._logs_dir / f"{extra_name}.log",
-                    )
-                )
-        if self.config.run_metrics:
-            assert self.metrics_port is not None
-            name = "metrics"
-            cwd_override = self.config.cwd_overrides.get(name)
-            cwd = Path(cwd_override) if cwd_override else self._config_dir
-            self._spawn(
-                _ProcSpec(
-                    name=name,
-                    argv=[tai, "metrics", "--host", self.host, "--port", str(self.metrics_port)],
-                    cwd=cwd,
-                    env=self._child_env(family_dirs[0], cwd_override),
-                    log_path=self._logs_dir / "metrics.log",
-                )
-            )
-
-    def _spawn_serve_fleet(self, tai: str, manifest_path: Path, family_dirs: list[str]) -> None:
-        """Spawn the ``tai serve`` fleet — one master per app port, honouring the
-        stack's topology (MULTIWORKER: ``--workers N`` on one port; REPLICAS: two
-        one-worker masters on two ports)."""
-        n_app = len(self.app_ports)
-        for i, port in enumerate(self.app_ports):
-            name = "serve" if n_app == 1 else f"serve-{chr(ord('a') + i)}"
-            workers = self.config.workers if self.config.topology is Topology.MULTIWORKER else 1
-            argv = [
-                tai,
-                "serve",
-                "--host",
-                self.host,
-                "--port",
-                str(port),
-                "--workers",
-                str(workers),
-                "--manifest-path",
-                str(manifest_path),
-            ]
-            # Multiple workers on the stateful http transport pin each MCP session
-            # to the worker that created it, which the skeleton refuses to start;
-            # stateless http is exactly what a MULTIWORKER stack wants (requests
-            # spread across workers so cross-worker seams and the metrics
-            # round-trip are exercised).
-            if workers > 1:
-                argv.append("--stateless-http")
-            cwd_override = self.config.cwd_overrides.get(name)
-            cwd = Path(cwd_override) if cwd_override else self._config_dir
-            self._spawn(
-                _ProcSpec(
-                    name=name,
-                    argv=argv,
-                    cwd=cwd,
-                    env=self._child_env(family_dirs[i], cwd_override),
-                    log_path=self._logs_dir / f"{name}.log",
-                )
-            )
-
-    def _spawn_embed_host(self, family_dir: str) -> None:
-        """Spawn the user-owned embed host: ``uvicorn`` serving the host FastAPI
-        app in ``tai42_e2e_fixtures.embed_main`` that mounts ``create_app()``. One process
-        on the single app port; the clean child env carries no ``PROMETHEUS_MULTIPROC_DIR``,
-        so the mounted app comes up in in-process metrics mode — the surface the embed
-        suite scrapes."""
-        name = "embed"
-        port = self.app_ports[0]
-        cwd_override = self.config.cwd_overrides.get(name)
-        cwd = Path(cwd_override) if cwd_override else self._config_dir
-        argv = [
-            self._uvicorn_bin(),
-            "tai42_e2e_fixtures.embed_main:app",
-            "--host",
-            self.host,
-            "--port",
-            str(port),
-        ]
-        self._spawn(
-            _ProcSpec(
-                name=name,
-                argv=argv,
-                cwd=cwd,
-                env=self._child_env(family_dir, cwd_override),
-                log_path=self._logs_dir / f"{name}.log",
-            )
-        )
-
-    # ---- readiness -------------------------------------------------------
-
-    def _wait_ready(self) -> None:
-        deadline = self.infra.settings.boot_timeout
-        for port in self.app_ports:
-            self._wait_http_ok(f"http://{self.host}:{port}/health", deadline, "app health")
-        if self.config.run_metrics:
-            assert self.metrics_port is not None
-            self._wait_http_ok(f"http://{self.host}:{self.metrics_port}/metrics", deadline, "metrics")
-        self._wait_fleet_converged(deadline)
-
-    def _wait_fleet_converged(self, deadline: float) -> None:
-        """Block until the whole expected fleet is on the bus AND every serve worker
-        has left its boot-time self-resync reload gate, so a test acting the instant
-        the stack fixture returns never races an incomplete fleet or a still-held gate.
-
-        A busless single-worker stack joins no bus — no presence keys, no on-ready
-        self-resync — so HTTP health is its full readiness and this returns at once."""
-        if not self._needs_bus():
-            return
-        self._wait_full_census(deadline)
-        self._drain_boot_gate(deadline)
-
-    def _expected_serve_workers(self) -> int:
-        """How many ``serve``-kind presence rows the booted fleet registers: a
-        REPLICAS stack runs one worker per app port, a MULTIWORKER master runs
-        ``--workers N`` on its single port, and the embed host is one app process
-        (a MULTIWORKER shape with ``workers=1``)."""
-        if self.config.topology is Topology.REPLICAS:
-            return len(self.app_ports)
-        return self.config.workers
-
-    def _serve_workers_on_port(self) -> int:
-        """The serve-worker count behind a single app port — the whole MULTIWORKER
-        ``--workers N`` master, or the lone worker of one REPLICAS master."""
-        if self.config.topology is Topology.REPLICAS:
-            return 1
-        return self.config.workers
-
-    def _wait_full_census(self, deadline: float) -> None:
-        """Poll the bus census until the FULL expected fleet is present — every
-        serve worker the topology spawns plus the backend worker when a backend is
-        registered — so readiness never returns on a half-formed fleet."""
-        expected_serve = self._expected_serve_workers()
-
-        def probe() -> bool:
-            early = self._early_exit_detail()
-            if early is not None:
-                raise RuntimeError(f"fleet census: {early}")
-            workers = self.census()
-            if sum(1 for w in workers if w.kind == "serve") < expected_serve:
-                return False
-            return not (self.config.run_backend and not any(w.kind == "backend" for w in workers))
-
-        want = f"{expected_serve} serve workers" + (" + backend" if self.config.run_backend else "")
-        wait_for(probe, deadline=deadline, message=f"the worker-bus census never reached the full fleet ({want})")
-
-    def _drain_boot_gate(self, deadline: float) -> None:
-        """Drive a gated probe on every app port until it answers non-``reloading``,
-        so the boot-time self-resync gate has cleared fleet-wide before the fixture
-        returns. A single-port MULTIWORKER master spreads stateless requests across its
-        workers, so the probe runs until every worker pid has answered clear; a
-        REPLICAS port owns one worker, so one clear answer per port suffices."""
-        self._run_readiness_coro(self._drain_gate_coro(self.app_ports, deadline))
-
-    async def _drain_gate_coro(self, app_ports: list[int], deadline: float) -> None:
-        # A profile that carries no ``e2e_worker_info`` probe never fires an immediate
-        # gated tool call in its tests, so its gate needs no draining here — the
-        # full-census wait is that profile's convergence.
-        async with self.mcp(auth=self.auth_token) as client:
-            if "e2e_worker_info" not in await client.tool_names():
-                return
-        # Positive confirmation the boot self-resync gate has cleared: each serve worker
-        # answers a real ``e2e_worker_info`` call non-``reloading`` before the fixture
-        # returns, so a test firing a gated request the instant the stack is ready never
-        # races the gate.
-        workers = self._serve_workers_on_port()
-        # The budget must model the stack: N workers each import the whole platform
-        # and hold their own ~2s self-resync gate, and on a contended CI runner the
-        # flat boot budget can elapse before even ONE of a wide pool answers (the
-        # observed "only saw [] of 4 workers" flake). Scale the drain per worker;
-        # a healthy narrow stack still clears in a fraction of it.
-        for port in app_ports:
-            await self.wait_workers(workers, port=port, deadline=deadline * max(1, workers))
-
-    def _early_exit_detail(self) -> str | None:
-        for handle in self._procs.values():
-            if not handle.is_running():
-                return f"process {handle.name!r} exited early (code {handle.poll()}):\n{handle.log_tail()}"
-        return None
-
-    def _wait_http_ok(self, url: str, deadline: float, label: str) -> None:
-        def probe() -> bool:
-            early = self._early_exit_detail()
-            if early is not None:
-                raise RuntimeError(f"{label}: {early}")
-            try:
-                # 503 while a worker warms is "not ready", not a failure.
-                return httpx.get(url, timeout=2.0).status_code == 200
-            except httpx.HTTPError:
-                return False
-
-        wait_for(probe, deadline=deadline, message=f"{label} never became ready at {url}")
-
-    def _wait_backend_census(self, deadline: float, baseline: Mapping[str, int] | None = None) -> None:
-        # The bus census lists ALL workers (serve + backend) by slot name, so a restart
-        # keys on a fresh ``backend``-kind LIFE: a worker's slot name is STABLE across a
-        # restart, so a respawn reuses the same name at an INCREMENTED generation (or, if
-        # the old claim has not yet lapsed, the next free name) — never a fresh unrelated
-        # id. ``baseline`` is the pre-restart ``{name: generation}`` of the kind; the wait
-        # holds until BOTH facts land: every baseline life is GONE (its name absent, or a
-        # higher generation on that name) AND at least one fresh READY life of the kind
-        # exists (a name absent from the baseline, or a higher generation on a baseline
-        # name). Keying on the generation ignores a SIGKILLed worker's corpse row — its
-        # presence key lingers at the OLD generation until its heartbeat TTL — so the wait
-        # never passes on the corpse before the replacement has joined and gone ready.
-        base = dict(baseline or {})
-
-        def probe() -> bool:
-            early = self._early_exit_detail()
-            if early is not None:
-                raise RuntimeError(f"backend census: {early}")
-            rows = {w.name: w for w in self.census() if w.kind == "backend"}
-            old_gone = all(name not in rows or rows[name].generation > gen for name, gen in base.items())
-            fresh_ready = any(
-                w.state == "ready" and (w.name not in base or w.generation > base[w.name]) for w in rows.values()
-            )
-            return old_gone and fresh_ready
-
-        want = "a fresh ready backend-kind life" if base else "a ready backend-kind worker"
-        wait_for(probe, deadline=deadline, message=f"{want} never appeared in the worker-bus census")
-
-    def _run_readiness_coro(self, coro: Coroutine[Any, Any, None]) -> None:
-        """Run a readiness coroutine to completion from synchronous boot/restart code.
-        Boot runs outside any event loop, but ``restart`` is called from within an
-        async test's running loop, so the coroutine is driven on a dedicated thread
-        with its own loop — correct whether or not the calling thread already owns one,
-        and its failure is re-raised on the calling thread."""
-        import threading
-
-        box: dict[str, BaseException] = {}
-
-        def runner() -> None:
-            try:
-                asyncio.run(coro)
-            except BaseException as exc:  # re-raised on the calling thread below
-                box["exc"] = exc
-
-        thread = threading.Thread(target=runner, name="tai-e2e-readiness")
-        thread.start()
-        thread.join()
-        if "exc" in box:
-            raise box["exc"]
+    # ---- readiness delegators --------------------------------------------
 
     async def wait_workers(self, n: int, *, port: int | None = None, deadline: float = 10.0) -> dict[int, str]:
         """Poll the ``e2e_worker_info`` probe until ``n`` distinct worker pids have
-        answered, returning each pid mapped to its reported state digest. Convergence
-        assertions compare those digests: every distinct pid reporting the same digest,
-        differing from the pre-mutation baseline, is fleet-wide convergence. ``port``
-        selects which app port to probe (default the primary). The stack's own auth token
-        authenticates the probe, so the drain reaches the fenced surface."""
-        seen: dict[int, str] = {}
+        answered, returning each pid mapped to its reported state digest (see
+        :func:`tai42_e2e.readiness.wait_workers`)."""
+        return await readiness.wait_workers(self, n, port=port, deadline=deadline)
 
-        async def worker_info() -> dict[str, Any]:
-            async with self.mcp(port, auth=self.auth_token) as client:
-                # A worker fresh in the census may still hold its boot-time reload gate
-                # (the ~2s self-resync), so poll past the retriable ``reloading`` rejection.
-                result = await client.call_tool("e2e_worker_info", retry_on_reloading=True)
-            data = result.data if result.data is not None else result.structured_content
-            if not isinstance(data, dict) or "pid" not in data or "state_digest" not in data:
-                raise RuntimeError(f"e2e_worker_info returned an unexpected shape: {data!r}")
-            return data
-
-        async def probe() -> bool:
-            # The MCP initialize handshake itself is rejected while the worker holds its
-            # self-resync gate (the client raises before a session exists, so the tool
-            # call's own ``retry_on_reloading`` cannot cover it); treat that envelope as
-            # "not ready yet" and keep polling.
-            data = await _probe_tolerating_reloading(worker_info)
-            if data is None:
-                return False
-            seen[int(data["pid"])] = str(data["state_digest"])
-            return len(seen) >= n
-
-        await wait_for_async(probe, deadline=deadline, message=f"only saw {sorted(seen)} of {n} workers")
-        return seen
+    def _wait_backend_census(self, deadline: float, baseline: Mapping[str, int] | None = None) -> None:
+        readiness.wait_backend_census(self, deadline, baseline)
 
     # ---- client helpers --------------------------------------------------
 
@@ -892,8 +262,8 @@ class TaiStack:
         """The live fleet currently on the app-owned worker bus — every subscribed
         worker (HTTP ``serve`` workers AND the ``backend`` runtime), scanned off the
         bus presence keys under this stack's namespace. Backend-independent."""
-        # Local import: variants.py imports this module, so the census helper is
-        # reached at call time to avoid a module-load cycle.
+        # Local import: the variants package imports this module, so the census helper
+        # is reached at call time to avoid a module-load cycle.
         from tai42_e2e.variants import bus_census
 
         return bus_census(self.resources.bus_redis_url, self.resources.bus_namespace)
@@ -909,6 +279,8 @@ class TaiStack:
 
     def process(self, name: str) -> ProcessHandle:
         return self._procs[name]
+
+    # ---- restart / rotation ----------------------------------------------
 
     def restart(self, name: str) -> None:
         """Stop and respawn one process from its saved spec (component-restart
@@ -933,7 +305,7 @@ class TaiStack:
         for port in self._ports_for(name):
             wait_for(lambda p=port: ports.is_free(p), deadline=5.0, message=f"port {port} never freed before restart")
         spec = self._specs[name]
-        self._spawn(spec)
+        spawning.spawn(self, spec)
         self._wait_after_restart(name, before_backends)
 
     def rotate_connectors_kek(self, *, new_kek: str, previous: list[str]) -> None:
@@ -951,7 +323,7 @@ class TaiStack:
             self.config.env["CONNECTORS_KEK_PREVIOUS"] = ",".join(previous)
         else:
             self.config.env.pop("CONNECTORS_KEK_PREVIOUS", None)
-        self._render_env_file()
+        child_env.render_env_file(self)
         for name in [n for n in self._specs if n.startswith("serve") or n == "backend"]:
             env = self._specs[name].env
             env["CONNECTORS_KEK"] = new_kek
@@ -994,19 +366,19 @@ class TaiStack:
         if name.startswith("serve"):
             idx = 0 if name in ("serve", "serve-a") else 1
             port = self.app_ports[idx]
-            self._wait_http_ok(f"http://{self.host}:{port}/health", deadline, "app health")
+            readiness.wait_http_ok(self, f"http://{self.host}:{port}/health", deadline, "app health")
             # A respawned serve worker re-runs its boot self-resync gate on rejoin;
             # drain it (where the profile carries the probe) so a test acting right
             # after the restart does not race the gate, exactly as at boot.
-            if self._needs_bus():
-                self._run_readiness_coro(self._drain_gate_coro([port], deadline))
+            if child_env.needs_bus(self.config):
+                readiness.run_readiness_coro(readiness.drain_gate_coro(self, [port], deadline))
         elif name == "embed":
-            self._wait_http_ok(f"http://{self.host}:{self.app_ports[0]}/health", deadline, "app health")
-            if self._needs_bus():
-                self._run_readiness_coro(self._drain_gate_coro([self.app_ports[0]], deadline))
+            readiness.wait_http_ok(self, f"http://{self.host}:{self.app_ports[0]}/health", deadline, "app health")
+            if child_env.needs_bus(self.config):
+                readiness.run_readiness_coro(readiness.drain_gate_coro(self, [self.app_ports[0]], deadline))
         elif name == "metrics":
             assert self.metrics_port is not None
-            self._wait_http_ok(f"http://{self.host}:{self.metrics_port}/metrics", deadline, "metrics")
+            readiness.wait_http_ok(self, f"http://{self.host}:{self.metrics_port}/metrics", deadline, "metrics")
         elif name == "backend":
             self._wait_backend_census(deadline, baseline=before_backends)
 
@@ -1057,7 +429,7 @@ class TaiStack:
         for port in self._ports_for(name):
             with contextlib.suppress(TimeoutError):
                 wait_for(lambda p=port: ports.is_free(p), deadline=15.0, message=f"port {port} never freed for respawn")
-        self._spawn(self._specs[name])
+        spawning.spawn(self, self._specs[name])
 
     def wait_generation_bump(
         self, kind_or_name: str, baseline: int | Mapping[str, int], *, deadline: float = 90.0
@@ -1112,10 +484,10 @@ class TaiStack:
         return {name: rows[name] for name in targets if name in rows}
 
     def _early_exit_detail_supervised(self) -> str | None:
-        """Like ``_early_exit_detail`` but tolerant of the supervised churn: a serve/backend
-        handle momentarily exited is being respawned by the supervisor, not a failure. Only a
-        NON-supervised process that exited (or a supervised one with no respawn thread) is a
-        real early exit worth surfacing."""
+        """Like ``readiness.early_exit_detail`` but tolerant of the supervised churn: a
+        serve/backend handle momentarily exited is being respawned by the supervisor, not a
+        failure. Only a NON-supervised process that exited (or a supervised one with no
+        respawn thread) is a real early exit worth surfacing."""
         with self._supervisor_lock:
             for handle in self._procs.values():
                 if handle.name in self._supervised_names:
@@ -1123,118 +495,3 @@ class TaiStack:
                 if not handle.is_running():
                     return f"process {handle.name!r} exited early (code {handle.poll()}):\n{handle.log_tail()}"
         return None
-
-    # ---- config rendering ------------------------------------------------
-
-    def _render_env_file(self) -> None:
-        """Render the feature env map to ``<config>/.env`` so the admin reload
-        path (which re-reads ``.env``) sees the same values the process env
-        does. TMPDIR is deliberately NOT written here — it is per-process, which
-        is how REPLICAS get per-replica metrics dirs from one shared .env."""
-        merged = {
-            **self.config.env,
-            **self._origin_allowlist_env(),
-            **self._replica_b_origin_env(),
-            **self._app_origin_env(),
-            **self._bus_env(),
-        }
-        lines = [f"{key}={value}" for key, value in sorted(merged.items())]
-        (self._config_dir / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    def _origin_allowlist_env(self) -> dict[str, str]:
-        """Fill each ``origin_allowlist_env_keys`` entry, only known after boot.
-
-        Mock legs (the default) fill every entry with this stack's own loopback app
-        origins (``http://host:port`` for every allocated app port, comma-joined).
-
-        A REAL connector leg additionally lists keys in ``public_allowlist_env_keys``:
-        those fill from ``E2E_PUBLIC_BASE_URL`` (the origin the vendor redirects the OAuth
-        consent back to) and OVERRIDE the loopback fill, so the same key the connect flow
-        validates the request-derived redirect_uri against carries the public origin the
-        real redirect is registered at. The leg refuses to start (loud) if it asks for
-        public mode without the URL. Empty until boot allocates the ports."""
-        if not self.config.origin_allowlist_env_keys or not self.app_ports:
-            return {}
-        public_keys = set(self.config.public_allowlist_env_keys)
-        env: dict[str, str] = {}
-        if public_keys:
-            if not self.config.public_base_url:
-                raise RuntimeError(
-                    f"stack {self.config.name!r} routes {sorted(public_keys)} to the public redirect "
-                    "origin but public_base_url is unset (set E2E_PUBLIC_BASE_URL for a real connector leg)"
-                )
-            env.update(dict.fromkeys(public_keys, self.config.public_base_url.rstrip("/")))
-        loopback_keys = [key for key in self.config.origin_allowlist_env_keys if key not in public_keys]
-        if loopback_keys:
-            origins = ",".join(f"http://{self.host}:{port}" for port in self.app_ports)
-            env.update(dict.fromkeys(loopback_keys, origins))
-        return env
-
-    def _needs_bus(self) -> bool:
-        """Whether this stack joins the app-owned worker bus. The SUT refuses to boot
-        busless under ``--workers > 1`` or a registered backend; a file-mode REPLICAS stack
-        (each master ``--workers 1``) would boot busless but serve stale, so wiring the bus
-        there is harness policy, not a SUT rule. The embed host rides the same rule through
-        its backend worker."""
-        return self.config.workers > 1 or self.config.run_backend or self.config.topology is Topology.REPLICAS
-
-    def _bus_env(self) -> dict[str, str]:
-        """Point the worker bus at this stack's own bus Redis endpoint under a
-        per-stack namespace. The namespace is mandatory: bus pub/sub channels +
-        presence keys are server-global, so co-tenant stacks on one Redis MUST
-        diverge by namespace or they cross-deliver each other's fleet ops and
-        cross-count each other's census."""
-        if not self._needs_bus():
-            return {}
-        return {
-            "TAI_BUS_REDIS_URL": self.resources.bus_redis_url,
-            "TAI_BUS_NAMESPACE": self.resources.bus_namespace,
-        }
-
-    def _app_origin_env(self) -> dict[str, str]:
-        """Fill each ``app_origin_env_keys`` entry with this stack's own single app
-        origin (``http://host:port``), only known after boot allocates the port. Used by a
-        single-port (MULTIWORKER) stack for an env key that must name its OWN origin — e.g.
-        the ask_user callback base the web channel's answer door forwards an answer back to."""
-        if not self.config.app_origin_env_keys:
-            return {}
-        if not self.app_ports:
-            raise RuntimeError(f"app_origin_env_keys needs an allocated app port; stack {self.config.name!r} has none")
-        origin = f"http://{self.host}:{self.app_ports[0]}"
-        return dict.fromkeys(self.config.app_origin_env_keys, origin)
-
-    def _replica_b_origin_env(self) -> dict[str, str]:
-        """Fill the public-base-URL env keys, only known after boot.
-
-        Mock legs (the default) fill each ``replica_b_origin_env_keys`` entry with
-        this stack's SINGLE replica-B loopback origin (``http://host:port_b``);
-        this requires a two-app-port (REPLICAS) topology — a profile that names
-        these keys on a single-port stack is a configuration error, raised loudly
-        rather than silently pointing them at replica A.
-
-        A REAL inbound leg additionally lists keys in ``public_base_url_env_keys``:
-        those fill from ``E2E_PUBLIC_BASE_URL`` (the vendor-reachable origin) and
-        OVERRIDE the loopback fill, so the same key that reaches the door over
-        loopback in a mock leg reaches it over the public origin in a real one.
-        The leg refuses to start (loud) if it asks for public mode without the URL."""
-        public_keys = set(self.config.public_base_url_env_keys)
-        loopback_keys = [key for key in self.config.replica_b_origin_env_keys if key not in public_keys]
-        if not public_keys and not loopback_keys:
-            return {}
-        env: dict[str, str] = {}
-        if public_keys:
-            if not self.config.public_base_url:
-                raise RuntimeError(
-                    f"stack {self.config.name!r} routes {sorted(public_keys)} to the public callback "
-                    "origin but public_base_url is unset (set E2E_PUBLIC_BASE_URL for a real inbound leg)"
-                )
-            env.update(dict.fromkeys(public_keys, self.config.public_base_url.rstrip("/")))
-        if loopback_keys:
-            if len(self.app_ports) < 2:
-                raise RuntimeError(
-                    "replica_b_origin_env_keys requires a REPLICAS topology (two app ports); "
-                    f"stack {self.config.name!r} has {len(self.app_ports)}"
-                )
-            origin = f"http://{self.host}:{self.app_ports[1]}"
-            env.update(dict.fromkeys(loopback_keys, origin))
-        return env

@@ -31,6 +31,49 @@ from tai42_tools_stripe._internal.tools.stripe_client import (
 _sleep = asyncio.sleep
 
 
+def _selected_callback_url(session: dict[str, Any]) -> str | None:
+    """The session's ``tai_callback_url`` when it is a paid session carrying one, else
+    ``None`` (unpaid sessions and paid sessions with no callback url are skipped, not
+    counted)."""
+    if session.get("payment_status") != "paid":
+        return None
+    metadata = session.get("metadata") or {}
+    return metadata.get("tai_callback_url") or None
+
+
+async def _answer_session(session: dict[str, Any], callback_url: str) -> tuple[str, dict[str, Any] | None]:
+    """Attempt to answer one paid session. Returns an outcome key
+    (``answered``/``already_answered``/``expired``/``rejected``/``failed``) and, for
+    ``failed`` only, the ``{session_id, error}`` record.
+
+    A per-session verdict (door 404 → ``expired``, door 400 → ``rejected``) is counted,
+    never raised. Deployment-wide breakage (door 403, livemode mismatch, SSRF refusal,
+    transport error, retry exhaustion, unrecognised 200 body) becomes ``failed`` for the
+    caller's terminal raise, so one unanswerable session never aborts the rest.
+    """
+    session_id = session.get("id")
+    try:
+        _assert_livemode(session)
+        body = await post_answer(callback_url, build_answer_payload(session))
+    except CallbackDoorError as exc:
+        if exc.status == 404:
+            return "expired", None
+        if exc.status == 400:
+            return "rejected", None
+        return "failed", {"session_id": session_id, "error": str(exc)}
+    except Exception as exc:
+        # Batch collector: any non-CallbackDoorError (livemode mismatch, SSRF refusal,
+        # transport error, retry exhaustion) is recorded and surfaced by the caller's raise.
+        return "failed", {"session_id": session_id, "error": str(exc)}
+
+    status = (body.get("data") or {}).get("status")
+    if status == "answered":
+        return "answered", None
+    if status == "already_answered":
+        return "already_answered", None
+    return "failed", {"session_id": session_id, "error": f"unrecognised door body: {body!r}"}
+
+
 @tai42_app.tools.tool(tags={"stripe", "payments"})
 async def reconcile_stripe_payments(lookback_hours: int = 26) -> dict[str, Any]:
     """Re-answer every paid Checkout Session in the lookback window that the webhook path may have
@@ -64,60 +107,26 @@ async def reconcile_stripe_payments(lookback_hours: int = 26) -> dict[str, Any]:
     sessions = await list_checkout_sessions(created_gte)
     interval = stripe_settings().reconcile_answer_interval_seconds
 
-    answered = 0
-    already_answered = 0
-    expired = 0
-    rejected = 0
+    counts = {"answered": 0, "already_answered": 0, "expired": 0, "rejected": 0}
     failed: list[dict[str, Any]] = []
     selected = 0
 
     for session in sessions:
-        if session.get("payment_status") != "paid":
-            continue
-        metadata = session.get("metadata") or {}
-        callback_url = metadata.get("tai_callback_url")
-        if not callback_url:
+        callback_url = _selected_callback_url(session)
+        if callback_url is None:
             continue
 
         if selected and interval > 0:
             await _sleep(interval)
         selected += 1
-        session_id = session.get("id")
 
-        try:
-            _assert_livemode(session)
-            body = await post_answer(callback_url, build_answer_payload(session))
-        except CallbackDoorError as exc:
-            if exc.status == 404:
-                expired += 1
-            elif exc.status == 400:
-                rejected += 1
-            else:
-                failed.append({"session_id": session_id, "error": str(exc)})
-            continue
-        except Exception as exc:
-            # Batch collector: any non-CallbackDoorError (livemode mismatch, SSRF refusal,
-            # transport error, retry exhaustion) is recorded and surfaced by the raise below,
-            # so one unanswerable session never aborts the rest.
-            failed.append({"session_id": session_id, "error": str(exc)})
-            continue
-
-        status = (body.get("data") or {}).get("status")
-        if status == "answered":
-            answered += 1
-        elif status == "already_answered":
-            already_answered += 1
+        outcome, error = await _answer_session(session, callback_url)
+        if error is not None:
+            failed.append(error)
         else:
-            failed.append({"session_id": session_id, "error": f"unrecognised door body: {body!r}"})
+            counts[outcome] += 1
 
-    summary = {
-        "selected": selected,
-        "answered": answered,
-        "already_answered": already_answered,
-        "expired": expired,
-        "rejected": rejected,
-        "failed": failed,
-    }
+    summary = {"selected": selected, **counts, "failed": failed}
     if failed:
         raise ValueError(f"reconciliation left {len(failed)} session(s) failed: {summary}")
     return summary

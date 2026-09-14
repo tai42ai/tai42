@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import psycopg
 
-from tai42_e2e.netfixtures import OAuthIdp
+from tai42_e2e.oidc_idp import OAuthIdp
 from tai42_e2e.stack import TaiStack
 
 

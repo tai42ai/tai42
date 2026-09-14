@@ -44,8 +44,9 @@ so the adapter answers a retriable 503 while a reload is in flight).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, Field
 from tai42_contract.app.responses import OpaqueJson
@@ -151,69 +152,98 @@ def _provided_items(spec: dict[str, Any]) -> list[dict[str, str]]:
     return items
 
 
+def _pip_failed_error(exc: MarketplaceError) -> OperationError:
+    """A pip failure → 500. The full captured output stays in the log; the envelope
+    carries the summary plus a truncated tail so the operator sees the failing lines."""
+    pip = cast("PipFailedError", exc)
+    logger.error("marketplace pip failure: %s\n%s", pip, pip.output)
+    return OperationFailed(str(pip), extra={"pip_output": _truncate(pip.output)})
+
+
+def _artifact_integrity_error(exc: MarketplaceError) -> OperationError:
+    """A github artifact whose sha256 disagrees with the registry's ingest digest — an
+    install-integrity failure (a possibly re-pointed release tag), a loud terminal 500
+    carrying the digests and the rejected URL."""
+    art = cast("ArtifactIntegrityError", exc)
+    logger.error("marketplace artifact integrity failure: %s", art)
+    return OperationFailed(
+        str(art),
+        extra={
+            "artifact_ref": art.artifact_ref,
+            "expected_sha256": art.expected_sha256,
+            "actual_sha256": art.actual_sha256,
+        },
+    )
+
+
+def _public_routes_error(exc: MarketplaceError) -> OperationError:
+    """Declared public routes need the operator's explicit acceptance — a 400 carrying a
+    stable code + the rows so the UI can render the acceptance gate."""
+    err = cast("PublicRoutesNotAcceptedError", exc)
+    return BadRequestError(str(err), extra={"code": "PUBLIC_ROUTES_NOT_ACCEPTED", "public_routes": err.public_routes})
+
+
+def _route_collision_error(exc: MarketplaceError) -> OperationError:
+    """A declared route clashes with an already-owned one — a 409 carrying the collision
+    list; the remedy is to remap the item's base."""
+    err = cast("RouteCollisionError", exc)
+    return ConflictError(str(err), extra={"code": "ROUTE_COLLISION", "collisions": err.collisions})
+
+
+def _reserved_prefix_error(exc: MarketplaceError) -> OperationError:
+    """A declared public route resolves under a reserved never-public prefix — a 409
+    carrying the offending paths; the remedy is to remap the base."""
+    err = cast("ReservedRoutePrefixError", exc)
+    return ConflictError(str(err), extra={"code": "ROUTE_RESERVED_PREFIX", "routes": err.offenders})
+
+
+def _install_state_error(exc: MarketplaceError) -> OperationError:
+    """A not-installed ref is a 404; every other state conflict is a 409."""
+    err = cast("InstallStateError", exc)
+    return NotFoundError(str(err)) if err.not_installed else ConflictError(str(err))
+
+
+# Ordered (predicate, builder) pairs in classification precedence order; the FIRST
+# matching predicate wins, so the classification keys on the typed class (and, for a
+# state conflict, its ``not_installed`` flag) — never on message text. A failure matching
+# none is the terminal ``OperationFailed`` below.
+_ERROR_RULES: tuple[tuple[Callable[[MarketplaceError], bool], Callable[[MarketplaceError], OperationError]], ...] = (
+    # The caller's own author error — a malformed ref, an mcp-server install missing a
+    # required !ENV value, or a route_mounts override naming a non-route item / bad base.
+    (lambda e: isinstance(e, MalformedRefError | InstallEnvError | RouteMountError), lambda e: BadRequestError(str(e))),
+    (lambda e: isinstance(e, PublicRoutesNotAcceptedError), _public_routes_error),
+    (lambda e: isinstance(e, RouteCollisionError), _route_collision_error),
+    (lambda e: isinstance(e, ReservedRoutePrefixError), _reserved_prefix_error),
+    # The registry is this surface's upstream; a dead/garbled upstream is a 502, never a
+    # this-server 500 and never a promise that retry fixes it.
+    (lambda e: isinstance(e, RegistryUnreachableError | RegistryResponseError), lambda e: UpstreamError(str(e))),
+    (lambda e: isinstance(e, ListingNotFoundError), lambda e: NotFoundError(str(e))),
+    # Another worker (or this one) holds the fleet-wide marketplace lock — retriable. See
+    # the module docstring's Retry-After limitation.
+    (lambda e: isinstance(e, OperationInProgressError), lambda e: UnavailableError(str(e))),
+    (lambda e: isinstance(e, InstallStateError), _install_state_error),
+    # State conflicts the operator resolves, not by retrying as-is (an environment-shadowed
+    # prefix version is re-pinned or the image rebuilt).
+    (
+        lambda e: isinstance(
+            e, VersionRefusedError | ManifestCollisionError | ContractIncompatibleError | EnvironmentShadowError
+        ),
+        lambda e: ConflictError(str(e)),
+    ),
+    (lambda e: isinstance(e, PipFailedError), _pip_failed_error),
+    (lambda e: isinstance(e, ArtifactIntegrityError), _artifact_integrity_error),
+)
+
+
 def _to_operation_error(exc: MarketplaceError) -> OperationError:
     """Translate an internal marketplace failure to its honest operation error.
 
     The classification keys on the typed class (and, for a state conflict, its
     ``not_installed`` flag) — never on message text.
     """
-    if isinstance(exc, MalformedRefError | InstallEnvError | RouteMountError):
-        # The caller's own author error — a ref that is not a well-formed lowercase
-        # ``namespace/name``, an mcp-server install missing a required !ENV value
-        # (each missing var + json-pointer named, names only), or a route_mounts
-        # override naming a non-route item / a bad base.
-        return BadRequestError(str(exc))
-    if isinstance(exc, PublicRoutesNotAcceptedError):
-        # Declared public routes need the operator's explicit acceptance — a 400
-        # carrying a stable code + the rows so the UI can render the acceptance gate.
-        return BadRequestError(
-            str(exc), extra={"code": "PUBLIC_ROUTES_NOT_ACCEPTED", "public_routes": exc.public_routes}
-        )
-    if isinstance(exc, RouteCollisionError):
-        # A declared route clashes with an already-owned one — a 409 carrying the
-        # collision list; the remedy is to remap the item's base.
-        return ConflictError(str(exc), extra={"code": "ROUTE_COLLISION", "collisions": exc.collisions})
-    if isinstance(exc, ReservedRoutePrefixError):
-        # A declared public route resolves under a reserved never-public prefix — a
-        # 409 carrying the offending paths; the remedy is to remap the base.
-        return ConflictError(str(exc), extra={"code": "ROUTE_RESERVED_PREFIX", "routes": exc.offenders})
-    if isinstance(exc, RegistryUnreachableError | RegistryResponseError):
-        # The registry is this surface's upstream; a dead/garbled upstream is a
-        # 502, never a this-server 500 and never a promise that retry fixes it.
-        return UpstreamError(str(exc))
-    if isinstance(exc, ListingNotFoundError):
-        return NotFoundError(str(exc))
-    if isinstance(exc, OperationInProgressError):
-        # Another worker (or this one) holds the fleet-wide marketplace lock —
-        # retriable. See the module docstring's Retry-After limitation.
-        return UnavailableError(str(exc))
-    if isinstance(exc, InstallStateError):
-        # A not-installed ref is a 404; every other state conflict is a 409.
-        return NotFoundError(str(exc)) if exc.not_installed else ConflictError(str(exc))
-    if isinstance(
-        exc, VersionRefusedError | ManifestCollisionError | ContractIncompatibleError | EnvironmentShadowError
-    ):
-        # State conflicts the operator resolves, not by retrying as-is (an
-        # environment-shadowed prefix version is re-pinned or the image rebuilt).
-        return ConflictError(str(exc))
-    if isinstance(exc, PipFailedError):
-        # The full captured output stays in the log; the envelope carries the
-        # summary plus a truncated tail so the operator sees the failing lines.
-        logger.error("marketplace pip failure: %s\n%s", exc, exc.output)
-        return OperationFailed(str(exc), extra={"pip_output": _truncate(exc.output)})
-    if isinstance(exc, ArtifactIntegrityError):
-        # A github artifact whose sha256 disagrees with the registry's ingest
-        # digest — an install-integrity failure (a possibly re-pointed release
-        # tag), a loud terminal 500 carrying the digests and the rejected URL.
-        logger.error("marketplace artifact integrity failure: %s", exc)
-        return OperationFailed(
-            str(exc),
-            extra={
-                "artifact_ref": exc.artifact_ref,
-                "expected_sha256": exc.expected_sha256,
-                "actual_sha256": exc.actual_sha256,
-            },
-        )
+    for predicate, build in _ERROR_RULES:
+        if predicate(exc):
+            return build(exc)
     # PipUnavailableError / InstallUnwindError / ManifestComposeError /
     # LocalStateError / the base: the deployment environment failed the operation.
     return OperationFailed(_truncate(str(exc)))
@@ -293,6 +323,43 @@ class MarketplaceSearchQuery(BaseModel):
     page_size: str | None = Field(default=None, description="Items per page.")
 
 
+def _search_params(
+    q: str | None,
+    kind: str | None,
+    category: str | None,
+    tags: list[str] | None,
+    namespace: str | None,
+    tier: str | None,
+    contract: str | None,
+    sort: str | None,
+    page: str | None,
+    page_size: str | None,
+) -> dict[str, str | list[str]]:
+    """The whitelisted registry-search query: the single-valued facets in declared order
+    (dropping ``None``) plus the one multi-value facet ``tags`` (kept when truthy). One
+    job: build the forwarded query."""
+    facets: tuple[tuple[str, str | list[str] | None, bool], ...] = (
+        ("q", q, False),
+        ("kind", kind, False),
+        ("category", category, False),
+        ("tags", tags, True),
+        ("namespace", namespace, False),
+        ("tier", tier, False),
+        ("contract", contract, False),
+        ("sort", sort, False),
+        ("page", page, False),
+        ("page_size", page_size, False),
+    )
+    params: dict[str, str | list[str]] = {}
+    for name, value, multi in facets:
+        if multi:
+            if value:
+                params[name] = value
+        elif value is not None:
+            params[name] = value
+    return params
+
+
 @operation(
     summary="Search the marketplace",
     tags=["marketplace"],
@@ -319,27 +386,7 @@ async def marketplace_search(
     registry's rows ride through unchanged, so display metadata (``display_name``,
     ``icon_url``) is transparently forwarded.
     """
-    params: dict[str, str | list[str]] = {}
-    if q is not None:
-        params["q"] = q
-    if kind is not None:
-        params["kind"] = kind
-    if category is not None:
-        params["category"] = category
-    if tags:
-        params["tags"] = tags
-    if namespace is not None:
-        params["namespace"] = namespace
-    if tier is not None:
-        params["tier"] = tier
-    if contract is not None:
-        params["contract"] = contract
-    if sort is not None:
-        params["sort"] = sort
-    if page is not None:
-        params["page"] = page
-    if page_size is not None:
-        params["page_size"] = page_size
+    params = _search_params(q, kind, category, tags, namespace, tier, contract, sort, page, page_size)
     try:
         return await RegistryClient().search(params)
     except MarketplaceError as exc:

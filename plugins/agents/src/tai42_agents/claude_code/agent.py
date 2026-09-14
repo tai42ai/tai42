@@ -21,46 +21,27 @@ validation fires at run start (the first ``astream``/``run``), before any sandbo
 from __future__ import annotations
 
 import contextlib
-import json
 from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import BaseModel, SecretStr
 from tai42_contract.access_control.context import get_current_user_id
 from tai42_contract.agent import Agent
-from tai42_contract.agent.events import (
-    MessageDelta,
-    MessageFinal,
-    ReasoningStep,
-    StreamEvent,
-    StructuredFinal,
-    SuspendedFinal,
-    ToolCallStep,
-    ToolResultStep,
-)
+from tai42_contract.agent.events import StreamEvent, SuspendedFinal
 from tai42_contract.app import tai42_app
-from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.interactions import (
-    NestedParkOwnershipError,
     SuspendedInteraction,
-    assert_park_adoptable,
     current_execution_identity,
     get_park_completion,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
 )
 from tai42_contract.monitoring.models import SpanKind
-from tai42_contract.sandbox import (
-    SandboxExecTimeoutError,
-    SandboxSession,
-    SandboxStreamChunk,
-    SandboxStreamExit,
-)
+from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
 
-from tai42_agents._internal.nested_dispatch import nested_tool_dispatch
 from tai42_agents._internal.park import (
     AGENT_RESUME_TOOL_NAME,
     ParkIdentity,
@@ -79,8 +60,16 @@ from tai42_agents._internal.reject import (
 )
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.sandbox_util import build_policied_spec, workspace_key_for
-from tai42_agents.claude_code.options import build_options_payload, credential_env_names
-from tai42_agents.claude_code.payload import runner_payload_files
+from tai42_agents.claude_code.credentials import (
+    _BearerMaterial,
+    _secret_values,
+    redact_transcript,
+    resolve_creds,
+    scrub_credentials,
+)
+from tai42_agents.claude_code.errors import ClaudeCodeError
+from tai42_agents.claude_code.frames import drain_handle, iter_up_frames, map_event, terminal_event
+from tai42_agents.claude_code.inputs import ClaudeCodeInput, InlineSkillShape, SubagentSpecShape
 from tai42_agents.claude_code.protocol import (
     CLAUDE_AGENT_SDK_VERSION,
     AnswerFrame,
@@ -93,36 +82,25 @@ from tai42_agents.claude_code.protocol import (
     StartFrame,
     StopFrame,
     ToolCallFrame,
-    ToolResultFrame,
     dump_frame,
-    parse_up_frame,
+)
+from tai42_agents.claude_code.session_records import (
+    event_from_terminal_record,
+    persist_session_id,
+    persist_terminal_record,
+    read_session_id,
+    read_terminal_record,
 )
 from tai42_agents.claude_code.settings import (
     ClaudeCodeSettings,
-    ConnectionCred,
-    StaticCred,
     claude_code_crash_resume,
     claude_code_settings,
 )
-from tai42_agents.claude_code.skills_sync import sync_skills, validate_name
+from tai42_agents.claude_code.skills_sync import validate_name
+from tai42_agents.claude_code.tool_call import run_proxied_tool_call
+from tai42_agents.claude_code.workspace import _RUNNER_PAYLOAD_DIR, build_payload, materialize
 
 AGENT_NAME: Final[str] = "claude_code"
-
-# Short exec ceiling for the volume-authoring / scrub commands (reset, payload write, cred
-# scrub) — distinct from the turn-scoped ``run_timeout_seconds`` the drive itself runs under.
-_SHORT_EXEC_TIMEOUT: Final[float] = 60.0
-
-# Workspace-relative paths inside the session volume (rooted at ``session.workspace_path``).
-_SESSION_ID_PATH = ".runner/session_id"
-_CREDS_DIR = ".claude-home/.creds"
-_CLAUDE_CONFIG_DIR = "project/.claude"
-_RUNNER_PAYLOAD_DIR = ".runner/payload"
-# Crash-after-terminal idempotence records, one per resumed super-step, keyed by the
-# ``compute_superstep_id`` of the resume's interaction ids. A resume drive writes its record on
-# the clean terminal BEFORE reporting; a redelivered resume reads it and returns the SAME output
-# without re-driving the SDK session. There is no LangGraph snapshot here, so this durable record
-# IS the resume idempotence source (a durable-volume analogue of a checkpoint-snapshot guard).
-_TERMINAL_DIR = ".runner/terminal"
 
 # The two ABC ``run``/``astream`` parameters ``claude_code`` cannot honor, mapped to the reason
 # named in the raised error (its keys define the unhonored set).
@@ -164,45 +142,6 @@ def _resume_continuation(threaded: bool) -> Iterator[None]:
         reset_resume_continuation_tool(token)
 
 
-class InlineSkillShape(BaseModel):
-    """A skill authored inline on the tool face: a charset-valid name + a ``SKILL.md`` body."""
-
-    model_config = ConfigDict(extra="forbid")
-    name: str
-    content: str = ""
-
-
-class SubagentSpecShape(BaseModel):
-    """A subagent the caller declares on the tool face — mapped to the SDK AgentDefinition."""
-
-    model_config = ConfigDict(extra="forbid")
-    name: str
-    description: str = ""
-    system_prompt: TemplatedText | None = None
-    tool_names: list[str] = Field(default_factory=list)
-
-
-class ClaudeCodeInput(BaseModel):
-    """JSON tool-face parameters for ``claude_code``.
-
-    SECURITY INVARIANT: ``thread_id`` is NOT a field — workspace identity must never be
-    derivable from unauthenticated caller input. ``thread_id`` arrives ONLY as a trusted
-    in-process ``run``/``astream`` kwarg (the conversation bridge), so a tool-face call always
-    gets a fresh ephemeral workspace. ``extra="forbid"`` rejects any unknown key loudly.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    user_message: TemplatedText
-    system_message: TemplatedText | None = None
-    tool_names: list[str] = Field(default_factory=list)
-    skills: list[str] = Field(default_factory=list)
-    inline_skills: list[InlineSkillShape] = Field(default_factory=list)
-    response_format: TemplatedText | dict[str, Any] | None = None
-    max_turns: int | None = None
-    subagents: list[SubagentSpecShape] = Field(default_factory=list)
-
-
 # A parking agent binds the hidden ``agent_resume`` continuation from its OWN registration:
 # a claude-only box must still bind it, or every async park strands. Per-epoch
 # idempotent, so a combined box binds it exactly once.
@@ -213,35 +152,6 @@ register_agent_resume_tool()
 # re-baked env). Ephemeral ``uuid4`` workspaces are never cached. The cross-worker mutex is the
 # Redis workspace lease; this cache only avoids re-creating within one worker.
 _LIVE_SESSIONS: dict[str, SandboxSession] = {}
-
-
-class _BearerMaterial(BaseModel):
-    """A refreshable connection cred to re-materialize as a credential-helper file each turn."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    env_name: str
-    token: SecretStr | None
-    headers: dict[str, SecretStr]
-
-
-class _TerminalRecord(BaseModel):
-    """The durable crash-after-terminal idempotence record for one resumed super-step.
-
-    Captures the exact terminal OUTPUT (a message ``text`` or a structured ``data``) plus the
-    session id and usage; ``extra="forbid"`` so an in-session-forged record with stray keys fails
-    validation and is treated as absent (the resume re-drives rather than honoring garbage)."""
-
-    model_config = ConfigDict(extra="forbid")
-    superstep_id: str
-    session_id: str | None = None
-    usage: dict[str, Any] | None = None
-    structured: bool
-    text: str | None = None
-    data: Any = None
-
-
-class ClaudeCodeError(RuntimeError):
-    """A loud, constant-message ``claude_code`` failure surfaced to the caller."""
 
 
 @tai42_app.agents.agent(
@@ -404,7 +314,7 @@ class ClaudeCodeAgent(Agent):
         threaded = thread_id is not None
         workspace_key = workspace_key_for(AGENT_NAME, thread_id) if threaded else str(uuid4())
 
-        spec_env, static_env_names, bearer = await self._resolve_creds(settings)
+        spec_env, static_env_names, bearer = await resolve_creds(settings)
         model_env_name, _ = settings.model_credential()
 
         # The per-workspace Redis lease serializes threaded turns across workers (the volume is
@@ -473,15 +383,15 @@ class ClaudeCodeAgent(Agent):
             # The credential scrub/redact still run in the finally (idempotent on an already-scrubbed
             # volume), keeping the no-residual invariant on this exit too.
             if terminal_key is not None:
-                record = await self._read_terminal_record(session, terminal_key)
+                record = await read_terminal_record(session, terminal_key)
                 if record is not None:
-                    yield _event_from_terminal_record(record)
+                    yield event_from_terminal_record(record)
                     return
 
-            await self._materialize(session, ws=ws, settings=settings, bearer=bearer, options_snapshot=options_snapshot)
+            await materialize(session, ws=ws, settings=settings, bearer=bearer, options_snapshot=options_snapshot)
 
-            resume_id = await self._read_session_id(session) if threaded else None
-            payload = self._build_payload(
+            resume_id = await read_session_id(session) if threaded else None
+            payload = build_payload(
                 settings=settings,
                 ws=ws,
                 options_snapshot=options_snapshot,
@@ -534,12 +444,12 @@ class ClaudeCodeAgent(Agent):
             # (i) kill the exec and AWAIT the runner's death before any volume-mutating cleanup.
             if handle is not None:
                 await handle.kill()
-                await _drain_handle(handle)
+                await drain_handle(handle)
             # (ii) credential scrub + (iii) transcript redaction — TERMINAL exits only; a
             # park-suspend keeps the bearer file for the door-less expiry resume to reuse.
             if not park_suspended:
-                await self._scrub_credentials(session, ws=ws)
-                await self._redact_transcript(session, ws=ws, policy=policy, secrets=_secret_values(spec_env, bearer))
+                await scrub_credentials(session, ws=ws)
+                await redact_transcript(session, ws=ws, policy=policy, secrets=_secret_values(spec_env, bearer))
                 if not threaded:
                     # An ephemeral session is not cached; destroy it so its volume is reaped now.
                     await session.destroy()
@@ -557,8 +467,9 @@ class ClaudeCodeAgent(Agent):
         terminal_key: str | None = None,
     ) -> AsyncIterator[tuple[StreamEvent, bool]]:
         """Consume the runner's up-frames, mapping each to a contract event (paired with a
-        park flag). Handles the hello version/session gate, sync asks, async parks, and proxied
-        tool calls inline; a ``fatal`` or an error terminal raises loudly.
+        park flag) via a thin per-frame dispatch. Handles the hello version/session gate, sync
+        asks, async parks, and proxied tool calls inline; a ``fatal`` or an error terminal
+        raises loudly.
 
         On a clean terminal in a resume drive (``terminal_key`` set), the idempotence
         record is written BEFORE the terminal event is yielded, so a crash between here and the
@@ -566,61 +477,133 @@ class ClaudeCodeAgent(Agent):
         allowlist = set(tool_names)
         text_parts: list[str] = []
         seen_hello = False
-        async for frame in _iter_up_frames(handle):
+        async for frame in iter_up_frames(handle):
             if isinstance(frame, HelloFrame):
                 seen_hello = await self._on_hello(frame, session=session, thread_id=thread_id, resume_id=resume_id)
-            elif isinstance(frame, EventFrame):
-                event = _map_event(frame.event, text_parts)
-                if event is not None:
-                    yield event, False
-            elif isinstance(frame, AskFrame):
-                async for event, is_park in self._on_ask(
-                    frame, handle=handle, thread_id=thread_id, settings=settings, options_snapshot=options_snapshot
-                ):
-                    yield event, is_park
-                if frame.mode == "async" and thread_id is not None:
-                    return  # parked: stop draining, the finally kills the runner
-            elif isinstance(frame, ToolCallFrame):
-                parked = await self._on_tool_call(frame, handle=handle, allowlist=allowlist, thread_id=thread_id)
-                if parked is not None:
-                    # The tool async-parked: record it into the durable index, stop the runner,
-                    # and surface the suspended terminal — the same park tail the agent's own
-                    # async ask takes. thread_id is not None here (a thread-less park was refused
-                    # to the model inside _on_tool_call).
-                    assert thread_id is not None
-                    horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
-                    completion_tool, completion_context = get_park_completion()
-                    execution_identity, execution_fingerprint = current_execution_identity()
-                    identity = ParkIdentity(
-                        agent_name=AGENT_NAME,
-                        thread_id=thread_id,
-                        rebuild_kwargs={"thread_id": thread_id, "options_snapshot": options_snapshot},
-                        bind=True,
-                        completion_tool=completion_tool,
-                        completion_context=completion_context,
-                        retention_bound=horizon,
-                        execution_identity=execution_identity,
-                        execution_fingerprint=execution_fingerprint,
-                    )
-                    assert_park_capable(identity, durable=True, retention_bound=horizon)
-                    async for event in self._park_on_interaction(
-                        parked, identity=identity, handle=handle, thread_id=thread_id, horizon=horizon
-                    ):
-                        yield event, True
-                    return  # parked: stop draining, the finally kills the runner
-            elif isinstance(frame, ResultFrame):
-                self._emit_usage(frame, settings=settings)
-                event = _terminal_event(frame, text_parts)
-                # Persist the durable terminal record BEFORE reporting, so a crash after
-                # this point lets a redelivered resume re-produce the SAME output without re-driving.
-                if terminal_key is not None:
-                    await self._persist_terminal_record(session, terminal_key, frame, event)
-                yield event, False
+                continue
+            parked = False
+            async for event, is_park in self._project_frame(
+                frame,
+                handle=handle,
+                session=session,
+                settings=settings,
+                thread_id=thread_id,
+                allowlist=allowlist,
+                options_snapshot=options_snapshot,
+                text_parts=text_parts,
+                terminal_key=terminal_key,
+            ):
+                if is_park:
+                    parked = True
+                yield event, is_park
+            # A park (the agent's own async ask or a tool that parked) and the clean terminal
+            # both stop the drive: the finally kills the runner. Every other frame drains on.
+            if parked or isinstance(frame, ResultFrame):
                 return
-            elif isinstance(frame, FatalFrame):
-                raise ProtocolError(f"runner reported a fatal error: {frame.message}")
         if not seen_hello:
             raise ProtocolError("runner stream ended before the hello init frame")
+
+    async def _project_frame(
+        self,
+        frame: Any,
+        *,
+        handle: Any,
+        session: SandboxSession,
+        settings: ClaudeCodeSettings,
+        thread_id: str | None,
+        allowlist: set[str],
+        options_snapshot: dict[str, Any],
+        text_parts: list[str],
+        terminal_key: str | None,
+    ) -> AsyncIterator[tuple[StreamEvent, bool]]:
+        """Map one non-hello up-frame to its ``(event, is_park)`` pairs: an event frame's stream
+        event, a sync/async ask, a proxied tool call (with its park tail), or the terminal. A
+        ``fatal`` raises loudly."""
+        if isinstance(frame, EventFrame):
+            event = map_event(frame.event, text_parts)
+            if event is not None:
+                yield event, False
+        elif isinstance(frame, AskFrame):
+            async for pair in self._on_ask(
+                frame, handle=handle, thread_id=thread_id, settings=settings, options_snapshot=options_snapshot
+            ):
+                yield pair
+        elif isinstance(frame, ToolCallFrame):
+            async for pair in self._on_tool_call_frame(
+                frame,
+                handle=handle,
+                allowlist=allowlist,
+                thread_id=thread_id,
+                settings=settings,
+                options_snapshot=options_snapshot,
+            ):
+                yield pair
+        elif isinstance(frame, ResultFrame):
+            event = await self._on_result_frame(
+                frame, session=session, settings=settings, text_parts=text_parts, terminal_key=terminal_key
+            )
+            yield event, False
+        elif isinstance(frame, FatalFrame):
+            raise ProtocolError(f"runner reported a fatal error: {frame.message}")
+
+    async def _on_tool_call_frame(
+        self,
+        frame: ToolCallFrame,
+        *,
+        handle: Any,
+        allowlist: set[str],
+        thread_id: str | None,
+        settings: ClaudeCodeSettings,
+        options_snapshot: dict[str, Any],
+    ) -> AsyncIterator[tuple[StreamEvent, bool]]:
+        """Run one proxied tool call and, when it async-parked, take the park tail: build the
+        park identity, gate capability, and record it into the durable index — the same tail the
+        agent's own async ask takes. Yields ``(event, True)`` for each surfaced park event; a
+        tool that ran (or errored) to a plain result yields nothing."""
+        parked = await run_proxied_tool_call(frame, handle=handle, allowlist=allowlist, thread_id=thread_id)
+        if parked is None:
+            return
+        # The tool async-parked: record it into the durable index, stop the runner, and surface
+        # the suspended terminal — the same park tail the agent's own async ask takes. thread_id
+        # is not None here (a thread-less park was refused to the model inside run_proxied_tool_call).
+        assert thread_id is not None
+        horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
+        completion_tool, completion_context = get_park_completion()
+        execution_identity, execution_fingerprint = current_execution_identity()
+        identity = ParkIdentity(
+            agent_name=AGENT_NAME,
+            thread_id=thread_id,
+            rebuild_kwargs={"thread_id": thread_id, "options_snapshot": options_snapshot},
+            bind=True,
+            completion_tool=completion_tool,
+            completion_context=completion_context,
+            retention_bound=horizon,
+            execution_identity=execution_identity,
+            execution_fingerprint=execution_fingerprint,
+        )
+        assert_park_capable(identity, durable=True, retention_bound=horizon)
+        async for event in self._park_on_interaction(
+            parked, identity=identity, handle=handle, thread_id=thread_id, horizon=horizon
+        ):
+            yield event, True
+
+    async def _on_result_frame(
+        self,
+        frame: ResultFrame,
+        *,
+        session: SandboxSession,
+        settings: ClaudeCodeSettings,
+        text_parts: list[str],
+        terminal_key: str | None,
+    ) -> StreamEvent:
+        """Emit the SDK usage, build the terminal event, and — in a resume drive
+        (``terminal_key`` set) — persist the durable terminal record BEFORE the caller reports
+        it, so a crash after this point lets a redelivery re-produce the SAME output."""
+        self._emit_usage(frame, settings=settings)
+        event = terminal_event(frame, text_parts)
+        if terminal_key is not None:
+            await persist_terminal_record(session, terminal_key, frame, event)
+        return event
 
     async def _on_hello(
         self, frame: HelloFrame, *, session: SandboxSession, thread_id: str | None, resume_id: str | None
@@ -631,7 +614,7 @@ class ClaudeCodeAgent(Agent):
             )
         if thread_id is not None:
             if resume_id is None:
-                await self._persist_session_id(session, frame.session_id)
+                await persist_session_id(session, frame.session_id)
             elif frame.session_id != resume_id:
                 raise ProtocolError(f"runner reported session id {frame.session_id!r} != resumed id {resume_id!r}")
         return True
@@ -732,75 +715,6 @@ class ClaudeCodeAgent(Agent):
         await handle.write_stdin(dump_frame(StopFrame(reason="park")))
         yield SuspendedFinal(interaction_ids=[interaction_id], thread_id=thread_id, expiry_at=deadline)
 
-    async def _on_tool_call(
-        self, frame: ToolCallFrame, *, handle: Any, allowlist: set[str], thread_id: str | None
-    ) -> SuspendedInteraction | None:
-        """Run one proxied tool call and write its result back to the runner. Returns the park
-        sentinel when the tool async-parked (so the drive loop stops the runner and suspends),
-        else ``None``.
-
-        A tool that returns a :class:`SuspendedInteraction` async-parked its caller (a generic
-        contract sentinel — this loop learns nothing of the tool's resume machinery). On a
-        threaded run it is surfaced UP as a park, exactly as the agent's own async ask is; on a
-        thread-less (ephemeral) run it can never be resumed, so it is refused loudly to the
-        model as a tool error, mirroring the ephemeral async-ask refusal — never a silent
-        unresumable park.
-
-        A park this run does not OWN is refused the same way: a tool that drove a nested run
-        (a flow, another agent) surfaces a park resumed on THAT run's path, so parking this
-        session on it would suspend the session with nothing to resume it
-        (:func:`assert_park_adoptable`). This seam claims a park from the SENTINEL only — it
-        never reads a wire-form marker off a tool result — so the check here is the whole
-        claim check for this agent; there is no second, content-shaped path into its index.
-
-        The dispatch runs delivery-scoped and UNCHAINED: THIS agent owns the interaction and its
-        deferred answer, so a parking driver reached through the tool must not capture the
-        completion binding addressing that answer (see
-        :mod:`~tai42_agents._internal.nested_dispatch`). It is not chained because this session
-        resumes by feeding the runner the answer to the interaction its pending tool call is
-        waiting on — a park on the CALL is not a shape its protocol can resume — so a nested
-        run's park is refused here rather than waited on. The park surfaced up here is therefore
-        the agent's own — raised outside the scoped call, and the ownership check above is what
-        keeps that true."""
-        if frame.tool_name not in allowlist:
-            # A compromised session cannot widen its declared tool set — a loud protocol error.
-            raise ProtocolError(
-                f"runner requested tool {frame.tool_name!r} outside the granted allowlist {sorted(allowlist)}"
-            )
-        try:
-            with nested_tool_dispatch():
-                result = await tai42_app.tools.run_tool(frame.tool_name, frame.arguments)
-        except Exception as exc:
-            await handle.write_stdin(dump_frame(ToolResultFrame(call_id=frame.call_id, result=str(exc), is_error=True)))
-            return None
-        if isinstance(result, SuspendedInteraction):
-            # Ownership first: a park this session could never claim is refused for THAT
-            # reason on a thread-less run too, rather than being reported as a thread-less
-            # limitation the operator might try to fix by giving the run a thread.
-            try:
-                assert_park_adoptable(
-                    result.resume_owner, interaction_id=result.interaction_id, tool_name=frame.tool_name
-                )
-            except NestedParkOwnershipError as exc:
-                await handle.write_stdin(
-                    dump_frame(ToolResultFrame(call_id=frame.call_id, result=str(exc), is_error=True))
-                )
-                return None
-            if thread_id is None:
-                await handle.write_stdin(
-                    dump_frame(
-                        ToolResultFrame(
-                            call_id=frame.call_id,
-                            result="claude_code cannot async-park a tool-face (thread-less) run",
-                            is_error=True,
-                        )
-                    )
-                )
-                return None
-            return result
-        await handle.write_stdin(dump_frame(ToolResultFrame(call_id=frame.call_id, result=result)))
-        return None
-
     def _emit_usage(self, frame: ResultFrame, *, settings: ClaudeCodeSettings) -> None:
         """Emit the SDK-reported usage/cost into the ACTIVE trace (its model calls bypass the
         platform LLM seam). Guarded by ``current_trace_id`` and fail-safe by construction."""
@@ -812,218 +726,6 @@ class ClaudeCodeAgent(Agent):
         with writer.start_span(name=f"{AGENT_NAME}.generation", kind=SpanKind.LLM, model=settings.model) as span:
             span.update(usage_details=frame.usage)
 
-    # --- workspace authoring ---------------------------------------------------------------
-
-    async def _materialize(
-        self,
-        session: SandboxSession,
-        *,
-        ws: str,
-        settings: ClaudeCodeSettings,
-        bearer: list[_BearerMaterial],
-        options_snapshot: dict[str, Any],
-    ) -> None:
-        """Author the hermetic workspace for one turn (idempotent, re-run every turn)."""
-        # RESET the adapter-owned config + payload trees so no agent-written file survives.
-        await _exec_ok(session, ["rm", "-rf", f"{ws}/{_CLAUDE_CONFIG_DIR}", f"{ws}/{_RUNNER_PAYLOAD_DIR}"])
-        await session.put_file(
-            f"{_CLAUDE_CONFIG_DIR}/settings.json",
-            json.dumps(self._settings_json(settings), indent=2).encode("utf-8"),
-        )
-        # RE-WRITE the bearer credential-helper files EVERY TURN from the fresh resolution.
-        for material in bearer:
-            await session.put_file(f"{_CREDS_DIR}/{material.env_name}", _bearer_file(material).encode("utf-8"))
-        await sync_skills(
-            session,
-            skill_names=options_snapshot["skills"],
-            inline_skills=options_snapshot["inline_skills"],
-        )
-        for name, content in runner_payload_files():
-            await session.put_file(f"{_RUNNER_PAYLOAD_DIR}/{name}", content)
-
-    def _settings_json(self, settings: ClaudeCodeSettings) -> dict[str, Any]:
-        """The adapter-authored ``.claude/settings.json``: the permission floor, telemetry off,
-        and the operator's ``hook_settings`` fragment (verbatim)."""
-        doc: dict[str, Any] = {
-            "permissions": {"defaultMode": "acceptEdits"},
-            "env": {"DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1", "DISABLE_AUTOUPDATER": "1"},
-        }
-        if settings.hook_settings is not None:
-            doc["hooks"] = settings.hook_settings
-        return doc
-
-    def _build_payload(
-        self,
-        *,
-        settings: ClaudeCodeSettings,
-        ws: str,
-        options_snapshot: dict[str, Any],
-        static_env_names: list[str],
-        model_env_name: str,
-        resume_id: str | None,
-    ) -> dict[str, Any]:
-        return build_options_payload(
-            ws=ws,
-            system_prompt=options_snapshot["system_message"],
-            tool_names=options_snapshot["tool_names"],
-            skills=options_snapshot["skills"],
-            subagents=options_snapshot["subagents"],
-            response_format=options_snapshot["response_format"],
-            max_turns=options_snapshot["max_turns"] or settings.max_turns,
-            max_budget_usd=settings.max_budget_usd,
-            model=settings.model,
-            secret_env_names=credential_env_names(model_env_name, static_env_names),
-            session_id=None,
-            resume=resume_id,
-        )
-
-    # --- session id persistence ------------------------------------------------------------
-
-    async def _read_session_id(self, session: SandboxSession) -> str | None:
-        try:
-            raw = await session.get_file(_SESSION_ID_PATH)
-        except Exception:
-            return None
-        try:
-            record = json.loads(raw.decode("utf-8"))
-            session_id = record["session_id"]
-        except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as exc:
-            raise ProtocolError("persisted .runner/session_id is malformed on a thread with prior turns") from exc
-        if not isinstance(session_id, str) or not session_id:
-            raise ProtocolError("persisted .runner/session_id is malformed on a thread with prior turns")
-        return session_id
-
-    async def _persist_session_id(self, session: SandboxSession, session_id: str) -> None:
-        await session.put_file(_SESSION_ID_PATH, json.dumps({"session_id": session_id}).encode("utf-8"))
-
-    # --- terminal idempotence record ----------------------------------------------
-
-    async def _read_terminal_record(self, session: SandboxSession, superstep_id: str) -> _TerminalRecord | None:
-        """Read + schema-validate the durable terminal record for a resumed super-step, or
-        ``None`` when there is none (the common first-drive case) or it does not validate.
-
-        UNTRUSTED UNTIL VERIFIED: the in-session Bash can write under ``.runner``, so the record
-        is schema-validated and its ``superstep_id`` must match the one being resumed before it is
-        honored — a forged record only controls THIS thread's own output. A malformed or mismatched
-        record is treated as absent, so the resume re-drives rather than returning garbage."""
-        try:
-            raw = await session.get_file(f"{_TERMINAL_DIR}/{superstep_id}.json")
-        except Exception:
-            return None
-        try:
-            record = _TerminalRecord.model_validate_json(raw)
-        except (ValidationError, UnicodeDecodeError):
-            return None
-        if record.superstep_id != superstep_id:
-            return None
-        return record
-
-    async def _persist_terminal_record(
-        self, session: SandboxSession, superstep_id: str, frame: ResultFrame, event: StreamEvent
-    ) -> None:
-        """Write the durable terminal record for a resumed super-step BEFORE reporting the
-        terminal, capturing the exact output plus the session id + usage for observability."""
-        record = _TerminalRecord(
-            superstep_id=superstep_id,
-            session_id=frame.session_id,
-            usage=frame.usage,
-            structured=isinstance(event, StructuredFinal),
-            text=event.text if isinstance(event, MessageFinal) else None,
-            data=event.data if isinstance(event, StructuredFinal) else None,
-        )
-        await session.put_file(f"{_TERMINAL_DIR}/{superstep_id}.json", record.model_dump_json().encode("utf-8"))
-
-    # --- credentials -----------------------------------------------------------------------
-
-    async def _resolve_creds(
-        self, settings: ClaudeCodeSettings
-    ) -> tuple[dict[str, SecretStr], list[str], list[_BearerMaterial]]:
-        """Resolve the session creds into ``(spec_env, static_env_names, bearer)``.
-
-        The one model credential + every STATIC ``delivery="env"`` value ride ``spec.env`` (baked
-        at create); every refreshable ``delivery="bearer"`` cred is materialized per-turn as a
-        credential-helper file. A ``required`` connection resolving to nothing raises loudly.
-        """
-        model_env_name, model_secret = settings.model_credential()
-        spec_env: dict[str, SecretStr] = {model_env_name: model_secret}
-        static_env_names: list[str] = []
-        bearer: list[_BearerMaterial] = []
-        for cred in settings.creds:
-            if isinstance(cred, StaticCred):
-                spec_env[cred.env_name] = cred.value
-                static_env_names.append(cred.env_name)
-                continue
-            assert isinstance(cred, ConnectionCred)
-            resolved = await tai42_app.connectors.resolve_connection_auth(
-                cred.connection_id, cred.provider_id, cred.sub_service
-            )
-            self._inject_connection_cred(cred, resolved, spec_env, static_env_names, bearer)
-        return spec_env, static_env_names, bearer
-
-    def _inject_connection_cred(
-        self,
-        cred: ConnectionCred,
-        resolved: ResolvedConnectionAuth | None,
-        spec_env: dict[str, SecretStr],
-        static_env_names: list[str],
-        bearer: list[_BearerMaterial],
-    ) -> None:
-        if resolved is None or (resolved.access_token is None and not resolved.env and not resolved.headers):
-            if cred.required:
-                raise ClaudeCodeError(
-                    f"required connection cred {cred.env_name!r} resolved to nothing for the current caller"
-                )
-            return
-        # Static transport-partitioned env is baked into spec.env regardless of delivery.
-        for key, value in resolved.env.items():
-            spec_env[key] = value
-            static_env_names.append(key)
-        if cred.delivery == "env":
-            if resolved.access_token is not None:
-                spec_env[cred.env_name] = resolved.access_token
-                static_env_names.append(cred.env_name)
-            return
-        # delivery == "bearer": refreshable material re-written per turn as a helper file.
-        bearer.append(_BearerMaterial(env_name=cred.env_name, token=resolved.access_token, headers=resolved.headers))
-
-    async def _scrub_credentials(self, session: SandboxSession, *, ws: str) -> None:
-        """Remove injected credential MATERIAL under ``.claude-home`` (TERMINAL exits only). An
-        un-removable match is a loud error. The invariant: no injected credential material
-        persists after a run reaches a TERMINAL state."""
-        result = await session.exec(["rm", "-rf", f"{ws}/{_CREDS_DIR}"], timeout_seconds=_SHORT_EXEC_TIMEOUT)
-        if result.exit_code != 0:
-            raise ClaudeCodeError(f"claude_code credential scrub failed to remove {_CREDS_DIR}: {result.stderr}")
-
-    async def _redact_transcript(self, session: SandboxSession, *, ws: str, policy: Any, secrets: list[str]) -> None:
-        """When the platform ``scrub_transcript`` flag is ON, redact injected-credential VALUES
-        from the KEPT session transcript CONTENT (distinct from the credential-FILE scrub above:
-        this rewrites text, never deletes the transcript — resume still reads it). The knob OFF
-        leaves the transcript verbatim (the stated env-credential residual stands)."""
-        if not getattr(policy, "scrub_transcript", False) or not secrets:
-            return
-        script = (
-            "import os,sys\n"
-            "root=sys.argv[1]\n"
-            "marks=sys.argv[2:]\n"
-            "for dp,_,fns in os.walk(root):\n"
-            "  for fn in fns:\n"
-            "    p=os.path.join(dp,fn)\n"
-            "    try:\n"
-            "      t=open(p,encoding='utf-8').read()\n"
-            "    except (OSError,UnicodeDecodeError):\n"
-            "      continue\n"
-            "    n=t\n"
-            "    for m in marks:\n"
-            "      n=n.replace(m,'[REDACTED]')\n"
-            "    if n!=t:\n"
-            "      open(p,'w',encoding='utf-8').write(n)\n"
-        )
-        result = await session.exec(
-            ["python", "-c", script, f"{ws}/.claude-home", *secrets], timeout_seconds=_SHORT_EXEC_TIMEOUT
-        )
-        if result.exit_code != 0:
-            raise ClaudeCodeError(f"claude_code transcript redaction failed: {result.stderr}")
-
 
 # --- module helpers ------------------------------------------------------------------------
 
@@ -1031,96 +733,3 @@ class ClaudeCodeAgent(Agent):
 async def _aiter(items: list[StreamEvent]) -> AsyncIterator[StreamEvent]:
     for item in items:
         yield item
-
-
-async def _exec_ok(session: SandboxSession, argv: list[str]) -> None:
-    result = await session.exec(argv, timeout_seconds=_SHORT_EXEC_TIMEOUT)
-    if result.exit_code != 0:
-        raise ClaudeCodeError(f"workspace command {argv!r} failed ({result.exit_code}): {result.stderr}")
-
-
-def _secret_values(spec_env: dict[str, SecretStr], bearer: list[_BearerMaterial]) -> list[str]:
-    """Every injected secret STRING value (for transcript redaction): the baked ``spec.env``
-    values plus each bearer token/header value."""
-    values = [v.get_secret_value() for v in spec_env.values()]
-    for material in bearer:
-        if material.token is not None:
-            values.append(material.token.get_secret_value())
-        values.extend(v.get_secret_value() for v in material.headers.values())
-    return [v for v in values if v]
-
-
-def _bearer_file(material: _BearerMaterial) -> str:
-    lines: list[str] = []
-    if material.token is not None:
-        lines.append(f"Authorization: Bearer {material.token.get_secret_value()}")
-    for key, value in material.headers.items():
-        lines.append(f"{key}: {value.get_secret_value()}")
-    return "\n".join(lines) + "\n"
-
-
-async def _iter_up_frames(handle: Any) -> AsyncIterator[Any]:
-    """Yield parsed up-frames off the exec handle's byte stream, buffering whole JSON lines and
-    ignoring stderr (diagnostics). A ``SandboxStreamExit`` ends the stream."""
-    buffer = bytearray()
-    async for chunk in handle.output:
-        if isinstance(chunk, SandboxStreamExit):
-            break
-        assert isinstance(chunk, SandboxStreamChunk)
-        if chunk.stream != "stdout":
-            continue
-        buffer.extend(chunk.data)
-        while b"\n" in buffer:
-            line, _, rest = buffer.partition(b"\n")
-            buffer = bytearray(rest)
-            text = line.decode("utf-8", "replace").strip()
-            if text:
-                yield parse_up_frame(text)
-
-
-async def _drain_handle(handle: Any) -> None:
-    """Await the killed handle's stream to completion so no runner code is still mid-drive."""
-    try:
-        async for _ in handle.output:
-            pass
-    except (SandboxExecTimeoutError, ProtocolError):
-        pass
-
-
-def _map_event(event: dict[str, Any], text_parts: list[str]) -> StreamEvent | None:
-    """Map one runner ``event`` payload to a contract stream event (or ``None`` to skip)."""
-    kind = event.get("kind")
-    if kind == "text":
-        text = event.get("text", "")
-        text_parts.append(text)
-        return MessageDelta(text=text)
-    if kind == "thinking":
-        text = event.get("text", "")
-        if not text.strip():
-            return None
-        return ReasoningStep(text=text)
-    if kind == "tool_use":
-        return ToolCallStep(tool=event.get("name", ""), args=event.get("input", {}) or {}, call_id=event.get("id", ""))
-    if kind == "tool_result":
-        return ToolResultStep(
-            tool="", call_id=event.get("id", ""), result=event.get("content"), is_error=bool(event.get("is_error"))
-        )
-    return None
-
-
-def _event_from_terminal_record(record: _TerminalRecord) -> StreamEvent:
-    """Reconstruct the terminal stream event from a durable terminal record, mirroring ``_terminal_event``
-    so a redelivered resume re-produces the SAME drained value the original terminal did."""
-    if record.structured:
-        return StructuredFinal(data=record.data)
-    return MessageFinal(text=record.text or "")
-
-
-def _terminal_event(frame: ResultFrame, text_parts: list[str]) -> StreamEvent:
-    if frame.terminal_reason not in {"completed", "success"}:
-        raise ProtocolError(f"runner terminated with reason {frame.terminal_reason!r} (subtype {frame.subtype!r})")
-    if frame.is_structured and frame.result is not None:
-        return StructuredFinal(data=frame.result)
-    if isinstance(frame.result, str):
-        return MessageFinal(text=frame.result)
-    return MessageFinal(text="".join(text_parts))

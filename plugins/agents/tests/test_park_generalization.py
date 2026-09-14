@@ -21,8 +21,7 @@ from tai42_contract.sandbox import SandboxPolicy
 from tai42_contract.sandbox.models import WORKSPACE_KEY_RE
 
 from tai42_agents._internal import sandbox_util
-from tai42_agents._internal.park import assert_park_capable, lease
-from tai42_agents._internal.park import driver as drv
+from tai42_agents._internal.park import ParkIdentity, assert_park_capable, lease
 from tai42_agents._internal.park.errors import WorkspaceLeaseHeldError
 
 # ---- workspace key derivation ---------------------------------------------
@@ -46,8 +45,8 @@ def test_workspace_key_for_is_deterministic_and_charset_valid() -> None:
 # ---- structural park-capability gate --------------------------------------
 
 
-def _identity(*, bind: bool = True, rebuild_kwargs: dict[str, Any] | None = None) -> drv.ParkIdentity:
-    return drv.ParkIdentity(
+def _identity(*, bind: bool = True, rebuild_kwargs: dict[str, Any] | None = None) -> ParkIdentity:
+    return ParkIdentity(
         agent_name="claude_code",
         thread_id="t-1",
         rebuild_kwargs={"a": 1} if rebuild_kwargs is None else rebuild_kwargs,
@@ -80,7 +79,7 @@ def test_assert_park_capable_refuses_unbound() -> None:
 
 def test_park_identity_carries_no_langgraph_facts() -> None:
     identity = _identity()
-    assert set(drv.ParkIdentity.__slots__) == {
+    assert set(ParkIdentity.__slots__) == {
         "agent_name",
         "bind",
         "completion_context",

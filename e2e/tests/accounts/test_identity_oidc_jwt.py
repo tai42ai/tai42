@@ -14,7 +14,7 @@ from collections.abc import Callable
 import pytest
 
 from tai42_e2e.httpapi import ApiClient
-from tai42_e2e.netfixtures import OAuthIdp
+from tai42_e2e.oidc_idp import OAuthIdp
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 

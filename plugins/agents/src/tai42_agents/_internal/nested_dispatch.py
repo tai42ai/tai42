@@ -72,8 +72,8 @@ from tai42_contract.interactions import (
     set_park_completion,
 )
 
+from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME
 from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
-from tai42_agents._internal.park.driver import AGENT_RESUME_TOOL_NAME
 from tai42_agents._internal.park.middleware import resuming_park_interaction_ids
 
 logger = logging.getLogger(__name__)

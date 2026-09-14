@@ -88,34 +88,37 @@ def _opt_str_or_null(body: dict[str, Any], field: str) -> str | None:
     return value
 
 
-# -- HTTP-edge extractors -----------------------------------------------------
+# -- merge-patch field readers ------------------------------------------------
+# Each reads ONE overlay field when present (absence ≠ present-null), type-checks
+# it, and writes it into ``patch`` so a caller-sent key stays distinct from an
+# unchanged one.
 
 
-async def _extract_upsert(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
-    patch: dict[str, Any] = {}
-    # Only the keys the caller sent enter the patch, so absence (unchanged) stays
-    # distinct from a present-null (clear). Each present value is type-checked here.
-    if "display_name" in body:
-        value = body["display_name"]
+def _patch_string(body: dict[str, Any], field: str, patch: dict[str, Any]) -> None:
+    if field in body:
+        value = body[field]
         if value is not None and not isinstance(value, str):
-            raise BadRequestError("'display_name' must be a string or null")
-        patch["display_name"] = value
-    if "folder_id" in body:
-        value = body["folder_id"]
-        if value is not None and not isinstance(value, str):
-            raise BadRequestError("'folder_id' must be a string or null")
-        patch["folder_id"] = value
-    if "tags" in body:
-        value = body["tags"]
-        if not isinstance(value, list) or not all(isinstance(tag, str) for tag in value):
-            raise BadRequestError("'tags' must be a list of strings")
-        patch["tags"] = value
-    if "hidden" in body:
-        value = body["hidden"]
+            raise BadRequestError(f"{field!r} must be a string or null")
+        patch[field] = value
+
+
+def _patch_str_list(body: dict[str, Any], field: str, patch: dict[str, Any]) -> None:
+    if field in body:
+        value = body[field]
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise BadRequestError(f"{field!r} must be a list of strings")
+        patch[field] = value
+
+
+def _patch_bool(body: dict[str, Any], field: str, patch: dict[str, Any]) -> None:
+    if field in body:
+        value = body[field]
         if value is not None and not isinstance(value, bool):
-            raise BadRequestError("'hidden' must be a boolean or null")
-        patch["hidden"] = value
+            raise BadRequestError(f"{field!r} must be a boolean or null")
+        patch[field] = value
+
+
+def _patch_badges(body: dict[str, Any], patch: dict[str, Any]) -> None:
     if "badges" in body:
         value = body["badges"]
         if not isinstance(value, list) or not all(isinstance(badge, str) for badge in value):
@@ -128,6 +131,19 @@ async def _extract_upsert(request: Request) -> dict[str, Any]:
             if not TAG_RE.fullmatch(badge):
                 raise BadRequestError(f"badge {badge!r} must match {TAG_RE.pattern}")
         patch["badges"] = value
+
+
+# -- HTTP-edge extractors -----------------------------------------------------
+
+
+async def _extract_upsert(request: Request) -> dict[str, Any]:
+    body = await _json_object(request)
+    patch: dict[str, Any] = {}
+    _patch_string(body, "display_name", patch)
+    _patch_string(body, "folder_id", patch)
+    _patch_str_list(body, "tags", patch)
+    _patch_bool(body, "hidden", patch)
+    _patch_badges(body, patch)
     if not patch:
         raise BadRequestError(f"body must provide at least one of {list(_PATCH_FIELDS)}")
     return {"patch": patch}

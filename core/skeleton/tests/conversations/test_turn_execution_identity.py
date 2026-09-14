@@ -28,6 +28,7 @@ from tai42_skeleton.access_control.role_gate import reset_route_index
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.route_registry import route_registry
 from tai42_skeleton.authz.execution_identity import get_execution_identity
+from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
@@ -38,6 +39,7 @@ from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.registry import operation_registry
 
@@ -191,10 +193,10 @@ def _wire_turn(monkeypatch, execution_key: str, tool: str, arguments: dict) -> t
     route = _route(execution_key)
     manager = FakeManager(route)
     channel = FakeChannel()
-    monkeypatch.setattr(turn_module, "get_conversations_manager", lambda: manager)
+    monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "tai42_app", _FakeDeliveryApp(channel))
-    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {_AGENT: ToolCallingAgent(tool, arguments)})
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {_AGENT: ToolCallingAgent(tool, arguments)})
     return channel, route
 
 
@@ -254,7 +256,7 @@ async def test_the_identity_is_bound_for_the_turn_and_released_when_it_ends(ac, 
         return await complete_turn(self, record)
 
     _wire_turn(monkeypatch, "k-run", "shout", {})
-    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {_AGENT: _IdentityProbeAgent()})
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {_AGENT: _IdentityProbeAgent()})
     monkeypatch.setattr(ConversationRecordStore, "complete_turn", _observe_then_complete)
 
     async with app.app_context(_manifest()):

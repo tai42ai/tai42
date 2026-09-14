@@ -34,6 +34,108 @@ app = typer.Typer(
 _VISIBILITY_TO_HIDDEN: dict[str, bool | None] = {"default": None, "shown": False, "hidden": True}
 
 
+class _Unset:
+    """The absence of a ``--visibility`` flag, distinct from the ``"default"`` value
+    that maps to a ``None`` ``hidden``."""
+
+
+_UNSET = _Unset()
+
+
+def _reject_conflicting_flags(
+    display_name: str | None,
+    clear_display_name: bool,
+    folder: str | None,
+    clear_folder: bool,
+    tags: list[str] | None,
+    clear_tags: bool,
+    badges: list[str] | None,
+    clear_badges: bool,
+) -> None:
+    """Raise a usage error when a set flag and its matching clear flag are both given."""
+    for set_present, clear_flag, message in (
+        (display_name is not None, clear_display_name, "pass either --display-name or --clear-display-name, not both"),
+        (folder is not None, clear_folder, "pass either --folder or --clear-folder, not both"),
+        (bool(tags), clear_tags, "pass either --tag or --clear-tags, not both"),
+        (bool(badges), clear_badges, "pass either --badge or --clear-badges, not both"),
+    ):
+        if set_present and clear_flag:
+            raise typer.BadParameter(message)
+
+
+def _apply_patch_field(
+    body: dict[str, Any], key: str, *, set_present: bool, set_value: Any, clear: bool, clear_value: Any
+) -> None:
+    """Set ``body[key]`` to ``set_value`` when the field was set, else to
+    ``clear_value`` when its clear flag is on, else leave it absent (unchanged)."""
+    if set_present:
+        body[key] = set_value
+    elif clear:
+        body[key] = clear_value
+
+
+def _visibility_hidden(visibility: str | None) -> bool | _Unset | None:
+    """Map ``--visibility`` to its ``hidden`` value, raising on a bad value; return
+    the unset sentinel when the flag was omitted."""
+    if visibility is None:
+        return _UNSET
+    if visibility not in _VISIBILITY_TO_HIDDEN:
+        raise typer.BadParameter("--visibility must be one of: default, shown, hidden")
+    return _VISIBILITY_TO_HIDDEN[visibility]
+
+
+def build_overlay_patch(
+    display_name: str | None,
+    clear_display_name: bool,
+    folder: str | None,
+    clear_folder: bool,
+    tags: list[str] | None,
+    clear_tags: bool,
+    badges: list[str] | None,
+    clear_badges: bool,
+    visibility: str | None,
+) -> dict[str, Any]:
+    """Assemble the merge-patch body from the ``set`` command's set/clear pairs and
+    the visibility choice; only the flags actually passed appear in the result."""
+    body: dict[str, Any] = {}
+    _apply_patch_field(
+        body,
+        "display_name",
+        set_present=display_name is not None,
+        set_value=display_name,
+        clear=clear_display_name,
+        clear_value=None,
+    )
+    _apply_patch_field(
+        body,
+        "folder_id",
+        set_present=folder is not None,
+        set_value=folder,
+        clear=clear_folder,
+        clear_value=None,
+    )
+    _apply_patch_field(
+        body,
+        "tags",
+        set_present=bool(tags),
+        set_value=list(tags) if tags else [],
+        clear=clear_tags,
+        clear_value=[],
+    )
+    _apply_patch_field(
+        body,
+        "badges",
+        set_present=bool(badges),
+        set_value=list(badges) if badges else [],
+        clear=clear_badges,
+        clear_value=[],
+    )
+    hidden = _visibility_hidden(visibility)
+    if not isinstance(hidden, _Unset):
+        body["hidden"] = hidden
+    return body
+
+
 @app.command("list")
 @covers(("GET", "/api/tool-meta"))
 def list_tool_meta(ctx: typer.Context) -> None:
@@ -82,37 +184,12 @@ def set_tool_meta(
     Example: ``tai tool-meta set web_search --display-name 'Web Search' --tag research``
     """
     ctx_obj = app_context(ctx)
-    if display_name is not None and clear_display_name:
-        raise typer.BadParameter("pass either --display-name or --clear-display-name, not both")
-    if folder is not None and clear_folder:
-        raise typer.BadParameter("pass either --folder or --clear-folder, not both")
-    if tags and clear_tags:
-        raise typer.BadParameter("pass either --tag or --clear-tags, not both")
-    if badges and clear_badges:
-        raise typer.BadParameter("pass either --badge or --clear-badges, not both")
-
-    body: dict[str, Any] = {}
-    if display_name is not None:
-        body["display_name"] = display_name
-    elif clear_display_name:
-        body["display_name"] = None
-    if folder is not None:
-        body["folder_id"] = folder
-    elif clear_folder:
-        body["folder_id"] = None
-    if tags:
-        body["tags"] = list(tags)
-    elif clear_tags:
-        body["tags"] = []
-    if badges:
-        body["badges"] = list(badges)
-    elif clear_badges:
-        body["badges"] = []
-    if visibility is not None:
-        if visibility not in _VISIBILITY_TO_HIDDEN:
-            raise typer.BadParameter("--visibility must be one of: default, shown, hidden")
-        body["hidden"] = _VISIBILITY_TO_HIDDEN[visibility]
-
+    _reject_conflicting_flags(
+        display_name, clear_display_name, folder, clear_folder, tags, clear_tags, badges, clear_badges
+    )
+    body = build_overlay_patch(
+        display_name, clear_display_name, folder, clear_folder, tags, clear_tags, badges, clear_badges, visibility
+    )
     if not body:
         raise typer.BadParameter(
             "provide at least one field to set (--display-name/--clear-display-name, "

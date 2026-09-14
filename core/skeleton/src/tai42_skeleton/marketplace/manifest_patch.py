@@ -55,9 +55,10 @@ skipped item.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
-from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, PluginSpec
+from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, PluginItem, PluginSpec
 
 from tai42_skeleton.app.route_defaults import STUDIO_SPA_ROUTER
 from tai42_skeleton.marketplace.errors import ManifestBindingError, ManifestCollisionError
@@ -76,13 +77,46 @@ class _FieldTargets(NamedTuple):
     values: list[Any]
 
 
+# The item-value derivation the grouping shares between the two payload families:
+# a ``data`` item's whole manifest object, and a non-data item's contributed string.
+def _data_item_payload(item: PluginItem, mode: str) -> dict[str, Any]:
+    """The manifest object a ``data`` item contributes: an ``mcp_entry`` item's
+    ``{title, config}`` wrapper around its transport config, or a
+    ``descriptor_entry`` item's dumped ``provider`` descriptor. The contract
+    guarantees the declarative block the kind names is set."""
+    if mode == "mcp_entry":
+        assert item.mcp is not None
+        return {"title": item.name, "config": item.mcp.model_dump(exclude_none=True)}
+    assert item.provider is not None  # descriptor_entry
+    return item.provider.model_dump(mode="json", exclude_none=True)
+
+
+def _string_item_value(item: PluginItem, spec: PluginSpec, mode: str) -> str | None:
+    """The manifest string a non-data item contributes: the plugin's DISTRIBUTION
+    name for a ``package_list`` slot, the module's TOP-LEVEL import package for a
+    ``scalar_module`` slot (never the descriptor's impl submodule, so the loader
+    whitelists every module under the package root), else the item's own module."""
+    if mode == "package_list":
+        return spec.package
+    if mode == "scalar_module":
+        assert item.module is not None
+        return item.module.partition(".")[0]
+    return item.module
+
+
+# The dedupe key of a ``data`` payload: an mcp entry is unique by title, a connector
+# descriptor by id.
+_DATA_DEDUPE_KEY = {"mcp_entry": "title", "descriptor_entry": "id"}
+
+
 def _grouped_targets(spec: PluginSpec) -> dict[str, _FieldTargets]:
     """Group the spec's provides items by the manifest field they target.
 
     Every ``env_selected`` (``config``) item is skipped — it has no manifest
     field. Values are de-duplicated per field: multiple items sharing a module
     (or, for ``package_list``, the single distribution name) collapse to one
-    entry. An item kind with no binding raises :class:`ManifestBindingError`.
+    entry; a ``data`` item is deduped by its identifying key. An item kind with no
+    binding raises :class:`ManifestBindingError`.
     """
     grouped: dict[str, _FieldTargets] = {}
     for item in spec.provides:
@@ -94,41 +128,16 @@ def _grouped_targets(spec: PluginSpec) -> dict[str, _FieldTargets]:
         field = binding.field
         if field is None:  # pragma: no cover - guarded by the binding invariant
             raise ManifestBindingError(f"binding for kind {item.kind.value!r} names no field but is not env-selected")
-        target = grouped.get(field)
-        if target is None:
-            target = _FieldTargets(mode=binding.mode, values=[])
-            grouped[field] = target
+        target = grouped.setdefault(field, _FieldTargets(mode=binding.mode, values=[]))
         if binding.payload == "data":
-            # A data item carries its kind's declarative block and no module. The
-            # ``mcp_entry`` shape wraps ``item.mcp`` as a ``{title, config}`` object
-            # (deduped by title); ``descriptor_entry`` appends the item's
-            # ``provider`` descriptor itself (deduped by id). The contract guarantees
-            # the block the kind names is set.
-            if binding.mode == "mcp_entry":
-                assert item.mcp is not None
-                mcp_payload = {"title": item.name, "config": item.mcp.model_dump(exclude_none=True)}
-                if not any(existing["title"] == mcp_payload["title"] for existing in target.values):
-                    target.values.append(mcp_payload)
-            else:  # descriptor_entry
-                assert item.provider is not None
-                provider_payload = item.provider.model_dump(mode="json", exclude_none=True)
-                if not any(existing["id"] == provider_payload["id"] for existing in target.values):
-                    target.values.append(provider_payload)
-            continue
-        if binding.mode == "package_list":
-            value = spec.package
-        elif binding.mode == "scalar_module":
-            # A scalar slot holds the plugin's top-level import package, not the
-            # descriptor's impl submodule: the loader whitelists every module under
-            # the slot's package root, so importing it registers the provider and the
-            # sibling tool/extension modules the package ``__init__`` pulls in. Naming
-            # the submodule leaves those siblings un-whitelisted and aborts boot.
-            assert item.module is not None
-            value = item.module.partition(".")[0]
+            payload = _data_item_payload(item, binding.mode)
+            key = _DATA_DEDUPE_KEY[binding.mode]
+            if not any(existing[key] == payload[key] for existing in target.values):
+                target.values.append(payload)
         else:
-            value = item.module
-        if value not in target.values:
-            target.values.append(value)
+            value = _string_item_value(item, spec, binding.mode)
+            if value not in target.values:
+                target.values.append(value)
     return grouped
 
 
@@ -136,6 +145,167 @@ def _existing_list(manifest_dict: dict[str, Any], field: str) -> list[Any]:
     """The current value of a list-shaped manifest field, or ``[]`` when unset."""
     value = manifest_dict.get(field)
     return value if isinstance(value, list) else []
+
+
+def _ensure_list(manifest_dict: dict[str, Any], field: str) -> list[Any]:
+    """The list-shaped manifest field, replacing an absent or non-list value with a
+    fresh list stored in place so the caller appends into the live manifest."""
+    entries = manifest_dict.get(field)
+    if not isinstance(entries, list):
+        entries = []
+        manifest_dict[field] = entries
+    return entries
+
+
+# -- collision handlers, one per patch shape ---------------------------------
+
+
+def _collide_config_row(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> list[str]:
+    entries = _existing_list(manifest_dict, field)
+    occupied = {entry.get("module") for entry in entries} | {entry.get("title") for entry in entries}
+    return [f"{field} entry with module {module!r} already exists" for module in target.values if module in occupied]
+
+
+def _collide_string_list(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> list[str]:
+    entries = _existing_list(manifest_dict, field)
+    return [f"{field} already contains {value!r}" for value in target.values if value in entries]
+
+
+def _collide_mcp_entry(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> list[str]:
+    titles = {entry.get("title") for entry in _existing_list(manifest_dict, field)}
+    return [f"{field} entry titled {p['title']!r} already exists" for p in target.values if p["title"] in titles]
+
+
+def _collide_descriptor_entry(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> list[str]:
+    ids = {entry.get("id") for entry in _existing_list(manifest_dict, field)}
+    return [f"{field} entry with id {p['id']!r} already exists" for p in target.values if p["id"] in ids]
+
+
+def _collide_scalar_module(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> list[str]:
+    current = manifest_dict.get(field)
+    if current:
+        return [f"{field} is already set to {current!r} (cannot install {module!r})" for module in target.values]
+    if len(target.values) > 1:
+        joined = ", ".join(repr(module) for module in target.values)
+        return [f"{field} is a single-module slot but this plugin provides {joined}"]
+    return []
+
+
+_COLLIDE_HANDLERS: dict[str, Callable[[dict[str, Any], str, _FieldTargets], list[str]]] = {
+    "config_row": _collide_config_row,
+    "module_list": _collide_string_list,
+    "package_list": _collide_string_list,
+    "mcp_entry": _collide_mcp_entry,
+    "descriptor_entry": _collide_descriptor_entry,
+    "scalar_module": _collide_scalar_module,
+}
+
+
+# -- apply handlers, one per patch shape -------------------------------------
+
+
+def _apply_config_row(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> None:
+    entries = _ensure_list(manifest_dict, field)
+    for module in target.values:
+        entries.append({"title": module, "module": module})
+
+
+def _apply_string_list(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> None:
+    entries = _ensure_list(manifest_dict, field)
+    for value in target.values:
+        if value in entries:
+            continue
+        # ``routers_modules`` is ordering-aware: a router listed AFTER the Studio SPA
+        # catch-all serves nothing (the catch-all matches every path), so insert each
+        # new router BEFORE the sentinel when present, preserving the relative order of
+        # multiple inserted routers. Every other list field (and routers_modules without
+        # the sentinel, where the loader owns catch-all placement) plain-appends.
+        if field == "routers_modules" and STUDIO_SPA_ROUTER in entries:
+            entries.insert(entries.index(STUDIO_SPA_ROUTER), value)
+        else:
+            entries.append(value)
+
+
+def _apply_mcp_entry(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> None:
+    # The collisions() re-check in ``apply_provides`` rejects a title already present, so
+    # a hand-written or previously-installed entry is never overwritten.
+    entries = _ensure_list(manifest_dict, field)
+    entries.extend(target.values)
+
+
+def _apply_descriptor_entry(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> None:
+    # The collisions() re-check in ``apply_provides`` rejects a provider id already
+    # present, so a hand-written or previously-installed connector is never overwritten.
+    entries = _ensure_list(manifest_dict, field)
+    entries.extend(target.values)
+
+
+def _apply_scalar_module(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> None:
+    # The collisions() re-check rejects a spec with two distinct modules for one scalar
+    # slot, so target.values holds at most one here.
+    for module in target.values:
+        manifest_dict[field] = module
+
+
+_APPLY_HANDLERS: dict[str, Callable[[dict[str, Any], str, _FieldTargets], None]] = {
+    "config_row": _apply_config_row,
+    "module_list": _apply_string_list,
+    "package_list": _apply_string_list,
+    "mcp_entry": _apply_mcp_entry,
+    "descriptor_entry": _apply_descriptor_entry,
+    "scalar_module": _apply_scalar_module,
+}
+
+
+# -- removal handlers, one per patch shape -----------------------------------
+
+
+def _remove_by_predicate(manifest_dict: dict[str, Any], field: str, keep: Callable[[Any], bool]) -> bool:
+    """Drop every list entry ``keep`` rejects; report whether the field changed."""
+    entries = _existing_list(manifest_dict, field)
+    kept = [entry for entry in entries if keep(entry)]
+    if len(kept) != len(entries):
+        manifest_dict[field] = kept
+        return True
+    return False
+
+
+def _remove_config_row(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
+    modules = set(target.values)
+    return _remove_by_predicate(manifest_dict, field, lambda entry: entry.get("module") not in modules)
+
+
+def _remove_string_list(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
+    values = set(target.values)
+    return _remove_by_predicate(manifest_dict, field, lambda value: value not in values)
+
+
+def _remove_mcp_entry(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
+    titles = {payload["title"] for payload in target.values}
+    return _remove_by_predicate(manifest_dict, field, lambda entry: entry.get("title") not in titles)
+
+
+def _remove_descriptor_entry(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
+    ids = {payload["id"] for payload in target.values}
+    return _remove_by_predicate(manifest_dict, field, lambda entry: entry.get("id") not in ids)
+
+
+def _remove_scalar_module(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
+    current = manifest_dict.get(field)
+    if current is not None and current in target.values:
+        manifest_dict[field] = None
+        return True
+    return False
+
+
+_REMOVE_HANDLERS: dict[str, Callable[[dict[str, Any], str, _FieldTargets], bool]] = {
+    "config_row": _remove_config_row,
+    "module_list": _remove_string_list,
+    "package_list": _remove_string_list,
+    "mcp_entry": _remove_mcp_entry,
+    "descriptor_entry": _remove_descriptor_entry,
+    "scalar_module": _remove_scalar_module,
+}
 
 
 def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
@@ -157,37 +327,7 @@ def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
     """
     messages: list[str] = []
     for field, target in _grouped_targets(spec).items():
-        if target.mode == "config_row":
-            entries = _existing_list(manifest_dict, field)
-            occupied = {entry.get("module") for entry in entries} | {entry.get("title") for entry in entries}
-            for module in target.values:
-                if module in occupied:
-                    messages.append(f"{field} entry with module {module!r} already exists")
-        elif target.mode in ("module_list", "package_list"):
-            entries = _existing_list(manifest_dict, field)
-            for value in target.values:
-                if value in entries:
-                    messages.append(f"{field} already contains {value!r}")
-        elif target.mode == "mcp_entry":
-            entries = _existing_list(manifest_dict, field)
-            titles = {entry.get("title") for entry in entries}
-            for payload in target.values:
-                if payload["title"] in titles:
-                    messages.append(f"{field} entry titled {payload['title']!r} already exists")
-        elif target.mode == "descriptor_entry":
-            entries = _existing_list(manifest_dict, field)
-            ids = {entry.get("id") for entry in entries}
-            for payload in target.values:
-                if payload["id"] in ids:
-                    messages.append(f"{field} entry with id {payload['id']!r} already exists")
-        elif target.mode == "scalar_module":
-            current = manifest_dict.get(field)
-            if current:
-                for module in target.values:
-                    messages.append(f"{field} is already set to {current!r} (cannot install {module!r})")
-            elif len(target.values) > 1:
-                joined = ", ".join(repr(module) for module in target.values)
-                messages.append(f"{field} is a single-module slot but this plugin provides {joined}")
+        messages.extend(_COLLIDE_HANDLERS[target.mode](manifest_dict, field, target))
     return messages
 
 
@@ -204,54 +344,7 @@ def apply_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> None:
     if found:
         raise ManifestCollisionError("; ".join(found))
     for field, target in _grouped_targets(spec).items():
-        if target.mode == "config_row":
-            entries = manifest_dict.get(field)
-            if not isinstance(entries, list):
-                entries = []
-                manifest_dict[field] = entries
-            for module in target.values:
-                entries.append({"title": module, "module": module})
-        elif target.mode in ("module_list", "package_list"):
-            entries = manifest_dict.get(field)
-            if not isinstance(entries, list):
-                entries = []
-                manifest_dict[field] = entries
-            for value in target.values:
-                if value in entries:
-                    continue
-                # ``routers_modules`` is ordering-aware: a router listed AFTER the
-                # Studio SPA catch-all serves nothing (the catch-all matches every
-                # path), so insert each new router BEFORE the sentinel when present,
-                # preserving the relative order of multiple inserted routers. Every
-                # other module_list field (and routers_modules without the sentinel,
-                # the case where the loader owns catch-all placement) plain-appends.
-                if field == "routers_modules" and STUDIO_SPA_ROUTER in entries:
-                    entries.insert(entries.index(STUDIO_SPA_ROUTER), value)
-                else:
-                    entries.append(value)
-        elif target.mode == "mcp_entry":
-            # The collisions() re-check above rejects a title already present, so a
-            # hand-written or previously-installed entry is never overwritten.
-            entries = manifest_dict.get(field)
-            if not isinstance(entries, list):
-                entries = []
-                manifest_dict[field] = entries
-            for payload in target.values:
-                entries.append(payload)
-        elif target.mode == "descriptor_entry":
-            # The collisions() re-check above rejects a provider id already present, so a
-            # hand-written or previously-installed connector is never overwritten.
-            entries = manifest_dict.get(field)
-            if not isinstance(entries, list):
-                entries = []
-                manifest_dict[field] = entries
-            for payload in target.values:
-                entries.append(payload)
-        elif target.mode == "scalar_module":
-            # The collisions() re-check above rejects a spec with two distinct
-            # modules for one scalar slot, so target.values holds at most one here.
-            for module in target.values:
-                manifest_dict[field] = module
+        _APPLY_HANDLERS[target.mode](manifest_dict, field, target)
 
 
 def remove_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> bool:
@@ -273,37 +366,6 @@ def remove_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> bool:
     """
     changed = False
     for field, target in _grouped_targets(spec).items():
-        if target.mode == "config_row":
-            entries = _existing_list(manifest_dict, field)
-            modules = set(target.values)
-            kept = [entry for entry in entries if entry.get("module") not in modules]
-            if len(kept) != len(entries):
-                manifest_dict[field] = kept
-                changed = True
-        elif target.mode in ("module_list", "package_list"):
-            entries = _existing_list(manifest_dict, field)
-            values = set(target.values)
-            kept = [value for value in entries if value not in values]
-            if len(kept) != len(entries):
-                manifest_dict[field] = kept
-                changed = True
-        elif target.mode == "mcp_entry":
-            entries = _existing_list(manifest_dict, field)
-            titles = {payload["title"] for payload in target.values}
-            kept = [entry for entry in entries if entry.get("title") not in titles]
-            if len(kept) != len(entries):
-                manifest_dict[field] = kept
-                changed = True
-        elif target.mode == "descriptor_entry":
-            entries = _existing_list(manifest_dict, field)
-            ids = {payload["id"] for payload in target.values}
-            kept = [entry for entry in entries if entry.get("id") not in ids]
-            if len(kept) != len(entries):
-                manifest_dict[field] = kept
-                changed = True
-        elif target.mode == "scalar_module":
-            current = manifest_dict.get(field)
-            if current is not None and current in target.values:
-                manifest_dict[field] = None
-                changed = True
+        if _REMOVE_HANDLERS[target.mode](manifest_dict, field, target):
+            changed = True
     return changed

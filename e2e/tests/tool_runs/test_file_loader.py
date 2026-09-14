@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from fastmcp.client.client import CallToolResult
 
-from tai42_e2e.netfixtures import TargetServer
+from tai42_e2e.recording_proxy import TargetServer
 from tai42_e2e.stack import TaiStack
 
 

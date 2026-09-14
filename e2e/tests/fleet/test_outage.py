@@ -39,9 +39,9 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
-from tai42_e2e import wait_for_async
+from tai42_e2e import Infra, StackConfig, StackResources, Topology, wait_for_async
 from tai42_e2e.manifests import build_bare_stack
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack, Topology
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
 from tai42_e2e.variants import bus_census
 
@@ -57,7 +57,7 @@ from ._fleet import (
 )
 
 if TYPE_CHECKING:
-    from tai42_e2e.netfixtures import OAuthIdp
+    from tai42_e2e.oidc_idp import OAuthIdp
     from tai42_e2e.variants import Variants
 
 pytestmark = pytest.mark.backendless

@@ -16,7 +16,15 @@ from tai42_channel_whatsapp import WhatsAppChannel
 
 def test_importing_register_registers_channel_and_route(stub_app):
     sys.modules.pop("tai42_channel_whatsapp.register", None)
-    sys.modules.pop("tai42_channel_whatsapp.inbound", None)
+    # ``inbound`` is a package: evict it AND every submodule so re-importing it re-runs
+    # the route-registration side-effect (importing the package alone would find the
+    # cached ``webhook`` submodule and skip the @custom_route decorator).
+    for name in [
+        key
+        for key in sys.modules
+        if key == "tai42_channel_whatsapp.inbound" or key.startswith("tai42_channel_whatsapp.inbound.")
+    ]:
+        sys.modules.pop(name, None)
     stub_app.channels.registered.clear()
     stub_app.http.routes.clear()
 

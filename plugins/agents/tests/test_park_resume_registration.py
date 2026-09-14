@@ -69,7 +69,7 @@ for module_name in sys.argv[1:]:
     importlib.import_module(module_name)
 
 from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
-from tai42_agents._internal.park.driver import AGENT_RESUME_TOOL_NAME
+from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME
 
 print("AGENT_RESUME_COUNT=" + str(_REGISTERED.count(AGENT_RESUME_TOOL_NAME)))
 print("CHAINED_PARK_COUNT=" + str(_REGISTERED.count(CHAINED_PARK_DELIVERY_TOOL_NAME)))

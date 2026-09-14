@@ -8,8 +8,9 @@ answer paths reach clients via ``tai42_app.clients.client_ctx``; a stub bound he
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from http.cookies import SimpleCookie
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -17,6 +18,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from starlette.requests import Request
+from starlette.responses import Response, StreamingResponse
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, ChannelNotification
 from tai42_kit.clients.impl.http import HttpxClient
@@ -24,7 +26,9 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_web import page, stream
+from tai42_channel_web.page import REFUSAL_CODE_META, REFUSAL_CSP
 from tai42_channel_web.session import session_cookie_name
+from tai42_channel_web.store.questions import QuestionRecord, reserve_question
 
 
 class _ClientCtx:
@@ -492,6 +496,20 @@ def register(fake: FakeRedis, token: str, visitor_id: str, identity: str, params
     )
 
 
+def _deadline(seconds: float = 300) -> datetime:
+    """A tz-aware deadline ``seconds`` from now, for a pending-question record's TTL."""
+    return datetime.now(UTC) + timedelta(seconds=seconds)
+
+
+def _seed_old_shape_record(fake: FakeRedis) -> None:
+    """A record predating link params (no ``params`` key) — the strict decode refuses
+    it; the DOOR re-mints. Hand-written, not via ``register`` (which writes the new
+    shape)."""
+    fake.store[f"channel:web:session:{SESSION_TOKEN}"] = json.dumps(
+        {"visitor_id": VISITOR_ID, "identity": IDENTITY, "created_at": "now"}
+    )
+
+
 def pytest_collection_finish(session: pytest.Session) -> None:
     """Hand the shared handle back to its pre-import impl once collection is done.
 
@@ -662,3 +680,134 @@ def response(status_code: int, *, json: Any = None, text: str | None = None) -> 
     if text is not None:
         kwargs["text"] = text
     return httpx.Response(status_code, **kwargs)
+
+
+# -- shared door helpers (the per-door test modules drive handlers the same way) --
+
+# The RELATIVE registered paths (what each module declares and ``_handler`` looks up).
+_CHAT = "/chat/{identity}"
+_ASSETS = "/assets/{file}"
+_MESSAGES = "/messages"
+_STREAM = "/stream"
+_ANSWER = "/questions/{interaction_id}/answer"
+_ROTATE = "/session/rotate"
+# The ABSOLUTE URLs a caller reaches them on (base resolves here at the default),
+# used as the request scope path where a door reads it (mount-base derivation).
+_CHAT_URL = "/api/channels/web/chat/{identity}"
+_ASSETS_URL = "/api/channels/web/assets/{file}"
+_ROTATE_URL = "/api/channels/web/session/rotate"
+_TRANSCRIPT_KEY = f"channel:web:transcript:{IDENTITY}:{VISITOR_ID}"
+_SESSION_KEY = f"channel:web:session:{SESSION_TOKEN}"
+_FOREIGN_ORIGIN = [(b"origin", b"https://evil.example")]
+# What a browser sends on a cross-site subresource load, as opposed to a navigation.
+_SUBRESOURCE = [(b"sec-fetch-dest", b"image")]
+_NAVIGATION = [(b"sec-fetch-dest", b"document")]
+
+
+def _handler(stub_app: _StubApp, path: str) -> Callable[..., Awaitable[Response]]:
+    routes = [route for route in stub_app.http.routes if route.path == path]
+    assert len(routes) == 1
+    # Every public door passes no explicit ``authed`` (resolved from the declaration)
+    # and no action-class — the visitor session cookie is its credential.
+    assert routes[0].authed is None
+    assert routes[0].action is None
+    return routes[0].handler
+
+
+async def _close_body(resp: StreamingResponse) -> None:
+    """Close a streaming body the way an abandoned client does — the generator's
+    ``finally`` is what gives its stream slot back."""
+    await cast(AsyncGenerator[str], resp.body_iterator).aclose()
+
+
+def _body(resp: Response) -> dict:
+    return json.loads(bytes(resp.body))
+
+
+async def _sent_body(resp: Response) -> bytes:
+    """The bytes a response actually puts on the wire — the only way to read a
+    ``FileResponse``, which streams from disk rather than carrying a ``.body``."""
+    chunks: list[bytes] = []
+
+    async def send(message: Any) -> None:
+        if message["type"] == "http.response.body":
+            chunks.append(message.get("body", b""))
+
+    async def receive() -> Any:
+        return {"type": "http.disconnect"}
+
+    await resp({"type": "http", "method": "GET", "headers": []}, receive, send)
+    return b"".join(chunks)
+
+
+def _refusal(resp: Response, code: str | None = None) -> str:
+    """The HTML of a page-door refusal. The door is reached by NAVIGATING to it, so
+    every refusal must render as a page rather than as a body the browser shows as
+    text — self-contained under the refusal CSP (nothing to fetch, nothing to run, and
+    no inline style, which that CSP forbids), and still carrying the machine-readable
+    code for whoever reads the refused navigation."""
+    assert resp.headers["content-type"] == "text/html; charset=utf-8"
+    assert resp.headers["content-security-policy"] == REFUSAL_CSP
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["cache-control"] == "no-store"
+    html = bytes(resp.body).decode()
+    assert html.startswith("<!doctype html>")
+    for forbidden in ("<script", "<link", "<style", "style="):
+        assert forbidden not in html
+    if code is None:
+        assert REFUSAL_CODE_META not in html
+    else:
+        assert f'<meta name="{REFUSAL_CODE_META}" content="{code}">' in html
+    return html
+
+
+def _set_cookie(resp: Response) -> SimpleCookie:
+    raw = resp.headers.getlist("set-cookie")
+    assert len(raw) == 1
+    cookie = SimpleCookie()
+    cookie.load(raw[0])
+    return cookie
+
+
+def _chat_request(identity: str = IDENTITY, **kwargs: Any) -> Request:
+    return build_request(
+        method="GET", path=_CHAT_URL.format(identity=identity), path_params={"identity": identity}, **kwargs
+    )
+
+
+def _rotate_request(identity: str = IDENTITY, **kwargs: Any) -> Request:
+    """A rotation POST. The body names the web route the fresh session is minted for
+    — a session belongs to one."""
+    return build_request(path=_ROTATE_URL, json_body={"identity": identity}, **kwargs)
+
+
+def _stream_request(query: str = f"identity={IDENTITY}", **kwargs: Any) -> Request:
+    return build_request(method="GET", path=_STREAM, query=query, **kwargs)
+
+
+async def _seed_question(
+    interaction_id: str = "int-1",
+    callback_url: str = CALLBACK,
+    address: str = VISITOR_ID,
+    identity: str = IDENTITY,
+) -> QuestionRecord:
+    record = QuestionRecord(callback_url=callback_url, identity=identity, address=address, timeout_at=_deadline())
+    await reserve_question(interaction_id, record)
+    return record
+
+
+def _answer_request(
+    interaction_id: str = "int-1",
+    answer: Any = None,
+    raw_body: bytes | None = None,
+    token: str | None = SESSION_TOKEN,
+    **kwargs: Any,
+) -> Request:
+    return build_request(
+        path=_ANSWER.format(interaction_id=interaction_id),
+        json_body=None if raw_body is not None else {"answer": answer},
+        raw_body=raw_body,
+        path_params={"interaction_id": interaction_id},
+        token=token,
+        **kwargs,
+    )

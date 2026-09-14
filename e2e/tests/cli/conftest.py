@@ -10,8 +10,9 @@ from collections.abc import Iterator
 
 import pytest
 
+from tai42_e2e import Infra
 from tai42_e2e.booting import boot_stack
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e.stack import TaiStack
 
 from ._cli_support import build_cli_stack  # pyright: ignore[reportMissingImports]
 

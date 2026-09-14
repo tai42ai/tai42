@@ -4,7 +4,7 @@
 e2e (only ``generate_uuid`` was ever loaded). The core profile now carries all four; each is
 driven over the server's own MCP surface:
 
-* ``request`` against the harness recording target server (``netfixtures.TargetServer``),
+* ``request`` against the harness recording target server (``recording_proxy.TargetServer``),
   reached over loopback (the core stack opts the loopback CIDRs into the SSRF guard).
 * ``generate_embeddings`` against the LLM stub's ``/v1/embeddings`` via the tool's per-call
   ``base_url`` (``embedding_kwargs``), so no real embedding provider is contacted — the
@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 
 from tai42_e2e.llmstub import LlmStub
-from tai42_e2e.netfixtures import TargetServer
+from tai42_e2e.recording_proxy import TargetServer
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 

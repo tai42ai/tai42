@@ -152,6 +152,53 @@ list_spec_runnable_agents = register_operation_route(
 # -- run route (SSE) ---------------------------------------------------------
 
 
+async def _build_run_kwargs(
+    request: Request, agent: Agent, *, baked: dict[str, Any] | None = None
+) -> dict[str, Any] | Response:
+    """Read the JSON body, reject a malformed body / an unknown ``ToolInput`` field / a
+    request field that names a baked (fixed) one with a loud 400, field-combine the
+    request with ``baked``, validate against the agent's ``ToolInput`` and map through
+    ``run_kwargs_from_tool_input``. Return the run kwargs, or a 400 ``Response`` on any
+    rejection.
+
+    The validation error is rendered value-free (``_validation_detail``): an authored
+    run's ``baked`` fixed kwargs can carry credentials the runner is not entitled to
+    see, so the surfaced error names the violated bound, never the input value.
+    ``from_tool_input``'s own ``ValueError`` (a conflicting input) is hand-authored, so
+    it surfaces verbatim."""
+    baked = baked or {}
+    try:
+        body = await request.json()
+    except ValueError:
+        return _error("invalid JSON body", 400)
+    if not isinstance(body, dict):
+        return _error("body must be a JSON object of agent input", 400)
+    # Reject a body key that is not a ``ToolInput`` field: pydantic's default
+    # ``extra="ignore"`` would silently drop a typo'd field and run with its default,
+    # so a loud 400 names the offending key(s) instead.
+    unknown = sorted(set(body) - set(agent.ToolInput.model_fields))
+    if unknown:
+        return _error(f"unknown agent input field(s): {', '.join(unknown)}", 400)
+    # A baked field is a FIXED, non-overridable constant: a request that names one is
+    # rejected loudly — baked never silently wins over a request key, and a request
+    # never silently loses to a baked key. (No baked fields ⇒ this never fires.)
+    overridden = sorted(set(body) & set(baked))
+    if overridden:
+        return _error(f"cannot override the fixed field {overridden[0]!r} baked into this authored agent", 400)
+    # Field-combine (request + baked) THEN validate THEN map — the same order the tool
+    # face applies; the baked fixed kwargs are authoritative.
+    try:
+        validated = agent.ToolInput(**{**body, **baked})
+        run_kwargs = run_kwargs_from_tool_input(agent, validated)
+    except ValidationError as exc:
+        return _error(f"invalid agent input: {_validation_detail(exc)}", 400)
+    except ReservedThreadNamespaceError as exc:
+        return _error(str(exc), 400)
+    except ValueError as exc:
+        return _error(f"invalid agent input: {exc}", 400)
+    return run_kwargs
+
+
 async def _produce(agent: Agent, run_kwargs: dict[str, Any], queue: asyncio.Queue[tuple[str, Any]]) -> None:
     """Drain ``agent.astream`` into ``queue`` as ``(kind, payload)`` items:
     ``("event", StreamEvent)`` per event, then one terminal ``("end", None)`` or
@@ -179,6 +226,19 @@ async def _wait_until_disconnected(request: Request) -> None:
     both correct and low-cost."""
     while not await request.is_disconnected():
         await asyncio.sleep(_DISCONNECT_POLL_SECONDS)
+
+
+def _render_stream_item(kind: str, payload: Any) -> tuple[str, bool]:
+    """Map one ``(kind, payload)`` queue item to its SSE frame string and whether the
+    stream ends after it: an ``event`` dumps the ``StreamEvent`` (never ends), an
+    ``end`` yields the terminal end frame, and an error logs the traceback and yields
+    the terminal ``stream.error`` frame. Both terminals end the stream."""
+    if kind == "event":
+        return _sse(payload.model_dump_json(fallback=str)), False
+    if kind == "end":
+        return _sse(_END_FRAME), True
+    logger.error("agent run failed while streaming the response", exc_info=payload)
+    return _error_frame(payload), True
 
 
 async def _agent_event_stream(request: Request, agent: Agent, run_kwargs: dict[str, Any]) -> AsyncIterator[str]:
@@ -223,14 +283,9 @@ async def _agent_event_stream(request: Request, agent: Agent, run_kwargs: dict[s
                 continue
             kind, payload = get_task.result()
             get_task = None
-            if kind == "event":
-                yield _sse(payload.model_dump_json(fallback=str))
-            elif kind == "end":
-                yield _sse(_END_FRAME)
-                return
-            else:
-                logger.error("agent run failed while streaming the response", exc_info=payload)
-                yield _error_frame(payload)
+            frame, ends = _render_stream_item(kind, payload)
+            yield frame
+            if ends:
                 return
     finally:
         for task in (get_task, monitor, producer):
@@ -268,32 +323,12 @@ async def run_agent(request: Request) -> Response:
     if agent is None:
         return _error(f"no such agent: {name!r}", 404)
 
-    try:
-        body = await request.json()
-    except ValueError:
-        return _error("invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _error("body must be a JSON object of agent input", 400)
-    # Reject a body key that is not a ``ToolInput`` field: pydantic's default
-    # ``extra="ignore"`` would silently drop a typo'd field and run with its
-    # default, so a loud 400 names the offending key(s) instead.
-    unknown = sorted(set(body) - set(agent.ToolInput.model_fields))
-    if unknown:
-        return _error(f"unknown agent input field(s): {', '.join(unknown)}", 400)
-    # Validate, then apply the same validated-input -> run-kwargs mapping the binding
-    # applies before calling the agent (a raw pass-through diverges for any agent whose
-    # ``from_tool_input`` renames or derives kwargs). ``from_tool_input`` raises a
-    # ``ValueError`` on a genuinely conflicting input (e.g. two fields that map to the
-    # same run kwarg) — surfaced as a loud 400, never a silent drop.
-    try:
-        validated = agent.ToolInput(**body)
-        run_kwargs = run_kwargs_from_tool_input(agent, validated)
-    except ValidationError as exc:
-        return _error(f"invalid agent input: {exc}", 400)
-    except ReservedThreadNamespaceError as exc:
-        return _error(str(exc), 400)
-    except ValueError as exc:
-        return _error(f"invalid agent input: {exc}", 400)
+    # Read + validate the body and map to run kwargs through the same validated-input ->
+    # run-kwargs seam the binding applies (a raw pass-through diverges for any agent
+    # whose ``from_tool_input`` renames or derives kwargs).
+    run_kwargs = await _build_run_kwargs(request, agent)
+    if isinstance(run_kwargs, Response):
+        return run_kwargs
     return StreamingResponse(
         _agent_event_stream(request, agent, run_kwargs),
         media_type="text/event-stream",
@@ -349,44 +384,12 @@ async def run_authored_agent(request: Request) -> Response:
     if agent is None:
         return _error(f"{name!r} is a tool preset, not an authored agent", 400)
 
-    try:
-        body = await request.json()
-    except ValueError:
-        return _error("invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _error("body must be a JSON object of agent input", 400)
-
-    # Reject a body key that is not a ``ToolInput`` field: pydantic's default
-    # ``extra="ignore"`` would silently drop a typo'd field, so name it in a loud
-    # 400 instead.
-    unknown = sorted(set(body) - set(agent.ToolInput.model_fields))
-    if unknown:
-        return _error(f"unknown agent input field(s): {', '.join(unknown)}", 400)
-
-    # The baked spec fields are FIXED (baked as hidden, non-overridable constants).
-    # A request that names one is rejected loudly — baked never silently wins over a
-    # request key, and a request never silently loses to a baked key.
-    baked = spec.fixed_kwargs
-    overridden = sorted(set(body) & set(baked))
-    if overridden:
-        return _error(f"cannot override the fixed field {overridden[0]!r} baked into this authored agent", 400)
-
-    # Field-combine (baked spec + remaining request fields) THEN validate THEN map —
-    # the same order the tool face applies. The baked fixed kwargs are authoritative
-    # and the request fills only the remaining fields.
-    try:
-        validated = agent.ToolInput(**{**body, **baked})
-        run_kwargs = run_kwargs_from_tool_input(agent, validated)
-    except ValidationError as exc:
-        return _error(f"invalid agent input: {_validation_detail(exc)}", 400)
-    except ReservedThreadNamespaceError as exc:
-        return _error(str(exc), 400)
-    except ValueError as exc:
-        # ``from_tool_input`` rejects a conflicting input (e.g. a request field that
-        # maps to the same run kwarg as a baked field) — a loud 400, never a silent
-        # override. The message is hand-authored (no input values), so it is safe to
-        # surface verbatim.
-        return _error(f"invalid agent input: {exc}", 400)
+    # Read + validate the body against the agent's ``ToolInput``, combining the request
+    # fields with the baked fixed kwargs and mapping through ``from_tool_input`` — never
+    # a raw splat that would bypass validation and the field mapping.
+    run_kwargs = await _build_run_kwargs(request, agent, baked=spec.fixed_kwargs)
+    if isinstance(run_kwargs, Response):
+        return run_kwargs
     return StreamingResponse(
         _agent_event_stream(request, agent, run_kwargs),
         media_type="text/event-stream",

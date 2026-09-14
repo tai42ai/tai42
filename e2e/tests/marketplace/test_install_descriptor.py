@@ -42,9 +42,10 @@ from typing import Any
 import pytest
 import yaml
 
+from tai42_e2e import Infra
 from tai42_e2e.booting import boot_stack
-from tai42_e2e.manifests import build_marketplace_connectors_stack
-from tai42_e2e.marketplace import (
+from tai42_e2e.catalog_seed import seed_iota_listing, seed_kappa_listing
+from tai42_e2e.fixture_catalog import (
     IOTA_CLIENT_ID_ENV,
     IOTA_CLIENT_SECRET_ENV,
     IOTA_PROVIDER_ID,
@@ -56,14 +57,13 @@ from tai42_e2e.marketplace import (
     KAPPA_CONFIG_FIELD_SECRET,
     KAPPA_PROVIDER_ID,
     KAPPA_REF,
-    MarketplaceService,
     render_iota_descriptor,
-    seed_iota_listing,
-    seed_kappa_listing,
 )
-from tai42_e2e.netfixtures import OAuthIdp
+from tai42_e2e.manifests import build_marketplace_connectors_stack
+from tai42_e2e.marketplace import MarketplaceService
+from tai42_e2e.oidc_idp import OAuthIdp
 from tai42_e2e.pkgsource import FixturePackageIndex
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
 from ._market_support import cli_env, installed_refs, ok_json, persisted_manifest, run_cli, tai_bin

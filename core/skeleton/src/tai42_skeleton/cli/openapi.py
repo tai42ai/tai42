@@ -297,34 +297,26 @@ def _reload_gate_response(*, also_unavailable: bool) -> dict[str, Any]:
     }
 
 
-def _operation(meta: RouteMetadata, method: str, components: dict[str, Any]) -> dict[str, Any]:
+def _operation_responses(meta: RouteMetadata, method: str, components: dict[str, Any]) -> dict[str, Any]:
+    """The operation's ``responses`` map: the success status, any additional success
+    statuses, the plain-envelope error statuses, and — merged into the ``503`` slot,
+    OVERWRITING a declared 503 so one slot admits both bodies — the reload gate's
+    response when the route is ``reload_gated``."""
     responses: dict[str, Any] = {str(meta.success_status): _success_response(meta, method, components)}
     for status in meta.additional_success_statuses:
         responses[str(status)] = _success_response(meta, method, components)
     for status in meta.error_statuses:
         responses[str(status)] = _error_response(status)
-    # The reload gate is declared as ``reload_gated``, never as an error status, so its
-    # response is added here and OVERWRITES a declared 503 — merged into one slot that
-    # admits both bodies when the route answers both.
     if meta.reload_gated:
         responses["503"] = _reload_gate_response(also_unavailable=503 in meta.error_statuses)
+    return responses
 
-    operation: dict[str, Any] = {
-        "operationId": _operation_id(method, meta.path),
-        "summary": meta.summary,
-        "tags": list(meta.tags),
-        "responses": responses,
-    }
-    if meta.description:
-        operation["description"] = meta.description
 
-    # A route's typed ``request_model`` is documented according to how the method carries
-    # it: a body-reading (write) method takes a JSON ``requestBody``; a read method
-    # (GET/HEAD) reads its inputs from the query string, so the model's fields become
-    # ``in: query`` parameters instead (a GET request body would misdocument the
-    # endpoint). A ``query_model`` is additive to either: its fields are ``in: query`` for
-    # ANY method, so a WRITE-method door publishes the query it reads at the edge. Path
-    # parameters always precede the model-derived ones.
+def _operation_parameters(meta: RouteMetadata, method: str, components: dict[str, Any]) -> list[dict[str, Any]]:
+    """The operation's parameters: path params, then a read method's ``request_model``
+    fields as ``in: query`` (a GET reads its inputs from the query string, never a
+    body), then any ``query_model`` fields (``in: query`` for ANY method). Refuses a
+    duplicate ``(name, in)`` pair before returning."""
     parameters = _path_parameters(meta.path)
     if meta.request_model is not None and method_to_action(method) == "read":
         parameters = parameters + _query_parameters(meta.request_model, components)
@@ -332,8 +324,25 @@ def _operation(meta: RouteMetadata, method: str, components: dict[str, Any]) -> 
         parameters = parameters + _query_parameters(meta.query_model, components)
     if parameters:
         _check_unique_parameters(parameters, path=meta.path, method=method)
+    return parameters
+
+
+def _operation(meta: RouteMetadata, method: str, components: dict[str, Any]) -> dict[str, Any]:
+    operation: dict[str, Any] = {
+        "operationId": _operation_id(method, meta.path),
+        "summary": meta.summary,
+        "tags": list(meta.tags),
+        "responses": _operation_responses(meta, method, components),
+    }
+    if meta.description:
+        operation["description"] = meta.description
+
+    parameters = _operation_parameters(meta, method, components)
+    if parameters:
         operation["parameters"] = parameters
 
+    # A body-reading (write) method takes a JSON ``requestBody`` from its
+    # ``request_model``; a read method documents the model as query params instead.
     if meta.request_model is not None and method_to_action(method) == "write":
         ref = _register_model(meta.request_model, components)
         operation["requestBody"] = {
@@ -345,8 +354,7 @@ def _operation(meta: RouteMetadata, method: str, components: dict[str, Any]) -> 
         operation["security"] = [{_SECURITY_SCHEME: []}]
 
     # A destructive route (an operation flagged ``destructive`` or a DELETE the
-    # adapter auto-forced) advertises it so a client can gate the call; a
-    # non-destructive route emits nothing.
+    # adapter auto-forced) advertises it so a client can gate the call.
     if meta.destructive:
         operation["x-destructive"] = True
 

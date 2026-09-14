@@ -39,6 +39,68 @@ def _declared(obj: object, attr: str) -> Any:
     return getattr(obj, attr, _UNDECLARED)
 
 
+def _check_name(runtime: BackendRuntime | type[BackendRuntime], name: str) -> list[str]:
+    """The missing-``name`` declaration, without which no launch subcommand selects it."""
+    if _declared(runtime, "name") is _UNDECLARED:
+        return [f"{name} declares no name, so no launch subcommand can select it"]
+    return []
+
+
+def _check_mode(runtime: BackendRuntime | type[BackendRuntime], cls: type[BackendRuntime], name: str) -> list[str]:
+    """A missing/typewise-invalid ``mode`` and the run body each mode owes."""
+    mode = _declared(runtime, "mode")
+    if mode is _UNDECLARED:
+        return [f"{name} declares no mode, so the host cannot tell how to drive its run body"]
+    if not isinstance(mode, ExecutionMode):
+        # ``ExecutionMode`` is a ``StrEnum``, so a plain ``"on_loop"`` compares EQUAL
+        # to the member while failing every ``is`` check the host drives the body
+        # with — the runtime would be silently treated as none of the three modes.
+        return [
+            f"{name} declares mode={mode!r}, which is not an ExecutionMode member; the host dispatches on "
+            "identity, so a look-alike string matches no mode at all"
+        ]
+    problems: list[str] = []
+    if mode is ExecutionMode.on_loop and not _overrides(cls, "run_on_loop"):
+        problems.append(f"{name} declares mode={mode.value} but implements no run_on_loop")
+    if mode in (ExecutionMode.worker_thread, ExecutionMode.inline) and not _overrides(cls, "run_blocking"):
+        problems.append(f"{name} declares mode={mode.value} but implements no run_blocking")
+    return problems
+
+
+def _check_consumes_work(
+    runtime: BackendRuntime | type[BackendRuntime], cls: type[BackendRuntime], mode: Any, name: str
+) -> list[str]:
+    """A ``consumes_work`` runtime owes a ``request_drain`` and may never be ``inline``."""
+    if not runtime.consumes_work:
+        return []
+    problems: list[str] = []
+    if not _overrides(cls, "request_drain"):
+        problems.append(f"{name} declares consumes_work but implements no request_drain")
+    if mode is ExecutionMode.inline:
+        problems.append(
+            f"{name} declares consumes_work with mode={mode.value}: a runtime that blocks the serving loop "
+            "cannot be drained from it, so it may not consume work"
+        )
+    return problems
+
+
+def _check_pool_turnover(
+    runtime: BackendRuntime | type[BackendRuntime], cls: type[BackendRuntime], name: str
+) -> list[str]:
+    """A ``pool_turnover_required`` runtime owes a ``turn_over_pool`` and ``consumes_work``."""
+    if not runtime.pool_turnover_required:
+        return []
+    problems: list[str] = []
+    if not _overrides(cls, "turn_over_pool"):
+        problems.append(f"{name} declares pool_turnover_required but implements no turn_over_pool")
+    if not runtime.consumes_work:
+        problems.append(
+            f"{name} declares pool_turnover_required without consumes_work: a runtime that pulls no work "
+            "holds no pool to turn over"
+        )
+    return problems
+
+
 def check_runtime_declarations(runtime: BackendRuntime | type[BackendRuntime]) -> list[str]:
     """Every way ``runtime``'s declarations and its bindings disagree.
 
@@ -52,47 +114,13 @@ def check_runtime_declarations(runtime: BackendRuntime | type[BackendRuntime]) -
     """
     cls = runtime if isinstance(runtime, type) else type(runtime)
     name = cls.__name__
-    problems: list[str] = []
-
-    if _declared(runtime, "name") is _UNDECLARED:
-        problems.append(f"{name} declares no name, so no launch subcommand can select it")
-
     mode = _declared(runtime, "mode")
-    if mode is _UNDECLARED:
-        problems.append(f"{name} declares no mode, so the host cannot tell how to drive its run body")
-    elif not isinstance(mode, ExecutionMode):
-        # ``ExecutionMode`` is a ``StrEnum``, so a plain ``"on_loop"`` compares EQUAL
-        # to the member while failing every ``is`` check the host drives the body
-        # with — the runtime would be silently treated as none of the three modes.
-        problems.append(
-            f"{name} declares mode={mode!r}, which is not an ExecutionMode member; the host dispatches on "
-            "identity, so a look-alike string matches no mode at all"
-        )
-    else:
-        if mode is ExecutionMode.on_loop and not _overrides(cls, "run_on_loop"):
-            problems.append(f"{name} declares mode={mode.value} but implements no run_on_loop")
-        if mode in (ExecutionMode.worker_thread, ExecutionMode.inline) and not _overrides(cls, "run_blocking"):
-            problems.append(f"{name} declares mode={mode.value} but implements no run_blocking")
-
-    if runtime.consumes_work:
-        if not _overrides(cls, "request_drain"):
-            problems.append(f"{name} declares consumes_work but implements no request_drain")
-        if mode is ExecutionMode.inline:
-            problems.append(
-                f"{name} declares consumes_work with mode={mode.value}: a runtime that blocks the serving loop "
-                "cannot be drained from it, so it may not consume work"
-            )
-
-    if runtime.pool_turnover_required:
-        if not _overrides(cls, "turn_over_pool"):
-            problems.append(f"{name} declares pool_turnover_required but implements no turn_over_pool")
-        if not runtime.consumes_work:
-            problems.append(
-                f"{name} declares pool_turnover_required without consumes_work: a runtime that pulls no work "
-                "holds no pool to turn over"
-            )
-
-    return problems
+    return [
+        *_check_name(runtime, name),
+        *_check_mode(runtime, cls, name),
+        *_check_consumes_work(runtime, cls, mode, name),
+        *_check_pool_turnover(runtime, cls, name),
+    ]
 
 
 def check_backend_declarations(backend: object) -> list[str]:

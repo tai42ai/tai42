@@ -287,22 +287,8 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         provider_id: str | None = None,
         alias: str | None = None,
     ) -> bool:
-        if not isinstance(blob, (bytes, bytearray)):
-            raise TypeError("blob must be bytes")
-        blob = bytes(blob)
-        if create_only and expected_blob is not None:
-            raise ValueError("put: create_only and expected_blob are mutually exclusive")
-        if expected_blob is not None:
-            expected_blob = bytes(expected_blob)
+        blob, expected_blob = self._validate_put_args(blob, create_only, expected_blob, provider_id, alias)
         conn_uuid = self._as_uuid(connection_id)
-
-        # An INSERT path (create-only or plain upsert) writes the plaintext
-        # provider_id/alias columns that back the uniqueness constraint, so both
-        # are required there. A compare-and-set is a pure UPDATE and never
-        # touches them.
-        inserts = create_only or expected_blob is None
-        if inserts and (provider_id is None or alias is None):
-            raise ValueError("put: provider_id and alias are required for an insert (create-only or upsert)")
 
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -310,84 +296,125 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
             conn.cursor() as cur,
         ):
             if create_only:
-                try:
-                    await cur.execute(
-                        "INSERT INTO connector_connections "
-                        "(connection_id, provider_id, alias, encrypted_blob, session_expires_at) "
-                        "VALUES (%s, %s, %s, %s, %s) "
-                        "ON CONFLICT (connection_id) DO NOTHING "
-                        "RETURNING cache_version",
-                        (conn_uuid, provider_id, alias, blob, session_expires_at),
-                    )
-                except UniqueViolation as exc:
-                    # A connection_id conflict is caught by ON CONFLICT (returns no
-                    # row); a UniqueViolation that escapes is the alias constraint.
-                    if getattr(exc.diag, "constraint_name", None) == _ALIAS_UNIQUE_CONSTRAINT:
-                        raise AliasInUseError(
-                            f"alias {alias!r} is already in use for provider {provider_id!r}"
-                        ) from exc
-                    raise
-                row = await cur.fetchone()
-                if row is None:
-                    raise ConnectorError(f"create-only put: record already exists for {connection_id}")
-                version = int(row[0])
-            elif expected_blob is not None:
-                # Atomic compare-and-set on the durable source of truth: commit
-                # only if the stored ciphertext still equals the blob the caller
-                # refreshed from, bumping the version. 0 rows ⇒ a peer rotated it
-                # first (or it's gone) ⇒ CAS miss, caller lost.
-                await cur.execute(
-                    "UPDATE connector_connections "
-                    "SET encrypted_blob = %s, "
-                    "    session_expires_at = %s, "
-                    "    cache_version = cache_version + 1, "
-                    "    updated_at = now() "
-                    "WHERE connection_id = %s "
-                    "  AND encrypted_blob = %s "
-                    "RETURNING cache_version",
-                    (blob, session_expires_at, conn_uuid, expected_blob),
+                version = await self._put_create_only(
+                    cur, conn_uuid, provider_id, alias, blob, session_expires_at, connection_id
                 )
-                row = await cur.fetchone()
-                if row is None:
+            elif expected_blob is not None:
+                version = await self._put_compare_and_set(cur, conn_uuid, blob, expected_blob, session_expires_at)
+                if version is None:
                     return False
-                version = int(row[0])
             else:
-                # A plain upsert writes the plaintext provider_id/alias on both
-                # the insert and the update branch (EXCLUDED.*), so an update
-                # overwrites the stored identity to match the incoming one; the
-                # ``UNIQUE (provider_id, alias)`` constraint can therefore trip
-                # here too when the new alias is already held by another
-                # connection, surfaced as AliasInUseError like the create-only path.
-                try:
-                    await cur.execute(
-                        "INSERT INTO connector_connections "
-                        "(connection_id, provider_id, alias, encrypted_blob, session_expires_at) "
-                        "VALUES (%s, %s, %s, %s, %s) "
-                        "ON CONFLICT (connection_id) DO UPDATE "
-                        "SET provider_id = EXCLUDED.provider_id, "
-                        "    alias = EXCLUDED.alias, "
-                        "    encrypted_blob = EXCLUDED.encrypted_blob, "
-                        "    session_expires_at = EXCLUDED.session_expires_at, "
-                        "    cache_version = connector_connections.cache_version + 1, "
-                        "    updated_at = now() "
-                        "RETURNING cache_version",
-                        (conn_uuid, provider_id, alias, blob, session_expires_at),
-                    )
-                except UniqueViolation as exc:
-                    if getattr(exc.diag, "constraint_name", None) == _ALIAS_UNIQUE_CONSTRAINT:
-                        raise AliasInUseError(
-                            f"alias {alias!r} is already in use for provider {provider_id!r}"
-                        ) from exc
-                    raise
-                row = await cur.fetchone()
-                if row is None:
-                    # An upsert with RETURNING always yields a row; a None here is
-                    # a broken driver/contract, not a normal outcome — fail loudly.
-                    raise ConnectorError(f"upsert put returned no cache_version for {connection_id}")
-                version = int(row[0])
+                version = await self._put_upsert(
+                    cur, conn_uuid, provider_id, alias, blob, session_expires_at, connection_id
+                )
 
         await self._cache_set(connection_id, blob, session_expires_at, version)
         return True
+
+    @staticmethod
+    def _validate_put_args(
+        blob: bytes,
+        create_only: bool,
+        expected_blob: bytes | None,
+        provider_id: str | None,
+        alias: str | None,
+    ) -> tuple[bytes, bytes | None]:
+        """Validate and normalize the ``put`` arguments, returning the coerced ``blob`` and
+        ``expected_blob``."""
+        if not isinstance(blob, (bytes, bytearray)):
+            raise TypeError("blob must be bytes")
+        blob = bytes(blob)
+        if create_only and expected_blob is not None:
+            raise ValueError("put: create_only and expected_blob are mutually exclusive")
+        if expected_blob is not None:
+            expected_blob = bytes(expected_blob)
+        # An INSERT path (create-only or plain upsert) writes the plaintext
+        # provider_id/alias columns that back the uniqueness constraint, so both
+        # are required there. A compare-and-set is a pure UPDATE and never
+        # touches them.
+        inserts = create_only or expected_blob is None
+        if inserts and (provider_id is None or alias is None):
+            raise ValueError("put: provider_id and alias are required for an insert (create-only or upsert)")
+        return blob, expected_blob
+
+    @staticmethod
+    async def _put_create_only(cur, conn_uuid, provider_id, alias, blob, session_expires_at, connection_id) -> int:
+        """The create-only INSERT (ON CONFLICT DO NOTHING); raises AliasInUseError on an
+        alias collision and ConnectorError when the record already exists. Returns the
+        cache version."""
+        try:
+            await cur.execute(
+                "INSERT INTO connector_connections "
+                "(connection_id, provider_id, alias, encrypted_blob, session_expires_at) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (connection_id) DO NOTHING "
+                "RETURNING cache_version",
+                (conn_uuid, provider_id, alias, blob, session_expires_at),
+            )
+        except UniqueViolation as exc:
+            # A connection_id conflict is caught by ON CONFLICT (returns no
+            # row); a UniqueViolation that escapes is the alias constraint.
+            if getattr(exc.diag, "constraint_name", None) == _ALIAS_UNIQUE_CONSTRAINT:
+                raise AliasInUseError(f"alias {alias!r} is already in use for provider {provider_id!r}") from exc
+            raise
+        row = await cur.fetchone()
+        if row is None:
+            raise ConnectorError(f"create-only put: record already exists for {connection_id}")
+        return int(row[0])
+
+    @staticmethod
+    async def _put_compare_and_set(cur, conn_uuid, blob, expected_blob, session_expires_at) -> int | None:
+        """Atomic compare-and-set on the durable source of truth: commit only if the stored
+        ciphertext still equals the blob the caller refreshed from, bumping the version. 0
+        rows ⇒ a peer rotated it first (or it's gone) ⇒ CAS miss (``None``), caller lost."""
+        await cur.execute(
+            "UPDATE connector_connections "
+            "SET encrypted_blob = %s, "
+            "    session_expires_at = %s, "
+            "    cache_version = cache_version + 1, "
+            "    updated_at = now() "
+            "WHERE connection_id = %s "
+            "  AND encrypted_blob = %s "
+            "RETURNING cache_version",
+            (blob, session_expires_at, conn_uuid, expected_blob),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return int(row[0])
+
+    @staticmethod
+    async def _put_upsert(cur, conn_uuid, provider_id, alias, blob, session_expires_at, connection_id) -> int:
+        """The plain upsert (ON CONFLICT DO UPDATE). It writes the plaintext
+        provider_id/alias on both branches (EXCLUDED.*), so an update overwrites the stored
+        identity to match the incoming one; the ``UNIQUE (provider_id, alias)`` constraint
+        can therefore trip here too, surfaced as AliasInUseError like the create-only path.
+        Returns the cache version, raising loudly if RETURNING yields no row."""
+        try:
+            await cur.execute(
+                "INSERT INTO connector_connections "
+                "(connection_id, provider_id, alias, encrypted_blob, session_expires_at) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (connection_id) DO UPDATE "
+                "SET provider_id = EXCLUDED.provider_id, "
+                "    alias = EXCLUDED.alias, "
+                "    encrypted_blob = EXCLUDED.encrypted_blob, "
+                "    session_expires_at = EXCLUDED.session_expires_at, "
+                "    cache_version = connector_connections.cache_version + 1, "
+                "    updated_at = now() "
+                "RETURNING cache_version",
+                (conn_uuid, provider_id, alias, blob, session_expires_at),
+            )
+        except UniqueViolation as exc:
+            if getattr(exc.diag, "constraint_name", None) == _ALIAS_UNIQUE_CONSTRAINT:
+                raise AliasInUseError(f"alias {alias!r} is already in use for provider {provider_id!r}") from exc
+            raise
+        row = await cur.fetchone()
+        if row is None:
+            # An upsert with RETURNING always yields a row; a None here is
+            # a broken driver/contract, not a normal outcome — fail loudly.
+            raise ConnectorError(f"upsert put returned no cache_version for {connection_id}")
+        return int(row[0])
 
     async def delete(self, connection_id: str) -> None:
         conn_uuid = self._as_uuid(connection_id)

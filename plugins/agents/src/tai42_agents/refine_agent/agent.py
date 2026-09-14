@@ -49,7 +49,9 @@ from tai42_agents.refine_agent.prompt import (
 )
 
 if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
     from langchain_core.tools import StructuredTool
+    from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
 # Contract ``Agent.run`` parameters the refine loop has no seat for, mapped to the
@@ -99,6 +101,43 @@ def _final_evaluator_input() -> dict[str, Any]:
     """The prompt that asks the approved Evaluator for its final user-facing
     answer, run against the same checkpointed thread the loop built up."""
     return {"messages": [{"role": "user", "content": "Critic Approved."}]}
+
+
+async def _build_role_agent(
+    llm: BaseChatModel,
+    tools: Sequence[StructuredTool],
+    system_prompt: str,
+    checkpointer: BaseCheckpointSaver,
+    *,
+    is_enabled_for_debug: bool,
+    response_format: Any = None,
+) -> Any:
+    """Build one role's ``create_agent`` stack — the Evaluator, the Critic, or the
+    structured final Evaluator.
+
+    Each role runs the same middleware stack: system purge first (so a stored system
+    message never reaches the model), the context-overflow strategies fed this role's
+    own system prompt (so the trimming budget covers the full outgoing request),
+    rolling cache-mark, and tool-error visibility. Each role's system message is its
+    graph's per-run ``system_prompt``, applied at the model-call boundary and never
+    written into the checkpointed thread. ``response_format`` forces the structured
+    final answer on the final pass; ``None`` keeps the role text-shaped.
+    """
+    extra = {} if response_format is None else {"response_format": response_format}
+    return create_agent(
+        llm,
+        tools=list(tools),
+        system_prompt=system_prompt,
+        checkpointer=checkpointer,
+        middleware=[
+            SystemPurgeMiddleware(),
+            *await context_overflow_middlewares(system_prompt=system_prompt),
+            RollingCacheMarkMiddleware(),
+            _tool_error_middleware,
+        ],
+        debug=is_enabled_for_debug,
+        **extra,
+    )
 
 
 async def _run_refine_loop(
@@ -156,36 +195,11 @@ async def _run_refine_loop(
         conn_string=llm_provider_settings().checkpoint_conn_string,
     )
     is_enabled_for_debug = logging_settings().is_enabled_for("DEBUG")
-    # Each role's system message is its graph's per-run system_prompt, applied at
-    # the model-call boundary and never written into the checkpointed thread; the
-    # system-purge middleware removes any system message a stored history carries,
-    # and the context-overflow middlewares receive the prompt so the trimming
-    # budget covers the full outgoing request.
-    evaluator: Any = create_agent(
-        evaluator_llm,
-        tools=list(tools),
-        system_prompt=EVALUATOR_SYSTEM_MESSAGE,
-        checkpointer=checkpointer,
-        middleware=[
-            SystemPurgeMiddleware(),
-            *await context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
-            RollingCacheMarkMiddleware(),
-            _tool_error_middleware,
-        ],
-        debug=is_enabled_for_debug,
+    evaluator: Any = await _build_role_agent(
+        evaluator_llm, tools, EVALUATOR_SYSTEM_MESSAGE, checkpointer, is_enabled_for_debug=is_enabled_for_debug
     )
-    critic: Any = create_agent(
-        critic_llm,
-        tools=list(tools),
-        system_prompt=CRITIC_SYSTEM_MESSAGE,
-        checkpointer=checkpointer,
-        middleware=[
-            SystemPurgeMiddleware(),
-            *await context_overflow_middlewares(system_prompt=CRITIC_SYSTEM_MESSAGE),
-            RollingCacheMarkMiddleware(),
-            _tool_error_middleware,
-        ],
-        debug=is_enabled_for_debug,
+    critic: Any = await _build_role_agent(
+        critic_llm, tools, CRITIC_SYSTEM_MESSAGE, checkpointer, is_enabled_for_debug=is_enabled_for_debug
     )
 
     evaluator_config = init_langgraph_config(evaluator_config)
@@ -231,18 +245,12 @@ async def _run_refine_loop(
     # fresh thread (never a cross-topology resume).
     snapshot = await evaluator.aget_state(evaluator_config)
     history = list(snapshot.values.get("messages", []))
-    structured_evaluator: Any = create_agent(
+    structured_evaluator: Any = await _build_role_agent(
         evaluator_llm,
-        tools=list(tools),
-        system_prompt=EVALUATOR_SYSTEM_MESSAGE,
-        checkpointer=checkpointer,
-        middleware=[
-            SystemPurgeMiddleware(),
-            *await context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
-            RollingCacheMarkMiddleware(),
-            _tool_error_middleware,
-        ],
-        debug=is_enabled_for_debug,
+        tools,
+        EVALUATOR_SYSTEM_MESSAGE,
+        checkpointer,
+        is_enabled_for_debug=is_enabled_for_debug,
         response_format=strategy,
     )
     final_input = {"messages": [*history, {"role": "user", "content": "Critic Approved."}]}

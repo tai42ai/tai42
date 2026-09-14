@@ -14,8 +14,8 @@ from collections.abc import Callable
 
 import pytest
 
-from tai42_e2e import wait_for_async
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e import Infra, wait_for_async
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
 
 

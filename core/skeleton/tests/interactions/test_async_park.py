@@ -30,6 +30,7 @@ from tai42_skeleton.authz.execution_identity import reset_execution_identity, se
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.interactions import InteractionStore, ask_user
 from tai42_skeleton.interactions import helper as helper_module
+from tai42_skeleton.interactions.ask import park as park_module
 from tai42_skeleton.interactions.helper import InteractionTimeoutError
 from tai42_skeleton.interactions.settings import InteractionsSettings
 
@@ -192,7 +193,7 @@ def repark_fires(monkeypatch):
         fired.append((tool, arguments))
         return {"ok": True}
 
-    monkeypatch.setattr(helper_module, "tai42_app", SimpleNamespace(tools=SimpleNamespace(run_tool=_fake_run_tool)))
+    monkeypatch.setattr(park_module, "tai42_app", SimpleNamespace(tools=SimpleNamespace(run_tool=_fake_run_tool)))
     return fired
 
 
@@ -261,7 +262,7 @@ async def test_a_failing_notice_never_fails_the_park(monkeypatch, fake_redis, fa
     async def _boom(tool, arguments):
         raise RuntimeError("delivery tool is down")
 
-    monkeypatch.setattr(helper_module, "tai42_app", SimpleNamespace(tools=SimpleNamespace(run_tool=_boom)))
+    monkeypatch.setattr(park_module, "tai42_app", SimpleNamespace(tools=SimpleNamespace(run_tool=_boom)))
     completion = set_park_completion(
         "deliver_chained_park", chained_park_context("tai42:chained-park:k1", (None, None))
     )

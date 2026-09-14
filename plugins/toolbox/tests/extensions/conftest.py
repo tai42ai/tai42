@@ -8,6 +8,7 @@ composed callable, restoring a null app afterwards.
 from __future__ import annotations
 
 import importlib
+import socket
 from collections.abc import Awaitable, Callable, Iterator
 from types import ModuleType
 from typing import Any
@@ -137,6 +138,15 @@ def restore_null_app() -> Iterator[None]:
     never leaks into the next."""
     yield
     tai42_app.bind(_NullApp())
+
+
+@pytest.fixture(autouse=True)
+def _restore_socket() -> Iterator[None]:
+    """Restore ``socket.socket`` after each test so an ``install_dispatcher`` call
+    (permanent by design) never leaks the routing class into the next test."""
+    original = socket.socket
+    yield
+    socket.socket = original
 
 
 @pytest.fixture

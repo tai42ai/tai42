@@ -23,6 +23,7 @@ from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, Execution
 from tai42_skeleton.authz.token_free import TokenFreeConditionError
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.cache import get_conversations_manager
+from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,81 @@ async def export_conversation_routes() -> dict[str, Any]:
         data.pop("callback_secret", None)
         exported.append(data)
     return {"routes": exported}
+
+
+def _validate_row(
+    item: Any, existing: dict[str, ConversationRoute], mode: Literal["skip", "overwrite"], report: _SectionReport
+) -> ConversationRoute | None:
+    """The :class:`ConversationRoute` a backup row parses to, or ``None`` when the row is
+    rejected (a validation failure recorded per row) or left fully untouched (an existing
+    route under ``skip`` — no re-mint, no re-assertion of its execution key)."""
+    route_name = item.get("route_name") if isinstance(item, dict) else None
+    try:
+        route = ConversationRoute.model_validate(item)
+    except ValidationError as exc:
+        # Rejected per row rather than written unanchored.
+        report["errors"].append(f"route {route_name!r}: {exc}")
+        report["skipped"] += 1
+        return None
+    if route.route_name in existing and mode == "skip":
+        report["skipped_existing"] += 1
+        return None
+    return route
+
+
+async def _authorize_row(
+    route: ConversationRoute, scan: ExecutionKeyScan, claimed: dict[tuple[str, str], str], report: _SectionReport
+) -> bool:
+    """Whether ``route`` may be written: its execution key must assert usable and
+    token-free-evaluable, and its ``(channel, our_identity)`` claim must be unheld by a
+    DIFFERENT route. Either failure is a per-row rejection recorded in the report."""
+    try:
+        # The same assertion the create door makes; a key reminted since the backup no
+        # longer carries the row's bound fingerprint.
+        await scan.assert_usable(route.execution_key, bound_fingerprint=route.execution_key_fingerprint)
+    except (ExecutionKeyAuthorityError, TokenFreeConditionError) as exc:
+        # A property of the ROW, so it is rejected per row. Other types (a corrupt stored
+        # policy, a store read error) propagate as the section's own failure.
+        report["errors"].append(f"route {route.route_name!r}: {exc}")
+        report["skipped"] += 1
+        return False
+    pair = _channel_identity(route)
+    holder = claimed.get(pair) if pair is not None else None
+    if pair is not None and holder is not None and holder != route.route_name:
+        report["errors"].append(
+            f"route {route.route_name!r}: channel {pair[0]!r} identity {pair[1]!r} is already routed by {holder!r}"
+        )
+        report["skipped"] += 1
+        return False
+    return True
+
+
+async def _write_row(
+    route: ConversationRoute,
+    manager: BaseConversationsManager,
+    existing: dict[str, ConversationRoute],
+    claimed: dict[tuple[str, str], str],
+    report: _SectionReport,
+) -> None:
+    """Persist ``route`` with a freshly minted callback secret (shown once), re-home its
+    ``(channel, identity)`` claim, and record it as created or updated. Export carried no
+    secret; a ``channel`` row and a poll-only api row (no callback declared) sign nothing and
+    carry none. created/updated follows the pre-restore snapshot, not the store's return."""
+    callback_secret = secrets.token_urlsafe(32) if route.door == "api" and route.callback_url is not None else None
+    restored = route.model_copy(update={"callback_secret": callback_secret})
+    await manager.put_route(restored)
+    pair = _channel_identity(route)
+    # The row may have moved off the pair it held before this write.
+    for held in [held for held, owner in claimed.items() if owner == route.route_name]:
+        claimed.pop(held)
+    if pair is not None:
+        claimed[pair] = route.route_name
+    if route.route_name in existing:
+        report["updated"] += 1
+    else:
+        report["created"] += 1
+    if callback_secret is not None:
+        report["new_callback_secrets"].append({"route_name": route.route_name, "callback_secret": callback_secret})
 
 
 async def import_conversation_routes(
@@ -94,55 +170,11 @@ async def import_conversation_routes(
     scan = ExecutionKeyScan()
 
     for item in payload["routes"]:
-        route_name = item.get("route_name") if isinstance(item, dict) else None
-        try:
-            route = ConversationRoute.model_validate(item)
-        except ValidationError as exc:
-            # Rejected per row rather than written unanchored.
-            report["errors"].append(f"route {route_name!r}: {exc}")
-            report["skipped"] += 1
+        route = _validate_row(item, existing, mode, report)
+        if route is None:
             continue
-        if route.route_name in existing and mode == "skip":
-            # Left fully untouched — no re-mint, no re-assertion of its execution key.
-            report["skipped_existing"] += 1
+        if not await _authorize_row(route, scan, claimed, report):
             continue
-        try:
-            # The same assertion the create door makes; a key reminted since the backup no
-            # longer carries the row's bound fingerprint.
-            await scan.assert_usable(route.execution_key, bound_fingerprint=route.execution_key_fingerprint)
-        except (ExecutionKeyAuthorityError, TokenFreeConditionError) as exc:
-            # A property of the ROW, so it is rejected per row. Other types (a corrupt
-            # stored policy, a store read error) propagate as the section's own failure.
-            report["errors"].append(f"route {route.route_name!r}: {exc}")
-            report["skipped"] += 1
-            continue
-
-        pair = _channel_identity(route)
-        holder = claimed.get(pair) if pair is not None else None
-        if pair is not None and holder is not None and holder != route.route_name:
-            report["errors"].append(
-                f"route {route.route_name!r}: channel {pair[0]!r} identity {pair[1]!r} is already routed by {holder!r}"
-            )
-            report["skipped"] += 1
-            continue
-
-        # Export carried no secret; mint one here and show it once. A ``channel`` row and a
-        # poll-only api row (no callback declared) sign nothing and carry none.
-        callback_secret = secrets.token_urlsafe(32) if route.door == "api" and route.callback_url is not None else None
-        restored = route.model_copy(update={"callback_secret": callback_secret})
-
-        # created/updated follows the pre-restore snapshot, not the store's return.
-        await manager.put_route(restored)
-        # The row may have moved off the pair it held before this write.
-        for held in [held for held, owner in claimed.items() if owner == route.route_name]:
-            claimed.pop(held)
-        if pair is not None:
-            claimed[pair] = route.route_name
-        if route.route_name in existing:
-            report["updated"] += 1
-        else:
-            report["created"] += 1
-        if callback_secret is not None:
-            report["new_callback_secrets"].append({"route_name": route.route_name, "callback_secret": callback_secret})
+        await _write_row(route, manager, existing, claimed, report)
 
     return report

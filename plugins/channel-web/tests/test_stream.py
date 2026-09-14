@@ -16,9 +16,10 @@ from starlette.requests import Request
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
 
-from tai42_channel_web import store, stream
+from tai42_channel_web import stream
 from tai42_channel_web.settings import WebSettings, web_settings
-from tai42_channel_web.store import append_message
+from tai42_channel_web.store import connection, transcript
+from tai42_channel_web.store.transcript import append_message
 from tai42_channel_web.stream import StreamLimitError, check_stream_admission, stream_transcript
 
 from .conftest import IDENTITY, VISITOR_ID, FakeRedis
@@ -159,7 +160,7 @@ async def test_an_entry_written_during_the_replay_is_emitted_once(
     # from the backlog and again from the tail. The backlog is bounded by that same
     # cursor instead.
     await append_message(IDENTITY, VISITOR_ID, "in", "before")
-    real_capture = store.capture_cursor
+    real_capture = transcript.capture_cursor
 
     async def _capture_then_write(redis: Any, identity: str, address: str) -> str:
         cursor = await real_capture(redis, identity, address)
@@ -167,7 +168,7 @@ async def test_an_entry_written_during_the_replay_is_emitted_once(
         await append_message(identity, address, "out", "during the replay")
         return cursor
 
-    monkeypatch.setattr(store, "capture_cursor", _capture_then_write)
+    monkeypatch.setattr(transcript, "capture_cursor", _capture_then_write)
 
     frames = await _collect(_open_stream(_AliveRequest(alive=1), web_settings()))
 
@@ -184,7 +185,7 @@ async def test_the_pooled_connection_is_released_before_every_yield(
     # ``async with``. Moving one inside passes every other test in this file while
     # pinning a shared-pool connection per open stream for the stream's whole life.
     held = 0
-    real_ctx = store.pooled_redis_ctx
+    real_ctx = connection.pooled_redis_ctx
 
     @asynccontextmanager
     async def _tracked() -> AsyncIterator[Any]:
@@ -196,7 +197,7 @@ async def test_the_pooled_connection_is_released_before_every_yield(
             finally:
                 held -= 1
 
-    monkeypatch.setattr(store, "pooled_redis_ctx", _tracked)
+    monkeypatch.setattr(connection, "pooled_redis_ctx", _tracked)
     monkeypatch.setenv("CHANNEL_WEB_BACKLOG_BATCH_ENTRIES", "1")
     reset_all_settings()
     for i in range(3):

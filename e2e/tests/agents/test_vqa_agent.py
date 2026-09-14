@@ -14,7 +14,7 @@ from collections.abc import Callable
 import pytest
 
 from tai42_e2e.llmstub import LlmStub
-from tai42_e2e.netfixtures import TargetServer
+from tai42_e2e.recording_proxy import TargetServer
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 

@@ -325,6 +325,62 @@ class PooledClient[T]:
         return isinstance(exc, self._disconnection_exceptions())
 
 
+async def _close_epoch_clients(per_epoch: dict[type, dict[str, _ClientEntry]], errors: list[Exception]) -> None:
+    """Force-close every pooled client of a detached epoch map, regardless of held
+    leases, collecting each close failure into ``errors`` so none is dropped.
+
+    The map must already be detached from the live registry (its entries are
+    unreachable to a concurrent lease release), so marking each entry closing and
+    closing it here cannot race a second teardown.
+    """
+    for cls, clients in per_epoch.items():
+        closer = cls()
+        for entry in list(clients.values()):
+            entry.closing = True
+            try:
+                await closer._close(entry.client)
+            except Exception as e:
+                logger.exception("Error closing client %s", type(entry.client).__name__)
+                errors.append(e)
+        clients.clear()
+
+
+async def _wait_for_epoch_leases(loop: AbstractEventLoop, epoch: int, deadline: float) -> None:
+    """Poll ``epoch``'s held leases to zero, or until ``deadline`` seconds elapse."""
+    end = loop.time() + deadline
+    while True:
+        with _registry_lock:
+            per_loop = _loop_clients.get(loop)
+            per_epoch = per_loop.get(epoch) if per_loop is not None else None
+            # Poll HELD LEASES, not pooled presence: an idle 0-lease retired client
+            # never fires another release event, so waiting on its presence would
+            # burn the whole deadline — it must fall straight through to force-close.
+            pending = per_epoch is not None and any(
+                entry.leases > 0 for clients in per_epoch.values() for entry in clients.values()
+            )
+        if not pending or loop.time() >= end:
+            break
+        await asyncio.sleep(_DRAIN_POLL_SECONDS)
+
+
+def _detach_epoch(loop: AbstractEventLoop, epoch: int) -> dict[type, dict[str, _ClientEntry]] | None:
+    """Atomically pop ``epoch``'s pools and its epoch-scoped locks under the lock.
+
+    Detaching first is what makes a concurrent lease release safe: its
+    ``_release_if_retired`` finds the epoch gone and closes nothing, so no client
+    is closed twice — the closing-flag setters all ``del`` under this same lock, so
+    no in-dict entry is ever mid-teardown.
+    """
+    with _registry_lock:
+        per_loop = _loop_clients.get(loop)
+        per_epoch = per_loop.pop(epoch, None) if per_loop is not None else None
+        locks = _loop_locks.get(loop)
+        if locks is not None:
+            for lock_key in [k for k in locks if k[0] == epoch]:
+                del locks[lock_key]
+    return per_epoch
+
+
 async def drain_epoch(epoch: int, deadline: float) -> None:
     """Drain and close a retired epoch's client pools for the running loop.
 
@@ -343,48 +399,14 @@ async def drain_epoch(epoch: int, deadline: float) -> None:
     if not present:
         return
 
-    end = loop.time() + deadline
-    while True:
-        with _registry_lock:
-            per_loop = _loop_clients.get(loop)
-            per_epoch = per_loop.get(epoch) if per_loop is not None else None
-            # Poll HELD LEASES, not pooled presence: an idle 0-lease retired client
-            # never fires another release event, so waiting on its presence would
-            # burn the whole deadline — it must fall straight through to force-close.
-            pending = per_epoch is not None and any(
-                entry.leases > 0 for clients in per_epoch.values() for entry in clients.values()
-            )
-        if not pending or loop.time() >= end:
-            break
-        await asyncio.sleep(_DRAIN_POLL_SECONDS)
+    await _wait_for_epoch_leases(loop, epoch, deadline)
 
-    # Detach the epoch atomically, then force-close whatever leases are still
-    # held. Detaching first is what makes a concurrent lease release safe: its
-    # _release_if_retired finds the epoch gone and closes nothing, so no client is
-    # closed twice — the closing flag setters all del under this same lock, so no
-    # in-dict entry is ever mid-teardown.
-    with _registry_lock:
-        per_loop = _loop_clients.get(loop)
-        per_epoch = per_loop.pop(epoch, None) if per_loop is not None else None
-        locks = _loop_locks.get(loop)
-        if locks is not None:
-            for lock_key in [k for k in locks if k[0] == epoch]:
-                del locks[lock_key]
+    per_epoch = _detach_epoch(loop, epoch)
     if not per_epoch:
         return
 
-    errors = []
-    for cls, clients in per_epoch.items():
-        closer = cls()
-        for entry in list(clients.values()):
-            entry.closing = True
-            try:
-                await closer._close(entry.client)
-            except Exception as e:
-                logger.exception("Error force-closing client %s", type(entry.client).__name__)
-                errors.append(e)
-        clients.clear()
-
+    errors: list[Exception] = []
+    await _close_epoch_clients(per_epoch, errors)
     if errors:
         raise ExceptionGroup(f"Errors force-closing client epoch {epoch}", errors)
 
@@ -409,18 +431,9 @@ async def shutdown_all_clients() -> None:
     if not per_loop:
         return
 
-    errors = []
+    errors: list[Exception] = []
     for per_epoch in per_loop.values():
-        for cls, clients in per_epoch.items():
-            closer = cls()
-            for entry in list(clients.values()):
-                entry.closing = True
-                try:
-                    await closer._close(entry.client)
-                except Exception as e:
-                    logger.exception("Error closing client %s", type(entry.client).__name__)
-                    errors.append(e)
-            clients.clear()
+        await _close_epoch_clients(per_epoch, errors)
 
     if errors:
         raise ExceptionGroup("Errors while shutting down clients", errors)

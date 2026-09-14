@@ -106,6 +106,68 @@ def _declared_metadata(
     )
 
 
+class _ParseError(Exception):
+    """A request-parse rejection carrying the exact status + error body the handler
+    returns — a malformed JSON body (400) or a pydantic validation failure (422). Kept
+    distinct from :class:`OperationError` so the handler renders the parse body verbatim
+    while the operation's own typed errors keep the ``{"error", **extra}`` shape."""
+
+    def __init__(self, status: int, body: dict[str, Any]) -> None:
+        super().__init__()
+        self.status = status
+        self.body = body
+
+
+async def _read_operation_kwargs(
+    request: Request,
+    path_params: tuple[str, ...],
+    context_extractor: ContextExtractor | None,
+    request_model: type[BaseModel] | None,
+    reads_body: bool,
+) -> dict[str, Any]:
+    """Build the operation's flat kwargs from the HTTP edge: the path params, plus EITHER
+    the context-extractor's result OR the parsed request-model dict OR nothing.
+
+    An :class:`OperationError` the extractor raises is re-raised for the handler to map to
+    its status. A malformed JSON body or a pydantic ``ValidationError`` raises a
+    :class:`_ParseError` carrying the status + body the handler returns (a validation
+    failure yields field paths + types only, never the rejected input values)."""
+    kwargs: dict[str, Any] = {name: request.path_params[name] for name in path_params}
+    if context_extractor is not None:
+        # A request-shaped input (header credentials, a body the operation validates
+        # itself with its own error classes) is derived here at the HTTP edge and passed
+        # to the operation as flat kwargs — the operation stays request-free. The
+        # extractor REPLACES the default request-model parse; ``request_model`` is then
+        # metadata only (the emitted spec's requestBody). A typed error the extractor
+        # raises is re-raised for the handler to map to its status.
+        extra = await context_extractor(request)
+        kwargs.update(extra)
+    elif request_model is not None:
+        try:
+            raw = await request.json() if reads_body else dict(request.query_params)
+        except Exception as exc:
+            raise _ParseError(400, {"error": "malformed request body"}) from exc
+        try:
+            model = request_model.model_validate(raw)
+        except ValidationError as exc:
+            # Field paths + error types only — never the rejected input values, which a
+            # pydantic error entry carries and could leak a secret.
+            raise _ParseError(422, {"error": validation_error_fields(exc)}) from exc
+        kwargs.update(model.model_dump())
+    return kwargs
+
+
+def _unwrap_operation_result(result: Any) -> tuple[Any, BackgroundTask | None]:
+    """Split an operation result into ``(payload, background)``.
+
+    An :class:`OperationResponse` carries a post-flush ``BackgroundTask`` (the
+    profile-apply self-exit) alongside its payload; a bare payload returns
+    ``(result, None)``."""
+    if isinstance(result, OperationResponse):
+        return result.payload, result.background
+    return result, None
+
+
 def _build_handler(
     op: OperationMetadata,
     method: str,
@@ -123,60 +185,26 @@ def _build_handler(
         if op.reload_gated and reload_gate.locked:
             return reload_gate.reject_response()
 
-        kwargs: dict[str, Any] = {name: request.path_params[name] for name in path_params}
-
-        if context_extractor is not None:
-            # A request-shaped input (header credentials, a body the operation
-            # validates itself with its own error classes) is derived here at the
-            # HTTP edge and passed to the operation as flat kwargs — the operation
-            # stays request-free. The extractor owns body/header reads, so it
-            # REPLACES the default request-model parse; ``request_model`` is then
-            # metadata only (the emitted spec's requestBody). A malformed input the
-            # extractor rejects raises a typed error mapped to its status here.
-            try:
-                extra = await context_extractor(request)
-            except OperationError as exc:
-                return JSONResponse({"error": exc.message, **exc.extra}, status_code=exc.status)
-            kwargs.update(extra)
-        elif request_model is not None:
-            try:
-                if reads_body:
-                    raw = await request.json()
-                else:
-                    raw = dict(request.query_params)
-            except Exception:
-                return JSONResponse({"error": "malformed request body"}, status_code=400)
-            try:
-                model = request_model.model_validate(raw)
-            except ValidationError as exc:
-                # Field paths + error types only — never the rejected input values,
-                # which a pydantic error entry carries and could leak a secret.
-                return JSONResponse({"error": validation_error_fields(exc)}, status_code=422)
-            kwargs.update(model.model_dump())
-
         try:
+            kwargs = await _read_operation_kwargs(request, path_params, context_extractor, request_model, reads_body)
             result = await op.func(**kwargs)
         except OperationError as exc:
-            # ``exc.extra`` carries any additional error-body fields the operation
-            # opted into (e.g. a stable UI ``code``); empty for the common error.
+            # A typed error from the extractor or the operation — ``exc.extra`` carries
+            # any additional error-body fields the operation opted into (e.g. a stable UI
+            # ``code``); empty for the common error.
             return JSONResponse({"error": exc.message, **exc.extra}, status_code=exc.status)
+        except _ParseError as parse:
+            return JSONResponse(parse.body, status_code=parse.status)
 
-        # An operation may return an ``OperationResponse`` to attach a post-flush
-        # BackgroundTask (the profile-apply self-exit); unwrap it so the payload is
-        # enveloped as usual and the task rides the response, firing only after the body
-        # ships. Every other operation returns a bare payload (background stays None).
-        background: BackgroundTask | None = None
-        if isinstance(result, OperationResponse):
-            background = result.background
-            result = result.payload
-
-        # ``response_headers`` ride the SUCCESS response only (a caching directive
-        # the route's read carries); an error response is uncached and unadorned.
-        # ``success_status`` is the operation's own success code — 200 for the
-        # common enveloped read/write, or an accepted-but-detached ``202`` (the
-        # background tool-run submit door answers 202, not 200).
+        # Unwrap a post-flush ``BackgroundTask`` (the profile-apply self-exit) from the
+        # payload; a bare payload's background stays ``None``. ``response_headers`` ride
+        # the SUCCESS response only (a caching directive the route's read carries); an
+        # error response is uncached and unadorned. ``success_status`` is the operation's
+        # own success code — 200 for the common enveloped read/write, or an
+        # accepted-but-detached ``202`` (the background tool-run submit door).
+        payload, background = _unwrap_operation_result(result)
         return JSONResponse(
-            {"data": _serialize(result)},
+            {"data": _serialize(payload)},
             status_code=success_status,
             headers=response_headers,
             background=background,

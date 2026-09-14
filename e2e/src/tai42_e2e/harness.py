@@ -19,7 +19,7 @@ import psycopg
 from tai42_e2e.pg import PostgresAdmin
 from tai42_e2e.redisx import RedisAdmin
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import Infra, InfraUnavailable, StackResources
+from tai42_e2e.topology import Infra, InfraUnavailable, StackResources
 from tai42_e2e.variants import resolve_variants
 
 
@@ -379,7 +379,7 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
     return raw
 
 
-def seed_payments_authz(infra: Infra, resources: StackResources) -> str:
+def seed_stripe_authz(infra: Infra, resources: StackResources) -> str:
     """Seed the Stripe payments stack's auth before boot: a root ``*``-scope key plus a
     route table that pins the unauthenticated payment doors public.
 
@@ -392,7 +392,7 @@ def seed_payments_authz(infra: Infra, resources: StackResources) -> str:
     ``e2e-all`` scope the root satisfies; the readiness probes stay public so boot's
     readiness wait is not itself denied. The webhook shape is excluded from the protected
     catch-all so deny-wins never re-protects it. Returns the raw root token."""
-    raw = seed_root_identity(infra, resources, user_id="payments-root", scopes=["*"])
+    raw = seed_root_identity(infra, resources, user_id="stripe-root", scopes=["*"])
     seed_route_rows(
         resources,
         [
@@ -402,7 +402,7 @@ def seed_payments_authz(infra: Infra, resources: StackResources) -> str:
             # The Stripe webhook ingress: unauthenticated at the platform edge, authenticated
             # by the topic's stripe-signature verifier. A non-/api door, so the verifier's
             # declared-public tier does not reach it — it needs this public row.
-            ("payments-webhook", "public", r"^/universal_webhook/.*$"),
+            ("stripe-webhook", "public", r"^/universal_webhook/.*$"),
             # The interactions callback and served-media doors need no row: both register
             # ``authed=False``, so the verifier's declared-public tier publics them straight
             # from the route registration (the protected catch-all below may cover them; the
@@ -410,7 +410,7 @@ def seed_payments_authz(infra: Infra, resources: StackResources) -> str:
             # Everything else (the verifier bind, hook register, preset create, the MCP edge)
             # → e2e-all, excluding the webhook shape so deny-wins never re-protects it.
             (
-                "payments-protected",
+                "stripe-protected",
                 "e2e-all",
                 r"^/(?!health$)(?!metrics$)(?!ready$)(?!universal_webhook/).*$",
             ),

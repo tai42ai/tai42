@@ -222,7 +222,7 @@ async def test_all_media_answer_round_trip_and_empty_answer_consumers(monkeypatc
     from tai42_contract.conversations import AnswerPart
     from tai42_contract.interactions.models import MediaItem, MediaKind
 
-    from tai42_skeleton.conversations.records import _record_matches
+    from tai42_skeleton.conversations.record_keys import _record_matches
 
     store = _store(monkeypatch, FakeRecordRedis())
     parts = [

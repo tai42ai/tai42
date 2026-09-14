@@ -10,7 +10,9 @@ from pydantic import SecretStr, ValidationError
 from tai42_contract.template import TemplatedText
 
 import tai42_agents.claude_code.agent as agent_module
-from tai42_agents.claude_code.agent import ClaudeCodeAgent, ClaudeCodeError, ClaudeCodeInput
+from tai42_agents.claude_code.agent import ClaudeCodeAgent
+from tai42_agents.claude_code.errors import ClaudeCodeError
+from tai42_agents.claude_code.inputs import ClaudeCodeInput
 from tai42_agents.claude_code.settings import ClaudeCodeSettings
 from tai42_agents.claude_code.skills_sync import SkillNameError
 

@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pydantic import ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
@@ -226,227 +225,6 @@ async def _import_sub_mcp(payload: dict[str, Any]) -> _SectionReport:
     return report
 
 
-# -- webhooks ----------------------------------------------------------------
-
-
-async def _export_webhooks() -> dict[str, Any]:
-    from tai42_skeleton.hooks.cache import get_hooks_manager
-    from tai42_skeleton.hooks.trigger_links import export_trigger_links
-
-    manager = get_hooks_manager()
-    hooks = await manager.list_hooks()
-    # Envelope carries hooks + per-topic verifier bindings + trigger-link records (hashes
-    # and metadata only, never a raw token). Bindings must travel with the hooks, or a
-    # verified topic restores as a public door.
-    return {
-        "hooks": [params.model_dump(mode="json") for params in hooks.values()],
-        "topic_verifiers": await manager.all_topic_verifiers(),
-        **(await export_trigger_links()),
-    }
-
-
-async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> _SectionReport:
-    from tai42_contract.hooks import HookParams
-
-    from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, ExecutionKeyScan
-    from tai42_skeleton.authz.token_free import TokenFreeConditionError
-    from tai42_skeleton.hooks.cache import get_hooks_manager
-    from tai42_skeleton.hooks.trigger_links import (
-        TriggerLinkError,
-        bound_hashes_by_name,
-        restore_tombstone,
-        restore_trigger_link,
-    )
-
-    manager = get_hooks_manager()
-    mode = current_import_mode()
-    report = _empty_report()
-    # One scan for the whole restore: each distinct execution key is read and rendered once.
-    scan = ExecutionKeyScan()
-
-    async def _restore_hooks(hooks: list[dict[str, Any]], unlocked_topics: frozenset[str] = frozenset()) -> None:
-        existing = await manager.list_hooks()
-        for item in hooks:
-            name = item.get("name") if isinstance(item, dict) else None
-            try:
-                params = HookParams.model_validate(item)
-            except ValidationError as exc:
-                # Per-hook rejection, never a hook without a bounded identity nor an aborted restore.
-                report["errors"].append(f"hook {name!r}: {exc}")
-                report["skipped"] += 1
-                continue
-            if params.name in existing and mode == "skip":
-                # Existing hook (keyed by name) left untouched — not re-registered, not re-validated.
-                report["skipped_existing"] += 1
-                continue
-            if params.topic in unlocked_topics:
-                # Lock absent: writing the hook would hand an unverified public door its execution key.
-                report["errors"].append(
-                    f"hook {name!r}: topic {params.topic!r} is not restored — its verifier binding failed, "
-                    "which would leave this hook live on an unverified public door"
-                )
-                report["skipped"] += 1
-                continue
-            try:
-                # A stored hook must name a usable, token-free-evaluable execution key,
-                # asserted exactly as the register door does (pass-role half not asserted:
-                # this route is admin-only fenced).
-                await scan.assert_usable(params.execution_key, bound_fingerprint=params.execution_key_fingerprint)
-            except (ExecutionKeyAuthorityError, TokenFreeConditionError) as exc:
-                # Only these two are per-record faults; other types propagate as the section's failure.
-                report["errors"].append(f"hook {name!r}: {exc}")
-                report["skipped"] += 1
-                continue
-            try:
-                await manager.register(params)
-            except ValueError as exc:
-                # A non-compiling inline condition/expr jq is a per-hook rejection; other
-                # types (store/transport) propagate as the section's failure.
-                report["errors"].append(f"hook {name!r}: {exc}")
-                report["skipped"] += 1
-                continue
-            if params.name in existing:
-                report["updated"] += 1
-            else:
-                report["created"] += 1
-
-    # A bare LIST is the hooks-only backup shape (no trigger-link envelope); restore the hooks directly.
-    if isinstance(payload, list):
-        await _restore_hooks(payload)
-        return report
-
-    if not isinstance(payload, dict):
-        raise ValueError(
-            f"webhooks section payload must be a list (old shape) or an envelope dict, got {type(payload)}"
-        )
-    # A missing key or non-list value raises loudly BEFORE any write — never a
-    # silently default-empty section, never a bad type failing deeper in.
-    for key in ("hooks", "trigger_links", "tombstones"):
-        if key not in payload:
-            raise ValueError(f"webhooks envelope is missing the required {key!r} key")
-        if not isinstance(payload[key], list):
-            raise ValueError(f"webhooks envelope {key!r} must be a list")
-    if "topic_verifiers" not in payload:
-        raise ValueError("webhooks envelope is missing the required 'topic_verifiers' key")
-    if not isinstance(payload["topic_verifiers"], dict):
-        raise ValueError("webhooks envelope 'topic_verifiers' must be a mapping of topic to binding")
-    hooks = payload["hooks"]
-    topic_verifiers = payload["topic_verifiers"]
-    trigger_links = payload["trigger_links"]
-    tombstones = payload["tombstones"]
-
-    # Whole-section pre-write scan, touching zero keys: refuse a payload binding ONE
-    # hash under TWO names, internally or against the LIVE index (a later revoke treats
-    # an orphan binding as authoritative and would destroy the new name's record). A
-    # NAME appearing twice is fine — it resolves last-wins through displacement.
-    live_link_names = await bound_hashes_by_name()
-    _reject_duplicate_hash_binding(trigger_links, live_link_names)
-
-    # Ingress locks go back BEFORE the records they gate: no window in which a restored
-    # hook is reachable through a door the backup had verified. Topics whose lock failed
-    # are carried forward and every record ON them is refused below.
-    unlocked_topics: set[str] = set()
-    existing_verifiers = await manager.all_topic_verifiers()
-    for topic, binding in topic_verifiers.items():
-        if not isinstance(topic, str) or not topic:
-            report["errors"].append(f"topic verifier with missing or empty topic: {topic!r}")
-            report["skipped"] += 1
-            continue
-        if topic in existing_verifiers and mode == "skip":
-            # Existing verifier binding left in place; the lock is present, so records on
-            # this topic are NOT treated as unlocked below.
-            report["skipped_existing"] += 1
-            continue
-        try:
-            # Validates the binding shape on write: a bad entry is a per-topic rejection.
-            await manager.set_topic_verifier(topic, binding)
-        except ValidationError as exc:
-            report["errors"].append(f"topic verifier {topic!r}: {exc}")
-            report["skipped"] += 1
-            unlocked_topics.add(topic)
-            continue
-        if topic in existing_verifiers:
-            report["updated"] += 1
-        else:
-            report["created"] += 1
-
-    await _restore_hooks(hooks, frozenset(unlocked_topics))
-
-    # Tombstones first: a tombstoned hash then refuses its own record below (tombstone
-    # wins). An idempotent set-union keyed by ``token_hash`` — ``skip``/``overwrite`` are moot.
-    for token_hash in tombstones:
-        try:
-            await restore_tombstone(token_hash)
-        except TriggerLinkError as exc:
-            report["errors"].append(f"tombstone {token_hash!r}: {exc.message}")
-            report["skipped"] += 1
-
-    for item in trigger_links:
-        name = item.get("name") if isinstance(item, dict) else None
-        try:
-            if not isinstance(item, dict):
-                raise TriggerLinkError(400, "trigger link entry must be a JSON object")
-            if item["name"] in live_link_names and mode == "skip":
-                # Existing trigger link (keyed by name) left untouched — its live record
-                # and token hash stand, so a re-import does not re-key it.
-                report["skipped_existing"] += 1
-                continue
-            record = item["record"]
-            topic = record.get("topic") if isinstance(record, dict) else None
-            if topic in unlocked_topics:
-                # Lock absent: restoring the link would put it back on a verified door.
-                raise TriggerLinkError(
-                    400,
-                    f"topic {topic!r} is not restored — its verifier binding failed, which would take this "
-                    "link back into service on an unverified public door",
-                )
-            outcome = await restore_trigger_link(
-                name=item["name"], token_hash=item["token_hash"], record=record, scan=scan
-            )
-        except (TriggerLinkError, KeyError) as exc:
-            message = exc.message if isinstance(exc, TriggerLinkError) else f"missing key {exc}"
-            report["errors"].append(f"trigger link {name!r}: {message}")
-            report["skipped"] += 1
-            continue
-        if outcome in ("skipped_expired", "skipped_tombstoned"):
-            report["skipped"] += 1
-        elif outcome == "updated":
-            report["updated"] += 1
-        else:
-            report["created"] += 1
-    return report
-
-
-def _reject_duplicate_hash_binding(trigger_links: Any, live_by_name: dict[str, str]) -> None:
-    """Raise if any single token hash is bound under two DIFFERENT names, within the
-    payload or against the live store index — zero keys written. ``live_by_name`` maps
-    every ``name:*`` store binding (orphans included) to its hash, so binding a new name
-    to an already-orphaned hash is refused too (a later revoke would destroy the new
-    name's live record)."""
-    # Malformed entries are left to the per-item restore to reject loudly.
-    hash_to_name: dict[str, str] = {}
-    for item in trigger_links:
-        if not isinstance(item, dict):
-            continue
-        name, token_hash = item.get("name"), item.get("token_hash")
-        if not isinstance(name, str) or not isinstance(token_hash, str):
-            continue
-        prior = hash_to_name.get(token_hash)
-        if prior is not None and prior != name:
-            raise ValueError(
-                f"webhooks envelope binds token hash {token_hash!r} under two names ({prior!r} and {name!r})"
-            )
-        hash_to_name[token_hash] = name
-
-    live_by_hash = {token_hash: name for name, token_hash in live_by_name.items()}
-    for token_hash, name in hash_to_name.items():
-        live_name = live_by_hash.get(token_hash)
-        if live_name is not None and live_name != name:
-            raise ValueError(
-                f"import binds token hash {token_hash!r} to {name!r} but it is already live under {live_name!r}"
-            )
-
-
 # -- conversations -----------------------------------------------------------
 
 
@@ -613,6 +391,10 @@ def register_core_sections(registry: Any) -> None:
     never re-registers. Registration order IS an import's replay order: a section
     deciding its records against live state another section restores is registered AFTER it.
     """
+    # Imported here (not at module top) so ``webhooks_section`` can reach this module's
+    # ``_empty_report`` without an import cycle.
+    from tai42_skeleton.backup.webhooks_section import _export_webhooks, _import_webhooks
+
     registry.register_section("manifest", _export_manifest, _import_manifest)
     registry.register_section("env", _export_env, _import_env, secret=True)
     registry.register_section("access_control", _export_access_control, _import_access_control, secret=True)

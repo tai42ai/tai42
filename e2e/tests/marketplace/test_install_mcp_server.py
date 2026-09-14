@@ -26,15 +26,9 @@ from __future__ import annotations
 import pytest
 
 from tai42_e2e import wait_for_async
-from tai42_e2e.marketplace import (
-    ETA_MCP_TITLE,
-    ETA_MCP_TOOL,
-    ETA_PACKAGE,
-    ETA_REF,
-    FixtureArtifacts,
-    MarketplaceService,
-    seed_eta_listing,
-)
+from tai42_e2e.catalog_seed import seed_eta_listing
+from tai42_e2e.fixture_catalog import ETA_MCP_TITLE, ETA_MCP_TOOL, ETA_PACKAGE, ETA_REF, FixtureArtifacts
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
 

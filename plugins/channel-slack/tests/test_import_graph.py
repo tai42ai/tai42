@@ -30,11 +30,17 @@ ALLOWED_THIRD_PARTY = frozenset(
         "_openssl",
         "annotated_types",
         "anyio",
+        # jsonschema and its closure (attr/attrs/referencing/rpds) reach the graph
+        # through tai42_kit.utils.data, the package that exports the form-text renderer.
+        "attr",
+        "attrs",
         "click",
         "cryptography",
         "dotenv",
         "httpx",
         "idna",
+        "jsonschema",
+        "jsonschema_specifications",
         # redis<6 imports PyJWT eagerly at import time.
         "jwt",
         "opentelemetry",
@@ -44,7 +50,11 @@ ALLOWED_THIRD_PARTY = frozenset(
         "pygments",
         "python_multipart",
         "redis",
+        "referencing",
         "rich",
+        "rpds",
+        # ruamel (YAML) reaches the graph through tai42_kit.utils.data.
+        "ruamel",
         "starlette",
         "typing_extensions",
         "typing_inspection",

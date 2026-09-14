@@ -19,7 +19,19 @@ def test_importing_register_registers_channel_and_routes(stub_app):
     # module objects and the shared stub-app registrations are snapshotted and
     # restored so a re-imported ``routes`` module never leaks a second, non-identical
     # copy of its handler classes into a later test.
-    saved_modules = {name: sys.modules.get(name) for name in ("tai42_channel_web.register", "tai42_channel_web.routes")}
+    saved_modules = {
+        name: sys.modules.get(name)
+        for name in (
+            "tai42_channel_web.register",
+            "tai42_channel_web.routes",
+            "tai42_channel_web.routes.page_routes",
+            "tai42_channel_web.routes.message_routes",
+            "tai42_channel_web.routes.stream_routes",
+            "tai42_channel_web.routes.answer_routes",
+            "tai42_channel_web.routes.session_routes",
+            "tai42_channel_web.routes.gate_routes",
+        )
+    }
     saved_channels = dict(stub_app.channels.registered)
     saved_routes = list(stub_app.http.routes)
     for name in saved_modules:

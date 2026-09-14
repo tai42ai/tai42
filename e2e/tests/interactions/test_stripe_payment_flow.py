@@ -31,9 +31,9 @@ from typing import Any
 import httpx
 import pytest
 
-from tai42_e2e.netfixtures import FakeStripe
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.stripe_stub import FakeStripe
 from tai42_e2e.waiting import wait_for_async
 
 # Every delivery here is HMAC-signed locally and answered by the in-process FakeStripe stub
@@ -284,9 +284,9 @@ def _log_has(stack: TaiStack, needle: str) -> str:
 
 @pytest.mark.backendless
 async def test_stripe_payment_webhook_loop(
-    payments_stack: tuple[TaiStack, str], fake_stripe: FakeStripe, uniq: Callable[[str], str]
+    stripe_stack: tuple[TaiStack, str], fake_stripe: FakeStripe, uniq: Callable[[str], str]
 ) -> None:
-    stack, root_token = payments_stack
+    stack, root_token = stripe_stack
     secret = stack.config.env["E2E_STRIPE_WEBHOOK_SECRET"].encode()
     api = stack.api(port=stack.port_a)
     topic, preset_name = await _setup_flow(stack, api, uniq)
@@ -439,9 +439,9 @@ async def _mint_filler(fake_stripe: FakeStripe) -> str:
 
 @pytest.mark.backendless
 async def test_stripe_reconciliation_recovers_a_lost_payment(
-    payments_stack: tuple[TaiStack, str], fake_stripe: FakeStripe, uniq: Callable[[str], str]
+    stripe_stack: tuple[TaiStack, str], fake_stripe: FakeStripe, uniq: Callable[[str], str]
 ) -> None:
-    stack, root_token = payments_stack
+    stack, root_token = stripe_stack
     api = stack.api(port=stack.port_a)
     _topic, preset_name = await _setup_flow(stack, api, uniq)
 

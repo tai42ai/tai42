@@ -18,13 +18,14 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from tai42_e2e import diagnostics
+from tai42_e2e import Infra, StackResources, diagnostics
 from tai42_e2e.booting import allocate_and_build, boot_stack
+from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio, FakeWhatsApp
 from tai42_e2e.harness import (
     seed_admin_bypass_authz,
     seed_bridge_authz,
-    seed_payments_authz,
     seed_projection_authz,
+    seed_stripe_authz,
 )
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import (
@@ -54,7 +55,6 @@ from tai42_e2e.manifests import (
     build_monitoring_stack,
     build_off_stack,
     build_oidc_stack,
-    build_payments_stack,
     build_postgres_mcp_stack,
     build_projection_authz_stack,
     build_projection_stack,
@@ -67,20 +67,14 @@ from tai42_e2e.manifests import (
     build_schedule_stack,
     build_seams_stack,
     build_shipped_connectors_stack,
+    build_stripe_stack,
 )
-from tai42_e2e.netfixtures import (
-    FakeSlack,
-    FakeStripe,
-    FakeTelegram,
-    FakeTwilio,
-    FakeWhatsApp,
-    OAuthIdp,
-    RecordingConnectProxy,
-    TargetServer,
-)
+from tai42_e2e.oidc_idp import OAuthIdp
 from tai42_e2e.pytest_plugin import gated_collect_ignore
+from tai42_e2e.recording_proxy import RecordingConnectProxy, TargetServer
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import Infra, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
+from tai42_e2e.stripe_stub import FakeStripe
 
 # The monitoring / marketplace / fleet suites only collect when their opt-in gate is
 # on. ``infra`` and ``fresh_stack`` come from the pytest11 plugin.
@@ -372,7 +366,7 @@ def bridge_stack(
 
 
 @pytest.fixture(scope="module")
-def payments_stack(
+def stripe_stack(
     infra: Infra,
     tmp_path_factory: pytest.TempPathFactory,
     fake_stripe: FakeStripe,
@@ -392,10 +386,10 @@ def payments_stack(
         "stripe_stub_base": fake_stripe.api_base_url,
     }
     root = tmp_path_factory.mktemp("notifications")
-    resources, config = _allocate_and_build(infra, root, build_payments_stack, resource_kwargs, False)
+    resources, config = _allocate_and_build(infra, root, build_stripe_stack, resource_kwargs, False)
     stack = TaiStack(config, infra, resources, root)
     try:
-        root_token = seed_payments_authz(infra, resources)
+        root_token = seed_stripe_authz(infra, resources)
     except BaseException:
         stack.teardown()
         raise

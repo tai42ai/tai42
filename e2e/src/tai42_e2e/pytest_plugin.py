@@ -21,8 +21,9 @@ from tai42_e2e.booting import allocate_and_build
 from tai42_e2e.harness import InfraUnavailable, connect_infra
 from tai42_e2e.manifests import build_core_stack
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.tcprelay import TcpRelay
+from tai42_e2e.topology import Infra, StackConfig, StackResources
 from tai42_e2e.variants import Variants
 
 

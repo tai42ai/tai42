@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from starlette.requests import Request
 
-from tai42_channel_web.routes import _inbound_locale
+from tai42_channel_web.routes.message_routes import _inbound_locale
 
 
 def _request(accept_language: str | None) -> Request:

@@ -417,6 +417,13 @@ class FixturePackageIndex:
 
     def _build_app(self) -> FastAPI:
         app = FastAPI()
+        self._install_index_routes(app)
+        self._install_github_routes(app)
+        return app
+
+    def _install_index_routes(self, app: FastAPI) -> None:
+        """The PyPI surfaces the installer resolves fixture wheels through:
+        the simple index, the wheel downloads, and the JSON metadata API."""
 
         @app.get("/simple/")
         async def simple_root() -> HTMLResponse:
@@ -450,6 +457,23 @@ class FixturePackageIndex:
                 return JSONResponse({"error": f"unknown project {project}"}, status_code=404)
             return JSONResponse(self._pypi_json(project))
 
+    def _gh_contents_payload(self, path: str, ref: str | None) -> bytes | None:
+        """The ``tai-plugin.yml`` bytes to serve for a contents fetch, or ``None``.
+
+        A tagged fetch serves that tag's stamped/rendered spec; a ref-less fetch (a
+        monorepo descriptor listing's seed-time existence probe) serves the staged
+        default-branch spec when one was registered. A non-spec path serves nothing."""
+        if path.rsplit("/", 1)[-1] != _PLUGIN_SPEC_FILENAME:
+            return None
+        payload = self._gh_releases[ref].plugin_yaml if ref is not None and ref in self._gh_releases else None
+        if payload is None and ref is None:
+            payload = self._gh_default_contents
+        return payload
+
+    def _install_github_routes(self, app: FastAPI) -> None:
+        """The github-API surfaces the ingest fetches through: repo existence,
+        tagged descriptor contents, the tree/blob docs walk, and the catch-all 404."""
+
         @app.get("/gh-api/repos/{owner}/{repo}")
         async def gh_repo(owner: str, repo: str) -> JSONResponse:
             # The lightweight existence probe a repo-form seed makes before ingest
@@ -465,16 +489,10 @@ class FixturePackageIndex:
             # declared version does not normalize from that tag, so each tag must
             # serve its own stamped spec.
             self.requests.append(f"/gh-api/repos/{owner}/{repo}/contents/{path}")
-            if path.rsplit("/", 1)[-1] == _PLUGIN_SPEC_FILENAME:
-                # A tagged fetch serves that tag's stamped/rendered spec; a ref-less
-                # fetch (a monorepo descriptor listing's seed-time existence probe)
-                # serves the staged default-branch spec when one was registered.
-                payload = self._gh_releases[ref].plugin_yaml if ref is not None and ref in self._gh_releases else None
-                if payload is None and ref is None:
-                    payload = self._gh_default_contents
-                if payload is not None:
-                    content = base64.b64encode(payload).decode("ascii")
-                    return JSONResponse({"encoding": "base64", "content": content, "path": path})
+            payload = self._gh_contents_payload(path, ref)
+            if payload is not None:
+                content = base64.b64encode(payload).decode("ascii")
+                return JSONResponse({"encoding": "base64", "content": content, "path": path})
             return JSONResponse({"error": f"not found: {path} at ref {ref!r}"}, status_code=404)
 
         @app.get("/gh-api/repos/{owner}/{repo}/git/trees/{tree_sha}")
@@ -511,5 +529,3 @@ class FixturePackageIndex:
         async def unknown(path: str) -> JSONResponse:
             self.requests.append(f"/{path}")
             return JSONResponse({"error": f"not found: /{path}"}, status_code=404)
-
-        return app

@@ -21,9 +21,10 @@ from typing import Any
 import httpx
 import pytest
 
+from tai42_e2e import StackConfig, StackResources
 from tai42_e2e.manifests import build_deep_agent_durable_stack
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import StackConfig, StackResources, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import Variants
 
 # The durable stack replaces the scripted-stub LLM group with real Anthropic when the

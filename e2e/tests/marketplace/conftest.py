@@ -29,15 +29,15 @@ from pathlib import Path
 
 import pytest
 
+from tai42_e2e import Infra
 from tai42_e2e.booting import boot_stack
-from tai42_e2e.manifests import (
-    build_marketplace_authz_stack,
-    build_marketplace_connectors_stack,
-    build_marketplace_prefix_stack,
-    build_marketplace_stack,
-    build_router_merge_stack,
+from tai42_e2e.catalog_seed import (
+    assert_zeta_ranges_bracket_running_contract,
+    forge_zeta_wheel,
+    seed_fixture_catalog,
+    seed_zeta_listing,
 )
-from tai42_e2e.marketplace import (
+from tai42_e2e.fixture_catalog import (
     ALPHA_PACKAGE,
     BETA_PACKAGE,
     DELTA_PACKAGE,
@@ -51,17 +51,20 @@ from tai42_e2e.marketplace import (
     ZETA_PACKAGE,
     ZETA_WIDE_CONTRACT_RANGE,
     FixtureArtifacts,
-    MarketplaceService,
-    assert_zeta_ranges_bracket_running_contract,
     forge_fixture_artifacts,
-    forge_zeta_wheel,
-    seed_fixture_catalog,
-    seed_zeta_listing,
 )
-from tai42_e2e.netfixtures import OAuthIdp
+from tai42_e2e.manifests import (
+    build_marketplace_authz_stack,
+    build_marketplace_connectors_stack,
+    build_marketplace_prefix_stack,
+    build_marketplace_stack,
+    build_router_merge_stack,
+)
+from tai42_e2e.marketplace import MarketplaceService
+from tai42_e2e.oidc_idp import OAuthIdp
 from tai42_e2e.pkgsource import BuiltWheel, FixturePackageIndex
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e.stack import TaiStack
 
 from ._market_support import MarketInstaller
 

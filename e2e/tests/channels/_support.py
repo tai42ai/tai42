@@ -33,7 +33,8 @@ import redis as redis_lib
 from fastmcp.client.client import CallToolResult
 
 from tai42_e2e import manifests
-from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio, SignedInbound
+from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio
+from tai42_e2e.provider_stub import SignedInbound
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 from tai42_e2e.webchat import WebChatClient

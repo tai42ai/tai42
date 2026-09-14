@@ -119,13 +119,10 @@ def _canonical_hash(schema: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def build_flow(schema: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    """The ``(flow_json, schema_hash)`` for a form answer schema.
-
-    Validates the schema is the supported ``object`` subset and maps each property
-    to a field component; raises ``ChannelInputError`` (naming the offending
-    property or shape) on anything outside it. Pure — no I/O.
-    """
+def _validate_object_schema(schema: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
+    """The ``(properties, required)`` of a supported top-level object schema, or raise
+    ``ChannelInputError`` naming what is outside the subset — the type is ``object``,
+    ``properties`` is a non-empty object, and ``required`` is a list of property names."""
     if not isinstance(schema, dict) or schema.get("type") != "object":
         raise ChannelInputError(
             f"form schema must be a top-level object schema, got type={schema.get('type')!r}"
@@ -138,7 +135,17 @@ def build_flow(schema: dict[str, Any]) -> tuple[dict[str, Any], str]:
     required_raw = schema.get("required", [])
     if not isinstance(required_raw, list) or not all(isinstance(item, str) for item in required_raw):
         raise ChannelInputError("form schema 'required' must be a list of property-name strings")
-    required = set(required_raw)
+    return properties, set(required_raw)
+
+
+def build_flow(schema: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """The ``(flow_json, schema_hash)`` for a form answer schema.
+
+    Validates the schema is the supported ``object`` subset and maps each property
+    to a field component; raises ``ChannelInputError`` (naming the offending
+    property or shape) on anything outside it. Pure — no I/O.
+    """
+    properties, required = _validate_object_schema(schema)
 
     components: list[dict[str, Any]] = []
     payload: dict[str, str] = {}
@@ -277,6 +284,139 @@ def _forward_field_data(name: str, prop: dict[str, Any], option_fields: set[str]
     return forwarded
 
 
+def _validate_form_properties(properties: dict[str, Any], required: set[str], option_fields: set[str]) -> None:
+    """Validate every property is inside the supported per-send subset, raising
+    ``ChannelInputError`` naming a reserved name, a non-object property, or an
+    unsupported type — before any screen is built."""
+    for name, prop in properties.items():
+        if name == _RESERVED_PROPERTY:
+            raise ChannelInputError(
+                f"form property {name!r}: reserved on this channel — Meta injects {name!r} into the "
+                "Flow response to correlate the reply, so a field of that name is unanswerable"
+            )
+        if not isinstance(prop, dict):
+            raise ChannelInputError(f"form property {name!r}: schema must be an object")
+        # Validate the subset up front (raises naming the property on an unsupported type).
+        _dynamic_component(name, prop, name in required, option_fields)
+
+
+def _resolve_pages(
+    properties: dict[str, Any], pages: list[dict[str, Any]] | None
+) -> tuple[list[dict[str, Any]], list[list[str]]]:
+    """The resolved page list (defaulting to one screen carrying every property in
+    schema order) and each page's field names, raising ``ChannelInputError`` for a page
+    that names a property the schema does not declare."""
+    resolved_pages = pages if pages else [{"title": _SCREEN_TITLE, "fields": list(properties)}]
+    fields_by_screen: list[list[str]] = []
+    for page in resolved_pages:
+        page_fields = [str(field) for field in page["fields"]]
+        for field in page_fields:
+            if field not in properties:
+                raise ChannelInputError(f"form page names unknown property {field!r}")
+        fields_by_screen.append(page_fields)
+    return resolved_pages, fields_by_screen
+
+
+def _screen_data_model(
+    index: int,
+    this_fields: list[str],
+    later_fields: list[str],
+    earlier_fields: list[str],
+    properties: dict[str, Any],
+    option_fields: set[str],
+) -> dict[str, Any]:
+    """The screen's ``data`` declarations: the entry screen declares EVERY field's
+    init/ds (the send injects them all there); a later screen declares its own and its
+    successors' init/ds plus a ``__val`` carrier for each field collected earlier."""
+    data_model: dict[str, Any] = {}
+    if index == 0:
+        for name, prop in properties.items():
+            data_model.update(_field_data_decls(name, prop, option_fields))
+    else:
+        for name in [*this_fields, *later_fields]:
+            data_model.update(_field_data_decls(name, properties[name], option_fields))
+        for name in earlier_fields:
+            data_model[f"{name}__val"] = _val_decl(properties[name])
+    return data_model
+
+
+def _screen_footer(
+    index: int,
+    is_terminal: bool,
+    this_fields: list[str],
+    later_fields: list[str],
+    earlier_fields: list[str],
+    properties: dict[str, Any],
+    option_fields: set[str],
+    routing_model: dict[str, list[str]],
+) -> dict[str, Any]:
+    """The screen's ``Footer`` component: the terminal screen completes with the flat
+    union of every field (this screen's from the form, earlier ones from their ``__val``
+    carriers); a non-terminal screen navigates to the next, forwarding successors' init/ds
+    and every collected value, and records the transition in ``routing_model``."""
+    if is_terminal:
+        payload = {
+            name: (f"${{form.{name}}}" if name in this_fields else f"${{data.{name}__val}}") for name in properties
+        }
+        return {"type": "Footer", "label": _FOOTER_LABEL, "on-click-action": {"name": "complete", "payload": payload}}
+    screen_id = f"{_SCREEN_PREFIX}{index}"
+    next_screen = f"{_SCREEN_PREFIX}{index + 1}"
+    routing_model[screen_id] = [next_screen]
+    forward: dict[str, str] = {}
+    for name in later_fields:
+        forward.update(_forward_field_data(name, properties[name], option_fields))
+    for name in earlier_fields:
+        forward[f"{name}__val"] = f"${{data.{name}__val}}"
+    for name in this_fields:
+        forward[f"{name}__val"] = f"${{form.{name}}}"
+    return {
+        "type": "Footer",
+        "label": _CONTINUE_LABEL,
+        "on-click-action": {
+            "name": "navigate",
+            "next": {"type": "screen", "name": next_screen},
+            "payload": forward,
+        },
+    }
+
+
+def _build_form_screen(
+    index: int,
+    page: dict[str, Any],
+    properties: dict[str, Any],
+    required: set[str],
+    option_fields: set[str],
+    fields_by_screen: list[list[str]],
+    earlier_fields: list[str],
+    screen_count: int,
+    routing_model: dict[str, list[str]],
+) -> dict[str, Any]:
+    """One Flow screen for a page: its field components, its ``data`` model, and its
+    footer (which records any transition in ``routing_model``)."""
+    this_fields = fields_by_screen[index]
+    later_fields = [field for screen in fields_by_screen[index + 1 :] for field in screen]
+    is_terminal = index == screen_count - 1
+
+    data_model = _screen_data_model(index, this_fields, later_fields, earlier_fields, properties, option_fields)
+    components = [_dynamic_component(name, properties[name], name in required, option_fields) for name in this_fields]
+    footer = _screen_footer(
+        index, is_terminal, this_fields, later_fields, earlier_fields, properties, option_fields, routing_model
+    )
+
+    screen: dict[str, Any] = {
+        "id": f"{_SCREEN_PREFIX}{index}",
+        "title": str(page["title"]),
+        "terminal": is_terminal,
+        "layout": {
+            "type": "SingleColumnLayout",
+            "children": [{"type": "Form", "name": _FORM_NAME, "children": [*components, footer]}],
+        },
+    }
+    if data_model:
+        screen["data"] = data_model
+    return screen
+
+
 def build_form_flow(
     schema: dict[str, Any],
     pages: list[dict[str, Any]] | None = None,
@@ -296,108 +436,29 @@ def build_form_flow(
     subset or any page field that is not a declared property.
     """
     option_fields = option_fields or set()
-    if not isinstance(schema, dict) or schema.get("type") != "object":
-        raise ChannelInputError(
-            f"form schema must be a top-level object schema, got type={schema.get('type')!r}"
-            if isinstance(schema, dict)
-            else "form schema must be a JSON object"
-        )
-    properties = schema.get("properties")
-    if not isinstance(properties, dict) or not properties:
-        raise ChannelInputError("form schema must carry a non-empty 'properties' object")
-    required_raw = schema.get("required", [])
-    if not isinstance(required_raw, list) or not all(isinstance(item, str) for item in required_raw):
-        raise ChannelInputError("form schema 'required' must be a list of property-name strings")
-    required = set(required_raw)
-
-    for name, prop in properties.items():
-        if name == _RESERVED_PROPERTY:
-            raise ChannelInputError(
-                f"form property {name!r}: reserved on this channel — Meta injects {name!r} into the "
-                "Flow response to correlate the reply, so a field of that name is unanswerable"
-            )
-        if not isinstance(prop, dict):
-            raise ChannelInputError(f"form property {name!r}: schema must be an object")
-        # Validate the subset up front (raises naming the property on an unsupported type).
-        _dynamic_component(name, prop, name in required, option_fields)
-
-    resolved_pages = pages if pages else [{"title": _SCREEN_TITLE, "fields": list(properties)}]
-    fields_by_screen: list[list[str]] = []
-    for page in resolved_pages:
-        page_fields = [str(field) for field in page["fields"]]
-        for field in page_fields:
-            if field not in properties:
-                raise ChannelInputError(f"form page names unknown property {field!r}")
-        fields_by_screen.append(page_fields)
+    properties, required = _validate_object_schema(schema)
+    _validate_form_properties(properties, required, option_fields)
+    resolved_pages, fields_by_screen = _resolve_pages(properties, pages)
 
     screen_count = len(resolved_pages)
     screens: list[dict[str, Any]] = []
     routing_model: dict[str, list[str]] = {}
     earlier_fields: list[str] = []
     for index, page in enumerate(resolved_pages):
-        screen_id = f"{_SCREEN_PREFIX}{index}"
-        this_fields = fields_by_screen[index]
-        later_fields = [field for screen in fields_by_screen[index + 1 :] for field in screen]
-        is_terminal = index == screen_count - 1
-
-        data_model: dict[str, Any] = {}
-        if index == 0:
-            # The entry screen declares EVERY field's init/ds — the send injects them all
-            # here and each step forwards the ones its successors still need.
-            for name, prop in properties.items():
-                data_model.update(_field_data_decls(name, prop, option_fields))
-        else:
-            for name in [*this_fields, *later_fields]:
-                data_model.update(_field_data_decls(name, properties[name], option_fields))
-            for name in earlier_fields:
-                data_model[f"{name}__val"] = _val_decl(properties[name])
-
-        components = [
-            _dynamic_component(name, properties[name], name in required, option_fields) for name in this_fields
-        ]
-
-        if is_terminal:
-            payload = {
-                name: (f"${{form.{name}}}" if name in this_fields else f"${{data.{name}__val}}") for name in properties
-            }
-            footer = {
-                "type": "Footer",
-                "label": _FOOTER_LABEL,
-                "on-click-action": {"name": "complete", "payload": payload},
-            }
-        else:
-            next_screen = f"{_SCREEN_PREFIX}{index + 1}"
-            routing_model[screen_id] = [next_screen]
-            forward: dict[str, str] = {}
-            for name in later_fields:
-                forward.update(_forward_field_data(name, properties[name], option_fields))
-            for name in earlier_fields:
-                forward[f"{name}__val"] = f"${{data.{name}__val}}"
-            for name in this_fields:
-                forward[f"{name}__val"] = f"${{form.{name}}}"
-            footer = {
-                "type": "Footer",
-                "label": _CONTINUE_LABEL,
-                "on-click-action": {
-                    "name": "navigate",
-                    "next": {"type": "screen", "name": next_screen},
-                    "payload": forward,
-                },
-            }
-
-        screen: dict[str, Any] = {
-            "id": screen_id,
-            "title": str(page["title"]),
-            "terminal": is_terminal,
-            "layout": {
-                "type": "SingleColumnLayout",
-                "children": [{"type": "Form", "name": _FORM_NAME, "children": [*components, footer]}],
-            },
-        }
-        if data_model:
-            screen["data"] = data_model
-        screens.append(screen)
-        earlier_fields = [*earlier_fields, *this_fields]
+        screens.append(
+            _build_form_screen(
+                index,
+                page,
+                properties,
+                required,
+                option_fields,
+                fields_by_screen,
+                earlier_fields,
+                screen_count,
+                routing_model,
+            )
+        )
+        earlier_fields = [*earlier_fields, *fields_by_screen[index]]
 
     flow_json: dict[str, Any] = {"version": _FLOW_JSON_VERSION, "screens": screens}
     if screen_count > 1:

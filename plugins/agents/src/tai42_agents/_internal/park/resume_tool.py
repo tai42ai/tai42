@@ -29,7 +29,7 @@ from typing import Any
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import register_continuation_abandonment_handler
 
-from tai42_agents._internal.park.driver import (
+from tai42_agents._internal.park.resume import (
     AGENT_RESUME_TOOL_NAME,
     agent_resume,
     fire_park_failed_completion,

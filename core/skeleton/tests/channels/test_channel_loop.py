@@ -39,6 +39,7 @@ from tai42_skeleton.interactions import InteractionStore, InteractionTimeoutErro
 from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
+from tai42_skeleton.operations.interactions import _add_data
 from tai42_skeleton.routers import interactions as router
 
 from .._helpers import DeliverOnlyChannel, await_add_event
@@ -190,7 +191,7 @@ async def test_fake_channel_text_loop(wired, fake_channel):
     state = await wired.store.get_state(wired.fake, iid)
     assert state is not None
     assert state.request.channel == "fake"
-    assert router._add_data(state.request)["channel"] == "fake"
+    assert _add_data(state.request)["channel"] == "fake"
 
     # 4. play the plugin: forward the human's reply as {"answer": <value>}
     resp = await router.callback(
@@ -276,7 +277,7 @@ async def test_add_frame_omits_channel_when_unset(wired):
     state = await wired.store.get_state(wired.fake, iid)
     assert state is not None
     assert state.request.channel is None
-    assert "channel" not in router._add_data(state.request)
+    assert "channel" not in _add_data(state.request)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -383,7 +384,7 @@ async def test_channel_delivery_forwards_media_and_inbox_keeps_it(wired, fake_ch
 
     state = await wired.store.get_state(wired.fake, iid)
     assert state is not None
-    assert router._add_data(state.request)["media"] == media
+    assert _add_data(state.request)["media"] == media
 
     resp = await router.callback(
         _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "ok"}')

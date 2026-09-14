@@ -48,13 +48,13 @@ from pathlib import Path
 import httpx
 import trustme
 from playwright.sync_api import sync_playwright
-from tai42_e2e import diagnostics, manifests
+from tai42_e2e import Infra, diagnostics, manifests
 from tai42_e2e.booting import allocate_and_build
+from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.harness import connect_infra
 from tai42_e2e.manifests import build_channel_stack
-from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e.stack import TaiStack
 from tai42_e2e.webchat import SESSION_COOKIE, registered_visitor_id
 
 # The monorepo root, four levels up from this file (plugins/channel-web/scripts/).

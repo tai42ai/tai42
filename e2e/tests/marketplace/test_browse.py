@@ -13,17 +13,17 @@ from typing import Any
 
 import pytest
 
-from tai42_e2e.marketplace import (
+from tai42_e2e.catalog_seed import seed_iota_listing
+from tai42_e2e.fixture_catalog import (
     ALPHA_REF,
     BETA_REF,
     GAMMA_REF,
     IOTA_PROVIDER_ID,
     IOTA_REF,
     IOTA_VERSION_V1,
-    MarketplaceService,
     contract_facet_probe_versions,
-    seed_iota_listing,
 )
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
 

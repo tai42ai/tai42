@@ -31,13 +31,13 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from tai42_e2e import wait_for_async
+from tai42_e2e import StackConfig, Topology, wait_for_async
 from tai42_e2e.manifests import build_bare_stack, build_connectors_stack
-from tai42_e2e.stack import StackConfig, Topology
 from tai42_e2e.waiting import WaitTimeout
 
 if TYPE_CHECKING:
-    from tai42_e2e.stack import StackResources, TaiStack
+    from tai42_e2e import StackResources
+    from tai42_e2e.stack import TaiStack
     from tai42_e2e.variants import Variants
 
 # The MULTIWORKER worker count every convergence fleet boots. Two uvicorn workers behind one

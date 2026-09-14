@@ -101,33 +101,63 @@ async def preset_bind(
         )
 
     if output_schema is None:
-        return Tool.from_tool(
-            base,
-            name=name,
-            description=description,
-            transform_args=transform_args,
-        )
-
+        return _bind_plain(base, name, description, transform_args)
     if base_tool in app.agents.all_agents():
-        # Agent base — FORCE structured output: bake ``response_format`` from the
-        # authored schema. The agent run seam requires a top-level ``title``; when
-        # the author left it off, inject the preset name. The advertised output
-        # schema stays the authored (title-free) value; the agent's own drain
-        # validates the forced result, so no second validation wrapper is attached.
-        baked_response_format = dict(output_schema)
-        baked_response_format.setdefault("title", name)
-        transform_args["response_format"] = ArgTransform(hide=True, default=baked_response_format)
-        return Tool.from_tool(
-            base,
-            name=name,
-            description=description,
-            transform_args=transform_args,
-            output_schema=output_schema,
-        )
+        return _bind_agent_forced(base, name, description, transform_args, output_schema)
+    return _bind_validated(base, name, description, transform_args, output_schema)
 
-    # Plain tool — DECLARE + VALIDATE: advertise the authored schema and validate
-    # every result against it, raising loudly on any mismatch (a non-LLM tool
-    # cannot be forced).
+
+def _bind_plain(base: Tool, name: str, description: str, transform_args: dict[str, ArgTransform]) -> Tool:
+    """Transform ``base`` baking the hidden constants, with NO output schema — the
+    plain no-output-schema path (one ``Tool.from_tool``)."""
+    return Tool.from_tool(
+        base,
+        name=name,
+        description=description,
+        transform_args=transform_args,
+    )
+
+
+def _bind_agent_forced(
+    base: Tool,
+    name: str,
+    description: str,
+    transform_args: dict[str, ArgTransform],
+    output_schema: dict[str, Any],
+) -> Tool:
+    """Force structured output by baking ``response_format`` from the authored
+    schema.
+
+    The agent run seam requires a top-level ``title``; when the author left it off,
+    inject the preset name. The advertised output schema stays the authored
+    (title-free) value; the agent's own drain validates the forced result, so no
+    second validation wrapper is attached."""
+    baked_response_format = dict(output_schema)
+    baked_response_format.setdefault("title", name)
+    transform_args["response_format"] = ArgTransform(hide=True, default=baked_response_format)
+    return Tool.from_tool(
+        base,
+        name=name,
+        description=description,
+        transform_args=transform_args,
+        output_schema=output_schema,
+    )
+
+
+def _bind_validated(
+    base: Tool,
+    name: str,
+    description: str,
+    transform_args: dict[str, ArgTransform],
+    output_schema: dict[str, Any],
+) -> Tool:
+    """Advertise the authored schema and validate every non-park result against it,
+    redacting a secret-bearing failure.
+
+    The plain-tool declare-and-validate path: a non-LLM tool cannot be forced, so
+    every result is validated against ``output_schema`` at run time, raising loudly
+    on any mismatch."""
+
     def _raise_redacted(caught: JsonSchemaValidationError) -> None:
         # The placeholder-only failure: json_path kept, instance text replaced by the
         # placeholder. MUST be invoked OUTSIDE the ``except`` and raise ``from None`` so
