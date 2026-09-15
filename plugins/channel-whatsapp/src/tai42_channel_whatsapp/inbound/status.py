@@ -48,7 +48,5 @@ async def _handle_status(status: dict[str, Any]) -> None:
         # record. Post the receipt onto the originating trace via the send-outcome index;
         # only a genuine miss (neither the bridge nor such a send owns the id) keeps the
         # untracked-message log.
-        if not await tai42_app.channels.record_send_receipt(
-            "whatsapp", wamid, receipt, errors=status.get("errors")
-        ):
+        if not await tai42_app.channels.record_send_receipt("whatsapp", wamid, receipt, errors=status.get("errors")):
             logger.info("whatsapp status for untracked message %s ignored: %s", wamid, exc)
