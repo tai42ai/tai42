@@ -91,7 +91,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.8"
+      "release-as": "1.2.8",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/accounts-postgres": {
       "package-name": "tai42-accounts-postgres",
@@ -165,7 +175,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.0.4"
+      "release-as": "3.0.4",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/backend-celery": {
       "package-name": "tai42-backend-celery",
@@ -183,7 +203,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.0.4"
+      "release-as": "3.0.4",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/backend-rq": {
       "package-name": "tai42-backend-rq",
@@ -285,7 +315,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "4.0.6"
+      "release-as": "4.0.6",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/channel-web": {
       "package-name": "tai42-channel-web",
@@ -411,7 +451,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.9"
+      "release-as": "1.1.9",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/identity-redis": {
       "package-name": "tai42-identity-redis",
@@ -429,7 +479,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.9"
+      "release-as": "1.2.9",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/monitoring-langfuse": {
       "package-name": "tai42-monitoring-langfuse",
@@ -531,7 +591,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.10"
+      "release-as": "1.1.10",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/storage-local": {
       "package-name": "tai42-storage-local",
@@ -549,7 +619,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.10"
+      "release-as": "1.1.10",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/storage-s3": {
       "package-name": "tai42-storage-s3",
@@ -679,7 +759,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.0.19"
+      "release-as": "1.0.19",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/tools-whatsapp": {
       "package-name": "tai42-tools-whatsapp",
@@ -697,7 +787,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.9"
+      "release-as": "1.1.9",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/webhook-verifier-github": {
       "package-name": "tai42-webhook-verifier-github",
@@ -715,7 +815,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.7"
+      "release-as": "1.2.7",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "plugins/webhook-verifier-stripe": {
       "package-name": "tai42-webhook-verifier-stripe",
@@ -733,7 +843,17 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.7"
+      "release-as": "1.2.7",
+      "changelog-sections": [
+        {
+          "type": "refactor",
+          "section": "Code Refactoring"
+        },
+        {
+          "type": "ci",
+          "section": "Continuous Integration"
+        }
+      ]
     },
     "e2e": {
       "package-name": "tai42-e2e",
