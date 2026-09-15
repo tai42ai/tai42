@@ -1,4 +1,4 @@
-"""Delivery-status webhooks — receipts recorded against outbound messages, flow-send
+"""Delivery-status webhooks — receipts recorded against outbound messages, notify_user-send
 receipts, and benign handling of untracked ids / odd status shapes."""
 
 from __future__ import annotations
@@ -61,37 +61,37 @@ async def test_status_unknown_wamid_is_benign_200(handler, stub_app, caplog: pyt
     assert any("untracked message wamid.OUT" in record.message for record in caplog.records)
 
 
-async def test_status_flow_send_hit_delivered_posts_receipt_no_untracked_log(
+async def test_status_send_hit_delivered_posts_receipt_no_untracked_log(
     handler, stub_app, caplog: pytest.LogCaptureFixture
 ):
-    # The bridge does not own the id (LookupError), but it is a flow send: the flow-send
-    # receipt seam resolves it and posts the receipt onto the trace, so NO untracked log.
-    stub_app.conversations.status_error = LookupError("outbound id wamid.FLOW maps to no answer record")
-    stub_app.channels.flow_receipt_result = True
+    # The bridge does not own the id (LookupError), but it is a notify_user send: the
+    # send-receipt seam resolves it and posts the receipt onto the trace, so NO untracked log.
+    stub_app.conversations.status_error = LookupError("outbound id wamid.SEND maps to no answer record")
+    stub_app.channels.send_receipt_result = True
 
     with caplog.at_level("INFO"):
-        result = await handler(signed_request(status_payload(wamid="wamid.FLOW", state="delivered")))
+        result = await handler(signed_request(status_payload(wamid="wamid.SEND", state="delivered")))
 
     assert result.status_code == 200
-    assert stub_app.channels.flow_receipt_calls == [
+    assert stub_app.channels.send_receipt_calls == [
         {
             "channel": "whatsapp",
-            "provider_message_id": "wamid.FLOW",
+            "provider_message_id": "wamid.SEND",
             "status": DeliveryReceipt.DELIVERED,
             "errors": None,
         }
     ]
-    assert not any("untracked message wamid.FLOW" in record.message for record in caplog.records)
+    assert not any("untracked message wamid.SEND" in record.message for record in caplog.records)
 
 
-async def test_status_flow_send_hit_failed_forwards_errors(handler, stub_app):
-    stub_app.conversations.status_error = LookupError("outbound id wamid.FLOW maps to no answer record")
-    stub_app.channels.flow_receipt_result = True
+async def test_status_send_hit_failed_forwards_errors(handler, stub_app):
+    stub_app.conversations.status_error = LookupError("outbound id wamid.SEND maps to no answer record")
+    stub_app.channels.send_receipt_result = True
 
-    result = await handler(signed_request(status_payload(wamid="wamid.FLOW", state="failed")))
+    result = await handler(signed_request(status_payload(wamid="wamid.SEND", state="failed")))
 
     assert result.status_code == 200
-    (call,) = stub_app.channels.flow_receipt_calls
+    (call,) = stub_app.channels.send_receipt_calls
     assert call["status"] is DeliveryReceipt.FAILED
     # The provider's error detail rides the receipt so the trace event carries it.
     assert call["errors"] == [{"code": 131047, "title": "Re-engagement message"}]

@@ -1,23 +1,23 @@
 """Tier 2 of the send-outcome monitoring layer: delivered-vs-accepted receipts reaching the originating trace.
 
-A flow send (``notify_user`` on a named channel) returns the provider message ids the
-medium ACCEPTED — but whether the medium later DELIVERED it arrives out of band, on the
-channel's delivery-status webhook, long after the flow trace has closed. This module
-carries that one hop:
+An out-of-band ``notify_user`` send on a named channel returns the provider message ids
+the medium ACCEPTED — but whether the medium later DELIVERED it arrives out of band, on
+the channel's delivery-status webhook, long after the originating trace has closed. This
+module carries that one hop:
 
-- :func:`index_flow_send` writes a TTL'd ``provider_message_id -> {trace_id, span_id}``
+- :func:`index_send` writes a TTL'd ``provider_message_id -> {trace_id, span_id}``
   entry at the send seam when a trace is ambient, on the interactions Redis (the store
-  the flow-send surface already uses), scoped by the interactions ``key_prefix`` for
+  the send surface already uses), scoped by the interactions ``key_prefix`` for
   per-deployment isolation exactly as the notifications sink is.
-- :func:`record_flow_send_receipt` is what the channel delivery-status webhooks call
+- :func:`record_send_receipt` is what the channel delivery-status webhooks call
   when the conversation bridge does not own an outbound id (its ``record_delivery_status``
   raised ``LookupError``): it resolves the id through this index and, on a hit, emits a
   ``delivery_receipt`` monitoring event onto the recorded trace/span with an EXPLICIT
   ``TraceContext`` — never an ambient emit, since the webhook runs in a detached context
-  with no active trace. It returns whether the id was a known flow send, so the webhook
+  with no active trace. It returns whether the id was a known send, so the webhook
   keeps its genuinely-unknown-id log only on a miss.
 
-Send-outcome queries are deliberately TWO surfaces. A flow send answers
+Send-outcome queries are deliberately TWO surfaces. An out-of-band send answers
 accepted-vs-delivered in one query here (send span + ``delivery_receipt`` in one
 trace); bridge-conversation deliveries belong to the conversation ledger. Never
 unify them at read time — federating the two stores costs a slow first fetch and
@@ -25,8 +25,8 @@ cross-store pagination. If one query over both surfaces is ever needed, the shap
 is write-time stamping at the conversation seam.
 
 This index covers exactly what the conversation bridge's own ledger/receipt path does
-NOT — flow sends, which run no ConversationRecord. The bridge path stays untouched and
-authoritative for bridge messages.
+NOT — ``notify_user`` sends, which run no ConversationRecord. The bridge path stays
+untouched and authoritative for bridge messages.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # may carry ``:`` of its own without bleeding across a segment boundary.
 _INDEX_SUFFIX = "send-receipt:"
 
-# The monitoring event name a resolved out-of-band receipt posts onto the flow trace.
+# The monitoring event name a resolved out-of-band receipt posts onto the originating trace.
 _RECEIPT_EVENT_NAME = "delivery_receipt"
 
 
@@ -60,10 +60,10 @@ def _index_key(key_prefix: str, channel: str, provider_message_id: str) -> str:
     return f"{key_prefix}{_INDEX_SUFFIX}{channel}:{provider_message_id}"
 
 
-async def index_flow_send(channel: str, provider_message_ids: list[str], *, trace_id: str, span_id: str) -> None:
-    """Map each accepted provider message id of a flow send to its originating ``{trace_id, span_id}``, TTL'd.
+async def index_send(channel: str, provider_message_ids: list[str], *, trace_id: str, span_id: str) -> None:
+    """Map each accepted provider message id of an out-of-band send to its originating ``{trace_id, span_id}``, TTL'd.
 
-    So a later out-of-band delivery receipt for that id can be posted back onto the flow trace.
+    So a later out-of-band delivery receipt for that id can be posted back onto the originating trace.
 
     A no-op when the id list is empty (a channel that exposes no correlatable id) or the
     interactions store is unconfigured. The TTL is the receipt-relevance window
@@ -80,18 +80,18 @@ async def index_flow_send(channel: str, provider_message_ids: list[str], *, trac
             await awaited(r.set(_index_key(settings.key_prefix, channel, provider_message_id), payload, ex=ttl))
 
 
-async def record_flow_send_receipt(
+async def record_send_receipt(
     channel: str, provider_message_id: str, receipt: DeliveryReceipt, *, errors: Any = None
 ) -> bool:
-    """Post an out-of-band delivery receipt for a FLOW send back onto its originating trace.
+    """Post an out-of-band delivery receipt for a ``notify_user`` send back onto its originating trace.
 
-    Resolves ``provider_message_id`` through the flow-send index; on a hit, emits a
+    Resolves ``provider_message_id`` through the send-receipt index; on a hit, emits a
     ``delivery_receipt`` event into the recorded trace, nested under the send span, with an
     EXPLICIT ``TraceContext`` (the webhook context is detached — an ambient emit would
     attach to nothing) — level ``ERROR`` for a FAILED receipt, default otherwise. The
     ``input`` carries the provider id, the receipt status, and any provider ``errors``.
 
-    Returns ``True`` when the id was a known flow send (event emitted), ``False`` when it
+    Returns ``True`` when the id was a known send (event emitted), ``False`` when it
     is not — the caller (the webhook) keeps its genuinely-unknown-id log only on a miss. A
     no-op returning ``False`` when the interactions store is unconfigured. Fail-safe
     end to end: the index READ is caught-and-logged and resolves to a benign miss
@@ -109,10 +109,10 @@ async def record_flow_send_receipt(
     except Exception:
         # A monitoring-store (interactions Redis) outage must never break receipt ingestion:
         # this resolves in the webhook's ``except LookupError`` fallback, so a raised error
-        # would 500 the delivery-status webhook. Log and treat the id as an unknown flow send
+        # would 500 the delivery-status webhook. Log and treat the id as an unknown send
         # (a benign miss) — the receipt correlation is lost, the webhook is not.
         logger.warning(
-            "flow-send receipt index read failed for %s on channel %r; treating as a miss",
+            "send-receipt index read failed for %s on channel %r; treating as a miss",
             provider_message_id,
             channel,
         )
@@ -128,8 +128,8 @@ async def record_flow_send_receipt(
         input_={"provider_message_id": provider_message_id, "status": receipt.value, "errors": errors},
     )
     if failed:
-        logger.info("flow send %s on channel %r reported FAILED by the provider", provider_message_id, channel)
+        logger.info("send %s on channel %r reported FAILED by the provider", provider_message_id, channel)
     return True
 
 
-__all__ = ["index_flow_send", "record_flow_send_receipt"]
+__all__ = ["index_send", "record_send_receipt"]

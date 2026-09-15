@@ -139,23 +139,23 @@ class AppChannels(Protocol):
         """
         ...
 
-    async def record_flow_send_receipt(
+    async def record_send_receipt(
         self, channel: str, provider_message_id: str, status: DeliveryReceipt, *, errors: Any = None
     ) -> bool:
-        """Post an out-of-band delivery receipt for a FLOW send back onto its originating trace.
+        """Post an out-of-band delivery receipt for a ``notify_user`` send back onto its originating trace.
 
-        The send is a ``notify_user`` channel send. The tier-2 counterpart to the
-        conversation bridge's ``record_delivery_status``: a
+        The send is a ``notify_user`` channel send with no conversation record. The tier-2
+        counterpart to the conversation bridge's ``record_delivery_status``: a
         channel's delivery-status webhook calls this when the bridge does not own the
         outbound id (``record_delivery_status`` raised ``LookupError``). It resolves the id
-        through the TTL'd flow-send index and, on a hit, emits a ``delivery_receipt`` event
-        into the recorded trace (a FAILED receipt at ERROR level), so the flow's own trace
+        through the TTL'd send-receipt index and, on a hit, emits a ``delivery_receipt`` event
+        into the recorded trace (a FAILED receipt at ERROR level), so the originating trace
         shows delivered-vs-accepted for its sends. ``errors`` carries any provider error
         detail for the event input.
 
-        Returns ``True`` when the id was a known flow send (event emitted), ``False`` when it
+        Returns ``True`` when the id was a known send (event emitted), ``False`` when it
         is not — so the webhook keeps its genuinely-unknown-id log only on a ``False``. A
-        no-op returning ``False`` where the flow-send store is unconfigured.
+        no-op returning ``False`` where the send-receipt store is unconfigured.
         """
         ...
 

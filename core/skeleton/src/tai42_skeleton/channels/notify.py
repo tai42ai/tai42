@@ -45,7 +45,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.channels.notifications_sink import record_notification
-from tai42_skeleton.channels.send_receipts import index_flow_send
+from tai42_skeleton.channels.send_receipts import index_send
 from tai42_skeleton.channels.send_span import active_trace_id, send_span
 from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
 from tai42_skeleton.interactions.media import substitute_media
@@ -189,7 +189,7 @@ async def _send_with_telemetry(
     """Send on the channel inside the send-outcome monitoring span and return the accepted per-message ids.
 
     Tier 1: one structured ``send:<channel>`` span around the single send seam (a no-op
-    outside a flow trace); on failure the span is marked ERROR with the typed detail and
+    outside an ambient trace); on failure the span is marked ERROR with the typed detail and
     the error re-raised unchanged. Tier 2, AFTER the span closes SUCCESS-shaped: index each
     accepted id to this trace/span so a later out-of-band delivery receipt can be posted
     back onto this run. The provider has already ACCEPTED the send, so this best-effort
@@ -205,10 +205,10 @@ async def _send_with_telemetry(
         trace_id = active_trace_id()
         if trace_id is not None:
             try:
-                await index_flow_send(channel, outbound_ids, trace_id=trace_id, span_id=span.id)
+                await index_send(channel, outbound_ids, trace_id=trace_id, span_id=span.id)
             except Exception:
                 logger.warning(
-                    "flow-send receipt indexing failed for channel %r ids %r; the send succeeded, "
+                    "send-receipt indexing failed for channel %r ids %r; the send succeeded, "
                     "only later delivery-receipt correlation is lost",
                     channel,
                     outbound_ids,

@@ -1,7 +1,7 @@
 """The best-effort answer-rejected participant notice seam (``_notify_participant``), wrapped in the
 tier-1 send span.
 
-In the inbound-webhook context there is no ambient flow trace, so the span is a gated
+In the inbound-webhook context there is no ambient trace, so the span is a gated
 no-op — the notice is covered honestly without fabricating a rootless span, and a notify
 failure is still swallowed (best-effort). Under an active trace the failure is recorded.
 """

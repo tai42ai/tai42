@@ -79,11 +79,11 @@ EXPECTED_FACADE = {
     "get",
     # channels (5) — ``register`` and ``get`` share their leaf names with
     # webhook_verifiers above; ``names``, ``handle_inbound_answer`` (the shared
-    # inbound-answer ladder) and ``record_flow_send_receipt`` (the tier-2 flow-send
+    # inbound-answer ladder) and ``record_send_receipt`` (the tier-2 send
     # delivery-receipt seam) channel plugins reach through the contract are distinct
     "names",
     "handle_inbound_answer",
-    "record_flow_send_receipt",
+    "record_send_receipt",
     # conversations (3)
     "accept",
     "record_delivery_status",

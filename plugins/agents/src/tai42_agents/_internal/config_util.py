@@ -74,8 +74,8 @@ def init_langgraph_config(config: dict[str, Any] | None = None) -> dict[str, Any
 
     # Trace-lineage precedence: an EXPLICITLY propagated context (the caller pinned
     # `monitoring_trace_id`, e.g. an agent invoked directly by a monitored driver) wins;
-    # else the AMBIENT deposit a flow left when it drives this agent as a node — so the
-    # agent's spans JOIN the flow's trace instead of orphaning into a fresh one; else a
+    # else the AMBIENT deposit a driver left when it drives this agent as a node — so the
+    # agent's spans JOIN the driver's trace instead of orphaning into a fresh one; else a
     # freshly minted root trace (the standalone default, byte-identical to before).
     trace_id = configurable.get("monitoring_trace_id")
     parent_span_id = configurable.get("monitoring_parent_span_id")

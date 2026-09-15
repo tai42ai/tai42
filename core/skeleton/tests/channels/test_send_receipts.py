@@ -1,7 +1,7 @@
-"""Tier 2 of the send-outcome monitoring layer: the flow-send receipt index.
+"""Tier 2 of the send-outcome monitoring layer: the send-receipt index.
 
 Covers the ``provider_message_id -> {trace_id, span_id}`` index write, the webhook hit
-path posting a ``delivery_receipt`` event back onto the flow trace (delivered vs failed
+path posting a ``delivery_receipt`` event back onto the originating trace (delivered vs failed
 level, nested under the send span), the unknown-id miss staying benign, the
 store-unconfigured no-op, and TTL expiry dropping the entry.
 """
@@ -77,9 +77,9 @@ def backend() -> Iterator[RecordingMonitoring]:
 
 
 async def test_index_write_then_delivered_receipt_posts_event(kv: _FakeKV, backend: RecordingMonitoring) -> None:
-    await send_receipts.index_flow_send("whatsapp", ["wamid-1"], trace_id="trace-1", span_id="span-1")
+    await send_receipts.index_send("whatsapp", ["wamid-1"], trace_id="trace-1", span_id="span-1")
 
-    hit = await send_receipts.record_flow_send_receipt("whatsapp", "wamid-1", DeliveryReceipt.DELIVERED)
+    hit = await send_receipts.record_send_receipt("whatsapp", "wamid-1", DeliveryReceipt.DELIVERED)
 
     assert hit is True
     (event,) = backend.writer.events
@@ -92,9 +92,9 @@ async def test_index_write_then_delivered_receipt_posts_event(kv: _FakeKV, backe
 
 
 async def test_failed_receipt_posts_error_level_event(kv: _FakeKV, backend: RecordingMonitoring) -> None:
-    await send_receipts.index_flow_send("whatsapp", ["wamid-2"], trace_id="trace-9", span_id="span-9")
+    await send_receipts.index_send("whatsapp", ["wamid-2"], trace_id="trace-9", span_id="span-9")
 
-    hit = await send_receipts.record_flow_send_receipt(
+    hit = await send_receipts.record_send_receipt(
         "whatsapp", "wamid-2", DeliveryReceipt.FAILED, errors=[{"code": 131026}]
     )
 
@@ -121,7 +121,7 @@ async def test_index_read_error_resolves_to_a_benign_miss(
     kv.get = _boom  # type: ignore[method-assign]
 
     with caplog.at_level("WARNING"):
-        hit = await send_receipts.record_flow_send_receipt("whatsapp", "wamid-x", DeliveryReceipt.DELIVERED)
+        hit = await send_receipts.record_send_receipt("whatsapp", "wamid-x", DeliveryReceipt.DELIVERED)
 
     assert hit is False
     assert backend.writer.events == []
@@ -129,7 +129,7 @@ async def test_index_read_error_resolves_to_a_benign_miss(
 
 
 async def test_unknown_id_is_benign_no_event(kv: _FakeKV, backend: RecordingMonitoring) -> None:
-    hit = await send_receipts.record_flow_send_receipt("whatsapp", "never-sent", DeliveryReceipt.DELIVERED)
+    hit = await send_receipts.record_send_receipt("whatsapp", "never-sent", DeliveryReceipt.DELIVERED)
 
     assert hit is False
     assert backend.writer.events == []
@@ -139,8 +139,8 @@ async def test_unconfigured_store_is_a_no_op(monkeypatch: pytest.MonkeyPatch, ba
     monkeypatch.setattr(send_receipts, "interactions_store_configured", lambda: False)
 
     # Neither the write nor the lookup touches Redis when the store is unconfigured.
-    await send_receipts.index_flow_send("whatsapp", ["wamid-3"], trace_id="t", span_id="s")
-    hit = await send_receipts.record_flow_send_receipt("whatsapp", "wamid-3", DeliveryReceipt.DELIVERED)
+    await send_receipts.index_send("whatsapp", ["wamid-3"], trace_id="t", span_id="s")
+    hit = await send_receipts.record_send_receipt("whatsapp", "wamid-3", DeliveryReceipt.DELIVERED)
 
     assert hit is False
     assert backend.writer.events == []
@@ -148,25 +148,25 @@ async def test_unconfigured_store_is_a_no_op(monkeypatch: pytest.MonkeyPatch, ba
 
 async def test_empty_id_list_writes_nothing(kv: _FakeKV, backend: RecordingMonitoring) -> None:
     # A channel that exposes no correlatable id indexes nothing.
-    await send_receipts.index_flow_send("whatsapp", [], trace_id="t", span_id="s")
+    await send_receipts.index_send("whatsapp", [], trace_id="t", span_id="s")
 
-    assert await send_receipts.record_flow_send_receipt("whatsapp", "anything", DeliveryReceipt.DELIVERED) is False
+    assert await send_receipts.record_send_receipt("whatsapp", "anything", DeliveryReceipt.DELIVERED) is False
 
 
 async def test_ttl_expiry_drops_the_index_entry(kv: _FakeKV, backend: RecordingMonitoring) -> None:
-    await send_receipts.index_flow_send("whatsapp", ["wamid-4"], trace_id="t", span_id="s")
+    await send_receipts.index_send("whatsapp", ["wamid-4"], trace_id="t", span_id="s")
 
     # Past the index TTL (100s), the entry is gone and a late receipt no longer correlates.
     kv.advance(101)
 
-    hit = await send_receipts.record_flow_send_receipt("whatsapp", "wamid-4", DeliveryReceipt.DELIVERED)
+    hit = await send_receipts.record_send_receipt("whatsapp", "wamid-4", DeliveryReceipt.DELIVERED)
     assert hit is False
     assert backend.writer.events == []
 
 
 async def test_channel_qualifies_the_index_key(kv: _FakeKV, backend: RecordingMonitoring) -> None:
     # The same provider id under a different channel is a distinct entry — never cross-resolved.
-    await send_receipts.index_flow_send("whatsapp", ["shared-id"], trace_id="t-wa", span_id="s-wa")
+    await send_receipts.index_send("whatsapp", ["shared-id"], trace_id="t-wa", span_id="s-wa")
 
-    assert await send_receipts.record_flow_send_receipt("twilio", "shared-id", DeliveryReceipt.DELIVERED) is False
-    assert await send_receipts.record_flow_send_receipt("whatsapp", "shared-id", DeliveryReceipt.DELIVERED) is True
+    assert await send_receipts.record_send_receipt("twilio", "shared-id", DeliveryReceipt.DELIVERED) is False
+    assert await send_receipts.record_send_receipt("whatsapp", "shared-id", DeliveryReceipt.DELIVERED) is True

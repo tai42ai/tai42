@@ -60,22 +60,22 @@ class _StubChannels:
         self.inbound_calls: list[Any] = []
         self.inbound_outcome: Any = InboundAnswerOutcome.NO_CORRELATION
         self.inbound_error: BaseException | None = None
-        # The tier-2 flow-send receipt seam: records calls and replays a hit/miss.
-        self.flow_receipt_calls: list[dict[str, Any]] = []
-        self.flow_receipt_result: bool = False
+        # The tier-2 send-receipt seam: records calls and replays a hit/miss.
+        self.send_receipt_calls: list[dict[str, Any]] = []
+        self.send_receipt_result: bool = False
 
     def register(self, name: str, channel: Any) -> None:
         if name in self.registered:
             raise ValueError(f"channel {name!r} already registered")
         self.registered[name] = channel
 
-    async def record_flow_send_receipt(
+    async def record_send_receipt(
         self, channel: str, provider_message_id: str, status: Any, *, errors: Any = None
     ) -> bool:
-        self.flow_receipt_calls.append(
+        self.send_receipt_calls.append(
             {"channel": channel, "provider_message_id": provider_message_id, "status": status, "errors": errors}
         )
-        return self.flow_receipt_result
+        return self.send_receipt_result
 
     async def handle_inbound_answer(
         self, *, channel_id: str, correlation_key: str, answer: Any, store: Any, bridge: Any
@@ -232,8 +232,8 @@ def stub_app() -> Iterator[_StubApp]:
     channels.inbound_calls.clear()
     channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
     channels.inbound_error = None
-    channels.flow_receipt_calls.clear()
-    channels.flow_receipt_result = False
+    channels.send_receipt_calls.clear()
+    channels.send_receipt_result = False
     yield _stub_app
     _stub_app.clients.by_class.clear()
     _stub_app.clients.ctx_kwargs.clear()
@@ -241,8 +241,8 @@ def stub_app() -> Iterator[_StubApp]:
     channels.inbound_calls.clear()
     channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
     channels.inbound_error = None
-    channels.flow_receipt_calls.clear()
-    channels.flow_receipt_result = False
+    channels.send_receipt_calls.clear()
+    channels.send_receipt_result = False
 
 
 _ENV_VARS = (

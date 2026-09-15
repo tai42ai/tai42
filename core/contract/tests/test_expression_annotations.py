@@ -155,9 +155,13 @@ def test_annotation_is_purely_additive_to_a_plain_declaration() -> None:
     # A control model declared WITHOUT the annotation must generate the same
     # schema, byte for byte, once the vendor key is removed — proving the
     # annotation adds one key and changes nothing else (defaults, titles,
-    # nullability, required set).
+    # nullability, required set). The control carries the mixin's own class
+    # docstring so the schema ``description`` matches, isolating the annotation
+    # as the sole difference.
     class PlainConditionModel(BaseModel):
         condition: TemplatedText | None = None
+
+    PlainConditionModel.__doc__ = ConditionMixin.__doc__
 
     annotated = ConditionMixin.model_json_schema()
     control = PlainConditionModel.model_json_schema()
@@ -191,7 +195,9 @@ def test_inheriting_surfaces_carry_the_annotation(model: type[BaseModel], field:
 def test_callback_override_changes_only_the_annotation_payload() -> None:
     # The callback redeclares ``condition``/``expr`` solely to refine the vendor
     # payload; type, default, and field ORDER must match the mixin composition of
-    # a callback that never overrode them.
+    # a callback that never overrode them. The control carries the callback's own
+    # class docstring so the schema ``description`` matches, isolating the
+    # annotation as the sole difference.
     class PlainMixinCondition(BaseModel):
         condition: TemplatedText | None = None
 
@@ -200,6 +206,8 @@ def test_callback_override_changes_only_the_annotation_payload() -> None:
 
     class PlainCallbackSchema(PlainMixinCondition, PlainMixinExpr):
         tool: str = ""
+
+    PlainCallbackSchema.__doc__ = CallbackSchema.__doc__
 
     annotated = CallbackSchema.model_json_schema()
     control = PlainCallbackSchema.model_json_schema()

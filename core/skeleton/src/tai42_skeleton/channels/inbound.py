@@ -232,7 +232,7 @@ async def _notify_participant(bridge: InboundBridge, message: str) -> None:
     try:
         channel = tai42_app.channels.get(bridge.channel_id)
         # Tier 1 send-outcome span, gated: this runs in the inbound-webhook context, which
-        # carries no ambient flow trace, so ``send_span`` no-ops here (a rootless span would
+        # carries no ambient trace, so ``send_span`` no-ops here (a rootless span would
         # attach to no run) — the notice is covered honestly without fabricating one. On the
         # rare path where a trace IS ambient the failure would be recorded; either way the
         # error is swallowed below, keeping this notice best-effort.

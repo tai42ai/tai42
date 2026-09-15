@@ -542,17 +542,21 @@ class AttachReconcileRecords(Protocol):
 
     async def read(self, subject: StateSubject) -> StateRecord | None:
         """Return the state's record for ``subject``, or ``None`` when it has none."""
+        ...
 
     async def list_subjects(
         self, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
     ) -> dict[str, Any]:
         """Return one keyset page of the state's subjects, optionally filtered by ``kind``."""
+        ...
 
     async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> StateRecord:
         """Merge ``patch`` into ``subject``'s record and return the updated record."""
+        ...
 
     async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult:
         """Apply ``ops`` to ``subject``'s record and return the :class:`ApplyResult`."""
+        ...
 
 
 @dataclass(frozen=True, kw_only=True)

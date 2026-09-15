@@ -1082,7 +1082,7 @@ def recording_backend(monkeypatch):
     async def _index(channel, provider_message_ids, *, trace_id, span_id):
         indexed.append({"channel": channel, "ids": provider_message_ids, "trace_id": trace_id, "span_id": span_id})
 
-    monkeypatch.setattr(notify_module, "index_flow_send", _index)
+    monkeypatch.setattr(notify_module, "index_send", _index)
     backend.indexed = indexed  # type: ignore[attr-defined]
     yield backend
     reset_monitoring()
@@ -1120,7 +1120,7 @@ async def test_notify_index_failure_does_not_fail_the_send_or_taint_the_span(
     async def _boom(channel, provider_message_ids, *, trace_id, span_id):
         raise ConnectionError("interactions redis down")
 
-    monkeypatch.setattr(notify_module, "index_flow_send", _boom)
+    monkeypatch.setattr(notify_module, "index_send", _boom)
 
     with caplog.at_level("WARNING"):
         assert await notify_user("split", channel="ids") == ["m1", "m2"]
@@ -1131,7 +1131,7 @@ async def test_notify_index_failure_does_not_fail_the_send_or_taint_the_span(
         {"output": {"messaging.message.id": ["m1", "m2"]}, "metadata": None, "level": None, "status_message": None}
     ]
     # The failure is logged, not raised.
-    assert any("flow-send receipt indexing failed" in record.message for record in caplog.records)
+    assert any("send-receipt indexing failed" in record.message for record in caplog.records)
 
 
 async def test_notify_failure_marks_error_span_and_reraises(register_channel, recording_backend):

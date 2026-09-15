@@ -2,7 +2,7 @@
   "$defs": {
     "HookSubject": {
       "additionalProperties": false,
-      "description": "The optional state subject a hook fire targets: the conversation-target scope\n``(target_kind, target_name)``, the subject ``kind`` (matching\n:data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text\ncarrying (inline or by stored id) a jq program evaluated over the event payload at\nfire — it must yield a non-empty string, else the fire fails loudly like any hook\nerror. Frozen; deposited as the ambient state context so a state write during the fire\nis keyed and attributed to the hook.",
+      "description": "The optional state subject a hook fire targets.\n\nCarries the conversation-target scope ``(target_kind, target_name)``, the subject ``kind`` (matching\n:data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text\ncarrying (inline or by stored id) a jq program evaluated over the event payload at\nfire — it must yield a non-empty string, else the fire fails loudly like any hook\nerror. Frozen; deposited as the ambient state context so a state write during the fire\nis keyed and attributed to the hook.",
       "properties": {
         "key_expr": {
           "$ref": "#/$defs/TemplatedText"
@@ -35,7 +35,7 @@
       "type": "object"
     },
     "MediaItem": {
-      "description": "One media item shown WITH a message — a display element, and inbound the shape a participant's\nsent media takes.\n\n``kind`` selects how it renders: an ``image`` inline, a ``document``/``video``/``audio`` as\nthe matching file bubble, a ``link`` as a labelled anchor. ``url`` is the source. A file\nkind (``image``/``document``/``video``/``audio``) must be an absolute ``https`` URL, a\nsame-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to media the skeleton serves by id, or an\nabsolute ``http(s)`` served reference of that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a\nchannel send mints from ``public_base_url`` (remote file media is https-only: the inbox CSP\n``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an ``http:``\nremote source would be an unrenderable record); ``image`` ADDITIONALLY admits an inline\n``data:image/*`` URI — that inline form is image-only, a ``data:`` URI on any other file\nkind is refused. A ``link`` must be an absolute ``http(s)`` URL (anchors are not governed by\n``img-src``; the human clicks through). A remote url names a host directly — an ASCII DNS\nname, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply punycode); an embedded\n``user@`` credential form is rejected as it spoofs the authority — and is always a single\nline — raw whitespace and control/format characters are rejected. ``caption`` is the\naccessibility text — the image's alt text, a file's label, or the link's display label.\n``filename`` is the document's suggested display name; it is meaningful ONLY for a\n``document`` item and is refused on every other kind.",
+      "description": "One media item shown WITH a message — a display element, and inbound a participant's sent media.\n\n``kind`` selects how it renders: an ``image`` inline, a ``document``/``video``/``audio`` as\nthe matching file bubble, a ``link`` as a labelled anchor. ``url`` is the source. A file\nkind (``image``/``document``/``video``/``audio``) must be an absolute ``https`` URL, a\nsame-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to media the skeleton serves by id, or an\nabsolute ``http(s)`` served reference of that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a\nchannel send mints from ``public_base_url`` (remote file media is https-only: the inbox CSP\n``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an ``http:``\nremote source would be an unrenderable record); ``image`` ADDITIONALLY admits an inline\n``data:image/*`` URI — that inline form is image-only, a ``data:`` URI on any other file\nkind is refused. A ``link`` must be an absolute ``http(s)`` URL (anchors are not governed by\n``img-src``; the human clicks through). A remote url names a host directly — an ASCII DNS\nname, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply punycode); an embedded\n``user@`` credential form is rejected as it spoofs the authority — and is always a single\nline — raw whitespace and control/format characters are rejected. ``caption`` is the\naccessibility text — the image's alt text, a file's label, or the link's display label.\n``filename`` is the document's suggested display name; it is meaningful ONLY for a\n``document`` item and is refused on every other kind.",
       "properties": {
         "caption": {
           "anyOf": [
@@ -77,6 +77,7 @@
       "type": "object"
     },
     "MediaKind": {
+      "description": "How a media item renders: an inline image, a file bubble, or a labelled link.",
       "enum": [
         "image",
         "link",
@@ -88,7 +89,7 @@
       "type": "string"
     },
     "PresetSeedToolMeta": {
-      "description": "The optional display metadata a :class:`PresetSeed` seeds onto its preset's\ntool_meta. Each field is applied only where the preset's tool_meta leaves it\nabsent — a seed never overwrites an operator-set display value.\n\n``display_name`` is the human tool title; ``tags`` label it in listings;\n``folder_path`` is a ``/``-style path the applier resolves into the tool_meta\nfolder tree (creating missing segments), never a raw stored string.",
+      "description": "The optional display metadata a :class:`PresetSeed` seeds onto its preset's tool_meta.\n\nEach field is applied only where the preset's tool_meta leaves it absent — a seed never overwrites\nan operator-set display value.\n\n``display_name`` is the human tool title; ``tags`` label it in listings;\n``folder_path`` is a ``/``-style path the applier resolves into the tool_meta\nfolder tree (creating missing segments), never a raw stored string.",
       "properties": {
         "display_name": {
           "anyOf": [
@@ -134,7 +135,7 @@
       "type": "object"
     },
     "PresetSpec": {
-      "description": "A base tool bound to fixed kwargs, resolved into a ``StructuredTool`` at\nrun time (see ``resolve_tools``). A base tool that interprets its fixed kwargs\nas a nested document carries that document opaquely here.",
+      "description": "A base tool bound to fixed kwargs, resolved into a ``StructuredTool`` at run time.\n\nSee ``resolve_tools``. A base tool that interprets its fixed kwargs as a nested document\ncarries that document opaquely here.",
       "properties": {
         "base_tool": {
           "title": "Base Tool",
@@ -163,7 +164,7 @@
       "type": "object"
     },
     "QuickReplyButtonParam": {
-      "description": "The runtime argument for one QUICK-REPLY button of a template's buttons component:\n``payload`` is the string the medium returns when the human taps the button. Frozen.",
+      "description": "The runtime argument for one QUICK-REPLY button of a template's buttons component.\n\n``payload`` is the string the medium returns when the human taps the button. Frozen.",
       "properties": {
         "kind": {
           "const": "quick_reply",
@@ -184,7 +185,7 @@
     },
     "StateAttach": {
       "additionalProperties": false,
-      "description": "One state attached by a binding: the ``state`` name, the ``templates`` to attach on it\n(attach-on-use, idempotent at save), the ``subject_expr`` (a templated text rendering to a\njq over the run input → a full subject object or the record KEY, its scope taken from the\nambient door context and its kind from the state's declared subject kind), an optional\n``scope_expr`` (a templated text rendering to a BOOLEAN predicate over the run input\nevaluated first — ``false`` skips this state for the run, a non-boolean is a loud error,\nabsent engages), and the ordered ``input_injections`` / ``updates``. Frozen.",
+      "description": "One state attached by a binding.\n\nCarries the ``state`` name, the ``templates`` to attach on it (attach-on-use, idempotent at save),\nthe ``subject_expr`` (a templated text rendering to a jq over the run input → a full subject object\nor the record KEY, its scope taken from the ambient door context and its kind from the state's\ndeclared subject kind), an optional ``scope_expr`` (a templated text rendering to a BOOLEAN predicate\nover the run input evaluated first — ``false`` skips this state for the run, a non-boolean is a loud\nerror, absent engages), and the ordered ``input_injections`` / ``updates``. Frozen.",
       "properties": {
         "input_injections": {
           "items": {
@@ -293,7 +294,7 @@
     },
     "StateTemplateDeclarations": {
       "additionalProperties": false,
-      "description": "The ``declarations`` section of a state-template document: the JSON ``schema`` (wire\nkey ``schema``, attribute ``schema_``) of the static values an attachment stores, and an\nOPTIONAL ``check`` — a :class:`~tai42_contract.template.TemplatedText` carrying a jq\npredicate over those values. Structural validation (the check's jq, the schema's shape)\nlives at the store; this model pins the served wire shape.\n\nThe wire key ``schema`` is the attribute ``schema_`` (alias) because a ``schema`` field\nwould shadow ``BaseModel.schema``.",
+      "description": "The ``declarations`` section of a state-template document.\n\nThe JSON ``schema`` (wire key ``schema``, attribute ``schema_``) of the static values an\nattachment stores, and an OPTIONAL ``check`` — a :class:`~tai42_contract.template.TemplatedText`\ncarrying a jq predicate over those values. Structural validation (the check's jq, the schema's\nshape) lives at the store; this model pins the served wire shape.\n\nThe wire key ``schema`` is the attribute ``schema_`` (alias) because a ``schema`` field\nwould shadow ``BaseModel.schema``.",
       "properties": {
         "check": {
           "anyOf": [
@@ -320,7 +321,7 @@
     },
     "StateTemplateJq": {
       "additionalProperties": false,
-      "description": "One named jq program on a state template. ``purpose`` is ``input`` — a read over the\nrecord returning a value — or ``update`` — a program over ``{record, input}`` returning a\ntemplate-relative op batch. ``jq`` is the program body as a\n:class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).\n``params`` names the keys the program takes; ``reads``/``writes`` are the\ntemplate-relative record paths an ``update`` program declares and are absent on an\n``input`` program. Structural checks (jq compilation, path resolution) live at the store;\nthis model pins the served wire shape.",
+      "description": "One named jq program on a state template.\n\n``purpose`` is ``input`` — a read over the record returning a value — or ``update`` — a program\nover ``{record, input}`` returning a template-relative op batch. ``jq`` is the program body as a\n:class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).\n``params`` names the keys the program takes; ``reads``/``writes`` are the\ntemplate-relative record paths an ``update`` program declares and are absent on an\n``input`` program. Structural checks (jq compilation, path resolution) live at the store;\nthis model pins the served wire shape.",
       "properties": {
         "description": {
           "default": "",
@@ -375,7 +376,7 @@
     },
     "StateTemplateReconcile": {
       "additionalProperties": false,
-      "description": "The ``reconcile`` section of a state-template document: three jq programs the store\nruns to settle a state's OPEN records on a declarations edit — ``orphans`` names the items\na record subtree orphans against the new declarations, ``resolutions`` names the\nnot-done resolutions a close may name, and ``close`` returns the op batch that closes one\norphan. Each is a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a\nstored ``id``).",
+      "description": "The ``reconcile`` section of a state-template document.\n\nThree jq programs the store runs to settle a state's OPEN records on a declarations edit —\n``orphans`` names the items a record subtree orphans against the new declarations,\n``resolutions`` names the not-done resolutions a close may name, and ``close`` returns the op\nbatch that closes one orphan. Each is a :class:`~tai42_contract.template.TemplatedText` (inline\n``content`` or a stored ``id``).",
       "properties": {
         "close": {
           "$ref": "#/$defs/TemplatedText"
@@ -595,7 +596,7 @@
       }
     },
     "UrlButtonParam": {
-      "description": "The runtime argument for one URL button of a template's buttons component:\n``url_parameter`` is the dynamic suffix substituted into the button's pre-approved URL.\nFrozen.",
+      "description": "The runtime argument for one URL button of a template's buttons component.\n\n``url_parameter`` is the dynamic suffix substituted into the button's pre-approved URL.\nFrozen.",
       "properties": {
         "kind": {
           "const": "url",
@@ -618,7 +619,7 @@
   "contract_version": "12.0.0",
   "documents": {
     "AccessPolicy": {
-      "description": "Schema for data stored at 'ac:policy:{user_id}'. Represents WHAT the user\ncan do (permissions & logic).",
+      "description": "Schema for data stored at 'ac:policy:{user_id}'. Represents WHAT the user can do (permissions & logic).",
       "properties": {
         "condition": {
           "anyOf": [
@@ -684,6 +685,7 @@
       "type": "object"
     },
     "CallbackSchema": {
+      "description": "A backend task's follow-up: an optional guard ``condition`` and a follow-up tool kwargs ``expr``.",
       "properties": {
         "condition": {
           "anyOf": [
@@ -794,7 +796,7 @@
       "type": "object"
     },
     "ConversationRoute": {
-      "description": "The stored routing row: :class:`ConversationRouteCreate` plus the two\nserver-derived fields. What the manager persists and backup restore validates.\n\n``callback_secret`` (present only on an ``api`` row that declares a ``callback_url``)\nsigns the delivery callback; it is excluded from export and re-minted per row on import,\nso callbacks signed with the pre-import secret no longer verify.\n``execution_key_fingerprint`` is the bound key's per-mint\nidentity: a turn matches it against the live key, so a revoke+remint of the same\n``user_id`` fails closed.",
+      "description": "The stored routing row: :class:`ConversationRouteCreate` plus the two server-derived fields.\n\nWhat the manager persists and backup restore validates.\n\n``callback_secret`` (present only on an ``api`` row that declares a ``callback_url``)\nsigns the delivery callback; it is excluded from export and re-minted per row on import,\nso callbacks signed with the pre-import secret no longer verify.\n``execution_key_fingerprint`` is the bound key's per-mint\nidentity: a turn matches it against the live key, so a revoke+remint of the same\n``user_id`` fails closed.",
       "properties": {
         "callback_secret": {
           "anyOf": [
@@ -1030,7 +1032,7 @@
       "type": "object"
     },
     "ConversationRouteCreate": {
-      "description": "The client-facing create/edit body for a conversation route: the fields a caller\nsupplies.\n\nBinds a ``(target_kind, target_name)`` — an ``agent`` run or a ``tool`` dispatch — to\nan ``execution_key`` the turn runs AS (bound with pass-role at create). A ``tool``\ntarget may carry a ``payload_expr`` (jq mapping the inbound message to the tool's\nkwargs) and a ``reply_expr`` (jq mapping the tool's result to the reply); both are\ntool-only. ``api`` rows MAY carry an https ``callback_url`` (the answer sink; when absent\nthe caller reads its answer back from the poll door); ``channel`` rows carry the\nregistry ``channel`` plus the ``our_identity`` the medium is texted at (N rows may\nshare a channel, each its own identity). The server-derived ``callback_secret`` and\n``execution_key_fingerprint`` are deliberately absent; :class:`ConversationRoute` is\nthis shape plus those. Frozen.",
+      "description": "The client-facing create/edit body for a conversation route: the fields a caller supplies.\n\nBinds a ``(target_kind, target_name)`` — an ``agent`` run or a ``tool`` dispatch — to\nan ``execution_key`` the turn runs AS (bound with pass-role at create). A ``tool``\ntarget may carry a ``payload_expr`` (jq mapping the inbound message to the tool's\nkwargs) and a ``reply_expr`` (jq mapping the tool's result to the reply); both are\ntool-only. ``api`` rows MAY carry an https ``callback_url`` (the answer sink; when absent\nthe caller reads its answer back from the poll door); ``channel`` rows carry the\nregistry ``channel`` plus the ``our_identity`` the medium is texted at (N rows may\nshare a channel, each its own identity). The server-derived ``callback_secret`` and\n``execution_key_fingerprint`` are deliberately absent; :class:`ConversationRoute` is\nthis shape plus those. Frozen.",
       "properties": {
         "callback_url": {
           "anyOf": [
@@ -1247,7 +1249,7 @@
       "type": "object"
     },
     "HookParams": {
-      "description": "The stored hook record: :class:`HookRegister` plus the server-derived\n``execution_key_fingerprint``. Managers persist this shape, never the request body.",
+      "description": "The stored hook record: :class:`HookRegister` plus the server-derived ``execution_key_fingerprint``.\n\nManagers persist this shape, never the request body.",
       "properties": {
         "condition": {
           "anyOf": [
@@ -1445,7 +1447,7 @@
     },
     "HookSubject": {
       "additionalProperties": false,
-      "description": "The optional state subject a hook fire targets: the conversation-target scope\n``(target_kind, target_name)``, the subject ``kind`` (matching\n:data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text\ncarrying (inline or by stored id) a jq program evaluated over the event payload at\nfire — it must yield a non-empty string, else the fire fails loudly like any hook\nerror. Frozen; deposited as the ambient state context so a state write during the fire\nis keyed and attributed to the hook.",
+      "description": "The optional state subject a hook fire targets.\n\nCarries the conversation-target scope ``(target_kind, target_name)``, the subject ``kind`` (matching\n:data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text\ncarrying (inline or by stored id) a jq program evaluated over the event payload at\nfire — it must yield a non-empty string, else the fire fails loudly like any hook\nerror. Frozen; deposited as the ambient state context so a state write during the fire\nis keyed and attributed to the hook.",
       "properties": {
         "key_expr": {
           "$ref": "#/$defs/TemplatedText"
@@ -1646,7 +1648,7 @@
       "type": "object"
     },
     "RoleDefinition": {
-      "description": "An operator-authored role: the ONE validated shape the enforcer /\nmembership-check, the management operations, and the generated Studio SDK all\nshare.\n\nA role composes TWO layers. Layer 1 is a KEPT jq security base — carried on\nthe ``condition`` field (from ``ConditionMixin``) so the body round-trips it,\nbut NEVER authored through the grant map: the seed sets it (admin → ``None``,\neditor/viewer → their base jq) and a new role inherits it from its\n``base_tier``. Layer 2 is the editable ``grants`` — a per-tag ACCESS LEVEL\nmap (feature-group TAG name → ``none``/``read``/``write``) naming the role's\nlevel on each feature group. An absent tag means level ``none`` (deny).",
+      "description": "An operator-authored role: the one validated shape every access-control surface shares.\n\nShared by the enforcer / membership-check, the management operations, and the generated\nStudio SDK.\n\nA role composes TWO layers. Layer 1 is a KEPT jq security base — carried on\nthe ``condition`` field (from ``ConditionMixin``) so the body round-trips it,\nbut NEVER authored through the grant map: the seed sets it (admin → ``None``,\neditor/viewer → their base jq) and a new role inherits it from its\n``base_tier``. Layer 2 is the editable ``grants`` — a per-tag ACCESS LEVEL\nmap (feature-group TAG name → ``none``/``read``/``write``) naming the role's\nlevel on each feature group. An absent tag means level ``none`` (deny).",
       "properties": {
         "allow_all": {
           "default": false,
@@ -1750,7 +1752,7 @@
     },
     "StateAttach": {
       "additionalProperties": false,
-      "description": "One state attached by a binding: the ``state`` name, the ``templates`` to attach on it\n(attach-on-use, idempotent at save), the ``subject_expr`` (a templated text rendering to a\njq over the run input → a full subject object or the record KEY, its scope taken from the\nambient door context and its kind from the state's declared subject kind), an optional\n``scope_expr`` (a templated text rendering to a BOOLEAN predicate over the run input\nevaluated first — ``false`` skips this state for the run, a non-boolean is a loud error,\nabsent engages), and the ordered ``input_injections`` / ``updates``. Frozen.",
+      "description": "One state attached by a binding.\n\nCarries the ``state`` name, the ``templates`` to attach on it (attach-on-use, idempotent at save),\nthe ``subject_expr`` (a templated text rendering to a jq over the run input → a full subject object\nor the record KEY, its scope taken from the ambient door context and its kind from the state's\ndeclared subject kind), an optional ``scope_expr`` (a templated text rendering to a BOOLEAN predicate\nover the run input evaluated first — ``false`` skips this state for the run, a non-boolean is a loud\nerror, absent engages), and the ordered ``input_injections`` / ``updates``. Frozen.",
       "properties": {
         "input_injections": {
           "items": {
@@ -1820,7 +1822,7 @@
     },
     "StateDeclaration": {
       "additionalProperties": false,
-      "description": "A declared state: its ``name``, human ``description``, base JSON ``schema``\n(wire key ``schema``, attribute ``schema_``), the ``subject_kinds`` it serves\n(≥1, unique, each matching :data:`SUBJECT_KIND_RE`), the ``default_subject_kind``\na door's ambient subject resolves to (one of ``subject_kinds``), and an optional\n``retention_days`` (a positive INT4, or unset to keep records forever).\n\n``effective_schema`` is the base ``schema`` composed with every attached template's\nfragment, and ``regimes`` are the absolute write-regime rules composed over the\nattachments (each ``{path, regime}``, the attachment path prefixed onto the template's regime\npaths). ``updated_at`` is the row's last-write timestamp. The platform computes all\nthree and serves them on every read; a client that supplies a non-``None`` value for\nany of them on a write is refused (``… is set/computed by the platform``), so none can\nbe forged across the wire.",
+      "description": "A declared state: its identity, base schema, subject kinds, and optional retention.\n\nCarries its ``name``, human ``description``, base JSON ``schema`` (wire key ``schema``,\nattribute ``schema_``), the ``subject_kinds`` it serves (≥1, unique, each matching\n:data:`SUBJECT_KIND_RE`), the ``default_subject_kind`` a door's ambient subject resolves\nto (one of ``subject_kinds``), and an optional ``retention_days`` (a positive INT4, or\nunset to keep records forever).\n\n``effective_schema`` is the base ``schema`` composed with every attached template's\nfragment, and ``regimes`` are the absolute write-regime rules composed over the\nattachments (each ``{path, regime}``, the attachment path prefixed onto the template's regime\npaths). ``updated_at`` is the row's last-write timestamp. The platform computes all\nthree and serves them on every read; a client that supplies a non-``None`` value for\nany of them on a write is refused (``… is set/computed by the platform``), so none can\nbe forged across the wire.",
       "properties": {
         "default_subject_kind": {
           "title": "Default Subject Kind",
@@ -1961,7 +1963,7 @@
     },
     "StateTemplateDocument": {
       "additionalProperties": false,
-      "description": "A state-template document: the reusable schema fragment plus the parameters, write\nregimes, attach-time ``declarations`` and ``trace`` switch the platform owns, plus\n``template_jq`` (named jq programs — ``input``-purpose reads and ``update``-purpose\nrecord operations) and ``reconcile`` (how a declarations edit settles open records)\nthat give the record its meaning. A template is data end to end: the states API serves\nan input-purpose result for a subject and applies an update-purpose program to a subject\ngenerically, so a template is usable through the API with no other engine.\n``extra=\"forbid\"`` refuses any key outside these.\n\nThe wire key ``schema`` is the attribute ``schema_`` (alias). The ``declarations``,\n``template_jq`` and ``reconcile`` sections carry their served sub-shapes\n(:class:`StateTemplateDeclarations`, :class:`StateTemplateJq`,\n:class:`StateTemplateReconcile`); the skeleton store does the semantic validation (jq\ncompilation, regime/record path resolution against the fragment) these models do not.",
+      "description": "A state-template document: a reusable schema fragment and the programs that give records meaning.\n\nIt carries the reusable schema fragment plus the parameters, write regimes, attach-time\n``declarations`` and ``trace`` switch the platform owns, plus ``template_jq`` (named jq\nprograms — ``input``-purpose reads and ``update``-purpose record operations) and ``reconcile``\n(how a declarations edit settles open records) that give the record its meaning. A template is\ndata end to end: the states API serves an input-purpose result for a subject and applies an\nupdate-purpose program to a subject generically, so a template is usable through the API with no\nother engine. ``extra=\"forbid\"`` refuses any key outside these.\n\nThe wire key ``schema`` is the attribute ``schema_`` (alias). The ``declarations``,\n``template_jq`` and ``reconcile`` sections carry their served sub-shapes\n(:class:`StateTemplateDeclarations`, :class:`StateTemplateJq`,\n:class:`StateTemplateReconcile`); the skeleton store does the semantic validation (jq\ncompilation, regime/record path resolution against the fragment) these models do not.",
       "properties": {
         "declarations": {
           "anyOf": [
@@ -2109,7 +2111,7 @@
       "$ref": "#/$defs/SubAgentSpec"
     },
     "TargetConversationConfig": {
-      "description": "Per-target configuration for the conversation bridge, keyed by\n``(target_kind, target_name)`` — the agent or tool an inbound turn is routed to.\n\n``multichannel`` opts the target into person linking; ``greeting_template`` is the\nfirst-contact greeting, which may reference at most the ``{pairing_code}`` placeholder\n(minted at greeting time). The row carries no server-derived fields, so it IS its own\ncreate payload — no Create/stored split. An unknown ``{...}`` placeholder is refused so\na typo cannot render literally; a blank template string is refused, because ``None`` is\nthe explicit spelling for \"no greeting\". Frozen.",
+      "description": "Per-target configuration for the conversation bridge, keyed by ``(target_kind, target_name)``.\n\nThe key names the agent or tool an inbound turn is routed to.\n``multichannel`` opts the target into person linking; ``greeting_template`` is the\nfirst-contact greeting, which may reference at most the ``{pairing_code}`` placeholder\n(minted at greeting time). The row carries no server-derived fields, so it IS its own\ncreate payload — no Create/stored split. An unknown ``{...}`` placeholder is refused so\na typo cannot render literally; a blank template string is refused, because ``None`` is\nthe explicit spelling for \"no greeting\". Frozen.",
       "properties": {
         "greeting_template": {
           "anyOf": [
