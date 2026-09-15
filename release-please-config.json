@@ -15,7 +15,6 @@
           "jsonpath": "$.contract_version"
         }
       ],
-      "release-as": "12.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -31,7 +30,6 @@
       "package-name": "tai42-kit",
       "component": "tai42-kit",
       "skip-changelog": true,
-      "release-as": "5.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -47,7 +45,6 @@
       "package-name": "tai42-cli",
       "component": "tai42-cli",
       "skip-changelog": true,
-      "release-as": "8.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -63,7 +60,6 @@
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
       "skip-changelog": true,
-      "release-as": "16.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -91,7 +87,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.8",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -119,7 +114,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "2.4.9",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -147,7 +141,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "6.0.5",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -175,7 +168,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.0.4",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -203,7 +195,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.0.4",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -231,7 +222,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.0.5",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -259,7 +249,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.3.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -287,7 +276,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.4.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -315,7 +303,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "4.0.6",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -343,7 +330,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "5.0.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -371,7 +357,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "4.0.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -451,7 +436,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.9",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -479,7 +463,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.9",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -507,7 +490,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -535,7 +517,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.3",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -563,7 +544,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.10",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -591,7 +571,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.10",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -619,7 +598,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.10",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -647,7 +625,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.11",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -675,7 +652,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.0.5",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -703,7 +679,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.0.20",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -731,7 +706,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.10",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -759,7 +733,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.0.19",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -787,7 +760,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.9",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -815,7 +787,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -843,7 +814,6 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -859,7 +829,6 @@
       "package-name": "tai42-e2e",
       "component": "tai42-e2e",
       "skip-changelog": true,
-      "release-as": "11.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
