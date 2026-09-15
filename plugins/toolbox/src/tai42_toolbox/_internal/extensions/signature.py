@@ -9,7 +9,8 @@ def with_added_params(sig: inspect.Signature, *new_params: inspect.Parameter) ->
     """Return ``sig`` with ``new_params`` inserted before any trailing ``**kwargs``.
 
     A parameter after a ``VAR_KEYWORD`` is an invalid signature order, so the new ones
-    go just ahead of it (or at the end when the tool has no ``**kwargs``)."""
+    go just ahead of it (or at the end when the tool has no ``**kwargs``).
+    """
     params = list(sig.parameters.values())
     index = len(params)
     for position, existing in enumerate(params):

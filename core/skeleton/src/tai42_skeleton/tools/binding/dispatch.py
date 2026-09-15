@@ -1,5 +1,4 @@
-"""The shared in-process ``run_tool`` seam — tier fence, dispatch scope, retry,
-and the resolved-target invocation."""
+"""The shared in-process ``run_tool`` seam — tier fence, dispatch scope, retry, and resolved-target call."""
 
 import inspect
 from typing import Any
@@ -21,8 +20,10 @@ from tai42_skeleton.tools.tier import enforce_run_tier
 
 
 class _DispatchMixin(_ResolutionMixin):
-    """Runs a tool through the single in-process execution seam: fence, scope,
-    identity authorization, resolution, retry, and result serialization."""
+    """Runs a tool through the single in-process execution seam.
+
+    Fence, scope, identity authorization, resolution, retry, and result serialization.
+    """
 
     async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
         """Validate ``arguments`` against ``key``'s signature and invoke it.
@@ -46,7 +47,8 @@ class _DispatchMixin(_ResolutionMixin):
         runs-index record that opens the run's trace root). The MCP ``tools/call`` edge
         enters the SAME scope via ``DispatchScopeMiddleware``. Retry and bound-identity
         authorization live in :meth:`_dispatch_tool`, so a retried call is one logical
-        dispatch inside one scope."""
+        dispatch inside one scope.
+        """
         # Run-time tier fence: a ``fenced``/``secret`` tool — or a preset/branch over one —
         # runs only for an administrator. Enforced here at the shared in-process seam every
         # door flows through, before argument work or the invoked-tool deposit, so a refused
@@ -66,16 +68,18 @@ class _DispatchMixin(_ResolutionMixin):
             return result
 
     async def _dispatch_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
-        """Resolve ``key`` and invoke it under any bound execution identity, arguments
-        already stripped of the ``_UNSET`` sentinel. The turn budget (:meth:`run_tool`)
-        wraps this dispatch.
+        """Resolve ``key`` and invoke it under any bound execution identity.
+
+        Arguments already stripped of the ``_UNSET`` sentinel. The turn budget (:meth:`run_tool`) wraps
+        this dispatch.
 
         A tool that DECLARED a retry policy has its invocation re-fired through
         :func:`dispatch_with_retry` — inside the runs-index record and attribution
         stamp (one row, one logical dispatch, whatever the attempt count) and after
         the authorization + resolution below, which run ONCE per dispatch: the
         decision was made for this call, and every attempt re-fires the same
-        resolved target. No policy = the loop degenerates to a single plain await."""
+        resolved target. No policy = the loop degenerates to a single plain await.
+        """
         # Execution-identity seam: decided at INVOCATION, before the tool is resolved, on
         # the exact arguments this call fires. With no identity bound it is a contextvar
         # read and the path below is untouched.
@@ -119,7 +123,7 @@ class _DispatchMixin(_ResolutionMixin):
 
             return await dispatch_with_retry(key, retry_policy, run_transformed_attempt)
         if not isinstance(mcp_tool, FunctionTool):
-            raise RuntimeError(f"Tool {key!r} has no callable body and cannot be run directly.")
+            raise RuntimeError(f"Tool {key!r} has no callable body and cannot be run directly.")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
         # ``without_injected_parameters`` strips the fastmcp Context / ``Depends``
         # params from the signature AND, when called, resolves and injects them

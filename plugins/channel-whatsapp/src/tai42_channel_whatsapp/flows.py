@@ -79,8 +79,10 @@ _RESERVED_PROPERTY = "flow_token"
 
 
 def _field_component(name: str, prop: dict[str, Any], required: bool) -> dict[str, Any]:
-    """One Flow field component for a single top-level schema property, or raise
-    ``ChannelInputError`` naming the property when it is outside the subset."""
+    """One Flow field component for a single top-level schema property.
+
+    Raises ``ChannelInputError`` naming the property when it is outside the subset.
+    """
     label = prop.get("title") if isinstance(prop.get("title"), str) else name
     prop_type = prop.get("type")
     enum = prop.get("enum")
@@ -120,9 +122,11 @@ def _canonical_hash(schema: dict[str, Any]) -> str:
 
 
 def _validate_object_schema(schema: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
-    """The ``(properties, required)`` of a supported top-level object schema, or raise
-    ``ChannelInputError`` naming what is outside the subset — the type is ``object``,
-    ``properties`` is a non-empty object, and ``required`` is a list of property names."""
+    """The ``(properties, required)`` of a supported top-level object schema.
+
+    Raises ``ChannelInputError`` naming what is outside the subset — the type is ``object``, ``properties``
+    is a non-empty object, and ``required`` is a list of property names.
+    """
     if not isinstance(schema, dict) or schema.get("type") != "object":
         raise ChannelInputError(
             f"form schema must be a top-level object schema, got type={schema.get('type')!r}"
@@ -181,10 +185,12 @@ def build_flow(schema: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
 
 def _canonical_hash_pages(schema: dict[str, Any], pages: list[dict[str, Any]], option_fields: set[str]) -> str:
-    """sha256 hex over a canonical dump of the ``(schema, pages, option_fields)`` TRIPLE —
-    the published Flow key for a stepped/per-send form. A different page layout OR a
-    different option-bearing set keys a different published Flow, and the ``pages``/
-    ``option_fields`` members keep it from colliding with the ask-less (schema-only) hash."""
+    """sha256 hex over a canonical dump of the ``(schema, pages, option_fields)`` TRIPLE.
+
+    The published Flow key for a stepped/per-send form. A different page layout OR a different
+    option-bearing set keys a different published Flow, and the ``pages``/``option_fields`` members keep
+    it from colliding with the ask-less (schema-only) hash.
+    """
     canonical = json.dumps(
         {"schema": schema, "pages": pages, "option_fields": sorted(option_fields)},
         sort_keys=True,
@@ -195,19 +201,23 @@ def _canonical_hash_pages(schema: dict[str, Any], pages: list[dict[str, Any]], o
 
 
 def _renders_as_dropdown(name: str, prop: dict[str, Any], option_fields: set[str]) -> bool:
-    """Whether a property renders as a choice ``Dropdown`` on the per-send Flow — a
-    string that either carries a schema ``enum`` or is marked option-bearing by the ask.
-    Only a string maps to a dropdown; a non-string is never one whatever the ask says."""
+    """Whether a property renders as a choice ``Dropdown`` on the per-send Flow.
+
+    A string that either carries a schema ``enum`` or is marked option-bearing by the ask. Only a string
+    maps to a dropdown; a non-string is never one whatever the ask says.
+    """
     if prop.get("type") != "string":
         return False
     return prop.get("enum") is not None or name in option_fields
 
 
 def _dynamic_component(name: str, prop: dict[str, Any], required: bool, option_fields: set[str]) -> dict[str, Any]:
-    """One Flow field component for the dynamic (per-send) form: every control reads
-    its ``init-value`` from the screen ``data`` model and a choice field reads a dynamic
-    ``data-source``, so the send injects the values/options. Raises ``ChannelInputError``
-    naming a property outside the supported subset."""
+    """One Flow field component for the dynamic (per-send) form.
+
+    Every control reads its ``init-value`` from the screen ``data`` model and a choice field reads a
+    dynamic ``data-source``, so the send injects the values/options. Raises ``ChannelInputError`` naming a
+    property outside the supported subset.
+    """
     label = prop.get("title") if isinstance(prop.get("title"), str) else name
     prop_type = prop.get("type")
     init = f"${{data.{name}__init}}"
@@ -243,16 +253,17 @@ _DS_ITEM_EXAMPLE = [{"id": "a", "title": "a"}]
 
 
 def _init_decl(prop: dict[str, Any]) -> dict[str, Any]:
-    """The screen-``data`` declaration for a field's ``init-value`` — a boolean for an
-    OptIn, else a string (a text/number input or a dropdown selection id)."""
+    """The screen-``data`` declaration for a field's ``init-value`` — a boolean for an OptIn, else a string."""
     if prop.get("type") == "boolean":
         return {"type": "boolean", "__example__": False}
     return {"type": "string", "__example__": ""}
 
 
 def _field_data_decls(name: str, prop: dict[str, Any], option_fields: set[str]) -> dict[str, Any]:
-    """The screen-``data`` declarations a field needs where it is RENDERED: its
-    ``init-value`` source and, for a choice field, its dynamic ``data-source``."""
+    """The screen-``data`` declarations a field needs where it is RENDERED.
+
+    Its ``init-value`` source and, for a choice field, its dynamic ``data-source``.
+    """
     decls: dict[str, Any] = {f"{name}__init": _init_decl(prop)}
     if _renders_as_dropdown(name, prop, option_fields):
         decls[f"{name}__ds"] = {
@@ -267,17 +278,20 @@ def _field_data_decls(name: str, prop: dict[str, Any], option_fields: set[str]) 
 
 
 def _val_decl(prop: dict[str, Any]) -> dict[str, Any]:
-    """The screen-``data`` declaration for a value COLLECTED on an earlier screen and
-    forwarded to the terminal completion — a boolean for an OptIn, else a string."""
+    """The screen-``data`` declaration for a value COLLECTED on an earlier screen and forwarded to completion.
+
+    A boolean for an OptIn, else a string.
+    """
     if prop.get("type") == "boolean":
         return {"type": "boolean", "__example__": False}
     return {"type": "string", "__example__": ""}
 
 
 def _forward_field_data(name: str, prop: dict[str, Any], option_fields: set[str]) -> dict[str, str]:
-    """The navigate-payload entries that carry a downstream field's ``init``/``ds`` on
-    to the next screen (they enter only at the entry screen, so each step re-forwards
-    the ones its successors still need)."""
+    """The navigate-payload entries that carry a downstream field's ``init``/``ds`` on to the next screen.
+
+    They enter only at the entry screen, so each step re-forwards the ones its successors still need.
+    """
     forwarded = {f"{name}__init": f"${{data.{name}__init}}"}
     if _renders_as_dropdown(name, prop, option_fields):
         forwarded[f"{name}__ds"] = f"${{data.{name}__ds}}"
@@ -285,9 +299,10 @@ def _forward_field_data(name: str, prop: dict[str, Any], option_fields: set[str]
 
 
 def _validate_form_properties(properties: dict[str, Any], required: set[str], option_fields: set[str]) -> None:
-    """Validate every property is inside the supported per-send subset, raising
-    ``ChannelInputError`` naming a reserved name, a non-object property, or an
-    unsupported type — before any screen is built."""
+    """Validate every property is inside the supported per-send subset, before any screen is built.
+
+    Raises ``ChannelInputError`` naming a reserved name, a non-object property, or an unsupported type.
+    """
     for name, prop in properties.items():
         if name == _RESERVED_PROPERTY:
             raise ChannelInputError(
@@ -303,9 +318,11 @@ def _validate_form_properties(properties: dict[str, Any], required: set[str], op
 def _resolve_pages(
     properties: dict[str, Any], pages: list[dict[str, Any]] | None
 ) -> tuple[list[dict[str, Any]], list[list[str]]]:
-    """The resolved page list (defaulting to one screen carrying every property in
-    schema order) and each page's field names, raising ``ChannelInputError`` for a page
-    that names a property the schema does not declare."""
+    """The resolved page list and each page's field names.
+
+    Defaults to one screen carrying every property in schema order. Raises ``ChannelInputError`` for a
+    page that names a property the schema does not declare.
+    """
     resolved_pages = pages or [{"title": _SCREEN_TITLE, "fields": list(properties)}]
     fields_by_screen: list[list[str]] = []
     for page in resolved_pages:
@@ -325,9 +342,11 @@ def _screen_data_model(
     properties: dict[str, Any],
     option_fields: set[str],
 ) -> dict[str, Any]:
-    """The screen's ``data`` declarations: the entry screen declares EVERY field's
-    init/ds (the send injects them all there); a later screen declares its own and its
-    successors' init/ds plus a ``__val`` carrier for each field collected earlier."""
+    """The screen's ``data`` declarations.
+
+    The entry screen declares EVERY field's init/ds (the send injects them all there); a later screen
+    declares its own and its successors' init/ds plus a ``__val`` carrier for each field collected earlier.
+    """
     data_model: dict[str, Any] = {}
     if index == 0:
         for name, prop in properties.items():
@@ -350,10 +369,12 @@ def _screen_footer(
     option_fields: set[str],
     routing_model: dict[str, list[str]],
 ) -> dict[str, Any]:
-    """The screen's ``Footer`` component: the terminal screen completes with the flat
-    union of every field (this screen's from the form, earlier ones from their ``__val``
-    carriers); a non-terminal screen navigates to the next, forwarding successors' init/ds
-    and every collected value, and records the transition in ``routing_model``."""
+    """The screen's ``Footer`` component.
+
+    The terminal screen completes with the flat union of every field (this screen's from the form, earlier
+    ones from their ``__val`` carriers); a non-terminal screen navigates to the next, forwarding
+    successors' init/ds and every collected value, and records the transition in ``routing_model``.
+    """
     if is_terminal:
         payload = {
             name: (f"${{form.{name}}}" if name in this_fields else f"${{data.{name}__val}}") for name in properties
@@ -391,8 +412,10 @@ def _build_form_screen(
     screen_count: int,
     routing_model: dict[str, list[str]],
 ) -> dict[str, Any]:
-    """One Flow screen for a page: its field components, its ``data`` model, and its
-    footer (which records any transition in ``routing_model``)."""
+    """One Flow screen for a page: its field components, its ``data`` model, and its footer.
+
+    The footer records any transition in ``routing_model``.
+    """
     this_fields = fields_by_screen[index]
     later_fields = [field for screen in fields_by_screen[index + 1 :] for field in screen]
     is_terminal = index == screen_count - 1
@@ -473,9 +496,10 @@ def build_flow_data(
     values: dict[str, Any] | None,
     options: dict[str, list[dict[str, Any]]] | None,
 ) -> dict[str, Any]:
-    """The ``flow_action_payload.data`` a per-send form carries: every field's
-    ``init`` (its prefilled value, or the empty default) and every choice field's ``ds``
-    (its per-send option list ``{id, title}``, or the schema ``enum`` as the default).
+    """The ``flow_action_payload.data`` a per-send form carries.
+
+    Every field's ``init`` (its prefilled value, or the empty default) and every choice field's ``ds`` (its
+    per-send option list ``{id, title}``, or the schema ``enum`` as the default).
 
     A choice field is a string property that carries a schema ``enum`` OR one the send
     marks option-bearing (a key in ``options``) — matching the published Flow's dynamic

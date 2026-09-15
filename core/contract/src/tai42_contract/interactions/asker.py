@@ -38,6 +38,8 @@ def check_ask_timing(*, timeout: float | None, expiry_at: datetime | None) -> No
 
 @runtime_checkable
 class AskUser(Protocol):
+    """The interaction-ask facet: pose a question to a human and receive the typed answer."""
+
     async def __call__(
         self,
         question: str,
@@ -61,9 +63,10 @@ class AskUser(Protocol):
         mode: Literal["sync", "async"] = "sync",
         expiry_at: datetime | None = None,
     ) -> Any:
-        """Ask a human ``question``: in ``mode="sync"`` block until the answer
-        returns; in ``mode="async"`` park the caller and return a
-        ``SuspendedInteraction`` immediately.
+        """Ask a human ``question`` and return the typed answer.
+
+        In ``mode="sync"`` block until the answer returns; in ``mode="async"`` park the caller
+        and return a ``SuspendedInteraction`` immediately.
 
         Returns the typed answer per ``answer_format`` (text->str, confirm->bool,
         select->chosen value, form->validated dict). Implementations raise a

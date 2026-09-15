@@ -1,6 +1,8 @@
-"""The retention prune: the only place either thread index shrinks outside a record delete,
-plus the route/thread teardown a route or thread delete runs and the resumable cursor a pass
-returns."""
+"""The retention prune: the only place either thread index shrinks outside a record delete.
+
+Plus the route/thread teardown a route or thread delete runs and the resumable cursor a pass
+returns.
+"""
 
 from __future__ import annotations
 
@@ -24,8 +26,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PruneCursor:
-    """Where a prune pass stopped, so the next one RESUMES there instead of re-reading the
-    same head of the same index forever.
+    """Where a prune pass stopped, so the next one RESUMES there.
+
+    Resuming avoids re-reading the same head of the same index forever.
 
     A record carries no expiry until it turns terminal, so an index member can be older
     than the retention window while its row is still very much alive. A run of such members
@@ -42,7 +45,8 @@ class PruneCursor:
     leaves the route index between two passes shifts every thread behind it down one rank,
     so the rank alone would carry a member offset into a DIFFERENT thread and silently skip
     that thread's first members; the next pass applies ``member_rank`` only when the thread
-    standing at ``thread_rank`` is still this one."""
+    standing at ``thread_rank`` is still this one.
+    """
 
     route_name: str | None = None
     thread_rank: int = 0
@@ -56,10 +60,12 @@ PRUNE_START = PruneCursor()
 
 @dataclass(frozen=True)
 class _ThreadPruneStep:
-    """What draining one thread cost and where it left off. ``resume_rank`` is ``None``
-    exactly when the thread has no expired candidate left to offer; ``emptied`` says the
-    thread's index ran empty, which took it out of the route index and shifted the ranks of
-    every thread behind it down by one."""
+    """What draining one thread cost and where it left off.
+
+    ``resume_rank`` is ``None`` exactly when the thread has no expired candidate left to offer;
+    ``emptied`` says the thread's index ran empty, which took it out of the route index and
+    shifted the ranks of every thread behind it down by one.
+    """
 
     spent: int
     resume_rank: int | None
@@ -72,9 +78,10 @@ class RecordPruneMixin(RecordStoreBase):
     async def prune_expired_terminal_indexes(
         self, route_names: Iterable[str], cursor: PruneCursor = PRUNE_START
     ) -> PruneCursor:
-        """Drop the index members no read reaches, so neither index outgrows the retained
-        keyspace it names. The ONLY place either thread index shrinks outside a record
-        delete — the reads deliberately leave it alone.
+        """Drop the index members no read reaches, so neither index outgrows the keyspace it names.
+
+        The retained keyspace stays bounded: the ONLY place either thread index shrinks outside
+        a record delete — the reads deliberately leave it alone.
 
         Terminal-status members are dropped by score: a member's score is its row's exact
         expiry moment, and the ``delivered``/``shed``/``silent`` indexes are read by nothing
@@ -94,7 +101,8 @@ class RecordPruneMixin(RecordStoreBase):
         Takes the cursor the previous pass returned and returns where this one stopped, so
         the work left over is picked up from there rather than re-read from the front (see
         :class:`PruneCursor`). A pass that walked every route returns
-        :data:`PRUNE_START`."""
+        :data:`PRUNE_START`.
+        """
         now = time.time()
         expired_before = now - self.settings.answer_retention_ttl_seconds
         budget = _records._PRUNE_WORK_PER_PASS
@@ -132,8 +140,9 @@ class RecordPruneMixin(RecordStoreBase):
         member_thread: str | None,
         budget: int,
     ) -> tuple[int, PruneCursor | None]:
-        """Walk one route's threads from ``thread_rank`` on, in rank windows of
-        :data:`_PRUNE_THREADS_PER_BATCH`, spending at most ``budget`` units of work.
+        """Walk one route's threads from ``thread_rank`` on, spending at most ``budget`` units of work.
+
+        Walks in rank windows of :data:`_PRUNE_THREADS_PER_BATCH`.
 
         Returns ``(spent, stopped)``, where ``stopped`` is the cursor to resume from when
         the budget ran out mid-route and ``None`` when the route was walked to its end. A
@@ -144,7 +153,8 @@ class RecordPruneMixin(RecordStoreBase):
         ``member_rank`` is applied only to ``member_thread``: between two passes a thread at
         a LOWER rank can vanish and shift this one out from under the rank the last pass
         recorded, and a member offset carried into a different thread would silently skip
-        that thread's first members."""
+        that thread's first members.
+        """
         key = self.settings.route_threads_key(route_name)
         spent = 0
         rank = thread_rank
@@ -189,9 +199,10 @@ class RecordPruneMixin(RecordStoreBase):
         start_rank: int,
         budget: int,
     ) -> _ThreadPruneStep:
-        """Offer one thread's retention-expired candidates to the atomic prune step, from
-        ``start_rank`` on, one bounded batch at a time until the thread has none left or
-        ``budget`` units of work are spent.
+        """Offer one thread's retention-expired candidates to the atomic prune step, from ``start_rank`` on.
+
+        Offered one bounded batch at a time until the thread has none left or ``budget`` units
+        of work are spent.
 
         A candidate whose row is still there is NOT removed, so the rank of the next
         unexamined member is the rank walked to minus the members the step did remove.
@@ -205,7 +216,8 @@ class RecordPruneMixin(RecordStoreBase):
         deliberately leave the index alone, and a thread that can offer no member would
         otherwise be examined and skipped by every pass forever, over-counting the route's
         ``total``, re-logging the read doors' orphan warning and blocking a door edit behind
-        a count with no visible thread."""
+        a count with no visible thread.
+        """
         thread_key = self.settings.thread_index_key(route_name, thread_id)
         route_key = self.settings.route_threads_key(route_name)
         spent = 0
@@ -235,28 +247,34 @@ class RecordPruneMixin(RecordStoreBase):
                 return _ThreadPruneStep(spent, rank, emptied=False)
 
     async def count_route_threads(self, route_name: str) -> int:
-        """How many threads ``route_name``'s index holds — the count the delete door reads
-        to tell an unknown route from one whose reclamation was interrupted and is owed."""
+        """How many threads ``route_name``'s index holds.
+
+        The count the delete door reads to tell an unknown route from one whose reclamation was
+        interrupted and is owed.
+        """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             return int(await awaited(r.zcard(self.settings.route_threads_key(route_name))))
 
     async def route_thread_ids(self, route_name: str) -> list[str]:
-        """Every thread id currently in ``route_name``'s thread index — the route delete's
-        work list for a per-thread cascade (parked-ask cancellation) that must run BEFORE
-        :meth:`drop_route_threads` tears the indexes down. A plain read that reclaims
-        nothing; the index itself is walked and dropped by ``drop_route_threads``. Read in
-        full because the cascade must reach every thread the route owns, not a page of them."""
+        """Every thread id currently in ``route_name``'s thread index.
+
+        The route delete's work list for a per-thread cascade (parked-ask cancellation) that
+        must run BEFORE :meth:`drop_route_threads` tears the indexes down. A plain read that
+        reclaims nothing; the index itself is walked and dropped by ``drop_route_threads``. Read
+        in full because the cascade must reach every thread the route owns, not a page of them.
+        """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             key = self.settings.route_threads_key(route_name)
             return [_member(member) for member in await awaited(r.zrange(key, 0, -1))]
 
     async def drop_route_threads(self, route_name: str) -> None:
-        """Delete a route's thread indexes — every per-thread transcript ZSET the route's
-        thread index names and each thread's mode override, then the index itself. Neither the
-        transcript indexes nor the route index carry a TTL and the prune pass
-        only walks LIVE routes, so a deleted route's indexes are unreachable unless its
-        delete reclaims them here. The records themselves are left to their own retention
-        TTL.
+        """Delete a route's thread indexes.
+
+        Every per-thread transcript ZSET the route's thread index names and each thread's mode
+        override, then the index itself. Neither the transcript indexes nor the route index
+        carry a TTL and the prune pass only walks LIVE routes, so a deleted route's indexes are
+        unreachable unless its delete reclaims them here. The records themselves are left to
+        their own retention TTL.
 
         Walked in rank windows of :data:`_PRUNE_THREADS_PER_BATCH`, so no single reply
         carries a whole route's threads; each window leaves the route index as it is
@@ -266,7 +284,8 @@ class RecordPruneMixin(RecordStoreBase):
         finished with, and re-running this reclaims exactly the remainder. That index is
         therefore the durable marker a repeated delete finds the work by — which is why the
         delete door treats a name with a surviving route index as reclaimable rather than
-        as an unknown route."""
+        as an unknown route.
+        """
         key = self.settings.route_threads_key(route_name)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             while True:
@@ -282,17 +301,19 @@ class RecordPruneMixin(RecordStoreBase):
             await awaited(r.delete(key))
 
     async def drop_thread(self, route_name: str, thread_id: str) -> int:
-        """Delete one thread under ``route_name`` outright — every answer record its transcript
-        index names, that index, the thread's membership in the route index, and its mode
-        override. Returns the number of record ROWS removed (an index member whose row already
-        expired counts 0 yet is still unindexed).
+        """Delete one thread under ``route_name`` outright.
+
+        Removes every answer record its transcript index names, that index, the thread's
+        membership in the route index, and its mode override. Returns the number of record ROWS
+        removed (an index member whose row already expired counts 0 yet is still unindexed).
 
         RETRYABLE: draining the transcript index reclaims the route member with the last
         record (the same atomic step a record delete takes), so an interrupted run leaves the
         still-indexed remainder for a re-run, and the trailing deletes cover an index already
         emptied and a route member stranded without one. Neither thread index carries a TTL and
         the prune pass walks LIVE routes only, so nothing here may leave a member behind: the
-        operator asked for the thread gone now, not on the records' own retention clock."""
+        operator asked for the thread gone now, not on the records' own retention clock.
+        """
         thread_key = self.settings.thread_index_key(route_name, thread_id)
         route_key = self.settings.route_threads_key(route_name)
         status_keys = [self.settings.status_index_key(status.value) for status in _INDEXED_STATUSES]

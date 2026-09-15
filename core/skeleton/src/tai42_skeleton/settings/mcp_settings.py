@@ -16,6 +16,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class MCPDispatchSettings(TaiBaseSettings):
+    """``TAI_MCP_*`` call-timeout and schema-depth bounds for the MCP dispatch seam."""
+
     model_config = SettingsConfigDict(env_prefix="TAI_MCP_")
 
     # Wall-clock budget for one downstream MCP tool call. Bounds a downstream that
@@ -34,4 +36,5 @@ class MCPDispatchSettings(TaiBaseSettings):
 
 @settings_cache
 def mcp_dispatch_settings() -> MCPDispatchSettings:
+    """The cached :class:`MCPDispatchSettings` for this process."""
     return MCPDispatchSettings()

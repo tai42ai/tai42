@@ -22,11 +22,12 @@ from .models import _DISABLED_CODE, _DISABLED_MESSAGE, PolicyRollback
     response_model=DocumentVersionList,
 )
 async def list_policy_versions(user_id: str) -> list[dict[str, Any]]:
-    """The user's append-only policy version history from the durable PG store, each
-    row flagged ``is_current`` against the active pointer. Secret-adjacent (a version
-    body carries the raw condition) and admin-only: a non-admin caller is denied 403 so
-    it can never read another user's policy history. 404 when the user has no policy
-    history."""
+    """The user's append-only policy version history from the durable PG store.
+
+    Each row is flagged ``is_current`` against the active pointer. Secret-adjacent (a version
+    body carries the raw condition) and admin-only: a non-admin caller is denied 403 so it can
+    never read another user's policy history. 404 when the user has no policy history.
+    """
     # OFF: access control disabled → no policy history exists; the honest empty list,
     # never a store read under the synthetic admin.
     if not _pkg.access_control_settings().enable:
@@ -58,12 +59,14 @@ async def list_policy_versions(user_id: str) -> list[dict[str, Any]]:
     response_model=PolicyRollbackResult,
 )
 async def rollback_policy(user_id: str, version: int) -> dict[str, Any]:
-    """Re-point the enforced policy to a prior version. Store-first: the target version
-    body is read from the history, written to the enforced store (the authority) FIRST;
-    on that success the cache-invalidation key is bumped immediately so enforcement
-    follows, then the durable history pointer is advanced. Admin-only: a non-admin caller
-    is denied 403 so it can never roll back another user's (or its own) enforced policy.
-    404 if the version is absent or the user has no live key."""
+    """Re-point the enforced policy to a prior version.
+
+    Store-first: the target version body is read from the history, written to the enforced store
+    (the authority) FIRST; on that success the cache-invalidation key is bumped immediately so
+    enforcement follows, then the durable history pointer is advanced. Admin-only: a non-admin
+    caller is denied 403 so it can never roll back another user's (or its own) enforced policy.
+    404 if the version is absent or the user has no live key.
+    """
     # OFF: access control disabled → refuse the rollback with a named, machine-readable
     # reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:

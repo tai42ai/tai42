@@ -48,12 +48,13 @@ MAX_ATTEMPTS_CEILING = 10
 
 
 class ToolRetryBackoff(BaseModel):
-    """The exponential-backoff shape between attempts: attempt ``n`` waits
-    ``min(cap_seconds, initial_seconds * multiplier**(n-1))`` before attempt
-    ``n+1``. A server-provided ``retry_after`` on the failed attempt's error
-    WIDENS the wait when it asks for longer (the medium's own ask wins, even
-    past the cap — the cap bounds the platform's growth, not the server's
-    explicit request)."""
+    """The exponential-backoff shape between attempts.
+
+    Attempt ``n`` waits ``min(cap_seconds, initial_seconds * multiplier**(n-1))`` before attempt
+    ``n+1``. A server-provided ``retry_after`` on the failed attempt's error WIDENS the wait when
+    it asks for longer (the medium's own ask wins, even past the cap — the cap bounds the
+    platform's growth, not the server's explicit request).
+    """
 
     model_config = ConfigDict(frozen=True)
 

@@ -1,5 +1,8 @@
-"""Up-frame plumbing for ``claude_code``: iterate the runner's byte stream into parsed
-up-frames, drain a killed handle, and map an event / terminal frame to a contract stream event."""
+"""Up-frame plumbing for ``claude_code``.
+
+Iterate the runner's byte stream into parsed up-frames, drain a killed handle, and map an event /
+terminal frame to a contract stream event.
+"""
 
 from __future__ import annotations
 
@@ -25,13 +28,17 @@ from tai42_agents.claude_code.protocol import ProtocolError, ResultFrame, parse_
 
 
 async def iter_up_frames(handle: Any) -> AsyncIterator[Any]:
-    """Yield parsed up-frames off the exec handle's byte stream, buffering whole JSON lines and
-    ignoring stderr (diagnostics). A ``SandboxStreamExit`` ends the stream."""
+    """Yield parsed up-frames off the exec handle's byte stream.
+
+    Buffers whole JSON lines and ignores stderr (diagnostics). A ``SandboxStreamExit`` ends the
+    stream.
+    """
     buffer = bytearray()
     async for chunk in handle.output:
         if isinstance(chunk, SandboxStreamExit):
             break
-        assert isinstance(chunk, SandboxStreamChunk)
+        if not (isinstance(chunk, SandboxStreamChunk)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         if chunk.stream != "stdout":
             continue
         buffer.extend(chunk.data)
@@ -74,6 +81,11 @@ def map_event(event: dict[str, Any], text_parts: list[str]) -> StreamEvent | Non
 
 
 def terminal_event(frame: ResultFrame, text_parts: list[str]) -> StreamEvent:
+    """The contract terminal for a result ``frame``; raises ``ProtocolError`` on a non-success reason.
+
+    A structured result yields a :class:`StructuredFinal`, else the frame's text (or the joined
+    ``text_parts``) yields a :class:`MessageFinal`.
+    """
     if frame.terminal_reason not in {"completed", "success"}:
         raise ProtocolError(f"runner terminated with reason {frame.terminal_reason!r} (subtype {frame.subtype!r})")
     if frame.is_structured and frame.result is not None:

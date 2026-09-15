@@ -136,8 +136,10 @@ class RoutingSocket(socket.socket):
                 sock.settimeout(original_timeout)
 
     def _adopt_wrapped_socket(self, sock: socket.socket) -> None:
-        """Forward the wrapped socket's I/O onto this instance so callers keep using the
-        object they were handed after a TLS wrap replaced ``sock`` and took this fd."""
+        """Forward the wrapped socket's I/O onto this instance so callers keep using the same object.
+
+        Used after a TLS wrap replaced ``sock`` and took this fd.
+        """
         self.send = sock.send
         self.sendto = sock.sendto
         self.sendall = sock.sendall
@@ -154,8 +156,10 @@ class RoutingSocket(socket.socket):
 
 
 def _build_connect_request(dest_host: str, dest_port: int, route: RouteConfig) -> bytes:
-    """The encoded ``CONNECT`` request line + headers, with Basic proxy auth when the
-    route carries credentials."""
+    """The encoded ``CONNECT`` request line + headers.
+
+    Adds Basic proxy auth when the route carries credentials.
+    """
     connect_str = f"CONNECT {dest_host}:{dest_port} HTTP/1.1\r\nHost: {dest_host}:{dest_port}\r\n"
     if route.username and route.password:
         auth = f"{route.username}:{route.password}"
@@ -166,9 +170,11 @@ def _build_connect_request(dest_host: str, dest_port: int, route: RouteConfig) -
 
 
 def _read_connect_response(sock: socket.socket, deadline: float) -> bytes:
-    """Read the proxy's ``CONNECT`` response up to the header terminator, each recv
-    bounded by the time left to ``deadline`` and the buffer capped at
-    ``_MAX_PROXY_HEADER_BYTES``."""
+    """Read the proxy's ``CONNECT`` response up to the header terminator.
+
+    Each recv is bounded by the time left to ``deadline`` and the buffer capped at
+    ``_MAX_PROXY_HEADER_BYTES``.
+    """
     response = b""
     while True:
         # Bound each recv by the time left; a non-positive remaining makes recv raise promptly.
@@ -185,8 +191,7 @@ def _read_connect_response(sock: socket.socket, deadline: float) -> bytes:
 
 
 def _parse_connect_status(response: bytes) -> None:
-    """Raise ``OSError`` unless the proxy's ``CONNECT`` response status line is a well-formed
-    ``200``."""
+    """Raise ``OSError`` unless the proxy's ``CONNECT`` response status line is a well-formed ``200``."""
     header = response.split(b"\r\n\r\n")[0]
     status = header.split(b"\r\n")[0]
     parts = status.split()
@@ -201,8 +206,9 @@ def _parse_connect_status(response: bytes) -> None:
 
 
 def _routing_socks_socket() -> type[RoutingSocket]:
-    """Return the lazily-defined SOCKS routing socket class, building it on first use
-    (only reachable once a SOCKS route has selected this path, so PySocks is present).
+    """Return the lazily-defined SOCKS routing socket class, building it on first use.
+
+    Only reachable once a SOCKS route has selected this path, so PySocks is present.
     """
     global _routing_socks_socket_cls
     if _routing_socks_socket_cls is None:

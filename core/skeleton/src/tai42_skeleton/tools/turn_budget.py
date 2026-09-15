@@ -93,8 +93,9 @@ async def turn_budget() -> AsyncIterator[None]:
 
 
 class TurnBudgetMiddleware(Middleware):
-    """A retained, standalone FastMCP middleware that arms the synchronous turn budget
-    around a ``tools/call``. NOT registered by the platform.
+    """A retained, standalone FastMCP middleware that arms the synchronous turn budget around a call.
+
+    NOT registered by the platform.
 
     The live MCP ``tools/call`` edge arms the run lifecycle — the turn budget included —
     through ``DispatchScopeMiddleware`` (:mod:`tai42_skeleton.tools.dispatch_scope`),
@@ -104,9 +105,11 @@ class TurnBudgetMiddleware(Middleware):
 
     ``on_call_tool`` stamps the run attribution and arms :func:`turn_budget` around
     ``call_next``; the shared ContextVar guard keeps a nested in-process re-dispatch
-    from opening a second window."""
+    from opening a second window.
+    """
 
     def __init__(self) -> None:
+        """Emit the deprecation warning for this unregistered middleware."""
         warnings.warn(
             "TurnBudgetMiddleware is not registered by the platform; the MCP tools/call "
             "edge lifecycle is handled by DispatchScopeMiddleware "
@@ -121,14 +124,16 @@ class TurnBudgetMiddleware(Middleware):
         context: "MiddlewareContext[Any]",
         call_next: Callable[["MiddlewareContext[Any]"], Awaitable[Any]],
     ) -> Any:
+        """Stamp the run attribution and arm :func:`turn_budget` around ``call_next``."""
         with stamp_run_attribution():
             async with turn_budget():
                 return await call_next(context)
 
 
 async def drive_live_caller_astream[EventT](stream: AsyncIterator[EventT]) -> AsyncIterator[EventT]:
-    """Drive a live-caller agent ``astream`` under the turn budget AND the attribution
-    scope — the ONE shared seam every live-caller agent-run door routes through.
+    """Drive a live-caller agent ``astream`` under the turn budget and the attribution scope.
+
+    The ONE shared seam every live-caller agent-run door routes through.
 
     The three live-caller doors that call ``agent.astream`` directly (the conversation
     bridge and both agent-run SSE routes) hold a live client connection, so they are NOT
@@ -138,7 +143,8 @@ async def drive_live_caller_astream[EventT](stream: AsyncIterator[EventT]) -> As
     ``TurnTimeoutError`` out through this iterator to the door's existing raise path;
     ``turn_budget``'s re-entrancy guard keeps a nested tool re-dispatch from opening a
     second window. Detached runs stay exempt by ``turn_budget``'s own ``in_detached_run``
-    no-op — this seam never arms a budget there."""
+    no-op — this seam never arms a budget there.
+    """
     with stamp_run_attribution():
         async with turn_budget():
             async for event in stream:

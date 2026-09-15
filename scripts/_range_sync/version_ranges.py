@@ -1,5 +1,7 @@
-"""Core version-range derivation and PEP 508 requirement parsing: the single
-floor/cap rule and the cross-major guard a pin preserves."""
+"""Core version-range derivation and PEP 508 requirement parsing.
+
+The single floor/cap rule and the cross-major guard a pin preserves.
+"""
 
 from __future__ import annotations
 
@@ -53,10 +55,11 @@ def derive_range(version: str) -> str:
 
 
 def _major_structure(spec: str) -> tuple[int | None, int | None]:
-    """The ``(floor_major, cap_major)`` integer majors of a specifier; each is
-    None when that end is absent or unparseable. A ``~=X.Y`` / ``==X.Y.Z`` spec
-    implies floor and cap majors both X; otherwise the floor comes from ``>=``
-    and the cap from ``<``."""
+    """The ``(floor_major, cap_major)`` integer majors of a specifier; each None when absent or unparseable.
+
+    A ``~=X.Y`` / ``==X.Y.Z`` spec implies floor and cap majors both X; otherwise the floor comes from
+    ``>=`` and the cap from ``<``.
+    """
     s = spec.strip()
     if not s:
         return (None, None)
@@ -73,11 +76,12 @@ def _major_structure(spec: str) -> tuple[int | None, int | None]:
 
 
 def is_cross_major(old_spec: str, new_spec: str) -> bool:
-    """True when *old_spec* and *new_spec* differ in EITHER the floor's integer
-    major OR the cap's integer major — a deliberately widened cap (``<3`` derived
-    down to ``<2``) crosses as surely as a raised floor. Pre-1.0 both majors are
-    0, so a 0.x minor bump never crosses. A major that is absent at one end (no
-    comparable value) does not, by itself, make that end differ."""
+    """True when *old_spec* and *new_spec* differ in EITHER the floor's or the cap's integer major.
+
+    A deliberately widened cap (``<3`` derived down to ``<2``) crosses as surely as a raised floor.
+    Pre-1.0 both majors are 0, so a 0.x minor bump never crosses. A major that is absent at one end (no
+    comparable value) does not, by itself, make that end differ.
+    """
     old_floor, old_cap = _major_structure(old_spec)
     new_floor, new_cap = _major_structure(new_spec)
     floor_differs = old_floor is not None and new_floor is not None and old_floor != new_floor
@@ -86,10 +90,12 @@ def is_cross_major(old_spec: str, new_spec: str) -> bool:
 
 
 def _pin_guarded(old_spec: str, derived: str) -> bool:
-    """A rewrite a pin should preserve (and an unpinned cap should warn on): the
-    majors cross (floor or cap), or the existing spec's major structure is
-    unparseable — the latter treated conservatively as a crossing rather than
-    rewritten blind. An empty spec is version-less and never guarded."""
+    """A rewrite a pin should preserve (and an unpinned cap should warn on).
+
+    The majors cross (floor or cap), or the existing spec's major structure is unparseable — the latter
+    treated conservatively as a crossing rather than rewritten blind. An empty spec is version-less and
+    never guarded.
+    """
     if is_cross_major(old_spec, derived):
         return True
     return bool(old_spec.strip()) and _major_structure(old_spec) == (None, None)
@@ -105,8 +111,10 @@ class ParsedRequirement:
     marker: str  # verbatim ";..." including the leading ';', or "" if none
 
     def with_specifier(self, new_spec: str) -> str:
-        """Rebuild the requirement string with *new_spec* as the specifier,
-        preserving name, extras, and environment marker verbatim."""
+        """Rebuild the requirement string with *new_spec* as the specifier.
+
+        Preserves name, extras, and environment marker verbatim.
+        """
         return f"{self.name}{self.extras}{new_spec}{self.marker}"
 
 

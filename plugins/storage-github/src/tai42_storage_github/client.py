@@ -13,6 +13,8 @@ from tai42_storage_github.settings import github_storage_settings
 
 
 class GithubHttpxClient(PooledClient[httpx.AsyncClient]):
+    """Pooled ``httpx.AsyncClient`` configured for the GitHub storage backend."""
+
     async def _create(self, **kwargs: object) -> httpx.AsyncClient:
         settings = github_storage_settings()
         return httpx.AsyncClient(

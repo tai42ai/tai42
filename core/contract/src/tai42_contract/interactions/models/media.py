@@ -17,6 +17,8 @@ from pydantic import BaseModel, field_validator, model_validator
 
 
 class MediaKind(StrEnum):
+    """How a media item renders: an inline image, a file bubble, or a labelled link."""
+
     IMAGE = "image"
     LINK = "link"
     DOCUMENT = "document"
@@ -110,9 +112,10 @@ def _is_valid_host(host: str, *, bracketed: bool) -> bool:
         return True
     try:
         ipaddress.IPv4Address(host)
-        return True
     except ValueError:
         pass
+    else:
+        return True
     name = host.removesuffix(".")
     if not name or len(name) > 253:
         return False
@@ -164,13 +167,15 @@ def _is_served_media_url(value: str) -> bool:
 
 
 def served_media_id(url: str) -> str | None:
-    """The stored-media id a served ``image`` url references, or ``None`` if the url
-    is not a served reference. Handles BOTH forms a request may carry: the
-    same-origin relative ``{MEDIA_ROUTE_PREFIX}{id}`` an inbox ask stores, and the
-    absolute ``http(s)`` served reference a channel send mints from
-    ``public_base_url``. The prefix is located by parsing (the relative-form
-    ``startswith``, the absolute-form url ``path``), never by substring search — so a
-    prefix buried in a query or fragment is not mistaken for a served id."""
+    """The stored-media id a served ``image`` url references, or ``None`` if not a served reference.
+
+    Handles BOTH forms a request may carry: the same-origin relative
+    ``{MEDIA_ROUTE_PREFIX}{id}`` an inbox ask stores, and the absolute ``http(s)``
+    served reference a channel send mints from ``public_base_url``. The prefix is
+    located by parsing (the relative-form ``startswith``, the absolute-form url
+    ``path``), never by substring search — so a prefix buried in a query or fragment
+    is not mistaken for a served id.
+    """
     if _is_media_route_url(url):
         return url[len(MEDIA_ROUTE_PREFIX) :]
     if _is_served_media_url(url):
@@ -218,8 +223,7 @@ def _validate_file_media_url(url: str, kind: MediaKind) -> None:
 
 
 class MediaItem(BaseModel):
-    """One media item shown WITH a message — a display element, and inbound the shape a participant's
-    sent media takes.
+    """One media item shown WITH a message — a display element, and inbound a participant's sent media.
 
     ``kind`` selects how it renders: an ``image`` inline, a ``document``/``video``/``audio`` as
     the matching file bubble, a ``link`` as a labelled anchor. ``url`` is the source. A file
@@ -305,11 +309,14 @@ class MediaItem(BaseModel):
 
 
 def check_media_list(items: Sequence[MediaItem]) -> None:
-    """List-level media caps every door that accepts media shares: a present media
-    list is non-empty, holds at most ``MEDIA_MAX_ITEMS`` items, and its summed url text
-    is within ``MEDIA_TOTAL_URI_CHARS``. Raises ``ValueError`` loudly; per-item shape is
-    ``MediaItem``'s own concern. Callers run this on the RAW validated items before any
-    store write, so an over-cap ask/notify is refused before a substitution stores bytes."""
+    """Apply the list-level media caps every door that accepts media shares must enforce.
+
+    A present media list is non-empty, holds at most ``MEDIA_MAX_ITEMS`` items, and
+    its summed url text is within ``MEDIA_TOTAL_URI_CHARS``. Raises ``ValueError``
+    loudly; per-item shape is ``MediaItem``'s own concern. Callers run this on the
+    RAW validated items before any store write, so an over-cap ask/notify is refused
+    before a substitution stores bytes.
+    """
     if not items:
         raise ValueError("media must be a non-empty list when present")
     if len(items) > MEDIA_MAX_ITEMS:
@@ -320,10 +327,13 @@ def check_media_list(items: Sequence[MediaItem]) -> None:
 
 
 def validate_action_url(value: str) -> str:
-    """Validate a tappable link-action URL — the ``url`` a link button/anchor opens when the
-    human taps it. An absolute ``http(s)`` URL, single-line (raw whitespace and control/format
-    characters rejected, as on a media url), within ``MEDIA_URL_MAX_CHARS``. Returns the value
-    unchanged or raises ``ValueError``. Shared by every link-action option shape."""
+    """Validate a tappable link-action URL — the ``url`` a link button/anchor opens when tapped.
+
+    An absolute ``http(s)`` URL, single-line (raw whitespace and control/format
+    characters rejected, as on a media url), within ``MEDIA_URL_MAX_CHARS``. Returns
+    the value unchanged or raises ``ValueError``. Shared by every link-action option
+    shape.
+    """
     if not value.strip():
         raise ValueError("link url must be non-blank")
     if any(ch.isspace() or not ch.isprintable() for ch in value):

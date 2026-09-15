@@ -45,8 +45,9 @@ from tai42_channel_whatsapp.client import (
 
 
 def _mint_wire_ids(authored: list[str | None], noun: str) -> list[str]:
-    """The wire id for every tappable option on ONE message, collision-proof against the
-    AUTHORED ids present. WhatsApp requires interactive button/list-row ids UNIQUE across
+    """The wire id for every tappable option on ONE message, collision-proof against authored ids.
+
+    WhatsApp requires interactive button/list-row ids UNIQUE across
     the whole message, so a minted id that happened to equal an authored id (e.g. an
     authored ``"1"`` beside an un-id'd sibling whose 0-based index also mints ``"1"``) would
     make Meta 400 the send. Rule (mirrors the telegram channel's prefer-authored/mint-index
@@ -59,7 +60,8 @@ def _mint_wire_ids(authored: list[str | None], noun: str) -> list[str]:
 
     Two EQUAL authored ids on one message are an author error the wire cannot express
     (unique-id rule) — refused loudly here with ``ChannelInputError`` naming the id, before
-    any send, rather than shipped for Meta to 400."""
+    any send, rather than shipped for Meta to 400.
+    """
     authored_ids = [value for value in authored if value is not None]
     seen: set[str] = set()
     for value in authored_ids:
@@ -86,20 +88,24 @@ def _mint_wire_ids(authored: list[str | None], noun: str) -> list[str]:
 
 
 def _reply_wire_ids(replies: list[ReplyOption], wire_ids: list[str]) -> list[tuple[str, str]]:
-    """``(wire_id, text)`` per reply option — ``wire_ids`` is the pre-minted, collision-proof
-    id list (see :func:`_mint_wire_ids`) aligned with ``replies``. A minted id carries no
-    ``:`` interaction part, so ``_map_tap_to_answer`` can never mistake a notification tap for
-    a pending-ask reply."""
+    """``(wire_id, text)`` per reply option, aligned with the pre-minted collision-proof id list.
+
+    ``wire_ids`` is the pre-minted list (see :func:`_mint_wire_ids`) aligned with
+    ``replies``. A minted id carries no ``:`` interaction part, so ``_map_tap_to_answer``
+    can never mistake a notification tap for a pending-ask reply.
+    """
     return [(wire_id, reply.text) for wire_id, reply in zip(wire_ids, replies, strict=True)]
 
 
 def _api_sections(sections: list[OptionSection], wire_ids: list[str]) -> list[dict[str, Any]]:
-    """The Cloud-API ``action.sections`` array for a sectioned notification list: each
-    section keeps its ``title`` and maps its reply rows to ``{id, title, description?}``.
-    ``wire_ids`` is the pre-minted, collision-proof id list (see :func:`_mint_wire_ids`)
-    aligned with the rows read left-to-right across every section (list-row ids must be
-    unique across the whole message); a present ``description`` rides as the row's secondary
-    line."""
+    """The Cloud-API ``action.sections`` array for a sectioned notification list.
+
+    Each section keeps its ``title`` and maps its reply rows to
+    ``{id, title, description?}``. ``wire_ids`` is the pre-minted, collision-proof id
+    list (see :func:`_mint_wire_ids`) aligned with the rows read left-to-right across
+    every section (list-row ids must be unique across the whole message); a present
+    ``description`` rides as the row's secondary line.
+    """
     api_sections: list[dict[str, Any]] = []
     cursor = 0
     for section in sections:
@@ -115,11 +121,14 @@ def _api_sections(sections: list[OptionSection], wire_ids: list[str]) -> list[di
 
 
 def _sections_renderable(body: str, sections: list[OptionSection]) -> bool:
-    """Whether a sectioned list fits every WhatsApp wire cap: an interactive body within
-    ``_INTERACTIVE_BODY_MAX_CHARS``, each section title within ``_SECTION_TITLE_MAX_CHARS``,
-    each row title within ``_LIST_ROW_TITLE_MAX_CHARS`` and each row description within
-    ``_LIST_ROW_DESCRIPTION_MAX_CHARS``. A single over-cap field forces the whole message a
-    tier down to numbered text (never a truncated/over-cap value on the wire)."""
+    """Whether a sectioned list fits every WhatsApp wire cap.
+
+    An interactive body within ``_INTERACTIVE_BODY_MAX_CHARS``, each section title within
+    ``_SECTION_TITLE_MAX_CHARS``, each row title within ``_LIST_ROW_TITLE_MAX_CHARS`` and
+    each row description within ``_LIST_ROW_DESCRIPTION_MAX_CHARS``. A single over-cap
+    field forces the whole message a tier down to numbered text (never a truncated/over-cap
+    value on the wire).
+    """
     if len(body) > _INTERACTIVE_BODY_MAX_CHARS:
         return False
     for section in sections:
@@ -134,12 +143,14 @@ def _sections_renderable(body: str, sections: list[OptionSection]) -> bool:
 
 
 def _numbered_sections_body(body: str, sections: list[OptionSection], footer: str | None) -> str:
-    """The numbered-text fallback for a sectioned list past the wire caps: the body, then each
-    section's title as a header line with its rows numbered continuously (1-based across all
-    sections), the type-an-option footer, and any interactive footer appended as a trailing
-    line — the plain-text send carries no wire caps on these fields, so the authored titles
-    AND row descriptions ride whole (a description often being the very field that forced
-    the degrade)."""
+    """The numbered-text fallback for a sectioned list past the wire caps.
+
+    The body, then each section's title as a header line with its rows numbered
+    continuously (1-based across all sections), the type-an-option footer, and any
+    interactive footer appended as a trailing line — the plain-text send carries no wire
+    caps on these fields, so the authored titles AND row descriptions ride whole (a
+    description often being the very field that forced the degrade).
+    """
     lines = [body]
     index = 1
     for section in sections:
@@ -155,33 +166,43 @@ def _numbered_sections_body(body: str, sections: list[OptionSection], footer: st
 
 
 def _cta_url_renderable(body: str, link: LinkOption) -> bool:
-    """Whether a lone link option fits the ``cta_url`` interactive: an interactive body within
-    ``_INTERACTIVE_BODY_MAX_CHARS`` and a button ``display_text`` within
-    ``_CTA_URL_LABEL_MAX_CHARS``. Otherwise the lone link degrades to a ``label: url`` body
-    line (the same rendering the multi-link path uses)."""
+    """Whether a lone link option fits the ``cta_url`` interactive.
+
+    An interactive body within ``_INTERACTIVE_BODY_MAX_CHARS`` and a button
+    ``display_text`` within ``_CTA_URL_LABEL_MAX_CHARS``. Otherwise the lone link
+    degrades to a ``label: url`` body line (the same rendering the multi-link path uses).
+    """
     return len(body) <= _INTERACTIVE_BODY_MAX_CHARS and len(link.label) <= _CTA_URL_LABEL_MAX_CHARS
 
 
 def _link_option_line(option: LinkOption) -> str:
-    """A :class:`LinkOption` rendered as one appended body line (``label: url``) — the
-    composition WhatsApp uses when a link cannot be a native button (a reply-buttons/list
-    interactive rides no URL button; only the lone-link ``cta_url`` shape carries one)."""
+    """A :class:`LinkOption` rendered as one appended body line (``label: url``).
+
+    The composition WhatsApp uses when a link cannot be a native button (a
+    reply-buttons/list interactive rides no URL button; only the lone-link ``cta_url``
+    shape carries one).
+    """
     return f"{option.label}: {option.url}"
 
 
 def _append_lines(body: str, lines: list[str]) -> str:
-    """``body`` with each extra line appended (blank ``body`` contributes no leading blank
-    line, so the extra lines stand alone when the message text is empty)."""
+    """``body`` with each extra line appended.
+
+    A blank ``body`` contributes no leading blank line, so the extra lines stand alone
+    when the message text is empty.
+    """
     if not lines:
         return body
     return "\n".join([body, *lines]) if body else "\n".join(lines)
 
 
 def _folded_body(notification: ChannelNotification, links_media: list[MediaItem]) -> tuple[str, str | None]:
-    """The interactive body (link media appended) and the footer, with an over-wire-cap
-    footer folded into the body as a trailing line and dropped from the interactive footer
-    slot — the same text-fallback idiom, leaving the body's own cap check to decide
-    interactive-vs-fallback."""
+    """The interactive body (link media appended) and the footer.
+
+    An over-wire-cap footer is folded into the body as a trailing line and dropped from
+    the interactive footer slot — the same text-fallback idiom, leaving the body's own
+    cap check to decide interactive-vs-fallback.
+    """
     body = _body_with_links(notification.message, links_media)
     footer = notification.footer
     if footer is not None and len(footer) > _FOOTER_MAX_CHARS:
@@ -191,9 +212,11 @@ def _folded_body(notification: ChannelNotification, links_media: list[MediaItem]
 
 
 def _interactive_header(header: MediaItem | None) -> dict[str, Any] | None:
-    """The Cloud-API header object when a media header can ride the interactive header
-    slot (image/video/document), else ``None`` (absent header, or an audio header that
-    must be sent as its own message)."""
+    """The Cloud-API header object when a media header can ride the interactive header slot.
+
+    Rides for image/video/document, else ``None`` (absent header, or an audio header that
+    must be sent as its own message).
+    """
     if header is not None and header.kind is not MediaKind.AUDIO:
         return _build_header_object(header)
     return None
@@ -202,8 +225,10 @@ def _interactive_header(header: MediaItem | None) -> dict[str, Any] | None:
 async def _leading_header(
     phone_number_id: str, target: str, header: MediaItem | None, header_obj: dict[str, Any] | None
 ) -> list[str]:
-    """Send the header as its own leading message when it is present but not riding the
-    interactive header slot (an audio header, or a text-fallback message); else nothing."""
+    """Send the header as its own leading message when it is present but not on the interactive header slot.
+
+    Applies to an audio header, or a text-fallback message; else nothing.
+    """
     if header is not None and header_obj is None:
         return [await _send_one_file(phone_number_id, target, header)]
     return []
@@ -217,9 +242,12 @@ async def _render_section_list(
     header: MediaItem | None,
     footer: str | None,
 ) -> list[str]:
-    """Render a sectioned notification as an interactive LIST, or the numbered-text fallback
-    when a section/row title, a row description, or the body exceeds its wire cap. Author-error
-    id collisions are refused up front by :func:`_mint_wire_ids`, whichever tier is chosen."""
+    """Render a sectioned notification as an interactive LIST, or the numbered-text fallback.
+
+    The fallback is used when a section/row title, a row description, or the body exceeds
+    its wire cap. Author-error id collisions are refused up front by
+    :func:`_mint_wire_ids`, whichever tier is chosen.
+    """
     section_ids = _mint_wire_ids([row.id for section in sections for row in section.rows], "notification")
     if not _sections_renderable(body, sections):
         prelude: list[str] = []
@@ -266,8 +294,11 @@ async def _render_lone_cta_url(
 async def _render_link_only(
     phone_number_id: str, target: str, body_with_links: str, header: MediaItem | None, footer: str | None
 ) -> list[str]:
-    """Render an only-link notification (a lone over-cap link, or ≥2 links) as a plain text
-    body of ``label: url`` lines with the footer appended and any media header sent ahead."""
+    """Render an only-link notification (a lone over-cap link, or ≥2 links) as a plain text body.
+
+    The body is ``label: url`` lines with the footer appended and any media header sent
+    ahead.
+    """
     prelude: list[str] = []
     if header is not None:
         prelude.append(await _send_one_file(phone_number_id, target, header))
@@ -276,8 +307,10 @@ async def _render_link_only(
 
 
 def _reply_rows(reply_ids: list[str], replies: list[ReplyOption]) -> list[dict[str, str]]:
-    """The Cloud-API list rows for reply options: ``{id, title, description?}`` per reply,
-    aligned with the pre-minted collision-proof ``reply_ids``."""
+    """The Cloud-API list rows for reply options: ``{id, title, description?}`` per reply.
+
+    Aligned with the pre-minted collision-proof ``reply_ids``.
+    """
     rows: list[dict[str, str]] = []
     for wire_id, reply in zip(reply_ids, replies, strict=True):
         row: dict[str, str] = {"id": wire_id, "title": reply.text}
@@ -297,9 +330,11 @@ async def _render_reply_kind(
     header_obj: dict[str, Any] | None,
     footer: str | None,
 ) -> str:
-    """Send the reply-options message in its chosen shape (buttons / list / numbered text)
-    and return its ``wamid``. Descriptions ride the numbered lines whole on the text tier —
-    a degrade never silently drops content."""
+    """Send the reply-options message in its chosen shape (buttons / list / numbered text).
+
+    Returns its ``wamid``. Descriptions ride the numbered lines whole on the text tier —
+    a degrade never silently drops content.
+    """
     if kind == "buttons":
         return await send_interactive_buttons(
             phone_number_id=phone_number_id,
@@ -332,10 +367,13 @@ async def _render_reply_options(
     header: MediaItem | None,
     footer: str | None,
 ) -> list[str]:
-    """Render reply options as buttons or a list — buttons render no description, so any
-    described row prefers the list, and an over-cap row title/description/body degrades the
-    whole message to numbered text. A media header rides the interactive header unless the
-    message degrades to text (or the header is audio), in which case it is sent ahead."""
+    """Render reply options as buttons or a list.
+
+    Buttons render no description, so any described row prefers the list, and an over-cap
+    row title/description/body degrades the whole message to numbered text. A media header
+    rides the interactive header unless the message degrades to text (or the header is
+    audio), in which case it is sent ahead.
+    """
     titles = [reply.text for reply in replies]
     descriptions = [reply.description for reply in replies]
     allow_buttons = not any(reply.description for reply in replies)
@@ -356,10 +394,12 @@ async def _render_options(
     header: MediaItem | None,
     footer: str | None,
 ) -> list[str]:
-    """Render a flat ``options`` notification: a lone link option as a ``cta_url`` interactive,
-    an only-link set as a plain text body, else reply options as buttons/list/numbered text.
-    Any LINK options are appended to the body as ``label: url`` lines (reply widgets carry no
-    URL button)."""
+    """Render a flat ``options`` notification.
+
+    A lone link option renders as a ``cta_url`` interactive, an only-link set as a plain
+    text body, else reply options as buttons/list/numbered text. Any LINK options are
+    appended to the body as ``label: url`` lines (reply widgets carry no URL button).
+    """
     replies = [option for option in options if isinstance(option, ReplyOption)]
     link_options = [option for option in options if isinstance(option, LinkOption)]
     if not replies and len(link_options) == 1 and _cta_url_renderable(body, link_options[0]):
@@ -373,10 +413,12 @@ async def _render_options(
 async def _send_interactive_notification(
     phone_number_id: str, target: str, notification: ChannelNotification, links_media: list[MediaItem]
 ) -> list[str]:
-    """Render an interactive notification (``options`` or ``sections``) to its native
-    WhatsApp shape, returning every ``wamid`` in send order (any audio header, or a header on
-    a text fallback, rides ahead of the interactive so the actionable message stays at the
-    foot). ``links_media`` are the ``link`` MEDIA items appended to the body as text lines.
+    """Render an interactive notification (``options`` or ``sections``) to its native WhatsApp shape.
+
+    Returns every ``wamid`` in send order (any audio header, or a header on a text
+    fallback, rides ahead of the interactive so the actionable message stays at the
+    foot). ``links_media`` are the ``link`` MEDIA items appended to the body as text
+    lines.
 
     Wire mapping (Cloud API):
 
@@ -415,7 +457,7 @@ async def _send_interactive_notification(
 async def _send_notification(phone_number_id: str, target: str, notification: ChannelNotification) -> list[str]:
     """Send a freeform notification and return every ``wamid`` in send order.
 
-    Order: the message body / interactive choice surface (carrying the text and any
+    In order: the message body / interactive choice surface (carrying the text and any
     tappable ``options``/``sections``, plus ``link`` media appended as body lines), then a
     ``location`` message, then each file-media item (image/document/video/audio) as its own
     native message. A MEDIA-ONLY / location-only notification (blank message, no options)

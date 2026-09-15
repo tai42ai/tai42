@@ -113,7 +113,7 @@ def create_route(
         ),
     ] = None,
 ) -> None:
-    """Create or replace a conversation route.
+    r"""Create or replace a conversation route.
 
     An UPSERT — a name that already exists is REPLACED, rebinding its ``execution_key``
     along with everything else (``created`` is ``false`` for a replace). A ``door=api``
@@ -175,9 +175,9 @@ def delete_thread(
     route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
     thread_id: Annotated[str, typer.Argument(help="Thread id (e.g. bridge:chat:+15550001111).")],
 ) -> None:
-    """Forget one conversation thread — its agent checkpoint, its answer records and its
-    thread indexes — so a later message on the same address starts a fresh memory.
+    """Forget one conversation thread so a later message on the same address starts a fresh memory.
 
+    Forgetting clears the thread's agent checkpoint, its answer records and its thread indexes.
     Forgetting is absolute: a valid id on its own route always succeeds, reporting
     ``removed: 0`` when nothing was left to clear (an aged-out or never-seen thread), never a
     404 — the agent memory is forgotten regardless. A route-keyed id must carry the route's
@@ -202,10 +202,11 @@ def delete_person(
     ctx: typer.Context,
     person_id: Annotated[str, typer.Argument(help="Person id (uuid4).")],
 ) -> None:
-    """Erase a linked person ENTIRELY — its aggregated ``bridge:@person:<id>`` thread (agent
-    checkpoint, answer records, thread indexes and mode override across every route it spans),
-    its person row, and every address→person index mapping.
+    """Erase a linked person ENTIRELY — its aggregated thread, its person row and every address index.
 
+    The aggregated ``bridge:@person:<id>`` thread carries the agent checkpoint, answer records,
+    thread indexes and mode override across every route it spans; the person row and every
+    address→person index mapping are dropped too.
     Idempotent: erasing an already-gone person is not an error (``erased: false``), and its
     aggregated checkpoint is forgotten regardless. A turn in flight on the aggregated thread is
     refused (409, retry once it drains). The same write grant that forgets a thread erases a
@@ -225,8 +226,10 @@ def get_person(
     ctx: typer.Context,
     person_id: Annotated[str, typer.Argument(help="Person id (uuid4).")],
 ) -> None:
-    """Read a person — its identity, folded addresses and stored ``locale`` (the BCP 47 tag
-    the rendering layer resolves text against, or ``null`` when none is known).
+    """Read a person — its identity, folded addresses and stored ``locale``.
+
+    ``locale`` is the BCP 47 tag the rendering layer resolves text against, or ``null`` when
+    none is known.
 
     Example: ``tai conversations get-person 4f1c0e2a-...``
     """
@@ -246,10 +249,11 @@ def set_person_locale(
         typer.Argument(help="BCP 47 tag (e.g. he-IL); omit to CLEAR the stored locale."),
     ] = None,
 ) -> None:
-    """Set (or clear) a person's stored ``locale`` — the operator override the rendering layer
-    resolves text against, winning over the channel-seeded value on every later turn. Omit
-    ``locale`` to clear it back to no-locale-known. The same write grant that forgets a thread
-    sets a person's locale.
+    """Set (or clear) a person's stored ``locale``.
+
+    ``locale`` is the operator override the rendering layer resolves text against, winning over
+    the channel-seeded value on every later turn. Omit ``locale`` to clear it back to
+    no-locale-known. The same write grant that forgets a thread sets a person's locale.
 
     Example: ``tai conversations set-person-locale 4f1c0e2a-... he-IL``
     """
@@ -302,8 +306,9 @@ def get_mode(
     route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
     thread_id: Annotated[str, typer.Argument(help="Thread id (e.g. bridge:chat-line:+15550001111).")],
 ) -> None:
-    """Show a thread's control mode and where it comes from (a per-thread override, or the
-    route's default).
+    """Show a thread's control mode and where it comes from.
+
+    The mode is a per-thread override when one is set, otherwise the route's default.
 
     Example: ``tai conversations mode-get chat-line bridge:chat-line:+15550001111``
     """
@@ -344,9 +349,11 @@ def get_message(
     route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
     message_id: Annotated[str, typer.Argument(help="Answer record message id (uuid4).")],
 ) -> None:
-    """Read one conversation answer record. Any holder of the conversations read grant reads
-    any record on the route, whichever door it arrived through; a non-admin caller gets the
-    caller-safe projection, with the internal error detail withheld.
+    """Read one conversation answer record.
+
+    Any holder of the conversations read grant reads any record on the route, whichever door it
+    arrived through; a non-admin caller gets the caller-safe projection, with the internal error
+    detail withheld.
 
     Example: ``tai conversations get-message chat-line 4f1c...``
     """
@@ -430,8 +437,10 @@ def get_transcript(
         typer.Option("--q", help="Keep only records whose inbound text or answer contains this substring."),
     ] = None,
 ) -> None:
-    """Read one thread's transcript. Any holder of the conversations read grant reads any
-    thread's transcript on the route; an unknown thread or route is a plain 404.
+    """Read one thread's transcript.
+
+    Any holder of the conversations read grant reads any thread's transcript on the route; an
+    unknown thread or route is a plain 404.
 
     ``--order asc`` (the default) reads oldest first; ``--order desc`` reads newest first,
     so page 1 always holds the latest messages — the order a live tail wants. The window
@@ -513,7 +522,7 @@ def set_config(
         ),
     ] = None,
 ) -> None:
-    """Create or replace a per-target conversation config.
+    r"""Create or replace a per-target conversation config.
 
     An UPSERT — a config for that (target_kind, target_name) is REPLACED if it exists
     (``created`` is ``false`` for a replace). The target must EXIST. ``--greeting-template``

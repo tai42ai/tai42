@@ -1,6 +1,8 @@
-"""The pre-lexical raw-text gates: refuse the control characters libjq cannot read
-faithfully, and refuse the character classes where this module's lexer and jq's could
-disagree about where a token begins and ends."""
+"""The pre-lexical raw-text gates over a jq condition.
+
+Refuse the control characters libjq cannot read faithfully, and refuse the character classes
+where this module's lexer and jq's could disagree about where a token begins and ends.
+"""
 
 from __future__ import annotations
 
@@ -12,8 +14,9 @@ _PRINTABLE_ASCII_END = "~"
 
 
 def _assert_no_control_characters(condition_text: str) -> None:
-    """Refuse the control characters that make libjq read a DIFFERENT source than the
-    raw text, BEFORE the compile gate hands the text to libjq. A NUL is the sharp case:
+    """Refuse the control characters that make libjq read a DIFFERENT source than the raw text.
+
+    Runs BEFORE the compile gate hands the text to libjq. A NUL is the sharp case:
     it terminates the C string libjq lexes, so libjq compiles only the prefix while the
     scan reasons over the whole text — the compile gate would then answer about a program
     that is never the one analyzed.
@@ -35,9 +38,9 @@ def _assert_no_control_characters(condition_text: str) -> None:
 
 
 def _assert_source_shape(condition_text: str) -> None:
-    """Assert that ``condition_text`` is written in the character subset where this
-    module's lexer and jq's cannot disagree about where a token begins and ends:
-    printable ASCII (space through ``~``), on a single line, with no ``#`` anywhere.
+    """Assert ``condition_text`` uses the character subset where this module's lexer and jq's cannot disagree.
+
+    The subset is printable ASCII (space through ``~``), on a single line, with no ``#`` anywhere.
 
     **PRE-LEXICAL, and must stay that way** — reading raw characters only. A gate
     expressed over tokens would inherit the very lexing assumptions it exists to test.

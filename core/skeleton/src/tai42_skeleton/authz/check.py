@@ -3,7 +3,7 @@
 ``check`` applies the HTTP edge's terms — route→resource verifier, policy/jq fences,
 per-tag LEVEL decision — to the path SYNTHESIZED from the operation's route template
 plus the call's path arguments, in the same fail-closed conjunction. Raises
-:class:`PermissionDenied` on a deny, returns on an allow, never grants on an error.
+:class:`PermissionDeniedError` on a deny, returns on an allow, never grants on an error.
 
 Path arguments are caller-supplied, so the synthesized path is pinned twice before any
 layer reads it: substitution refuses a value that does not fill the segment(s) its
@@ -41,7 +41,7 @@ from tai42_skeleton.access_control.verifier import AccessControlVerifier, is_alw
 from tai42_skeleton.authz.execution_identity import get_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.authz.token_free import TokenFreeConditionError, assert_token_free_evaluable
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.template import TemplateNotFoundError
 
 if TYPE_CHECKING:
@@ -62,8 +62,9 @@ _UNSAFE_SEGMENTS = frozenset({"", ".", ".."})
 
 
 def synthesize_path(op: OperationMetadata, call_arguments: dict[str, object]) -> str:
-    """The concrete resource path for ``op``, substituting the call's path args into the
-    route template — the SAME canonical form the HTTP edge derives from the raw request
+    """Build the concrete resource path for ``op`` by substituting the call's path args into the route template.
+
+    The result is the SAME canonical form the HTTP edge derives from the raw request
     target (each segment decoded once, ``/`` re-encoded to ``%2F`` and ``%`` to ``%25``).
 
     A plain ``{name}`` value that carries ``/`` (a state record ``{key}`` — a thread key
@@ -71,7 +72,7 @@ def synthesize_path(op: OperationMetadata, call_arguments: dict[str, object]) ->
     INSIDE the segment, exactly as the raw-path record doors keep it, never split across
     segments. A ``{name:path}`` value keeps its ``/`` as separators. Either way no value
     may contribute an empty or ``.``/``..`` segment (checked per decoded segment);
-    anything else raises :class:`PermissionDenied`.
+    anything else raises :class:`PermissionDeniedError`.
     """
     if op.route_template is None:
         raise ValueError(f"operation {op.name!r} has no route template; it was never registered as a route")
@@ -79,10 +80,10 @@ def synthesize_path(op: OperationMetadata, call_arguments: dict[str, object]) ->
     def _sub(match: re.Match[str]) -> str:
         param = match.group(1)
         if param not in call_arguments:
-            raise PermissionDenied(f"access denied: missing path argument {param!r} for {op.name!r}")
+            raise PermissionDeniedError(f"access denied: missing path argument {param!r} for {op.name!r}")
         value = str(call_arguments[param])
         if any(segment in _UNSAFE_SEGMENTS for segment in value.split("/")):
-            raise PermissionDenied(f"access denied: path argument {param!r} for {op.name!r} is not a path segment")
+            raise PermissionDeniedError(f"access denied: path argument {param!r} for {op.name!r} is not a path segment")
         if match.group(2) == _MULTI_SEGMENT_CONVERTER:
             # A ``:path`` parameter's ``/`` are genuine separators, not data.
             return value
@@ -94,32 +95,35 @@ def synthesize_path(op: OperationMetadata, call_arguments: dict[str, object]) ->
 
 
 def _own_route(op: OperationMetadata, path: str, method: str) -> RouteMetadata:
-    """The registered route ``op`` dispatches as, asserted to be the one ``path`` resolves
-    to; denies if ``path`` resolves to no route or a different one.
+    """Return the registered route ``op`` dispatches as, asserting ``path`` resolves to it.
+
+    Denies if ``path`` resolves to no route or a different one.
 
     Resolved ONCE here and reused by every term below: re-resolving the caller-influenced
     path per term could let terms disagree on which route is authorized, and an
     unresolvable path reads as "not gated" to the per-tag decision, dropping the fence.
     """
     template = op.route_template
-    assert template is not None  # synthesize_path already refused a template-less operation
+    if template is None:
+        raise AssertionError
     try:
         canonical = canonicalize_path(path)
         # A raise here (an encoded slash resolving to a non-raw route) is a fail-closed
         # deny, not a route: authz would otherwise reason on a form the router never serves.
         meta = resolve_route_meta(canonical, method)
     except MalformedPathError as exc:
-        raise PermissionDenied(f"access denied: {method} {path} is not a well-formed path for {op.name!r}") from exc
+        raise PermissionDeniedError(
+            f"access denied: {method} {path} is not a well-formed path for {op.name!r}"
+        ) from exc
     if meta is None or canonicalize_path(meta.path) != canonicalize_path(template):
-        raise PermissionDenied(
+        raise PermissionDeniedError(
             f"access denied: {method} {path} does not resolve to the route {op.name!r} is registered at"
         )
     return meta
 
 
 def _assert_execution_condition_evaluable(condition: str, *, principal: str, template_id: str | None) -> None:
-    """Deny unless a RENDERED policy condition is evaluable under the reduced claim set a
-    background execution carries.
+    """Deny unless a RENDERED policy condition is evaluable under a background execution's reduced claim set.
 
     Must be asserted on the rendered text about to be enforced, not only at bind time: a
     template edit changes that text with no write to the bound record.
@@ -134,7 +138,9 @@ def _assert_execution_condition_evaluable(condition: str, *, principal: str, tem
             template_id,
             exc,
         )
-        raise PermissionDenied(f"access denied: policy condition for {principal!r} is not evaluable at a fire") from exc
+        raise PermissionDeniedError(
+            f"access denied: policy condition for {principal!r} is not evaluable at a fire"
+        ) from exc
 
 
 async def _render_condition(condition: TemplatedText, *, principal: str) -> str:
@@ -154,7 +160,7 @@ async def _render_condition(condition: TemplatedText, *, principal: str) -> str:
             condition.id,
             exc,
         )
-        raise PermissionDenied(f"access denied: the policy condition of {principal!r} does not render") from exc
+        raise PermissionDeniedError(f"access denied: the policy condition of {principal!r} does not render") from exc
 
 
 _verifier: tuple[AccessControlSettings, AccessControlVerifier] | None = None
@@ -191,7 +197,7 @@ async def check(
 ) -> None:
     """Authorize ``caller_identity`` to dispatch ``operation_metadata``.
 
-    Returns on allow; raises :class:`PermissionDenied` on deny. With access
+    Returns on allow; raises :class:`PermissionDeniedError` on deny. With access
     control disabled everything is allowed (matching the HTTP edge, where no
     middleware runs). The internal principal is allowed; an external caller with
     no resolvable identity is denied fail-closed.
@@ -213,7 +219,7 @@ async def check(
         return
     user_id = caller_identity.user_id
     if user_id is None:
-        raise PermissionDenied("access denied: no caller identity for an external tool dispatch")
+        raise PermissionDeniedError("access denied: no caller identity for an external tool dispatch")
 
     # A background fire rather than a request; keys several terms of the shared tail.
     is_execution_fire = get_execution_identity() is not None
@@ -246,8 +252,7 @@ async def _authorize_pinned_route(
     route: RouteMetadata,
     is_execution_fire: bool,
 ) -> None:
-    """The post-pin authorization tail, over a target already resolved to ``path``,
-    ``method`` and the registered ``route`` it dispatches as.
+    """Run the post-pin authorization tail over a target already resolved to ``path``, ``method`` and ``route``.
 
     The ONE spelling of the HTTP edge's decision downstream of the route pin, shared by
     :func:`check` and
@@ -255,7 +260,7 @@ async def _authorize_pinned_route(
     drift onto a narrower one. ``is_execution_fire`` is the caller's to decide; it keys
     the deleted-principal refusal, the fingerprint re-assert, the live effective-scope
     derivation and the token-free-evaluable re-assert. Returns on an allow; raises
-    :class:`PermissionDenied` on a deny, and never grants on a read fault.
+    :class:`PermissionDeniedError` on a deny, and never grants on a read fault.
     """
     # The store's policy VERSION, read ONCE and threaded through EVERY versioned read
     # below, so no layer serves a pre-bump cached copy while another serves a post-bump
@@ -294,9 +299,11 @@ async def _authorize_pinned_route(
 
 @dataclass
 class _PinnedPrincipal:
-    """The principal resolved for a pinned tool-edge decision: the caller's policy, the
-    fresh live context, the owner's policy (for an owned key, else ``None``), and the
-    caller's verified token claims."""
+    """Principal resolved for a pinned tool-edge decision.
+
+    Holds the caller's policy, the fresh live context, the owner's policy (for an owned
+    key, else ``None``), and the caller's verified token claims.
+    """
 
     policy: AccessPolicy
     context: dict[str, Any]
@@ -305,27 +312,28 @@ class _PinnedPrincipal:
 
 
 async def _read_pinned_policy_version(enforcer: PolicyEnforcer, user_id: str) -> int:
-    """The single versioned read every downstream layer is pinned to; a read fault denies
-    fail-closed."""
+    """Read the single policy version every downstream layer is pinned to; a read fault denies fail-closed."""
     try:
         return await enforcer.current_policy_version()
     except Exception as exc:
         logger.warning("authz: policy version read failed for %s — denying", user_id, exc_info=True)
-        raise PermissionDenied("access denied") from exc
+        raise PermissionDeniedError("access denied") from exc
 
 
 async def _resolve_pinned_resource_ids(
     verifier: AccessControlVerifier, path: str, method: str, version: int
 ) -> list[str]:
-    """Route→resource resolution through the edge's one memoized verifier, plus the
-    "no resource configured" deny. A read fault denies fail-closed."""
+    """Resolve route→resource ids through the edge's one memoized verifier.
+
+    Denies when no resource is configured; a read fault denies fail-closed.
+    """
     try:
         resource_ids = await verifier.resolve_resource_ids(path, policy_version=version)
     except Exception as exc:
         logger.warning("authz: route resolution failed for %s — denying", path, exc_info=True)
-        raise PermissionDenied("access denied") from exc
+        raise PermissionDeniedError("access denied") from exc
     if not resource_ids:
-        raise PermissionDenied(f"access denied: no resource configured for {method} {path}")
+        raise PermissionDeniedError(f"access denied: no resource configured for {method} {path}")
     return resource_ids
 
 
@@ -336,23 +344,26 @@ async def _resolve_principal_policies(
     version: int,
     is_execution_fire: bool,
 ) -> _PinnedPrincipal:
-    """Fetch policy + live context pinned to ``version``, deny a disabled/deleted principal,
-    re-assert a fire's bound fingerprint, then fetch + validate the owner's policy."""
+    """Fetch policy and live context pinned to ``version`` and resolve the owner's policy.
+
+    Denies a disabled/deleted principal, re-asserts a fire's bound fingerprint, then
+    fetches and validates the owner's policy.
+    """
     try:
         policy = await enforcer.get_policy_at(user_id, version)
         context = await enforcer.get_live_context(user_id)
     except Exception as exc:
         logger.warning("authz: policy/context fetch failed for %s — denying", user_id, exc_info=True)
-        raise PermissionDenied("access denied") from exc
+        raise PermissionDeniedError("access denied") from exc
 
     if policy.policy_data.get("disabled") is True:
-        raise PermissionDenied("access denied: principal is disabled")
+        raise PermissionDeniedError("access denied: principal is disabled")
 
     # A fire's identity is built once at fire-open, so only the store can say the key still
     # EXISTS; an empty policy is what a deleted key reads as, denying its next dispatch. A
     # real request cannot reach here deleted — its credential fails to verify.
     if is_execution_fire and policy_is_empty(policy):
-        raise PermissionDenied("access denied: principal has no policy")
+        raise PermissionDeniedError("access denied: principal has no policy")
 
     # The fire's bound per-mint fingerprint is re-asserted against the LIVE policy every
     # dispatch, so a within-fire revoke+remint of the same ``user_id`` is denied here
@@ -363,7 +374,7 @@ async def _resolve_principal_policies(
             # An invariant breach: a gate-on execution identity always carries one — ""
             # for a fingerprint-less ACCOUNT principal (resolved by the ONE equality),
             # None never. Refuse loudly rather than dispatch with no anchor at all.
-            raise PermissionDenied("access denied: bound execution identity carries no key fingerprint")
+            raise PermissionDeniedError("access denied: bound execution identity carries no key fingerprint")
         # Imported at call time: the execution module imports this one.
         from tai42_skeleton.authz.execution import assert_policy_matches_fingerprint
 
@@ -383,11 +394,11 @@ async def _resolve_principal_policies(
             owner_policy = await enforcer.get_policy_at(owner, version)
         except Exception as exc:
             logger.warning("authz: owner policy fetch failed for %s — denying", owner, exc_info=True)
-            raise PermissionDenied("access denied") from exc
+            raise PermissionDeniedError("access denied") from exc
         if owner_policy.policy_data.get("disabled") is True:
-            raise PermissionDenied("access denied: owner is disabled")
+            raise PermissionDeniedError("access denied: owner is disabled")
         if policy_is_empty(owner_policy):
-            raise PermissionDenied("access denied: owner has no policy")
+            raise PermissionDeniedError("access denied: owner has no policy")
 
     return _PinnedPrincipal(policy=policy, context=context, owner_policy=owner_policy, claims=claims)
 
@@ -398,11 +409,14 @@ def _pinned_scope_set(
     owner_policy: AccessPolicy | None,
     is_execution_fire: bool,
 ) -> list[str]:
-    """The scope set. On the request path this CONSUMES the auth backend's already-decided
-    effective scopes (owner-attenuated), never re-deriving the attenuation; it falls back
-    to the caller's own policy scopes only when none was carried. A background fire carries
-    no attenuation decision, so the set is derived here from the policies just read live —
-    narrowing a running key's scopes denies its very next dispatch."""
+    """Return the scope set for the decision.
+
+    On the request path this CONSUMES the auth backend's already-decided effective scopes
+    (owner-attenuated), never re-deriving the attenuation; it falls back to the caller's own
+    policy scopes only when none was carried. A background fire carries no attenuation
+    decision, so the set is derived here from the policies just read live — narrowing a
+    running key's scopes denies its very next dispatch.
+    """
     if is_execution_fire:
         return effective_scopes(policy.scopes, owner_policy.scopes) if owner_policy is not None else policy.scopes
     if caller_identity.effective_scopes is not None:
@@ -411,12 +425,15 @@ def _pinned_scope_set(
 
 
 def _assert_scope_covers(resource_ids: list[str], scopes: list[str], public: str) -> None:
-    """The caller must hold EVERY protected resource id (or ``"*"``); the public id carries
-    no scope requirement. Skipped by the caller when the id set is public-alone."""
+    """Assert the caller holds EVERY protected resource id, or ``"*"``.
+
+    The public id carries no scope requirement. Skipped by the caller when the id set is
+    public-alone.
+    """
     protected_ids = [rid for rid in resource_ids if rid != public]
     has_permission = "*" in scopes or all(rid in scopes for rid in protected_ids)
     if not has_permission:
-        raise PermissionDenied("access denied: insufficient scope")
+        raise PermissionDeniedError("access denied: insufficient scope")
 
 
 async def _enforce_pinned_conditions(
@@ -428,14 +445,16 @@ async def _enforce_pinned_conditions(
     scopes: list[str],
     is_execution_fire: bool,
 ) -> None:
-    """The jq policy fences over the synthesized path, keyed on {"method", "path"}: the
-    key's condition, then — for an owned key — the owner's as a SEPARATE enforce pass over a
-    context built from the OWNER's policy_data + scopes. Two sequential enforce calls are
-    semantically AND; never concatenate the jq strings.
+    """Enforce the jq policy fences over the synthesized path, keyed on {"method", "path"}.
+
+    The key's condition runs first, then — for an owned key — the owner's as a SEPARATE
+    enforce pass over a context built from the OWNER's policy_data + scopes. Two sequential
+    enforce calls are semantically AND; never concatenate the jq strings.
 
     A fire presents no token, so its ``.identity`` carries only the stored owner claim; each
     rendered condition is re-asserted token-free-evaluable before being enforced. An ordinary
-    request carries full claims and skips this."""
+    request carries full claims and skips this.
+    """
     policy = principal.policy
     owner_policy = principal.owner_policy
     claims = principal.claims
@@ -477,14 +496,14 @@ async def _enforce_pinned_conditions(
                 )
             await enforcer.enforce(owner_context.model_dump(), owner_condition, condition_configured=True)
     except AuthenticationError as exc:
-        raise PermissionDenied("access denied: policy condition rejected") from exc
-    except PermissionDenied:
+        raise PermissionDeniedError("access denied: policy condition rejected") from exc
+    except PermissionDeniedError:
         # The render and token-free-evaluable refusals are already final decisions; re-raise
         # so the catch-all below cannot flatten them into a generic denial.
         raise
     except Exception as exc:
         logger.warning("authz: policy enforcement failed for %s — denying", user_id, exc_info=True)
-        raise PermissionDenied("access denied") from exc
+        raise PermissionDeniedError("access denied") from exc
 
 
 async def _enforce_pinned_tag_level(
@@ -496,15 +515,17 @@ async def _enforce_pinned_tag_level(
     user_id: str,
     path: str,
 ) -> None:
-    """The per-tag LEVEL pass over the pinned route — never re-resolved from the
-    caller-influenced path — with the policies already read and keyed on the SAME version,
-    so the grant cache answers from their generation. It fences a fenced/secret operation to
-    an admin. An infra fault fails closed."""
+    """Run the per-tag LEVEL pass over the pinned route, never re-resolved from the caller-influenced path.
+
+    The policies are already read and keyed on the SAME version, so the grant cache answers
+    from their generation. It fences a fenced/secret operation to an admin. An infra fault
+    fails closed.
+    """
     try:
         allowed, cause = await role_level_decision_for_route(policy, owner_policy, route, method, version)
     except Exception as exc:
         logger.warning("authz: per-tag level resolution failed for %s — denying", user_id, exc_info=True)
-        raise PermissionDenied("access denied") from exc
+        raise PermissionDeniedError("access denied") from exc
 
     if not allowed:
         logger.warning(
@@ -514,4 +535,4 @@ async def _enforce_pinned_tag_level(
             path,
             cause.value if cause is not None else "deny",
         )
-        raise PermissionDenied(f"access denied: {method} {path} is not permitted for {user_id!r}")
+        raise PermissionDeniedError(f"access denied: {method} {path} is not permitted for {user_id!r}")

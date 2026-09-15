@@ -18,7 +18,7 @@ import pytest
 
 from tai42_e2e import diagnostics
 from tai42_e2e.booting import allocate_and_build
-from tai42_e2e.harness import InfraUnavailable, connect_infra
+from tai42_e2e.harness import InfraUnavailableError, connect_infra
 from tai42_e2e.manifests import build_core_stack
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
@@ -110,7 +110,7 @@ def infra(harness_settings: HarnessSettings) -> Iterator[Infra]:
     failure), create the DDL-applied template DB, and expose the admin clients."""
     try:
         infra = connect_infra(harness_settings)
-    except InfraUnavailable as exc:
+    except InfraUnavailableError as exc:
         pytest.exit(str(exc), returncode=1)
     try:
         yield infra

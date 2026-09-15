@@ -1,3 +1,5 @@
+"""Checkpoint saver creation with a serialization guard around every saver."""
+
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -43,9 +45,10 @@ def _raise_serialization_error(obj: Any, cause: ormsgpack.MsgpackEncodeError) ->
 
 
 class _GuardedSerializer:
-    """Wraps a saver's serializer so a ``MsgpackEncodeError`` becomes a
-    :class:`CheckpointSerializationError` naming the offending path. All other
-    serializer methods delegate unchanged."""
+    """Wrap a saver's serializer so a ``MsgpackEncodeError`` becomes a :class:`CheckpointSerializationError`.
+
+    The raised error names the offending path. All other serializer methods delegate unchanged.
+    """
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
@@ -75,9 +78,11 @@ class _GuardedSerializer:
 
 
 def _guard_saver_serialization(saver: BaseCheckpointSaver) -> BaseCheckpointSaver:
-    """Wrap ``saver.serde`` in the serialization guard (idempotent). Every saver
-    the registry hands to a graph flows through here, so no checkpoint write can
-    reach the serializer unguarded."""
+    """Wrap ``saver.serde`` in the serialization guard (idempotent).
+
+    Every saver the registry hands to a graph flows through here, so no checkpoint write can
+    reach the serializer unguarded.
+    """
     if not isinstance(saver.serde, _GuardedSerializer):
         saver.serde = _GuardedSerializer(saver.serde)
     return saver
@@ -233,8 +238,7 @@ async def create_checkpoint_resource(
     provider: str,
     conn_string: str | None = None,
 ) -> tuple[Resource, CleanupFn]:
-    """
-    Creates a long-lived connection resource for checkpoints.
+    """Creates a long-lived connection resource for checkpoints.
 
     A ``None`` conn string falls back per provider to the base connection
     namespace: ``redis`` to the base Redis URL (``REDIS_URL`` /
@@ -260,6 +264,7 @@ async def create_checkpoint_resource(
 
 
 def get_saver_from_resource(provider: str, resource: Resource) -> BaseCheckpointSaver:
+    """Build the checkpoint saver for ``provider`` from an already-open ``resource``, serialization-guarded."""
     # Every branch returns through the serialization guard: this is the single
     # choke point that yields the saver a graph checkpoints through, so no saver
     # can serialize a checkpoint value unguarded.

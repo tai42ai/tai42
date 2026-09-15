@@ -1,5 +1,4 @@
-"""Scheduling operations — a thin skin over the run-tool seam, reporting honestly when
-no scheduling backend is installed.
+"""Scheduling operations — a thin skin over the run-tool seam, reporting honestly when no backend is installed.
 
 Availability is detected at CALL time, never probed at import: list/create/delete
 pre-check that an installed backend registers the marker tools (``_MARKER_TOOLS``) and
@@ -14,10 +13,10 @@ Every door dispatches a NAMED inner tool and wraps that dispatch identically:
   itself asked for is that tool's absence — the door's own verdict (501 for
   list/delete/server-datetime, 404 for create);
 * an ``UnknownToolError`` naming a DIFFERENT tool escaped the running tool's own body —
-  a structured :class:`OperationFailed` (500);
-* a typed :class:`OperationError` (most sharply ``PermissionDenied``) passes through as
+  a structured :class:`OperationFailedError` (500);
+* a typed :class:`OperationError` (most sharply ``PermissionDeniedError``) passes through as
   the answer it already is;
-* any other exception becomes a structured ``OperationFailed`` (500), never an opaque
+* any other exception becomes a structured ``OperationFailedError`` (500), never an opaque
   "Internal Server Error".
 
 Only list's and delete's absent-marker-tool branch logs (``logger.warning``): the
@@ -65,8 +64,8 @@ from tai42_skeleton.operations import (
     NotFoundError,
     NotSupportedError,
     OperationError,
-    OperationFailed,
-    PermissionDenied,
+    OperationFailedError,
+    PermissionDeniedError,
     UnavailableError,
     operation,
 )
@@ -99,10 +98,12 @@ _CRONTAB_FIELD_KEYS = frozenset({"minute", "hour", "day_of_month", "month_of_yea
 
 
 def _derive_schedule_name(tool_name: str, tool_kwargs: dict[str, Any], backend_schedule: Any) -> str:
-    """A deterministic name when the caller gives none: the tool plus a fingerprint of the
-    full schedule spec (tool, its arguments, the cadence). An identical re-add resolves to
+    """A deterministic name when the caller gives none: the tool plus a fingerprint of the full schedule spec.
+
+    The spec fingerprint covers the tool, its arguments, and the cadence. An identical re-add resolves to
     the same name and updates that schedule in place; any change of arguments or cadence
-    yields a distinct name, so repeated adds never clobber a different schedule."""
+    yields a distinct name, so repeated adds never clobber a different schedule.
+    """
     spec = json.dumps(
         {"tool_name": tool_name, "tool_kwargs": tool_kwargs, "backend_schedule": backend_schedule},
         sort_keys=True,
@@ -123,7 +124,8 @@ async def _resolve_schedule_dispatch(
     or the structured crontab fields onto the ``<tool_name>_schedule_task`` branch's
     ``backend_schedule``; an empty ``schedule_kwargs`` dispatches the named tool once. Any
     other key on a base tool is a malformed request, and cadence keys never reach the base
-    tool's arguments (the silent run-once path)."""
+    tool's arguments (the silent run-once path).
+    """
     if tool_name.endswith(_SCHEDULE_BRANCH_SUFFIX) or _EXPERT_SCHEDULE_KEY in schedule_kwargs:
         return tool_name, {**tool_kwargs, **schedule_kwargs}
 
@@ -177,14 +179,15 @@ async def _resolve_schedule_dispatch(
 
 
 class ScheduleCreate(BaseModel):
-    """Create a schedule that periodically runs ``tool_name`` with ``tool_kwargs``
-    on the cadence in ``schedule_kwargs``.
+    """Create a schedule that periodically runs ``tool_name`` on the cadence in ``schedule_kwargs``.
 
+    ``tool_kwargs`` are the arguments each fire passes to the tool.
     ``state_binding`` is the OPTIONAL door-layer binding the recurring fire applies. Unlike
     the per-schedule ``subject`` (a free key inside ``tool_kwargs`` that legitimately reaches
     the base tool), it is a top-level field: it is injected into the dispatched arguments as
     a reserved key the kit's ``schedule_task`` wrapper stamps under a backend arg and pops
-    before the base tool runs, so the tool never sees it."""
+    before the base tool runs, so the tool never sees it.
+    """
 
     tool_name: str = Field(min_length=1)
     tool_kwargs: dict[str, Any] = {}
@@ -201,10 +204,11 @@ async def _scheduling_backend_present() -> bool:
 @operation(
     summary="List schedules",
     tags=["schedules"],
-    errors=[NotSupportedError, PermissionDenied, UnavailableError, OperationFailed],
+    errors=[NotSupportedError, PermissionDeniedError, UnavailableError, OperationFailedError],
     response_model=OpaqueJson,
 )
 async def list_schedules() -> Any:
+    """List the installed backend's schedules; raises 501 when no scheduling backend is present."""
     if not await _scheduling_backend_present():
         raise NotSupportedError(_NO_BACKEND_MESSAGE)
     try:
@@ -218,12 +222,12 @@ async def list_schedules() -> Any:
             )
             raise NotSupportedError(_NO_BACKEND_MESSAGE) from exc
         logger.exception("list-schedules %r raised unknown-tool %r during execution", _LIST_TOOL, exc.tool_name)
-        raise OperationFailed(f"schedule listing failed (unknown tool {exc.tool_name})") from exc
+        raise OperationFailedError(f"schedule listing failed (unknown tool {exc.tool_name})") from exc
     except OperationError:
         raise
     except Exception as exc:
         logger.exception("list-schedules %r raised during execution", _LIST_TOOL)
-        raise OperationFailed(f"schedule listing failed ({type(exc).__name__})") from exc
+        raise OperationFailedError(f"schedule listing failed ({type(exc).__name__})") from exc
 
 
 async def export_schedules_raw() -> Any:
@@ -236,7 +240,8 @@ async def export_schedules_raw() -> Any:
     scheduling backend) raises :class:`NotSupportedError`. An absent ``backend_export_schedules``
     while the marker tools ARE present propagates its ``UnknownToolError`` unchanged, so
     the referee gates the rename loudly rather than treating an unreadable target set as
-    "no holders"; every other failure wraps as the discipline in ``list_schedules``."""
+    "no holders"; every other failure wraps as the discipline in ``list_schedules``.
+    """
     if not await _scheduling_backend_present():
         raise NotSupportedError(_NO_BACKEND_MESSAGE)
     try:
@@ -248,42 +253,43 @@ async def export_schedules_raw() -> Any:
         if exc.tool_name == _EXPORT_TOOL:
             raise
         logger.exception("export-schedules %r raised unknown-tool %r during execution", _EXPORT_TOOL, exc.tool_name)
-        raise OperationFailed(f"schedule export failed (unknown tool {exc.tool_name})") from exc
+        raise OperationFailedError(f"schedule export failed (unknown tool {exc.tool_name})") from exc
     except OperationError:
         raise
     except Exception as exc:
         logger.exception("export-schedules %r raised during execution", _EXPORT_TOOL)
-        raise OperationFailed(f"schedule export failed ({type(exc).__name__})") from exc
+        raise OperationFailedError(f"schedule export failed ({type(exc).__name__})") from exc
 
 
 @operation(
     summary="Get the server date and time",
     tags=["schedules"],
-    errors=[NotSupportedError, PermissionDenied, UnavailableError, OperationFailed],
+    errors=[NotSupportedError, PermissionDeniedError, UnavailableError, OperationFailedError],
     response_model=OpaqueJson,
 )
 async def server_datetime() -> Any:
+    """Return the server's current date and time; raises 501 when the time tool is not available."""
     try:
         return await tai42_app.tools.run_tool(_TIME_TOOL, {})
     except UnknownToolError as exc:
         if exc.tool_name == _TIME_TOOL:
             raise NotSupportedError(f"{_TIME_TOOL} tool is not available") from exc
         logger.exception("server-datetime %r raised unknown-tool %r during execution", _TIME_TOOL, exc.tool_name)
-        raise OperationFailed(f"server-datetime lookup failed (unknown tool {exc.tool_name})") from exc
+        raise OperationFailedError(f"server-datetime lookup failed (unknown tool {exc.tool_name})") from exc
     except OperationError:
         raise
     except Exception as exc:
         logger.exception("server-datetime %r raised during execution", _TIME_TOOL)
-        raise OperationFailed(f"server-datetime lookup failed ({type(exc).__name__})") from exc
+        raise OperationFailedError(f"server-datetime lookup failed ({type(exc).__name__})") from exc
 
 
 def _validate_schedule_subject(tool_kwargs: dict[str, Any]) -> None:
-    """A schedule that carries a ``subject`` in its tool kwargs must carry a well-formed
-    full :class:`~tai42_contract.states.StateSubject` — the value the fire re-establishes
-    as its ``schedule``-door state context (the fire is anonymous, so the subject is
-    stamped at creation, where it is known). A malformed one is refused HERE, loudly, so
-    a job that could never resolve its subject is never persisted. Absent leaves the fire
-    with no state context."""
+    """A ``subject`` in a schedule's tool kwargs must be a well-formed :class:`~tai42_contract.states.StateSubject`.
+
+    That value is what the fire re-establishes as its ``schedule``-door state context (the fire is anonymous, so the
+    subject is stamped at creation, where it is known). A malformed one is refused HERE, loudly, so
+    a job that could never resolve its subject is never persisted. Absent leaves the fire with no state context.
+    """
     subject = tool_kwargs.get("subject")
     if subject is None:
         return
@@ -303,9 +309,9 @@ def _validate_schedule_subject(tool_kwargs: dict[str, Any]) -> None:
         BadRequestError,
         NotFoundError,
         NotSupportedError,
-        PermissionDenied,
+        PermissionDeniedError,
         UnavailableError,
-        OperationFailed,
+        OperationFailedError,
     ],
     request_model=ScheduleCreate,
     response_model=OpaqueJson,
@@ -321,7 +327,8 @@ async def create_schedule(
     The caller supplies ``tool_name``, so reaching this is arbitrary-tool-execution
     privilege (the recurring firing runs the named tool with real side effects). As a
     "run any tool by name" door it is a tier-1 meta-executor, never projected to the MCP
-    surface — matching ``run_tool`` and ``submit_run``."""
+    surface — matching ``run_tool`` and ``submit_run``.
+    """
     if not await _scheduling_backend_present():
         raise NotSupportedError(_NO_BACKEND_MESSAGE)
     _validate_schedule_subject(tool_kwargs)
@@ -359,12 +366,12 @@ async def create_schedule(
         if exc.tool_name == dispatch_name:
             raise NotFoundError(f"unknown tool: {dispatch_name}") from exc
         logger.exception("create-schedule %r raised unknown-tool %r during execution", dispatch_name, exc.tool_name)
-        raise OperationFailed(f"schedule creation failed (unknown tool {exc.tool_name})") from exc
+        raise OperationFailedError(f"schedule creation failed (unknown tool {exc.tool_name})") from exc
     except OperationError:
         raise
     except Exception as exc:
         logger.exception("create-schedule %r raised during execution", dispatch_name)
-        raise OperationFailed(f"schedule creation failed ({type(exc).__name__})") from exc
+        raise OperationFailedError(f"schedule creation failed ({type(exc).__name__})") from exc
     finally:
         if binding_token is not None:
             reset_current_tool_invocation(binding_token)
@@ -374,10 +381,11 @@ async def create_schedule(
     summary="Delete a schedule",
     tags=["schedules"],
     reload_gated=True,
-    errors=[NotSupportedError, PermissionDenied, UnavailableError, OperationFailed],
+    errors=[NotSupportedError, PermissionDeniedError, UnavailableError, OperationFailedError],
     response_model=OpaqueJson,
 )
 async def delete_schedule(schedule_name: str) -> Any:
+    """Delete the schedule named ``schedule_name``; raises 501 when no scheduling backend is present."""
     if not await _scheduling_backend_present():
         raise NotSupportedError(_NO_BACKEND_MESSAGE)
     try:
@@ -390,9 +398,9 @@ async def delete_schedule(schedule_name: str) -> Any:
             )
             raise NotSupportedError(_NO_BACKEND_MESSAGE) from exc
         logger.exception("delete-schedule %r raised unknown-tool %r during execution", _DELETE_TOOL, exc.tool_name)
-        raise OperationFailed(f"schedule deletion failed (unknown tool {exc.tool_name})") from exc
+        raise OperationFailedError(f"schedule deletion failed (unknown tool {exc.tool_name})") from exc
     except OperationError:
         raise
     except Exception as exc:
         logger.exception("delete-schedule %r raised during execution", _DELETE_TOOL)
-        raise OperationFailed(f"schedule deletion failed ({type(exc).__name__})") from exc
+        raise OperationFailedError(f"schedule deletion failed ({type(exc).__name__})") from exc

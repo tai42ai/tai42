@@ -24,7 +24,7 @@ from tai42_skeleton.authz import execution as execution_module
 from tai42_skeleton.authz.execution_identity import get_execution_identity
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 from tai42_skeleton.hooks.settings import HooksSettings
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from ..access_control.conftest import FakeAccessControlPg, make_pg_ctx
 from ..access_control.conftest import FakeRedis as AcFakeRedis
@@ -70,7 +70,7 @@ async def test_a_keyless_record_that_reaches_the_fire_is_refused_and_runs_nothin
     # is no fallback to the server's own authority.
     app = make_app()
     keyless = HookParams.model_construct(name="h", topic="t", tool="noop", execution_key="", tool_kwargs={})
-    with pytest.raises(PermissionDenied, match="binds no execution key"):
+    with pytest.raises(PermissionDeniedError, match="binds no execution key"):
         await InMemoryHooksManager._run_hook(keyless, {})
     assert app.tools.runs == []
 

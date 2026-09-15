@@ -25,7 +25,7 @@ _TEMPLATE_ROOT = "/tai-template-root"
 
 
 def safe_template_path(path: object) -> str:
-    """Reject a template key that escapes the template root.
+    r"""Reject a template key that escapes the template root.
 
     LEXICAL containment: the key is resolved with ``os.path.realpath`` under the
     virtual ``_TEMPLATE_ROOT`` anchor (which is not on disk), so realpath collapses

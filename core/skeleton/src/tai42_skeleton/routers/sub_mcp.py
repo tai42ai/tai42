@@ -46,10 +46,11 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 
 
 async def _extract_registration(request: Request) -> dict:
-    """Parse + structurally validate the registration body into the operation's flat
-    ``slug``/``tools``/``transport`` arguments, rejecting a malformed body before the
-    operation runs (the adapter's plain parse would yield 422; this preserves the
-    explicit 400 surface)."""
+    """Parse + structurally validate the registration body into the operation's flat arguments.
+
+    Yields the ``slug``/``tools``/``transport`` arguments, rejecting a malformed body before the operation
+    runs (the adapter's plain parse would yield 422; this preserves the explicit 400 surface).
+    """
     try:
         body = await request.json()
     except ValueError as exc:

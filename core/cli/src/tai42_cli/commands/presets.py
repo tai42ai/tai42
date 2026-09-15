@@ -155,8 +155,9 @@ def save_version(
     ] = None,
     extensions: Annotated[str | None, typer.Option("--extensions", help=_EXTENSIONS_HELP_CLEARABLE)] = None,
 ) -> None:
-    """Save a new preset version. Omitted fields carry forward; ``--extensions '[]'``
-    sends the explicit clear sentinel.
+    """Save a new preset version.
+
+    Omitted fields carry forward; ``--extensions '[]'`` sends the explicit clear sentinel.
 
     Example: ``tai presets save-version my_preset --kwargs '{"n":2}'``
     """
@@ -238,8 +239,9 @@ def validate_preset(
     ] = None,
     extensions: Annotated[str | None, typer.Option("--extensions", help=_EXTENSIONS_HELP)] = None,
 ) -> None:
-    """Dry-run a preset draft — report whether it would be accepted as a create (a
-    new name) or a new version (an existing name), without writing anything.
+    """Dry-run a preset draft without writing anything.
+
+    Reports whether it would be accepted as a create (a new name) or a new version (an existing name).
 
     Example: ``tai presets validate greet --base-tool echo --description 'Greet' --kwargs '{"prefix":"hi"}'``
     """
@@ -267,8 +269,9 @@ def set_version_tags(
     version: Annotated[int, typer.Argument(help="Version number.")],
     tags: Annotated[list[str] | None, typer.Argument(help="The tags to set; none clears them to [].")] = None,
 ) -> None:
-    """Replace a preset version's tags (labels only — no rebind). Zero tag arguments
-    clears them to ``[]``.
+    """Replace a preset version's tags (labels only — no rebind).
+
+    Zero tag arguments clears them to ``[]``.
 
     Example: ``tai presets set-version-tags my_preset 2 stable reviewed``
     """

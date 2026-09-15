@@ -97,8 +97,7 @@ a drift guard on the host side keeps the two in step."""
 
 
 class BackendRuntime(ABC):
-    """ONE launchable runtime of an execution backend, named by its launch
-    subcommand.
+    """ONE launchable runtime of an execution backend, named by its launch subcommand.
 
     The vendor binding answers only "how MY engine starts, drains, and
     recycles"; readiness gating, signal wiring, drain-on-cancellation and pool
@@ -131,15 +130,21 @@ class BackendRuntime(ABC):
     @classmethod
     @abstractmethod
     def from_args(cls, args: Sequence[str]) -> Self:
-        """Parse this runtime's own options (strictly — an unknown option aborts
-        the launch loudly) and return the runtime. Parses only; starts nothing."""
+        """Parse this runtime's own options and return the runtime.
+
+        Strict — an unknown option aborts the launch loudly. Parses only; starts
+        nothing.
+        """
 
     async def build(self) -> None:
-        """Construct engine objects. Runs BEFORE the readiness gate — building is
-        not consuming — and before any run body. Default: nothing to build.
+        """Construct engine objects.
+
+        Runs BEFORE the readiness gate — building is not consuming — and before any
+        run body. Default: nothing to build.
 
         Concrete rather than abstract: a runtime whose engine object is built by
-        ``from_args`` alone must not be forced to declare an empty override."""
+        ``from_args`` alone must not be forced to declare an empty override.
+        """
         return
 
     # -- running -------------------------------------------------------------
@@ -147,20 +152,21 @@ class BackendRuntime(ABC):
     async def run_on_loop(self) -> None:
         """Consume until stopped, driven by the serving loop.
 
-        REQUIRED iff ``mode`` is ``on_loop``."""
+        REQUIRED iff ``mode`` is ``on_loop``.
+        """
         raise NotImplementedError(f"{type(self).__name__} declares mode=on_loop but implements no run_on_loop")
 
     def run_blocking(self) -> None:
         """Consume until stopped, blocking the calling thread.
 
-        REQUIRED iff ``mode`` is ``worker_thread`` or ``inline``."""
+        REQUIRED iff ``mode`` is ``worker_thread`` or ``inline``.
+        """
         raise NotImplementedError(f"{type(self).__name__} declares a blocking mode but implements no run_blocking")
 
     # -- stopping ------------------------------------------------------------
 
     def request_drain(self) -> None:
-        """Stop accepting new work, let in-flight work finish, and make the run
-        body RETURN once drained.
+        """Stop accepting new work, let in-flight work finish, and make the run body RETURN once drained.
 
         Called from the loop thread — while a ``worker_thread`` body runs on
         another thread — so it MUST NOT block and MUST NOT touch
@@ -171,23 +177,25 @@ class BackendRuntime(ABC):
         cancellation path. Escalation belongs to :meth:`request_terminate`,
         never to a second ``request_drain``.
 
-        REQUIRED iff ``consumes_work``."""
+        REQUIRED iff ``consumes_work``.
+        """
         raise NotImplementedError(f"{type(self).__name__} consumes work but implements no request_drain")
 
     def request_terminate(self) -> None:
         """Cold stop: abandon in-flight work now. Called on a repeated signal.
 
         Default: report that this runtime declares no cold stop and let the warm
-        drain continue — the supervisor's kill is the backstop."""
+        drain continue — the supervisor's kill is the backstop.
+        """
         logger.warning("%s declares no cold stop; the warm drain continues", type(self).__name__)
 
     # -- capability-conditional ----------------------------------------------
 
     async def turn_over_pool(self, *, reason: str, budget: float) -> None:
-        """Replace every worker that predates the mutation named by ``reason``,
-        and CONFIRM it: on return, no pre-mutation worker may still serve work.
+        """Replace every worker that predates the mutation named by ``reason``, and CONFIRM it.
 
-        Raise loudly if it cannot be confirmed within ``budget`` seconds — the
+        On return, no pre-mutation worker may still serve work. Raise loudly if it
+        cannot be confirmed within ``budget`` seconds — the
         caller is inside a fleet-op apply, and a raise makes that op report
         ``failed`` rather than a false ``applied``.
 
@@ -198,14 +206,16 @@ class BackendRuntime(ABC):
         the live pool turns out not to hold a snapshot: the workers that do not
         exist cannot be stale, and the next ones are built after the mutation.
 
-        REQUIRED iff ``pool_turnover_required``."""
+        REQUIRED iff ``pool_turnover_required``.
+        """
         raise NotImplementedError(f"{type(self).__name__} requires pool turnover but implements no turn_over_pool")
 
     # -- teardown ------------------------------------------------------------
 
     async def aclose(self) -> None:
-        """Release engine resources once the run body is done with them. Always
-        awaited, on every exit path. Default: nothing to release.
+        """Release engine resources once the run body is done with them.
+
+        Always awaited, on every exit path. Default: nothing to release.
 
         The run body has normally LEFT by then, but there is one exception the
         binding has to survive: a blocking body cannot be cancelled, so a
@@ -214,5 +224,6 @@ class BackendRuntime(ABC):
         be released without assuming the body let go.
 
         Concrete rather than abstract: a runtime that owns no resource must not
-        be forced to declare an empty override."""
+        be forced to declare an empty override.
+        """
         return

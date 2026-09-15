@@ -35,9 +35,11 @@ def _empty_report() -> _SectionReport:
 
 
 async def export_versioned_documents() -> dict[str, Any]:
-    """Export every document row and every version row verbatim; each keeps its
-    synthetic ``id`` (so the version-to-document link survives) and ``created_at``
-    is serialized. The ``body`` JSONB is carried as-is."""
+    """Export every document row and every version row verbatim.
+
+    Each keeps its synthetic ``id`` (so the version-to-document link survives) and ``created_at`` is
+    serialized. The ``body`` JSONB is carried as-is.
+    """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,

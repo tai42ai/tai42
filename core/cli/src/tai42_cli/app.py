@@ -86,9 +86,11 @@ class TaiCLIGroup(TyperGroup):
     the native command modules) raise standard-``click`` exceptions, and remote
     commands raise :class:`ApiError`. This override translates all of those into
     Typer's own control-flow exceptions so they render cleanly — a server/usage
-    message on stderr with a non-zero exit — instead of a traceback."""
+    message on stderr with a non-zero exit — instead of a traceback.
+    """
 
     def invoke(self, ctx: Any) -> Any:
+        """Run the command, translating click and API exceptions into Typer's own."""
         try:
             return super().invoke(ctx)
         except ApiError as exc:
@@ -109,7 +111,8 @@ def _apply_json_flag(ctx: click.Context, _param: click.Parameter, value: bool | 
     The root callback owns the flag-first form (``tai --json <cmd>``); this lets the
     same flag ride AFTER the subcommand (``tai <cmd> --json``). ``value`` is ``None``
     unless the flag was actually passed, so the root callback's setting stands when
-    the trailing flag is absent."""
+    the trailing flag is absent.
+    """
     if value is not None and isinstance(ctx.obj, AppContext):
         ctx.obj.json_output = value
     return value
@@ -120,7 +123,8 @@ def _json_flag_option() -> TyperOption:
 
     Built as a :class:`TyperOption` so its parse handling matches the Typer context
     the compiled commands run under (a raw ``click.Option`` reads a context attribute
-    Typer's vendored context does not carry)."""
+    Typer's vendored context does not carry).
+    """
     return TyperOption(
         param_decls=["--json/--no-json"],
         is_flag=True,
@@ -143,7 +147,8 @@ def inject_json_flag(command: click.Command) -> None:
     A group is detected by its ``commands`` mapping rather than by ``isinstance`` —
     Typer's compiled sub-groups are its own vendored ``Group`` type, not a
     :class:`click.Group` subclass. Extensions apply this to their own Typer-backed
-    leaves after mounting them."""
+    leaves after mounting them.
+    """
     subcommands = getattr(command, "commands", None)
     if subcommands is not None:
         for sub in subcommands.values():
@@ -158,7 +163,8 @@ def mount_launcher(group: click.Group, launcher: click.Command, name: str) -> No
     The command's own ``name`` is the canonical subcommand name now, so it is set
     here (the rich help lists commands by that name, not by the registration key).
     Extensions use this to mount their raw click launcher commands onto the root
-    group."""
+    group.
+    """
     launcher.name = name
     group.add_command(launcher)
 
@@ -202,6 +208,15 @@ def main(
         help="Read-timeout window in seconds. Resolved: this flag -> TAI_CLI_TIMEOUT_SECONDS -> default.",
     ),
 ) -> None:
+    """Resolve shared CLI options and bootstrap config for every subcommand.
+
+    Args:
+        ctx: Typer context carrying the resolved settings to subcommands.
+        json_output: Emit raw JSON instead of human-readable tables.
+        server: Server base URL override.
+        api_key_stdin: Read the API key as one line from stdin.
+        timeout: Read-timeout window in seconds.
+    """
     # Bootstrap a local ``.env`` once for the whole CLI so every subcommand — the
     # remote client and any contributed launcher alike — sees it. ``TAI_CONFIG_MODE``
     # is read straight from the environment (default ``file``) and validated here, so
@@ -277,7 +292,8 @@ def _discover_extensions(root: click.Group) -> None:
     Each entry point loads to a ``register(group: click.Group) -> None`` callable and
     is invoked with the compiled root group. Entry points are processed in sorted
     entry-point-name order so contributed help order is deterministic. A failing load
-    or a failing ``register`` propagates — a broken contribution is never swallowed."""
+    or a failing ``register`` propagates — a broken contribution is never swallowed.
+    """
     discovered = sorted(entry_points(group=_EXTENSION_GROUP), key=lambda ep: ep.name)
     for ep in discovered:
         register = ep.load()
@@ -285,8 +301,11 @@ def _discover_extensions(root: click.Group) -> None:
 
 
 def _build_app() -> click.Group:
-    """Compile the Typer app to a click group, give every native leaf the trailing
-    ``--json`` form, then let installed extensions contribute their commands."""
+    """Compile the Typer app to a click group and wire in every command form.
+
+    Gives every native leaf the trailing ``--json`` form, then lets installed
+    extensions contribute their commands.
+    """
     command = cast(click.Group, get_command(cli_app))
     # Inject the trailing ``--json`` form onto the native tree BEFORE extensions run;
     # each extension applies :func:`inject_json_flag` to its own Typer-backed leaves.

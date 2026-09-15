@@ -19,11 +19,12 @@ class _RestoreStore(_StoreBase):
     async def restore_records(
         self, state: str, rows: list[dict[str, Any]], *, origin: CompletedOrigin, validate_doc: Any
     ) -> None:
-        """Restore record rows for ``state`` under the completed origin, validating each
-        document against the effective schema, in ONE txn — the backup section's own
-        record-restore path. Each row carries its four subject columns plus ``data``. A
-        record already present with equal data is a no-op; a differing one is overwritten.
-        Records one write per restored row."""
+        """Restore record rows for ``state`` under the completed origin, validating each document, in ONE txn.
+
+        The backup section's own record-restore path. Each row carries its four subject columns
+        plus ``data``. A record already present with equal data is a no-op; a differing one is
+        overwritten. Records one write per restored row.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -52,9 +53,11 @@ class _RestoreStore(_StoreBase):
                 await self._insert_write(cur, state, tk, tn, kind, key, seq, origin, [[]], None)
 
     async def restore_aliases(self, state: str, rows: list[dict[str, Any]]) -> None:
-        """Restore subject-alias rows for ``state`` verbatim, in ONE txn (identity, not a
-        write — no ledger row). Each row carries the target, the alias ``(kind, key)``,
-        the canonical ``(kind, key)`` and the ``mode``."""
+        """Restore subject-alias rows for ``state`` verbatim, in ONE txn (identity, not a write — no ledger row).
+
+        Each row carries the target, the alias ``(kind, key)``, the canonical ``(kind, key)``
+        and the ``mode``.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,

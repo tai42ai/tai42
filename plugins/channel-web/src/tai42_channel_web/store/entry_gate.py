@@ -1,5 +1,4 @@
-"""The route entry gate: the explicit gate flag, hashed multi-use entry codes, and
-the per-client guess throttle."""
+"""The route entry gate: the explicit gate flag, hashed multi-use entry codes, and the per-client throttle."""
 
 from __future__ import annotations
 
@@ -23,8 +22,10 @@ _ENTRY_CODE_BYTES = 16
 
 @dataclass(frozen=True)
 class EntryCode:
-    """One minted entry code as the management door lists it. ``code_id`` is the
-    sha256 hex the code is stored under — the raw code is never at rest."""
+    """One minted entry code as the management door lists it.
+
+    ``code_id`` is the sha256 hex the code is stored under — the raw code is never at rest.
+    """
 
     code_id: str
     label: str | None
@@ -49,17 +50,17 @@ def _code_id(raw_code: str) -> str:
 
 
 def _glob_escape(segment: str) -> str:
-    """Backslash-escape the five Redis glob metacharacters so a SCAN ``MATCH`` treats
-    the identity segment literally — ``_clean_identity`` admits them, and an unescaped
-    one would match a sibling identity's keys."""
+    """Backslash-escape the five Redis glob metacharacters so a SCAN ``MATCH`` treats the segment literally.
+
+    ``_clean_identity`` admits them, and an unescaped one would match a sibling identity's keys.
+    """
     for ch in ("\\", "*", "?", "[", "]"):
         segment = segment.replace(ch, "\\" + ch)
     return segment
 
 
 def _entry_code_ttl(expires_at: datetime) -> int:
-    """Whole seconds until ``expires_at``, refusing a past deadline — a code that is
-    already dead must never be minted."""
+    """Whole seconds until ``expires_at``, refusing a past deadline — an already-dead code is never minted."""
     seconds = math.ceil((expires_at.astimezone(UTC) - datetime.now(UTC)).total_seconds())
     if seconds <= 0:
         raise ValueError(f"entry code expires_at {expires_at.isoformat()} is not in the future")
@@ -72,8 +73,10 @@ def _decode_entry_code(code_id: str, raw: str | bytes) -> EntryCode:
 
 
 async def is_gate_enabled(identity: str) -> bool:
-    """Whether ``identity``'s route is gated. The flag is EXPLICIT: an expired or
-    revoked code never silently reopens a route."""
+    """Whether ``identity``'s route is gated.
+
+    The flag is EXPLICIT: an expired or revoked code never silently reopens a route.
+    """
     async with _redis() as redis:
         return await redis.get(_entry_gate_key(identity)) == _GATE_ON
 
@@ -89,8 +92,10 @@ async def set_gate(identity: str, enabled: bool) -> None:
 
 async def mint_entry_code(identity: str, label: str | None, expires_at: datetime | None) -> tuple[str, str]:
     """Mint a multi-use entry code for a gated route and return ``(raw_code, code_id)``.
-    Only the hash is stored; the Redis TTL is set iff ``expires_at`` (expiry IS the
-    TTL). A past ``expires_at`` raises ``ValueError`` — a dead code is never minted."""
+
+    Only the hash is stored; the Redis TTL is set iff ``expires_at`` (expiry IS the TTL). A past
+    ``expires_at`` raises ``ValueError`` — a dead code is never minted.
+    """
     ttl = _entry_code_ttl(expires_at) if expires_at is not None else None
     raw_code = secrets.token_urlsafe(_ENTRY_CODE_BYTES)
     code_id = _code_id(raw_code)
@@ -116,9 +121,11 @@ async def get_entry_code(identity: str, code_id: str) -> EntryCode | None:
 
 
 async def list_entry_codes(identity: str) -> list[EntryCode]:
-    """Every live code for a route. SCAN over the identity prefix with the identity
-    glob-escaped, so the ``MATCH`` cannot reach a sibling identity's keys; a code whose
-    TTL lapsed between the SCAN and the GET is simply skipped."""
+    """Every live code for a route.
+
+    SCAN over the identity prefix with the identity glob-escaped, so the ``MATCH`` cannot reach a sibling
+    identity's keys; a code whose TTL lapsed between the SCAN and the GET is simply skipped.
+    """
     prefix = f"channel:web:entry_code:{identity}:"
     pattern = f"channel:web:entry_code:{_glob_escape(identity)}:*"
     codes: list[EntryCode] = []
@@ -139,17 +146,20 @@ async def revoke_entry_code(identity: str, code_id: str) -> bool:
 
 
 async def check_entry_code(identity: str, raw_code: str) -> bool:
-    """Whether the presented code is live for ``identity``. Lookup is BY HASH, so a
-    constant-time compare buys nothing: no secret is byte-compared, and presence of the
-    key is liveness (expiry is the TTL)."""
+    """Whether the presented code is live for ``identity``.
+
+    Lookup is BY HASH, so a constant-time compare buys nothing: no secret is byte-compared, and presence
+    of the key is liveness (expiry is the TTL).
+    """
     async with _redis() as redis:
         return await redis.get(_entry_code_key(identity, _code_id(raw_code))) is not None
 
 
 async def entry_attempt_allowed(client_bucket: str) -> bool:
-    """Count one entry attempt against ``client_bucket``; ``False`` once the window's
-    cap is spent. INCR, then EX the window on the first hit — a Redis failure raises,
-    never fails open."""
+    """Count one entry attempt against ``client_bucket``; ``False`` once the window's cap is spent.
+
+    INCR, then EX the window on the first hit — a Redis failure raises, never fails open.
+    """
     settings = web_settings()
     key = _entry_throttle_key(client_bucket)
     async with _redis() as redis:

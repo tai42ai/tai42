@@ -1,6 +1,7 @@
 // Register the jest-dom matchers (`toBeInTheDocument`, `toHaveTextContent`, …) on
 // vitest's `expect`, used by the component tests.
 import '@testing-library/jest-dom/vitest';
+
 import { vi } from 'vitest';
 
 /* eslint-disable @typescript-eslint/no-empty-function --

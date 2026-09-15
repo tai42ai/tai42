@@ -161,7 +161,7 @@ async def test_list_traces_token_query_carries_page_filter(manager, mock_client,
 
     mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
     errors_for([])
-    await LangfuseReader(manager).list_traces(filter=MonitoringFilter(tags=["run:7"]))
+    await LangfuseReader(manager).list_traces(filter_=MonitoringFilter(tags=["run:7"]))
     assert {"column": "tags", "operator": "any of", "value": ["run:7"], "type": "arrayOptions"} in captured["filters"]
 
 
@@ -236,7 +236,7 @@ async def test_native_sort_token_query_drops_unsupported_filter(
     route_metrics(tokens={"a": 5})
     errors_for([])
     result = await LangfuseReader(manager).list_traces(
-        filter=MonitoringFilter(level=MonitoringLevel.ERROR, min_cost=1.0, min_tokens=10, max_latency=100.0)
+        filter_=MonitoringFilter(level=MonitoringLevel.ERROR, min_cost=1.0, min_tokens=10, max_latency=100.0)
     )
     assert [t.id for t in result] == ["a"]
     filters = token_query()["filters"]
@@ -254,7 +254,7 @@ async def test_native_sort_token_query_keeps_supported_filter(
     list_returns([trace_row(id="a", tags=["run:7"])])
     route_metrics(tokens={"a": 5})
     errors_for([])
-    await LangfuseReader(manager).list_traces(filter=MonitoringFilter(name="flow-a", tags=["run:7"]))
+    await LangfuseReader(manager).list_traces(filter_=MonitoringFilter(name="flow-a", tags=["run:7"]))
     filters = token_query()["filters"]
     cols = {c["column"]: c for c in filters}
     assert cols["name"]["value"] == "flow-a"

@@ -27,8 +27,10 @@ from .models import _DISABLED_CODE, _DISABLED_MESSAGE, ApiKeyCreate, ApiKeyEdit,
 
 @operation(summary="List api-key token payloads", tags=["access-control"], response_model=TokenPayloadList)
 async def list_tokens_payload() -> list[dict[str, Any]]:
-    """Every provisioned key's identity + policy (NEVER key material). Non-admin callers
-    see ONLY the keys they own (management/listing owner home); admin sees every key."""
+    """Every provisioned key's identity + policy (NEVER key material).
+
+    Non-admin callers see ONLY the keys they own (management/listing owner home); admin sees every key.
+    """
     # OFF: access control disabled → no provisioned keys; the honest empty list,
     # never a store read under the synthetic admin.
     if not _pkg.access_control_settings().enable:
@@ -56,9 +58,11 @@ async def create_api_key(
     condition: TemplatedText | None,
     owner_user_id: str | None,
 ) -> dict[str, Any]:
-    """Provision a key, returning ``{"api_key", "key_fingerprint"}``. The raw ``sk-…``
-    ``api_key`` is surfaced ONCE; ``key_fingerprint`` is the key's immutable per-mint
-    identity a caller binds a hook against so the binding survives only this exact mint."""
+    """Provision a key, returning ``{"api_key", "key_fingerprint"}``.
+
+    The raw ``sk-…`` ``api_key`` is surfaced ONCE; ``key_fingerprint`` is the key's immutable per-mint
+    identity a caller binds a hook against so the binding survives only this exact mint.
+    """
     # OFF: access control disabled → refuse the mint with a named, machine-readable
     # reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:
@@ -105,12 +109,13 @@ async def create_api_key(
     response_model=UserUpdateAck,
 )
 async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
-    """A PATCH-style partial edit: only the fields present in ``updates`` are
-    overwritten; a field absent is preserved at its stored value, so saving a
-    description or scope change never silently drops an authorization ``condition`` or
-    ``policy_data`` gate. ``updates`` is the sparse set of present fields (a single dict
-    rather than flattened params, so "field absent" stays distinct from "field is
-    ``null``" — the partial-edit semantics a flat signature cannot express)."""
+    """A PATCH-style partial edit: only the fields present in ``updates`` are overwritten.
+
+    A field absent is preserved at its stored value, so saving a description or scope change never silently
+    drops an authorization ``condition`` or ``policy_data`` gate. ``updates`` is the sparse set of present
+    fields (a single dict rather than flattened params, so "field absent" stays distinct from "field is
+    ``null``" — the partial-edit semantics a flat signature cannot express).
+    """
     # OFF: access control disabled → refuse the edit with a named, machine-readable
     # reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:
@@ -145,10 +150,12 @@ async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
 async def modify_api_key_scopes(
     user_id: str, add: list[str] | None = None, remove: list[str] | None = None
 ) -> dict[str, Any]:
-    """Add and/or remove named scopes on a key's stored scope set without replacing the
-    whole set. The new set keeps the stored order, drops the removed scopes, then appends
-    the additions in the given order. A plain read-merge-write with NO new locking: two
-    simultaneous edits of one key can lose one (accepted for this surface)."""
+    """Add and/or remove named scopes on a key's stored scope set without replacing the whole set.
+
+    The new set keeps the stored order, drops the removed scopes, then appends the additions in the given
+    order. A plain read-merge-write with NO new locking: two simultaneous edits of one key can lose one
+    (accepted for this surface).
+    """
     add = add or []
     remove = remove or []
     # OFF: access control disabled → refuse the write with a named, machine-readable
@@ -197,15 +204,17 @@ async def modify_api_key_scopes(
     response_model=RevokeAck,
 )
 async def revoke_api_key(user_id: str) -> dict[str, Any]:
-    """Revoke a key (immediate: next request fails to auth). Deletes the key record, its
-    enforced policy row, and its live context; the user's ``ac_policy`` version history
-    is deliberately NOT touched (it belongs to the identity, so a key later re-created
+    """Revoke a key (immediate: next request fails to auth).
+
+    Deletes the key record, its enforced policy row, and its live context; the user's ``ac_policy`` version
+    history is deliberately NOT touched (it belongs to the identity, so a key later re-created
     for the same ``user_id`` resumes that history).
 
     No version bump here, unlike every other mutation on this surface: revocation's
     cache-buster is atomic with the policy-row delete inside
     :func:`~tai42_skeleton.access_control.management.revoke_api_key`, so no fault in the
-    steps behind it can leave the revoked key's authority live in a warm cache slot."""
+    steps behind it can leave the revoked key's authority live in a warm cache slot.
+    """
     # OFF: access control disabled → refuse the revoke with a named, machine-readable
     # reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:
@@ -232,17 +241,18 @@ async def revoke_api_key(user_id: str) -> dict[str, Any]:
     response_model=ClaimLinkResult,
 )
 async def create_claim_link(api_key: str, ttl_seconds: int | None) -> dict[str, Any]:
-    """Mint a one-time claim link that carries ``api_key`` to another device (the QR
-    onboarding leg). The submitted key is resolved through the gate's own verifier chain
-    and the caller must own it (or be admin) per the module's ownership rule; the response
-    returns the claim token ONCE plus a fragment-carrier path (``/login#claim=<token>``)
-    and an expiry.
+    """Mint a one-time claim link that carries ``api_key`` to another device (the QR onboarding leg).
+
+    The submitted key is resolved through the gate's own verifier chain and the caller must own it
+    (or be admin) per the module's ownership rule; the response returns the claim token ONCE plus a
+    fragment-carrier path (``/login#claim=<token>``) and an expiry.
 
     Accepted oracle (deliberate, not an oversight): an unresolvable key answers 400 and a
     valid-but-not-yours key answers 403, so an authenticated caller can tell a live key
     from garbage. This adds NO capability the ``/api/auth/me`` carve-out does not already
     grant a caller holding a candidate key. The uniform-404 no-oracle rule governs the
-    unauthenticated EXCHANGE surface, never this authed creation."""
+    unauthenticated EXCHANGE surface, never this authed creation.
+    """
     # OFF: access control disabled → refuse the claim-link mint with a named,
     # machine-readable reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fleet docs gate: validate every first-party plugin's in-package ``docs/``
-tree against the canonical contract, failing loud on the first plugin whose
-tree violates it.
+"""Docs gate: validate every first-party plugin's in-package ``docs/`` tree against the canonical contract.
+
+Fails loud on the first plugin whose tree violates it.
 
 Discovery is data-driven, never a hardcoded plugin list that silently rots: the
 workspace members come from the root ``pyproject.toml``
@@ -40,9 +40,11 @@ def _repo_root() -> Path:
 
 
 def _rel(path: Path, root: Path) -> str:
-    """``path`` relative to ``root`` when it lies under it (the enumerated case),
-    else the path as given (an out-of-tree dir passed explicitly, e.g. a test
-    fixture)."""
+    """Return ``path`` relative to ``root`` when it lies under it, else the path as given.
+
+    Under-root is the enumerated case; an out-of-tree dir passed explicitly (e.g. a test
+    fixture) is returned as given.
+    """
     try:
         return path.relative_to(root).as_posix()
     except ValueError:
@@ -63,10 +65,11 @@ def _plugin_dirs(root: Path) -> list[Path]:
 
 
 def _docs_dirs(plugin_dir: Path) -> list[Path]:
-    """The plugin's in-package ``docs/`` roots (a directory named ``docs`` sitting
-    inside its import package under ``src/``). Normally zero or one; a ``docs``
-    nested inside another ``docs`` is excluded so only the package-level tree is
-    validated as a set."""
+    """Return the plugin's in-package ``docs/`` roots (a ``docs`` dir inside its import package under ``src/``).
+
+    Normally zero or one; a ``docs`` nested inside another ``docs`` is excluded so only the
+    package-level tree is validated as a set.
+    """
     src = plugin_dir / "src"
     if not src.is_dir():
         return []
@@ -75,8 +78,7 @@ def _docs_dirs(plugin_dir: Path) -> list[Path]:
 
 
 def _read_docs(docs_dir: Path) -> dict[str, bytes]:
-    """The docs tree as ``validate_docs`` expects it: ``docs/``-prefixed relative
-    keys mapped to raw bytes."""
+    """Return the docs tree as ``validate_docs`` expects it: ``docs/``-prefixed relative keys mapped to raw bytes."""
     files: dict[str, bytes] = {}
     for path in sorted(docs_dir.rglob("*")):
         if path.is_file():
@@ -104,6 +106,7 @@ def _check_plugin(plugin_dir: Path, root: Path) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Gate the given plugin roots (or every workspace plugin) and return a process exit code."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "plugin_dir",

@@ -1,6 +1,8 @@
-"""Up-front argument/combo validation for ``ask_user``: reject every bad
-argument combination and resolve the derived values (``fmt``, ``channel_obj``,
-clamped ``audience``, normalized ``schema``) before any state is written."""
+"""Up-front argument/combo validation for ``ask_user``.
+
+Reject every bad argument combination and resolve the derived values (``fmt``, ``channel_obj``,
+clamped ``audience``, normalized ``schema``) before any state is written.
+"""
 
 from __future__ import annotations
 
@@ -22,9 +24,11 @@ from .payload import normalize_schema
 
 @dataclass(frozen=True)
 class AskValidation:
-    """The resolved outcome of the up-front validation: the parsed answer format,
-    whether it is the external format, the resolved channel object (reused by
-    delivery), the write-clamped audience, and the normalized schema."""
+    """The resolved outcome of the up-front validation.
+
+    The parsed answer format, whether it is the external format, the resolved channel object
+    (reused by delivery), the write-clamped audience, and the normalized schema.
+    """
 
     fmt: AnswerFormat
     is_external: bool
@@ -50,8 +54,11 @@ def validate_ask_arguments(
     mode: Literal["sync", "async"],
     expiry_at: datetime | None,
 ) -> AskValidation:
-    """Reject every bad argument/combo before any state; resolve ``fmt``,
-    ``channel_obj``, the write-clamped ``audience`` and the normalized ``schema``."""
+    """Reject every bad argument/combo before any state; resolve the derived values.
+
+    Resolves ``fmt``, ``channel_obj``, the write-clamped ``audience`` and the normalized
+    ``schema``.
+    """
     fmt = _validate_timing_and_format(mode, timeout, expiry_at, answer_format, options, data, pages)
     is_external = fmt is AnswerFormat.EXTERNAL
     # ``audience`` (the addressed identity) is validated loud and up front — a
@@ -75,9 +82,11 @@ def _validate_timing_and_format(
     data: Any,
     pages: Any,
 ) -> AnswerFormat:
-    """Validate the timing (sync ``timeout`` vs async ``expiry_at``) and the format's
-    argument shape (``options`` only on select/text, ``data``/``pages`` only on form),
-    returning the parsed :class:`AnswerFormat`."""
+    """Validate the timing (sync ``timeout`` vs async ``expiry_at``) and the format's argument shape.
+
+    ``options`` only on select/text, ``data``/``pages`` only on form. Returns the parsed
+    :class:`AnswerFormat`.
+    """
     check_ask_timing(timeout=timeout, expiry_at=expiry_at)
     if mode != "async" and expiry_at is not None:
         raise ValueError("expiry_at is only valid with mode='async'")
@@ -110,11 +119,12 @@ def _validate_channel_args(
     question: str,
     recipient: str | None,
 ) -> tuple[Channel | None, type[BaseModel] | dict[str, Any] | None]:
-    """Resolve and validate a set ``channel`` (loud, up front): the channel owns
-    delivery so ``link``/``verifier`` are forbidden, a form is deliverable only over a
-    form-capable channel with a renderable schema, and a ``recipient`` needs a channel.
-    Returns the resolved channel object (or ``None``) and the possibly-normalized
-    schema."""
+    """Resolve and validate a set ``channel`` (loud, up front).
+
+    The channel owns delivery so ``link``/``verifier`` are forbidden, a form is deliverable only
+    over a form-capable channel with a renderable schema, and a ``recipient`` needs a channel.
+    Returns the resolved channel object (or ``None``) and the possibly-normalized schema.
+    """
     if channel is None:
         if recipient is not None:
             # An address is meaningless without a channel to send on; the named
@@ -141,10 +151,12 @@ def _validate_channel_args(
 def _validate_channel_form(
     channel: str, channel_obj: Channel, schema: type[BaseModel] | dict[str, Any] | None, question: str
 ) -> type[BaseModel] | dict[str, Any] | None:
-    """Validate a channel-delivered form: the channel must advertise
-    ``supports_form_delivery`` and (when a schema is given) the schema must fall in the
-    channel-renderable subset plus the channel's own optional ``validate_form_schema``
-    limits. Returns the normalized schema."""
+    """Validate a channel-delivered form.
+
+    The channel must advertise ``supports_form_delivery`` and (when a schema is given) the
+    schema must fall in the channel-renderable subset plus the channel's own optional
+    ``validate_form_schema`` limits. Returns the normalized schema.
+    """
     if not getattr(channel_obj, "supports_form_delivery", False):
         # A form is delivered only over a channel that advertises the capability; a
         # channel without it can never surface a multi-field form.
@@ -168,9 +180,11 @@ def _validate_channel_form(
 def _validate_external_args(
     is_external: bool, link: Any, channel: str | None, schema: type[BaseModel] | dict[str, Any] | None, verifier: Any
 ) -> None:
-    """Validate the external/non-external combos: external needs a ``link`` (or a
-    channel) and normalizes its optional schema + validates its optional verifier;
-    a non-external format forbids both ``link`` and ``verifier``."""
+    """Validate the external/non-external combos.
+
+    External needs a ``link`` (or a channel) and normalizes its optional schema + validates its
+    optional verifier; a non-external format forbids both ``link`` and ``verifier``.
+    """
     if is_external:
         if link is None and channel is None:
             raise ValueError("answer_format 'external' requires a link (or a channel)")
@@ -191,12 +205,13 @@ def _validate_external_args(
 
 
 def validate_verifier(verifier: Any) -> None:
-    """Reject a malformed or unknown ``verifier`` at ask-time, before any state is
-    written. It must be a dict carrying a non-empty ``name`` that resolves against
-    the registered webhook verifiers. A non-dict (or a typo'd/unregistered name)
-    would otherwise slip through as an unrecognised binding at the callback door
-    and silently degrade the question to an open, unverified one — so this is a
-    hard guard (raise), never a soft ignore."""
+    """Reject a malformed or unknown ``verifier`` at ask-time, before any state is written.
+
+    It must be a dict carrying a non-empty ``name`` that resolves against the registered webhook
+    verifiers. A non-dict (or a typo'd/unregistered name) would otherwise slip through as an
+    unrecognised binding at the callback door and silently degrade the question to an open,
+    unverified one — so this is a hard guard (raise), never a soft ignore.
+    """
     name = verifier.get("name") if isinstance(verifier, dict) else None
     if not isinstance(name, str) or not name:
         raise ValueError("verifier must be a dict with a non-empty 'name'")
@@ -207,13 +222,14 @@ def validate_verifier(verifier: Any) -> None:
 
 
 def validate_channel(channel: Any) -> Channel:
-    """Reject a malformed or unknown ``channel`` at ask-time, before any state
-    is written. It must be a non-empty string naming a registered channel — an
-    unknown name would otherwise persist a question no deliverer can ever push
-    to a human, leaving the caller blocked until timeout. A hard guard (raise),
-    never a soft ignore. Returns the resolved channel object; delivery reuses
-    this exact validated instance, so a registry change between validation and
-    delivery can never surface as a post-persist lookup failure."""
+    """Reject a malformed or unknown ``channel`` at ask-time, before any state is written.
+
+    It must be a non-empty string naming a registered channel — an unknown name would otherwise
+    persist a question no deliverer can ever push to a human, leaving the caller blocked until
+    timeout. A hard guard (raise), never a soft ignore. Returns the resolved channel object;
+    delivery reuses this exact validated instance, so a registry change between validation and
+    delivery can never surface as a post-persist lookup failure.
+    """
     if not isinstance(channel, str) or not channel:
         raise ValueError("channel must be a non-empty string")
     try:

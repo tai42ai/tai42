@@ -1,5 +1,7 @@
-"""Response models for the group-B skeleton operations (config, hooks, connectors,
-templates, tools, tool_meta, tool_extensions, tool_runs, roles, storage, schedules).
+"""Response models for the group-B skeleton operations.
+
+Covers config, hooks, connectors, templates, tools, tool_meta, tool_extensions, tool_runs, roles, storage,
+schedules.
 
 Each model DESCRIBES the inner payload a route returns today — the shape the adapter
 wraps in the ``{"data": ...}`` success envelope — and never re-declares the envelope or
@@ -25,25 +27,28 @@ from tai42_skeleton.hooks.trigger_auth import TriggerAuth
 
 
 class EnvView(BaseModel):
-    """The stored env map plus the operator's masked-key marks. ``env`` values are
-    verbatim (masking is display-side, never on the wire); ``secret_keys`` names which
-    keys the UI masks."""
+    """The stored env map plus the operator's masked-key marks.
+
+    ``env`` values are verbatim (masking is display-side, never on the wire); ``secret_keys`` names which
+    keys the UI masks.
+    """
 
     env: dict[str, str]
     secret_keys: list[str]
 
 
 class ConfigModeView(BaseModel):
-    """The active config backend mode: ``file`` (built in) or an external provider's
-    mode name."""
+    """The active config backend mode: ``file`` (built in) or an external provider's mode name."""
 
     config_mode: str
 
 
 class SettingsGroupView(BaseModel):
-    """One registered settings group. ``fields`` rows are each a settings-field's dumped
-    metadata extended with the resolved ``value`` and its ``value_source`` layer — an
-    open per-field metadata map, so it is typed as such rather than reshaped."""
+    """One registered settings group.
+
+    ``fields`` rows are each a settings-field's dumped metadata extended with the resolved ``value`` and its
+    ``value_source`` layer — an open per-field metadata map, so it is typed as such rather than reshaped.
+    """
 
     name: str
     module: str
@@ -69,8 +74,10 @@ class ProfileListResponse(RootModel[list[ProfileSummary]]):
 
 
 class ProfileWriteResult(BaseModel):
-    """A profile write/rollback confirmation — the new active version, never the body
-    (so a secret never re-emits on the write path)."""
+    """A profile write/rollback confirmation — the new active version, never the body.
+
+    So a secret never re-emits on the write path.
+    """
 
     ok: bool
     version: int
@@ -83,8 +90,10 @@ class OkResult(BaseModel):
 
 
 class ProfileDiffChange(BaseModel):
-    """One changed env key in a profile diff. ``old``/``new`` are the env VALUES on each
-    side (real values — the UI masks); NEVER widened where rendered."""
+    """One changed env key in a profile diff.
+
+    ``old``/``new`` are the env VALUES on each side (real values — the UI masks); NEVER widened where rendered.
+    """
 
     key: str
     old: str
@@ -92,8 +101,10 @@ class ProfileDiffChange(BaseModel):
 
 
 class ProfileDiff(BaseModel):
-    """A settings-profile-vs-stored-env diff. ``added``/``removed``/``recycle_keys``/
-    ``refused_keys`` are key names; ``changed`` carries the per-key value change."""
+    """A settings-profile-vs-stored-env diff.
+
+    ``added``/``removed``/``recycle_keys``/``refused_keys`` are key names; ``changed`` carries the per-key value change.
+    """
 
     added: list[str]
     removed: list[str]
@@ -103,8 +114,10 @@ class ProfileDiff(BaseModel):
 
 
 class ProfileVersionSummary(BaseModel):
-    """One row of a settings-profile version history. ``created_at`` is an ISO-8601
-    timestamp string; ``is_current`` marks the active version."""
+    """One row of a settings-profile version history.
+
+    ``created_at`` is an ISO-8601 timestamp string; ``is_current`` marks the active version.
+    """
 
     version: int
     tags: list[str]
@@ -117,8 +130,10 @@ class ProfileVersionListResponse(RootModel[list[ProfileVersionSummary]]):
 
 
 class ProfileVersionView(BaseModel):
-    """One settings-profile version row extended with its full ``body`` (real env
-    values — this door is secret-fenced; masking is display-side only)."""
+    """One settings-profile version row extended with its full ``body``.
+
+    Real env values — this door is secret-fenced; masking is display-side only.
+    """
 
     version: int
     tags: list[str]
@@ -131,11 +146,13 @@ class ProfileVersionView(BaseModel):
 
 
 class HookListView(BaseModel):
-    """The registered hooks plus the live per-topic verifier bindings and derived
-    trigger-auth axis. ``topic_verifiers`` values are dumped binding metadata (an open,
+    """The registered hooks plus the live per-topic verifier bindings and derived trigger-auth axis.
+
+    ``topic_verifiers`` values are dumped binding metadata (an open,
     secret-adjacent map, kept opaque so a bound config is not widened onto the wire);
     ``trigger_auth`` maps each visible topic to how its webhook ingress door
-    authenticates, derived live, never stored."""
+    authenticates, derived live, never stored.
+    """
 
     items: list[HookParams]
     total: int
@@ -144,8 +161,7 @@ class HookListView(BaseModel):
 
 
 class HookRegisterResult(BaseModel):
-    """A hook upsert confirmation — ``registered`` is ``True`` for a create and a
-    replace alike."""
+    """A hook upsert confirmation — ``registered`` is ``True`` for a create and a replace alike."""
 
     registered: bool
     name: str
@@ -173,9 +189,11 @@ class RemovedByTopic(BaseModel):
 
 
 class TriggerLinkCreated(BaseModel):
-    """A freshly minted trigger link. ``token`` is a ONE-TIME secret — it appears only
-    here (nothing else stores or lists it); typing must not widen where it is logged.
-    ``expires_at`` is an ISO-8601 timestamp string, or ``null`` for a permanent link."""
+    """A freshly minted trigger link.
+
+    ``token`` is a ONE-TIME secret — it appears only here (nothing else stores or lists it); typing must not
+    widen where it is logged. ``expires_at`` is an ISO-8601 timestamp string, or ``null`` for a permanent link.
+    """
 
     name: str
     trigger_path: str
@@ -185,10 +203,11 @@ class TriggerLinkCreated(BaseModel):
 
 
 class TriggerLinkView(BaseModel):
-    """One listed trigger link: the stored record plus its token-hash PREFIX (never a
-    raw token — none is stored) and its derived ``trigger_auth`` axis. ``created_at`` is
-    an ISO-8601 timestamp string; ``expires_at`` is one or ``null`` for a permanent
-    link."""
+    """One listed trigger link: the stored record plus its token-hash PREFIX and derived ``trigger_auth`` axis.
+
+    Never a raw token — none is stored. ``created_at`` is an ISO-8601 timestamp string; ``expires_at`` is one
+    or ``null`` for a permanent link.
+    """
 
     name: str
     topic: str
@@ -218,16 +237,21 @@ class StringListResponse(RootModel[list[str]]):
 
 
 class StartConnectOutcome(RootModel[StartConnectResponse | StartConnectNoAuthResponse]):
-    """A Connect start: either an OAuth authorize URL (``StartConnectResponse``) or an
-    immediate no-auth connection (``StartConnectNoAuthResponse``)."""
+    """A Connect start.
+
+    Either an OAuth authorize URL (``StartConnectResponse``) or an immediate no-auth connection
+    (``StartConnectNoAuthResponse``).
+    """
 
 
 class ConnectorReencryptResult(BaseModel):
-    """The KEK re-encrypt sweep's outcome. ``scanned`` blobs split into ``reencrypted``
-    (rewritten under the current KEK), ``skipped`` (already under the current key), and
-    ``failed`` (no configured key could open them, or compare-and-set contention was not
+    """The KEK re-encrypt sweep's outcome.
+
+    ``scanned`` blobs split into ``reencrypted`` (rewritten under the current KEK), ``skipped`` (already under
+    the current key), and ``failed`` (no configured key could open them, or compare-and-set contention was not
     resolved). ``failed_connection_ids`` names each failed connection; ``cas_retries``
-    counts compare-and-set retries forced by concurrent refreshes."""
+    counts compare-and-set retries forced by concurrent refreshes.
+    """
 
     scanned: int
     reencrypted: int
@@ -241,10 +265,12 @@ class ConnectorReencryptResult(BaseModel):
 
 
 class TemplateFetchView(BaseModel):
-    """A stored template's content and its inferred input schema. The ``schema`` object
-    is an inferred JSON schema (it may carry an ``x-tai42-inference: partial`` marker
+    """A stored template's content and its inferred input schema.
+
+    The ``schema`` object is an inferred JSON schema (it may carry an ``x-tai42-inference: partial`` marker
     when type inference is incomplete). The Python attribute is suffixed to avoid
-    shadowing a ``BaseModel`` member; the wire key stays ``schema`` via the alias."""
+    shadowing a ``BaseModel`` member; the wire key stays ``schema`` via the alias.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -261,8 +287,7 @@ class TemplateUploadResult(BaseModel):
 
 
 class TemplateDeleteResult(BaseModel):
-    """A template (or template-directory) delete confirmation with the fleet
-    cache-eviction summary."""
+    """A template (or template-directory) delete confirmation with the fleet cache-eviction summary."""
 
     path: str
     deleted: bool
@@ -286,9 +311,10 @@ class CacheClearResult(BaseModel):
 
 
 class ToolTagRow(BaseModel):
-    """One tool's declared tags, visibility, and capability badges. ``hidden`` and
-    ``badges`` are the tool's OWN declaration (before the tool_meta overlay's
-    override)."""
+    """One tool's declared tags, visibility, and capability badges.
+
+    ``hidden`` and ``badges`` are the tool's OWN declaration (before the tool_meta overlay's override).
+    """
 
     name: str
     tags: list[str]
@@ -301,9 +327,11 @@ class ToolTagListResponse(RootModel[list[ToolTagRow]]):
 
 
 class ToolSchemaView(BaseModel):
-    """One tool's input/output JSON schemas and description. ``input``/``output`` are
-    arbitrary JSON-schema objects; ``output`` and ``description`` are null when the tool
-    declares none."""
+    """One tool's input/output JSON schemas and description.
+
+    ``input``/``output`` are arbitrary JSON-schema objects; ``output`` and ``description`` are null when the tool
+    declares none.
+    """
 
     input: dict[str, JsonValue]
     output: dict[str, JsonValue] | None
@@ -318,8 +346,7 @@ class ToolsSchemaMap(RootModel[dict[str, ToolSchemaView]]):
 
 
 class ToolMetaListView(BaseModel):
-    """The whole tool-metadata overlay in one read: the flat folder tree plus every
-    per-tool row."""
+    """The whole tool-metadata overlay in one read: the flat folder tree plus every per-tool row."""
 
     folders: list[FolderRecord]
     meta: list[ToolMetaRecord]
@@ -343,8 +370,10 @@ class FolderDeleted(BaseModel):
 
 
 class ToolExtensionsView(BaseModel):
-    """A tool's applied extension combos plus the catalog of available extensions. Each
-    ``available`` entry is a ``{name, kind}`` string map."""
+    """A tool's applied extension combos plus the catalog of available extensions.
+
+    Each ``available`` entry is a ``{name, kind}`` string map.
+    """
 
     combos: list[list[ExtensionElement]]
     available: list[dict[str, str]]
@@ -360,9 +389,11 @@ class RunSubmitted(BaseModel):
 
 
 class ToolRunView(BaseModel):
-    """A background tool run's full status view. ``finished_at``/``result``/``error`` are
-    present only once the run reaches a terminal status, so they are optional; ``result``
-    is the tool's arbitrary output."""
+    """A background tool run's full status view.
+
+    ``finished_at``/``result``/``error`` are present only once the run reaches a terminal status, so they are
+    optional; ``result`` is the tool's arbitrary output.
+    """
 
     run_id: str
     tool_name: str
@@ -375,7 +406,9 @@ class ToolRunView(BaseModel):
 
 class ToolRunListItem(BaseModel):
     """One background tool run in the list view — never ``result``/``error``.
-    ``finished_at`` is present only for a terminal run."""
+
+    ``finished_at`` is present only for a terminal run.
+    """
 
     run_id: str
     tool_name: str
@@ -400,7 +433,9 @@ class RoleDeleted(BaseModel):
 
 class RoleVersionsView(BaseModel):
     """A role's append-only version history plus its who/when/before-after audit trail.
-    ``audit`` rows are open audit-event metadata (secret-fenced, kept opaque)."""
+
+    ``audit`` rows are open audit-event metadata (secret-fenced, kept opaque).
+    """
 
     versions: list[DocumentVersion]
     audit: list[dict[str, JsonValue]]

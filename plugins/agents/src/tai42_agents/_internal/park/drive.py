@@ -1,5 +1,7 @@
-"""The drive-side park machinery: bind the resume continuation for a run's drive, detach the
-chains it never parked on, and classify a stopped drive's pending interrupt.
+"""The drive-side park machinery: bind the resume continuation, detach unparked chains, and classify interrupts.
+
+Binds the resume continuation for a run's drive, detaches the chains it never
+parked on, and classifies a stopped drive's pending interrupt.
 
 :func:`park_continuation` / :func:`park_step_binding` / :func:`park_drive` bind the resume
 continuation (and, for a park-capable drive, the chained-park claims ledger) around a drive;
@@ -54,7 +56,8 @@ def park_continuation(park: ParkIdentity | None) -> Iterator[None]:
     WHOLE-DRIVE resource — it accumulates across steps and is reconciled once the drive stops —
     so it is bound alongside this, not folded in: :func:`park_step_binding` composes both for a
     streaming drive, and a coroutine drive binds :func:`~tai42_contract.interactions.chained_park_claims`
-    directly around its ``await``."""
+    directly around its ``await``.
+    """
     name = AGENT_RESUME_TOOL_NAME if park is not None and park.bind else None
     token = set_resume_continuation_tool(name)
     try:
@@ -65,29 +68,31 @@ def park_continuation(park: ParkIdentity | None) -> Iterator[None]:
 
 @contextlib.contextmanager
 def park_step_binding(park: ParkIdentity | None, claims: set[str]) -> Iterator[None]:
-    """Per-drive-step binding for a STREAMING drive: the resume continuation AND the chained-park
-    claims ledger, both re-entered around each ``__anext__`` by :func:`bind_resume_per_step` and
-    both released before the step's value is yielded, so neither leaks into the consumer.
+    """Per-drive-step binding for a STREAMING drive: the resume continuation and the chained-park claims ledger.
 
-    The two bindings differ in what they own. The resume continuation is per-step by nature —
+    Both are re-entered around each ``__anext__`` by :func:`bind_resume_per_step`
+    and both released before the step's value is yielded, so neither leaks into
+    the consumer. The two bindings differ in what they own. The resume continuation is per-step by nature —
     nothing carries across steps. The claims ledger is WHOLE-DRIVE: every step re-binds the ONE
     ``claims`` set the face owns, so a chained key claimed in an early step survives to the
     reconcile the face runs — :func:`detach_dead_chains` over that same set — when the drive
-    stops. A non-park-capable run binds ``None`` and claims nothing; its set stays empty."""
+    stops. A non-park-capable run binds ``None`` and claims nothing; its set stays empty.
+    """
     with park_continuation(park), chained_park_claims(claims):
         yield
 
 
 @contextlib.asynccontextmanager
 async def park_drive(park: ParkIdentity | None) -> AsyncIterator[None]:
-    """Whole-drive park binding for a COROUTINE drive — a run face that awaits the drive to a
-    result, never yielding to an external consumer.
+    """Whole-drive park binding for a COROUTINE drive.
 
-    Binds the resume continuation and the chained-park claims ledger for the drive's duration,
+    A run face that awaits the drive to a result, never yielding to an external
+    consumer. Binds the resume continuation and the chained-park claims ledger for the drive's duration,
     and detaches the dead chains when it stops (whether it returned or raised). Safe to hold
     across the drive's ``await`` points: a coroutine stays in one task, so unlike a streaming
     generator nothing leaks past a yield — a streaming face binds per step via
-    :func:`park_step_binding` and detaches around its own loop instead."""
+    :func:`park_step_binding` and detaches around its own loop instead.
+    """
     claims: set[str] = set()
     with park_continuation(park), chained_park_claims(claims):
         try:
@@ -97,13 +102,14 @@ async def park_drive(park: ParkIdentity | None) -> AsyncIterator[None]:
 
 
 async def detach_dead_chains(claims: set[str]) -> None:
-    """Tombstone the chained keys this drive claimed but never parked on, so a later terminal
-    lands benignly instead of hunting a park that will never exist.
+    """Tombstone the chained keys this drive claimed but never parked on.
 
-    Failures are logged and swallowed: the drive already has its result (or its exception), and
+    So a later terminal lands benignly instead of hunting a park that will never
+    exist. Failures are logged and swallowed: the drive already has its result (or its exception), and
     a detach that could not run must not replace either — the undetached chain falls back to the
     delivery tool's own at-least-once retry tail. ``CancelledError`` propagates: a drive being
-    torn down has no time to write, and swallowing it would fight the cancellation."""
+    torn down has no time to write, and swallowing it would fight the cancellation.
+    """
     if not claims:
         return
     try:
@@ -121,10 +127,10 @@ async def bind_resume_per_step[StreamItemT](
     binding: Callable[[], AbstractContextManager[Any]],
     events: AsyncIterator[StreamItemT],
 ) -> AsyncGenerator[StreamItemT]:
-    """Yield from ``events`` with a resume-continuation ``binding`` re-entered around each step,
-    so the continuation is bound WHILE a step is computed but never leaks across a yield.
+    """Yield from ``events`` with a resume-continuation ``binding`` re-entered around each step.
 
-    The binding cannot live in the yielding generator's own ``with`` body: PEP 568 (per-send
+    So the continuation is bound WHILE a step is computed but never leaks across a
+    yield. The binding cannot live in the yielding generator's own ``with`` body: PEP 568 (per-send
     context isolation for async generators) is unimplemented, so a ``ContextVar`` set there lands
     in the CONSUMER's task and persists across every yield — leaking the binding into the consumer,
     and on an abandoned stream stranding it bound forever (its ``Token`` then resets from a foreign
@@ -133,7 +139,8 @@ async def bind_resume_per_step[StreamItemT](
     to the consumer, so the consumer never observes it and a mid-stream ``aclose`` unwinds cleanly.
     ``binding`` is a zero-arg factory (a fresh context manager per step), e.g.
     ``lambda: park_step_binding(park, claims)`` for a park-capable LangGraph drive or
-    ``lambda: _resume_continuation(threaded)`` for the ``claude_code`` engine."""
+    ``lambda: _resume_continuation(threaded)`` for the ``claude_code`` engine.
+    """
     step = events.__aiter__()
     try:
         while True:
@@ -150,9 +157,11 @@ async def bind_resume_per_step[StreamItemT](
 
 
 def collect_pending_interrupts(snapshot: Any) -> list[tuple[str, Any]]:
-    """Every pending interrupt in a snapshot as ``(id, value)``, descending into subgraph
-    tasks so a park raised inside a subagent stack is seen too (read with
-    ``subgraphs=True``)."""
+    """Every pending interrupt in a snapshot as ``(id, value)``, descending into subgraph tasks.
+
+    So a park raised inside a subagent stack is seen too (read with
+    ``subgraphs=True``).
+    """
     pending: list[tuple[str, Any]] = []
 
     def _walk(snap: Any) -> None:
@@ -166,9 +175,10 @@ def collect_pending_interrupts(snapshot: Any) -> list[tuple[str, Any]]:
 
 
 def _park_interactions(value: Any) -> dict[str, Any] | None:
-    """The ``{interaction_id: expiry}`` map of a park interrupt's value, or ``None`` when
-    the interrupt is a plain HITL interrupt (recognized by the reserved value shape, never
-    a name)."""
+    """The ``{interaction_id: expiry}`` map of a park interrupt's value, or ``None`` for a plain HITL interrupt.
+
+    The plain-HITL case is recognized by the reserved value shape, never a name.
+    """
     if isinstance(value, dict) and AGENT_PARK_PAYLOAD_KEY in value:
         return value[AGENT_PARK_PAYLOAD_KEY]["interactions"]
     return None
@@ -192,7 +202,8 @@ async def finalize_drive(
     each async-ask) is collected into ONE super-step: a single durable index over the union of
     all their interactions and one :class:`SuspendedFinal`, resumed by feeding each interrupt
     its own answers in one langgraph resume map. A park interrupt with no park identity to
-    record it against raises loudly rather than stranding the park."""
+    record it against raises loudly rather than stranding the park.
+    """
     if not interrupt_on and (park is None or not park.bind):
         # Skipping the read cannot swallow a park: the park hook interrupts only for a marker
         # whose resume owner is the continuation bound here, and nothing binds one unless the
@@ -234,8 +245,7 @@ async def finalize_drive(
 
 
 def _earliest_expiry(interactions: dict[str, Any]) -> str | None:
-    """The earliest park deadline across the siblings (ISO-8601), or ``None`` when none
-    carried one."""
+    """The earliest park deadline across the siblings (ISO-8601), or ``None`` when none carried one."""
     deadlines = [v for v in interactions.values() if v is not None]
     if not deadlines:
         return None

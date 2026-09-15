@@ -1,5 +1,4 @@
-"""Governing-package version + bump-class verdicts, and the loud-fail helper
-the whole gate raises through."""
+"""Governing-package version + bump-class verdicts, and the loud-fail helper the whole gate raises through."""
 
 from __future__ import annotations
 
@@ -16,8 +15,10 @@ def _fail(message: str) -> NoReturn:
 
 
 def read_project_version(member_dir: Path) -> str:
-    """The ``project.version`` of a packaged member — the source of truth the
-    release tag must match, read the same way the release workflow reads it."""
+    """The ``project.version`` of a packaged member — the source of truth the release tag must match.
+
+    Read the same way the release workflow reads it.
+    """
     import tomllib
 
     pyproject = member_dir / "pyproject.toml"
@@ -27,12 +28,13 @@ def read_project_version(member_dir: Path) -> str:
 
 
 def governing_bump(package: str, version: str, repo_root: Path) -> str:
-    """The bump class of the governing package — its ``version`` against its
-    previous released tag, via :mod:`tai42_cli.api_gate`'s tag/version plumbing. A package
-    with no previous tag is a first release and returns ``"major"`` (an unbounded
-    first release carries any surface). When the package is not bumped on a train,
-    its version is the last released one, so the bump reads as that last release's
-    class — never major — and a consumer break correctly fails the gate."""
+    """The bump class of the governing package — its ``version`` against its previous released tag.
+
+    Uses :mod:`tai42_cli.api_gate`'s tag/version plumbing. A package with no previous tag is a first
+    release and returns ``"major"`` (an unbounded first release carries any surface). When the package is
+    not bumped on a train, its version is the last released one, so the bump reads as that last release's
+    class — never major — and a consumer break correctly fails the gate.
+    """
     previous = api_gate._previous_tag(package, version, repo_root)
     if previous is None:
         return "major"

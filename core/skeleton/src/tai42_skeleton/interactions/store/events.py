@@ -1,5 +1,4 @@
-"""The interaction event-stream frames: the add/answered/removed event types and
-the field builder the SSE tail reads."""
+"""The interaction event-stream frames: the add/answered/removed event types and the SSE field builder."""
 
 from __future__ import annotations
 

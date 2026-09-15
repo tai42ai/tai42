@@ -1,5 +1,6 @@
-"""The ``get_pairing_code`` builtin: mint a single-use pair code for a live channel
-conversation so the person can prove, from another channel, that both addresses are theirs.
+"""The ``get_pairing_code`` builtin: mint a single-use pair code for a live channel conversation.
+
+The code lets the person prove, from another channel, that both addresses are theirs.
 
 A thin, LLM-facing shim over
 :func:`tai42_skeleton.conversations.pairing.mint_pairing_code`. It returns ONLY

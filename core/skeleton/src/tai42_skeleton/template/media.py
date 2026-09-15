@@ -26,9 +26,10 @@ class _ImageUrl(TypedDict):
 
 
 class ContentPart(TypedDict):
-    """A LangChain ``image_url`` content part — a public URL or a base64 ``data:``
-    URI the model dereferences. The ``image_url`` shape is image-only at the model
-    boundary."""
+    """A LangChain ``image_url`` content part — a public URL or a base64 ``data:`` URI the model dereferences.
+
+    The ``image_url`` shape is image-only at the model boundary.
+    """
 
     type: str
     image_url: _ImageUrl

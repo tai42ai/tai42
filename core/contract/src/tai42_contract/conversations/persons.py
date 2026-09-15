@@ -12,8 +12,9 @@ from tai42_contract.locale import normalize_optional_locale
 
 
 class PersonAddress(BaseModel):
-    """One reachable endpoint of a :class:`Person` on a single target — one channel address
-    (or api caller address) the platform folds into that person's identity.
+    """One reachable endpoint of a :class:`Person` on a single target.
+
+    One channel address (or api caller address) the platform folds into that person's identity.
 
     A ``channel``-door address carries the registry ``channel`` name plus the
     ``our_identity`` the medium is texted at; an ``api``-door address carries ``None`` for
@@ -74,8 +75,10 @@ class PersonAddress(BaseModel):
 
 
 class Person(BaseModel):
-    """A single identity on one target: the one-or-more :class:`PersonAddress` rows the
-    platform treats as the same person for a ``(target_kind, target_name)`` pair.
+    """A single identity on one target.
+
+    The one-or-more :class:`PersonAddress` rows the platform treats as the same person for a
+    ``(target_kind, target_name)`` pair.
 
     A provisional person carries exactly ONE address — its first contact. Explicit pair-code
     redemption merges two persons into one (the union of their addresses); persons never

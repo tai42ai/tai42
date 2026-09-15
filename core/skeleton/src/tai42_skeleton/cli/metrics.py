@@ -17,6 +17,7 @@ from tai42_skeleton.routers.metrics_settings import activate_multiproc_env, metr
 
 
 async def get_metrics() -> Response:
+    """Render the multiprocess Prometheus metrics as a plain-text ``Response``."""
     # Imported lazily: ``tai42_skeleton.routers.prometheus`` imports
     # ``prometheus_client``, which freezes its value backend (mmap vs in-process
     # mutex) at first import based on ``PROMETHEUS_MULTIPROC_DIR``. Registering
@@ -29,6 +30,7 @@ async def get_metrics() -> Response:
 
 
 def create_app() -> FastAPI:
+    """Build the FastAPI app exposing the ``/metrics`` endpoint over the multiproc directory."""
     app = FastAPI()
 
     # Lazily imported (see ``get_metrics``): keep ``prometheus_client`` out of

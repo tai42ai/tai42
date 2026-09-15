@@ -25,24 +25,25 @@ _DEFAULT_AGGREGATION: dict[str, str] = {
 class MetricsQuery(_LangfuseQuery):
     """Serves ``query_metrics`` from the Langfuse Metrics API."""
 
-    async def query_metrics(self, filter: MetricsFilter) -> MetricsResult:
+    async def query_metrics(self, filter_: MetricsFilter) -> MetricsResult:
+        """Run ``filter_`` against the Langfuse Metrics API, scoped to this source's environment marker."""
         client = await self._active_client()
         source = self._m.active_source()
 
-        dimension_fields = list(filter.dimensions)
+        dimension_fields = list(filter_.dimensions)
         query: dict[str, Any] = {
-            "view": filter.view.value if hasattr(filter.view, "value") else filter.view,
-            "metrics": [self._metric_entry(m) for m in filter.metrics],
+            "view": filter_.view.value if hasattr(filter_.view, "value") else filter_.view,
+            "metrics": [self._metric_entry(m) for m in filter_.metrics],
             "dimensions": [{"field": d} for d in dimension_fields],
             # Scope every metrics query to our data via the environment marker.
-            "filters": [*filter.filters, _environment_clause(source)],
-            "fromTimestamp": filter.from_timestamp.isoformat(),
-            "toTimestamp": filter.to_timestamp.isoformat(),
+            "filters": [*filter_.filters, _environment_clause(source)],
+            "fromTimestamp": filter_.from_timestamp.isoformat(),
+            "toTimestamp": filter_.to_timestamp.isoformat(),
         }
-        if filter.granularity:
-            query["timeDimension"] = {"granularity": filter.granularity}
-        if filter.order_by:
-            query["orderBy"] = filter.order_by
+        if filter_.granularity:
+            query["timeDimension"] = {"granularity": filter_.granularity}
+        if filter_.order_by:
+            query["orderBy"] = filter_.order_by
 
         response = await asyncio.to_thread(
             partial(

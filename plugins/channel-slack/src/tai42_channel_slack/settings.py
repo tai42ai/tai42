@@ -22,6 +22,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class SlackSettings(TaiBaseSettings):
+    """Slack channel configuration (``CHANNEL_SLACK_*`` env)."""
+
     model_config = SettingsConfigDict(env_prefix="CHANNEL_SLACK_")
 
     # The bot token (``xoxb-…``, scope ``chat:write``). SecretStr keeps it out of
@@ -48,9 +50,11 @@ class SlackSettings(TaiBaseSettings):
     @field_validator("allowed_recipients", mode="before")
     @classmethod
     def _parse_allowed_recipients(cls, value: object) -> object:
-        """Parse the allowlist from a JSON list (bracketed string), a
-        comma-separated string, or a list; string items are stripped and empties
-        dropped, a non-string item passes through so item validation raises."""
+        """Parse the allowlist from a JSON list (bracketed string), a comma-separated string, or a list.
+
+        String items are stripped and empties dropped; a non-string item passes through so item validation
+        raises.
+        """
         if isinstance(value, str):
             stripped = value.strip()
             value = json.loads(stripped) if stripped.startswith("[") else stripped.split(",")
@@ -67,17 +71,18 @@ class SlackSettings(TaiBaseSettings):
 
 
 class SlackRedisSettings(RedisConnectionSettings):
-    """The correlation store connection — ``CHANNEL_SLACK_REDIS_URL`` plus the
-    inherited tuning fields."""
+    """The correlation store connection — ``CHANNEL_SLACK_REDIS_URL`` plus the inherited tuning fields."""
 
     model_config = SettingsConfigDict(env_prefix="CHANNEL_SLACK_")
 
 
 @settings_cache
 def slack_settings() -> SlackSettings:
+    """Return the cached :class:`SlackSettings` instance."""
     return SlackSettings()
 
 
 @settings_cache
 def slack_redis_settings() -> SlackRedisSettings:
+    """Return the cached :class:`SlackRedisSettings` instance."""
     return SlackRedisSettings()

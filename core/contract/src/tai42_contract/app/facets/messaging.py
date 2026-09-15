@@ -17,8 +17,9 @@ class AppInteractions(Protocol):
 
     @property
     def ask_user(self) -> AskUser:
-        """The bound, :class:`~tai42_contract.interactions.AskUser`-typed ``ask_user``
-        callable, so an in-process plugin asks a human without importing the skeleton:
+        """The bound, :class:`~tai42_contract.interactions.AskUser`-typed ``ask_user`` callable.
+
+        An in-process plugin asks a human without importing the skeleton:
         ``await tai42_app.interactions.ask_user(question, ..., mode="async",
         expiry_at=...)``. The return shape is the ``AskUser`` contract's:
         ``mode="sync"`` returns the typed answer, ``mode="async"`` returns a
@@ -26,19 +27,23 @@ class AppInteractions(Protocol):
         Protocol's, including the per-ask ``on_mismatch`` digression policy and
         ``mismatch_notice`` retry text a channel-delivered ask carries. A facade
         EXPOSURE of the skeleton helper through the already-typed Protocol — no new
-        ask semantics."""
+        ask semantics.
+        """
         ...
 
 
 @runtime_checkable
 class AppWebhookVerifiers(Protocol):
+    """The webhook-verifier registry namespace (``app.webhook_verifiers``)."""
+
     def register(self, name: str, verifier: WebhookVerifier) -> None:
         """Register a :class:`WebhookVerifier` under ``name``.
 
         A provider plugin calls this through the ``tai42_app`` handle when its
         import-only ``webhook_verifier_modules`` entry loads. Registering a name
         already taken raises loudly — a silent overwrite could swap a topic's
-        verifier out from under a live binding."""
+        verifier out from under a live binding.
+        """
         ...
 
     def get(self, name: str) -> WebhookVerifier:
@@ -46,19 +51,23 @@ class AppWebhookVerifiers(Protocol):
 
         Resolution happens when a verifier is bound to a public webhook door, so
         an unknown name surfaces at bind time as a loud failure, never a
-        silently-unverified door."""
+        silently-unverified door.
+        """
         ...
 
 
 @runtime_checkable
 class AppChannels(Protocol):
+    """The channel registry namespace (``app.channels``) and inbound-answer ladder."""
+
     def register(self, name: str, channel: Channel) -> None:
         """Register a :class:`Channel` under ``name``.
 
         A channel plugin calls this through the ``tai42_app`` handle when its
         import-only ``channel_modules`` entry loads. Registering a name already
         taken raises loudly — a silent overwrite could swap the medium a live
-        ask is delivered on."""
+        ask is delivered on.
+        """
         ...
 
     def get(self, name: str) -> Channel:
@@ -66,7 +75,8 @@ class AppChannels(Protocol):
 
         Resolution happens when ``ask_user`` is called with ``channel=name``,
         BEFORE any interaction state is written, so an unknown name surfaces as
-        a loud failure, never a question silently delivered nowhere."""
+        a loud failure, never a question silently delivered nowhere.
+        """
         ...
 
     def names(self) -> list[str]:
@@ -82,9 +92,11 @@ class AppChannels(Protocol):
         store: CorrelationStore,
         bridge: InboundBridge,
     ) -> InboundAnswerResult:
-        """Resolve one inbound participant reply against its pending ask — the ONE shared
-        inbound-answer ladder every correlated channel calls instead of hand-rolling
-        its own "forward → interpret 2xx/404/400 → release/bridge/keep" sequence.
+        """Resolve one inbound participant reply against its pending ask.
+
+        This is the ONE shared inbound-answer ladder every correlated channel calls
+        instead of hand-rolling its own "forward → interpret 2xx/404/400 →
+        release/bridge/keep" sequence.
 
         Returns an :class:`InboundAnswerResult`: the ``outcome`` the channel maps to its
         transport ack, plus the door's ``retry_reason``/``retry_field`` when it rejected
@@ -130,10 +142,10 @@ class AppChannels(Protocol):
     async def record_flow_send_receipt(
         self, channel: str, provider_message_id: str, status: DeliveryReceipt, *, errors: Any = None
     ) -> bool:
-        """Post an out-of-band delivery receipt for a FLOW send (a ``notify_user`` channel
-        send) back onto its originating monitoring trace.
+        """Post an out-of-band delivery receipt for a FLOW send back onto its originating trace.
 
-        The tier-2 counterpart to the conversation bridge's ``record_delivery_status``: a
+        The send is a ``notify_user`` channel send. The tier-2 counterpart to the
+        conversation bridge's ``record_delivery_status``: a
         channel's delivery-status webhook calls this when the bridge does not own the
         outbound id (``record_delivery_status`` raised ``LookupError``). It resolves the id
         through the TTL'd flow-send index and, on a hit, emits a ``delivery_receipt`` event
@@ -143,15 +155,18 @@ class AppChannels(Protocol):
 
         Returns ``True`` when the id was a known flow send (event emitted), ``False`` when it
         is not — so the webhook keeps its genuinely-unknown-id log only on a ``False``. A
-        no-op returning ``False`` where the flow-send store is unconfigured."""
+        no-op returning ``False`` where the flow-send store is unconfigured.
+        """
         ...
 
 
 @runtime_checkable
 class AppConversations(Protocol):
-    """The conversation bridge's entry surface for medium adapters: inbound messages
-    via ``accept``, out-of-band delivery receipts via ``record_delivery_status``.
-    Routing-row CRUD, the turn engine and the API door are not part of this facet.
+    """The conversation bridge's entry surface for medium adapters.
+
+    Inbound messages arrive via ``accept``, out-of-band delivery receipts via
+    ``record_delivery_status``. Routing-row CRUD, the turn engine and the API
+    door are not part of this facet.
     """
 
     async def accept(
@@ -168,8 +183,7 @@ class AppConversations(Protocol):
         location: LocationElement | None = None,
         locale: str | None = None,
     ) -> str:
-        """Accept one inbound channel message, persist it, and return its
-        ``message_id`` (a uuid4).
+        """Accept one inbound channel message, persist it, and return its ``message_id`` (a uuid4).
 
         Routed to the ``door=channel`` route matching ``(channel, our_identity)``; the
         turn runs as that route's execution key and answers back over the same channel.
@@ -238,5 +252,6 @@ class AppConversations(Protocol):
         AFTER the target exists but BEFORE the route is written; a validator returning
         any message lines refuses the creation with them (a 422), so a defect the target
         carries — a flow reading a state no binding supplies — is caught at bind, never
-        deferred to run time. Registering two validators for one kind raises loudly."""
+        deferred to run time. Registering two validators for one kind raises loudly.
+        """
         ...

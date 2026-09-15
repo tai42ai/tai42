@@ -592,7 +592,7 @@ def test_the_claim_point_claims_a_chained_park_like_any_other() -> None:
     seen: list[Any] = []
     token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
     try:
-        with _capture_interrupt(seen), pytest.raises(_Suspended):
+        with _capture_interrupt(seen), pytest.raises(_SuspendedError):
             _park_or_resume(messages)
     finally:
         reset_resume_continuation_tool(token)
@@ -628,7 +628,7 @@ def test_the_claim_point_still_refuses_a_park_owned_elsewhere() -> None:
     assert message.status == "error"
 
 
-class _Suspended(Exception):
+class _SuspendedError(Exception):
     """Stands in for what ``interrupt`` does to the node: it never returns on a park pass."""
 
 
@@ -643,7 +643,7 @@ def _capture_interrupt(seen: list[Any]):
 
     def _record(payload: Any) -> dict[str, Any]:
         seen.append(payload)
-        raise _Suspended
+        raise _SuspendedError
 
     mw.interrupt = _record  # type: ignore[assignment]
     try:

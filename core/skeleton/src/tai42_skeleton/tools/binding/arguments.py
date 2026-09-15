@@ -1,5 +1,4 @@
-"""Shapes a client call's arguments by parameter name and builds the stable
-makefun validation wrapper ``run_tool`` dispatches through."""
+"""Shape a client call's arguments by parameter name and build the makefun validation wrapper ``run_tool`` uses."""
 
 import asyncio
 import inspect
@@ -16,12 +15,13 @@ from tai42_skeleton.agent.binding import _UNSET
 def _named_call_arguments(
     signature: inspect.Signature, args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> dict[str, Any]:
-    """A client-tool call's arguments keyed by PARAMETER NAME — the shape the
-    execution-identity decision reads them in.
+    """A client-tool call's arguments keyed by PARAMETER NAME.
 
-    Positionals are bound through ``signature``, a ``**kwargs`` catch-all is flattened
+    The shape the execution-identity decision reads them in. Positionals are
+    bound through ``signature``, a ``**kwargs`` catch-all is flattened
     back in, ``*args`` is dropped, and the :data:`_UNSET` sentinel is stripped — so the
-    decision sees exactly the set-fields-only argument set ``run_tool`` authorizes."""
+    decision sees exactly the set-fields-only argument set ``run_tool`` authorizes.
+    """
     bound = signature.bind_partial(*args, **kwargs)
     arguments = dict(bound.arguments)
     for name, param in signature.parameters.items():
@@ -34,16 +34,17 @@ def _named_call_arguments(
 
 @lru_cache(maxsize=2048)
 def _validation_wrapper(resolved_fn: Callable[..., Any], offload: bool) -> Callable[..., Any]:
-    """A stable makefun wrapper presenting ``resolved_fn``'s signature, whose body
-    resolves and invokes ``resolved_fn`` (offloading a sync call to a worker thread
-    when ``offload`` is set).
+    """A stable makefun wrapper presenting ``resolved_fn``'s signature.
 
-    Keyed on ``(resolved_fn, offload)`` and cached module-wide. ``resolved_fn`` is
+    Its body resolves and invokes ``resolved_fn`` (offloading a sync call to a
+    worker thread when ``offload`` is set). Keyed on ``(resolved_fn, offload)``
+    and cached module-wide. ``resolved_fn`` is
     fastmcp's process-cached ``without_injected_parameters`` wrapper — a stable
     object per tool — so ``run_tool`` reuses one wrapper across calls instead of
     compiling a fresh function each time. That keeps fastmcp's process-global
     ``get_cached_typeadapter`` LRU hitting on the same wrapper rather than
-    thrashing it with a per-call throwaway."""
+    thrashing it with a per-call throwaway.
+    """
 
     async def safe_impl(**kwargs):
         result = await asyncio.to_thread(resolved_fn, **kwargs) if offload else resolved_fn(**kwargs)

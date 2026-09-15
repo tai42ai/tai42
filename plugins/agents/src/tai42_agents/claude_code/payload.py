@@ -17,8 +17,10 @@ _TEMPLATE_SUFFIX = ".tmpl"
 
 
 def runner_payload_files() -> list[tuple[str, bytes]]:
-    """Every runner payload file as ``(in_session_filename, content)``, the ``.tmpl`` suffix
-    stripped. Sorted for a deterministic authoring order."""
+    """Every runner payload file as ``(in_session_filename, content)``, the ``.tmpl`` suffix stripped.
+
+    Sorted for a deterministic authoring order.
+    """
     root = files(_PAYLOAD_ANCHOR).joinpath(_PAYLOAD_DIRNAME)
     out: list[tuple[str, bytes]] = [
         (entry.name[: -len(_TEMPLATE_SUFFIX)], entry.read_bytes())

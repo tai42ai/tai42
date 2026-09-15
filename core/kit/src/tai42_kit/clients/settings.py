@@ -19,6 +19,8 @@ from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, require, 
 
 
 class ClientSettings(DefaultNamespaceMixin, TaiBaseSettings):
+    """Base a client's settings subclass extends to supply connection kwargs via ``client_kwargs()``."""
+
     # Abstract base — claims no env vars of its own; excluded from the settings
     # registry. Own-attribute flag, so concrete product subclasses still register.
     # The default-namespace mixin is first in the MRO so its
@@ -33,6 +35,8 @@ class ClientSettings(DefaultNamespaceMixin, TaiBaseSettings):
 
 
 class RedisConnectionSettings(ClientSettings):
+    """Base Redis connection settings with unprefixed field names for a store to subclass with its own prefix."""
+
     # Base with unprefixed field names — a product subclasses it with its own
     # ``env_prefix``; excluded here so the unprefixed base is not a bogus group.
     registry_exclude: ClassVar[bool] = True
@@ -90,6 +94,8 @@ class RedisConnectionSettings(ClientSettings):
 
 
 class PostgresConnectionSettings(ClientSettings):
+    """Base Postgres connection settings loaded under a database's ``TAI_DATABASE_<NAME>_`` prefix."""
+
     # Base with unprefixed field names — the registry loads it under a database's
     # ``TAI_DATABASE_<NAME>_`` prefix; excluded here so the unprefixed base is not
     # a bogus group.
@@ -119,6 +125,7 @@ class PostgresConnectionSettings(ClientSettings):
 
     @property
     def pg_dsn(self) -> str:
+        """Build the libpq DSN from the connection fields; a missing host or password raises a named error."""
         # None must never reach connection building unnoticed: a missing host or
         # password raises a named error telling the operator which env var to set,
         # rather than an AttributeError on None.get_secret_value() or a bare

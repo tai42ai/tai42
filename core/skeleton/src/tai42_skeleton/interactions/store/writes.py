@@ -1,6 +1,8 @@
-"""The durable question-lifecycle mutations: persist a new question, atomically
-reserve an open slot, claim-and-record an answer, prune an abandoned question, and
-cascade-cancel a thread's parks."""
+"""The durable question-lifecycle mutations.
+
+Persist a new question, atomically reserve an open slot, claim-and-record an answer, prune an
+abandoned question, and cascade-cancel a thread's parks.
+"""
 
 from __future__ import annotations
 
@@ -23,9 +25,11 @@ PruneResult = Literal["pruned", "answered", "gone"]
 
 @dataclass(frozen=True)
 class _AnswerClaim:
-    """The denormalized state-hash fields ``record_answer`` reads in its immediate
-    (pre-MULTI) phase, plus the group's post-decrement ``remaining`` count — the
-    inputs the MULTI queue writes from."""
+    """The denormalized state-hash fields ``record_answer`` reads in its immediate (pre-MULTI) phase.
+
+    Plus the group's post-decrement ``remaining`` count — the inputs the MULTI queue writes
+    from.
+    """
 
     sensitive: bool
     audience: str | None
@@ -51,12 +55,13 @@ class _StoreWrites(_StoreKeys):
         expiry_ttl_margin_seconds: int = ttl._DEFAULT_EXPIRY_TTL_MARGIN_SECONDS,
         thread_id: str | None = None,
     ) -> None:
-        """Persist a new question: stream entry, state, pending index + deadline
-        index + count, the open-index ZSET member, add-event, and refreshed TTLs.
-        The TTL refresh gives this question's own state hash its own ``_key_ttl`` — it
-        SELF-COVERS, relying on no sibling to refresh it — and extends the shared group
-        stream and ``count_key`` to the greatest horizon across the group's parks, so a
-        still-open question always has a live group stream and count.
+        """Persist a new question and refresh its TTLs.
+
+        Writes the stream entry, state, pending index + deadline index + count, the open-index
+        ZSET member, add-event, and refreshed TTLs. The TTL refresh gives this question's own
+        state hash its own ``_key_ttl`` — it SELF-COVERS, relying on no sibling to refresh it —
+        and extends the shared group stream and ``count_key`` to the greatest horizon across the
+        group's parks, so a still-open question always has a live group stream and count.
 
         A key's TTL is its ``_key_ttl``: an async park whose ``expiry_at`` runs past
         the ``idle_ttl`` horizon gets a TTL covering that expiry plus
@@ -86,7 +91,8 @@ class _StoreWrites(_StoreKeys):
         its TTL. When the request is ``async`` (which always carries an ``expiry_at``)
         the per-interaction expiry member is added and ``continuation_*`` is
         denormalized onto the state hash so the answer/expiry path rebinds the
-        continuation under the same authority the ask ran under."""
+        continuation under the same authority the ask ran under.
+        """
         # Atomic phantom self-heal over the parallel deadline index, BEFORE the new
         # question is written (its deadline is in the future, so it is never a
         # purge target). redis-py's async ``eval`` stub types a non-awaitable
@@ -114,9 +120,12 @@ class _StoreWrites(_StoreKeys):
     def _build_state_mapping(
         self, request: InteractionRequest, continuation_fingerprint: str | None, thread_id: str | None
     ) -> dict[str, str]:
-        """Shape the durable state hash, folding in the ``sensitive``/``audience``/
-        ``continuation_*``/``thread_id``/``media_ids`` denormalizations a terminal
-        claim reads from single ``hget``s without deserializing the request."""
+        """Shape the durable state hash.
+
+        Folds in the ``sensitive``/``audience``/``continuation_*``/``thread_id``/``media_ids``
+        denormalizations a terminal claim reads from single ``hget``s without deserializing the
+        request.
+        """
         state = InteractionState(status="pending", group_id=request.group_id, request=request)
         state_mapping: dict[str, str] = {
             "status": state.status,
@@ -137,8 +146,10 @@ class _StoreWrites(_StoreKeys):
             # An async request always carries a continuation tool + identity
             # (model-validated); the fingerprint is the captured fire key (``""`` for
             # a gate-off fire, absent only pre-capture).
-            assert request.continuation_tool is not None
-            assert request.continuation_identity is not None
+            if request.continuation_tool is None:
+                raise AssertionError
+            if request.continuation_identity is None:
+                raise AssertionError
             state_mapping["continuation_tool"] = request.continuation_tool
             state_mapping["continuation_identity"] = request.continuation_identity
             if continuation_fingerprint is not None:
@@ -172,9 +183,11 @@ class _StoreWrites(_StoreKeys):
         ticket_ttl: int | None,
         open_member_reserved: bool,
     ) -> str | None:
-        """Enqueue the record + index writes (stream, state, count, pending +
-        deadline indexes, expiry member, thread-park member, open member, ticket,
-        add-event); return the ``thread_parks_key`` (or ``None``) for the TTL step."""
+        """Enqueue the record + index writes; return the ``thread_parks_key`` (or ``None``) for the TTL step.
+
+        Writes the stream, state, count, pending + deadline indexes, expiry member, thread-park
+        member, open member, ticket, and add-event.
+        """
         group_key = self.group_key(request.group_id)
         state_key = self.state_key(request.interaction_id)
         count_key = self.count_key(request.group_id)
@@ -235,10 +248,12 @@ class _StoreWrites(_StoreKeys):
         thread_parks_key: str | None,
         media_ids: list[str],
     ) -> None:
-        """Enqueue the per-key TTL refreshes: this park's own state hash to its own
-        horizon, the shared group stream + count (and thread-parks set) set-or-extended
-        to the greater horizon (``EXPIRE NX`` + ``EXPIRE GT``), and the media
-        set-or-extend Lua over the group's media index and keys."""
+        """Enqueue the per-key TTL refreshes.
+
+        This park's own state hash to its own horizon, the shared group stream + count (and
+        thread-parks set) set-or-extended to the greater horizon (``EXPIRE NX`` + ``EXPIRE GT``),
+        and the media set-or-extend Lua over the group's media index and keys.
+        """
         group_key = self.group_key(request.group_id)
         state_key = self.state_key(request.interaction_id)
         count_key = self.count_key(request.group_id)
@@ -288,7 +303,8 @@ class _StoreWrites(_StoreKeys):
         A ``True`` reservation adds the SAME member ``add`` would, so the caller
         must then invoke ``add(..., open_member_reserved=True)`` to avoid a double
         ZADD. redis-py's async ``eval`` stub types a non-awaitable return; it is
-        awaitable at runtime."""
+        awaitable at runtime.
+        """
         reserved = await cast(
             "Awaitable[int]",
             r.eval(
@@ -314,10 +330,11 @@ class _StoreWrites(_StoreKeys):
         continuation_due_ttl: int | None = None,
         continuation_first_attempt_at_ms: int | None = None,
     ) -> bool:
-        """Atomically claim and record an answer: mark answered, remove the
-        open-index member, decrement the group's pending count (drop the group
-        from the index at zero), wake the caller, append the answered-event. The
-        reply key gets a short TTL so a late answer to a timed-out question
+        """Atomically claim and record an answer.
+
+        Marks answered, removes the open-index member, decrements the group's pending count
+        (dropping the group from the index at zero), wakes the caller, appends the
+        answered-event. The reply key gets a short TTL so a late answer to a timed-out question
         expires instead of resurrecting it.
 
         DURABLE CONTINUATION OUTBOX: when the resolved interaction is an async park
@@ -345,7 +362,8 @@ class _StoreWrites(_StoreKeys):
 
         Returns ``True`` when this call claimed the answer, ``False`` when the
         interaction was missing or already answered (a lost duplicate race) —
-        in which case nothing is written and no caller is woken."""
+        in which case nothing is written and no caller is woken.
+        """
         if ticket is not None and ticket_ttl is None:
             raise ValueError("record_answer(): ticket given without ticket_ttl")
         interaction_id = response.interaction_id
@@ -385,9 +403,10 @@ class _StoreWrites(_StoreKeys):
                         continuation_first_attempt_at_ms,
                     )
                     await pipe.execute()
-                    return True
                 except WatchError:
                     continue
+                else:
+                    return True
 
     async def _read_answer_claim(
         self,
@@ -399,11 +418,13 @@ class _StoreWrites(_StoreKeys):
         continuation_due_ttl: int | None,
         continuation_first_attempt_at_ms: int | None,
     ) -> _AnswerClaim | None:
-        """Read + validate the denormalized fields the claim needs (status gate,
-        ``sensitive``/``audience``/``media_ids``/``thread_id``/``continuation_*``, and
-        the post-decrement ``remaining`` count), returning a frozen ``_AnswerClaim``
-        or ``None`` when the status is missing/``answered``. MULTI queues, it cannot
-        read — so this is the immediate (pre-MULTI) phase."""
+        """Read + validate the denormalized fields the claim needs.
+
+        Reads the status gate plus the denormalized ``sensitive``/``audience``/``media_ids``/
+        ``thread_id``/``continuation_*`` fields and the post-decrement ``remaining`` count,
+        returning a frozen ``_AnswerClaim`` or ``None`` when the status is missing/``answered``.
+        MULTI queues, it cannot read — so this is the immediate (pre-MULTI) phase.
+        """
         # redis-py's async stubs type pre-MULTI pipeline reads with the sync
         # (non-awaitable) return; the value is awaitable at runtime.
         status = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "status")))
@@ -474,10 +495,12 @@ class _StoreWrites(_StoreKeys):
         continuation_due_ttl: int | None,
         continuation_first_attempt_at_ms: int | None,
     ) -> None:
-        """Enqueue the MULTI writes: the answered-state ``hset``, ``decr``,
-        open/expiry/thread/media index removals, ticket + state refresh, the reply
-        ``rpush`` + ``expire``, the answered event, the at-zero group cleanup, and the
-        durable continuation-due outbox enqueue."""
+        """Enqueue the MULTI writes for a claimed answer.
+
+        The answered-state ``hset``, ``decr``, open/expiry/thread/media index removals, ticket +
+        state refresh, the reply ``rpush`` + ``expire``, the answered event, the at-zero group
+        cleanup, and the durable continuation-due outbox enqueue.
+        """
         interaction_id = response.interaction_id
         state_key = self.state_key(interaction_id)
         count_key = self.count_key(group_id)
@@ -504,7 +527,7 @@ class _StoreWrites(_StoreKeys):
         if ticket is not None:
             # ``ticket_ttl`` is guaranteed non-None here (guarded at the top); pin it
             # for the type checker.
-            assert ticket_ttl is not None
+            assert ticket_ttl is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
             pipe.expire(self.ticket_key(ticket), ticket_ttl)
             # Refresh the state key to the same window as the ticket: the idempotent
             # already-answered path resolves the ticket AND reads the state, so a state
@@ -529,9 +552,9 @@ class _StoreWrites(_StoreKeys):
             # claim. Validated non-None in the read phase above; pin for the type
             # checker. The answer rides the record so a redelivery survives even a
             # sensitive park (whose body is dropped) and a since-expired state.
-            assert claim.continuation_identity is not None
-            assert continuation_due_ttl is not None
-            assert continuation_first_attempt_at_ms is not None
+            assert claim.continuation_identity is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
+            assert continuation_due_ttl is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
+            assert continuation_first_attempt_at_ms is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
             due_key = self.continuation_due_key(interaction_id)
             due_mapping = records._continuation_due_mapping(
                 claim.continuation_tool,
@@ -547,11 +570,11 @@ class _StoreWrites(_StoreKeys):
     async def prune_pending(
         self, r: Redis, interaction_id: str, group_id: str, *, reason: str | None = None
     ) -> PruneResult:
-        """Remove a still-open question that is being abandoned (cancel-cleanup or
-        the timeout path). Status-gated exactly like ``record_answer``, INCLUDING
-        its ``except WatchError: continue`` retry loop: an answer committing
-        between the status read and EXEC fires WatchError, the retry then reads
-        ``answered`` and returns ``"answered"`` cleanly.
+        """Remove a still-open question that is being abandoned (cancel-cleanup or the timeout path).
+
+        Status-gated exactly like ``record_answer``, INCLUDING its ``except WatchError:
+        continue`` retry loop: an answer committing between the status read and EXEC fires
+        WatchError, the retry then reads ``answered`` and returns ``"answered"`` cleanly.
 
         ``reason`` TAGS the emitted ``interaction.removed`` event with WHY the question
         left pending (``"cancelled"`` for the operator per-interaction cancel door); it
@@ -571,7 +594,8 @@ class _StoreWrites(_StoreKeys):
         still ``pending``, in one MULTI: delete the state key, ``ZREM open_key``,
         ``DECR`` the group count, and at zero delete the count key + ``ZREM`` the
         group from BOTH the pending index and the parallel pending-deadline index;
-        then append an ``interaction.removed`` event and return ``"pruned"``."""
+        then append an ``interaction.removed`` event and return ``"pruned"``.
+        """
         state_key = self.state_key(interaction_id)
         count_key = self.count_key(group_id)
 
@@ -639,16 +663,19 @@ class _StoreWrites(_StoreKeys):
                         approximate=True,
                     )
                     await pipe.execute()
-                    return "pruned"
                 except WatchError:
                     continue
+                else:
+                    return "pruned"
 
     async def cancel_thread_parks(self, r: Redis, thread_id: str) -> list[str]:
-        """Cancel every async park bound to ``thread_id`` — the ONE cascade a conversation
-        thread delete (admin-delete, forget-me, route-delete) fires so a parked ``ask_user``
-        the deletion would ORPHAN is torn down instead of lingering (its expiry reaper later
-        firing a continuation into a thread that no longer exists → a delivery retry storm,
-        its channel correlation muting the participant's number until the ~24h deadline).
+        """Cancel every async park bound to ``thread_id`` — the ONE cascade a thread delete fires.
+
+        Fired by a conversation thread delete (admin-delete, forget-me, route-delete) so a
+        parked ``ask_user`` the deletion would ORPHAN is torn down instead of lingering (its
+        expiry reaper later firing a continuation into a thread that no longer exists → a
+        delivery retry storm, its channel correlation muting the participant's number until the
+        ~24h deadline).
 
         Reads the thread's reverse-index members and runs the EXISTING ``prune_pending`` for
         each: status-gated and idempotent, it removes a still-pending park WITHOUT firing any
@@ -663,7 +690,8 @@ class _StoreWrites(_StoreKeys):
         cancelling twice finds the set drained/absent the second time. The recovery is proven:
         once the interaction state is gone the answer-door returns not-found, and each channel
         bridges the next reply as a fresh turn and self-releases its correlation — so this
-        cancellation is channel-blind and enumerates no channels."""
+        cancellation is channel-blind and enumerates no channels.
+        """
         key = self.thread_parks_key(thread_id)
         members = [serde.as_str(member) for member in await cast("Awaitable[set[str | bytes]]", r.smembers(key))]
         for interaction_id in members:

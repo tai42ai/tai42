@@ -69,7 +69,7 @@ _ASYNC_ONLY = "SandboxSessionBackend is async-only; use aexecute/aupload_files/a
 # them at their absolute location: re-basing them under ``project`` would diverge the uploaded file
 # from the script's read path and the >50KB edit would fail SILENTLY (``temp_read_failed``, the
 # target left unmodified). Verified against deepagents 0.7.5 ``backends/sandbox.py``.
-_DEEPAGENTS_ENGINE_TMP_PREFIX = "/tmp/.deepagents_edit_"  # deepagents' own scratch prefix, not ours
+_DEEPAGENTS_ENGINE_TMP_PREFIX = "/tmp/.deepagents_edit_"  # noqa: S108 fixed scratch prefix, not a tempfile
 
 
 class SandboxSessionBackend(BaseSandbox):
@@ -82,6 +82,7 @@ class SandboxSessionBackend(BaseSandbox):
     """
 
     def __init__(self, session: SandboxSession) -> None:
+        """Bind the backend to a live ``session`` and derive its writable project root."""
         self._session = session
         # The agent's writable tree, absolute under the provider's workspace root. Built
         # from ``session.workspace_path`` (never a hardcoded ``/workspace``) so the same
@@ -107,6 +108,7 @@ class SandboxSessionBackend(BaseSandbox):
 
     @property
     def id(self) -> str:
+        """The live session's id."""
         return self._session.id
 
     # -- path rooting --------------------------------------------------------------
@@ -134,7 +136,8 @@ class SandboxSessionBackend(BaseSandbox):
         large-edit fallback uploads and reads via a baked-in absolute path) are the exception: they
         pass through UN-rebased so the upload and the server-side read agree (see
         ``_DEEPAGENTS_ENGINE_TMP_PREFIX``). Those are out-of-tree by construction — never an agent
-        virtual path — so they can never collide with the agent's project tree."""
+        virtual path — so they can never collide with the agent's project tree.
+        """
         if file_path.startswith(_DEEPAGENTS_ENGINE_TMP_PREFIX):
             return file_path
         if file_path == self._root or file_path.startswith(self._root + "/"):
@@ -142,8 +145,10 @@ class SandboxSessionBackend(BaseSandbox):
         return f"{self._root}/{file_path.lstrip('/')}"
 
     async def _ensure_root(self) -> None:
-        """Create the project root once (idempotent) so an exec can cwd into it. Runs
-        with the default (workspace-root) cwd, which always exists."""
+        """Create the project root once (idempotent) so an exec can cwd into it.
+
+        Runs with the default (workspace-root) cwd, which always exists.
+        """
         if self._root_ready:
             return
         await self._session.exec(["mkdir", "-p", self._root], timeout_seconds=_DEFAULT_EXEC_TIMEOUT_SECONDS)
@@ -158,23 +163,29 @@ class SandboxSessionBackend(BaseSandbox):
     # shell tool's own relative commands resolve there too.
 
     async def als(self, path: str) -> LsResult:
+        """List ``path`` re-based under the project root."""
         return await super().als(self._rooted(path))
 
     async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """Read ``file_path`` re-based under the project root."""
         return await super().aread(self._rooted(file_path), offset, limit)
 
     async def awrite(self, file_path: str, content: str) -> WriteResult:
+        """Write ``content`` to ``file_path`` re-based under the project root."""
         return await super().awrite(self._rooted(file_path), content)
 
     async def aedit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+        """Edit ``file_path`` re-based under the project root."""
         return await super().aedit(self._rooted(file_path), old_string, new_string, replace_all)
 
     async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """Glob ``pattern`` under ``path`` (or the project root) re-based under the project root."""
         return await super().aglob(pattern, self._rooted(path) if path is not None else self._root)
 
     async def agrep(
         self, pattern: str, path: str | None = None, glob: str | None = None, *, max_count: int | None = None
     ) -> GrepResult:
+        """Grep ``pattern`` under ``path`` (or the project root) re-based under the project root."""
         rooted = self._rooted(path) if path is not None else self._root
         return await super().agrep(pattern, rooted, glob, max_count=max_count)
 
@@ -188,7 +199,8 @@ class SandboxSessionBackend(BaseSandbox):
         the agent's tree. The tai42 :class:`~tai42_contract.sandbox.ExecResult`'s
         ``stdout``/``stderr`` are combined into ``ExecuteResponse.output`` (the shape
         deepagents' parsers consume); ``truncated`` is ``False`` (the session streams the
-        whole result)."""
+        whole result).
+        """
         await self._ensure_root()
         result = await self._session.exec(
             ["sh", "-lc", command],
@@ -201,7 +213,8 @@ class SandboxSessionBackend(BaseSandbox):
         """Write each ``(path, data)`` into the project tree via ``session.put_file``.
 
         A write failure is reported per-file as a ``FileUploadResponse`` error (batch
-        partial-success, the deepagents contract) rather than raising."""
+        partial-success, the deepagents contract) rather than raising.
+        """
         responses: list[FileUploadResponse] = []
         for path, data in files:
             try:
@@ -215,7 +228,8 @@ class SandboxSessionBackend(BaseSandbox):
         """Read each path from the project tree via ``session.get_file``.
 
         A miss maps to ``FileDownloadResponse(error="file_not_found")`` for that path (the
-        normalized deepagents literal), so a partial batch still yields the files present."""
+        normalized deepagents literal), so a partial batch still yields the files present.
+        """
         responses: list[FileDownloadResponse] = []
         for path in paths:
             try:
@@ -227,10 +241,10 @@ class SandboxSessionBackend(BaseSandbox):
 
 
 def build_sandbox_backend(session: SandboxSession, inline_skills: dict[str, str] | None = None) -> CompositeBackend:
-    """The deep agent's DURABLE composite backend for a live run: scratch on the sandbox
-    workspace volume, skills read-only over the template store.
+    """The deep agent's DURABLE composite backend for a live run.
 
-    ``default`` (everything except skills) is a :class:`SandboxSessionBackend` over ``session``
+    Scratch lives on the sandbox workspace volume, skills read-only over the
+    template store. ``default`` (everything except skills) is a :class:`SandboxSessionBackend` over ``session``
     — the ``StateBackend``→``SandboxSessionBackend`` swap, which makes deepagents' built-in
     ``execute`` tool a LIVE durable shell and moves scratch out of graph state onto the volume.
     ``routes={SKILLS_ROOT: skills_backend}`` is unchanged from the non-sandbox
@@ -240,6 +254,7 @@ def build_sandbox_backend(session: SandboxSession, inline_skills: dict[str, str]
 
     Composed HERE rather than folding the session into ``backend.build_backend`` so the durable
     default lives beside its :class:`SandboxSessionBackend`; the append path keeps the
-    non-sandbox ``build_backend`` (StateBackend), so a checkpoint-only write needs no session."""
+    non-sandbox ``build_backend`` (StateBackend), so a checkpoint-only write needs no session.
+    """
     skills_backend: BackendProtocol = InlineSkillsBackend(inline_skills) if inline_skills else TemplateSkillsBackend()
     return CompositeBackend(default=SandboxSessionBackend(session), routes={SKILLS_ROOT: skills_backend})

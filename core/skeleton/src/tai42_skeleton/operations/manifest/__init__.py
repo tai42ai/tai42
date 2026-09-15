@@ -1,5 +1,4 @@
-"""Manifest + MCP-status operations — ``/api/manifest*``, ``/api/mcp-config*``,
-``/api/mcp-status*``.
+"""Manifest + MCP-status operations — ``/api/manifest*``, ``/api/mcp-config*``, ``/api/mcp-status*``.
 
 A thin skin over the live-manifest admin surface (``tai42_app.admin``), the config
 manager, the reload gate, and the worker bus (``instance.app.bus``). Two groups:

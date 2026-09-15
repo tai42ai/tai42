@@ -1,5 +1,6 @@
-"""The subject-keyed state store's wire models — the shapes every door and tool
-read and write a subject's document through.
+"""The subject-keyed state store's wire models.
+
+The shapes every door and tool read and write a subject's document through.
 
 A *state* is a declared JSON document, one per *subject*. A subject is
 ``{target_kind, target_name, kind, key}``: the ``(target_kind, target_name)``
@@ -72,8 +73,7 @@ StateDoor = Literal["conversation", "hook", "schedule", "tool", "api", "operator
 
 
 class StateSubject(BaseModel):
-    """One addressed subject: the conversation-target scope
-    ``(target_kind, target_name)`` plus the ``(kind, key)`` within it.
+    """One addressed subject: a scope ``(target_kind, target_name)`` plus ``(kind, key)`` within it.
 
     Equality (and identity across every store method) is all four fields. ``key`` is
     stripped and must be 1..512 characters; ``kind`` matches :data:`SUBJECT_KIND_RE`.
@@ -106,10 +106,12 @@ class StateSubject(BaseModel):
 
 
 class SubjectCandidates(BaseModel):
-    """What a door knows about the subject before a state names its kind: the target
-    scope and a ``by_kind`` map of the candidate keys the door resolved
+    """What a door knows about the subject before a state names its kind.
+
+    The target scope and a ``by_kind`` map of the candidate keys the door resolved
     (``{"person": <id>, "thread": <thread_id>}``). A state's ambient subject is
-    ``by_kind[declaration.default_subject_kind]``. Frozen."""
+    ``by_kind[declaration.default_subject_kind]``. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -129,14 +131,16 @@ class SubjectCandidates(BaseModel):
 
 
 class StateContext(BaseModel):
-    """The ambient execution-context snapshot one door deposits so every downstream
-    write resolves its subject and provenance without a per-door argument.
+    """The ambient execution-context snapshot one door deposits for every downstream write.
+
+    It resolves each write's subject and provenance without a per-door argument.
 
     ONE generic object: the park carrier stores it whole, so a resumed run joins the
     same attribution later without a second field. ``door`` names the entering door,
     ``candidates`` the resolvable subjects, ``actor`` the accountable principal (a
     user id / execution key / ``None`` for system fires), ``turn_id`` the conversation
-    turn, and ``inbound_id`` the inbound message the turn answers. Frozen."""
+    turn, and ``inbound_id`` the inbound message the turn answers. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -155,7 +159,8 @@ class WriteOrigin(BaseModel):
     echoes verbatim — never reading a key from it — in which a consumer keeps its own
     provenance (its own identifiers, say). ``door``, ``actor`` and ``turn_id`` are NOT here:
     they are stamped by the platform chokepoint from the ambient context, so the audit
-    ledger cannot be forged by a consumer. Frozen."""
+    ledger cannot be forged by a consumer. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -179,10 +184,12 @@ class WriteOrigin(BaseModel):
 
 
 class CompletedOrigin(WriteOrigin):
-    """A :class:`WriteOrigin` completed by the platform write chokepoint: the
-    consumer's fields plus the ``door``, ``actor``, ``turn_id`` and ``inbound_id``
+    """A :class:`WriteOrigin` completed by the platform write chokepoint.
+
+    The consumer's fields plus the ``door``, ``actor``, ``turn_id`` and ``inbound_id``
     stamped from :class:`StateContext`. This is the shape the ``state_writes`` ledger
-    row and the ``_trace`` stamp carry. Frozen."""
+    row and the ``_trace`` stamp carry. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -193,11 +200,13 @@ class CompletedOrigin(WriteOrigin):
 
 
 class StateDeclaration(BaseModel):
-    """A declared state: its ``name``, human ``description``, base JSON ``schema``
-    (wire key ``schema``, attribute ``schema_``), the ``subject_kinds`` it serves
-    (≥1, unique, each matching :data:`SUBJECT_KIND_RE`), the ``default_subject_kind``
-    a door's ambient subject resolves to (one of ``subject_kinds``), and an optional
-    ``retention_days`` (a positive INT4, or unset to keep records forever).
+    """A declared state: its identity, base schema, subject kinds, and optional retention.
+
+    Carries its ``name``, human ``description``, base JSON ``schema`` (wire key ``schema``,
+    attribute ``schema_``), the ``subject_kinds`` it serves (≥1, unique, each matching
+    :data:`SUBJECT_KIND_RE`), the ``default_subject_kind`` a door's ambient subject resolves
+    to (one of ``subject_kinds``), and an optional ``retention_days`` (a positive INT4, or
+    unset to keep records forever).
 
     ``effective_schema`` is the base ``schema`` composed with every attached template's
     fragment, and ``regimes`` are the absolute write-regime rules composed over the
@@ -205,7 +214,8 @@ class StateDeclaration(BaseModel):
     paths). ``updated_at`` is the row's last-write timestamp. The platform computes all
     three and serves them on every read; a client that supplies a non-``None`` value for
     any of them on a write is refused (``… is set/computed by the platform``), so none can
-    be forged across the wire."""
+    be forged across the wire.
+    """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, serialize_by_alias=True)
 
@@ -246,14 +256,16 @@ class StateDeclaration(BaseModel):
 
 
 class StateTemplateDeclarations(BaseModel):
-    """The ``declarations`` section of a state-template document: the JSON ``schema`` (wire
-    key ``schema``, attribute ``schema_``) of the static values an attachment stores, and an
-    OPTIONAL ``check`` — a :class:`~tai42_contract.template.TemplatedText` carrying a jq
-    predicate over those values. Structural validation (the check's jq, the schema's shape)
-    lives at the store; this model pins the served wire shape.
+    """The ``declarations`` section of a state-template document.
+
+    The JSON ``schema`` (wire key ``schema``, attribute ``schema_``) of the static values an
+    attachment stores, and an OPTIONAL ``check`` — a :class:`~tai42_contract.template.TemplatedText`
+    carrying a jq predicate over those values. Structural validation (the check's jq, the schema's
+    shape) lives at the store; this model pins the served wire shape.
 
     The wire key ``schema`` is the attribute ``schema_`` (alias) because a ``schema`` field
-    would shadow ``BaseModel.schema``."""
+    would shadow ``BaseModel.schema``.
+    """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, serialize_by_alias=True)
 
@@ -262,14 +274,16 @@ class StateTemplateDeclarations(BaseModel):
 
 
 class StateTemplateJq(BaseModel):
-    """One named jq program on a state template. ``purpose`` is ``input`` — a read over the
-    record returning a value — or ``update`` — a program over ``{record, input}`` returning a
-    template-relative op batch. ``jq`` is the program body as a
+    """One named jq program on a state template.
+
+    ``purpose`` is ``input`` — a read over the record returning a value — or ``update`` — a program
+    over ``{record, input}`` returning a template-relative op batch. ``jq`` is the program body as a
     :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).
     ``params`` names the keys the program takes; ``reads``/``writes`` are the
     template-relative record paths an ``update`` program declares and are absent on an
     ``input`` program. Structural checks (jq compilation, path resolution) live at the store;
-    this model pins the served wire shape."""
+    this model pins the served wire shape.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -288,10 +302,12 @@ class StateTemplateJq(BaseModel):
 
     @model_serializer(mode="wrap")
     def _serialize_by_purpose(self, handler: Any) -> dict[str, Any]:
-        """An ``input`` program carries no ``reads``/``writes`` on the wire; an ``update``
-        program carries both (each defaulting to an empty list). Dropping them for an input
-        program keeps the served shape purpose-exact rather than padding it with empty
-        record-path lists that only an update program means."""
+        """Serialize the program purpose-exact: an ``input`` carries no ``reads``/``writes`` on the wire.
+
+        An ``update`` program carries both (each defaulting to an empty list). Dropping them for an
+        input program keeps the served shape purpose-exact rather than padding it with empty
+        record-path lists that only an update program means.
+        """
         data = handler(self)
         if self.purpose == "input":
             data.pop("reads", None)
@@ -300,12 +316,14 @@ class StateTemplateJq(BaseModel):
 
 
 class StateTemplateReconcile(BaseModel):
-    """The ``reconcile`` section of a state-template document: three jq programs the store
-    runs to settle a state's OPEN records on a declarations edit — ``orphans`` names the items
-    a record subtree orphans against the new declarations, ``resolutions`` names the
-    not-done resolutions a close may name, and ``close`` returns the op batch that closes one
-    orphan. Each is a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a
-    stored ``id``)."""
+    """The ``reconcile`` section of a state-template document.
+
+    Three jq programs the store runs to settle a state's OPEN records on a declarations edit —
+    ``orphans`` names the items a record subtree orphans against the new declarations,
+    ``resolutions`` names the not-done resolutions a close may name, and ``close`` returns the op
+    batch that closes one orphan. Each is a :class:`~tai42_contract.template.TemplatedText` (inline
+    ``content`` or a stored ``id``).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -315,20 +333,22 @@ class StateTemplateReconcile(BaseModel):
 
 
 class StateTemplateDocument(BaseModel):
-    """A state-template document: the reusable schema fragment plus the parameters, write
-    regimes, attach-time ``declarations`` and ``trace`` switch the platform owns, plus
-    ``template_jq`` (named jq programs — ``input``-purpose reads and ``update``-purpose
-    record operations) and ``reconcile`` (how a declarations edit settles open records)
-    that give the record its meaning. A template is data end to end: the states API serves
-    an input-purpose result for a subject and applies an update-purpose program to a subject
-    generically, so a template is usable through the API with no other engine.
-    ``extra="forbid"`` refuses any key outside these.
+    """A state-template document: a reusable schema fragment and the programs that give records meaning.
+
+    It carries the reusable schema fragment plus the parameters, write regimes, attach-time
+    ``declarations`` and ``trace`` switch the platform owns, plus ``template_jq`` (named jq
+    programs — ``input``-purpose reads and ``update``-purpose record operations) and ``reconcile``
+    (how a declarations edit settles open records) that give the record its meaning. A template is
+    data end to end: the states API serves an input-purpose result for a subject and applies an
+    update-purpose program to a subject generically, so a template is usable through the API with no
+    other engine. ``extra="forbid"`` refuses any key outside these.
 
     The wire key ``schema`` is the attribute ``schema_`` (alias). The ``declarations``,
     ``template_jq`` and ``reconcile`` sections carry their served sub-shapes
     (:class:`StateTemplateDeclarations`, :class:`StateTemplateJq`,
     :class:`StateTemplateReconcile`); the skeleton store does the semantic validation (jq
-    compilation, regime/record path resolution against the fragment) these models do not."""
+    compilation, regime/record path resolution against the fragment) these models do not.
+    """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, serialize_by_alias=True)
 
@@ -353,12 +373,14 @@ class StateTemplateDocument(BaseModel):
 
 
 class AttachBody(BaseModel):
-    """An attach request: the ``path`` in the state's document where the template's
-    fragment lands, the attachment's parameter values, its static ``declarations``, and
-    ``options`` — a free-form, per-operation directive bag a registered attach reconciler
-    reads (how to reconcile OPEN records against the new declarations). ``options`` is
-    passed to the reconcilers for THIS attach only, never stored or served back; every
-    other key is refused."""
+    """An attach request placing a template's fragment at a path in a state's document.
+
+    ``path`` is where the fragment lands; the request also carries the attachment's parameter
+    values, its static ``declarations``, and ``options`` — a free-form, per-operation directive
+    bag a registered attach reconciler reads (how to reconcile OPEN records against the new
+    declarations). ``options`` is passed to the reconcilers for THIS attach only, never stored or
+    served back; every other key is refused.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -369,9 +391,12 @@ class AttachBody(BaseModel):
 
 
 class StateRecord(BaseModel):
-    """A read record: the ``state``, its ``subject``, the ``data`` document and its
-    monotonic ``seq``, plus the ``canonical_subject`` a fold resolved the subject to
-    and every subject ``folded_from`` into it. Frozen."""
+    """A read record: a subject's ``data`` document with its sequence and fold provenance.
+
+    Carries the ``state``, its ``subject``, the ``data`` document and its monotonic ``seq``, plus
+    the ``canonical_subject`` a fold resolved the subject to and every subject ``folded_from`` into
+    it. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -384,10 +409,13 @@ class StateRecord(BaseModel):
 
 
 class ApplyResult(BaseModel):
-    """The outcome of an ``apply``: whether it ``applied`` (a replayed op-id or an
-    empty batch is ``False``; a batch whose every op guard-skips still reports
-    ``applied=True`` with the ops in ``skipped``), the resulting ``data`` and ``seq``
-    when it did, and the ``skipped`` ops (each a reason record) a guard held back."""
+    """The outcome of an ``apply``.
+
+    ``applied`` reports whether it took (a replayed op-id or an empty batch is ``False``; a batch
+    whose every op guard-skips still reports ``applied=True`` with the ops in ``skipped``); the
+    resulting ``data`` and ``seq`` are set when it did, and ``skipped`` lists the ops (each a reason
+    record) a guard held back.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -398,10 +426,12 @@ class ApplyResult(BaseModel):
 
 
 class TemplateJqResult(BaseModel):
-    """The result of evaluating an ``input``-purpose ``template_jq`` program for a subject:
-    the resolved ``name``, its ``purpose`` (always ``"input"`` here), and the ``value`` (any
+    """The result of evaluating an ``input``-purpose ``template_jq`` program for a subject.
+
+    The resolved ``name``, its ``purpose`` (always ``"input"`` here), and the ``value`` (any
     JSON — the program's jq output over the subject's record). A read; no write is
-    recorded."""
+    recorded.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -411,11 +441,13 @@ class TemplateJqResult(BaseModel):
 
 
 class TemplateJqApplyResult(BaseModel):
-    """The outcome of applying an ``update``-purpose ``template_jq`` program to a subject:
-    its ``name`` and the :class:`ApplyResult` outcome of the op batch its jq returned, run
+    """The outcome of applying an ``update``-purpose ``template_jq`` program to a subject.
+
+    Its ``name`` and the :class:`ApplyResult` outcome of the op batch its jq returned, run
     through the same ``apply`` chokepoint as a delta — ``applied`` (a replayed ``op_id`` or
     an empty batch is ``False``), the resulting ``data`` and ``seq`` when it applied, and the
-    guard-``skipped`` ops."""
+    guard-``skipped`` ops.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -427,9 +459,11 @@ class TemplateJqApplyResult(BaseModel):
 
 
 class WriteEntry(BaseModel):
-    """One row of a subject's audit trail: the ``seq`` and timestamp ``at`` of the
-    write, the :class:`CompletedOrigin` that produced it, and the absolute ``paths``
-    it touched (each a list of string keys / integer list indices)."""
+    """One row of a subject's audit trail.
+
+    The ``seq`` and timestamp ``at`` of the write, the :class:`CompletedOrigin` that produced it,
+    and the absolute ``paths`` it touched (each a list of string keys / integer list indices).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -440,10 +474,13 @@ class WriteEntry(BaseModel):
 
 
 class WritesPage(BaseModel):
-    """One keyset page of a subject's write ledger: the ``items`` (newest first) and the
-    ``next_cursor`` a caller feeds the next call. ``next_cursor`` is the last row's id (a
-    string) when the page is full, else ``None`` — the page-model idiom the subject and
-    search pages share, so a caller pages the audit trail the same way it pages them."""
+    """One keyset page of a subject's write ledger.
+
+    The ``items`` (newest first) and the ``next_cursor`` a caller feeds the next call.
+    ``next_cursor`` is the last row's id (a string) when the page is full, else ``None`` — the
+    page-model idiom the subject and search pages share, so a caller pages the audit trail the same
+    way it pages them.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -452,10 +489,12 @@ class WritesPage(BaseModel):
 
 
 class ConsumerLink(BaseModel):
-    """Where the Studio opens a consumer: a feature ``token`` + ``search`` (a states
-    page → hooks/scheduling/agents cross-link) OR a ``plugin_path`` + ``search`` (a
-    plugin's own screen). All optional — a consumer that renders no link supplies
-    none."""
+    """Where the Studio opens a consumer.
+
+    A feature ``token`` + ``search`` (a states page → hooks/scheduling/agents cross-link) OR a
+    ``plugin_path`` + ``search`` (a plugin's own screen). All optional — a consumer that renders no
+    link supplies none.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -465,11 +504,13 @@ class ConsumerLink(BaseModel):
 
 
 class ConsumerRow(BaseModel):
-    """One thing that binds a state, as the Consumers tab reads it: its ``kind``
-    (hook / schedule / agent / a consumer plugin's own kind), ``name``, human ``detail`` and optional
-    ``link``. ``unavailable`` (mutually exclusive with the rest) marks a consumer
-    family that cannot be listed on this deployment (e.g. no scheduling backend),
-    surfaced as a muted line — never swallowed."""
+    """One thing that binds a state, as the Consumers tab reads it.
+
+    Its ``kind`` (hook / schedule / agent / a consumer plugin's own kind), ``name``, human
+    ``detail`` and optional ``link``. ``unavailable`` (mutually exclusive with the rest) marks a
+    consumer family that cannot be listed on this deployment (e.g. no scheduling backend), surfaced
+    as a muted line — never swallowed.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -490,33 +531,41 @@ AttachValidator = Callable[["StateTemplateDocument", dict[str, Any], dict[str, A
 
 @runtime_checkable
 class AttachReconcileRecords(Protocol):
-    """The narrow record door an attach reconciler reads and writes the (re)attached state's
-    records through — a subset of the states facet bound to the one state: read a subject,
-    page its subjects, ``merge`` a shallow resolution, or ``apply`` a full op batch (the
-    same keyed ops as an update-purpose program, so a record under a ``composing`` write
-    regime can be closed too). Every write runs on the attach transaction and is completed
-    and audited at the platform chokepoint exactly like a facet write."""
+    """The narrow record door an attach reconciler reads and writes a (re)attached state through.
 
-    async def read(self, subject: StateSubject) -> StateRecord | None: ...
+    A subset of the states facet bound to the one state: read a subject, page its subjects,
+    ``merge`` a shallow resolution, or ``apply`` a full op batch (the same keyed ops as an
+    update-purpose program, so a record under a ``composing`` write regime can be closed too). Every
+    write runs on the attach transaction and is completed and audited at the platform chokepoint
+    exactly like a facet write.
+    """
+
+    async def read(self, subject: StateSubject) -> StateRecord | None:
+        """Return the state's record for ``subject``, or ``None`` when it has none."""
 
     async def list_subjects(
         self, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Return one keyset page of the state's subjects, optionally filtered by ``kind``."""
 
-    async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> StateRecord: ...
+    async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> StateRecord:
+        """Merge ``patch`` into ``subject``'s record and return the updated record."""
 
-    async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult: ...
+    async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult:
+        """Apply ``ops`` to ``subject``'s record and return the :class:`ApplyResult`."""
 
 
 @dataclass(frozen=True, kw_only=True)
 class AttachReconcileContext:
-    """What an attach reconciler receives before an attach write commits: the ``state`` name,
-    the ``template`` document, the ``operation`` replacing declarations, the
+    """What an attach reconciler receives before an attach write commits.
+
+    The ``state`` name, the ``template`` document, the ``operation`` replacing declarations, the
     ``previous_declarations`` (``None`` on a first attach), the ``new_declarations``, the
     attachment ``options``, and the ``records`` door bound to the state. A reconciler RAISES a
     :class:`~tai42_contract.states.errors.TemplateValidationError` to refuse the attach
     (naming the offending records) or writes resolutions through ``records`` and returns,
-    letting the attach commit with those writes."""
+    letting the attach commit with those writes.
+    """
 
     state: str
     template: StateTemplateDocument

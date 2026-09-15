@@ -1,11 +1,14 @@
-"""The per-target conversation config store — keyspace 9 of the conversation bridge: the
-durable, backed-up ``(target_kind, target_name)`` → :class:`TargetConversationConfig` map
-(``multichannel`` opt-in + first-contact ``greeting_template``).
+"""The per-target conversation config store — keyspace 9 of the conversation bridge.
+
+The durable, backed-up ``(target_kind, target_name)`` →
+:class:`TargetConversationConfig` map (``multichannel`` opt-in + first-contact
+``greeting_template``).
 
 Redis-backed and gated exactly as the routing-row store: construction refuses with a loud
 501 without the redis conversations backend, because a durable operator-config map cannot
-live per-process. The registry is INERT here — nothing reads the stored config yet; the
-accept path and the pairing tool consume it in a later step.
+live per-process. The accept path and the pairing tool read a target's config through
+:meth:`ConversationTargetConfigStore.get`, and the backup section exports the whole map
+through :meth:`~ConversationTargetConfigStore.list`.
 """
 
 from __future__ import annotations
@@ -59,24 +62,32 @@ def _as_str(value: Any) -> str:
 
 
 def _member(target_kind: str, target_name: str) -> str:
-    """The index member for a config key — the row-key suffix, so appending it to
-    :attr:`ConversationsSettings.target_config_key_prefix` rebuilds the row key it names."""
+    """The index member for a config key — the row-key suffix.
+
+    Appending it to :attr:`ConversationsSettings.target_config_key_prefix` rebuilds the
+    row key it names.
+    """
     return f"{target_kind}:{target_name}"
 
 
 class ConversationTargetConfigStore:
-    """The Redis-backed per-target config store (keyspace 9). Construction refuses with a
-    loud 501 without the redis conversations backend."""
+    """The Redis-backed per-target config store (keyspace 9).
+
+    Construction refuses with a loud 501 without the redis conversations backend.
+    """
 
     def __init__(self, settings: ConversationsSettings) -> None:
+        """Store ``settings``; refuse with a loud 501 without the redis conversations backend."""
         if settings.in_memory:
             raise NotSupportedError(_NO_BACKEND)
         self.settings = settings
 
     async def upsert(self, config: TargetConversationConfig) -> bool:
-        """Store ``config`` (an upsert — create or replace), keeping the name index in
-        lockstep. Return ``True`` when the row is newly created, ``False`` when it replaced
-        an existing row of the same ``(target_kind, target_name)`` key."""
+        """Store ``config`` (an upsert — create or replace), keeping the name index in lockstep.
+
+        Return ``True`` when the row is newly created, ``False`` when it replaced an
+        existing row of the same ``(target_kind, target_name)`` key.
+        """
         async with client_ctx(RedisClient, self.settings.redis) as r:
             existed = await eval_script(
                 r,
@@ -99,8 +110,10 @@ class ConversationTargetConfigStore:
         return TargetConversationConfig.model_validate_json(_as_str(raw))
 
     async def delete(self, target_kind: str, target_name: str) -> bool:
-        """Remove the config for ``(target_kind, target_name)``, keeping the name index in
-        lockstep. Return ``True`` when a row was removed, ``False`` when none existed."""
+        """Remove the config for ``(target_kind, target_name)``, keeping the name index in lockstep.
+
+        Return ``True`` when a row was removed, ``False`` when none existed.
+        """
         async with client_ctx(RedisClient, self.settings.redis) as r:
             removed = await eval_script(
                 r,

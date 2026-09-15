@@ -1,3 +1,5 @@
+"""Middleware that keeps only the newest prompt-caching breakpoint at the model call."""
+
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -31,8 +33,7 @@ def _strip_blocks(content: list[Any]) -> list[Any] | str:
 
 
 def roll_cache_marks(messages: list[AnyMessage]) -> list[AnyMessage] | None:
-    """Keep the ``cache_control`` mark only on the last message that carries one,
-    stripping it from every earlier message.
+    """Keep the ``cache_control`` mark only on the last message that carries one, stripping earlier ones.
 
     Returns a new message list (earlier marked messages replaced by stripped copies,
     the rest shared by reference) or ``None`` when history carries zero or one mark
@@ -85,6 +86,7 @@ class RollingCacheMarkMiddleware(AgentMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], ModelResponse[Any]],
     ) -> ModelCallResult[Any]:
+        """Roll the cache marks on ``request.messages`` before the synchronous model call."""
         rolled = roll_cache_marks(request.messages)
         if rolled is not None:
             request = request.override(messages=rolled)
@@ -95,6 +97,7 @@ class RollingCacheMarkMiddleware(AgentMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelCallResult[Any]:
+        """Roll the cache marks on ``request.messages`` before the async model call."""
         rolled = roll_cache_marks(request.messages)
         if rolled is not None:
             request = request.override(messages=rolled)

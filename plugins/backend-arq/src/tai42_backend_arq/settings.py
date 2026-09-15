@@ -44,11 +44,14 @@ _RESULT_PAYLOAD_KEYS = frozenset({"t", "f", "a", "k", "et", "s", "r", "st", "ft"
 
 
 class TaskFailedError(Exception):
-    """A task's stored failure, revived from the tagged description its exception
-    serialized to. Carries the original exception's type name, ``repr``, and
-    formatted traceback text when one was attached."""
+    """A task's stored failure, revived from the tagged description its exception serialized to.
+
+    Carries the original exception's type name, ``repr``, and formatted traceback text when one
+    was attached.
+    """
 
     def __init__(self, error_type: str, error_repr: str, traceback_text: str | None) -> None:
+        """Record the revived failure's ``error_type``, ``error_repr`` and optional ``traceback_text``."""
         super().__init__(error_repr if traceback_text is None else f"{error_repr}\n{traceback_text}")
         self.error_type = error_type
         self.error_repr = error_repr
@@ -59,7 +62,8 @@ def _describe_unserializable(value: Any) -> dict[str, Any]:
     """The tagged in-place description of a value JSON cannot encode.
 
     A ``SecretValue`` refuses every transport by design: tagging it would leak a
-    secret into the result store as a normal-looking value, so it raises instead."""
+    secret into the result store as a normal-looking value, so it raises instead.
+    """
     if isinstance(value, SecretValue):
         raise TypeError("SecretValue refuses serialization transport")
     is_exception = isinstance(value, BaseException)
@@ -97,7 +101,8 @@ def job_serializer(payload: Any) -> bytes:
 
     In a result payload, a value JSON cannot encode serializes to its tagged
     description instead of failing the whole payload. Job payloads stay strict:
-    an unserializable argument raises (arq's ``SerializationError`` at enqueue)."""
+    an unserializable argument raises (arq's ``SerializationError`` at enqueue).
+    """
     if _is_result_payload(payload):
         return orjson.dumps(to_jsonable_python(payload, fallback=_describe_unserializable))
     return orjson.dumps(to_jsonable_python(payload))
@@ -109,7 +114,8 @@ def job_deserializer(data: bytes) -> Any:
     A failed result whose stored result is a tagged description is revived into
     an exception (``asyncio.CancelledError`` for a stored abort,
     :class:`TaskFailedError` otherwise); a malformed tag raises. A tagged
-    description inside a successful result is left as the mapping itself."""
+    description inside a successful result is left as the mapping itself.
+    """
     payload = orjson.loads(data)
     if _is_result_payload(payload) and not payload["s"] and _is_tagged(payload["r"]):
         payload["r"] = _revive_failure(payload["r"])
@@ -117,6 +123,8 @@ def job_deserializer(data: bytes) -> Any:
 
 
 class ArqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings):
+    """The ``ARQ_*`` backend config: the Redis connection, queue name, drain timeouts and key namespace."""
+
     model_config = SettingsConfigDict(
         env_prefix="ARQ_",
     )
@@ -146,8 +154,10 @@ class ArqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSetting
     job_completion_wait: int = 300
 
     def make_redis_settings(self, url: str | None = None) -> Any:
-        """Build the arq ``RedisSettings`` for ``url`` (default: ``redis_url``),
-        applying the configured connection cap."""
+        """Build the arq ``RedisSettings`` for ``url`` (default: ``redis_url``).
+
+        Applies the configured connection cap.
+        """
         from arq.connections import RedisSettings
 
         settings = RedisSettings.from_dsn(url or self.redis_url)
@@ -157,32 +167,40 @@ class ArqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSetting
 
     @property
     def redis_settings(self) -> Any:
+        """The arq ``RedisSettings`` for the configured ``redis_url``."""
         return self.make_redis_settings()
 
     @property
     def arq_prefix(self) -> str:
+        """The Redis key prefix arq itself uses."""
         return "arq:"
 
     # -- own schedule namespace ------------------------------------------------
 
     @property
     def arq_schedule_hash(self) -> str:
+        """The Redis hash key prefix for this plugin's schedule entries."""
         return f"{self.arq_prefix}schedule:"
 
     def arq_schedule_key(self, name: str) -> str:
+        """The Redis key for the schedule entry named ``name``."""
         return f"{self.arq_schedule_hash}{name}"
 
     @property
     def arq_schedule_pattern(self) -> str:
+        """The Redis ``SCAN`` glob matching every schedule entry key."""
         return f"{self.arq_schedule_hash}*"
 
     def arq_schedule_lock_key(self, name: str) -> str:
+        """The Redis lock key serializing writers of the schedule named ``name``."""
         return f"{self.arq_prefix}lock:schedule:{name}"
 
     def arq_schedule_recovery_lock_key(self, name: str) -> str:
+        """The Redis lock key serializing recovery of the schedule named ``name``."""
         return f"{self.arq_prefix}schedule_recovery_lock:{name}"
 
 
 @settings_cache
 def arq_settings() -> ArqSettings:
+    """The process-cached :class:`ArqSettings`."""
     return ArqSettings()

@@ -1,5 +1,4 @@
-"""The provider/registry facades (``app.agents``/``backends``/``sandboxes``/``storage``/
-``monitoring``/``extensions``/``webhook_verifiers``/``connectors``/``accounts``)."""
+"""The provider/registry facades: ``app.agents``, ``backends``, ``sandboxes``, ``storage``, and peers."""
 
 from __future__ import annotations
 
@@ -37,12 +36,15 @@ class AgentsFacet(_Facet):
     def agent(
         self, name: str, tags: set[str] | None = None, meta: dict[str, Any] | None = None
     ) -> Callable[[type[_AgentT]], type[_AgentT]]:
+        """Decorator registering an agent class under ``name`` with optional ``tags``/``meta``."""
         return self._app._agent_binding.agent(name, tags, meta)
 
     def get_agent(self, name: str) -> Agent:
+        """The agent registered under ``name``."""
         return self._app._agent_binding.get_agent(name)
 
     def all_agents(self) -> dict[str, Agent]:
+        """Every registered agent, keyed by name."""
         return self._app._agent_binding.all_agents()
 
 
@@ -50,46 +52,60 @@ class BackendsFacet(_Facet):
     """``app.backends`` — backend registration (``AppBackends``)."""
 
     def register_backend(self, cls: type | None = None) -> Callable[..., Any]:
+        """Register the process's backend class (or return the decorator when called bare)."""
         return self._app._backend_holder.register_backend(cls)
 
     @property
     def backend(self) -> Backend | None:
+        """The registered backend, or ``None`` when none is registered."""
         return self._app._backend_holder.backend
 
 
 class SandboxesFacet(_Facet):
-    """``app.sandboxes`` — sandbox provider registration + the acquisition chokepoint
-    and the resolved-policy read (``AppSandboxes``)."""
+    """``app.sandboxes`` — sandbox registration, the acquisition chokepoint, and the resolved-policy read.
+
+    Implements ``AppSandboxes``.
+    """
 
     def register_sandbox(self, cls: type[Sandbox]) -> type[Sandbox]:
+        """Register ``cls`` as the sandbox provider and return it."""
         return self._app._sandbox_holder.register_sandbox(cls)
 
     @property
     def sandbox(self) -> Sandbox | None:
-        """The registered provider, or ``None`` — status/introspection ONLY. Never gate
-        execution on this nullable read; acquire through :meth:`require_sandbox`."""
+        """The registered provider, or ``None`` — status/introspection ONLY.
+
+        Never gate execution on this nullable read; acquire through
+        :meth:`require_sandbox`.
+        """
         return self._app._sandbox_holder.sandbox
 
     def require_sandbox(self) -> Sandbox:
-        """The ONE raising acquisition chokepoint every consumer reaches — returns the
-        registered provider or raises ``SandboxUnavailableError`` when none is registered."""
+        """The ONE raising acquisition chokepoint every consumer reaches.
+
+        Returns the registered provider or raises ``SandboxUnavailableError`` when none
+        is registered.
+        """
         return self._app._sandbox_holder.require()
 
     def sandbox_policy(self) -> SandboxPolicy:
-        """The skeleton-resolved :class:`SandboxPolicy` — the SAME value the holder binds
-        to the kit at provider registration, read through the ONE shared resolver so the
-        bound policy and this read can never diverge. Available REGARDLESS of whether a
-        provider is registered (it reads operator config, not a provider)."""
+        """The skeleton-resolved :class:`SandboxPolicy`.
+
+        The SAME value the holder binds to the kit at provider registration, read through
+        the ONE shared resolver so the bound policy and this read can never diverge.
+        Available REGARDLESS of whether a provider is registered (it reads operator
+        config, not a provider).
+        """
         from tai42_skeleton.sandbox.policy import resolve_sandbox_policy
 
         return resolve_sandbox_policy()
 
 
 class StorageFacet(_Facet):
-    """``app.storage`` — storage provider registration + the resource manager
-    layered on it (``AppStorage``)."""
+    """``app.storage`` — storage provider registration + the resource manager layered on it (``AppStorage``)."""
 
     def register_storage(self, cls: type[Storage] | None = None) -> Callable[..., Any]:
+        """Register the storage provider class (or return the decorator when called bare)."""
         return self._app._register_storage(cls)
 
     @property
@@ -99,7 +115,8 @@ class StorageFacet(_Facet):
         The read-only counterpart to :meth:`register_storage`, mirroring
         :attr:`BackendsFacet.backend`: the storage doors report identity + serve
         CRUD off this instance, answering ``None`` as the honest empty state
-        rather than fabricating a default provider."""
+        rather than fabricating a default provider.
+        """
         return self._app._storage_registry.provider
 
     @property
@@ -117,14 +134,14 @@ class MonitoringFacet(_Facet):
     """``app.monitoring`` — monitoring backend registration (``AppMonitoring``)."""
 
     def register_monitoring(self, builder: Callable[..., Any] | None = None) -> Callable[..., Any]:
+        """Register the monitoring backend builder (or return the decorator when called bare)."""
         from tai42_skeleton.monitoring import register_monitoring
 
         return register_monitoring(builder)
 
     @property
     def active(self) -> Monitoring:
-        """The active monitoring backend (the no-op default until a plugin
-        installs a real one via ``register_monitoring``)."""
+        """The active monitoring backend (the no-op default until a plugin installs a real one)."""
         from tai42_skeleton.monitoring import get_monitoring
 
         return get_monitoring()
@@ -141,21 +158,25 @@ class ExtensionsFacet(_Facet):
         name: str | None = None,
         requires_body_locality: bool = False,
     ) -> Callable[..., Any]:
+        """Register an extension of ``kind`` (or return the decorator when called bare)."""
         return self._app._extension_registry.extension(
             f, kind=kind, name=name, requires_body_locality=requires_body_locality
         )
 
     def available_extensions(self) -> list[dict]:
+        """Every registered extension as a listing dict."""
         return self._app._extension_registry.available_extensions()
 
     def validate_combo(self, combo: Sequence[ExtensionElement]) -> None:
-        """Validate one extension combo against the LIVE registry: reject an
-        unknown extension name and a combo carrying two extensions of a
+        """Validate one extension combo against the LIVE registry.
+
+        Rejects an unknown extension name and a combo carrying two extensions of a
         non-stackable kind. A combo element is an extension name or a
         ``{"name", "config"}`` mapping — validation keys on the name. Raises
-        :class:`~tai42_skeleton.exceptions.exceptions.TaiValidationError`
-        on the first violation (the shape both the presets and the tool-extensions
-        routes validate a combo through before any persist)."""
+        :class:`~tai42_skeleton.exceptions.exceptions.TaiValidationError` on the first
+        violation (the shape both the presets and the tool-extensions routes validate a
+        combo through before any persist).
+        """
         registry = self._app._extension_registry
         available = {entry["name"] for entry in registry.available_extensions()}
         names = [extension_name(element) for element in combo]
@@ -168,39 +189,43 @@ class ExtensionsFacet(_Facet):
 
 
 class WebhookVerifiersFacet(_Facet):
-    """``app.webhook_verifiers`` — webhook-verifier registration + lookup
-    (``AppWebhookVerifiers``)."""
+    """``app.webhook_verifiers`` — webhook-verifier registration + lookup (``AppWebhookVerifiers``)."""
 
     def register(self, name: str, verifier: WebhookVerifier) -> None:
+        """Register ``verifier`` under ``name``."""
         return self._app._webhook_verifier_registry.register(name, verifier)
 
     def get(self, name: str) -> WebhookVerifier:
+        """The webhook verifier registered under ``name``."""
         return self._app._webhook_verifier_registry.get(name)
 
     def names(self) -> list[str]:
-        """The sorted names of every registered verifier — the catalog the Studio
-        bind form offers instead of free text. Empty when no verifier lifecycle
-        module is loaded."""
+        """The sorted names of every registered verifier — the catalog the bind form offers.
+
+        Offered instead of free text; empty when no verifier lifecycle module is loaded.
+        """
         return self._app._webhook_verifier_registry.names()
 
 
 class ConnectorsFacet(_Facet):
-    """``app.connectors`` — connector provider registration + the token store
-    (``AppConnectors``)."""
+    """``app.connectors`` — connector provider registration + the token store (``AppConnectors``)."""
 
     def register_connector(self, descriptor: ProviderDescriptor) -> None:
+        """Register a connector provider from its ``descriptor``."""
         return self._app._register_connector(descriptor)
 
     @property
     def token_store(self) -> ConnectorTokenStore:
+        """The connector token store."""
         return self._app._token_store
 
     async def resolve_connection_auth(
         self, connection_id: str, provider_id: str, sub_service: str
     ) -> ResolvedConnectionAuth | None:
-        """Resolve the credential a connection injects for the CURRENT caller — the facade
-        accessor an in-process plugin uses to read a skeleton-resolved credential without
-        importing the skeleton.
+        """Resolve the credential a connection injects for the CURRENT caller.
+
+        The facade accessor an in-process plugin uses to read a skeleton-resolved
+        credential without importing the skeleton.
 
         FAILS CLOSE BEFORE any resolution: reads the bound execution identity FIRST and
         raises a loud, constant-message error when none is bound — so an identity-less
@@ -212,15 +237,16 @@ class ConnectorsFacet(_Facet):
         wrapped ``SecretStr``. ``None`` maps to ``None`` (the connection injects nothing).
         ``connection_id`` is a REFERENCE supplied by operator settings, never
         session-supplied, so a session can neither reach an identity-less door's creds nor
-        name another identity's connection."""
+        name another identity's connection.
+        """
         return await self._app._resolve_connection_auth(connection_id, provider_id, sub_service)
 
 
 class AccountsFacet(_Facet):
-    """``app.accounts`` — read access to the current epoch's live provider instances
-    (``AppAccounts``)."""
+    """``app.accounts`` — read access to the current epoch's live provider instances (``AppAccounts``)."""
 
     def active_provider(self, name: str) -> IdentityProvider | None:
+        """The current live epoch's provider named ``name``, or ``None`` when absent."""
         # Resolve the CURRENT (live) epoch's provider, never the generation under
         # construction — a failed build's provider instances must never bind into a
         # surviving epoch's memoized verifier (the zero-mutation invariant). See

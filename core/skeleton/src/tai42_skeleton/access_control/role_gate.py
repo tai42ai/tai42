@@ -39,9 +39,11 @@ _ACTION_RANK: dict[str, int] = {"read": 1, "write": 2}
 
 
 class DenialCause(Enum):
-    """The internal CAUSE of a per-request denial, attached to the denial for
-    debugging/logging. The EXTERNAL response stays a generic 403 (no information leak);
-    only the internal detail/log line names the cause."""
+    """The internal CAUSE of a per-request denial, attached to the denial for debugging/logging.
+
+    The EXTERNAL response stays a generic 403 (no information leak); only the internal detail/log line
+    names the cause.
+    """
 
     HARD_FENCE = "hard-fence"
     LEVEL_MISS = "level-miss"
@@ -49,9 +51,11 @@ class DenialCause(Enum):
 
 
 def level_satisfies(level: str, action: str) -> bool:
-    """Whether a role's ``level`` on a tag satisfies a request's derived ``action``:
-    ``write`` satisfies ``read`` and ``write``; ``read`` satisfies ``read``; ``none``
-    (or an unknown level) satisfies nothing. Fail-closed on an unknown level."""
+    """Whether a role's ``level`` on a tag satisfies a request's derived ``action``.
+
+    ``write`` satisfies ``read`` and ``write``; ``read`` satisfies ``read``; ``none`` (or an unknown level)
+    satisfies nothing. Fail-closed on an unknown level.
+    """
     return _LEVEL_RANK.get(level, 0) >= _ACTION_RANK[action]
 
 
@@ -65,7 +69,8 @@ def grant_map_admits(meta: RouteMetadata, method: str, grants: RoleGrants) -> tu
       tag reaches every grantable route under it). An absent tag is level ``none``.
 
     Returns ``(allowed, cause)``; ``cause`` is ``None`` on an allow, else the denial
-    cause for the caller to log."""
+    cause for the caller to log.
+    """
     if meta.action in ("fenced", "secret"):
         return False, DenialCause.HARD_FENCE
     derived = method_to_action(method)
@@ -139,8 +144,7 @@ def _build_index() -> None:
 
 @register_settings_reset
 def reset_route_index() -> None:
-    """Drop the cached concrete/templated route index so it rebuilds against the current
-    registry.
+    """Drop the cached concrete/templated route index so it rebuilds against the current registry.
 
     MUST be called AFTER a reload has re-imported the router modules and every router has
     re-attached its routes — ``start()`` does. A stale index answers ``None`` for every
@@ -154,9 +158,9 @@ def reset_route_index() -> None:
 
 
 def resolve_route_meta(path: str, method: str | None) -> RouteMetadata | None:
-    """The registered :class:`RouteMetadata` a concrete request ``(path, method)``
-    resolves to, or ``None`` when the path is not a registered route.
+    """The registered :class:`RouteMetadata` a concrete request ``(path, method)`` resolves to, or ``None``.
 
+    ``None`` is returned when the path is not a registered route.
     ``None`` is NOT an allow: a path with no registered route is not a grantable gated
     route (it is the public SPA shell, an operational probe, or an unmapped path), and
     those are governed by the scope layer + the jq base — the per-tag pass simply does
@@ -166,13 +170,16 @@ def resolve_route_meta(path: str, method: str | None) -> RouteMetadata | None:
     A concrete path matching a templated route's pattern resolves to that route's
     metadata (feature tags + action-class). The path is canonicalized first so the match
     decides on the same form the verifier uses; a malformed path resolves to ``None``
-    (denied fail-closed by the verifier/middleware, never opened here)."""
+    (denied fail-closed by the verifier/middleware, never opened here).
+    """
     if method is None:
         return None
     if _concrete_index is None or _templated_matchers is None:
         _build_index()
-    assert _concrete_index is not None
-    assert _templated_matchers is not None
+    if _concrete_index is None:
+        raise AssertionError
+    if _templated_matchers is None:
+        raise AssertionError
     try:
         canonical = canonicalize_path(path)
     except MalformedPathError:
@@ -188,11 +195,12 @@ def resolve_route_meta(path: str, method: str | None) -> RouteMetadata | None:
 
 
 def _fail_closed_on_encoded_slash(meta: RouteMetadata, canonical: str, carries_encoded_slash: bool) -> RouteMetadata:
-    """``meta`` unless the canonical path carries an encoded slash and ``meta`` is not a
-    raw-path-matched route, in which case authz would be reasoning on a different form
-    than the router — Starlette matched that route on the decoded path, where the encoded
-    slash split the segment — so raise :class:`MalformedPathError` (a fail-closed deny the
-    callers turn into a denial), never return the route."""
+    """Return ``meta`` unless the canonical path carries an encoded slash on a non-raw-path-matched route.
+
+    In that case authz would be reasoning on a different form than the router — Starlette matched that route
+    on the decoded path, where the encoded slash split the segment — so raise :class:`MalformedPathError`
+    (a fail-closed deny the callers turn into a denial), never return the route.
+    """
     if carries_encoded_slash and not meta.raw_path_matched:
         raise MalformedPathError(
             f"path {canonical!r} carries an encoded slash but route {meta.path!r} is not raw-path-matched"
@@ -208,7 +216,8 @@ def refusal_route(path: str, method: str | None) -> str:
     bare path, which can carry a path-borne secret (``/trigger/{token}``). A path
     with no registered gated route has no template — ``<unmatched>``, as does an
     encoded-slash path fenced off a non-raw route. Shared by every refusal site (the
-    auth-error handler, the resource guard) so one derivation feeds them all."""
+    auth-error handler, the resource guard) so one derivation feeds them all.
+    """
     try:
         meta = resolve_route_meta(path, method)
     except MalformedPathError:

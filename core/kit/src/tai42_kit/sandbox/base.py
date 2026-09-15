@@ -44,9 +44,11 @@ LABEL_DURABILITY = "tai42.sandbox.durability"
 
 @dataclass
 class _LedgerRecord:
-    """One live session's kit-owned bookkeeping, held beside the provider's
-    session object. ``expires_at`` is the only mutable field (``touch`` extends
-    it); everything else is fixed at create."""
+    """One live session's kit-owned bookkeeping, held beside the provider's session object.
+
+    ``expires_at`` is the only mutable field (``touch`` extends it); everything else is fixed at
+    create.
+    """
 
     session: ManagedSandboxSession
     image: str
@@ -75,6 +77,7 @@ class ManagedSandbox(Sandbox):
     """
 
     def __init__(self) -> None:
+        """Start with an empty session ledger, workspace index and no bound policy."""
         self._ledger: dict[str, _LedgerRecord] = {}
         self._by_workspace: dict[str, set[str]] = {}
         self._policy: SandboxPolicy | None = None
@@ -93,8 +96,7 @@ class ManagedSandbox(Sandbox):
     # -- create chokepoint ---------------------------------------------------
 
     async def create_session(self, spec: SandboxSessionSpec) -> ManagedSandboxSession:
-        """Create a session after enforcing the held policy — the kit
-        session-create policy chokepoint.
+        """Create a session after enforcing the held policy — the kit session-create chokepoint.
 
         Enforced BEFORE the provider primitive runs: the ``network`` ceiling, the
         ``isolation`` floor (an unset value inherits the floor; a set value must
@@ -138,8 +140,10 @@ class ManagedSandbox(Sandbox):
         return self._policy
 
     def _enforce_policy(self, spec: SandboxSessionSpec, policy: SandboxPolicy) -> SandboxSessionSpec:
-        """Return the spec resolved against ``policy`` — the effective isolation
-        baked in and the standard labels stamped — or REJECT it loudly."""
+        """Return the spec resolved against ``policy``, or REJECT it loudly.
+
+        The effective isolation is baked in and the standard labels stamped.
+        """
         if network_openness(spec.network) > network_openness(policy.egress):
             raise SandboxSpecRejectedError(
                 f"policy refused: network {spec.network!r} is looser than the egress ceiling {policy.egress!r}"
@@ -174,10 +178,11 @@ class ManagedSandbox(Sandbox):
         )
 
     def _standard_labels(self, spec: SandboxSessionSpec) -> dict[str, str]:
-        """The infrastructure labels the provider stamps on the session's
-        resources so a crash-restart can rediscover orphans. Applied to a spec
-        already validated free of reserved-namespace keys, so no consumer label
-        can collide with them."""
+        """The infrastructure labels the provider stamps on the session's resources.
+
+        They let a crash-restart rediscover orphans. Applied to a spec already validated free of
+        reserved-namespace keys, so no consumer label can collide with them.
+        """
         return {
             LABEL_SANDBOX: "1",
             LABEL_WORKSPACE: spec.workspace_key,
@@ -187,9 +192,11 @@ class ManagedSandbox(Sandbox):
     # -- lookup --------------------------------------------------------------
 
     async def get_session(self, session_id: str) -> ManagedSandboxSession:
+        """Return the live session for ``session_id``, raising when the ledger holds no such id."""
         return self._record(session_id).session
 
     async def list_sessions(self) -> list[SandboxSessionInfo]:
+        """Return an info snapshot of every session currently in the ledger."""
         return [self._build_info(record) for record in self._ledger.values()]
 
     def session_info(self, session_id: str) -> SandboxSessionInfo:
@@ -225,8 +232,7 @@ class ManagedSandbox(Sandbox):
         record.expires_at = self._now() + timedelta(seconds=record.ttl_seconds)
 
     async def reap(self) -> list[str]:
-        """Destroy every session past its ``expires_at`` and return the destroyed
-        ids.
+        """Destroy every session past its ``expires_at`` and return the destroyed ids.
 
         A reap tears down the session but PRESERVES a persistent workspace: the
         provider primitive is called with ``remove_workspace=False`` (an ephemeral
@@ -240,8 +246,7 @@ class ManagedSandbox(Sandbox):
         return [record.session.id for record in expired]
 
     async def destroy_session(self, session_id: str) -> None:
-        """Tear a session down, workspace included. Idempotent on an already-gone
-        session.
+        """Tear a session down, workspace included. Idempotent on an already-gone session.
 
         An explicit teardown removes the workspace too: the provider primitive is
         called with ``remove_workspace=True``, so even a persistent workspace is
@@ -272,8 +277,9 @@ class ManagedSandbox(Sandbox):
     # -- orphan recovery -----------------------------------------------------
 
     async def recover_orphans(self) -> list[str]:
-        """Reconcile runtime-side resources carrying this base's labels that no
-        live ledger entry claims — the residue of a crashed process.
+        """Reconcile runtime-side resources carrying this base's labels that no live entry claims.
+
+        These are the residue of a crashed process.
 
         Called once at registration. The provider lists and disposes of each
         orphan (re-adopting or destroying it) via :meth:`_list_orphan_resources`;
@@ -288,16 +294,17 @@ class ManagedSandbox(Sandbox):
     # -- clock ---------------------------------------------------------------
 
     def _now(self) -> datetime:
-        """The current instant TTL bookkeeping is computed against. A seam so a
-        test can drive reap/touch without wall-clock waits."""
+        """The current instant TTL bookkeeping is computed against.
+
+        A seam so a test can drive reap/touch without wall-clock waits.
+        """
         return datetime.now(UTC)
 
     # -- provider primitives -------------------------------------------------
 
     @abstractmethod
     async def _create_session_resources(self, spec: SandboxSessionSpec) -> ManagedSandboxSession:
-        """Create the runtime resources for ``spec`` and return the provider's
-        :class:`ManagedSandboxSession`.
+        """Create the runtime resources for ``spec`` and return the provider's :class:`ManagedSandboxSession`.
 
         ``spec`` arrives POLICY-RESOLVED: its ``isolation`` is the concrete
         effective level (never ``None``) and its ``labels`` carry the standard
@@ -317,8 +324,7 @@ class ManagedSandbox(Sandbox):
 
     @abstractmethod
     async def _list_orphan_resources(self) -> list[str]:
-        """List (and reconcile) runtime-side resources carrying this base's labels
-        that no live session claims, returning a descriptor of each one handled.
+        """List and reconcile labelled runtime resources no live session claims, returning a descriptor each.
 
         The provider re-adopts or destroys each orphan; the returned descriptors
         are logged by :meth:`recover_orphans` so the reconciliation is auditable.

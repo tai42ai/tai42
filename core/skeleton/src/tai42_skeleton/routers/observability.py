@@ -92,8 +92,11 @@ def _error(message: str, status_code: int) -> JSONResponse:
 
 
 def _not_supported(exc: MonitoringReadNotSupportedError) -> JSONResponse:
-    """The backend cannot serve reads — a distinct 501 carrying ``code`` so the
-    UI can render its dedicated 'read not supported' state (not a generic error)."""
+    """The backend cannot serve reads — a distinct 501 carrying ``code`` for the UI.
+
+    The ``code`` lets the UI render its dedicated 'read not supported' state (not a
+    generic error).
+    """
     return JSONResponse(
         {"error": str(exc), "code": "monitoring-read-not-supported"},
         status_code=501,
@@ -106,8 +109,10 @@ def _not_supported(exc: MonitoringReadNotSupportedError) -> JSONResponse:
 
 
 async def _extract_metrics_query(request: Request) -> dict[str, Any]:
-    """Decode the metrics query string into the operation's flat params, mapping the
-    module-local ``RequestParseError`` to the door's explicit 400."""
+    """Decode the metrics query string into the operation's flat params.
+
+    Maps the module-local ``RequestParseError`` to the door's explicit 400.
+    """
     try:
         t0, t1 = parse_time_range(request)
         granularity = select_granularity(t0, t1, request.query_params.get("granularity"))
@@ -117,8 +122,10 @@ async def _extract_metrics_query(request: Request) -> dict[str, Any]:
 
 
 async def _extract_runs_query(request: Request) -> dict[str, Any]:
-    """Decode the run-list query string into the operation's flat params, mapping the
-    module-local ``RequestParseError`` to the door's explicit 400."""
+    """Decode the run-list query string into the operation's flat params.
+
+    Maps the module-local ``RequestParseError`` to the door's explicit 400.
+    """
     try:
         t0, t1 = parse_time_range(request)
         run_filter, order_by = parse_run_filter(request)
@@ -211,9 +218,11 @@ async def export_run_trace(request: Request) -> Response:
     action="read",
 )
 async def export_runs(request: Request) -> Response:
-    """Bulk export of the filtered run list as CSV (default) or JSON. Honors the
-    same advanced filters as the run list. Capped at ``_EXPORT_CAP`` rows;
-    truncation is flagged in-band (never a silent loss)."""
+    """Bulk export of the filtered run list as CSV (default) or JSON.
+
+    Honors the same advanced filters as the run list. Capped at ``_EXPORT_CAP`` rows;
+    truncation is flagged in-band (never a silent loss).
+    """
     try:
         t0, t1 = parse_time_range(request)
         run_filter, order_by = parse_run_filter(request)
@@ -235,7 +244,7 @@ async def export_runs(request: Request) -> Response:
                 to_timestamp=t1,
                 limit=PAGE_CHUNK,
                 page=page,
-                filter=run_filter,
+                filter_=run_filter,
                 order_by=order_by,
             )
             summaries.extend(batch)

@@ -61,14 +61,14 @@ def test_grants_set_parses_and_posts(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert captured["method"] == "POST"
     assert captured["path"] == "/api/auth/roles/ops/grants"
-    assert captured["body"] == {"set": {"hooks": "read"}, "remove": []}
+    assert captured["body"] == {"upsert": {"hooks": "read"}, "remove": []}
 
 
 def test_grants_set_and_remove_body_mapping(monkeypatch) -> None:
     handler, captured = _capture()
     result = run_cli(monkeypatch, handler, ["roles", "grants", "ops", "--set", "hooks=write", "--remove", "presets"])
     assert result.exit_code == 0, result.output
-    assert captured["body"] == {"set": {"hooks": "write"}, "remove": ["presets"]}
+    assert captured["body"] == {"upsert": {"hooks": "write"}, "remove": ["presets"]}
 
 
 def test_grants_no_flags_is_bad_parameter(monkeypatch) -> None:

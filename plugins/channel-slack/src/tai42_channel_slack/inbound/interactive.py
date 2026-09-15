@@ -34,7 +34,7 @@ from tai42_channel_slack.forms import (
     is_declared_field,
 )
 from tai42_channel_slack.inbound.routing import _bridge, _recipients, _resolve_answer
-from tai42_channel_slack.inbound.verification import _InboundRejected, _read_verified_body
+from tai42_channel_slack.inbound.verification import _InboundRejectedError, _read_verified_body
 from tai42_channel_slack.settings import slack_settings
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ async def slack_interactive(request: Request) -> Response:
     """
     try:
         raw = await _read_verified_body(request)
-    except _InboundRejected as rejected:
+    except _InboundRejectedError as rejected:
         return rejected.response
 
     payload = _parse_interactive_payload(raw)
@@ -89,8 +89,10 @@ async def slack_interactive(request: Request) -> Response:
 
 
 def _parse_interactive_payload(raw: bytes) -> dict[str, Any] | None:
-    """The JSON object in the ``payload`` field of a form-encoded interactivity
-    body, or ``None`` for a body that carries no decodable JSON object."""
+    """The JSON object in the ``payload`` field of a form-encoded interactivity body.
+
+    ``None`` for a body that carries no decodable JSON object.
+    """
     try:
         fields = parse_qs(raw.decode("utf-8"))
     except UnicodeDecodeError:
@@ -124,9 +126,12 @@ def _state_values(view: dict[str, Any]) -> dict[str, Any]:
 
 
 def _field_has_block(schema: dict[str, Any], field: str | None) -> bool:
-    """Whether the door-named ``field`` is a declared schema property, so its name is a
-    valid modal block_id to pin the inline error under (else the caller falls back to the
-    first field). A None/absent/nested field has no matching block."""
+    """Whether the door-named ``field`` is a declared schema property.
+
+    So its name is a valid modal block_id to pin the inline error under (else the
+    caller falls back to the first field). A None/absent/nested field has no
+    matching block.
+    """
     return isinstance(field, str) and is_declared_field(schema, field)
 
 
@@ -231,10 +236,9 @@ async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> R
 
 
 async def _handle_view_submission(payload: dict[str, Any]) -> Response:
-    """Resolve one ``tai42_form_submit`` submission against its pending ask via the ONE
-    shared ladder, rendering the modal's own ack.
+    """Resolve one ``tai42_form_submit`` submission against its pending ask via the ONE shared ladder.
 
-    The interaction id rides in ``private_metadata`` and IS the correlation key. A gone
+    Renders the modal's own ack. The interaction id rides in ``private_metadata`` and IS the correlation key. A gone
     form record shows the expired notice. Otherwise the state is coerced per the stored
     schema and handed to the ladder as ``{"answer": <dict>}`` with
     ``owns_retry_notice=True`` — a completed modal has no re-reply surface, so the

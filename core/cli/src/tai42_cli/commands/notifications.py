@@ -1,5 +1,4 @@
-"""``tai notifications`` — read the internal notifications feed and send a
-notification.
+"""``tai notifications`` — read the internal notifications feed and send a notification.
 
 Thin wrappers over the authed ``/api/notifications`` routes: ``list`` reads the
 deployment's internal notifications feed — channel-less sends plus any

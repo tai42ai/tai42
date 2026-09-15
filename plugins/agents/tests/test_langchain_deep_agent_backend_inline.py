@@ -11,7 +11,7 @@ import pytest
 from tai42_contract.app import tai42_app
 from tests._langchain_deep_agent_backend_support import (
     _FakeResourceManager,
-    _TemplateMissing,
+    _TemplateMissingError,
 )
 
 from tai42_agents.langchain_deep_agent.backend import (
@@ -223,7 +223,7 @@ def test_inline_agrep_propagates_vanished_listed_key(fake_tm: _FakeResourceManag
     async def go() -> None:
         fake_tm.phantom_keys.add("skills/gone/SKILL.md")
         skills = build_backend(inline_skills={"demo": "INLINE"}).routes[SKILLS_ROOT]
-        with pytest.raises(_TemplateMissing):
+        with pytest.raises(_TemplateMissingError):
             await skills.agrep("anything")
 
     asyncio.run(go())

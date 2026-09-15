@@ -53,10 +53,14 @@ def _bucket() -> str:
 # Importing this module registers S3Storage as the app's storage provider.
 @tai42_app.storage.register_storage
 class S3Storage(Storage):
+    """S3-backed :class:`Storage` provider — objects are flat keys in the configured bucket."""
+
     async def load(self, path: str) -> str:
+        """Load ``path`` as UTF-8 text, raising ``FileNotFoundError`` when absent."""
         return (await self.load_bytes(path)).decode("utf-8")
 
     async def load_bytes(self, path: str) -> bytes:
+        """Load ``path``'s raw bytes, raising ``FileNotFoundError`` when absent."""
         bucket = _bucket()
         async with tai42_app.clients.client_ctx(S3Client) as client:
             try:
@@ -70,6 +74,7 @@ class S3Storage(Storage):
                 return data
 
     async def list(self) -> list[str]:
+        """Every object key in the bucket."""
         bucket = _bucket()
         async with tai42_app.clients.client_ctx(S3Client) as client:
             paginator = client.get_paginator("list_objects_v2")
@@ -79,9 +84,11 @@ class S3Storage(Storage):
             return keys
 
     async def upload(self, path: str, content: str) -> None:
+        """Upload ``content`` as UTF-8 text at ``path``."""
         await self.upload_bytes(path, content.encode("utf-8"), content_type=_TEMPLATE_CONTENT_TYPE)
 
     async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
+        """Upload ``data`` at ``path`` with an optional ``content_type``, refusing a flat-key-space collision."""
         bucket = _bucket()
         put_kwargs: dict[str, Any] = {"Bucket": bucket, "Key": path, "Body": data}
         if content_type is not None:
@@ -117,6 +124,7 @@ class S3Storage(Storage):
             raise StoragePathConflictError(path, [ancestor])
 
     async def delete(self, path: str) -> None:
+        """Delete the object at ``path``, raising ``FileNotFoundError`` when absent."""
         bucket = _bucket()
         async with tai42_app.clients.client_ctx(S3Client) as client:
             # delete_object is silent on a missing key; confirm existence first
@@ -131,6 +139,7 @@ class S3Storage(Storage):
         logger.info("Deleted object %s", path)
 
     async def delete_dir(self, path: str) -> None:
+        """Delete every object under the ``path`` directory prefix, raising ``FileNotFoundError`` when none."""
         assert_not_root(path)
 
         # Treat the path as a directory prefix so a bare "d" can't match sibling
@@ -157,6 +166,7 @@ class S3Storage(Storage):
         logger.info("Deleted %d objects under %s", len(keys), path)
 
     async def stat(self, path: str) -> ObjectStat:
+        """The :class:`ObjectStat` for ``path``, raising ``FileNotFoundError`` when absent."""
         bucket = _bucket()
         async with tai42_app.clients.client_ctx(S3Client) as client:
             try:

@@ -35,9 +35,9 @@ def build_rebuild_kwargs(
     langgraph_config: dict[str, Any] | None,
     workspace_key: str,
 ) -> dict[str, Any]:
-    """The JSON-serializable subset of a run's inputs that determines graph
-    compilation — the identity a cross-worker resume recompiles the same graph from.
+    """The JSON-serializable subset of a run's inputs that determines graph compilation.
 
+    The identity a cross-worker resume recompiles the same graph from.
     Every value is a ``DeepAgentInput`` field name (subagents/inline_skills dumped to
     JSON, the system message the already-RENDERED text carried as a ``TemplatedText``
     inline ``content`` so resume never re-renders differently), so

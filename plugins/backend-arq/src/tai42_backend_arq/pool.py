@@ -16,12 +16,15 @@ from tai42_backend_arq.settings import arq_settings, job_deserializer, job_seria
 
 
 class RedisPoolManager:
+    """The process-wide cached ``ArqRedis`` pool and its lifecycle."""
+
     _pool: ArqRedis | None = None
     # Lazily created on the running loop it is first awaited on; dropped with the pool.
     _lock: asyncio.Lock | None = None
 
     @classmethod
     async def get(cls) -> ArqRedis:
+        """The cached pool, creating it once on first await."""
         if cls._pool is None:
             # Double-checked under the lock so two pools can't race into existence.
             if cls._lock is None:
@@ -38,6 +41,7 @@ class RedisPoolManager:
 
     @classmethod
     async def close(cls) -> None:
+        """Close and drop the cached pool (wired to the app shutdown hook)."""
         if cls._pool:
             await cls._pool.aclose()
             cls._pool = None

@@ -23,6 +23,7 @@ class OperatorMisconfiguredError(RuntimeError):
     __tai_error_kind__ = ErrorKind.UNAVAILABLE
 
     def __init__(self, env_var: str, provider_id: str):
+        """Build the error naming the unset ``env_var`` and the ``provider_id`` that requires it."""
         super().__init__(
             f"Provider {provider_id!r} is enabled but env var {env_var} is "
             f"unset. Set {env_var} on the API process environment."
@@ -32,9 +33,10 @@ class OperatorMisconfiguredError(RuntimeError):
 
 
 class MalformedConnectionIdError(ConnectorError):
-    """A ``connection_id`` that is not a well-formed identifier (a uuid4) and can key no
-    record. The persistence boundary maps it to the same not-found outcome as a
-    genuinely-absent record, so a door is no oracle for the id's shape.
+    """A ``connection_id`` that is not a well-formed identifier (a uuid4) and can key no record.
+
+    The persistence boundary maps it to the same not-found outcome as a genuinely-absent record, so a
+    door is no oracle for the id's shape.
     """
 
     # Deliberately indistinguishable from a genuinely-absent record (no id-shape oracle), so it shares NOT_FOUND.

@@ -42,10 +42,11 @@ _AS_TYPE: dict[SpanKind, str] = {
 
 
 def _emit(payload: Any) -> Any:
-    """Normalize a trace payload for the SDK: a ``SecretValue`` anywhere inside
-    becomes the placeholder so a recorder never receives a real secret. No single
-    SDK entry funnels every emit, so this is called at each ``input``/``output``
-    site."""
+    """Normalize a trace payload for the SDK: a ``SecretValue`` anywhere inside becomes the placeholder.
+
+    So a recorder never receives a real secret. No single SDK entry funnels every emit, so this is called
+    at each ``input``/``output`` site.
+    """
     return mask_secrets(payload)
 
 
@@ -58,7 +59,8 @@ def _split_run_version(metadata: dict[str, Any] | None) -> tuple[str | None, dic
     HAS a native ``version`` trace dimension, so lift the value onto it and drop the
     key from the forwarded metadata (leaving it in would double it as a metadata
     attribute). Absent key ⇒ ``(None, metadata)`` unchanged; the value is coerced to
-    ``str`` for the SDK's string dimension."""
+    ``str`` for the SDK's string dimension.
+    """
     if not metadata or RUN_VERSION_METADATA_KEY not in metadata:
         return None, metadata
     rest = {k: v for k, v in metadata.items() if k != RUN_VERSION_METADATA_KEY}
@@ -119,10 +121,12 @@ class LangfuseSpan:
     """Wraps a Langfuse observation as a contract ``Span`` handle (fail-safe)."""
 
     def __init__(self, obs: Any) -> None:
+        """Wrap the Langfuse observation ``obs``."""
         self._obs = obs
 
     @property
     def id(self) -> str:
+        """The backend observation id."""
         return self._obs.id
 
     def update(
@@ -135,6 +139,7 @@ class LangfuseSpan:
         level: MonitoringLevel | None = None,
         status_message: str | None = None,
     ) -> None:
+        """Update the observation's output/model/usage/metadata/level fields (fail-safe)."""
         try:
             kwargs: dict[str, Any] = {}
             if output is not None:
@@ -160,6 +165,7 @@ class LangfuseSpan:
         name: str | None = None,
         tags: list[str] | None = None,
     ) -> None:
+        """Set the enclosing trace's name and tags (fail-safe)."""
         try:
             set_trace_attributes(self._obs, name=name, tags=tags)
         except Exception:
@@ -170,6 +176,7 @@ class LangfuseWriter:
     """Emits observations through the active project's Langfuse client."""
 
     def __init__(self, manager: LangfuseClientManager) -> None:
+        """Bind the Langfuse client ``manager`` that resolves the active project's client."""
         self._m = manager
 
     # --- emit (fail-safe) ---------------------------------------------------
@@ -181,11 +188,12 @@ class LangfuseWriter:
         name: str,
         kind: SpanKind,
         trace_context: TraceContext | None = None,
-        input: Any = None,
+        input_: Any = None,
         model: str | None = None,
         model_parameters: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Iterator[Span]:
+        """Open an observation as the current span for the block, yielding a :class:`Span` handle (fail-safe)."""
         if self._m.is_disabled():
             yield _NoOpSpan()
             return
@@ -198,8 +206,8 @@ class LangfuseWriter:
             ctx = _trace_context_dict(trace_context)
             if ctx:
                 kwargs["trace_context"] = ctx
-            if input is not None:
-                kwargs["input"] = _emit(input)
+            if input_ is not None:
+                kwargs["input"] = _emit(input_)
             if model is not None:
                 kwargs["model"] = model
             if model_parameters is not None:
@@ -234,7 +242,7 @@ class LangfuseWriter:
         start: datetime,
         end: datetime,
         trace_context: TraceContext,
-        input: Any = None,
+        input_: Any = None,
         output: Any = None,
         level: MonitoringLevel | None = None,
         status_message: str | None = None,
@@ -242,6 +250,7 @@ class LangfuseWriter:
         usage_details: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """Emit one already-closed span with explicit ``start``/``end`` times (fail-safe)."""
         if not trace_context.trace_id:
             raise ValueError(
                 "record_span requires trace_context.trace_id: the explicit-time "
@@ -258,7 +267,7 @@ class LangfuseWriter:
                 end=end,
                 trace_id=trace_context.trace_id,
                 parent_span_id=trace_context.parent_span_id,
-                input=_emit(input),
+                input_=_emit(input_),
                 output=_emit(output),
                 level=_level_str(level),
                 status_message=status_message,
@@ -275,11 +284,12 @@ class LangfuseWriter:
         name: str,
         level: MonitoringLevel = DEFAULT_LEVEL,
         trace_context: TraceContext | None = None,
-        input: Any = None,
+        input_: Any = None,
         output: Any = None,
         status_message: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """Emit a point-in-time event on the current or given trace (fail-safe)."""
         if self._m.is_disabled():
             return
         try:
@@ -287,8 +297,8 @@ class LangfuseWriter:
             ctx = _trace_context_dict(trace_context)
             if ctx:
                 kwargs["trace_context"] = ctx
-            if input is not None:
-                kwargs["input"] = _emit(input)
+            if input_ is not None:
+                kwargs["input"] = _emit(input_)
             if output is not None:
                 kwargs["output"] = _emit(output)
             if status_message is not None:
@@ -307,6 +317,7 @@ class LangfuseWriter:
         metadata: dict[str, Any] | None = None,
         output: Any = None,
     ) -> None:
+        """Update the ambient current span's level/status/metadata/output (fail-safe)."""
         if self._m.is_disabled():
             return
         try:
@@ -334,6 +345,7 @@ class LangfuseWriter:
         user_id: str | None = None,
         session_id: str | None = None,
     ) -> Iterator[None]:
+        """Propagate trace-level attributes (name, tags, metadata, user/session/version) over the block."""
         if self._m.is_disabled():
             yield
             return
@@ -372,6 +384,7 @@ class LangfuseWriter:
     # --- guard query (returns None, never raises) ---------------------------
 
     def current_trace_id(self) -> str | None:
+        """The ambient current trace id, or ``None`` (never raises)."""
         try:
             return self._m.active_client().get_current_trace_id()
         except Exception:
@@ -381,6 +394,7 @@ class LangfuseWriter:
     # --- propagation / callbacks (propagate loudly) --------------------------
 
     def inject_context(self, ctx: TraceContext) -> dict[str, Any]:
+        """Build the runnable config that carries ``ctx`` (trace id, parent, tags, metadata) downstream."""
         config: dict[str, Any] = {"monitoring_provider": "langfuse"}
         configurable: dict[str, str] = {}
         if ctx.trace_id:
@@ -401,6 +415,7 @@ class LangfuseWriter:
         return config
 
     def get_monitoring_callbacks(self, ctx: TraceContext) -> list[object]:
+        """The langchain callback handlers that record a run under ``ctx``, or ``[]`` when disabled."""
         if self._m.is_disabled():
             return []
         self._m._ensure_built()
@@ -415,13 +430,17 @@ class LangfuseWriter:
     # --- scoping / suppression / lifecycle (propagate loudly) ----------------
 
     def scope(self, public_key: str) -> AbstractContextManager[None]:
+        """Bind the active project to ``public_key`` for the block."""
         return self._m.scope(public_key)
 
     def disable(self) -> AbstractContextManager[None]:
+        """Suppress all emission for the block."""
         return self._m.disable()
 
     def flush(self) -> None:
+        """Flush buffered observations to the backend."""
         self._m.flush()
 
     def shutdown(self) -> None:
+        """Flush and tear down the client."""
         self._m.shutdown()

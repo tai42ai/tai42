@@ -42,21 +42,27 @@ _ROUTE_CARRYING_KINDS = frozenset({PluginItemKind.CHANNEL, PluginItemKind.ROUTER
 
 
 class MountMapError(RuntimeError):
-    """A mount-map build fault that must fail the boot/reload loudly — a resolved
-    public route under a reserved prefix."""
+    """A mount-map build fault that must fail the boot/reload loudly.
+
+    Raised for a resolved public route under a reserved prefix.
+    """
 
 
 class MountRegistrationError(RuntimeError):
-    """A ``custom_route`` call that violates its module's mount binding — an
-    undeclared route, an explicit ``authed`` on a declared route, a declared route
-    that never registered, or any route from a route-less item's module."""
+    """A ``custom_route`` call that violates its module's mount binding.
+
+    An undeclared route, an explicit ``authed`` on a declared route, a declared route
+    that never registered, or any route from a route-less item's module.
+    """
 
 
 @dataclass(frozen=True)
 class MountBinding:
-    """One module's declared mount. ``forbidden`` marks a module whose item
-    declares NO routes: any ``custom_route`` from it is a registration error.
-    ``declared_routes`` is empty for a forbidden binding."""
+    """One module's declared mount.
+
+    ``forbidden`` marks a module whose item declares NO routes: any ``custom_route`` from it is a registration error.
+    ``declared_routes`` is empty for a forbidden binding.
+    """
 
     owner_ref: str
     item_name: str
@@ -65,8 +71,10 @@ class MountBinding:
     forbidden: bool = False
 
     def resolved_path(self, path: str) -> str:
-        """The absolute served path of a declared relative ``path``: the fixed
-        ``/api/`` root, the mount ``base``, then the declared path."""
+        """The absolute served path of a declared relative ``path``.
+
+        The fixed ``/api/`` root, the mount ``base``, then the declared path.
+        """
         return f"/api/{self.base}{path}"
 
     def find_route(self, path: str, methods: frozenset[str]) -> RouteDecl | None:
@@ -87,16 +95,19 @@ _current: ContextVar[_MountContext | None] = ContextVar("mount_binding", default
 
 
 def current_mount_binding() -> MountBinding | None:
-    """The mount binding of the module importing on this coroutine/thread, or
-    ``None`` off a bound import (a core router, an operator-authored module)."""
+    """The mount binding of the module importing on this coroutine/thread, or ``None`` off a bound import.
+
+    Off a bound import means a core router or an operator-authored module.
+    """
     ctx = _current.get()
     return ctx.binding if ctx is not None else None
 
 
 def note_registered(path: str, methods: frozenset[str]) -> None:
-    """Record that the importing module registered the declared row ``(path,
-    methods)``, so the post-import completeness check knows it was served. A no-op
-    off a bound import."""
+    """Record that the importing module registered the declared row ``(path, methods)``.
+
+    The post-import completeness check reads this to know the row was served. A no-op off a bound import.
+    """
     ctx = _current.get()
     if ctx is not None:
         ctx.seen.add((path, methods))
@@ -104,10 +115,12 @@ def note_registered(path: str, methods: frozenset[str]) -> None:
 
 @contextlib.contextmanager
 def bind_module(binding: MountBinding | None) -> Iterator[None]:
-    """Carry ``binding`` for the span of one module import; a ``None`` binding is a
-    plain pass-through (core semantics). On a clean import of a route-declaring
+    """Carry ``binding`` for the span of one module import.
+
+    A ``None`` binding is a plain pass-through (core semantics). On a clean import of a route-declaring
     binding, verify every declared row registered — a declared-but-unregistered
-    row raises :class:`MountRegistrationError`."""
+    row raises :class:`MountRegistrationError`.
+    """
     if binding is None:
         yield
         return
@@ -115,9 +128,7 @@ def bind_module(binding: MountBinding | None) -> Iterator[None]:
     token = _current.set(ctx)
     try:
         yield
-    except BaseException:
-        raise
-    else:
+        # Reached only when the body did not raise, exactly as an ``else`` clause would.
         _verify_all_registered(ctx)
     finally:
         _current.reset(token)
@@ -190,9 +201,10 @@ def _route_item_for_module(spec: PluginSpec, module: str) -> PluginItem | None:
 
 
 def _packaged_spec_for_module(module: str) -> PluginSpec | None:
-    """The ``PluginSpec`` packaged beside the module's top-level import package
-    (``<top_level>/tai-plugin.yml``), or ``None`` when the package ships none (an
-    operator-authored module)."""
+    """The ``PluginSpec`` packaged beside the module's top-level import package.
+
+    Named ``<top_level>/tai-plugin.yml``, or ``None`` when the package ships none (an operator-authored module).
+    """
     top_level = module.partition(".")[0]
     try:
         resource = importlib.resources.files(top_level).joinpath(PLUGIN_SPEC_FILENAME)

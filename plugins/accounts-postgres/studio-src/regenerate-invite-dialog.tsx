@@ -2,9 +2,10 @@
  * Regenerate a pending user's invite, replacing the live one, and show the new
  * one-time link.
  */
+import { Button, Dialog, errorMessage, ErrorState, Spinner } from '@tai42/studio-sdk';
 import type { ReactElement } from 'react';
 import { useCallback, useState } from 'react';
-import { Button, Dialog, ErrorState, Spinner, errorMessage } from '@tai42/studio-sdk';
+
 import type { AdminUser, InviteResult, UsersAdminApi } from '@/api';
 import { InviteResultView } from '@/invite-result-view';
 

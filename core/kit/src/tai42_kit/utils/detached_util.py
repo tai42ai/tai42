@@ -26,4 +26,5 @@ def reset_detached_run(token: Token[bool]) -> None:
 
 
 def in_detached_run() -> bool:
+    """Whether the current context is flagged as a detached run."""
     return _detached_run.get()

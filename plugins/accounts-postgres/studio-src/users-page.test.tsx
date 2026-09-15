@@ -1,7 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
 import type { AdminUser, InviteResult, RoleTemplate, UsersAdminApi } from '@/api';
+
 import { UsersPage } from './users-page';
 
 // The page reaches the backend only through `useUsersAdminApi`; the tests drive a

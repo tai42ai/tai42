@@ -18,8 +18,11 @@ logger = logging.getLogger(__name__)
 
 
 class LifespanMixin(LifecycleState):
+    """Process startup/shutdown hooks and the long-lived background reapers mixed into the app."""
+
     @asynccontextmanager
     async def app_context(self, manifest: Manifest, *, kind: WorkerKind = WorkerKind.serve):
+        """The process lifespan for ``manifest`` — start background tasks on enter, tear everything down on exit."""
         # Bus/boot invariant at the one seam both `tai serve` and `tai backend`
         # cross: a process with a registered backend, or a shared-config deployment,
         # must have the worker bus configured — otherwise sibling workers or instances
@@ -99,7 +102,8 @@ class LifespanMixin(LifecycleState):
         any other exception means the task stopped doing its job, so log it at
         ERROR with the task's name. Returns True when the task instead returned a
         value cleanly (no cancellation, no exception), letting a caller treat an
-        unexpected clean return as its own failure."""
+        unexpected clean return as its own failure.
+        """
         if task.cancelled():
             return False
         exc = task.exception()
@@ -110,14 +114,15 @@ class LifespanMixin(LifecycleState):
 
     @classmethod
     def _on_perpetual_task_done(cls, task: asyncio.Task[Any]) -> None:
-        """Done-callback for a run-until-cancelled lifespan-owned task (the
-        worker-bus subscription and the failed-MCP re-probe loop).
+        """Done-callback for a run-until-cancelled lifespan-owned task.
 
+        Covers the worker-bus subscription and the failed-MCP re-probe loop.
         A clean cancellation stays silent and a runtime exception is logged at
         ERROR — and, unlike a bounded task, a NORMAL return is ALSO logged at
         ERROR: these tasks are contractually perpetual, so returning means the
         worker silently stopped doing its job (a subscription that returns stops
-        receiving sibling reloads; the re-probe loop stops self-healing)."""
+        receiving sibling reloads; the re-probe loop stops self-healing).
+        """
         if cls._log_task_exception(task):
             logger.error(
                 "perpetual background task %r returned unexpectedly; it must run until cancelled",
@@ -160,9 +165,11 @@ class LifespanMixin(LifecycleState):
             raise ExceptionGroup("shutdown teardown failed", errors)
 
     def _spawn_interactions_reaper(self) -> None:
-        """Start the async-park expiry reaper loop on the serving loop. Owned by
-        ``app_context``; runs until cancelled at shutdown. A no-op each pass when the
-        interactions store is unconfigured."""
+        """Start the async-park expiry reaper loop on the serving loop.
+
+        Owned by ``app_context``; runs until cancelled at shutdown. A no-op each pass when the
+        interactions store is unconfigured.
+        """
         from tai42_skeleton.interactions.reaper import run_expiry_reaper_loop
 
         self._interactions_reaper_task = asyncio.create_task(
@@ -174,13 +181,14 @@ class LifespanMixin(LifecycleState):
         self._interactions_reaper_task.add_done_callback(self._on_perpetual_task_done)
 
     async def _cancel_interactions_reaper(self) -> None:
-        """Cancel the expiry reaper and await its termination — the shutdown
-        counterpart of ``_spawn_interactions_reaper``.
+        """Cancel the expiry reaper and await its termination at shutdown.
 
+        The shutdown counterpart of ``_spawn_interactions_reaper``.
         A non-``CancelledError`` death was already surfaced at ERROR by the
         done-callback, so it is awaited-and-swallowed here (this runs inside
         ``app_context``'s shutdown ``finally``, where re-raising would skip the
-        remaining teardown)."""
+        remaining teardown).
+        """
         task = self._interactions_reaper_task
         self._interactions_reaper_task = None
         if task is None:
@@ -190,13 +198,15 @@ class LifespanMixin(LifecycleState):
             await task
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
             pass
 
     def _spawn_sandbox_reaper(self) -> None:
-        """Start the sandbox session reap loop on the serving loop, but ONLY when a
-        provider is registered — the loop is never started absent one. Owned by
-        ``app_context``; runs until cancelled at shutdown."""
+        """Start the sandbox session reap loop on the serving loop, but ONLY when a provider is registered.
+
+        The loop is never started absent one. Owned by ``app_context``; runs until cancelled at
+        shutdown.
+        """
         if self._sandbox_holder.sandbox is None:
             return
         from tai42_skeleton.sandbox import run_sandbox_reap_loop
@@ -210,13 +220,14 @@ class LifespanMixin(LifecycleState):
         self._sandbox_reaper_task.add_done_callback(self._on_perpetual_task_done)
 
     async def _cancel_sandbox_reaper(self) -> None:
-        """Cancel the sandbox reap loop and await its termination — the shutdown
-        counterpart of ``_spawn_sandbox_reaper``.
+        """Cancel the sandbox reap loop and await its termination at shutdown.
 
+        The shutdown counterpart of ``_spawn_sandbox_reaper``.
         A non-``CancelledError`` death was already surfaced at ERROR by the
         done-callback, so it is awaited-and-swallowed here (this runs inside
         ``app_context``'s shutdown ``finally``, where re-raising would skip the
-        remaining teardown)."""
+        remaining teardown).
+        """
         task = self._sandbox_reaper_task
         self._sandbox_reaper_task = None
         if task is None:
@@ -226,5 +237,5 @@ class LifespanMixin(LifecycleState):
             await task
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
             pass

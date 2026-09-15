@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 from typing import Any, cast
 
 import pytest
 
-from tai42_skeleton.marketplace import installer as installer_module
 from tai42_skeleton.marketplace.errors import (
     EnvironmentShadowError,
     PluginPrefixError,
@@ -81,7 +81,7 @@ def _prefix_installer(
 async def test_install_with_prefix_preflights_writable_and_targets_the_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec(provides=[{"kind": "tool", "name": "gen-uuid", "module": "pkg.tools.uuid", "description": "d"}])
     h.registry.resolved = make_resolved(spec, version="1.0.0")
@@ -122,7 +122,7 @@ async def test_uninstall_with_prefix_removes_from_prefix_and_shells_no_pip() -> 
 async def test_install_unwind_with_prefix_removes_the_package_from_the_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec()
     h.registry.resolved = make_resolved(spec, version="1.0.0")
@@ -143,7 +143,7 @@ async def test_install_unwind_with_prefix_removes_the_package_from_the_prefix(
 async def test_update_with_prefix_removes_old_then_installs_new_into_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
     new = make_spec(version="2.0.0", provides=_tool_provides("pkg.new"))
     h = Harness(manifest={"tools": [{"title": "pkg.old", "module": "pkg.old"}]})
@@ -171,7 +171,7 @@ async def test_install_prefix_env_same_version_proceeds(monkeypatch: pytest.Monk
     # the SAME version being installed. The prefix install is a harmless no-op
     # there (nothing lands), but the manifest wiring is the value, so the install
     # PROCEEDS and is recorded — never refused.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec(provides=[{"kind": "tool", "name": "gen-uuid", "module": "pkg.tools.uuid", "description": "d"}])
     h.registry.resolved = make_resolved(spec, version="1.0.0")
@@ -195,7 +195,7 @@ async def test_install_prefix_env_different_version_refused_before_state_change(
     # DIFFERENT version. The prefix sits at the end of sys.path, so a prefix install
     # would be shadowed and never import — refused loudly BEFORE any state change,
     # naming both versions. No pip, no manifest write, no attribution.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec()
     h.registry.resolved = make_resolved(spec, version="2.0.0")
@@ -275,7 +275,7 @@ async def test_install_unwind_prefix_env_present_removes_no_files(monkeypatch: p
     # restores the manifest and removes the freshly-installed package — but nothing
     # landed in the prefix (env-shadowed no-op), so the removal is a tolerant skip,
     # never a spurious prefix error masking the real attribution failure.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec()
     h.registry.resolved = make_resolved(spec, version="1.0.0")
@@ -293,7 +293,7 @@ async def test_update_prefix_env_shadow_refused_before_removal(monkeypatch: pyte
     # An update cannot install a version the environment shadows: with the env
     # providing the distribution, the target (necessarily a different version) is
     # refused BEFORE the old prefix wheel is removed and before any pip call.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
     new = make_spec(version="2.0.0", provides=_tool_provides("pkg.new"))
     h = Harness(manifest={"tools": [{"title": "pkg.old", "module": "pkg.old"}]})

@@ -1,5 +1,4 @@
-"""Component identity, settings, and the boot-time migration gate for the platform
-state store.
+"""Component identity, settings, and the boot-time migration gate for the platform state store.
 
 The store is a first-class platform component: its own migration chain under the kit
 DB registry component ``states`` (env ``TAI_DB_BINDING_STATES``), which — like the
@@ -69,15 +68,19 @@ def states_migrations_dir() -> Traversable:
 
 
 def states_store_configured() -> bool:
-    """Whether the ``states`` component's bound database is configured — the gate every
-    facet method and route honors (false ⇒ 501 ``states-not-configured``)."""
+    """Whether the ``states`` component's bound database is configured.
+
+    The gate every facet method and route honors (false ⇒ 501 ``states-not-configured``).
+    """
     return component_store_configured(STATES_COMPONENT)
 
 
 def states_entry() -> MigrationEntry:
-    """The state store's chain as a runner entry against the component's bound MIGRATOR
-    (DDL-privileged) identity — the entry ``tai db migrate`` applies (mirrors
-    ``skeleton_entry``)."""
+    """The state store's chain as a runner entry against the component's bound MIGRATOR identity.
+
+    The MIGRATOR is the DDL-privileged identity — this is the entry ``tai db migrate`` applies
+    (mirrors ``skeleton_entry``).
+    """
     return MigrationEntry(
         component=STATES_COMPONENT,
         migrations_dir=states_migrations_dir(),
@@ -86,15 +89,15 @@ def states_entry() -> MigrationEntry:
 
 
 async def assert_states_schema_applied() -> None:
-    """Boot gate: assert the ``states`` chain is applied when the component's database is
-    configured.
+    """Boot gate: assert the ``states`` chain is applied when the component's database is configured.
 
     Verifies the chain on the store's RUNTIME connection (``component_store_settings`` —
     the exact database the store reads and writes, with SELECT on ``tai_schema_history``),
     not the migrator identity. A deployment with no configured database for the component
     owns no state tables, so the gate is a no-op; otherwise a pending/diverged chain
     refuses loudly naming ``tai db migrate``, never a runtime relation-missing surprise on
-    the first write."""
+    the first write.
+    """
     if not states_store_configured():
         logger.info("states schema gate: the states database is not configured — skipping the migration check")
         return

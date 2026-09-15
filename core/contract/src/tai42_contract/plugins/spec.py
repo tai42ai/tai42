@@ -25,8 +25,7 @@ from tai42_contract.plugins.versions import VERSION_RE, check_specifier_clause
 
 
 class PluginPermissions(BaseModel):
-    """Capabilities a plugin declares — informational: surfaced in listings,
-    not enforced by a sandbox.
+    """Capabilities a plugin declares — informational: surfaced in listings, not enforced by a sandbox.
 
     Omitting the block declares none (every flag defaults to ``False``); an
     unknown key is rejected loudly rather than silently ignored.
@@ -102,8 +101,10 @@ class PluginSpec(BaseModel):
 
     @property
     def delivery(self) -> Literal["package", "descriptor"]:
-        """How the plugin is delivered: ``"descriptor"`` when it ships no
-        package (an all-data, install-nothing listing), else ``"package"``."""
+        """How the plugin is delivered: ``"descriptor"`` when it ships no package, else ``"package"``.
+
+        A descriptor is an all-data, install-nothing listing.
+        """
         return "descriptor" if self.package is None else "package"
 
     @field_validator("namespace", "name")
@@ -292,7 +293,8 @@ class PluginSpec(BaseModel):
         # rewritten — a mismatch is a loud reject.
         for item in self.provides:
             if item.kind is PluginItemKind.CONNECTOR:
-                assert item.provider is not None
+                if item.provider is None:
+                    raise AssertionError
                 if (item.provider.origin == "system") != (self.namespace == "tai42"):
                     raise ValueError(
                         f"connector {item.name!r} origin {item.provider.origin!r} must be 'system' "

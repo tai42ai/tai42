@@ -64,9 +64,11 @@ class DispatchScope:
     as a park by TYPE; :meth:`observe_park` records a park recognized from the MCP wire
     marker by its interaction id. Both record the park on the runs-index row and no-op
     when no row was opened — a non-preset/draft dispatch, a nested sub-preset dispatch, or
-    the store OFF."""
+    the store OFF.
+    """
 
     def __init__(self) -> None:
+        """Start with no open run and no observed dispatch result."""
         self._run: RunRecord | None = None
         # The dispatch's terminal result and whether it was a clean (non-park) success —
         # read by the binding apply-after so state updates run ONLY on a real output. A
@@ -76,6 +78,7 @@ class DispatchScope:
         self._succeeded: bool = False
 
     def observe(self, result: object) -> None:
+        """Record the in-process ``result`` and whether it was a clean (non-park) success."""
         self._result = result
         # A park (a ``SuspendedInteraction`` return) is not a clean output — no updates apply.
         # Mirrors ``RunRecord.observe``, so the in-process door and the MCP edge (via
@@ -85,6 +88,7 @@ class DispatchScope:
             self._run.observe(result)
 
     def observe_park(self, interaction_id: str) -> None:
+        """Record a park recognized from the MCP wire ``interaction_id`` — never a clean success."""
         # A park is not a clean output — no updates apply to a suspended run.
         self._succeeded = False
         if self._run is not None:
@@ -102,15 +106,17 @@ _binding_scope_armed: ContextVar[bool] = ContextVar("tai42_binding_scope_armed",
 async def _binding_application(
     app: TaiMCP, merged: object, arguments: dict[str, Any] | None, scope: DispatchScope, door_id: str
 ) -> AsyncIterator[None]:
-    """Apply the merged binding ONCE around the dispatch: injections write ``arguments`` (in
-    place) BEFORE it, updates apply through the store AFTER a clean success. A ``None`` merge
-    — no binding, or a nested dispatch that is not the outermost — is a guarded no-op, so a
-    pure tool is byte-for-byte untouched.
+    """Apply the merged binding ONCE around the dispatch.
+
+    Injections write ``arguments`` (in place) BEFORE it, updates apply through the store AFTER a clean
+    success. A ``None`` merge — no binding, or a nested dispatch that is not the outermost — is a guarded
+    no-op, so a pure tool is byte-for-byte untouched.
 
     Injections and updates share ONE guard: whenever the merge is a binding they both engage,
     over ``arguments`` itself (an empty dict kept by identity, so an in-place injection reaches
     the dispatch) or a fresh ``{}`` when the door carried none. A dispatch with no arguments
-    never silently skips its injections."""
+    never silently skips its injections.
+    """
     from tai42_contract.states import StateBinding
 
     args = arguments if arguments is not None else {}
@@ -125,9 +131,9 @@ async def _binding_application(
 async def dispatch_scope(
     app: TaiMCP, key: str, arguments: dict[str, Any] | None = None
 ) -> AsyncIterator[DispatchScope]:
-    """Arm the shared run lifecycle around a dispatch of ``key``, yielding the
-    :class:`DispatchScope` the caller drives with the dispatch outcome.
+    """Arm the shared run lifecycle around a dispatch of ``key``, yielding its :class:`DispatchScope`.
 
+    The caller drives the yielded scope with the dispatch outcome.
     Deposits the ambient invoked-tool seam (CARRYING FORWARD any door binding a prior
     deposit left on it, read-then-set), enters the run-attribution stamp and the turn
     budget, and — when ``key`` is a REGISTERED preset with a retained active version —
@@ -142,7 +148,8 @@ async def dispatch_scope(
     tool target applies the carried door binding alone; a bare preset run applies the preset's
     own binding alone. A NESTED dispatch (the armed guard) applies nothing — a sub-preset's
     own binding never fires, and the door binding is never re-applied. Injections write
-    ``arguments`` (in place) before the dispatch, updates apply after a clean success."""
+    ``arguments`` (in place) before the dispatch, updates apply after a clean success.
+    """
     scope = DispatchScope()
     prior = current_tool_invocation()
     door_binding = prior.state_binding if prior is not None else None
@@ -192,9 +199,11 @@ class DispatchScopeMiddleware(Middleware):
     The caller identity the authz middleware bound is deposited as the run attribution
     before the scope, so a row born here carries the caller's ``user_id`` rather than
     NULL. Retry rides via :func:`dispatch_with_retry` around ``call_next`` so a
-    policy-armed preset re-fires here exactly as through the in-process seam."""
+    policy-armed preset re-fires here exactly as through the in-process seam.
+    """
 
     def __init__(self, app: TaiMCP) -> None:
+        """Bind the app whose ``tools/call`` edge this middleware arms the run scope on."""
         self._app = app
 
     async def on_call_tool(
@@ -202,6 +211,7 @@ class DispatchScopeMiddleware(Middleware):
         context: MiddlewareContext[Any],
         call_next: Callable[[MiddlewareContext[Any]], Awaitable[Any]],
     ) -> Any:
+        """Enter the shared dispatch scope for the MCP ``tools/call``, then delegate to ``call_next``."""
         from tai42_skeleton.access_control.user import request_identity
 
         name = context.message.name

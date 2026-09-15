@@ -47,13 +47,12 @@ def extract_tool_error(response: Any) -> str:
 
 
 def extract_tool_output(response: Any) -> Any:
-    """
-    Robustly extracts the output from an MCP tool response.
+    """Robustly extracts the output from an MCP tool response.
+
     Optimized for deterministic, programmatic use (no agent).
     Returns the full structured object to preserve metadata and context.
     An error response is returned unchanged.
     """
-
     is_error = _safe_get(response, "isError", "is_error", default=False)
     if is_error:
         return response

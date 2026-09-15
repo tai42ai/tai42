@@ -78,8 +78,10 @@ def _build_redactor_regex(meta_key: str) -> re.Pattern[str]:
 
 
 def _read_string(text: str, i: int) -> int:
-    """Index just past the closing quote of the string starting at ``text[i]``
-    (a quote char), honouring ``\\`` escapes. ``len(text)`` if unterminated."""
+    r"""Index just past the closing quote of the string starting at ``text[i]`` (a quote char).
+
+    Honours ``\\`` escapes; ``len(text)`` if unterminated.
+    """
     quote = text[i]
     j = i + 1
     while j < len(text):
@@ -94,8 +96,10 @@ def _read_string(text: str, i: int) -> int:
 
 
 def _find_object_end(text: str, open_brace: int) -> int:
-    """Index of the ``}`` matching the ``{`` at ``open_brace``, skipping braces
-    inside quoted strings. Returns ``len(text)`` if unterminated."""
+    """Index of the ``}`` matching the ``{`` at ``open_brace``, skipping braces inside quoted strings.
+
+    Returns ``len(text)`` if unterminated.
+    """
     depth = 0
     i = open_brace
     while i < len(text):
@@ -114,11 +118,12 @@ def _find_object_end(text: str, open_brace: int) -> int:
 
 
 def _skip_value(text: str, i: int) -> int:
-    """Index just past the value starting at ``text[i]`` — a quoted string, a
-    bracketed collection (``[]``/``{}``/``()``, quote- and nesting-aware), or a
-    bare scalar up to the next top-level ``,``/``}``. Consuming the whole value
-    (not stopping at the first comma/brace) is what stops a collection or a
-    brace-bearing secret from leaking its tail."""
+    """Index just past the value starting at ``text[i]``.
+
+    The value is a quoted string, a bracketed collection (``[]``/``{}``/``()``, quote- and nesting-aware),
+    or a bare scalar up to the next top-level ``,``/``}``. Consuming the whole value (not stopping at the
+    first comma/brace) is what stops a collection or a brace-bearing secret from leaking its tail.
+    """
     n = len(text)
     if i >= n:
         return i
@@ -148,8 +153,10 @@ def _skip_value(text: str, i: int) -> int:
 
 
 def _mask_object_body(body: str) -> str:
-    """Mask every value in a flat/nested ``key: value`` object body. Keys (always
-    quoted) are kept; each value (any shape) is replaced with the redaction."""
+    """Mask every value in a flat/nested ``key: value`` object body.
+
+    Keys (always quoted) are kept; each value (any shape) is replaced with the redaction.
+    """
     out: list[str] = []
     i = 0
     n = len(body)
@@ -208,9 +215,11 @@ _HEADERS_ENV_MARKERS = ('"headers"', "'headers'", '"env"', "'env'")
 
 
 def _redact_meta_match(m: re.Match[str]) -> str:
-    """Replace the matched token value with the redaction. An empty value has
-    nothing to hide and would garble the text via ``str.replace("", …)`` (which
-    injects the redaction between every character), so it is left as-is."""
+    """Replace the matched token value with the redaction.
+
+    An empty value has nothing to hide and would garble the text via ``str.replace("", …)`` (which
+    injects the redaction between every character), so it is left as-is.
+    """
     value = m.group("value")
     if not value:
         return m.group(0)
@@ -232,15 +241,15 @@ def _redact_text(text: str, meta_key: str, pattern: re.Pattern[str]) -> str:
 
 
 def _redact_record(record: logging.LogRecord, meta_key: str, pattern: re.Pattern[str]) -> None:
-    """Scrub secrets from ``record`` in place: its message, and any attached
-    exception/stack text.
+    """Scrub secrets from ``record`` in place: its message, and any attached exception/stack text.
 
     The marker check inspects the raw ``msg`` (stringified — a non-``str`` ``msg``
     whose ``str()`` carries a token is caught too) and a string form of ``args``; the
     full ``%``-render (:meth:`~logging.LogRecord.getMessage`) and the redaction subs
     run only when a marker is present, and an exception is rendered only when the
     record carries one. So a token-free record pays only the cheap marker scan, not
-    the full format + regex."""
+    the full format + regex.
+    """
     raw_msg = record.msg if isinstance(record.msg, str) else str(record.msg)
     args_text = str(record.args) if record.args else ""
     if _has_marker(raw_msg, meta_key) or _has_marker(args_text, meta_key):
@@ -274,10 +283,12 @@ _TAI_SCOPE_PREFIXES = ("tai42_", "tai42.", "tai.", "mcp.", "fastmcp.")
 
 
 def _is_tai_logger(name: str) -> bool:
-    """Whether ``name`` belongs to the loggers tai's operation feeds — the module
-    ``__name__`` of a tai package (``tai42_skeleton``, ``tai42_kit``, ``tai42_contract``,
-    ``tai42_backend_*``, ``tai42_connector_*``, …), a dotted child of one, or the
-    ``mcp`` / ``fastmcp`` library trees the runtime drives."""
+    """Whether ``name`` belongs to the loggers tai's operation feeds.
+
+    The module ``__name__`` of a tai package (``tai42_skeleton``, ``tai42_kit``, ``tai42_contract``,
+    ``tai42_backend_*``, ``tai42_connector_*``, …), a dotted child of one, or the ``mcp`` / ``fastmcp``
+    library trees the runtime drives.
+    """
     return name in _TAI_SCOPE_EXACT or name.startswith(_TAI_SCOPE_PREFIXES)
 
 

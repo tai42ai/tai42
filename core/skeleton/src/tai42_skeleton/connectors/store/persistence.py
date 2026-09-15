@@ -1,6 +1,7 @@
-"""Single canonical decrypt-and-parse path for ConnectionRecord blobs
-(``store.get`` -> ``crypto.decrypt`` -> ``model_validate_json``), so every caller
-shares one error-handling contract.
+"""Single canonical decrypt-and-parse path for ConnectionRecord blobs, shared by every caller.
+
+The path is ``store.get`` -> ``crypto.decrypt`` -> ``model_validate_json``, so every
+caller shares one error-handling contract.
 
 :func:`load_record` raises :class:`ConnectionNotFoundError` on a missing blob and
 re-raises (after logging ERROR) on a decrypt failure; :func:`load_record_or_none`
@@ -24,16 +25,20 @@ logger = logging.getLogger(__name__)
 
 
 def session_expires_at_for(record: ConnectionRecord) -> datetime:
-    """Effective session expiry (Redis cache TTL and ``session_expires_at`` column),
-    capped by ``CONNECTORS_MAX_SESSION_TTL``. Resets on every write, so a regularly-used
-    connection behaves like an inactivity window.
+    """Effective session expiry (Redis cache TTL and ``session_expires_at`` column).
+
+    Capped by ``CONNECTORS_MAX_SESSION_TTL``. Resets on every write, so a
+    regularly-used connection behaves like an inactivity window.
     """
     return datetime.now(UTC) + connector_engine_config().max_session_ttl
 
 
 class ConnectionNotFoundError(KeyError):
-    """Missing connection; routers surface as 404. Defined here so the persistence
-    helper has no upward dependency on the service module."""
+    """Missing connection; routers surface as 404.
+
+    Defined here so the persistence helper has no upward dependency on the service
+    module.
+    """
 
 
 async def load_record_with_blob(
@@ -42,6 +47,7 @@ async def load_record_with_blob(
     include_expired: bool = False,
 ) -> tuple[ConnectionRecord, bytes]:
     """Decrypt + parse, returning the record AND the raw ciphertext it loaded from.
+
     Raises :class:`ConnectionNotFoundError` on missing.
 
     The blob is the compare-and-set handle for a refresh write-back: the resolver passes

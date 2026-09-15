@@ -1,5 +1,7 @@
-"""Derive a route's read/write action-class and its success media types from the
-handler + methods — the authoritative source of a route's authorization character."""
+"""Derive a route's read/write action-class and its success media types from the handler + methods.
+
+The authoritative source of a route's authorization character.
+"""
 
 from __future__ import annotations
 
@@ -45,13 +47,14 @@ MOUNT_METHODS: list[str] = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
 
 def method_to_action(method: str) -> Literal["read", "write"]:
-    """Map an HTTP method to its derived action-class — the ONE place the read/write
-    action is derived from the method. ``GET``/``HEAD``/``OPTIONS`` → ``read``;
-    ``POST``/``PUT``/``PATCH``/``DELETE`` → ``write``.
+    """Map an HTTP method to its derived action-class — the ONE place read/write is derived.
+
+    ``GET``/``HEAD``/``OPTIONS`` → ``read``; ``POST``/``PUT``/``PATCH``/``DELETE`` → ``write``.
 
     An unknown/empty method raises loudly (fail-closed) — the derivation never
     defaults to ``read``, so an unclassifiable method is caught at registration/boot
-    rather than silently admitted as a read."""
+    rather than silently admitted as a read.
+    """
     upper = method.upper()
     if upper in _READ_METHODS:
         return "read"
@@ -61,10 +64,12 @@ def method_to_action(method: str) -> Literal["read", "write"]:
 
 
 def derive_route_action(methods: tuple[str, ...]) -> Literal["read", "write"]:
-    """The grantable action-class a route's method set derives to: ``write`` when the
-    route serves ANY write method, else ``read``. Enforcement re-derives per-method
-    from the live request method (:func:`method_to_action`), so this coarse label
-    only classes the route as a whole (the UI grouping and the boot validation)."""
+    """The grantable action-class a route's method set derives to.
+
+    ``write`` when the route serves ANY write method, else ``read``. Enforcement re-derives
+    per-method from the live request method (:func:`method_to_action`), so this coarse label
+    only classes the route as a whole (the UI grouping and the boot validation).
+    """
     return "write" if any(method_to_action(method) == "write" for method in methods) else "read"
 
 
@@ -103,11 +108,13 @@ def _handler_source(func: Callable[..., object]) -> str:
 
 
 def _method_scoped_source(source: str, method: str) -> str:
-    """The handler source as ``method`` sees it: shared lines plus the block guarded
-    by ``if request.method == "<method>"``, dropping the blocks that guard a
-    DIFFERENT method. A handler that never dispatches on ``request.method`` (the
-    common case) yields its whole source unchanged, so single-method routes and
-    multi-method routes that share one code path are untouched."""
+    """The handler source as ``method`` sees it.
+
+    Shared lines plus the block guarded by ``if request.method == "<method>"``, dropping the
+    blocks that guard a DIFFERENT method. A handler that never dispatches on ``request.method``
+    (the common case) yields its whole source unchanged, so single-method routes and multi-method
+    routes that share one code path are untouched.
+    """
     kept: list[str] = []
     foreign_indent: int | None = None
     for line in source.splitlines(keepends=True):
@@ -132,18 +139,22 @@ def _method_media_types(source: str) -> tuple[str, ...]:
 
 
 def _success_media_types(source: str, methods: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
-    """Map each method to the content type(s) its success response serves, derived
-    from the method-scoped handler source so a route whose methods answer different
-    media types (the callback door: GET serves HTML, POST serves the JSON envelope)
-    documents each method faithfully."""
+    """Map each method to the content type(s) its success response serves.
+
+    Derived from the method-scoped handler source so a route whose methods answer different media
+    types (the callback door: GET serves HTML, POST serves the JSON envelope) documents each
+    method faithfully.
+    """
     return {method: _method_media_types(_method_scoped_source(source, method)) for method in methods}
 
 
 def _resolve_route_action(action: RouteAction | None, methods: tuple[str, ...], path: str, authed: bool) -> RouteAction:
-    """The route's authoritative action-class. Every AUTHED route DECLARES its class
-    explicitly: a grantable ``read``/``write``, or the admin-only ``fenced``/``secret``
-    fence. A declared ``read``/``write`` is VALIDATED against every method's derived action,
-    so a misdeclared class (``read`` on a write method) is refused at registration. An
+    """The route's authoritative action-class.
+
+    Every AUTHED route DECLARES its class explicitly: a grantable ``read``/``write``, or the
+    admin-only ``fenced``/``secret`` fence. A declared ``read``/``write`` is VALIDATED against
+    every method's derived action, so a misdeclared class (``read`` on a write method) is refused
+    at registration. An
     authed route that declares NOTHING BOOT-FAILS here — auto-deriving read/write for an
     undeclared authed route is fail-open (a forgotten fence silently becomes grantable), so
     the omission is refused rather than divined. A PUBLIC route (``authed=False``) never
@@ -151,7 +162,8 @@ def _resolve_route_action(action: RouteAction | None, methods: tuple[str, ...], 
     spec — and a ``fenced``/``secret`` class on a public route is itself a contradiction
     (the fence is enforced only in the authenticated path, so a public fence silently opens
     an admin-only door), refused here symmetric with the authed-without-action raise. An
-    unknown method raises out of the derivation (fail-closed)."""
+    unknown method raises out of the derivation (fail-closed).
+    """
     if action in _FENCED_ROUTE_ACTIONS:
         if not authed:
             raise ValueError(
@@ -181,7 +193,9 @@ def _resolve_route_action(action: RouteAction | None, methods: tuple[str, ...], 
 
 
 def _shape_specificity(shape: Shape) -> int:
-    """A shape's specificity for match tie-breaking: its count of LITERAL segments
-    (a fixed segment out-ranks any template), so ``/api/x/y`` beats ``/api/x/{z}``
-    when both match a concrete path."""
+    """A shape's specificity for match tie-breaking: its count of LITERAL segments.
+
+    A fixed segment out-ranks any template, so ``/api/x/y`` beats ``/api/x/{z}`` when both match
+    a concrete path.
+    """
     return sum(1 for segment in shape if isinstance(segment, ShapeLiteral))

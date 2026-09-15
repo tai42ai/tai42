@@ -59,13 +59,14 @@ from tai42_skeleton.operations.response_models_group_c import (
 _NO_AUTH_ANSWERED_BY = "system:no-auth"
 
 
-class _AnswerInvalid(Exception):
+class _AnswerInvalidError(Exception):
     """Raised when a human-door answer fails its stored-format validation.
 
     ``field`` is the failing answer field's dotted path when the fault is located
     to one (a form schema mismatch), else ``None``; the callback door surfaces it
     as the 400 body's optional ``field`` key so a channel can pin the error on the
-    right control."""
+    right control.
+    """
 
     def __init__(self, message: str, *, field: str | None = None) -> None:
         super().__init__(message)
@@ -73,28 +74,33 @@ class _AnswerInvalid(Exception):
 
 
 class InteractionAnswer(BaseModel):
-    """An answer to a pending interaction — the ``answer`` value validated at
-    runtime against the interaction's own answer schema."""
+    """An answer to a pending interaction.
+
+    The ``answer`` value is validated at runtime against the interaction's own answer schema.
+    """
 
     answer: Any
 
 
 def _reply_ttl(request: InteractionRequest) -> int:
-    """Short TTL for the reply key ≈ the remaining timeout budget, so a late
-    answer to a timed-out question expires instead of resurrecting it."""
+    """Short TTL for the reply key ≈ the remaining timeout budget.
+
+    So a late answer to a timed-out question expires instead of resurrecting it.
+    """
     remaining = int((request.timeout_at - datetime.now(UTC)).total_seconds())
     return max(1, remaining)
 
 
 def _schema_error_field(exc: Exception) -> str | None:
-    """The failing ANSWER field's dotted path for a field-located
-    ``jsonschema.ValidationError`` (``count``, ``a.b``), or ``None`` when the fault
-    has no answer-field location. Only ``jsonschema.ValidationError`` locates a
-    fault in the answer: its ``.json_path`` (``$``-rooted, e.g. ``$.count``) names
-    the field. ``SchemaError`` also carries a ``.json_path``, but it points INTO the
-    stored schema (e.g. ``properties.x.type``) — a location no answering human owns
-    — so it is never surfaced; a malformed schema, a root-level ValidationError with
-    ``json_path == "$"``, and ``RecursionError`` all yield ``None``."""
+    """The failing ANSWER field's dotted path for a field-located ``jsonschema.ValidationError``, or ``None``.
+
+    The path is like ``count`` or ``a.b``; ``None`` when the fault has no answer-field location.
+    Only ``jsonschema.ValidationError`` locates a fault in the answer: its ``.json_path``
+    (``$``-rooted, e.g. ``$.count``) names the field. ``SchemaError`` also carries a
+    ``.json_path``, but it points INTO the stored schema (e.g. ``properties.x.type``) — a
+    location no answering human owns — so it is never surfaced; a malformed schema, a root-level
+    ValidationError with ``json_path == "$"``, and ``RecursionError`` all yield ``None``.
+    """
     json_path = exc.json_path if isinstance(exc, jsonschema.ValidationError) else None
     if isinstance(json_path, str) and json_path not in ("", "$"):
         # Drop the ``$`` root and a leading ``.`` so a top-level field reads as
@@ -104,9 +110,11 @@ def _schema_error_field(exc: Exception) -> str | None:
 
 
 def _schema_error_message(exc: Exception) -> str:
-    """The 400 message for a schema mismatch, naming the failing ANSWER field (via
-    ``_schema_error_field``) when the error locates one so a human on any surface can
-    tell WHICH field failed; a pathless fault falls back to the bare message."""
+    """The 400 message for a schema mismatch, naming the failing ANSWER field when the error locates one.
+
+    Uses ``_schema_error_field`` so a human on any surface can tell WHICH field failed; a
+    pathless fault falls back to the bare message.
+    """
     message = getattr(exc, "message", None) or str(exc)
     field = _schema_error_field(exc)
     if field is not None:
@@ -122,10 +130,11 @@ _SCHEMA_VALIDATION_ERRORS = (jsonschema.ValidationError, jsonschema.SchemaError,
 
 
 def _schema_mismatch(answer: Any, schema: dict) -> tuple[str, str | None] | None:
-    """Validate ``answer`` against ``schema``; return ``(message, field)`` on a
-    validation failure — ``message`` the 400 text, ``field`` the failing answer
-    field's dotted path (``None`` for a root-level or otherwise non-locatable fault)
-    — or ``None`` when the answer conforms."""
+    """Validate ``answer`` against ``schema``; return ``(message, field)`` on a validation failure, else ``None``.
+
+    ``message`` is the 400 text, ``field`` the failing answer field's dotted path (``None`` for
+    a root-level or otherwise non-locatable fault). Returns ``None`` when the answer conforms.
+    """
     try:
         jsonschema.validate(answer, schema)
     except _SCHEMA_VALIDATION_ERRORS as exc:
@@ -136,14 +145,14 @@ def _schema_mismatch(answer: Any, schema: dict) -> tuple[str, str | None] | None
 def _validate_text_answer(answer: Any) -> str:
     """A TEXT answer must be a string."""
     if not isinstance(answer, str):
-        raise _AnswerInvalid("answer must be a string")
+        raise _AnswerInvalidError("answer must be a string")
     return answer
 
 
 def _validate_confirm_answer(answer: Any) -> bool:
     """A CONFIRM answer must be a boolean."""
     if not isinstance(answer, bool):
-        raise _AnswerInvalid("answer must be a boolean")
+        raise _AnswerInvalidError("answer must be a boolean")
     return answer
 
 
@@ -151,25 +160,25 @@ def _validate_select_answer(request: InteractionRequest, answer: Any) -> Any:
     """A SELECT answer must be one of the question's offered options."""
     options = (request.format_payload or {}).get("options", [])
     if answer not in options:
-        raise _AnswerInvalid(f"answer must be one of {options}")
+        raise _AnswerInvalidError(f"answer must be one of {options}")
     return answer
 
 
 def _validate_form_answer(request: InteractionRequest, answer: Any) -> Any:
     """A FORM answer must be an object conforming to the question's stored schema."""
     if not isinstance(answer, dict):
-        raise _AnswerInvalid("answer must be an object")
+        raise _AnswerInvalidError("answer must be an object")
     payload = request.format_payload or {}
     schema = payload.get("schema")
     if not isinstance(schema, dict):
-        raise _AnswerInvalid("question schema is invalid: missing or non-object schema")
+        raise _AnswerInvalidError("question schema is invalid: missing or non-object schema")
     # Per-send option lists replace a property's enum for THIS send, so the answer is
     # judged against the choices the human was shown (the union of all pages' fields).
     schema = effective_answer_schema(schema, payload.get("data"))
     mismatch = _schema_mismatch(answer, schema)
     if mismatch is not None:
         message, field = mismatch
-        raise _AnswerInvalid(message, field=field)
+        raise _AnswerInvalidError(message, field=field)
     return answer
 
 
@@ -184,9 +193,11 @@ _ANSWER_VALIDATORS: dict[AnswerFormat, Callable[[InteractionRequest, Any], Any]]
 
 
 def _validate_answer(request: InteractionRequest, answer: Any) -> Any:
-    """Validate ``answer`` against the stored format; raise ``_AnswerInvalid``
-    (mapped to 400) on mismatch. Returns the validated value. An answer_format with no
-    validator (EXTERNAL, or a new member) is a server bug, never a client error."""
+    """Validate ``answer`` against the stored format; raise ``_AnswerInvalidError`` (mapped to 400) on mismatch.
+
+    Returns the validated value. An answer_format with no validator (EXTERNAL, or a new member)
+    is a server bug, never a client error.
+    """
     validator = _ANSWER_VALIDATORS.get(request.answer_format)
     if validator is None:
         raise RuntimeError(f"unhandled answer_format: {request.answer_format}")
@@ -205,17 +216,18 @@ async def _claim_or_serialization_error(
     continuation_due_ttl: int | None = None,
     continuation_first_attempt_at_ms: int | None = None,
 ) -> bool | None:
-    """Call ``record_answer``, converting a serializer blowup on an untrusted
-    answer into a loud-400 signal. A pathological answer (e.g. a deeply-nested JSON
-    object that parsed fine but exceeds the serializer's depth) raises when the
-    response is serialized — which happens at the top of ``record_answer`` before
-    any Redis write, so catching it here leaves no partial state. Returns the
-    claim result (``True``/``False``), or ``None`` to signal "serialization
+    """Call ``record_answer``, converting a serializer blowup on an untrusted answer into a loud-400 signal.
+
+    A pathological answer (e.g. a deeply-nested JSON object that parsed fine but exceeds the
+    serializer's depth) raises when the response is serialized — which happens at the top of
+    ``record_answer`` before any Redis write, so catching it here leaves no partial state.
+    Returns the claim result (``True``/``False``), or ``None`` to signal "serialization
     failed → answer the caller with a 400".
 
     ``continuation_due_ttl`` / ``continuation_first_attempt_at_ms`` are threaded to
     ``record_answer`` so an async park's durable continuation-due record is enqueued
-    ATOMICALLY with the claim; a sync question passes ``None`` and enqueues nothing."""
+    ATOMICALLY with the claim; a sync question passes ``None`` and enqueues nothing.
+    """
     try:
         return await store.record_answer(
             r,
@@ -232,9 +244,11 @@ async def _claim_or_serialization_error(
 
 
 async def _load_answerable_state(store: InteractionStore, r: Any, interaction_id: str) -> InteractionState:
-    """Read the interaction state and run the pre-audience guards: a missing state is a
-    404, an EXTERNAL question a 400 (answered via its callback URL), an already-answered
-    question a 409. Returns the answerable state."""
+    """Read the interaction state and run the pre-audience guards.
+
+    A missing state is a 404, an EXTERNAL question a 400 (answered via its callback URL), an
+    already-answered question a 409. Returns the answerable state.
+    """
     state = await store.get_state(r, interaction_id)
     if state is None:
         raise NotFoundError("Interaction not found")
@@ -246,9 +260,12 @@ async def _load_answerable_state(store: InteractionStore, r: Any, interaction_id
 
 
 def _authorize_answerer(state: InteractionState, restricted: str | None) -> None:
-    """The audience gate: a restricted caller may answer ONLY a question addressed to its
-    identity (an unaddressed question, or one addressed elsewhere, is a loud 403); an
-    unrestricted caller may answer anything."""
+    """The audience gate.
+
+    A restricted caller may answer ONLY a question addressed to its identity (an unaddressed
+    question, or one addressed elsewhere, is a loud 403); an unrestricted caller may answer
+    anything.
+    """
     if restricted is not None:
         if state.request.audience is None:
             raise ForbiddenError("restricted identities may answer only interactions addressed to them")
@@ -276,7 +293,8 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
     obtain a question's callback ticket — the ticket is delivered exclusively over the
     configured channel (never on any read/stream frame), so the unauthenticated
     callback door stays the sole ticket-bearing surface and no filtered stream leaks
-    it."""
+    it.
+    """
     # OFF gate: with no store configured no interaction can exist — a 404
     # byte-identical to the genuine miss below, so the door is no oracle.
     if not interactions_store_configured():
@@ -290,7 +308,7 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
         _authorize_answerer(state, restricted)
         try:
             validated = _validate_answer(state.request, answer)
-        except _AnswerInvalid as exc:
+        except _AnswerInvalidError as exc:
             raise BadRequestError(str(exc)) from exc
         response = InteractionResponse(
             interaction_id=interaction_id,
@@ -336,8 +354,7 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
     response_model=InteractionActionResult,
 )
 async def cancel_interaction(interaction_id: str) -> dict:
-    """Cancel a pending interaction — WITHDRAW one specific ask without answering it and
-    without deleting its conversation thread.
+    """Cancel a pending interaction — WITHDRAW one specific ask without answering or deleting its thread.
 
     The mirror of ``answer_interaction`` for the terminal-without-an-answer case: it
     tears the pending question down via the store's status-gated ``prune_pending`` (the
@@ -400,8 +417,10 @@ async def cancel_interaction(interaction_id: str) -> dict:
 
 
 def _add_data(request: InteractionRequest) -> dict:
-    """The add-frame shape shared by the paged list door and the live stream tail — the
-    client shape of one pending question."""
+    """The add-frame shape shared by the paged list door and the live stream tail.
+
+    The client shape of one pending question.
+    """
     # A verifier config rides ``format_payload`` server-side; STRIP it from the
     # client frame (the browser never needs the verifier name / secret_env) and
     # in its place emit ``server_verified`` so the UI renders a non-actionable
@@ -460,7 +479,8 @@ MAX_INTERACTIONS_PAGE = 1_000_000
 class InteractionWindowQuery(BaseModel):
     """The ``?page=``/``?pageSize=`` window the pending-list door takes.
 
-    Spec metadata only — the door parses its query at the HTTP edge."""
+    Spec metadata only — the door parses its query at the HTTP edge.
+    """
 
     page: int = Field(default=1, ge=1, le=MAX_INTERACTIONS_PAGE, description="1-based page number, pending order.")
     page_size: int = Field(
@@ -472,9 +492,11 @@ class InteractionWindowQuery(BaseModel):
 
 
 def _page_bounds(page: int, page_size: int) -> tuple[int, int]:
-    """The ``(offset, limit)`` a page/pageSize pair names. Both must be at least 1 and
-    ``page`` at most :data:`MAX_INTERACTIONS_PAGE`; a page size above the cap is capped,
-    never refused."""
+    """The ``(offset, limit)`` a page/pageSize pair names.
+
+    Both must be at least 1 and ``page`` at most :data:`MAX_INTERACTIONS_PAGE`; a page size
+    above the cap is capped, never refused.
+    """
     if page < 1 or page_size < 1:
         raise BadRequestError(f"page and page_size must be >= 1, got page={page} page_size={page_size}")
     if page > MAX_INTERACTIONS_PAGE:
@@ -497,8 +519,9 @@ def _next_page(page: int, limit: int, total: int) -> int | None:
     response_model=InteractionWindow,
 )
 async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
-    """The pending questions the inbox shows, one page at a time — the initial-load
-    surface a client reads BEFORE applying the live stream
+    """The pending questions the inbox shows, one page at a time.
+
+    The initial-load surface a client reads BEFORE applying the live stream
     (``GET /api/interactions/stream``).
 
     Order is the store's pending order (each group's most-recent question ``created_at``,
@@ -510,7 +533,8 @@ async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
     goes (phantom-group prune, abandoned past-deadline prune, answered/missing skip). Returns
     ``{"items", "total", "page", "page_size", "next_page", "truncated"}`` — ``items``
     carry the same shape as the stream's add frames, and ``truncated`` is always
-    ``false`` (the pending index is the whole set, sliced in memory)."""
+    ``false`` (the pending index is the whole set, sliced in memory).
+    """
     offset, limit = _page_bounds(page, page_size)
     # OFF gate: with no store configured nothing is pending — the honest empty page
     # (the malformed-window 400 above still applies, so the door is no configured oracle).
@@ -549,7 +573,8 @@ class PendingInteractionsQuery(BaseModel):
     """The ``?limit=`` window the parked-interactions audit door takes.
 
     Spec metadata only — the door parses its query at the HTTP edge, and the operation
-    clamps the value to ``1..``:data:`MAX_PENDING_INTERACTIONS_LIMIT`."""
+    clamps the value to ``1..``:data:`MAX_PENDING_INTERACTIONS_LIMIT`.
+    """
 
     limit: int = Field(
         default=DEFAULT_PENDING_INTERACTIONS_LIMIT,
@@ -569,8 +594,9 @@ class PendingInteractionsQuery(BaseModel):
     response_model=PendingInteractionListing,
 )
 async def list_pending_interactions(limit: int = DEFAULT_PENDING_INTERACTIONS_LIMIT) -> dict:
-    """A read-only admin audit of the parked async asks awaiting an answer — the native
-    surface a scheduled watchdog flow reads to spot parks nearing (or past) their
+    """A read-only admin audit of the parked async asks awaiting an answer.
+
+    The native surface a scheduled watchdog flow reads to spot parks nearing (or past) their
     expiry.
 
     An UNRESTRICTED operator sees the whole cross-audience set — exactly the reach the
@@ -584,7 +610,8 @@ async def list_pending_interactions(limit: int = DEFAULT_PENDING_INTERACTIONS_LI
     scan, so a restricted caller's filtered slice may hold fewer items. Returns
     ``{"items", "count"}`` — each item carries ``interaction_id``, ``group_id``,
     ``question`` (truncated), ``channel``, ``recipient``, ``audience``, ``thread_id``
-    (when the park carries one), ``expiry_at``, ``created_at``, ``mode``."""
+    (when the park carries one), ``expiry_at``, ``created_at``, ``mode``.
+    """
     _user_id, restricted = request_identity()
     limit = min(max(limit, 1), MAX_PENDING_INTERACTIONS_LIMIT)
     # OFF gate: with no store configured no park can exist — the honest empty audit.

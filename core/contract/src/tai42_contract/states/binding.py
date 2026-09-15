@@ -28,7 +28,8 @@ class StateInjection(BaseModel):
     Exactly one source is set: ``template_jq`` names an ``input``-purpose template jq
     (``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated
     text rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for
-    an injection — the run-input field the value lands under. Frozen."""
+    an injection — the run-input field the value lands under. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -52,7 +53,8 @@ class StateUpdate(BaseModel):
     output/input; or ``jq`` is a templated text rendering to a custom program over ``{record,
     output, input}`` authoring the whole op batch itself (a custom update carries no adapter).
     ``op_id`` is an optional templated text rendering to an idempotency-key expression.
-    Frozen."""
+    Frozen.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -73,13 +75,15 @@ class StateUpdate(BaseModel):
 
 
 class StateAttach(BaseModel):
-    """One state attached by a binding: the ``state`` name, the ``templates`` to attach on it
-    (attach-on-use, idempotent at save), the ``subject_expr`` (a templated text rendering to a
-    jq over the run input → a full subject object or the record KEY, its scope taken from the
-    ambient door context and its kind from the state's declared subject kind), an optional
-    ``scope_expr`` (a templated text rendering to a BOOLEAN predicate over the run input
-    evaluated first — ``false`` skips this state for the run, a non-boolean is a loud error,
-    absent engages), and the ordered ``input_injections`` / ``updates``. Frozen."""
+    """One state attached by a binding.
+
+    Carries the ``state`` name, the ``templates`` to attach on it (attach-on-use, idempotent at save),
+    the ``subject_expr`` (a templated text rendering to a jq over the run input → a full subject object
+    or the record KEY, its scope taken from the ambient door context and its kind from the state's
+    declared subject kind), an optional ``scope_expr`` (a templated text rendering to a BOOLEAN predicate
+    over the run input evaluated first — ``false`` skips this state for the run, a non-boolean is a loud
+    error, absent engages), and the ordered ``input_injections`` / ``updates``. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -102,7 +106,8 @@ class StateBinding(BaseModel):
 
     The same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,
     ``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the
-    ambient dispatch context, and repeated per node by a flow engine."""
+    ambient dispatch context, and repeated per node by a flow engine.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

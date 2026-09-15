@@ -40,8 +40,9 @@ def _new_record(
     inbound_event: dict[str, Any] | None = None,
     submitted_by: str | None = None,
 ) -> ConversationRecord:
-    """A freshly minted record for one accepted message, in the state its door commits it
-    to (``accepted``, ``pending_delivery`` or ``shed``). ``inbound_text`` is the message
+    """A freshly minted record for one accepted message, in the state its door commits it to.
+
+    That state is ``accepted``, ``pending_delivery`` or ``shed``. ``inbound_text`` is the message
     verbatim, durable from here so the record reads as a turn of a conversation and not
     only as its answer; ``inbound_form`` is the structured submission that rode WITH it
     (an ask-less form's answers), and ``inbound_attachments``/``inbound_location`` are the media
@@ -49,7 +50,8 @@ def _new_record(
     text-only inbound. A ``client`` api-door record MUST name the authenticated caller its
     thread and rate bucket are keyed by, and a ``client`` channel-door record names none; an
     ``operator`` record names the operator that sent it on EITHER door — it rides no rate
-    bucket and carries no inbound to dedupe."""
+    bucket and carries no inbound to dedupe.
+    """
     if origin == "operator":
         if not (caller_principal and caller_principal.strip()):
             raise RuntimeError(
@@ -93,13 +95,15 @@ def _new_record(
 
 
 def _answer_fields(parts: list[AnswerPart]) -> tuple[str, list[AnswerPart] | None]:
-    """The ``(answer, answer_parts)`` a record stores for an ordered ``parts`` list: the part
-    MESSAGES joined into the whole text every legacy reader consumes, and the parts list
-    ITSELF only when it adds something over that text — more than one part, or one part
-    carrying media/options/a template. A single PLAIN-TEXT answer carries ``answer_parts=None``
-    (byte-parity with the pre-parts single answer), mirroring ``ConversationAnswer.parts``. A
-    media-only part contributes nothing to ``answer``, so an all-media answer stores ``answer=""``
-    with the parts."""
+    """The ``(answer, answer_parts)`` a record stores for an ordered ``parts`` list.
+
+    The part MESSAGES are joined into the whole text every reader of the flat ``answer``
+    consumes, and the parts list ITSELF is stored only when it adds something over that
+    text — more than one part, or one part carrying media/options/a template. A single
+    PLAIN-TEXT answer carries ``answer_parts=None``, mirroring ``ConversationAnswer.parts``.
+    A media-only part contributes nothing to ``answer``, so an all-media answer stores
+    ``answer=""`` with the parts.
+    """
     answer = joined_answer_text(parts)
     if len(parts) == 1 and parts[0].is_plain_text():
         return answer, None
@@ -109,10 +113,12 @@ def _answer_fields(parts: list[AnswerPart]) -> tuple[str, list[AnswerPart] | Non
 def _with_outcome(
     intake: ConversationRecord, answer_status: AnswerStatus, parts: list[AnswerPart], error_detail: str | None
 ) -> ConversationRecord:
-    """``intake`` carrying a produced outcome and moved to ``pending_delivery`` — the shape
-    :meth:`ConversationRecordStore.complete_turn` requires. ``parts`` is the ordered
+    """``intake`` carrying a produced outcome and moved to ``pending_delivery``.
+
+    The shape :meth:`ConversationRecordStore.complete_turn` requires. ``parts`` is the ordered
     message list; the record stores the joined ``answer`` and, for a multi-message answer,
-    the ``answer_parts`` the delivery machine sends one message at a time."""
+    the ``answer_parts`` the delivery machine sends one message at a time.
+    """
     answer, answer_parts = _answer_fields(parts)
     return ConversationRecord.model_validate(
         intake.model_dump()
@@ -128,11 +134,13 @@ def _with_outcome(
 
 
 def _with_channel_silent(intake: ConversationRecord, note: str | None = None) -> ConversationRecord:
-    """``intake`` moved to terminal ``silent`` — a CHANNEL-door tool turn that produced no
-    reply, so nothing is ever sent. Carries no answer_status, matching
+    """``intake`` moved to terminal ``silent`` — a CHANNEL-door tool turn that produced no reply.
+
+    Nothing is ever sent. Carries no answer_status, matching
     :data:`ANSWERLESS_STATUSES`. ``note`` is an optional internal detail (never sent) — the
     paused-run pending reason — recorded so a silent-because-pending turn is diagnosable;
-    ``None`` records no detail, exactly as an ordinary silent turn does."""
+    ``None`` records no detail, exactly as an ordinary silent turn does.
+    """
     return ConversationRecord.model_validate(
         intake.model_dump()
         | {
@@ -146,12 +154,14 @@ def _with_channel_silent(intake: ConversationRecord, note: str | None = None) ->
 
 
 def _with_api_silent(intake: ConversationRecord, note: str | None = None) -> ConversationRecord:
-    """``intake`` moved to ``pending_delivery`` carrying a ``silent`` outcome — an API-door
-    tool turn that produced no reply. The silent outcome rides the same durable machine an
+    """``intake`` moved to ``pending_delivery`` carrying a ``silent`` outcome — an API-door turn with no reply.
+
+    The silent outcome rides the same durable machine an
     answer takes (a signed callback when the route declares one, else terminal-readable for
     the poll door); it carries no answer text. ``note`` is an optional internal detail (never sent — the
     silent marker delivered to the caller carries no answer or error) — the paused-run pending reason —
-    recorded so a silent-because-pending turn is diagnosable; ``None`` records no detail."""
+    recorded so a silent-because-pending turn is diagnosable; ``None`` records no detail.
+    """
     return ConversationRecord.model_validate(
         intake.model_dump()
         | {
@@ -165,9 +175,12 @@ def _with_api_silent(intake: ConversationRecord, note: str | None = None) -> Con
 
 
 def _outcome_record(intake: ConversationRecord, outcome: _ToolOutcome) -> ConversationRecord:
-    """Build the completed record from a resolved outcome: an answer goes to
-    ``pending_delivery``; a silent outcome is terminal ``silent`` on the channel door and a
-    deliverable ``silent`` marker on the api door."""
+    """Build the completed record from a resolved outcome.
+
+    An answer goes to ``pending_delivery``; a silent outcome is terminal
+    ``silent`` on the channel door and a deliverable ``silent`` marker on the api
+    door.
+    """
     if isinstance(outcome, _SilentOutcome):
         if intake.door == "channel":
             return _with_channel_silent(intake, outcome.note)

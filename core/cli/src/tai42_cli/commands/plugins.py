@@ -44,9 +44,11 @@ app = typer.Typer(
 
 
 def _split_ref(ref: str) -> tuple[str, str]:
-    """Split a ``namespace/name`` ref into its two halves, raising a usage error
-    on anything that is not exactly one non-empty namespace and one non-empty
-    name separated by a single ``/``."""
+    """Split a ``namespace/name`` ref into its two halves.
+
+    Raises a usage error on anything that is not exactly one non-empty namespace
+    and one non-empty name separated by a single ``/``.
+    """
     namespace, sep, name = ref.partition("/")
     if not sep or not namespace or not name or "/" in name:
         raise typer.BadParameter("REF must be 'namespace/name'", param_hint="REF")
@@ -144,8 +146,7 @@ def kinds(ctx: typer.Context) -> None:
 @app.command("installed")
 @covers(("GET", "/api/marketplace/installed"))
 def installed(ctx: typer.Context) -> None:
-    """List the installed marketplace plugins, their compat verdicts and update
-    availability, and any boot-quarantined plugins.
+    """List installed marketplace plugins with compat verdicts, update availability, and boot-quarantines.
 
     Example: ``tai plugins installed``
     """
@@ -178,8 +179,10 @@ def installed(ctx: typer.Context) -> None:
 
 
 def _mount_overrides(mount: list[str] | None) -> dict[str, str]:
-    """Parse repeated ``--mount item=base`` pairs into a ``{item: base}`` map,
-    rejecting a duplicated item so a base is never silently last-wins."""
+    """Parse repeated ``--mount item=base`` pairs into a ``{item: base}`` map.
+
+    Rejects a duplicated item so a base is never silently last-wins.
+    """
     overrides: dict[str, str] = {}
     for pair in mount or []:
         item, base = parse_assignment_arg(pair, param_hint="--mount")
@@ -190,10 +193,12 @@ def _mount_overrides(mount: list[str] | None) -> dict[str, str]:
 
 
 def _env_map(env: list[str] | None) -> dict[str, str]:
-    """Parse repeated ``--env KEY=VALUE`` pairs into a ``{KEY: VALUE}`` map,
-    rejecting a duplicated key so a value is never silently last-wins. These are
+    """Parse repeated ``--env KEY=VALUE`` pairs into a ``{KEY: VALUE}`` map.
+
+    Rejects a duplicated key so a value is never silently last-wins. These are
     the install-time env values the plugin's spec declares (an mcp entry's ``!ENV``
-    markers or an oauth connector's client credentials)."""
+    markers or an oauth connector's client credentials).
+    """
     values: dict[str, str] = {}
     for pair in env or []:
         key, value = parse_assignment_arg(pair, param_hint="--env")
@@ -204,10 +209,13 @@ def _env_map(env: list[str] | None) -> dict[str, str]:
 
 
 def _refuse_missing_env(preview: Any, supplied: set[str]) -> None:
-    """Exit non-zero, naming the vars, when the server's ``missing_env`` (required
-    env not already in the store or process env) still holds names the caller did
-    not supply via ``--env``. The CLI is not the env authority — it consumes the
-    server's ``missing_env`` and never re-derives from ``GET /api/config/env``."""
+    """Exit non-zero, naming the vars, when required env is still missing.
+
+    The server's ``missing_env`` (required env not already in the store or process
+    env) may still hold names the caller did not supply via ``--env``. The CLI is
+    not the env authority — it consumes the server's ``missing_env`` and never
+    re-derives from ``GET /api/config/env``.
+    """
     if not isinstance(preview, dict):
         return
     missing = [name for name in preview.get("missing_env") or [] if name not in supplied]
@@ -217,9 +225,10 @@ def _refuse_missing_env(preview: Any, supplied: set[str]) -> None:
 
 
 def _render_preview_table(preview: dict[str, Any]) -> None:
-    """Print the resolved routes, collisions, public routes, delivery, and required
-    env of an install preview as human lines (stdout stays data; every route is
-    visible)."""
+    """Print an install preview as human lines: routes, collisions, public routes, delivery, env.
+
+    Stdout stays data; every route is visible.
+    """
     delivery = preview.get("delivery")
     if delivery is not None:
         typer.echo(f"delivery: {delivery}")
@@ -252,8 +261,10 @@ def _render_preview_table(preview: dict[str, Any]) -> None:
 
 
 def _preview_body(ref: str, version: str | None, overrides: dict[str, str]) -> dict[str, Any]:
-    """The ``install/preview`` request body: the ref plus an optional pinned version
-    and route-mount overrides. Shared by ``install`` and ``update``."""
+    """The ``install/preview`` request body: ref, optional pinned version, route-mount overrides.
+
+    Shared by ``install`` and ``update``.
+    """
     body: dict[str, Any] = {"ref": ref}
     if version is not None:
         body["version"] = version
@@ -263,9 +274,11 @@ def _preview_body(ref: str, version: str | None, overrides: dict[str, str]) -> d
 
 
 def _run_dry_run(ctx_obj: AppContext, preview_body: dict[str, Any]) -> None:
-    """POST the preview and render it (``print_json`` under ``--json``, else the
-    human table), raising ``typer.Exit(1)`` on any route collision so a scripted
-    dry-run gates on it. Shared by ``install`` and ``update``."""
+    """POST the preview and render it (``print_json`` under ``--json``, else the human table).
+
+    Raises ``typer.Exit(1)`` on any route collision so a scripted dry-run gates on
+    it. Shared by ``install`` and ``update``.
+    """
     with ctx_obj.client() as client:
         preview = client.post("/api/marketplace/install/preview", json=preview_body)
     if ctx_obj.json_output:
@@ -284,8 +297,11 @@ def _install_body(
     env_values: dict[str, str],
     secret: list[str] | None,
 ) -> dict[str, Any]:
-    """The ``install`` request body: ref, optional version/route-mounts, the
-    public-route acknowledgement, and any supplied env values / secret keys."""
+    """The ``install`` request body.
+
+    Carries the ref, optional version/route-mounts, the public-route acknowledgement,
+    and any supplied env values / secret keys.
+    """
     body: dict[str, Any] = {"ref": ref}
     if version is not None:
         body["version"] = version
@@ -306,8 +322,10 @@ def _update_body(
     env_values: dict[str, str],
     secret: list[str] | None,
 ) -> dict[str, Any]:
-    """The ``update`` request body: ref, optional target version, and any supplied
-    env values / secret keys."""
+    """The ``update`` request body.
+
+    Carries the ref, optional target version, and any supplied env values / secret keys.
+    """
     body: dict[str, Any] = {"ref": ref}
     if version is not None:
         body["version"] = version
@@ -487,7 +505,7 @@ def advisories(ctx: typer.Context) -> None:
 
 # The placeholder token every template file carries where the listing name goes;
 # ``init`` substitutes the given NAME for it.
-_TEMPLATE_NAME_TOKEN = "__PLUGIN_NAME__"
+_TEMPLATE_NAME_TOKEN = "__PLUGIN_NAME__"  # noqa: S105 constant identifier, not a secret value
 # The package-data subdirectory shipping the descriptor-only plugin skeletons,
 # navigated from the ``tai42_cli`` package (never a filesystem path — read from
 # the wheel via importlib.resources).
@@ -498,7 +516,8 @@ def _template_name(kind: str, auth: str | None) -> str:
     """The template directory name for a ``--kind``/``--auth`` combination.
 
     ``--auth`` is REQUIRED for a connector (its provider is oauth or no-auth) and
-    FORBIDDEN for an mcp-server (a descriptor-only server carries no auth block)."""
+    FORBIDDEN for an mcp-server (a descriptor-only server carries no auth block).
+    """
     if kind == "connector":
         if auth is None:
             raise typer.BadParameter("connector requires --auth {oauth,none}", param_hint="--auth")
@@ -513,7 +532,8 @@ def _write_template(source: Traversable, dest: Path, name: str) -> list[Path]:
 
     Every template file is UTF-8 text; the name token is replaced in each. Both the
     target dir and every subdir are created with ``exist_ok=False`` so a pre-existing
-    path raises loudly rather than merging into an author's tree."""
+    path raises loudly rather than merging into an author's tree.
+    """
     written: list[Path] = []
 
     def recurse(node: Traversable, target: Path) -> None:

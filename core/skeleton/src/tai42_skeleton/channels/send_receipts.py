@@ -1,5 +1,4 @@
-"""Tier 2 of the send-outcome monitoring layer: delivered-vs-accepted receipts
-reaching the originating trace.
+"""Tier 2 of the send-outcome monitoring layer: delivered-vs-accepted receipts reaching the originating trace.
 
 A flow send (``notify_user`` on a named channel) returns the provider message ids the
 medium ACCEPTED — but whether the medium later DELIVERED it arrives out of band, on the
@@ -62,14 +61,15 @@ def _index_key(key_prefix: str, channel: str, provider_message_id: str) -> str:
 
 
 async def index_flow_send(channel: str, provider_message_ids: list[str], *, trace_id: str, span_id: str) -> None:
-    """Map each accepted provider message id of a flow send to its originating
-    ``{trace_id, span_id}``, TTL'd, so a later out-of-band delivery receipt for that id
-    can be posted back onto the flow trace.
+    """Map each accepted provider message id of a flow send to its originating ``{trace_id, span_id}``, TTL'd.
+
+    So a later out-of-band delivery receipt for that id can be posted back onto the flow trace.
 
     A no-op when the id list is empty (a channel that exposes no correlatable id) or the
     interactions store is unconfigured. The TTL is the receipt-relevance window
     (``INTERACTIONS_SEND_RECEIPT_INDEX_TTL_SECONDS``): long enough for a delayed carrier
-    receipt, bounded so the index cannot accumulate."""
+    receipt, bounded so the index cannot accumulate.
+    """
     if not provider_message_ids or not interactions_store_configured():
         return
     settings = interactions_settings()
@@ -98,7 +98,8 @@ async def record_flow_send_receipt(
     (``False``) on any monitoring-store outage — this seam runs in the webhook's
     ``except LookupError`` fallback, so a raised Redis error would 500 an otherwise-healthy
     delivery-status webhook and break receipt ingestion — and the event WRITE is fail-safe by
-    the writer's own contract (``create_event`` catches and logs its own backend errors)."""
+    the writer's own contract (``create_event`` catches and logs its own backend errors).
+    """
     if not interactions_store_configured():
         return False
     settings = interactions_settings()
@@ -124,7 +125,7 @@ async def record_flow_send_receipt(
         name=_RECEIPT_EVENT_NAME,
         level=MonitoringLevel.ERROR if failed else MonitoringLevel.DEFAULT,
         trace_context=TraceContext(trace_id=entry["trace_id"], parent_span_id=entry.get("span_id")),
-        input={"provider_message_id": provider_message_id, "status": receipt.value, "errors": errors},
+        input_={"provider_message_id": provider_message_id, "status": receipt.value, "errors": errors},
     )
     if failed:
         logger.info("flow send %s on channel %r reported FAILED by the provider", provider_message_id, channel)

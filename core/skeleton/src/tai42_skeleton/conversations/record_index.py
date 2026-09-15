@@ -1,6 +1,7 @@
-"""The per-status record index (keyspace 6): the delivery sweep's work listing, the status
-listing, and the in-flight-intake check, each reading the index rather than the whole
-retained keyspace."""
+"""The per-status record index (keyspace 6): the delivery sweep, the status listing, and the intake check.
+
+Each reads the index rather than the whole retained keyspace.
+"""
 
 from __future__ import annotations
 
@@ -33,8 +34,10 @@ class RecordIndexMixin(RecordStoreBase):
     """Reads over the per-status record index (keyspace 6)."""
 
     async def _indexed_ids(self, r: AsyncRedis, statuses: frozenset[DeliveryStatus], now: float) -> list[str]:
-        """The ``message_id``s indexed under ``statuses``, dropping the members whose row
-        has expired out from under the index first."""
+        """The ``message_id``s indexed under ``statuses``.
+
+        Drops the members whose row has expired out from under the index first.
+        """
         ids: list[str] = []
         for status in statuses:
             key = self.settings.status_index_key(status.value)
@@ -46,18 +49,22 @@ class RecordIndexMixin(RecordStoreBase):
         return ids
 
     async def _drop_orphan(self, r: AsyncRedis, message_id: str) -> None:
-        """Unindex a status-index member whose row is gone — a row deleted from under the
-        index rather than through :meth:`delete_record`."""
+        """Unindex a status-index member whose row is gone.
+
+        A row deleted from under the index rather than through :meth:`delete_record`.
+        """
         logger.warning("conversations: record %r is indexed but has no row; unindexed", message_id)
         keys = self._record_keys(message_id)
         await eval_script(r, _UNINDEX_LUA, len(keys), *keys, message_id)
 
     async def pending_work(self) -> list[PendingWork]:
-        """Every record the DELIVERY machine has unfinished work on — the listing behind
-        the boot re-drive and the periodic sweep. Read from the status index, so it costs
-        the work outstanding and not the whole retained keyspace. Terminal and intake
-        records are not read (an intake record is the turn engine's to resolve); a corrupt
-        row is logged and skipped rather than crashing the pass."""
+        """Every record the DELIVERY machine has unfinished work on.
+
+        The listing behind the boot re-drive and the periodic sweep. Read from the status
+        index, so it costs the work outstanding and not the whole retained keyspace.
+        Terminal and intake records are not read (an intake record is the turn engine's to
+        resolve); a corrupt row is logged and skipped rather than crashing the pass.
+        """
         work: list[PendingWork] = []
         wanted = frozenset({DeliveryStatus.PENDING_DELIVERY, DeliveryStatus.PROVISIONAL})
         now = time.time()
@@ -95,8 +102,10 @@ class RecordIndexMixin(RecordStoreBase):
         return work
 
     async def list_by_status(self, statuses: frozenset[DeliveryStatus]) -> list[ConversationRecord]:
-        """Every record whose ``delivery_status`` is in ``statuses``, read from the status
-        index. An unparseable row is logged and skipped rather than crashing the listing."""
+        """Every record whose ``delivery_status`` is in ``statuses``, read from the status index.
+
+        An unparseable row is logged and skipped rather than crashing the listing.
+        """
         records: list[ConversationRecord] = []
         wanted = {status.value for status in statuses}
         now = time.time()
@@ -117,13 +126,15 @@ class RecordIndexMixin(RecordStoreBase):
         return records
 
     async def thread_has_live_intake(self, thread_id: str) -> bool:
-        """Whether a turn is IN FLIGHT on ``thread_id`` — an ``accepted`` intake record still
-        holding a LIVE lease. That turn's completion re-stamps the thread indexes and writes
+        """Whether a turn is IN FLIGHT on ``thread_id`` — an ``accepted`` intake record still holding a LIVE lease.
+
+        That turn's completion re-stamps the thread indexes and writes
         checkpoint state, so a delete racing it would half-forget the memory. The intake lease
         is the CROSS-WORKER liveness marker the re-drive trusts (an ``accepted`` record whose
         lease expiry is still ahead of now); the per-worker FIFO reservation cannot answer for
         a turn running on a sibling worker, so the lease is read here, never taken. Scanned
-        off the ``accepted`` status index, which holds only the turns in flight fleet-wide."""
+        off the ``accepted`` status index, which holds only the turns in flight fleet-wide.
+        """
         now = time.time()
         accepted_key = self.settings.status_index_key(DeliveryStatus.ACCEPTED.value)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:

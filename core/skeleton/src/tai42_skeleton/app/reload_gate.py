@@ -1,5 +1,4 @@
-"""The process-wide reload gate — the mutual-exclusion seam between an admin
-config reload and the live serving surface.
+"""The process-wide reload gate — the mutual-exclusion seam between an admin config reload and the live serving surface.
 
 A reload (`admin.reload_config` / `admin.reload_mcp` / the failed-MCP re-probe)
 is heavy and synchronous: it re-reads env, resets settings caches, re-imports
@@ -93,6 +92,7 @@ class ReloadGate:
     """
 
     def __init__(self) -> None:
+        """Create the gate with its lock unbound until first serving-loop use."""
         self._lock: asyncio.Lock | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -113,22 +113,29 @@ class ReloadGate:
         return self._lock
 
     def bind_to_running_loop(self) -> None:
-        """Bind the lock to the current running loop — the lifespan-startup hook so
-        the gate is owned by the serving loop from the first request rather than
-        lazily on the first reload."""
+        """Bind the lock to the current running loop.
+
+        The lifespan-startup hook, so the gate is owned by the serving loop from
+        the first request rather than lazily on the first reload.
+        """
         self._serving_lock()
 
     @property
     def lock(self) -> asyncio.Lock:
-        """The raw serving-loop lock, for an async-side holder that must block
-        reloads while it runs (``async with reload_gate.lock: ...``)."""
+        """The raw serving-loop lock, for an async-side holder that must block reloads while it runs.
+
+        Use ``async with reload_gate.lock: ...``.
+        """
         return self._serving_lock()
 
     @property
     def locked(self) -> bool:
-        """Whether a reload is in progress. ``locked()`` reads a plain flag and
-        never touches the loop, so a route entry check is safe before the lock has
-        ever been bound (no reload has run yet)."""
+        """Whether a reload is in progress.
+
+        ``locked()`` reads a plain flag and never touches the loop, so a route
+        entry check is safe before the lock has ever been bound (no reload has
+        run yet).
+        """
         return self._lock is not None and self._lock.locked()
 
     async def run(self, fn: Callable[[], T], *, reimports: bool) -> T:
@@ -153,15 +160,19 @@ class ReloadGate:
 
     @staticmethod
     def _run_fork_exclusive(fn: Callable[[], T]) -> T:
-        """Run one re-importing reload body with no backend child being forked and no
-        in-process job running — the invariant :data:`tai42_kit.fork_gate.fork_gate`
-        exists to hold (stated canonically there)."""
+        """Run one re-importing reload body with no backend child forked and no in-process job running.
+
+        This is the invariant :data:`tai42_kit.fork_gate.fork_gate` exists to
+        hold (stated canonically there).
+        """
         with fork_gate.exclusive(timeout=FORK_QUIESCE_SECONDS):
             return fn()
 
     def reject_response(self) -> JSONResponse:
-        """The retriable 503 a gated route returns while a reload holds the lock —
-        explicit and loud so a client/CLI can branch on ``reloading``."""
+        """Return the retriable 503 a gated route serves while a reload holds the lock.
+
+        Explicit and loud so a client/CLI can branch on ``reloading``.
+        """
         return JSONResponse(
             {"error": REJECT_MESSAGE, "reloading": True},
             status_code=503,

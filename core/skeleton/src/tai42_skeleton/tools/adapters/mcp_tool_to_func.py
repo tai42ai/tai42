@@ -1,3 +1,5 @@
+"""Adapt an MCP tool descriptor into a callable that dispatches through the connector-aware auth path."""
+
 import keyword
 import logging
 from collections.abc import Callable
@@ -48,9 +50,10 @@ _LOG_ESCAPE = {c: f"\\x{c:02x}" for c in (*range(0x20), 0x7F, 0x85, 0x2028, 0x20
 
 
 def _log_safe(name: str) -> str:
-    """A downstream-advertised tool name rendered safe for a log line: its control
-    and line-boundary characters cannot forge or split a log record. Downstream
-    names are untrusted."""
+    """A downstream-advertised tool name rendered safe for a log line.
+
+    Its control and line-boundary characters cannot forge or split a log record. Downstream names are untrusted.
+    """
     return name.translate(_LOG_ESCAPE)
 
 
@@ -232,15 +235,17 @@ async def _dispatch_with_reconnect(
     arguments: dict[str, Any],
     mcp_client: FastMCPClient,
 ):
-    """Dispatch through :func:`_dispatch_once` with a single fresh-session retry on a
-    lost/unbuildable session, recording the health outcome.
+    """Dispatch through :func:`_dispatch_once` with a single fresh-session retry on a lost/unbuildable session.
+
+    Records the health outcome.
 
     An unavailable pooled session — a mid-run disconnect (downstream MCP restarted,
     evicting the dead session) OR a connect/init failure building the session
     (ClientConnectError, e.g. a down upstream on cold start) — gets exactly ONE
     fresh-session retry. A retry that still cannot reach the upstream converts to a
     structured unavailable result so the raw fastmcp text never reaches the consumer;
-    any other dispatch failure propagates raw to the caller."""
+    any other dispatch failure propagates raw to the caller.
+    """
     try:
         response = await _dispatch_once(config, transport, tool_name, arguments, mcp_client)
     except ClientDisconnectedError:
@@ -277,8 +282,9 @@ async def mcp_tool_call_wrapper(
     tool_input_model: type[BaseModel],
     tool_arguments: dict[str, Any],
 ):
-    """Pre-flight, dispatch, token-expired retry. ``is_managed`` (immutable)
-    gates every connector-wired branch.
+    """Pre-flight, dispatch, token-expired retry.
+
+    ``is_managed`` (immutable) gates every connector-wired branch.
 
     The ``FastMCPClient`` pool object is built here and handed to the callees;
     each ``call_with_auth`` opens its own per-config connection through it
@@ -320,6 +326,10 @@ async def mcp_tool_call_wrapper(
 def mcp_tool_to_func(
     config: TaiMCPConfig, tool: mcp.Tool, name: str, module: str, schema_max_depth: int | None = None
 ) -> Callable:
+    """Build a callable wrapping ``tool`` that dispatches to the MCP server.
+
+    The callable's signature matches ``tool``'s input schema.
+    """
     # Resolve the schema-depth bound once. The binding pass passes it in — resolved
     # OUTSIDE its per-tool skip guard, so a malformed TAI_MCP_SCHEMA_MAX_DEPTH fails
     # loudly as a config error rather than being caught per-tool and mis-logged as

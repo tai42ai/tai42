@@ -1,6 +1,7 @@
-"""The ``set_conversation_mode`` builtin: flip the CURRENT conversation's control mode
-between ``agent`` (the target turn runs) and ``manual`` (an operator answers by hand), so an
-agent can hand its own conversation off to a human.
+"""The ``set_conversation_mode`` builtin: flip the CURRENT conversation's control mode.
+
+Flips between ``agent`` (the target turn runs) and ``manual`` (an operator answers by
+hand), so an agent can hand its own conversation off to a human.
 
 A thin, LLM-facing shim over
 :func:`tai42_skeleton.conversations.mode.set_current_thread_mode`. It learns which thread to

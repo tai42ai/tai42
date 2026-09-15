@@ -1,6 +1,7 @@
-"""Opaque enrichment-params transport — the one shared vocabulary for the string-keyed,
-string-valued enrichment a channel adapter carries alongside a turn or an answer.
+"""Opaque enrichment-params transport shared across channel adapters.
 
+The one shared vocabulary for the string-keyed, string-valued enrichment a channel adapter
+carries alongside a turn or an answer.
 The platform attaches NO meaning and NO TRUST to these params; it only bounds the transport
 (count, key shape, value length, total serialized size). The SAME bounds guard every seam that
 carries channel enrichment: a conversation entry (:class:`~tai42_contract.conversations.ConversationMessage`
@@ -47,7 +48,7 @@ def validate_entry_params(params: dict[str, str]) -> dict[str, str]:
         if not ENTRY_PARAM_KEY_RE.fullmatch(key):
             raise ValueError(f"params key {key!r} must match {ENTRY_PARAM_KEY_RE.pattern!r}")
         if not isinstance(value, str):
-            raise ValueError(f"params value for key {key!r} must be a string")
+            raise ValueError(f"params value for key {key!r} must be a string")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         if len(value) > ENTRY_PARAM_VALUE_MAX_CHARS:
             raise ValueError(f"params value for key {key!r} is over the {ENTRY_PARAM_VALUE_MAX_CHARS}-character limit")
     total_bytes = len(json.dumps(params, separators=(",", ":"), sort_keys=True).encode())

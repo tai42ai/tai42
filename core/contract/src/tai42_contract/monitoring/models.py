@@ -52,10 +52,10 @@ class MetricsView(StrEnum):
 
 
 class ProjectConfig(BaseModel):
-    """Credentials for one trace destination ("project"), selectable at write
-    time via ``MonitoringWriter.scope(public_key)``.
+    """Credentials for one trace destination ("project").
 
-    Registered on a multi-project backend through ``Monitoring.add_project``
+    Selectable at write time via ``MonitoringWriter.scope(public_key)``. Registered on a
+    multi-project backend through ``Monitoring.add_project``
     so an in-process component can emit to its own project while sharing the one
     backend. ``source`` stamps every write with an environment marker so several
     callers sharing a project can each read back only their own data. A backend
@@ -82,9 +82,10 @@ class Span(Protocol):
 
     @property
     def id(self) -> str:
-        """This span's id, for explicitly threading a child's
-        ``TraceContext.parent_span_id`` (OTel context propagation is
-        unreliable across async boundaries)."""
+        """This span's id, for explicitly threading a child's ``TraceContext.parent_span_id``.
+
+        OTel context propagation is unreliable across async boundaries.
+        """
         ...
 
     def update(
@@ -242,12 +243,13 @@ _PREVIEW_PARSE_MAX = 20_000  # never structurally parse a string larger than thi
 
 
 def _maybe_json(text: str) -> Any:
-    """Parse a string that is itself an object/array — JSON first, then a Python
-    ``repr`` (single quotes, ``True``/``False``/``None``) via ``literal_eval`` —
-    else ``None``. Lets a stringified structure be bounded structurally (and
-    rendered as a tree) instead of char-clipped into garbage. A string over
-    ``_PREVIEW_PARSE_MAX`` is not parsed — it would be fully materialized just to
-    keep a few items — so the caller char-clips it instead."""
+    """Parse a string that is itself an object/array, else return ``None``.
+
+    JSON is tried first, then a Python ``repr`` (single quotes, ``True``/``False``/``None``) via
+    ``literal_eval``. Lets a stringified structure be bounded structurally (and rendered as a tree)
+    instead of char-clipped into garbage. A string over ``_PREVIEW_PARSE_MAX`` is not parsed — it would
+    be fully materialized just to keep a few items — so the caller char-clips it instead.
+    """
     s = text.strip()
     if len(s) < 2 or len(s) > _PREVIEW_PARSE_MAX or s[0] not in "{[":
         return None
@@ -305,13 +307,14 @@ def _preview_scalar(value: Any) -> JsonValue:
 
 
 def preview(value: Any, depth: int = 0) -> JsonValue:
-    """A structurally-bounded run-list preview of a trace's input/output: string
-    leaves cut to ``TRACE_PREVIEW_MAX_CHARS``, objects/arrays capped at
-    ``_PREVIEW_ITEMS`` entries, nesting elided past ``_PREVIEW_DEPTH`` — each with
-    a terminal marker — so the result is small but still valid JSON the client
-    renders as a tree. ``None`` stays ``None``; a stringified structure is parsed
-    and bounded, a plain string or non-JSON leaf (dates, etc.) char-clipped. The
-    cut is by design — the full value lives on ``get_trace``."""
+    """Build a structurally-bounded run-list preview of a trace's input/output.
+
+    String leaves cut to ``TRACE_PREVIEW_MAX_CHARS``, objects/arrays capped at ``_PREVIEW_ITEMS`` entries,
+    nesting elided past ``_PREVIEW_DEPTH`` — each with a terminal marker — so the result is small but still
+    valid JSON the client renders as a tree. ``None`` stays ``None``; a stringified structure is parsed and
+    bounded, a plain string or non-JSON leaf (dates, etc.) char-clipped. The cut is by design — the full
+    value lives on ``get_trace``.
+    """
     if isinstance(value, str):
         return _preview_str(value, depth)
     if isinstance(value, dict):
@@ -322,8 +325,7 @@ def preview(value: Any, depth: int = 0) -> JsonValue:
 
 
 class MonitoringTraceSummary(BaseModel):
-    """One run-list row: the backend's list-surface attributes plus its batched
-    aggregates, never a per-trace body.
+    """One run-list row: the backend's list-surface attributes plus its batched aggregates, never a per-trace body.
 
     ``input_preview`` / ``output_preview`` are server-bounded previews (see
     ``preview``) — a structurally-clipped JSON value; the full input/output are
@@ -331,7 +333,8 @@ class MonitoringTraceSummary(BaseModel):
     returned no usage for the trace (never coerced to ``0``). ``status`` is
     ``error`` when the run carries an error observation, ``ok`` otherwise — a
     malformed backend row fails the page loudly rather than being kept as a
-    partial row."""
+    partial row.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

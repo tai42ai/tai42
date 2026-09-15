@@ -35,9 +35,9 @@ _SWEEPABLE_PROVIDERS = frozenset({"postgres", "sqlite"})
     response_model=CheckpointSweepResult,
 )
 async def sweep_checkpoints() -> dict[str, Any]:
-    """Delete conversation threads whose newest checkpoint is older than the
-    configured idle lifetime; return the provider, the TTL, and the swept threads.
+    """Delete conversation threads whose newest checkpoint is older than the configured idle lifetime.
 
+    Returns the provider, the TTL, and the swept threads.
     A no-op (nothing deleted) when the TTL is unset, or the provider is ``redis``
     (native key TTL) or ``memory`` (process-lifetime) — each reported in ``skipped``.
     """

@@ -30,8 +30,7 @@ class _RegistrationMixin(_StatesServiceBase):
         self._consumer_listers.register(kind, lister)
 
     async def consumers(self, state: str) -> list[ConsumerRow]:
-        """Everything that binds ``state`` — the union of every registered consumer
-        lister."""
+        """Everything that binds ``state`` — the union of every registered consumer lister."""
         self._ensure_available()
         rows: list[ConsumerRow] = []
         for lister in self._consumer_listers.all().values():
@@ -44,9 +43,11 @@ class _RegistrationMixin(_StatesServiceBase):
     async def _run_attach_validators(
         self, template_doc: StateTemplateDocument, declarations: dict[str, Any], effective: dict[str, Any]
     ) -> None:
-        """Run every registered attach validator with the template document, the attach's
-        declaration values, and the state's effective schema — BEFORE any write. A validator
-        raises loudly (a :class:`TemplateValidationError`) to refuse the door."""
+        """Run every registered attach validator BEFORE any write.
+
+        Each gets the template document, the attach's declaration values, and the state's effective schema.
+        A validator raises loudly (a :class:`TemplateValidationError`) to refuse the door.
+        """
         for validator in self._attach_validators.all():
             await validator(template_doc, declarations, effective)
 
@@ -65,13 +66,15 @@ class _RegistrationMixin(_StatesServiceBase):
         options: dict[str, Any],
         conn: AsyncConnection[Any],
     ) -> None:
-        """Run each attach reconciler AFTER the validators and BEFORE the write, each with a
-        :class:`AttachReconcileContext` whose record door writes on the caller's transaction
+        """Run each attach reconciler AFTER the validators and BEFORE the write.
+
+        Each gets a :class:`AttachReconcileContext` whose record door writes on the caller's transaction
         ``conn`` — so a reconciler's writes commit with the attach or roll back together with
         a refusal. A reconciler raises (a :class:`TemplateValidationError`, named with the
         template and state) to refuse the attach, or writes resolutions through the record door
         and returns so the attach commits with them. Any other exception propagates with the
-        template and state named — never swallowed."""
+        template and state named — never swallowed.
+        """
         context = AttachReconcileContext(
             state=state,
             template=template_doc,
@@ -95,8 +98,7 @@ class _RegistrationMixin(_StatesServiceBase):
         self._seeds.register(doc)
 
     async def apply_template_seeds(self) -> None:
-        """Create each shipped template seed that is absent from the store (a no-op while the
-        feature is off)."""
+        """Create each shipped template seed that is absent from the store (a no-op while the feature is off)."""
         from tai42_skeleton.states import service as _pkg
 
         if not _pkg.states_store_configured():

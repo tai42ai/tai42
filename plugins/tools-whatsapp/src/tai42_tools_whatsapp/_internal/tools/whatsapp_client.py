@@ -30,9 +30,12 @@ _LIST_PAGE_CEILING = 100
 
 
 class WhatsAppToolsSettings(TaiBaseSettings):
-    """Provisioning-tool configuration, read from the ``CHANNEL_WHATSAPP_`` env group shared with
-    the rest of the WhatsApp deployment. The access token is ``SecretStr`` (never in a
-    repr/log/traceback); its plaintext is read only at the Bearer-auth seam."""
+    """Provisioning-tool configuration, read from the ``CHANNEL_WHATSAPP_`` env group.
+
+    Shared with the rest of the WhatsApp deployment. The access token is
+    ``SecretStr`` (never in a repr/log/traceback); its plaintext is read only at
+    the Bearer-auth seam.
+    """
 
     model_config = SettingsConfigDict(env_prefix="CHANNEL_WHATSAPP_")
 
@@ -52,9 +55,13 @@ def whatsapp_settings() -> WhatsAppToolsSettings:
 
 
 def _access_token() -> str:
-    """The configured Graph access token, revealed. Missing and EMPTY are the same failure and both
-    raise naming ``CHANNEL_WHATSAPP_ACCESS_TOKEN``: an empty env var parses to ``SecretStr("")``
-    (not ``None``), so a plain ``is None`` test would send ``Authorization: Bearer`` to Graph."""
+    """The configured Graph access token, revealed.
+
+    Missing and EMPTY are the same failure and both raise naming
+    ``CHANNEL_WHATSAPP_ACCESS_TOKEN``: an empty env var parses to ``SecretStr("")``
+    (not ``None``), so a plain ``is None`` test would send ``Authorization: Bearer``
+    to Graph.
+    """
     token = whatsapp_settings().access_token
     if not (token and token.get_secret_value()):
         raise ValueError("CHANNEL_WHATSAPP_ACCESS_TOKEN is not set (missing or empty)")
@@ -62,8 +69,11 @@ def _access_token() -> str:
 
 
 def _waba_id() -> str:
-    """The configured WhatsApp Business Account id. Missing and empty both raise naming
-    ``CHANNEL_WHATSAPP_WABA_ID``; the value is path-interpolated only after passing this gate."""
+    """The configured WhatsApp Business Account id.
+
+    Missing and empty both raise naming ``CHANNEL_WHATSAPP_WABA_ID``; the value is
+    path-interpolated only after passing this gate.
+    """
     waba_id = whatsapp_settings().waba_id
     if not waba_id:
         raise ValueError("CHANNEL_WHATSAPP_WABA_ID is not set (missing or empty)")
@@ -82,10 +92,12 @@ async def _http_request(
     data: str | None = None,
     params: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], str]:
-    """Issue one request through a fresh curl session and return ``(status, lowercased headers,
-    body text)``. Redirects are OFF: every Graph call carries ``Authorization: Bearer <token>`` and
-    libcurl replays custom headers across a redirect hop — a 302 off Graph would hand that header to
-    another host."""
+    """Issue one request through a fresh curl session and return ``(status, headers, body text)``.
+
+    Headers are lowercased. Redirects are OFF: every Graph call carries
+    ``Authorization: Bearer <token>`` and libcurl replays custom headers across a
+    redirect hop — a 302 off Graph would hand that header to another host.
+    """
     session_ctx = tai42_app.clients.client_ctx(CurlClient, session_params={}, fresh=True)
     async with session_ctx as session:
         resp = await session.request(

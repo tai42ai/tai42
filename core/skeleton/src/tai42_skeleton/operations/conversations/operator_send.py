@@ -1,5 +1,8 @@
-"""The operator send door: resolve the send target on a route-keyed or linked-person thread,
-validate the optional rich-send parts, and deliver a by-hand message as the route identity."""
+"""The operator send door.
+
+Resolve the send target on a route-keyed or linked-person thread, validate the optional
+rich-send parts, and deliver a by-hand message as the route identity.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ from tai42_contract.interactions import LocationElement, MediaItem
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations.errors import NotSupportedError, OperationFailed, UnavailableError
+from tai42_skeleton.operations.errors import NotSupportedError, OperationFailedError, UnavailableError
 from tai42_skeleton.operations.response_models_group_a import ThreadMessageAck
 
 from .backend import _person_routes, _record_store, _require_backend, _require_route, _thread_not_found
@@ -36,10 +39,12 @@ _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
 async def _route_keyed_target(named_route: ConversationRoute, thread_id: str, address: str | None) -> tuple[str, str]:
-    """The ``(route_name, client_address)`` a route-keyed thread's operator send targets: the
-    one route it lives on and the address embedded in its id. The id MUST carry the route's
+    """The ``(route_name, client_address)`` a route-keyed thread's operator send targets.
+
+    The one route it lives on and the address embedded in its id. The id MUST carry the route's
     ``bridge:{route_name}:`` prefix (the sole guard against reaching another route's thread) —
-    a mismatch is a loud 400. An explicit ``address`` must equal that embedded address."""
+    a mismatch is a loud 400. An explicit ``address`` must equal that embedded address.
+    """
     prefix = f"{BRIDGE_THREAD_PREFIX}{named_route.route_name}:"
     if not thread_id.startswith(prefix):
         raise BadRequestError(
@@ -60,13 +65,15 @@ async def _person_target(
     thread_id: str,
     address: str | None,
 ) -> tuple[str, str]:
-    """The ``(route_name, client_address)`` a LINKED person's aggregated-thread operator send
-    targets. The named route must be one of the person's routes (else a uniform thread
+    """The ``(route_name, client_address)`` a LINKED person's aggregated-thread operator send targets.
+
+    The named route must be one of the person's routes (else a uniform thread
     not-found). An explicit ``address`` must be one of the person's addresses (else a loud
     400), and its send route is the named route when the address wrote under it, else the
     address's own first route. With no explicit address the target is the person's NEWEST
     record — its route and client_address — so the reply returns where they last wrote from;
-    an empty thread offers none, which is a loud 400 asking for an explicit address."""
+    an empty thread offers none, which is a loud 400 asking for an explicit address.
+    """
     person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
     person = await _pkg._person_store().get_by_id(person_id)
     if (
@@ -99,12 +106,14 @@ async def _resolve_operator_target(
     thread_id: str,
     address: str | None,
 ) -> tuple[ConversationRoute, str]:
-    """The ``(target route, client_address)`` an operator message is built and delivered
-    against. A route-keyed thread targets its own route and embedded address; a person thread
+    """The ``(target route, client_address)`` an operator message is built and delivered against.
+
+    A route-keyed thread targets its own route and embedded address; a person thread
     targets the address's (or newest record's) route — looked up live, so a deleted route is a
     loud 404 rather than a send with a stale identity. ``address``, when given, is already
     canonicalized by the caller — the only place a MALFORMED address maps to a 400 —
-    so a ``ValueError`` from a store read here is server-side corruption, not a client error."""
+    so a ``ValueError`` from a store read here is server-side corruption, not a client error.
+    """
     if thread_id.startswith(PERSON_THREAD_PREFIX):
         route_name, client_address = await _person_target(store, named_route, thread_id, address)
     else:
@@ -119,7 +128,7 @@ async def _resolve_operator_target(
     summary="Send an operator message into a conversation thread",
     tags=["conversations"],
     destructive=True,
-    errors=[BadRequestError, NotFoundError, NotSupportedError, OperationFailed, UnavailableError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError, OperationFailedError, UnavailableError],
     request_model=ThreadMessageSend,
     response_model=ThreadMessageAck,
 )
@@ -139,8 +148,9 @@ async def send_conversation_thread_message(
     header: dict[str, Any] | None = None,
     footer: str | None = None,
 ) -> dict[str, Any]:
-    """Send a message BY HAND into ``thread_id`` on ``route_name`` as the route identity, and
-    return ``{"message_id", "thread_id"}``. No turn runs: the message is stored already
+    """Send a message BY HAND into ``thread_id`` on ``route_name`` as the route identity.
+
+    Returns ``{"message_id", "thread_id"}``. No turn runs: the message is stored already
     ``answered`` and delivered through the same machine a produced answer takes.
 
     ``media`` (a list of ``{"kind", "url", "caption"?, "filename"?}`` display items),
@@ -181,7 +191,8 @@ async def send_conversation_thread_message(
     Caller authority is the door's grantable ``write`` action — the same write grant that
     forgets threads — and the record names the calling operator. An unauthenticated caller
     (access control disabled or unbound) is a loud 501, since an operator action must be
-    attributable."""
+    attributable.
+    """
     _validate_route_name(route_name)
     if not thread_id.strip():
         raise BadRequestError("thread_id must be a non-blank thread identifier")
@@ -273,5 +284,5 @@ async def send_conversation_thread_message(
             schema=schema,
         )
     except OperatorAppendError as exc:
-        raise OperationFailed(str(exc)) from exc
+        raise OperationFailedError(str(exc)) from exc
     return {"message_id": message_id, "thread_id": thread_id}

@@ -26,6 +26,12 @@ def client_ctx[T](
     fresh: bool = False,
     **kwargs: Any,
 ) -> AbstractAsyncContextManager[T]:
+    """Return an async context manager yielding a connected client for ``client_cls``.
+
+    Pass either ``settings`` (its ``client_kwargs()`` supplies the connection kwargs) or raw
+    ``**kwargs``, never both. ``fresh=True`` builds a one-shot client outside the pool and closes it
+    on exit; otherwise the client is pooled and reused per event-loop + connection params.
+    """
     if settings is not None and kwargs:
         raise ValueError("client_ctx: pass either `settings` or **kwargs, not both")
     kw = settings.client_kwargs() if settings is not None else kwargs

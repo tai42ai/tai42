@@ -50,9 +50,11 @@ _VERSION = 1
 
 
 class _BackupUserStore:
-    """The ``accounts_users`` read/restore seam for the backup section — its own
-    class so it takes explicit settings and is unit-testable against a scripted
-    cursor, exactly like the stores in :mod:`tai42_accounts_postgres.stores`."""
+    """The ``accounts_users`` read/restore seam for the backup section.
+
+    Its own class so it takes explicit settings and is unit-testable against a scripted cursor,
+    exactly like the stores in :mod:`tai42_accounts_postgres.stores`.
+    """
 
     def __init__(self, settings: PostgresConnectionSettings) -> None:
         self._settings = settings
@@ -81,10 +83,12 @@ class _BackupUserStore:
         ]
 
     async def restore_users(self, users: list[dict[str, Any]]) -> dict[str, Any]:
-        """Create each absent user under its own savepoint (skip-only): an existing
-        ``user_id`` is a clean ``skipped_existing``; an email that collides with a
-        DIFFERENT existing user is a per-user error (the savepoint rolls it back), so
-        one bad row never poisons the rest."""
+        """Create each absent user under its own savepoint (skip-only).
+
+        An existing ``user_id`` is a clean ``skipped_existing``; an email that collides with a
+        DIFFERENT existing user is a per-user error (the savepoint rolls it back), so one bad row
+        never poisons the rest.
+        """
         report: dict[str, Any] = {"created": 0, "skipped_existing": 0, "errors": []}
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
@@ -141,11 +145,13 @@ class _BackupUserStore:
 
 
 def _parse_ts(value: Any) -> datetime:
-    """A payload timestamp (ISO string) back to a ``datetime`` psycopg adapts to
-    ``timestamptz``. A MISSING value becomes ``now()`` — an explicit SQL ``NULL``
+    """Convert a payload timestamp (ISO string) to a ``datetime`` psycopg adapts to ``timestamptz``.
+
+    A MISSING value becomes ``now()`` — an explicit SQL ``NULL``
     would never "defer to the column default" (Postgres raises ``NotNullViolation``
     on a NOT NULL column); the exporter always emits a real timestamp, so this
-    branch only serves hand-edited or foreign payloads."""
+    branch only serves hand-edited or foreign payloads.
+    """
     if value is None:
         return datetime.now(tz=UTC)
     if isinstance(value, datetime):
@@ -154,8 +160,11 @@ def _parse_ts(value: Any) -> datetime:
 
 
 async def export_accounts() -> dict[str, Any]:
-    """The section exporter: the account roster, or an empty roster when the accounts
-    store is not configured on this deployment (no live schema to read)."""
+    """The section exporter: the account roster.
+
+    An empty roster when the accounts store is not configured on this deployment (no live schema
+    to read).
+    """
     if not accounts_store_configured():
         return {"version": _VERSION, "users": []}
     users = await _BackupUserStore(component_store_settings(COMPONENT)).export_users()
@@ -163,8 +172,10 @@ async def export_accounts() -> dict[str, Any]:
 
 
 async def import_accounts(payload: dict[str, Any]) -> dict[str, Any]:
-    """The section importer: restore absent users from ``payload`` (skip-only),
-    returning per-entity counts. A payload from a newer schema version is refused."""
+    """The section importer: restore absent users from ``payload`` (skip-only), returning per-entity counts.
+
+    A payload from a newer schema version is refused.
+    """
     version = payload.get("version")
     # bool is an int subclass — refuse it explicitly (True would pass as 1).
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
@@ -181,9 +192,11 @@ async def import_accounts(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tai42_app.lifecycle.on_startup
 def register_accounts_backup_section() -> None:
-    """Register the ``accounts`` section once per boot. Idempotent: the host keeps one
-    backup registry across reloads, so a re-run skips rather than tripping the
-    duplicate-name guard."""
+    """Register the ``accounts`` section once per boot.
+
+    Idempotent: the host keeps one backup registry across reloads, so a re-run skips rather than
+    tripping the duplicate-name guard.
+    """
     if any(section.name == _SECTION for section in tai42_app.backup.sections()):
         return
     tai42_app.backup.register_section(_SECTION, export_accounts, import_accounts, secret=True)

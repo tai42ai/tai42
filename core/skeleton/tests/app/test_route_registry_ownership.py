@@ -9,7 +9,7 @@ from starlette.responses import JSONResponse, Response
 
 from tai42_skeleton.app.route_registry import (
     CORE_OWNER,
-    CrossOwnerRouteCollision,
+    CrossOwnerRouteCollisionError,
     EpochRouteAuditError,
     RouteOwner,
     RouteRegistry,
@@ -62,7 +62,7 @@ def test_cross_owner_collision_raises() -> None:
     # A concrete plugin route, then a DIFFERENT owner's template that overlaps it on
     # the shared method — the second registration raises, killing silent shadowing.
     _record(registry, "/api/e2e-epsilon/ping", ["GET"], _PLUGIN_A, public=True, authed=False)
-    with pytest.raises(CrossOwnerRouteCollision):
+    with pytest.raises(CrossOwnerRouteCollisionError):
         _record(registry, "/api/e2e-epsilon/{anything}", ["GET"], _PLUGIN_B, public=True, authed=False)
 
 
@@ -287,7 +287,7 @@ def test_staged_collision_does_not_touch_the_committed_surface() -> None:
     registry.begin_shape_staging()
     registry.reset_shape_index()
     _record(registry, "/api/acme/one/ping", ["GET"], _PLUGIN_A, public=True, authed=False)
-    with pytest.raises(CrossOwnerRouteCollision):
+    with pytest.raises(CrossOwnerRouteCollisionError):
         _record(registry, "/api/acme/one/{x}", ["GET"], _PLUGIN_B, public=True, authed=False)
     registry.abort_shape_staging()
     survivor = registry.match("/api/acme/one/ping", "GET")

@@ -1,6 +1,7 @@
 """MCP transport contract: open a client session to an MCP server.
 
-Implementations subclass fastmcp ``ClientTransport`` over a UDS/HTTP socket."""
+Implementations subclass fastmcp ``ClientTransport`` over a UDS/HTTP socket.
+"""
 
 from __future__ import annotations
 
@@ -16,8 +17,7 @@ class Transport(Protocol):
     """An MCP client transport."""
 
     def connect_session(self, **session_kwargs: Any) -> AbstractAsyncContextManager[ClientSession]:
-        """Open and yield a connected MCP ``ClientSession`` for the lifetime of
-        the context."""
+        """Open and yield a connected MCP ``ClientSession`` for the lifetime of the context."""
         ...
 
 

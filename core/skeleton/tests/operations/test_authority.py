@@ -21,7 +21,7 @@ from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.operations import _authority as authority
-from tai42_skeleton.operations.errors import NotFoundError, OperationFailed
+from tai42_skeleton.operations.errors import NotFoundError, OperationFailedError
 
 
 def _gate_on(monkeypatch: pytest.MonkeyPatch, *, caller_id: str | None, policies: dict[str, AccessPolicy]) -> None:
@@ -128,7 +128,7 @@ async def test_no_principal_at_all_raises_a_typed_loud_failure(
     # silent admin path. The detail stays in the server log — the typed error's text is
     # echoed to the caller.
     _gate_on(monkeypatch, caller_id=None, policies={})
-    with caplog.at_level("ERROR"), pytest.raises(OperationFailed) as exc_info:
+    with caplog.at_level("ERROR"), pytest.raises(OperationFailedError) as exc_info:
         await authority.resolve_caller()
     assert exc_info.value.status == 500
     assert str(exc_info.value.message) == "access_control: internal authority-resolution failure"

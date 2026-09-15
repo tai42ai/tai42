@@ -1,3 +1,5 @@
+"""Access-control data models: the stored shapes for identities, policies, and roles."""
+
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
@@ -42,8 +44,7 @@ class IdentityRecord(BaseModel):
 
 
 class AccessPolicy(ConditionMixin):
-    """Schema for data stored at 'ac:policy:{user_id}'. Represents WHAT the user
-    can do (permissions & logic)."""
+    """Schema for data stored at 'ac:policy:{user_id}'. Represents WHAT the user can do (permissions & logic)."""
 
     scopes: list[str] = Field(default_factory=list)
 
@@ -57,9 +58,10 @@ class AccessPolicy(ConditionMixin):
 
 
 class RoleDefinition(ConditionMixin):
-    """An operator-authored role: the ONE validated shape the enforcer /
-    membership-check, the management operations, and the generated Studio SDK all
-    share.
+    """An operator-authored role: the one validated shape every access-control surface shares.
+
+    Shared by the enforcer / membership-check, the management operations, and the generated
+    Studio SDK.
 
     A role composes TWO layers. Layer 1 is a KEPT jq security base — carried on
     the ``condition`` field (from ``ConditionMixin``) so the body round-trips it,

@@ -1,3 +1,5 @@
+"""Conversation-bridge settings and the Redis keyspace layout the store reads and writes."""
+
 import hashlib
 import json
 
@@ -19,24 +21,31 @@ _DEFAULT_MAX_MESSAGE_CHARS: dict[str, int] = {
 
 
 def _require_key_segment(name: str, value: str) -> None:
-    """Raise on a blank key segment: it builds a well-formed key every other blank value
-    also builds, silently colliding distinct messages onto one marker/index entry."""
+    """Raise on a blank key segment.
+
+    A blank segment builds a well-formed key every other blank value also builds, silently colliding
+    distinct messages onto one marker/index entry.
+    """
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-blank string to key a conversation record, got {value!r}")
 
 
 def _require_qualifier_segment(name: str, value: str) -> None:
-    """Raise on a blank or ``:``-bearing key segment that another segment FOLLOWS: a ``:``
-    moves the boundary, so ``(a, b:c)`` and ``(a:b, c)`` build the same key. A trailing
-    segment needs no such check."""
+    """Raise on a blank or ``:``-bearing key segment that another segment FOLLOWS.
+
+    A ``:`` moves the boundary, so ``(a, b:c)`` and ``(a:b, c)`` build the same key. A trailing segment
+    needs no such check.
+    """
     _require_key_segment(name, value)
     if ":" in value:
         raise ValueError(f"{name} must not contain ':' — it would collapse into the segment that follows it: {value!r}")
 
 
 class ConversationsRedisSettings(RedisConnectionSettings):
-    """Redis connection for the conversation bridge (``CONVERSATIONS_REDIS_*`` env). With
-    no ``redis_url`` there is no durable store and every routing operation refuses."""
+    """Redis connection for the conversation bridge (``CONVERSATIONS_REDIS_*`` env).
+
+    With no ``redis_url`` there is no durable store and every routing operation refuses.
+    """
 
     model_config = SettingsConfigDict(env_prefix="CONVERSATIONS_")
 
@@ -47,9 +56,11 @@ class ConversationsRedisSettings(RedisConnectionSettings):
 
 
 class ConversationsSettings(TaiBaseSettings):
-    """Conversation-bridge configuration (``CONVERSATIONS_*`` env). Without
-    ``CONVERSATIONS_REDIS_URL`` there is no durable store and every routing operation
-    refuses with a loud 501."""
+    """Conversation-bridge configuration (``CONVERSATIONS_*`` env).
+
+    Without ``CONVERSATIONS_REDIS_URL`` there is no durable store and every routing operation refuses
+    with a loud 501.
+    """
 
     model_config = SettingsConfigDict(
         env_prefix="CONVERSATIONS_",
@@ -176,8 +187,10 @@ class ConversationsSettings(TaiBaseSettings):
 
     @model_validator(mode="after")
     def _refresh_stays_under_the_intake_lease(self) -> "ConversationsSettings":
-        """Refuse a refresh interval at or above the lease: a live turn's lease would lapse
-        between heartbeats and the intake re-drive would reap it."""
+        """Refuse a refresh interval at or above the intake lease.
+
+        A live turn's lease would lapse between heartbeats and the intake re-drive would reap it.
+        """
         if self.intake_claim_refresh_seconds >= self.intake_claim_lease_seconds:
             raise ValueError(
                 f"CONVERSATIONS_INTAKE_CLAIM_REFRESH_SECONDS ({self.intake_claim_refresh_seconds}) must be below "
@@ -187,8 +200,10 @@ class ConversationsSettings(TaiBaseSettings):
 
     @model_validator(mode="after")
     def _refresh_stays_under_the_thread_lease(self) -> "ConversationsSettings":
-        """Refuse a refresh interval at or above the lease: a live turn's lease would lapse
-        between heartbeats and another worker would fork its checkpoint."""
+        """Refuse a refresh interval at or above the thread lease.
+
+        A live turn's lease would lapse between heartbeats and another worker would fork its checkpoint.
+        """
         if self.thread_lease_refresh_seconds >= self.thread_lease_seconds:
             raise ValueError(
                 f"CONVERSATIONS_THREAD_LEASE_REFRESH_SECONDS ({self.thread_lease_refresh_seconds}) must be below "
@@ -198,8 +213,11 @@ class ConversationsSettings(TaiBaseSettings):
 
     @model_validator(mode="after")
     def _send_timeout_stays_under_the_delivery_lease(self) -> "ConversationsSettings":
-        """Refuse a send timeout at or above the lease: a chunk could then still be in
-        flight after the sweep re-claimed the record, and both workers would send it."""
+        """Refuse a send timeout at or above the delivery lease.
+
+        A chunk could then still be in flight after the sweep re-claimed the record, and both workers
+        would send it.
+        """
         if self.delivery_send_timeout_seconds >= self.delivery_claim_lease_seconds:
             raise ValueError(
                 f"CONVERSATIONS_DELIVERY_SEND_TIMEOUT_SECONDS ({self.delivery_send_timeout_seconds}) must be below "
@@ -209,8 +227,11 @@ class ConversationsSettings(TaiBaseSettings):
 
     @model_validator(mode="after")
     def _callback_timeout_stays_under_the_delivery_lease(self) -> "ConversationsSettings":
-        """Refuse a callback timeout at or above the lease: a POST could then still be in
-        flight after the sweep re-claimed the record, and both workers would POST it."""
+        """Refuse a callback timeout at or above the delivery lease.
+
+        A POST could then still be in flight after the sweep re-claimed the record, and both workers
+        would POST it.
+        """
         if self.delivery_callback_timeout_seconds >= self.delivery_claim_lease_seconds:
             raise ValueError(
                 f"CONVERSATIONS_DELIVERY_CALLBACK_TIMEOUT_SECONDS ({self.delivery_callback_timeout_seconds}) must be "
@@ -220,6 +241,7 @@ class ConversationsSettings(TaiBaseSettings):
 
     @property
     def in_memory(self) -> bool:
+        """Whether the bridge runs without a durable store (no ``redis_url`` configured)."""
         return not self.redis.redis_url
 
     # -- Keyspace helpers ----------------------------------------------------
@@ -232,17 +254,21 @@ class ConversationsSettings(TaiBaseSettings):
     # inputs into a hash, so they carry no qualifier guard.
 
     def dedupe_key(self, channel: str, provider_message_id: str) -> str:
-        """Inbound-dedupe marker key, channel-qualified (a provider message id is unique
-        only within its channel). Both halves must be non-blank."""
+        """Inbound-dedupe marker key, channel-qualified (a provider message id is unique only within its channel).
+
+        Both halves must be non-blank.
+        """
         _require_qualifier_segment("channel", channel)
         _require_key_segment("provider_message_id", provider_message_id)
         return f"{self.prefix}:dedupe:{channel}:{provider_message_id}"
 
     def event_dedupe_key(self, route_name: str, event_id: str) -> str:
-        """Event-dedupe marker key, route-qualified (an event id is unique only within its
-        route). Its OWN family, distinct from :meth:`dedupe_key`'s channel namespace, so a
-        channel provider id and an event id sharing a value never collide on one marker; the
-        same ``inbound_dedupe_ttl_seconds`` governs both. Both halves must be non-blank."""
+        """Event-dedupe marker key, route-qualified (an event id is unique only within its route).
+
+        Its OWN family, distinct from :meth:`dedupe_key`'s channel namespace, so a channel provider id and
+        an event id sharing a value never collide on one marker; the same ``inbound_dedupe_ttl_seconds``
+        governs both. Both halves must be non-blank.
+        """
         _require_qualifier_segment("route_name", route_name)
         _require_key_segment("event_id", event_id)
         return f"{self.prefix}:event-dedupe:{route_name}:{event_id}"
@@ -252,9 +278,11 @@ class ConversationsSettings(TaiBaseSettings):
         return f"{self.prefix}:record:{message_id}"
 
     def status_index_key(self, delivery_status: str) -> str:
-        """Per-status record index — the sorted set of the ``message_id``s in that state,
-        which the re-drive and the sweep read instead of walking the record keyspace. A
-        member's score is the moment its row expires (``+inf`` while it carries no TTL)."""
+        """Per-status record index — the sorted set of the ``message_id``s in that state.
+
+        Read by the re-drive and the sweep instead of walking the record keyspace. A member's score is the
+        moment its row expires (``+inf`` while it carries no TTL).
+        """
         return f"{self.prefix}:status:{delivery_status}"
 
     def chunk_ledger_key(self, message_id: str) -> str:
@@ -262,25 +290,30 @@ class ConversationsSettings(TaiBaseSettings):
         return f"{self.prefix}:progress:{message_id}"
 
     def outbound_index_key(self, channel: str, outbound_message_id: str) -> str:
-        """Outbound-id → record reverse-index key, channel-qualified (an outbound provider
-        id is unique only within its channel). Both halves must be non-blank."""
+        """Outbound-id → record reverse-index key, channel-qualified.
+
+        An outbound provider id is unique only within its channel. Both halves must be non-blank.
+        """
         _require_qualifier_segment("channel", channel)
         _require_key_segment("outbound_message_id", outbound_message_id)
         return f"{self.prefix}:outbound:{channel}:{outbound_message_id}"
 
     def thread_index_key(self, route_name: str, thread_id: str) -> str:
-        """Per-thread transcript index — the sorted set of one thread's ``message_id``s,
-        scored by ``created_at``, so a transcript read never walks the record keyspace. The
-        ``thread_id`` carries ``:`` of its own and so sits LAST."""
+        """Per-thread transcript index — the sorted set of one thread's ``message_id``s, scored by ``created_at``.
+
+        So a transcript read never walks the record keyspace. The ``thread_id`` carries ``:`` of its own
+        and so sits LAST.
+        """
         _require_qualifier_segment("route_name", route_name)
         _require_key_segment("thread_id", thread_id)
         return f"{self.prefix}:thread:{route_name}:{thread_id}"
 
     def route_threads_key(self, route_name: str) -> str:
-        """Per-route thread index — the sorted set of the route's ``thread_id``s, scored by
-        the moment each thread was last active, so a listing reads the newest first. The
-        route name is checked exactly as :meth:`thread_index_key` checks it, so one name can
-        never key one of the two thread indexes and be refused by the other."""
+        """Per-route thread index — the sorted set of the route's ``thread_id``s, scored by last-active time.
+
+        So a listing reads the newest first. The route name is checked exactly as :meth:`thread_index_key`
+        checks it, so one name can never key one of the two thread indexes and be refused by the other.
+        """
         _require_qualifier_segment("route_name", route_name)
         return f"{self.prefix}:route_threads:{route_name}"
 
@@ -289,27 +322,34 @@ class ConversationsSettings(TaiBaseSettings):
         return f"{self.prefix}:route:{route_name}"
 
     def mode_key(self, thread_id: str) -> str:
-        """Per-thread mode-override key → ``agent``/``manual``. Absent = no override, so the
-        route's ``initial_mode`` stands. The ``thread_id`` carries ``:`` of its own and so
-        sits LAST."""
+        """Per-thread mode-override key → ``agent``/``manual``.
+
+        Absent = no override, so the route's ``initial_mode`` stands. The ``thread_id`` carries ``:`` of
+        its own and so sits LAST.
+        """
         _require_key_segment("thread_id", thread_id)
         return f"{self.prefix}:mode:{thread_id}"
 
     def thread_lease_key(self, thread_id: str) -> str:
-        """Per-thread cross-worker turn-lease key → the worker token holding it. The mutex a
-        turn holds for its whole run so two workers never fork one thread's checkpoint. The
-        ``thread_id`` carries ``:`` of its own and so sits LAST."""
+        """Per-thread cross-worker turn-lease key → the worker token holding it.
+
+        The mutex a turn holds for its whole run so two workers never fork one thread's checkpoint. The
+        ``thread_id`` carries ``:`` of its own and so sits LAST.
+        """
         _require_key_segment("thread_id", thread_id)
         return f"{self.prefix}:thread_lease:{thread_id}"
 
     @property
     def route_key_prefix(self) -> str:
+        """The route-row key prefix shared by every stored route (``<prefix>:route:``)."""
         return f"{self.prefix}:route:"
 
     @property
     def route_names_key(self) -> str:
-        """The set index of every stored route name, kept in lockstep with the per-route
-        keys by the create/delete scripts."""
+        """The set index of every stored route name.
+
+        Kept in lockstep with the per-route keys by the create/delete scripts.
+        """
         return f"{self.prefix}:route_names"
 
     # -- Person-linking keyspaces --------------------------------------------
@@ -321,45 +361,56 @@ class ConversationsSettings(TaiBaseSettings):
 
     @property
     def person_key_prefix(self) -> str:
-        """The person-row key prefix the merge/detach scripts build a row key from in-script
-        (a survivor id chosen server-side is not known to the caller)."""
+        """The person-row key prefix the merge/detach scripts build a row key from in-script.
+
+        A survivor id chosen server-side is not known to the caller.
+        """
         return f"{self.prefix}:person:"
 
     def person_index_key(self, target_kind: str, target_name: str) -> str:
-        """Per-target person index — a HASH ``door_address_key`` → ``person_id``. The
-        ``target_name`` is charset-unconstrained and so sits TERMINAL; ``target_kind`` is a
-        constrained qualifier checked ``:``-free."""
+        """Per-target person index — a HASH ``door_address_key`` → ``person_id``.
+
+        The ``target_name`` is charset-unconstrained and so sits TERMINAL; ``target_kind`` is a
+        constrained qualifier checked ``:``-free.
+        """
         _require_qualifier_segment("target_kind", target_kind)
         _require_key_segment("target_name", target_name)
         return f"{self.prefix}:person_index:{target_kind}:{target_name}"
 
     @property
     def person_index_key_prefix(self) -> str:
-        """The person-index key prefix the merge/detach scripts build the index key from
-        in-script, once they read the target off the row (``<prefix>:person_index:``, then
-        ``<target_kind>:<target_name>`` exactly as :meth:`person_index_key` renders it)."""
+        """The person-index key prefix the merge/detach scripts build the index key from in-script.
+
+        Once they read the target off the row (``<prefix>:person_index:``, then
+        ``<target_kind>:<target_name>`` exactly as :meth:`person_index_key` renders it).
+        """
         return f"{self.prefix}:person_index:"
 
     def pair_code_key(self, code_hash: str) -> str:
-        """Single-use pair-code record key, keyed by ``sha256(code)`` (hex, terminal). The
-        raw code is never a key nor a value anywhere — only its hash is."""
+        """Single-use pair-code record key, keyed by ``sha256(code)`` (hex, terminal).
+
+        The raw code is never a key nor a value anywhere — only its hash is.
+        """
         _require_key_segment("code_hash", code_hash)
         return f"{self.prefix}:pair_code:{code_hash}"
 
     @property
     def pair_code_key_prefix(self) -> str:
-        """The pair-code record key prefix the mint script builds the previously open code's
-        key from in-script (it holds only that code's sha256, via the open-code pointer)."""
+        """The pair-code record key prefix the mint script builds the previously open code's key from in-script.
+
+        It holds only that code's sha256, via the open-code pointer.
+        """
         return f"{self.prefix}:pair_code:"
 
     def open_code_key(self, target_kind: str, target_name: str, door_address_key: str) -> str:
-        """Open-pair-code pointer key for ONE minting conversation → the sha256 of the
-        currently open code. Its variable part is a SINGLE opaque terminal segment — the
-        sha256 of the deterministic JSON array ``[target_kind, target_name,
-        door_address_key]`` — because ``target_name`` and the address folded into
-        ``door_address_key`` are charset-unconstrained (may carry ``:``) and so can never be
-        raw non-terminal segments; the hash removes all delimiter ambiguity while keeping an
-        ordinary per-key TTL (a per-target HASH could not expire its fields)."""
+        """Open-pair-code pointer key for ONE minting conversation → the sha256 of the currently open code.
+
+        Its variable part is a SINGLE opaque terminal segment — the sha256 of the deterministic JSON array
+        ``[target_kind, target_name, door_address_key]`` — because ``target_name`` and the address folded
+        into ``door_address_key`` are charset-unconstrained (may carry ``:``) and so can never be raw
+        non-terminal segments; the hash removes all delimiter ambiguity while keeping an ordinary per-key
+        TTL (a per-target HASH could not expire its fields).
+        """
         _require_key_segment("target_kind", target_kind)
         _require_key_segment("target_name", target_name)
         _require_key_segment("door_address_key", door_address_key)
@@ -371,32 +422,39 @@ class ConversationsSettings(TaiBaseSettings):
     # -- Per-target config keyspace ------------------------------------------
 
     def target_config_key(self, target_kind: str, target_name: str) -> str:
-        """Per-target config row key, keyed by ``(target_kind, target_name)``. ``target_kind``
-        is a fixed vocabulary and sits before the free-form ``target_name``, so it is checked
-        ``:``-free while the name sits LAST."""
+        """Per-target config row key, keyed by ``(target_kind, target_name)``.
+
+        ``target_kind`` is a fixed vocabulary and sits before the free-form ``target_name``, so it is
+        checked ``:``-free while the name sits LAST.
+        """
         _require_qualifier_segment("target_kind", target_kind)
         _require_key_segment("target_name", target_name)
         return f"{self.prefix}:config:{target_kind}:{target_name}"
 
     @property
     def target_config_key_prefix(self) -> str:
+        """The per-target config row key prefix shared by every stored config (``<prefix>:config:``)."""
         return f"{self.prefix}:config:"
 
     @property
     def target_config_names_key(self) -> str:
-        """The set index of every stored config's ``{target_kind}:{target_name}`` member,
-        kept in lockstep with the per-config keys by the upsert/delete scripts. A member
-        appended to :attr:`target_config_key_prefix` rebuilds the row key it names."""
+        """The set index of every stored config's ``{target_kind}:{target_name}`` member.
+
+        Kept in lockstep with the per-config keys by the upsert/delete scripts. A member appended to
+        :attr:`target_config_key_prefix` rebuilds the row key it names.
+        """
         return f"{self.prefix}:config_names"
 
     # -- Redeem-throttle keyspace --------------------------------------------
 
     def _redeem_scope(self, target_kind: str, target_name: str, source_key: str) -> str:
-        """The opaque terminal segment scoping a redeem throttle to ONE (target, source):
-        the sha256 of the deterministic JSON array ``[target_kind, target_name,
-        source_key]``. ``target_name`` and ``source_key`` (a door-qualified accountable-party
-        encoding) are both charset-unconstrained, so the hash removes all delimiter ambiguity
-        while keeping an ordinary per-key TTL."""
+        """The opaque terminal segment scoping a redeem throttle to ONE (target, source).
+
+        The sha256 of the deterministic JSON array ``[target_kind, target_name, source_key]``.
+        ``target_name`` and ``source_key`` (a door-qualified accountable-party encoding) are both
+        charset-unconstrained, so the hash removes all delimiter ambiguity while keeping an ordinary
+        per-key TTL.
+        """
         _require_key_segment("target_kind", target_kind)
         _require_key_segment("target_name", target_name)
         _require_key_segment("source_key", source_key)
@@ -405,11 +463,16 @@ class ConversationsSettings(TaiBaseSettings):
         ).hexdigest()
 
     def redeem_fail_key(self, target_kind: str, target_name: str, source_key: str) -> str:
-        """Consecutive-invalid-redeem counter key for one (target, source). Cleared by a
-        valid redeem and decays after the backoff cap of inactivity."""
+        """Consecutive-invalid-redeem counter key for one (target, source).
+
+        Cleared by a valid redeem and decays after the backoff cap of inactivity.
+        """
         return f"{self.prefix}:redeem_fail:{self._redeem_scope(target_kind, target_name, source_key)}"
 
     def redeem_lock_key(self, target_kind: str, target_name: str, source_key: str) -> str:
-        """Backoff-lock marker key for one (target, source): present (with a TTL) exactly
-        while that source's redeems are throttled after crossing the failure threshold."""
+        """Backoff-lock marker key for one (target, source).
+
+        Present (with a TTL) exactly while that source's redeems are throttled after crossing the failure
+        threshold.
+        """
         return f"{self.prefix}:redeem_lock:{self._redeem_scope(target_kind, target_name, source_key)}"

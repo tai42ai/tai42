@@ -33,7 +33,7 @@ async def test_role_grants_set_remove(accounts_stack: TaiStack, uniq: Callable[[
     await create_role(admin, name=name, base_tier="editor", grants={"hooks": "read"})
 
     # --set a second tag: the upsert adds it, leaving the existing grant intact.
-    added = await admin.post(f"/api/auth/roles/{name}/grants", json={"set": {"presets": "write"}})
+    added = await admin.post(f"/api/auth/roles/{name}/grants", json={"upsert": {"presets": "write"}})
     assert added["grants"] == {"hooks": "read", "presets": "write"}, added
     assert await _role_grants(admin, name) == {"hooks": "read", "presets": "write"}
 

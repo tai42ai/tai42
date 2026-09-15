@@ -37,6 +37,7 @@ class EmailTakenError(Exception):
     """An account with this (normalized) email already exists."""
 
     def __init__(self, email: str) -> None:
+        """Record the ``email`` that was already registered."""
         super().__init__(f"email already registered: {email!r}")
         self.email = email
 
@@ -50,6 +51,7 @@ class UsersStore:
     """The ``accounts_users`` table."""
 
     def __init__(self, settings: PostgresConnectionSettings) -> None:
+        """Bind the store to the Postgres connection ``settings``."""
         self._settings = settings
 
     async def create(self, user_id: str, email: str, role: str, password_hash: str | None = None) -> str:
@@ -71,7 +73,6 @@ class UsersStore:
                         "INSERT INTO accounts_users (user_id, email, password_hash, role) VALUES (%s, %s, %s, %s)",
                         (attempt_id, email, password_hash, role),
                     )
-                return attempt_id
             except psycopg.errors.UniqueViolation as exc:
                 constraint = exc.diag.constraint_name
                 if constraint == _EMAIL_UNIQUE:
@@ -80,6 +81,8 @@ class UsersStore:
                     attempt_id = new_user_id()
                     continue
                 raise
+            else:
+                return attempt_id
         raise RuntimeError(
             f"could not generate a unique user_id after {_MAX_ID_ATTEMPTS} attempts (constraint {_USER_ID_UNIQUE})"
         )
@@ -113,6 +116,7 @@ class UsersStore:
             return await cur.fetchone()
 
     async def get_by_email(self, email: str) -> dict[str, Any] | None:
+        """The user row for ``email``, or ``None`` when none exists."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -125,6 +129,7 @@ class UsersStore:
             return await cur.fetchone()
 
     async def get_by_user_id(self, user_id: str) -> dict[str, Any] | None:
+        """The user row for ``user_id``, or ``None`` when none exists."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -138,6 +143,7 @@ class UsersStore:
             return await cur.fetchone()
 
     async def list(self) -> list[dict[str, Any]]:
+        """Every user row, oldest first, each with a ``pending_invite`` flag for a password-less account."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -150,6 +156,7 @@ class UsersStore:
             return list(await cur.fetchall())
 
     async def set_password_hash(self, user_id: str, password_hash: str) -> None:
+        """Set ``user_id``'s password hash."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -161,6 +168,7 @@ class UsersStore:
             )
 
     async def set_role(self, user_id: str, role: str) -> None:
+        """Set ``user_id``'s role."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -169,6 +177,7 @@ class UsersStore:
             await cur.execute("UPDATE accounts_users SET role = %s WHERE user_id = %s", (role, user_id))
 
     async def set_disabled(self, user_id: str, disabled: bool) -> None:
+        """Enable or disable ``user_id``."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -177,6 +186,7 @@ class UsersStore:
             await cur.execute("UPDATE accounts_users SET disabled = %s WHERE user_id = %s", (disabled, user_id))
 
     async def delete(self, user_id: str) -> None:
+        """Delete the user ``user_id``."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -185,6 +195,7 @@ class UsersStore:
             await cur.execute("DELETE FROM accounts_users WHERE user_id = %s", (user_id,))
 
     async def count(self) -> int:
+        """The total number of users."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -215,10 +226,10 @@ class UsersStore:
 
     @asynccontextmanager
     async def admin_guard_txn(self) -> AsyncIterator[_AdminGuard]:
-        """One transaction under the fixed advisory lock for a last-admin-guarded
-        mutation (disable / demote / delete).
+        """One transaction under the fixed advisory lock for a last-admin-guarded mutation.
 
-        A concurrent guarded removal blocks at the lock and re-evaluates the admin
+        The mutation is a disable, demote, or delete. A concurrent guarded removal blocks at
+        the lock and re-evaluates the admin
         count against committed state, so two removals of the last two admins can
         never both pass. On the yielded guard the caller re-reads, counts, and
         mutates on this one cursor; all commit or roll back together on block exit.
@@ -234,10 +245,10 @@ class UsersStore:
 
 
 class _AdminGuard:
-    """The last-admin re-read, count, and mutation, bound to one advisory-locked
-    cursor as a single serialized transaction.
+    """The last-admin re-read, count, and mutation, bound to one advisory-locked cursor.
 
-    Every method runs on the guard's own cursor, so the credential cleanup a guarded
+    Runs as a single serialized transaction. Every method runs on the guard's own cursor,
+    so the credential cleanup a guarded
     disable/delete performs runs in this transaction — never a second pool checkout
     under the lock.
     """
@@ -246,9 +257,10 @@ class _AdminGuard:
         self._cur = cur
 
     async def read_target(self, user_id: str) -> dict[str, Any] | None:
-        """The target's committed ``role``/``disabled`` under the lock — the
-        authoritative state the orphan check decides on, never the pre-lock
-        snapshot."""
+        """The target's committed ``role``/``disabled`` under the lock.
+
+        The authoritative state the orphan check decides on, never the pre-lock snapshot.
+        """
         await self._cur.execute(
             "SELECT role, disabled FROM accounts_users WHERE user_id = %s",
             (user_id,),
@@ -286,9 +298,11 @@ class SessionsStore:
     """The ``accounts_sessions`` table."""
 
     def __init__(self, settings: PostgresConnectionSettings) -> None:
+        """Bind the store to the Postgres connection ``settings``."""
         self._settings = settings
 
     async def create(self, token_hash: str, user_id: str, absolute_expires_at: Any) -> None:
+        """Mint a session for ``user_id``, sweeping absolute-expired rows in the same transaction."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -359,11 +373,14 @@ class InvitesStore:
     """The ``accounts_invites`` table."""
 
     def __init__(self, settings: PostgresConnectionSettings) -> None:
+        """Bind the store to the Postgres connection ``settings``."""
         self._settings = settings
 
     async def create(self, token_hash: str, user_id: str, expires_at: Any) -> None:
-        """Mint an invite, replacing any prior one for the user (one live invite
-        per user) and sweeping consumed/expired rows in the same transaction."""
+        """Mint an invite, replacing any prior one for the user (one live invite per user).
+
+        Sweeps consumed/expired rows in the same transaction.
+        """
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -398,6 +415,7 @@ class InvitesStore:
             return None if row is None else row["user_id"]
 
     async def delete_for_user(self, user_id: str) -> None:
+        """Drop every invite for ``user_id``."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,

@@ -41,15 +41,16 @@ def _write_target() -> dict[str, str]:
 
 
 def reset_quarantine() -> None:
-    """Clear the write-target map at the top of a boot/reload pass — the pass that
-    follows owns repopulating it. During a staged build this clears the staged
-    generation, leaving the committed set serving; at boot it clears the committed set."""
+    """Clear the write-target map at the top of a boot/reload pass; the following pass repopulates it.
+
+    During a staged build this clears the staged generation, leaving the committed set
+    serving; at boot it clears the committed set.
+    """
     _write_target().clear()
 
 
 def quarantine_plugin(name: str, reason: str) -> None:
-    """Record ``name`` as quarantined with its human-readable ``reason``,
-    emitting the one loud startup log line the quarantine contract requires."""
+    """Record ``name`` as quarantined with its human-readable ``reason``, emitting one loud startup log line."""
     _write_target()[name] = reason
     logger.error("plugin quarantined: %s — %s", name, reason)
 
@@ -60,8 +61,10 @@ def quarantined_plugins() -> dict[str, str]:
 
 
 def quarantined_plugins_staged() -> dict[str, str]:
-    """A snapshot copy of the STAGED generation if a build is staging, else committed —
-    the build's own view (the configured-auth-provider quarantine abort)."""
+    """Return a snapshot copy of the STAGED generation if a build is staging, else the committed one.
+
+    The build's own view (the configured-auth-provider quarantine abort).
+    """
     return dict(_write_target())
 
 
@@ -77,8 +80,7 @@ def begin_staging() -> None:
 
 
 def commit_staging() -> None:
-    """Promote the staged quarantine generation to committed in one reference
-    assignment. A no-op if no build staged."""
+    """Promote the staged quarantine generation to committed in one assignment; a no-op if none staged."""
     global _quarantined, _pending
     if _pending is not None:
         _quarantined = _pending

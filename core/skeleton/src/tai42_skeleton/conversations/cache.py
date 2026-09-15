@@ -1,3 +1,5 @@
+"""Process-wide cached conversations-manager singleton, cleared on a config reload."""
+
 import logging
 from threading import RLock
 
@@ -24,9 +26,10 @@ _CONVERSATIONS_MANAGER_LOCK = RLock()
     lock=_CONVERSATIONS_MANAGER_LOCK,
 )
 def get_conversations_manager() -> BaseConversationsManager:
-    """The process-wide routing-row manager, selected from ``CONVERSATIONS_*`` config: the
-    null in-memory backend without ``CONVERSATIONS_REDIS_URL``, else the Redis one. Cached
-    over a settings snapshot and rebuilt on a settings reload.
+    """The process-wide routing-row manager, selected from ``CONVERSATIONS_*`` config.
+
+    The null in-memory backend without ``CONVERSATIONS_REDIS_URL``, else the Redis one. Cached over
+    a settings snapshot and rebuilt on a settings reload.
     """
     settings = ConversationsSettings()
     if settings.in_memory:

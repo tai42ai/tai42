@@ -47,8 +47,10 @@ ParkBuilder = Callable[[dict[str, Any]], ParkIdentity | None]
 
 
 def _suspended_receipt(event: SuspendedFinal) -> dict[str, Any]:
-    """The suspended RECEIPT a parked run returns in place of an answer — the same
-    shape :meth:`Agent._drain` yields, so a park is a clean non-error outcome."""
+    """The suspended RECEIPT a parked run returns in place of an answer.
+
+    The same shape :meth:`Agent._drain` yields, so a park is a clean non-error outcome.
+    """
     return {
         "status": "suspended",
         "interaction_ids": event.interaction_ids,
@@ -131,8 +133,7 @@ async def _build_agent_and_input(
     user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
 ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-    """Compile the tools agent, build its input messages and run config, and ready
-    the thread for the turn.
+    """Compile the tools agent, build its input messages and run config, and ready the thread.
 
     Wraps :func:`_compile_tools_agent` with the input build and the turn-start
     repair: the single choke point every face builds through, so the thread's
@@ -196,8 +197,9 @@ async def ainvoke_tools_agent(
     park_builder: ParkBuilder | None = None,
     resume: Any = None,
 ) -> AgentInvokeResult:
-    """Invoke the tools agent and return the user output, per-call usage
-    aggregated from every AIMessage in the run state, and the structured response.
+    """Invoke the tools agent and return its output, per-call usage, and the structured response.
+
+    Usage is aggregated from every AIMessage in the run state.
 
     ``.structured`` holds the forced structured output when a ``response_format``
     was requested — validated against it, raising loudly if missing or
@@ -261,10 +263,11 @@ async def astream_tools_agent(
     user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
 ) -> AsyncIterator[Any]:
-    """Run the tools agent and yield the raw LangGraph ``astream`` chunks for the
-    requested ``stream_mode``; the caller decodes the channel shapes. A
-    ``response_format`` forces structured output onto the ``structured_response``
-    state channel."""
+    """Run the tools agent and yield the raw LangGraph ``astream`` chunks for ``stream_mode``.
+
+    The caller decodes the channel shapes. A ``response_format`` forces structured output onto
+    the ``structured_response`` state channel.
+    """
     agent, messages, config = await _build_agent_and_input(
         system_message,
         user_message,

@@ -94,8 +94,9 @@ class LangchainDeepAgentSettings(TaiBaseSettings):
 
 
 class _CrashResumeMeta(TaiBaseSettings):
-    """A lightweight read of ONLY ``TAI_AGENTS_LANGCHAIN_DEEP_CRASH_RESUME`` for the
-    registration-time meta declaration, requiring NONE of the full model's creds/digest image.
+    """A lightweight read of ONLY ``TAI_AGENTS_LANGCHAIN_DEEP_CRASH_RESUME`` for the registration meta.
+
+    Requires NONE of the full model's creds/digest image.
 
     Importing ``langchain_deep_agent.agent`` must NOT trigger the full
     :class:`LangchainDeepAgentSettings` validation: the digest-pinned ``session_image`` config
@@ -118,12 +119,15 @@ class _CrashResumeMeta(TaiBaseSettings):
 
 
 def langchain_deep_agent_crash_resume() -> bool:
-    """Read the ``crash_resume`` recycle-class setting for the registration meta WITHOUT the full
-    :class:`LangchainDeepAgentSettings` validation — importing the agent module must not require the
-    digest-pinned ``session_image`` or any other operator env."""
+    """Read the ``crash_resume`` recycle-class setting for the registration meta, without full validation.
+
+    Skips the full :class:`LangchainDeepAgentSettings` validation — importing the agent
+    module must not require the digest-pinned ``session_image`` or any other operator env.
+    """
     return _CrashResumeMeta().crash_resume
 
 
 @settings_cache
 def langchain_deep_agent_settings() -> LangchainDeepAgentSettings:
+    """The cached :class:`LangchainDeepAgentSettings` for this process."""
     return LangchainDeepAgentSettings()

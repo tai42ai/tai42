@@ -1,3 +1,5 @@
+"""Per-event-loop, epoch-aware pooling for shared driver clients."""
+
 import asyncio
 import json
 import logging
@@ -117,6 +119,12 @@ def current_client_epoch() -> int:
 
 
 class PooledClient[T]:
+    """A per-event-loop, per-epoch pool for a single driver client of type ``T``.
+
+    Subclasses implement :meth:`_create` and :meth:`_close`; callers lease the shared client
+    through :meth:`current`, which rebuilds it after a classified disconnection.
+    """
+
     @staticmethod
     def _key(**kwargs) -> str:
         return json.dumps(kwargs, sort_keys=True)
@@ -217,6 +225,11 @@ class PooledClient[T]:
 
     @asynccontextmanager
     async def current(self, **kwargs) -> AsyncIterator[T]:
+        """Lease the pooled client for ``kwargs``, creating it on first use.
+
+        A disconnection inside the body evicts and closes the client and raises
+        :class:`ClientDisconnectedError`; retry to rebuild it.
+        """
         loop = asyncio.get_running_loop()
         key = self._key(**kwargs)
         entry, epoch = await self._acquire(loop, key, kwargs)
@@ -287,6 +300,7 @@ class PooledClient[T]:
             logger.exception("Error closing retired client %s", type(entry.client).__name__)
 
     async def close(self, **kwargs) -> None:
+        """Close and drop the pooled client for ``kwargs`` in the current epoch, if one is pooled."""
         loop = asyncio.get_running_loop()
         epoch = current_client_epoch()
         key = self._key(**kwargs)
@@ -326,9 +340,9 @@ class PooledClient[T]:
 
 
 async def _close_epoch_clients(per_epoch: dict[type, dict[str, _ClientEntry]], errors: list[Exception]) -> None:
-    """Force-close every pooled client of a detached epoch map, regardless of held
-    leases, collecting each close failure into ``errors`` so none is dropped.
+    """Force-close every pooled client of a detached epoch map, regardless of held leases.
 
+    Each close failure is collected into ``errors`` so none is dropped.
     The map must already be detached from the live registry (its entries are
     unreachable to a concurrent lease release), so marking each entry closing and
     closing it here cannot race a second teardown.

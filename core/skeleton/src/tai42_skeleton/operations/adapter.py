@@ -44,15 +44,15 @@ _PATH_PARAM = re.compile(r"\{([^}:]+)(?::[^}]+)?\}")
 
 @dataclass(frozen=True)
 class OperationResponse:
-    """An operation result that carries a Starlette ``BackgroundTask`` to run AFTER the
-    response body flushes.
+    """An operation result that carries a Starlette ``BackgroundTask`` to run after the response body flushes.
 
     The profile-apply door returns this to arm its self-exit (``request_serve_graceful_exit``)
     as a post-flush background task — never an inline ``create_task`` that could race the
     body flush and sever the transport before the response ships. The HTTP adapter unwraps
     it: ``payload`` is enveloped as usual and ``background`` is attached to the response.
     Every other surface (the MCP projection) treats it as its ``payload`` alone — a
-    background self-exit is meaningless off the HTTP edge."""
+    background self-exit is meaningless off the HTTP edge.
+    """
 
     payload: Any
     background: BackgroundTask | None = None
@@ -107,10 +107,12 @@ def _declared_metadata(
 
 
 class _ParseError(Exception):
-    """A request-parse rejection carrying the exact status + error body the handler
-    returns — a malformed JSON body (400) or a pydantic validation failure (422). Kept
-    distinct from :class:`OperationError` so the handler renders the parse body verbatim
-    while the operation's own typed errors keep the ``{"error", **extra}`` shape."""
+    """A request-parse rejection carrying the exact status + error body the handler returns.
+
+    A malformed JSON body (400) or a pydantic validation failure (422). Kept distinct
+    from :class:`OperationError` so the handler renders the parse body verbatim while the
+    operation's own typed errors keep the ``{"error", **extra}`` shape.
+    """
 
     def __init__(self, status: int, body: dict[str, Any]) -> None:
         super().__init__()
@@ -125,13 +127,16 @@ async def _read_operation_kwargs(
     request_model: type[BaseModel] | None,
     reads_body: bool,
 ) -> dict[str, Any]:
-    """Build the operation's flat kwargs from the HTTP edge: the path params, plus EITHER
-    the context-extractor's result OR the parsed request-model dict OR nothing.
+    """Build the operation's flat kwargs from the HTTP edge.
+
+    The path params, plus EITHER the context-extractor's result OR the parsed
+    request-model dict OR nothing.
 
     An :class:`OperationError` the extractor raises is re-raised for the handler to map to
     its status. A malformed JSON body or a pydantic ``ValidationError`` raises a
     :class:`_ParseError` carrying the status + body the handler returns (a validation
-    failure yields field paths + types only, never the rejected input values)."""
+    failure yields field paths + types only, never the rejected input values).
+    """
     kwargs: dict[str, Any] = {name: request.path_params[name] for name in path_params}
     if context_extractor is not None:
         # A request-shaped input (header credentials, a body the operation validates
@@ -162,7 +167,8 @@ def _unwrap_operation_result(result: Any) -> tuple[Any, BackgroundTask | None]:
 
     An :class:`OperationResponse` carries a post-flush ``BackgroundTask`` (the
     profile-apply self-exit) alongside its payload; a bare payload returns
-    ``(result, None)``."""
+    ``(result, None)``.
+    """
     if isinstance(result, OperationResponse):
         return result.payload, result.background
     return result, None

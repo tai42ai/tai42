@@ -85,17 +85,19 @@ class _ImageHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(self.image_bytes)
 
-    def log_message(self, format: str, *args: object) -> None:
+    # ``format`` mirrors the http.server.BaseHTTPRequestHandler.log_message(self, format, *args) override.
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         # Quiet: the capture's own prints are the only output that matters.
         return
 
 
 @contextlib.contextmanager
 def _https_image_server(image_bytes: bytes):
-    """Start a local https server issuing a self-signed cert for 127.0.0.1 that serves
-    ``image_bytes`` as a PNG, yielding its ``https://127.0.0.1:<port>/placeholder.png``
-    URL. The browser fetches it with ``ignore_https_errors`` set; the server under test
-    never dials it."""
+    """Start a local https server (self-signed for 127.0.0.1) serving ``image_bytes`` as a PNG, yielding its URL.
+
+    The URL is ``https://127.0.0.1:<port>/placeholder.png``. The browser fetches it with
+    ``ignore_https_errors`` set; the server under test never dials it.
+    """
     handler = type("_BoundImageHandler", (_ImageHandler,), {"image_bytes": image_bytes})
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     ca = trustme.CA()
@@ -116,10 +118,11 @@ def _https_image_server(image_bytes: bytes):
 
 @contextlib.contextmanager
 def _channel_stack(infra: Infra, root: Path):
-    """Boot the channel-web-carrying stack (``build_channel_stack``) and yield it, torn
-    down leak-free at block exit. The web channel has no vendor, but the profile also loads
-    the telegram/slack/twilio plugins, so their in-process recording stubs stand in for the
-    outbound API base URLs the profile points at."""
+    """Boot the channel-web-carrying stack (``build_channel_stack``) and yield it, torn down leak-free at exit.
+
+    The web channel has no vendor, but the profile also loads the telegram/slack/twilio plugins, so their
+    in-process recording stubs stand in for the outbound API base URLs the profile points at.
+    """
     fake_telegram = FakeTelegram()
     fake_slack = FakeSlack()
     fake_twilio = FakeTwilio()
@@ -204,6 +207,7 @@ def _capture(stack: TaiStack, image_url: str, out_path: Path, *, headed: bool) -
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Capture the media-card screenshot to a PNG, returning the process exit code."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--out",

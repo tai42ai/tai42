@@ -12,8 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class BackupSectionInfo(BaseModel):
-    """Descriptor for one registered backup section, returned by
-    ``AppBackup.sections`` for the UI to render.
+    """Descriptor for one registered backup section, returned by ``AppBackup.sections`` for the UI to render.
 
     ``name`` is the section's unique registration key. ``secret`` marks a
     section whose exported payload carries credentials/secrets, so a caller can

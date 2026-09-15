@@ -1,6 +1,8 @@
-"""The delivery-state machine over an answer record: the exactly-once send lease and the
-provisional / delivered / failed / receipt transitions, plus the outbound reverse index
-(keyspace 3)."""
+"""The delivery-state machine over an answer record.
+
+The exactly-once send lease and the provisional / delivered / failed / receipt transitions,
+plus the outbound reverse index (keyspace 3).
+"""
 
 from __future__ import annotations
 
@@ -27,12 +29,13 @@ class RecordDeliveryMixin(RecordStoreBase):
     """The send lease, the delivery-state transitions, and the outbound reverse index."""
 
     async def claim_delivery(self, message_id: str, now: float, token: str, lease_seconds: float) -> int:
-        """Take (or refresh) the exactly-once delivery lease on ``message_id`` under
-        ``token``, leased for ``lease_seconds``: 1 when won, 0 when the record is already
-        sent (provisional) or terminal or a different worker holds a live lease, -1 when the
-        record is gone, -2 when it is still at intake and carries no answer. Only a
-        ``pending_delivery`` record is claimable for a send. The token holder re-claiming
-        extends its own lease; a different token waits for expiry."""
+        """Take (or refresh) the exactly-once delivery lease on ``message_id`` under ``token`` for ``lease_seconds``.
+
+        Returns 1 when won, 0 when the record is already sent (provisional) or terminal or a
+        different worker holds a live lease, -1 when the record is gone, -2 when it is still at
+        intake and carries no answer. Only a ``pending_delivery`` record is claimable for a send.
+        The token holder re-claiming extends its own lease; a different token waits for expiry.
+        """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             return int(
                 await eval_script(
@@ -54,9 +57,11 @@ class RecordDeliveryMixin(RecordStoreBase):
     async def mark_provisional(
         self, message_id: str, outbound_ids: list[str], attempts: int, now: float, token: str
     ) -> int:
-        """Move ``message_id`` to ``provisional`` awaiting an async delivery receipt or
-        grace expiry: 1 transitioned, 0 already terminal, -1 gone, -3 a different worker's
-        live lease. ``token`` is the delivery lease this caller holds."""
+        """Move ``message_id`` to ``provisional`` awaiting an async delivery receipt or grace expiry.
+
+        Returns 1 transitioned, 0 already terminal, -1 gone, -3 a different worker's live lease.
+        ``token`` is the delivery lease this caller holds.
+        """
         grace_deadline = now + self.settings.delivery_grace_seconds
         keys = self._record_keys(message_id, DeliveryStatus.PROVISIONAL)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
@@ -79,9 +84,11 @@ class RecordDeliveryMixin(RecordStoreBase):
     async def mark_delivered(
         self, message_id: str, outbound_ids: list[str], attempts: int, now: float, token: str
     ) -> int:
-        """Terminal delivered write with the retention TTL: 1 transitioned, 0 already
-        delivered, -1 gone, -2 already failed, -3 a different worker's live lease.
-        ``token`` is the delivery lease this caller holds."""
+        """Terminal delivered write with the retention TTL.
+
+        Returns 1 transitioned, 0 already delivered, -1 gone, -2 already failed, -3 a different
+        worker's live lease. ``token`` is the delivery lease this caller holds.
+        """
         keys = self._record_keys(message_id, DeliveryStatus.DELIVERED)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             return int(
@@ -101,9 +108,12 @@ class RecordDeliveryMixin(RecordStoreBase):
             )
 
     async def mark_failed(self, message_id: str, attempts: int, now: float, token: str) -> int:
-        """Terminal failed write with the retention TTL: 1 transitioned, 0 already failed,
-        -1 gone, -2 the send already completed (delivered/shed/provisional), -3 a different
-        worker's live lease. ``token`` is the delivery lease this caller holds."""
+        """Terminal failed write with the retention TTL.
+
+        Returns 1 transitioned, 0 already failed, -1 gone, -2 the send already completed
+        (delivered/shed/provisional), -3 a different worker's live lease. ``token`` is the delivery
+        lease this caller holds.
+        """
         keys = self._record_keys(message_id, DeliveryStatus.FAILED)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             return int(
@@ -122,9 +132,11 @@ class RecordDeliveryMixin(RecordStoreBase):
             )
 
     async def ingest_receipt(self, message_id: str, receipt: DeliveryReceipt, now: float) -> int:
-        """Ingest an out-of-band receipt against a fully sent (``provisional``) record: 1
-        transitioned, 0 already in the receipt's terminal state, -1 gone, -2 a conflicting
-        terminal state already recorded, -3 the record's send has not finished."""
+        """Ingest an out-of-band receipt against a fully sent (``provisional``) record.
+
+        Returns 1 transitioned, 0 already in the receipt's terminal state, -1 gone, -2 a conflicting
+        terminal state already recorded, -3 the record's send has not finished.
+        """
         target = DeliveryStatus.DELIVERED if receipt is DeliveryReceipt.DELIVERED else DeliveryStatus.FAILED
         keys = self._record_keys(message_id, target)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
@@ -145,8 +157,10 @@ class RecordDeliveryMixin(RecordStoreBase):
     # -- outbound reverse index (keyspace 3) ---------------------------------
 
     async def index_outbound(self, channel: str, outbound_ids: list[str], message_id: str) -> None:
-        """Map each outbound provider id back to ``message_id`` so an out-of-band receipt
-        resolves to the record. Written with the retention TTL, so it is swept with it."""
+        """Map each outbound provider id back to ``message_id`` so an out-of-band receipt resolves to the record.
+
+        Written with the retention TTL, so it is swept with it.
+        """
         if not outbound_ids:
             return
         ttl = self.settings.answer_retention_ttl_seconds
@@ -155,8 +169,10 @@ class RecordDeliveryMixin(RecordStoreBase):
                 await awaited(r.set(self.settings.outbound_index_key(channel, outbound_id), message_id, ex=ttl))
 
     async def resolve_outbound(self, channel: str, outbound_id: str) -> str | None:
-        """The ``message_id`` an outbound provider id maps to, or ``None`` when the index
-        holds no such id (an unknown id, or one already swept)."""
+        """The ``message_id`` an outbound provider id maps to, or ``None`` when the index holds no such id.
+
+        An unknown id, or one already swept.
+        """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             raw = await awaited(r.get(self.settings.outbound_index_key(channel, outbound_id)))
         if raw is None:

@@ -24,9 +24,10 @@ from tai42_agents.settings import agents_limits_settings
 
 
 def chained_park_horizon(inherited: str | None, retention_bound: datetime | None) -> str:
-    """The deadline a CHAINED park is recorded under: the nearest of the horizon it INHERITED
-    from the ask its nested run is parked on, the configured cap, and this run's retention bound.
+    """The deadline a CHAINED park is recorded under: the nearest of inherited horizon, cap, and retention bound.
 
+    The inherited horizon comes from the ask its nested run is parked on; the cap is
+    configured; the retention bound is this run's.
     Inheritance is the rule — the caller's suspension should last exactly as long as the thing
     it waits on — but a chained park has no ask of its own and no reaper firing at its deadline,
     so an inherited horizon is CLAMPED rather than trusted: the cap bounds how far a nested run
@@ -36,7 +37,8 @@ def chained_park_horizon(inherited: str | None, retention_bound: datetime | None
 
     Clamped, never refused: unlike an ask deadline (whose gate refuses a park that could not be
     resumed at all), a shortened chained horizon costs nothing — nothing fires AT it, and it only
-    sizes how long the index holds the park. A re-park moves it out again."""
+    sizes how long the index holds the park. A re-park moves it out again.
+    """
     now = datetime.now(UTC)
     horizon = now + timedelta(hours=agents_limits_settings().chained_park_horizon_cap_hours)
     if inherited is not None:
@@ -56,11 +58,14 @@ def chained_park_horizon(inherited: str | None, retention_bound: datetime | None
 
 
 def _gate_expiry_within_retention(retention_bound: datetime | None, interactions: dict[str, Any]) -> None:
-    """Refuse the whole super-step LOUDLY if any parked ask outlives the ``retention_bound``
-    — a deadline beyond it, or (under a bounded retention) no deadline at all — before a
-    single index key is written, so an unresumable park never persists.
+    """Refuse the whole super-step LOUDLY if any parked ask outlives the ``retention_bound``.
 
-    A ``None`` bound (keep-forever) bounds nothing, so every deadline passes."""
+    An outliving ask is one with a deadline beyond it, or (under a bounded retention) no
+    deadline at all. Refused before a single index key is written, so an unresumable park
+    never persists.
+
+    A ``None`` bound (keep-forever) bounds nothing, so every deadline passes.
+    """
     if retention_bound is None:
         return
     for interaction_id, expiry in interactions.items():
@@ -71,9 +76,11 @@ def _gate_expiry_within_retention(retention_bound: datetime | None, interactions
 
 
 async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
-    """Write the durable park index for a suspended super-step: one park entry per suspended
-    interaction plus the super-step barrier all the answers converge on. The provider-free,
-    engine-neutral persist seam BOTH the LangGraph engines and ``claude_code`` share.
+    """Write the durable park index for a suspended super-step.
+
+    One park entry per suspended interaction plus the super-step barrier all the answers
+    converge on. The provider-free, engine-neutral persist seam BOTH the LangGraph engines
+    and ``claude_code`` share.
 
     ``parks`` is every distinct park interrupt of the super-step, each as
     ``(interrupt_id, {interaction_id: expiry})`` — one entry for a single park, many for
@@ -99,7 +106,8 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
     in the ledger when the drive ends is exactly the chains it claimed and never parked on.
 
     Returns the ``{key: deadline}`` map actually written, so a caller reporting the park (the
-    suspended receipt) names the deadlines the index holds rather than the ones proposed."""
+    suspended receipt) names the deadlines the index holds rather than the ones proposed.
+    """
     interrupt_by_interaction: dict[str, str] = {}
     union: dict[str, Any] = {}
     for interrupt_id, interactions in parks:

@@ -1,5 +1,8 @@
-"""The answer record itself (keyspace 2): the key layout every mutating script takes, the
-content codec, and the create / turn-completion / intake-lease / delete / read writes."""
+"""The answer record itself (keyspace 2).
+
+The key layout every mutating script takes, the content codec, and the create / turn-completion /
+intake-lease / delete / read writes.
+"""
 
 from __future__ import annotations
 
@@ -44,11 +47,13 @@ class RecordWriteMixin(RecordStoreBase):
         *,
         route_row: bool = False,
     ) -> list[str]:
-        """``[record key, every status index, the target status index, the record's two
-        thread indexes, the routing row]``. ``target`` is omitted only by a script that
-        writes no status; ``thread`` only by one that touches no thread index;
-        ``route_row`` is taken only by the create, which decides against it whether the
-        route still routes."""
+        """The key list every record-mutating script takes.
+
+        ``[record key, every status index, the target status index, the record's two thread indexes,
+        the routing row]``. ``target`` is omitted only by a script that writes no status; ``thread`` only
+        by one that touches no thread index; ``route_row`` is taken only by the create, which decides
+        against it whether the route still routes.
+        """
         keys = [self.settings.record_key(message_id)]
         keys.extend(self.settings.status_index_key(status.value) for status in _INDEXED_STATUSES)
         if target is not None:
@@ -61,8 +66,10 @@ class RecordWriteMixin(RecordStoreBase):
         return keys
 
     def _index_score(self, status: DeliveryStatus, now: float) -> str:
-        """The index member's expiry: a terminal row's member is swept with the row it
-        names, a live one's is never swept."""
+        """The index member's expiry score for ``status``.
+
+        A terminal row's member is swept with the row it names, a live one's is never swept.
+        """
         if status not in TERMINAL_STATUSES:
             return _NO_EXPIRY_SCORE
         return str(now + self.settings.answer_retention_ttl_seconds)
@@ -70,21 +77,23 @@ class RecordWriteMixin(RecordStoreBase):
     # -- answer record (keyspace 2) ------------------------------------------
 
     def _content_blob(self, record: ConversationRecord) -> str:
-        """The record's content JSON — every field except the delivery-control ones, which
-        live in their own hash fields.
+        """The record's content JSON — every field except the delivery-control ones.
 
+        The delivery-control fields live in their own hash fields.
         ``allow_nan=False``: a non-finite float renders as bare ``Infinity``/``NaN``, which
         is not JSON and which no standard parser reads back, so the row would persist
-        unreadable. It raises here, at the write, instead."""
+        unreadable. It raises here, at the write, instead.
+        """
         content = record.model_dump(mode="json")
         for control in ("delivery_status", "outbound_message_ids", "attempts", "updated_at"):
             content.pop(control, None)
         return json.dumps(content, allow_nan=False)
 
     async def create_record(self, record: ConversationRecord, *, intake_token: str | None = None) -> None:
-        """Persist a freshly minted record in the state it carries (always a create — the
-        ``message_id`` is a fresh uuid4, or a caller's stable idempotency id its caller
-        dedupes on before calling). A non-terminal record carries NO expiry until it
+        """Persist a freshly minted record in the state it carries (always a create).
+
+        The ``message_id`` is a fresh uuid4, or a caller's stable idempotency id its caller
+        dedupes on before calling. A non-terminal record carries NO expiry until it
         reaches a terminal state; one created already terminal gets the retention TTL.
 
         An ``accepted`` record REQUIRES ``intake_token`` and is created already holding that
@@ -94,7 +103,8 @@ class RecordWriteMixin(RecordStoreBase):
         resolves its route a round trip before this write, and a delete completing in that
         window has already reclaimed both indexes. The record still stands (its delivery is
         the sender's to finish), but no transcript names it — logged loudly, because a
-        message answered against a route that vanished mid-turn is an operator's business."""
+        message answered against a route that vanished mid-turn is an operator's business.
+        """
         if (record.delivery_status is DeliveryStatus.ACCEPTED) is not (intake_token is not None):
             raise ValueError(
                 "an accepted record is created holding an intake lease and any other state without one; got "
@@ -134,9 +144,11 @@ class RecordWriteMixin(RecordStoreBase):
             )
 
     async def complete_turn(self, record: ConversationRecord) -> int:
-        """Move an intake record from ``accepted`` to ``pending_delivery`` carrying its
-        turn's outcome: 1 transitioned, 0 no longer at intake, -1 gone. Guarded on the
-        current status, so a late turn and a re-drive cannot both write an outcome."""
+        """Move an intake record from ``accepted`` to ``pending_delivery`` carrying its turn's outcome.
+
+        Returns 1 transitioned, 0 no longer at intake, -1 gone. Guarded on the current status, so a late
+        turn and a re-drive cannot both write an outcome.
+        """
         if record.delivery_status is not DeliveryStatus.PENDING_DELIVERY:
             raise ValueError(f"complete_turn writes a pending_delivery record, got {record.delivery_status.value!r}")
         keys = self._record_keys(record.message_id, DeliveryStatus.PENDING_DELIVERY, record)
@@ -156,10 +168,11 @@ class RecordWriteMixin(RecordStoreBase):
             )
 
     async def complete_silent(self, record: ConversationRecord) -> int:
-        """Move an intake record from ``accepted`` straight to terminal ``silent`` — a tool
-        turn that produced no reply — applying the retention TTL: 1 transitioned, 0 no
-        longer at intake, -1 gone. Guarded on the current status, so a late turn and a
-        re-drive cannot both write an outcome."""
+        """Move an intake record from ``accepted`` straight to terminal ``silent``, applying the retention TTL.
+
+        A tool turn that produced no reply. Returns 1 transitioned, 0 no longer at intake, -1 gone. Guarded
+        on the current status, so a late turn and a re-drive cannot both write an outcome.
+        """
         if record.delivery_status is not DeliveryStatus.SILENT:
             raise ValueError(f"complete_silent writes a silent record, got {record.delivery_status.value!r}")
         # One fresh ``now`` feeds both the index member's expiry score and the ``updated_at``
@@ -184,11 +197,12 @@ class RecordWriteMixin(RecordStoreBase):
             )
 
     async def claim_intake(self, message_id: str, now: float, token: str, lease_seconds: float) -> int:
-        """Take (or refresh) the intake lease on ``message_id`` under ``token``, leased for
-        ``lease_seconds``: 1 when held, 0 when a DIFFERENT worker's lease is still live, -1
-        when the record is gone, -2 when it has left intake. The worker running the turn
-        refreshes its own lease; a re-drive may adopt only a LAPSED one, so a live turn is
-        never reaped."""
+        """Take (or refresh) the intake lease on ``message_id`` under ``token``, leased for ``lease_seconds``.
+
+        Returns 1 when held, 0 when a DIFFERENT worker's lease is still live, -1 when the record is gone,
+        -2 when it has left intake. The worker running the turn refreshes its own lease; a re-drive may adopt
+        only a LAPSED one, so a live turn is never reaped.
+        """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             return int(
                 await eval_script(
@@ -203,10 +217,11 @@ class RecordWriteMixin(RecordStoreBase):
             )
 
     async def delete_record(self, record: ConversationRecord) -> bool:
-        """Delete a record and its index membership outright, returning whether one was
-        removed — the abort path for an accept that lost the inbound claim and so owns
-        nothing. Takes the record, not its id: the thread it is indexed under is named by
-        the record alone."""
+        """Delete a record and its index membership outright, returning whether one was removed.
+
+        The abort path for an accept that lost the inbound claim and so owns nothing. Takes the record,
+        not its id: the thread it is indexed under is named by the record alone.
+        """
         keys = self._record_keys(record.message_id, thread=record)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             return bool(await eval_script(r, _DELETE_LUA, len(keys), *keys, record.message_id, record.thread_id))

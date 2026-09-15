@@ -54,7 +54,8 @@ async def resolve_creds(
             spec_env[cred.env_name] = cred.value
             static_env_names.append(cred.env_name)
             continue
-        assert isinstance(cred, ConnectionCred)
+        if not (isinstance(cred, ConnectionCred)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         resolved = await tai42_app.connectors.resolve_connection_auth(
             cred.connection_id, cred.provider_id, cred.sub_service
         )
@@ -89,19 +90,23 @@ def _inject_connection_cred(
 
 
 async def scrub_credentials(session: SandboxSession, *, ws: str) -> None:
-    """Remove injected credential MATERIAL under ``.claude-home`` (TERMINAL exits only). An
-    un-removable match is a loud error. The invariant: no injected credential material
-    persists after a run reaches a TERMINAL state."""
+    """Remove injected credential MATERIAL under ``.claude-home`` (TERMINAL exits only).
+
+    An un-removable match is a loud error. The invariant: no injected credential material
+    persists after a run reaches a TERMINAL state.
+    """
     result = await session.exec(["rm", "-rf", f"{ws}/{_CREDS_DIR}"], timeout_seconds=_SHORT_EXEC_TIMEOUT)
     if result.exit_code != 0:
         raise ClaudeCodeError(f"claude_code credential scrub failed to remove {_CREDS_DIR}: {result.stderr}")
 
 
 async def redact_transcript(session: SandboxSession, *, ws: str, policy: Any, secrets: list[str]) -> None:
-    """When the platform ``scrub_transcript`` flag is ON, redact injected-credential VALUES
-    from the KEPT session transcript CONTENT (distinct from the credential-FILE scrub above:
-    this rewrites text, never deletes the transcript — resume still reads it). The knob OFF
-    leaves the transcript verbatim (the stated env-credential residual stands)."""
+    """Redact injected-credential VALUES from the KEPT session transcript when ``scrub_transcript`` is ON.
+
+    Distinct from the credential-FILE scrub above: this rewrites text, never deletes the
+    transcript — resume still reads it. The knob OFF leaves the transcript verbatim (the
+    stated env-credential residual stands).
+    """
     if not getattr(policy, "scrub_transcript", False) or not secrets:
         return
     script = (
@@ -129,8 +134,10 @@ async def redact_transcript(session: SandboxSession, *, ws: str, policy: Any, se
 
 
 def _secret_values(spec_env: dict[str, SecretStr], bearer: list[_BearerMaterial]) -> list[str]:
-    """Every injected secret STRING value (for transcript redaction): the baked ``spec.env``
-    values plus each bearer token/header value."""
+    """Every injected secret STRING value, for transcript redaction.
+
+    The baked ``spec.env`` values plus each bearer token/header value.
+    """
     values = [v.get_secret_value() for v in spec_env.values()]
     for material in bearer:
         if material.token is not None:

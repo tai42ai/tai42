@@ -152,7 +152,8 @@ async def login_password(request: Request) -> Response:
     body, error = await _parse(request, PasswordLoginBody)
     if error is not None:
         return error
-    assert body is not None
+    if body is None:
+        raise AssertionError
 
     email = service.normalize_email(body.email)
     ip = _client_ip(request)
@@ -176,7 +177,8 @@ async def login_password(request: Request) -> Response:
             return _throttled_response(exc)
         return _error("Invalid credentials", 401)
 
-    assert user is not None
+    if user is None:
+        raise AssertionError
     await _limiter().clear(email)
     raw = await service.mint_session(user["user_id"])
     return _session_response(raw, user["user_id"])
@@ -201,7 +203,8 @@ async def login_bootstrap(request: Request) -> Response:
     body, error = await _parse(request, BootstrapBody)
     if error is not None:
         return error
-    assert body is not None
+    if body is None:
+        raise AssertionError
 
     too_short = _password_too_short(body.password)
     if too_short is not None:
@@ -255,7 +258,8 @@ async def login_invite_accept(request: Request) -> Response:
     body, error = await _parse(request, InviteAcceptBody)
     if error is not None:
         return error
-    assert body is not None
+    if body is None:
+        raise AssertionError
 
     ip = _client_ip(request)
     too_short = _password_too_short(body.password)
@@ -282,9 +286,10 @@ async def login_invite_accept(request: Request) -> Response:
 
 @tai42_app.lifecycle.on_startup
 def _assert_accounts_provider_instantiated() -> None:
-    """Fail boot loudly if the accounts routes are mounted but the provider was
-    never instantiated — access control is disabled and the settings holder is
-    empty."""
+    """Fail boot loudly if the accounts routes are mounted but the provider was never instantiated.
+
+    Access control is disabled and the settings holder is empty.
+    """
     if not service.provider_settings_populated():
         raise RuntimeError(
             "tai42-accounts-postgres routes are mounted but its provider was never instantiated — "

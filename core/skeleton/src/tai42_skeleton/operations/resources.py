@@ -42,10 +42,12 @@ class ResourceGet(BaseModel):
 
 
 class ResourceGetQuery(BaseModel):
-    """The fetch-as-is door's ``?resource_id=`` query. ``resource_id`` is REQUIRED — a client
-    generated without it names no resource to load and is answered 400.
+    """The fetch-as-is door's ``?resource_id=`` query.
 
-    Spec metadata only — the door parses its query at the HTTP edge."""
+    ``resource_id`` is REQUIRED — a client generated without it names no resource
+    to load and is answered 400. Spec metadata only — the door parses its query
+    at the HTTP edge.
+    """
 
     resource_id: str = Field(min_length=1, description="The id (path) of the stored resource to load.")
 

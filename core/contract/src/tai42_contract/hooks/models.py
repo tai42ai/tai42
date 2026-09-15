@@ -1,3 +1,5 @@
+"""Hook wire and persisted models: the register body, stored params, subject, and verifier binding."""
+
 from __future__ import annotations
 
 import re
@@ -21,8 +23,7 @@ _SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 
 
 class TopicVerifierBinding(BaseModel):
-    """A per-topic webhook-verifier binding: the name of a registered verifier
-    plus its per-topic ``config``.
+    """A per-topic webhook-verifier binding: a registered verifier's name plus its per-topic ``config``.
 
     This is the persisted shape a hooks manager stores for a topic. ``verifier``
     names a registered :class:`~tai42_contract.webhooks.WebhookVerifier`; ``config``
@@ -38,13 +39,15 @@ class TopicVerifierBinding(BaseModel):
 
 
 class HookSubject(BaseModel):
-    """The optional state subject a hook fire targets: the conversation-target scope
-    ``(target_kind, target_name)``, the subject ``kind`` (matching
+    """The optional state subject a hook fire targets.
+
+    Carries the conversation-target scope ``(target_kind, target_name)``, the subject ``kind`` (matching
     :data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text
     carrying (inline or by stored id) a jq program evaluated over the event payload at
     fire — it must yield a non-empty string, else the fire fails loudly like any hook
     error. Frozen; deposited as the ambient state context so a state write during the fire
-    is keyed and attributed to the hook."""
+    is keyed and attributed to the hook.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -101,8 +104,10 @@ class HookRegister(ConditionMixin, ExprMixin):
 
 
 class HookParams(HookRegister):
-    """The stored hook record: :class:`HookRegister` plus the server-derived
-    ``execution_key_fingerprint``. Managers persist this shape, never the request body."""
+    """The stored hook record: :class:`HookRegister` plus the server-derived ``execution_key_fingerprint``.
+
+    Managers persist this shape, never the request body.
+    """
 
     execution_key_fingerprint: str = Field(
         min_length=1,

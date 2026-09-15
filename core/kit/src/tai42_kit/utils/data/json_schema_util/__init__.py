@@ -1,6 +1,7 @@
-"""JSON-Schema utilities: a schema → pydantic model converter, a schema →
-``TypedDict`` converter, a faithful draft-2020-12 validator, and the platform
-int64 / msgpack integer-range guard.
+"""JSON-Schema utilities.
+
+Exposes a schema → pydantic model converter, a schema → ``TypedDict`` converter, a faithful
+draft-2020-12 validator, and the platform int64 / msgpack integer-range guard.
 
 The converters map a JSON-Schema fragment to a Python annotation and cannot
 express every construct (``oneOf`` collapses to a plain ``Union``; ``not`` and

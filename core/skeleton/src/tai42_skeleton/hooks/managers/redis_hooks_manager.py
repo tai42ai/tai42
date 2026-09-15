@@ -1,3 +1,5 @@
+"""Redis-backed hooks manager: topic-indexed hook storage and webhook replay claims."""
+
 from typing import Any
 
 from tai42_contract.hooks.models import HookParams, TopicVerifierBinding
@@ -49,10 +51,14 @@ return 0
 
 
 class RedisHooksManager(BaseHooksManager):
+    """Hooks manager storing hook registrations and topic verifiers in redis."""
+
     def __init__(self, settings: HooksSettings):
+        """Bind the manager to ``settings`` (redis connection and key layout)."""
         super().__init__(settings)
 
     async def register(self, params: HookParams) -> bool:
+        """Register or move ``params`` under its topic atomically; returns ``True``."""
         self.validate_jq_fields(params)
         async with client_ctx(RedisClient, self.settings.redis) as r:
             await eval_script(
@@ -68,6 +74,7 @@ class RedisHooksManager(BaseHooksManager):
         return True
 
     async def unregister(self, name: str) -> bool:
+        """Remove the named hook atomically; returns whether one was present."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             removed = await eval_script(
                 r,
@@ -80,12 +87,14 @@ class RedisHooksManager(BaseHooksManager):
         return bool(removed)
 
     async def list_hooks_by_topic(self, topic: str) -> dict[str, HookParams]:
+        """Return the hooks registered under ``topic``, keyed by name."""
         key = self.settings.get_hook_key(topic)
         async with client_ctx(RedisClient, self.settings.redis) as r:
             data = await awaited(r.hgetall(key))
             return {name: HookParams.model_validate_json(hook_json) for name, hook_json in data.items()} if data else {}
 
     async def list_hooks(self) -> dict[str, HookParams]:
+        """Return every registered hook across all topics, keyed by name."""
         hooks: dict[str, HookParams] = {}
         async with client_ctx(RedisClient, self.settings.redis) as r:
             name_topic_map = await awaited(r.hgetall(self.settings.name_trigger_map_key))
@@ -108,6 +117,7 @@ class RedisHooksManager(BaseHooksManager):
         return hooks
 
     async def set_topic_verifier(self, topic: str, binding: dict[str, Any]) -> None:
+        """Store the verifier ``binding`` for ``topic``, validating its shape on write."""
         # Validate the shape on write so a malformed binding can never be stored;
         # persist the canonical JSON.
         model = TopicVerifierBinding.model_validate(binding)
@@ -115,6 +125,7 @@ class RedisHooksManager(BaseHooksManager):
             await awaited(r.hset(self.settings.topic_verifiers_key, topic, model.model_dump_json()))
 
     async def get_topic_verifier(self, topic: str) -> dict[str, Any] | None:
+        """Return ``topic``'s verifier binding, or ``None`` when none is set."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             raw = await awaited(r.hget(self.settings.topic_verifiers_key, topic))
         if not raw:
@@ -124,11 +135,13 @@ class RedisHooksManager(BaseHooksManager):
         return TopicVerifierBinding.model_validate_json(raw).model_dump()
 
     async def delete_topic_verifier(self, topic: str) -> bool:
+        """Delete ``topic``'s verifier binding; returns whether one was removed."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             removed = await awaited(r.hdel(self.settings.topic_verifiers_key, topic))
         return removed > 0
 
     async def all_topic_verifiers(self) -> dict[str, dict[str, Any]]:
+        """Return every topic's verifier binding, keyed by topic."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             data = await awaited(r.hgetall(self.settings.topic_verifiers_key))
         # Validate every entry on read (loud on a wrong shape), matching the
@@ -138,6 +151,7 @@ class RedisHooksManager(BaseHooksManager):
         }
 
     async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
+        """Claim one webhook delivery for ``replay_key`` under ``ttl_seconds``; ``True`` for the first claimant only."""
         # SET NX EX is one atomic command: the claim and its expiry land together, so
         # no window exists where a claimed key outlives its TTL (a permanent key) or a
         # replay slips between a claim and a separate expire. NX returns truthy only to

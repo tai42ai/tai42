@@ -1,5 +1,4 @@
-"""The Slack ``Channel`` — outbound sends via ``chat.postMessage``: ``deliver``
-(questions) and ``notify`` (fire-and-forget).
+"""The Slack ``Channel`` — outbound sends via ``chat.postMessage``: ``deliver`` (questions) and ``notify``.
 
 ANY failure raises :class:`~tai42_contract.channels.ChannelDeliveryError`, never
 a silent drop. Slack reports most send failures as HTTP 200 with
@@ -72,9 +71,11 @@ _TIER1_FORMATS = frozenset({"confirm", "external"})
 
 
 def _require_for_delivery[T](value: T | None, env_name: str) -> T:
-    """The configured value, or :class:`ChannelDeliveryError` naming the env var
-    (a config gap on the deliver/notify path is a delivery failure; wraps
-    ``require``, raised before any network call)."""
+    """The configured value, or :class:`ChannelDeliveryError` naming the env var.
+
+    A config gap on the deliver/notify path is a delivery failure; wraps
+    ``require``, raised before any network call.
+    """
     try:
         return require(value, "the slack channel", env_name)
     except ValueError as exc:
@@ -82,8 +83,10 @@ def _require_for_delivery[T](value: T | None, env_name: str) -> T:
 
 
 def _require_secret_for_delivery(value: SecretStr | None, env_name: str) -> str:
-    """The secret's plaintext, or :class:`ChannelDeliveryError` on unset/EMPTY
-    (fail closed; wraps ``require_secret``, message names only the env var)."""
+    """The secret's plaintext, or :class:`ChannelDeliveryError` on unset/EMPTY.
+
+    Fail closed; wraps ``require_secret``, message names only the env var.
+    """
     try:
         return require_secret(value, "the slack channel", env_name)
     except ValueError as exc:
@@ -91,10 +94,13 @@ def _require_secret_for_delivery(value: SecretStr | None, env_name: str) -> str:
 
 
 def _render_text(delivery: ChannelDelivery) -> str:
-    """The question as Slack message text. Tier-2 (``text``/``select``) carries the
-    reply-in-thread instruction (the thread is the correlation key); Tier-1
-    (``confirm``/``external``) carries the callback URL as a plain link. ``select``
-    enumerates its options inline; the answer is validated at the callback door."""
+    """The question as Slack message text.
+
+    Tier-2 (``text``/``select``) carries the reply-in-thread instruction (the
+    thread is the correlation key); Tier-1 (``confirm``/``external``) carries the
+    callback URL as a plain link. ``select`` enumerates its options inline; the
+    answer is validated at the callback door.
+    """
     lines = [delivery.question]
     if delivery.answer_format in _TIER1_FORMATS:
         lines.append(f"Answer here: {delivery.callback_url}")
@@ -177,10 +183,13 @@ def _notification_blocks(notification: ChannelNotification) -> list[dict[str, An
 
 
 def _notification_text_fallback(notification: ChannelNotification) -> str:
-    """The ``text`` field Slack requires alongside blocks. It carries the message plus the
-    interactive/location content as suggestion lines so the notification PREVIEW (the push
-    Slack shows before blocks render) still surfaces them; visual-only content (media,
-    header, footer) rides the blocks alone. Blank for a content-only send."""
+    """The ``text`` field Slack requires alongside blocks.
+
+    It carries the message plus the interactive/location content as suggestion
+    lines so the notification PREVIEW (the push Slack shows before blocks render)
+    still surfaces them; visual-only content (media, header, footer) rides the
+    blocks alone. Blank for a content-only send.
+    """
     parts = [notification.message] if notification.message.strip() else []
     if notification.options:
         parts.append(flat_options_text_lines(notification.options))
@@ -273,9 +282,11 @@ async def open_modal_view(trigger_id: str, view: dict[str, Any]) -> None:
 
 
 def _form_data_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
-    """The form's per-send ``{values, options}`` as plain JSON for the record and the
-    modal builder — each option ``{"value", "label"?}`` (label omitted when absent).
-    ``None`` when the ask carried no data."""
+    """The form's per-send ``{values, options}`` as plain JSON for the record and the modal builder.
+
+    Each option is ``{"value", "label"?}`` (label omitted when absent). ``None``
+    when the ask carried no data.
+    """
     if delivery.data is None:
         return None
     options: dict[str, list[dict[str, Any]]] = {}
@@ -288,16 +299,17 @@ def _form_data_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
 
 
 def _form_pages_list(delivery: ChannelDelivery) -> list[dict[str, Any]] | None:
-    """The form's step layout as plain JSON — each page ``{"title", "fields"}`` — or
-    ``None`` when the ask carried one page."""
+    """The form's step layout as plain JSON, or ``None`` when the ask carried one page.
+
+    Each page is ``{"title", "fields"}``.
+    """
     if delivery.pages is None:
         return None
     return [{"title": page.title, "fields": list(page.fields)} for page in delivery.pages]
 
 
 async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> None:
-    """Deliver a ``form`` question: post a section + a button whose click opens the
-    Block Kit modal, after reserving the form's state.
+    """Deliver a ``form`` question: post a section and an open-modal button after reserving the form's state.
 
     The full modal view the click will build is composed here (and discarded)
     BEFORE any Redis or network work — so an unmappable schema OR a modal past a
@@ -373,20 +385,23 @@ class SlackChannel:
     supports_form_delivery: ClassVar[bool] = True
 
     def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
-        """Enforce this channel's ask-time-knowable Block Kit caps at ask-time,
-        before any state is written — the question-text section cap, the supported
-        property subset, the label cap, the static-select option-count and
-        per-option text caps, and the modal 100-block cap. A violation is refused
-        here as a ``ValueError`` so a question or schema the delivery path could
-        never render is rejected up front instead of persisting a question that
-        only fails at delivery; ``forms`` is the single mapping definition, its
-        delivery-time ``FormSchemaError`` becoming the ask-time ``ValueError``."""
+        """Enforce this channel's ask-time-knowable Block Kit caps at ask-time, before any state is written.
+
+        Covers the question-text section cap, the supported property subset, the
+        label cap, the static-select option-count and per-option text caps, and
+        the modal 100-block cap. A violation is refused here as a ``ValueError``
+        so a question or schema the delivery path could never render is rejected
+        up front instead of persisting a question that only fails at delivery;
+        ``forms`` is the single mapping definition, its delivery-time
+        ``FormSchemaError`` becoming the ask-time ``ValueError``.
+        """
         try:
             _validate_form_schema(schema, question)
         except FormSchemaError as exc:
             raise ValueError(str(exc)) from exc
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
+        """Deliver ``delivery`` as a Slack message, storing the reply correlation for a Tier-2 typed reply."""
         # Settings read fresh each call so a rotated token or changed recipient
         # policy takes effect on the next question. Missing config is a delivery
         # failure: ChannelDeliveryError naming the env var, before any network call.
@@ -421,8 +436,7 @@ class SlackChannel:
         await store_correlation(ts, delivery.callback_url, delivery.interaction_id, delivery.timeout_at)
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
-        """Post one plain fire-and-forget message via ``chat.postMessage``, returning
-        the posted message ``[ts]``.
+        """Post one plain fire-and-forget message via ``chat.postMessage``, returning the posted ``[ts]``.
 
         No correlation, no deadline, no reply — the text is sent as-is. Without
         ``sender_identity`` the recipient follows ``deliver``'s allowlist policy;

@@ -100,9 +100,11 @@ class ManagedBackend(Backend):
         )
 
     async def launch(self, args: Sequence[str]) -> None:
-        """Run one launch subcommand to completion. NEVER overridden — the
-        template is what makes every backend behave identically around the
-        vendor binding."""
+        """Run one launch subcommand to completion.
+
+        NEVER overridden — the template is what makes every backend behave identically around the
+        vendor binding.
+        """
         self._drain_overran = False
         runtime = self._select(args)
         if not runtime.consumes_work:
@@ -152,8 +154,7 @@ class ManagedBackend(Backend):
         return runtime
 
     def _validate(self, runtime: BackendRuntime) -> None:
-        """Refuse a runtime whose declarations and bindings disagree, before
-        anything starts.
+        """Refuse a runtime whose declarations and bindings disagree, before anything starts.
 
         Checked on the INSTANCE, not the class: ``pool_turnover_required`` may be
         decided by a launch option, so a runtime that turns the capability on
@@ -186,9 +187,9 @@ class ManagedBackend(Backend):
     # -- running -------------------------------------------------------------
 
     async def _run_body(self, runtime: BackendRuntime) -> None:
-        """Drive the run body in the way its mode declares, and — for a CONSUMING
-        runtime — drain it if this coroutine is cancelled out from under it.
+        """Drive the run body in the way its mode declares, draining a consuming runtime on cancellation.
 
+        For a CONSUMING runtime the body is drained if this coroutine is cancelled out from under it.
         A consuming body is awaited through :func:`asyncio.shield` so an outer
         cancellation — which on a recycle arrives on the SAME signal as the drain
         request — unwinds THIS coroutine without severing in-flight work: the
@@ -282,7 +283,7 @@ class ManagedBackend(Backend):
         try:
             await asyncio.wait_for(asyncio.shield(body), timeout=self.drain_timeout)
         except TimeoutError:
-            logger.error(
+            logger.exception(
                 "%s %s: the run body did not return within %ss of the drain request; abandoning the wait so "
                 "teardown can run",
                 self.label,
@@ -322,7 +323,7 @@ class ManagedBackend(Backend):
                     runtime.name,
                 )
                 return
-            logger.error(
+            logger.exception(
                 "%s %s: releasing engine resources failed while the launch was already unwinding",
                 self.label,
                 runtime.name,
@@ -333,8 +334,7 @@ class ManagedBackend(Backend):
 
     @contextmanager
     def _drain_wiring(self, runtime: BackendRuntime) -> Iterator[None]:
-        """Subscribe warm-then-cold shutdown to SIGTERM and SIGINT for the span
-        of the run body.
+        """Subscribe warm-then-cold shutdown to SIGTERM and SIGINT for the span of the run body.
 
         Through the composed chain, so the host's own subscriber — the one whose
         main-task cancellation guarantees teardown — survives this registration
@@ -371,10 +371,10 @@ class ManagedBackend(Backend):
     # -- pool turnover -------------------------------------------------------
 
     def _install_turnover(self, runtime: BackendRuntime) -> None:
-        """Wire a pool turnover into every pool-turnover fleet op, for a runtime
-        whose workers hold a snapshot of this process's tool registry OR their own
-        compiled-template cache — both go stale under a bus op that reaches only
-        bus members.
+        """Wire a pool turnover into every pool-turnover fleet op.
+
+        For a runtime whose workers hold a snapshot of this process's tool registry OR their own
+        compiled-template cache — both go stale under a bus op that reaches only bus members.
 
         The handler runs inside the op's apply, before its terminal reply, so a
         raise makes that op report ``failed`` rather than a false ``applied``.
@@ -391,16 +391,17 @@ class ManagedBackend(Backend):
         tai42_app.lifecycle.on_fleet_op_applied(_on_fleet_op_applied)
 
     def _refresh_manifest_env(self) -> None:
-        """Publish the live manifest into the env so the replacement workers
-        inherit the post-mutation registry."""
+        """Publish the live manifest into the env so the replacement workers inherit the post-mutation registry."""
         os.environ[self.dispatch_settings.manifest_key] = json.dumps(
             tai42_app.admin.live_manifest, separators=(",", ":")
         )
 
 
 def _turnover_budget() -> float:
-    """The whole-turnover budget: the bus apply window less a margin, floored. A
-    malformed value raises — a guessed budget would report a false outcome."""
+    """The whole-turnover budget: the bus apply window less a margin, floored.
+
+    A malformed value raises — a guessed budget would report a false outcome.
+    """
     raw = os.environ.get(BUS_APPLY_TIMEOUT_ENV)
     apply_timeout = BUS_APPLY_TIMEOUT_DEFAULT if raw is None else float(raw)
     return max(_TURNOVER_BUDGET_FLOOR, apply_timeout - _TURNOVER_BUDGET_MARGIN)

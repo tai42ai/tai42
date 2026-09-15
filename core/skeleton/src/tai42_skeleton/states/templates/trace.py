@@ -37,18 +37,22 @@ _LIST_OF_SUBSCHEMAS = ("prefixItems", "allOf", "anyOf", "oneOf")
 
 
 def _inject_trace(schema: dict[str, Any]) -> dict[str, Any]:
-    """A deep copy of ``schema`` with a ``_trace`` property added to EVERY object schema
-    within it (nested objects, array items, ``additionalProperties`` schemas,
-    combinators), so a document validated whole under a tracing attachment admits the
-    stamped field even where ``additionalProperties: false`` would otherwise forbid it."""
+    """A deep copy of ``schema`` with a ``_trace`` property added to EVERY object schema within it.
+
+    Covers nested objects, array items, ``additionalProperties`` schemas and combinators, so a
+    document validated whole under a tracing attachment admits the stamped field even where
+    ``additionalProperties: false`` would otherwise forbid it.
+    """
     node = copy.deepcopy(schema)
     _inject_trace_inplace(node)
     return node
 
 
 def _child_subschemas(node: dict[str, Any]) -> Iterator[Any]:
-    """Every child subschema of an object-schema ``node`` across the JSON-Schema keyword
-    groups — the nodes ``_trace`` injection must descend into."""
+    """Every child subschema of an object-schema ``node`` across the JSON-Schema keyword groups.
+
+    The nodes ``_trace`` injection must descend into.
+    """
     for key in _DICT_OF_SUBSCHEMAS:
         sub = node.get(key)
         if isinstance(sub, dict):

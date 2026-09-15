@@ -78,11 +78,13 @@ class _AttachmentStore(_StoreBase):
         effective_schema: dict[str, Any],
         conn: AsyncConnection[Any] | None = None,
     ) -> None:
-        """Write a attach row and the state's recomposed effective schema in ONE txn, under
-        the declaration lock (serializing against every schema change, so the effective
-        schema a concurrent write validates against is never half-composed). Refuses loudly
-        when the state is not declared. With ``conn`` the write joins the caller's
-        transaction (a reconciler's writes commit or roll back with the attach)."""
+        """Write a attach row and the state's recomposed effective schema in ONE txn.
+
+        Runs under the declaration lock (serializing against every schema change, so the
+        effective schema a concurrent write validates against is never half-composed).
+        Refuses loudly when the state is not declared. With ``conn`` the write joins the
+        caller's transaction (a reconciler's writes commit or roll back with the attach).
+        """
         async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT name FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
             if await cur.fetchone() is None:
@@ -108,9 +110,11 @@ class _AttachmentStore(_StoreBase):
         effective_schema: dict[str, Any],
         conn: AsyncConnection[Any] | None = None,
     ) -> bool:
-        """Rewrite a attach's declarations (values only) and the state's effective schema in
-        ONE txn under the declaration lock. ``False`` when no such attach exists. With
-        ``conn`` the write joins the caller's transaction."""
+        """Rewrite a attach's declarations (values only) and the state's effective schema in ONE txn.
+
+        Runs under the declaration lock. ``False`` when no such attach exists. With
+        ``conn`` the write joins the caller's transaction.
+        """
         async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT name FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
             if await cur.fetchone() is None:
@@ -130,9 +134,11 @@ class _AttachmentStore(_StoreBase):
     async def update_attachment_parameters(
         self, state: str, template: str, parameters: dict[str, Any], *, effective_schema: dict[str, Any]
     ) -> bool:
-        """Rewrite a attach's stored (effective) parameters and the state's effective schema
-        in ONE txn under the declaration lock — used by a template replace to backfill a
-        newly defaulted parameter into a live attach. ``False`` when no such attach exists."""
+        """Rewrite a attach's stored (effective) parameters and the state's effective schema in ONE txn.
+
+        Runs under the declaration lock — used by a template replace to backfill a newly
+        defaulted parameter into a live attach. ``False`` when no such attach exists.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -155,9 +161,11 @@ class _AttachmentStore(_StoreBase):
             return True
 
     async def delete_attachment(self, state: str, template: str, *, effective_schema: dict[str, Any]) -> bool:
-        """Delete a attach row and rewrite the state's effective schema — in ONE txn under
-        the declaration lock. ``False`` when no such attach exists. A consumer's bindings
-        are DERIVED (never stored), so a attach delete cleans up nothing else."""
+        """Delete a attach row and rewrite the state's effective schema, in ONE txn under the declaration lock.
+
+        ``False`` when no such attach exists. A consumer's bindings are DERIVED (never
+        stored), so a attach delete cleans up nothing else.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,

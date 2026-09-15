@@ -30,9 +30,12 @@ from tai42_skeleton.plugins.registry import StudioPluginManifest
 
 
 class AgentView(BaseModel):
-    """One registered agent. ``input_schema`` is the agent's run-tool input JSON
-    schema (``ToolInput.model_json_schema()``), a genuinely-open schema object;
-    ``spec_runnable`` is the read authorable-marker, never inferred from a name."""
+    """One registered agent.
+
+    ``input_schema`` is the agent's run-tool input JSON schema
+    (``ToolInput.model_json_schema()``), a genuinely-open schema object;
+    ``spec_runnable`` is the read authorable-marker, never inferred from a name.
+    """
 
     name: str
     description: str
@@ -42,8 +45,10 @@ class AgentView(BaseModel):
 
 
 class AgentListing(BaseModel):
-    """The agent-catalog body (``list_agents`` and the spec-runnable filter share
-    it): every listed agent plus their ``total`` count."""
+    """The agent-catalog body (``list_agents`` and the spec-runnable filter share it).
+
+    Every listed agent plus their ``total`` count.
+    """
 
     items: list[AgentView]
     total: int
@@ -53,8 +58,11 @@ class AgentListing(BaseModel):
 
 
 class BackendInfo(BaseModel):
-    """Backend identity. ``backend``/``module`` are ``null`` when no provider is
-    registered (``present`` false)."""
+    """Backend identity.
+
+    ``backend``/``module`` are ``null`` when no provider is registered
+    (``present`` false).
+    """
 
     present: bool
     backend: str | None = None
@@ -76,9 +84,11 @@ class BackupSectionListing(RootModel[list[BackupSectionInfo]]):
 
 
 class BackupSectionReport(BaseModel):
-    """One section's per-import counts plus any per-record ``errors``. ``fanout`` is
-    present ONLY for the templates section (a template restore fans a cache-evict
-    across the fleet); every other section omits it."""
+    """One section's per-import counts plus any per-record ``errors``.
+
+    ``fanout`` is present ONLY for the templates section (a template restore fans
+    a cache-evict across the fleet); every other section omits it.
+    """
 
     created: int
     updated: int
@@ -89,8 +99,11 @@ class BackupSectionReport(BaseModel):
 
 
 class BackupImportResult(BaseModel):
-    """The import report: ``ok`` false when any selected section errored, and the
-    per-section reports keyed by section name."""
+    """The import report.
+
+    ``ok`` false when any selected section errored, and the per-section reports
+    keyed by section name.
+    """
 
     ok: bool
     sections: dict[str, BackupSectionReport]
@@ -109,9 +122,11 @@ class ChannelListing(BaseModel):
 
 
 class CheckpointSweepResult(BaseModel):
-    """The checkpoint-sweep report. ``skipped`` is present ONLY on a no-op branch
-    (an unsweepable provider or an unset TTL); a real sweep omits it and reports
-    the swept threads."""
+    """The checkpoint-sweep report.
+
+    ``skipped`` is present ONLY on a no-op branch (an unsweepable provider or an
+    unset TTL); a real sweep omits it and reports the swept threads.
+    """
 
     provider: str
     ttl_minutes: int | None = None
@@ -138,19 +153,23 @@ class ExtensionListing(RootModel[list[ExtensionView]]):
 
 
 class InteractionActionResult(BaseModel):
-    """A single interaction terminal result: the id and its new ``status``
-    (``answered`` for the answer door, ``cancelled`` for the cancel door)."""
+    """A single interaction terminal result: the id and its new ``status``.
+
+    ``answered`` for the answer door, ``cancelled`` for the cancel door.
+    """
 
     interaction_id: str
     status: str
 
 
 class InteractionFrame(BaseModel):
-    """One pending question's client add-frame (the paged list door and the live
-    tail share it). ``format_payload`` is the verifier-stripped, otherwise-open
-    payload (``null`` when the question carries none). ``server_verified`` rides
-    ONLY when a verifier was stripped; ``channel``/``recipient``/``origin``/
-    ``audience``/``media`` ride only when the question set them (absent otherwise)."""
+    """One pending question's client add-frame (the paged list door and the live tail share it).
+
+    ``format_payload`` is the verifier-stripped, otherwise-open payload (``null``
+    when the question carries none). ``server_verified`` rides ONLY when a
+    verifier was stripped; ``channel``/``recipient``/``origin``/``audience``/
+    ``media`` ride only when the question set them (absent otherwise).
+    """
 
     interaction_id: str
     group_id: str
@@ -169,9 +188,11 @@ class InteractionFrame(BaseModel):
 
 
 class InteractionWindow(BaseModel):
-    """One page of pending questions. ``truncated`` is always false (the pending
-    index is the whole set, sliced in memory); ``next_page`` is ``null`` on the
-    last page."""
+    """One page of pending questions.
+
+    ``truncated`` is always false (the pending index is the whole set, sliced in
+    memory); ``next_page`` is ``null`` on the last page.
+    """
 
     items: list[InteractionFrame]
     total: int
@@ -182,9 +203,11 @@ class InteractionWindow(BaseModel):
 
 
 class PendingInteraction(BaseModel):
-    """One parked (async) ask on the audit surface. ``channel``/``recipient``/
-    ``audience``/``thread_id``/``expiry_at`` are nullable (a park may carry none);
-    ``question`` is truncated to a preview."""
+    """One parked (async) ask on the audit surface.
+
+    ``channel``/``recipient``/``audience``/``thread_id``/``expiry_at`` are
+    nullable (a park may carry none); ``question`` is truncated to a preview.
+    """
 
     interaction_id: str
     group_id: str
@@ -199,8 +222,11 @@ class PendingInteraction(BaseModel):
 
 
 class PendingInteractionListing(BaseModel):
-    """The parked-interactions audit body: the bounded (and, for a restricted
-    caller, audience-filtered) slice plus its ``count``."""
+    """The parked-interactions audit body.
+
+    The bounded (and, for a restricted caller, audience-filtered) slice plus its
+    ``count``.
+    """
 
     items: list[PendingInteraction]
     count: int
@@ -210,17 +236,23 @@ class PendingInteractionListing(BaseModel):
 
 
 class LoginMethodsListing(BaseModel):
-    """The aggregated login surface. Each method is dumped ``exclude_none`` so an
-    unset optional (icon/autocomplete) is OMITTED, never ``null``; ``bootstrap`` is
-    true while a create-owner screen is still needed."""
+    """The aggregated login surface.
+
+    Each method is dumped ``exclude_none`` so an unset optional
+    (icon/autocomplete) is OMITTED, never ``null``; ``bootstrap`` is true while a
+    create-owner screen is still needed.
+    """
 
     methods: list[LoginMethod]
     bootstrap: bool
 
 
 class ClaimExchangeResult(BaseModel):
-    """The one-time claim-token exchange result. ``token`` is a raw, one-time API
-    key — a SECRET; it must never be logged or rendered where a key leaks."""
+    """The one-time claim-token exchange result.
+
+    ``token`` is a raw, one-time API key — a SECRET; it must never be logged or
+    rendered where a key leaks.
+    """
 
     token: str
     user_id: str
@@ -243,11 +275,14 @@ with warnings.catch_warnings():
     warnings.filterwarnings("ignore", message='Field name "schema"', category=UserWarning)
 
     class NotificationRecord(BaseModel):
-        """One stored internal-sink notification. ``recipient``/``audience`` and the
-        richer-send forms (``media``/``template``/``options``/``location``/
-        ``sections``/``header``/``footer``/``schema``) are ``null`` on a plain
-        record; ``schema`` (an open answer-schema object) rides only from the
-        channel path's feed write. ``id``/``created_at`` are server-minted."""
+        """One stored internal-sink notification.
+
+        ``recipient``/``audience`` and the richer-send forms
+        (``media``/``template``/``options``/``location``/``sections``/``header``/
+        ``footer``/``schema``) are ``null`` on a plain record; ``schema`` (an open
+        answer-schema object) rides only from the channel path's feed write.
+        ``id``/``created_at`` are server-minted.
+        """
 
         id: str
         message: str
@@ -265,16 +300,17 @@ with warnings.catch_warnings():
 
 
 class NotificationListing(BaseModel):
-    """The internal notifications feed, newest-first (empty on an unconfigured
-    store)."""
+    """The internal notifications feed, newest-first (empty on an unconfigured store)."""
 
     notifications: list[NotificationRecord]
 
 
 class NotifyResult(RootModel[str]):
-    """The notify-user body: a bare confirmation STRING (the adapter envelopes it
-    as ``{"data": <str>}``). Typed as a string rather than wrapped, so the wire
-    body is unchanged."""
+    """The notify-user body: a bare confirmation STRING.
+
+    The adapter envelopes it as ``{"data": <str>}``. Typed as a string rather
+    than wrapped, so the wire body is unchanged.
+    """
 
 
 # --- Observability ----------------------------------------------------------
@@ -282,8 +318,10 @@ class NotifyResult(RootModel[str]):
 
 class MetricsSummary(BaseModel):
     """The dashboard summary tile derived from the ungrouped metrics row.
-    ``timeToFirstTokenMs`` is always ``null`` (no neutral measure for it — kept for
-    a stable shape)."""
+
+    ``timeToFirstTokenMs`` is always ``null`` (no neutral measure for it — kept
+    for a stable shape).
+    """
 
     totalRuns: int
     totalCost: float
@@ -295,8 +333,11 @@ class MetricsSummary(BaseModel):
 
 
 class MetricsTimePoint(BaseModel):
-    """One granularity bucket of the dashboard series. ``bucket`` is the backend's
-    time-field value, ``null`` when the row exposes no ISO-like bucket."""
+    """One granularity bucket of the dashboard series.
+
+    ``bucket`` is the backend's time-field value, ``null`` when the row exposes no
+    ISO-like bucket.
+    """
 
     bucket: str | None = None
     runs: int
@@ -306,8 +347,10 @@ class MetricsTimePoint(BaseModel):
 
 
 class ModelUsageRow(BaseModel):
-    """One per-model usage row (top 8 by cost); ``model`` is ``unknown`` when the
-    backend named none."""
+    """One per-model usage row (top 8 by cost).
+
+    ``model`` is ``unknown`` when the backend named none.
+    """
 
     model: str
     calls: int
@@ -317,8 +360,11 @@ class ModelUsageRow(BaseModel):
 
 
 class MetricsResult(BaseModel):
-    """The metrics body: the summary tile, the granularity series, the (optional,
-    possibly-empty) per-model breakdown, and the resolved ``granularity``."""
+    """The metrics body.
+
+    The summary tile, the granularity series, the (optional, possibly-empty)
+    per-model breakdown, and the resolved ``granularity``.
+    """
 
     summary: MetricsSummary
     timeSeries: list[MetricsTimePoint]
@@ -327,10 +373,12 @@ class MetricsResult(BaseModel):
 
 
 class ObservabilityRunView(BaseModel):
-    """One run-list row projected from a trace summary. ``inputPreview``/
-    ``outputPreview`` are the backend's server-bounded (structurally-clipped) JSON
-    previews; the full bodies live on the trace. Nullable aggregates are ``null``
-    when the backend returned none."""
+    """One run-list row projected from a trace summary.
+
+    ``inputPreview``/``outputPreview`` are the backend's server-bounded
+    (structurally-clipped) JSON previews; the full bodies live on the trace.
+    Nullable aggregates are ``null`` when the backend returned none.
+    """
 
     id: str
     traceId: str
@@ -353,9 +401,11 @@ class ObservabilityRunsPage(BaseModel):
 
 
 class SpanView(BaseModel):
-    """One span within a run trace. ``input``/``output``/``usage``/``metadata`` are
-    the backend's free-form values (open JSON); ``nodeId`` is read from the span's
-    metadata when present."""
+    """One span within a run trace.
+
+    ``input``/``output``/``usage``/``metadata`` are the backend's free-form values
+    (open JSON); ``nodeId`` is read from the span's metadata when present.
+    """
 
     id: str
     parentId: str | None = None
@@ -375,8 +425,11 @@ class SpanView(BaseModel):
 
 
 class RunTraceView(BaseModel):
-    """The single-run detail: the trace's attributes (``input``/``output``/
-    ``metadata`` are open JSON) plus every span."""
+    """The single-run detail.
+
+    The trace's attributes (``input``/``output``/``metadata`` are open JSON) plus
+    every span.
+    """
 
     traceId: str
     timestamp: str | None = None
@@ -392,29 +445,36 @@ class RunTraceView(BaseModel):
 
 
 class StudioPluginListing(RootModel[list[StudioPluginManifest]]):
-    """The bare-list body of ``list_studio_plugins`` — each installed plugin's
-    parsed, validated ``StudioPluginManifest`` (a fixed shape, reused as-is)."""
+    """The bare-list body of ``list_studio_plugins``.
+
+    Each installed plugin's parsed, validated ``StudioPluginManifest`` (a fixed
+    shape, reused as-is).
+    """
 
 
 # --- Resources --------------------------------------------------------------
 
 
 class ResourceContent(RootModel[str | JsonValue]):
-    """The loaded resource body of ``get_resource_by_id`` (both the GET fetch and
-    the POST render route): the resource text, OR a media block. The fastmcp media
-    members (``Image``/``Audio``/``File``) are not pydantic-v2 JSON-schema-able, so
-    the media arm is described as its serialized JSON value (``JsonValue``) rather
-    than a media model."""
+    """The loaded resource body of ``get_resource_by_id`` (both the GET fetch and the POST render route).
+
+    The resource text, OR a media block. The fastmcp media members
+    (``Image``/``Audio``/``File``) are not pydantic-v2 JSON-schema-able, so the
+    media arm is described as its serialized JSON value (``JsonValue``) rather
+    than a media model.
+    """
 
 
 # --- Runs -------------------------------------------------------------------
 
 
 class RunView(BaseModel):
-    """One platform-runs-index row. ``traceId`` deep-links the observability trace
-    (``null`` when the run opened none); ``interactionId`` joins a parked run with
-    its resume row (``null`` for a plain run); ``endedAt`` is ``null`` while the run
-    is still running."""
+    """One platform-runs-index row.
+
+    ``traceId`` deep-links the observability trace (``null`` when the run opened
+    none); ``interactionId`` joins a parked run with its resume row (``null`` for
+    a plain run); ``endedAt`` is ``null`` while the run is still running.
+    """
 
     runId: str
     preset: str
@@ -429,8 +489,7 @@ class RunView(BaseModel):
 
 
 class RunsPage(BaseModel):
-    """One page of the platform runs index; ``nextPage`` is ``null`` on the last
-    page."""
+    """One page of the platform runs index; ``nextPage`` is ``null`` on the last page."""
 
     items: list[RunView]
     page: int
@@ -438,9 +497,12 @@ class RunsPage(BaseModel):
 
 
 class RunsPruneResult(BaseModel):
-    """The runs-index prune report. ``skipped`` is present ONLY on a no-op branch
-    (store off or retention unset); ``cutoff`` is present ONLY on a real prune (the
-    ISO cutoff older than which rows were deleted)."""
+    """The runs-index prune report.
+
+    ``skipped`` is present ONLY on a no-op branch (store off or retention unset);
+    ``cutoff`` is present ONLY on a real prune (the ISO cutoff older than which
+    rows were deleted).
+    """
 
     retention_days: int | None = None
     pruned_count: int
@@ -452,9 +514,12 @@ class RunsPruneResult(BaseModel):
 
 
 class SandboxPolicy(BaseModel):
-    """The resolved sandbox policy surfaced to external consumers: the network
-    ``egress`` ceiling, the ``isolation`` floor, the ``scrub_transcript`` flag and
-    the ``durable`` gate. Present regardless of whether a provider is registered."""
+    """The resolved sandbox policy surfaced to external consumers.
+
+    The network ``egress`` ceiling, the ``isolation`` floor, the
+    ``scrub_transcript`` flag and the ``durable`` gate. Present regardless of
+    whether a provider is registered.
+    """
 
     egress: str
     isolation: str
@@ -464,8 +529,10 @@ class SandboxPolicy(BaseModel):
 
 class SandboxInfo(BaseModel):
     """Sandbox identity plus the always-present resolved ``policy``.
+
     ``provider``/``module`` are ``null`` and ``sessions`` is 0 when no provider is
-    registered (``present`` false)."""
+    registered (``present`` false).
+    """
 
     present: bool
     provider: str | None = None
@@ -478,13 +545,14 @@ class SandboxInfo(BaseModel):
 
 
 class SubMcpMapListing(RootModel[dict[str, RouteConfig]]):
-    """The registered sub-MCP apps as a dynamic slug-keyed MAP (not an ``items``
-    list): each value is the durable ``RouteConfig`` (``tools`` + ``transport``)."""
+    """The registered sub-MCP apps as a dynamic slug-keyed MAP (not an ``items`` list).
+
+    Each value is the durable ``RouteConfig`` (``tools`` + ``transport``).
+    """
 
 
 class SubMcpRegistrationResult(BaseModel):
-    """The register/reload result: the ``slug`` mounted and the ``tools`` it exposes
-    on ``transport``."""
+    """The register/reload result: the ``slug`` mounted and the ``tools`` it exposes on ``transport``."""
 
     slug: str
     tools: list[str]
@@ -492,8 +560,10 @@ class SubMcpRegistrationResult(BaseModel):
 
 
 class SubMcpRemovalResult(BaseModel):
-    """The unregister result: the ``slug`` removed and the ``removed`` flag (always
-    true — a slug present nowhere is a 404 instead)."""
+    """The unregister result: the ``slug`` removed and the ``removed`` flag.
+
+    Always true — a slug present nowhere is a 404 instead.
+    """
 
     slug: str
     removed: bool
@@ -503,5 +573,4 @@ class SubMcpRemovalResult(BaseModel):
 
 
 class SystemKindsListing(RootModel[list[KindStatus]]):
-    """The bare-list body of ``list_system_kinds`` — one ``KindStatus`` per
-    pluggable kind, reused as-is."""
+    """The bare-list body of ``list_system_kinds`` — one ``KindStatus`` per pluggable kind, reused as-is."""

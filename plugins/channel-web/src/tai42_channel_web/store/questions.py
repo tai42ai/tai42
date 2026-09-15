@@ -17,12 +17,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class QuestionRecord:
-    """A pending web question: the callback door to forward the answer to, and the
-    transcript pair the ``chat.answered`` frame is appended to on success.
+    """A pending web question.
+
+    The callback door to forward the answer to, and the transcript pair the ``chat.answered`` frame
+    is appended to on success.
 
     ``restores`` counts how often a failed forward has already put this record back.
     It rides the record itself so the count expires exactly with the question, and it
-    is what bounds a visitor looping an answer the callback door keeps refusing."""
+    is what bounds a visitor looping an answer the callback door keeps refusing.
+    """
 
     callback_url: str
     identity: str
@@ -80,8 +83,11 @@ async def release_question(interaction_id: str) -> None:
 
 
 async def peek_question(interaction_id: str) -> QuestionRecord | None:
-    """Read the pending record WITHOUT claiming it, so the answer door can refuse a
-    question belonging to another conversation before the destructive ``GETDEL``."""
+    """Read the pending record WITHOUT claiming it.
+
+    Lets the answer door refuse a question belonging to another conversation before the destructive
+    ``GETDEL``.
+    """
     async with _redis() as redis:
         raw = await redis.get(_question_key(interaction_id))
     if raw is None:
@@ -90,8 +96,10 @@ async def peek_question(interaction_id: str) -> QuestionRecord | None:
 
 
 async def claim_question(interaction_id: str) -> QuestionRecord | None:
-    """Atomically claim-and-remove the pending record; ``None`` when there is none
-    (``GETDEL`` — a concurrent duplicate answer POST gets ``None``)."""
+    """Atomically claim-and-remove the pending record; ``None`` when there is none.
+
+    Uses ``GETDEL`` — a concurrent duplicate answer POST gets ``None``.
+    """
     async with _redis() as redis:
         raw = await redis.getdel(_question_key(interaction_id))
     if raw is None:
@@ -100,8 +108,7 @@ async def claim_question(interaction_id: str) -> QuestionRecord | None:
 
 
 async def restore_question(interaction_id: str, record: QuestionRecord, max_restores: int) -> bool:
-    """Put a claimed record back with its remaining TTL after a failed forward, and
-    report whether it is answerable again.
+    """Put a claimed record back with its remaining TTL after a failed forward, reporting if it is answerable.
 
     A ``SET NX``: if a NEW question reserved the id in the gap it is not clobbered
     (refused with a loud log); a record past its deadline is not restored.
@@ -109,7 +116,8 @@ async def restore_question(interaction_id: str, record: QuestionRecord, max_rest
     ``max_restores`` bounds the loop: every restore is one more forward a visitor can
     make the server pay for, and the callback door's own rate limit is keyed on this
     server's egress IP and shared with every other channel. Past the cap the record
-    stays dropped — loudly — and the interaction resolves by its own timeout."""
+    stays dropped — loudly — and the interaction resolves by its own timeout.
+    """
     if record.restores >= max_restores:
         logger.error(
             "not restoring the pending question %s: its answer has already been refused %d times "

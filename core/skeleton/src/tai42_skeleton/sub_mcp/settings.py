@@ -27,14 +27,18 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class SubMcpRedisSettings(RedisConnectionSettings):
-    """Redis connection for the sub-MCP registration store, composed from the kit
-    connection shape. Connection values come from the ``SUB_MCP_REDIS_*`` env
-    (``SUB_MCP_REDIS_URL`` …); with no ``redis_url`` the store runs in-memory."""
+    """Redis connection for the sub-MCP registration store, composed from the kit connection shape.
+
+    Connection values come from the ``SUB_MCP_REDIS_*`` env (``SUB_MCP_REDIS_URL`` …);
+    with no ``redis_url`` the store runs in-memory.
+    """
 
     model_config = SettingsConfigDict(env_prefix="SUB_MCP_")
 
 
 class SubMcpSettings(TaiBaseSettings):
+    """``SUB_MCP_*`` config for the sub-MCP registration store and its Redis connection."""
+
     model_config = SettingsConfigDict(
         env_prefix="SUB_MCP_",
         frozen=True,
@@ -48,10 +52,12 @@ class SubMcpSettings(TaiBaseSettings):
 
     @property
     def in_memory(self) -> bool:
+        """Whether the store runs in-memory (no ``redis_url`` configured)."""
         return not self.redis.redis_url
 
     @property
     def routes_key(self) -> str:
+        """The Redis hash key holding every registration."""
         # The single Redis hash holding every registration: field = slug, value =
         # ``RouteConfig`` JSON.
         return f"{self.prefix}:routes"
@@ -59,4 +65,5 @@ class SubMcpSettings(TaiBaseSettings):
 
 @settings_cache
 def sub_mcp_settings() -> SubMcpSettings:
+    """The cached :class:`SubMcpSettings` for this process."""
     return SubMcpSettings()

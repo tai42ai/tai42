@@ -1,5 +1,7 @@
-"""Full-table re-encrypt sweep: rewrite every stored connector token blob under the
-current ``CONNECTORS_KEK`` so a KEK rotation converges and the previous key can retire.
+"""Full-table re-encrypt sweep: rewrite every stored connector token blob under the current KEK.
+
+Rewriting under the current ``CONNECTORS_KEK`` lets a KEK rotation converge so the previous
+key can retire.
 
 Postgres is the durable source of truth, so enumeration runs at the SQL layer, covering
 EVERY row — including not-yet-purged expired sessions the serving ``list()`` hides — so
@@ -127,8 +129,10 @@ async def _converge_row(
 
 
 async def _enumerate_rows() -> list[tuple[str, bytes, datetime | None]]:
-    """Every connection row's ``(connection_id, encrypted_blob, session_expires_at)``,
-    including expired-but-not-purged sessions, ordered by id (like the backup export)."""
+    """Every connection row's ``(connection_id, encrypted_blob, session_expires_at)``.
+
+    Includes expired-but-not-purged sessions, ordered by id (like the backup export).
+    """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
@@ -142,8 +146,10 @@ async def _enumerate_rows() -> list[tuple[str, bytes, datetime | None]]:
 
 
 async def _reread_row(connection_id: str) -> tuple[bytes, datetime | None] | None:
-    """Re-read one row's current ciphertext + expiry after a CAS miss, or ``None`` when
-    the row no longer exists (a concurrent disconnect deleted it)."""
+    """Re-read one row's current ciphertext + expiry after a CAS miss, or ``None`` when it is gone.
+
+    ``None`` means the row no longer exists (a concurrent disconnect deleted it).
+    """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,

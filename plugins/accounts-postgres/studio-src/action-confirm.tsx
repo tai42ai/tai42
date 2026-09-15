@@ -3,9 +3,9 @@
  * pending + error state so a backend refusal (e.g. the last-enabled-admin guard's
  * 409) surfaces loudly in place; only a success closes and reloads the list.
  */
+import { ConfirmDialog } from '@tai42/studio-sdk';
 import type { ReactElement } from 'react';
 import { useCallback, useState } from 'react';
-import { ConfirmDialog } from '@tai42/studio-sdk';
 
 export function ActionConfirm({
   title,

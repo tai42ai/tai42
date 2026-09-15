@@ -6,7 +6,7 @@ import abc
 from typing import TYPE_CHECKING
 
 from tai42_e2e.rabbitx import RabbitAdmin, broker_url_for
-from tai42_e2e.topology import Infra, InfraUnavailable, StackResources
+from tai42_e2e.topology import Infra, InfraUnavailableError, StackResources
 from tai42_e2e.variants.census import BrokerLease
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ class BackendVariant(abc.ABC):
     def infra_check(self, settings: HarnessSettings) -> None:
         """Extra reachability beyond the shared Redis + Postgres. The default is
         a no-op (Redis-only backends); overridden where a backend needs its own
-        broker, raising :class:`InfraUnavailable` with the compose hint."""
+        broker, raising :class:`InfraUnavailableError` with the compose hint."""
         return
 
     def allocate_broker(self, infra: Infra, stack_id: str) -> BrokerLease | None:
@@ -156,7 +156,7 @@ class CeleryVariant(BackendVariant):
         try:
             admin.check_reachable()
         except Exception as exc:
-            raise InfraUnavailable(
+            raise InfraUnavailableError(
                 f"RabbitMQ not reachable ({exc}). Start it with `docker compose --profile celery up -d`."
             ) from exc
 

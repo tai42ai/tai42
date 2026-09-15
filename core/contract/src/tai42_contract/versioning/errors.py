@@ -19,6 +19,7 @@ class DocumentStoreError(Exception):
     __tai_error_kind__ = ErrorKind.UPSTREAM_ERROR
 
     def __init__(self, kind: str, name: str, message: str):
+        """Build the error from ``message``, recording the ``(kind, name)`` identity."""
         super().__init__(message)
         self.kind = kind
         self.name = name
@@ -31,6 +32,7 @@ class DocumentExistsError(DocumentStoreError):
     __tai_error_kind__ = ErrorKind.CONFLICT
 
     def __init__(self, kind: str, name: str):
+        """Build the collision error for the ``(kind, name)`` document."""
         super().__init__(kind, name, f"document {name!r} of kind {kind!r} already exists")
 
 
@@ -41,6 +43,7 @@ class DocumentNotFoundError(DocumentStoreError):
     __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, kind: str, name: str):
+        """Build the not-found error for the ``(kind, name)`` document."""
         super().__init__(kind, name, f"no active document {name!r} of kind {kind!r}")
 
 
@@ -55,6 +58,7 @@ class DocumentVersionNotFoundError(DocumentStoreError):
     __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, kind: str, name: str, version: int | None = None):
+        """Build the missing-version error for ``(kind, name)``, recording ``version`` when known."""
         self.version = version
         detail = "" if version is None else f" version {version}"
         super().__init__(kind, name, f"no{detail} version for document {name!r} of kind {kind!r}")

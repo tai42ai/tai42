@@ -39,14 +39,17 @@ class StoragePathConflictError(Exception):
     __tai_error_kind__ = ErrorKind.CONFLICT
 
     def __init__(self, path: str, conflicts: list[str]) -> None:
+        """Record the rejected ``path`` and the stored ids it ``conflicts`` with."""
         self.path = path
         self.conflicts = list(conflicts)
         super().__init__(f"storage path {path!r} collides with existing objects: {self.conflicts_summary()}")
 
     def conflicts_summary(self) -> str:
-        """The conflicting ids as a human string, capped at
-        :data:`_MESSAGE_CONFLICT_CAP` with a ``… and N more`` tail; the full list
-        stays on :attr:`conflicts`."""
+        """The conflicting ids as a human string, capped at :data:`_MESSAGE_CONFLICT_CAP`.
+
+        Beyond the cap a ``… and N more`` tail is appended; the full list stays on
+        :attr:`conflicts`.
+        """
         ids = self.conflicts
         if not ids:
             return "(none listed)"
@@ -87,6 +90,12 @@ def assert_not_root(path: str) -> None:
 
 
 class Storage(ABC):
+    """The abstract object-store contract: load, list, upload and delete objects by path.
+
+    Files and directories share one id space; a backend maps missing objects to
+    ``FileNotFoundError`` and colliding paths to :class:`StoragePathConflictError`.
+    """
+
     @abstractmethod
     async def load(self, path: str) -> str:
         """Return the content at ``path``.
@@ -101,6 +110,7 @@ class Storage(ABC):
 
     @abstractmethod
     async def list(self) -> builtins.list[str]:
+        """Return every stored object path, in no guaranteed order."""
         raise NotImplementedError
 
     @abstractmethod
@@ -117,22 +127,24 @@ class Storage(ABC):
 
     @abstractmethod
     async def delete(self, path: str) -> None:
-        """Delete the object at ``path``, raising ``FileNotFoundError`` when it
-        does not exist (a caller wanting idempotent semantics maps that to a
-        no-op)."""
+        """Delete the object at ``path``, raising ``FileNotFoundError`` when it does not exist.
+
+        A caller wanting idempotent semantics maps that ``FileNotFoundError`` to a no-op.
+        """
         raise NotImplementedError
 
     @abstractmethod
     async def delete_dir(self, path: str) -> None:
-        """Delete every object under ``path``. Path and existence validation
-        (``ValueError`` / ``FileNotFoundError``) must complete before any
-        deletion begins — once destruction starts, failures surface as other
-        exception types, so callers can treat those two as pre-mutation."""
+        """Delete every object under ``path``.
+
+        Path and existence validation (``ValueError`` / ``FileNotFoundError``) must complete
+        before any deletion begins — once destruction starts, failures surface as other
+        exception types, so callers can treat those two as pre-mutation.
+        """
         raise NotImplementedError
 
     async def load_bytes(self, path: str) -> bytes:
-        """Return the raw bytes at ``path``, with the same ``FileNotFoundError``
-        contract as :meth:`load`.
+        """Return the raw bytes at ``path``, with the same ``FileNotFoundError`` contract as :meth:`load`.
 
         Text-bridge default: reads the text via :meth:`load` and UTF-8 encodes it,
         so a text-only backend serves bytes for free. A binary-native backend

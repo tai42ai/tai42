@@ -19,6 +19,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class EnvSecretMarksSettings(TaiBaseSettings):
+    """The operator's marks for which env keys to treat as secret."""
+
     # Names of env keys the operator marked secret. ``NoDecode`` disables
     # pydantic-settings' JSON decode for this complex field so the raw
     # comma-separated env string reaches the ``mode="before"`` validator, which
@@ -28,8 +30,10 @@ class EnvSecretMarksSettings(TaiBaseSettings):
     @field_validator("secret_keys", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
-        """Accept a comma-separated string (env values are strings), trimming
-        whitespace and dropping empty segments; pass non-strings through."""
+        """Accept a comma-separated string, trimming whitespace and dropping empty segments.
+
+        Env values are strings; a non-string value is passed through unchanged.
+        """
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
@@ -37,19 +41,21 @@ class EnvSecretMarksSettings(TaiBaseSettings):
 
 @settings_cache
 def env_secret_marks_settings() -> EnvSecretMarksSettings:
+    """The cached operator secret-marks settings group."""
     return EnvSecretMarksSettings()
 
 
 def effective_secret_keys(manifest: Mapping[str, Any]) -> tuple[str, ...]:
-    """The env key names masked as secret: the stored operator marks
-    (``EnvSecretMarksSettings.secret_keys``) UNIONED with every live
-    ``connectors[*].client_secret_env``, deduped and sorted.
+    """The env key names masked as secret, deduped and sorted.
 
+    The stored operator marks (``EnvSecretMarksSettings.secret_keys``) UNIONED with
+    every live ``connectors[*].client_secret_env``.
     Secret-ness of a connector's client secret is an invariant the manifest already
     STATES, so it is DERIVED here at read time rather than duplicated into the env
     store — an oauth connector's secret value stays masked even with no operator mark.
     ``manifest`` is the live manifest as a dumped dict (``tai42_app.admin.live_manifest``);
-    a missing or malformed ``connectors`` key contributes nothing."""
+    a missing or malformed ``connectors`` key contributes nothing.
+    """
     keys = set(env_secret_marks_settings().secret_keys)
     connectors = manifest.get("connectors")
     if isinstance(connectors, list):

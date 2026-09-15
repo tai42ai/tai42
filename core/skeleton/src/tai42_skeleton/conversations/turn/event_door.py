@@ -29,8 +29,10 @@ from tai42_skeleton.conversations.turn.schedule import _schedule_turn, _spawn_in
 
 async def _get_event_route(route_name: str) -> ConversationRoute:
     """The route the event door runs on — door-agnostic (channel or api), tool-target only.
+
     A missing route is refused as unresolved (404); an AGENT target is refused with
-    :class:`EventTargetNotToolError` (409) — an event has no rendered text to hand an agent."""
+    :class:`EventTargetNotToolError` (409) — an event has no rendered text to hand an agent.
+    """
     route = await cache.get_conversations_manager().get_route(route_name)
     if route is None:
         raise ConversationRouteResolutionError(f"no conversation route named {route_name!r}")
@@ -47,8 +49,9 @@ async def _resolve_event_thread(
     submission: ConversationEventSubmission,
     caller_principal: str,
 ) -> tuple[str, str, str | None, _Multichannel | None]:
-    """Resolve the EXISTING thread an event enters, returning
-    ``(thread_id, client_address, record_caller_principal, multichannel)``.
+    """Resolve the EXISTING thread an event enters.
+
+    Returns ``(thread_id, client_address, record_caller_principal, multichannel)``.
 
     Addressed by ``thread_id``: the id is verified live on the route's thread index and its
     latest record supplies the delivery ``client_address`` (a person-aggregated thread has
@@ -61,7 +64,8 @@ async def _resolve_event_thread(
     invariant: ``None`` for a channel target, the qualifying principal for an api target.
 
     The multichannel context of the sending address is resolved and returned so the turn can
-    read (never write) the linked person whose fields it carries into the tool payload."""
+    read (never write) the linked person whose fields it carries into the tool payload.
+    """
     if submission.thread_id is not None:
         thread_id = submission.thread_id.strip()
         latest = await store.latest_thread_record(route.route_name, thread_id)
@@ -117,7 +121,8 @@ async def submit_event(
     the durable record, and the idempotency claim LAST — so a refused admission (an unknown
     thread, a rate cap, a full queue) writes nothing and never burns the ``event_id`` key: a
     redelivery of a rate-capped event runs cleanly, and a redelivery of an ACCEPTED one
-    returns the original turn's ``message_id`` (``202``) and starts no second turn."""
+    returns the original turn's ``message_id`` (``202``) and starts no second turn.
+    """
     if caller_principal is None or not caller_principal.strip():
         raise UnauthenticatedApiCallerError(
             f"event conversation route {route_name!r} needs an accountable caller principal and this "

@@ -1,5 +1,4 @@
-"""The FastMCP tool subclass that reveals wrapped secrets (and re-emits the
-suspended-interaction marker) at ``convert_result``."""
+"""The FastMCP tool subclass that reveals wrapped secrets (and re-emits the suspended-interaction marker)."""
 
 from typing import Any
 
@@ -12,8 +11,7 @@ from tai42_skeleton.tools.reveal_gate import inprocess_reveal_gate, note_secret_
 
 
 class _SecretRevealingTool(FunctionTool):
-    """A FastMCP tool that reveals wrapped secrets in its return before FastMCP
-    serializes the MCP ``tools/call`` result for the live caller.
+    """A FastMCP tool that reveals wrapped secrets in its return before the MCP ``tools/call`` result is serialized.
 
     ``convert_result`` has three present-tense modes, keyed on the in-process
     reveal gate:
@@ -32,7 +30,8 @@ class _SecretRevealingTool(FunctionTool):
     The reveal must land here, before FastMCP's own serialization (which has no
     secret-aware step: ``ToolResult`` would drop a ``SecretValue`` — structured
     serialize raises, the text block masks it), not in a result-transforming
-    middleware that only sees the already-serialized ``ToolResult``."""
+    middleware that only sees the already-serialized ``ToolResult``.
+    """
 
     def convert_result(self, raw_value: Any) -> ToolResult:
         gate = inprocess_reveal_gate.get()

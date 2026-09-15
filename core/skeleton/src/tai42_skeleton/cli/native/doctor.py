@@ -33,6 +33,8 @@ _INFO = "info"
 
 @dataclass(frozen=True)
 class Check:
+    """One diagnostic check result: its ``name``, ``status``, and human-readable ``detail``."""
+
     name: str
     status: str
     detail: str
@@ -88,7 +90,8 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
     with a half-set admin identity (a kit
     :class:`~tai42_kit.db.AdminIdentityIncompleteError`, which names both admin vars)
     is caught and rendered as a FAIL so the diagnostic stays a diagnostic; every other
-    error propagates so a broken probe is never mistaken for a clean schema."""
+    error propagates so a broken probe is never mistaken for a clean schema.
+    """
     import psycopg
 
     try:

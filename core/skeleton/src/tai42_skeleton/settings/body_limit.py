@@ -12,6 +12,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class BodyLimitSettings(TaiBaseSettings):
+    """``TAI_BODY_LIMIT_*`` settings for the app-level request body-size cap."""
+
     model_config = SettingsConfigDict(env_prefix="TAI_BODY_LIMIT_")
 
     # Cap (actual bytes, never client Content-Length) on any request body.
@@ -21,4 +23,5 @@ class BodyLimitSettings(TaiBaseSettings):
 
 @settings_cache
 def body_limit_settings() -> BodyLimitSettings:
+    """The cached ``BodyLimitSettings`` for this process."""
     return BodyLimitSettings()

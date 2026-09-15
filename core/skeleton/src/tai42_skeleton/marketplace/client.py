@@ -38,15 +38,18 @@ class RegistryClient:
     """Typed client for the marketplace registry's public read API."""
 
     def __init__(self, base_url: str | None = None) -> None:
+        """Pin the client to one resolved base URL, stripping a single trailing slash."""
         # Resolve the base URL now, not per call: a client instance pins one
         # endpoint, and one trailing slash is stripped so ``{base}{path}``
         # composes cleanly (the settings value is left unmutated).
         self._base_url = (base_url or marketplace_settings().url).rstrip("/")
 
     async def search(self, params: Mapping[str, str | list[str]]) -> dict[str, Any]:
-        """Proxy the registry search. ``params`` carries the whitelisted query
-        names the route forwards; a ``list[str]`` value (``tags``) is encoded as
-        repeated query params, never comma-joined."""
+        """Proxy the registry search.
+
+        ``params`` carries the whitelisted query names the route forwards; a ``list[str]`` value (``tags``) is
+        encoded as repeated query params, never comma-joined.
+        """
         query = {key: value for key, value in params.items() if value is not None}
         data = await self._request("GET", "/api/v1/search", params=query)
         return _as_dict(data, "search")
@@ -58,18 +61,22 @@ class RegistryClient:
         return _as_dict(data, "plugin")
 
     async def versions(self, namespace: str, name: str) -> list[dict[str, Any]]:
-        """The listing's version rows, unwrapped from the registry's
-        ``{"versions": [...]}`` wrapper nested under ``data``."""
+        """The listing's version rows.
+
+        Unwrapped from the registry's ``{"versions": [...]}`` wrapper nested under ``data``.
+        """
         ref = f"{namespace}/{name}"
         data = await self._request("GET", f"/api/v1/plugins/{_seg(namespace)}/{_seg(name)}/versions", ref=ref)
         return _unwrap_list(data, "versions", "versions")
 
     async def items(self, kind: str | None = None) -> list[dict[str, Any]]:
-        """Every LISTED plugin's provided items, deduped by owning listing — one row
-        per item with ``kind``/``name``/``module`` (nullable, ``null`` for mcp-server)/
+        """Every LISTED plugin's provided items, deduped by owning listing.
+
+        One row per item with ``kind``/``name``/``module`` (nullable, ``null`` for mcp-server)/
         ``description`` and the owning ``namespace``/``listing``/``package``. The
         UNCAPPED item enumeration the catalog projects (``GET /api/v1/items``), NOT the
-        page-capped search. An optional ``kind`` filters to one item kind."""
+        page-capped search. An optional ``kind`` filters to one item kind.
+        """
         params: dict[str, str] = {}
         if kind is not None:
             params["kind"] = kind
@@ -79,25 +86,28 @@ class RegistryClient:
         return rows
 
     async def categories(self) -> list[str]:
-        """The registry's controlled category vocabulary — a bare list of
-        category names, unwrapped from the registry's ``{"categories": [...]}``
-        wrapper so the route re-envelopes a plain array."""
+        """The registry's controlled category vocabulary — a bare list of category names.
+
+        Unwrapped from the registry's ``{"categories": [...]}`` wrapper so the route re-envelopes a plain array.
+        """
         data = await self._request("GET", "/api/v1/categories")
         return _unwrap_list(data, "categories", "categories")
 
     async def kinds(self) -> list[str]:
-        """The registry's controlled item-kind vocabulary — a bare list of kind
-        names in the contract enum's declaration order, unwrapped from the
-        registry's ``{"kinds": [...]}`` wrapper so the route re-envelopes a plain
-        array."""
+        """The registry's controlled item-kind vocabulary — a bare list of kind names.
+
+        In the contract enum's declaration order, unwrapped from the registry's ``{"kinds": [...]}`` wrapper
+        so the route re-envelopes a plain array.
+        """
         data = await self._request("GET", "/api/v1/kinds")
         return _unwrap_list(data, "kinds", "kinds")
 
     async def advisories(self, *, listing: str | None = None, since: str | None = None) -> list[dict[str, Any]]:
-        """Advisory rows, unwrapped from the registry's ``{"advisories": [...]}``
-        wrapper nested under ``data``, optionally filtered to one listing and/or a
-        since cursor. A 404 on the listing-filtered call surfaces as
-        :class:`ListingNotFoundError` naming that ref."""
+        """Advisory rows, optionally filtered to one listing and/or a since cursor.
+
+        Unwrapped from the registry's ``{"advisories": [...]}`` wrapper nested under ``data``. A 404 on the
+        listing-filtered call surfaces as :class:`ListingNotFoundError` naming that ref.
+        """
         params: dict[str, str] = {}
         if listing is not None:
             params["listing"] = listing
@@ -109,8 +119,9 @@ class RegistryClient:
         return rows
 
     async def resolve(self, namespace: str, name: str, version: str | None = None) -> dict[str, Any]:
-        """The single install-time pinning call: the registry pins the version
-        (given, or latest published), returns the artifact pointer + stored
+        """The single install-time pinning call.
+
+        The registry pins the version (given, or latest published), returns the artifact pointer + stored
         PluginSpec + matching advisories, and counts the download.
 
         The installed ``tai42-contract`` version ALWAYS rides along as the
@@ -200,8 +211,10 @@ class RegistryClient:
 
 
 def _error_message(response: httpx.Response) -> str:
-    """The registry's enveloped error message, or a status-based fallback when
-    the body is not the expected ``{"error": …}`` shape."""
+    """The registry's enveloped error message, or a status-based fallback.
+
+    Falls back when the body is not the expected ``{"error": …}`` shape.
+    """
     try:
         payload = response.json()
     except ValueError:
@@ -214,14 +227,14 @@ def _error_message(response: httpx.Response) -> str:
 
 
 def _seg(value: str) -> str:
-    """Percent-encode one path segment so a namespace/name value cannot inject a
-    query, a fragment, or a dot-segment that reroutes the request.
+    """Percent-encode one path segment so a value cannot inject a query, fragment, or rerouting dot-segment.
 
     ``quote(safe="")`` encodes ``/``, ``?``, and ``#`` so the value stays exactly
     one path component. It leaves ``.`` alone, though, and a bare ``..`` (or ``.``)
     segment is collapsed by httpx's dot-segment normalization to a DIFFERENT
     endpoint — so ``.`` is percent-encoded too, keeping the literal segment on the
-    wire (the registry decodes it back)."""
+    wire (the registry decodes it back).
+    """
     return quote(value, safe="").replace(".", "%2E")
 
 
@@ -252,9 +265,10 @@ _RESOLVE_FIELD_TYPES: dict[str, tuple[type, str]] = {
 
 
 def _validate_resolve_field_types(resolved: dict[str, Any]) -> None:
-    """Assert each present resolve-response field carries its contracted JSON
-    type (see :data:`_RESOLVE_FIELD_TYPES`). Absent and ``null`` fields pass —
-    per-source presence is the installer's check, not the boundary's."""
+    """Assert each present resolve-response field carries its contracted JSON type (see :data:`_RESOLVE_FIELD_TYPES`).
+
+    Absent and ``null`` fields pass — per-source presence is the installer's check, not the boundary's.
+    """
     for field, (expected, label) in _RESOLVE_FIELD_TYPES.items():
         value = resolved.get(field)
         if value is not None and not isinstance(value, expected):
@@ -270,7 +284,8 @@ def _require_dict_elements(rows: list[Any], what: str) -> None:
     Advisory lists are consumed element-by-element with ``.get`` at the trust
     boundary's callers, so a non-dict element is garbled registry data → a typed
     :class:`RegistryResponseError` (a 502), uniform with every other
-    malformed-response case, never an ``AttributeError``-driven 500 downstream."""
+    malformed-response case, never an ``AttributeError``-driven 500 downstream.
+    """
     for element in rows:
         if not isinstance(element, dict):
             raise RegistryResponseError(
@@ -291,9 +306,11 @@ def _as_list(data: Any, what: str) -> list[Any]:
 
 
 def _unwrap_list(data: Any, key: str, what: str) -> list[Any]:
-    """The inner array of the ``{key: [...]}`` wrapper the registry nests under
-    ``data`` (its list endpoints double-wrap: ``{"data": {"versions": [...]}}``),
-    or a typed fault when the wrapper key is absent or its value is not a list."""
+    """The inner array of the ``{key: [...]}`` wrapper the registry nests under ``data``.
+
+    Its list endpoints double-wrap: ``{"data": {"versions": [...]}}``. Raises a typed fault when the wrapper key
+    is absent or its value is not a list.
+    """
     if not isinstance(data, dict) or key not in data:
         raise RegistryResponseError(
             f"marketplace registry {what} response is missing the {key!r} key",

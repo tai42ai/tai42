@@ -40,10 +40,11 @@ _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"presets"})
 
 
 class DeepAgentInput(BaseModel):
-    """JSON tool-face parameters for ``langchain_deep_agent``. Live ``tools=`` are absent
-    from this JSON schema (a live ``StructuredTool`` is not JSON-serializable), but
-    both in-process faces — :meth:`DeepAgent.run` and :meth:`DeepAgent.astream` —
-    accept them directly.
+    """JSON tool-face parameters for ``langchain_deep_agent``.
+
+    Live ``tools=`` are absent from this JSON schema (a live ``StructuredTool`` is not
+    JSON-serializable), but both in-process faces — :meth:`DeepAgent.run` and
+    :meth:`DeepAgent.astream` — accept them directly.
 
     The schema advertises exactly the composable fields ``langchain_deep_agent``'s runtime
     honors — ``subagents``, ``skills``, ``inline_skills``, ``interrupt_on``,
@@ -94,6 +95,8 @@ class DeepAgentInput(BaseModel):
     @field_validator("user_content_kwargs")
     @classmethod
     def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """An empty dict carries no content-block keys — normalize {} to None so it
-        reads as unset, matching the builders that treat {} as no mark."""
+        """Normalize an empty ``user_content_kwargs`` dict to ``None`` so it reads as unset.
+
+        An empty dict carries no content-block keys, matching the builders that treat {} as no mark.
+        """
         return value or None

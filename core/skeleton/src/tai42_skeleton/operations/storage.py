@@ -49,9 +49,11 @@ _UNSAFE_ID_MESSAGE = "must be a relative path with no '..' segment"
 
 
 class StorageUpload(BaseModel):
-    """A storage upload: exactly ONE of ``content_text`` (stored verbatim) or
-    ``content_base64`` (decoded to bytes) supplies the content for ``id``. An
-    existing id is overwritten — provider passthrough semantics."""
+    """A storage upload: exactly one of ``content_text`` or ``content_base64`` supplies the content for ``id``.
+
+    ``content_text`` is stored verbatim; ``content_base64`` is decoded to bytes.
+    An existing id is overwritten — provider passthrough semantics.
+    """
 
     id: str
     content_text: str | None = None
@@ -72,9 +74,11 @@ def _require_provider() -> Storage:
 
 
 def _is_unsafe_path(value: str) -> bool:
-    """Whether an id/path input is unsafe to pass to the provider — it is absolute
-    (a leading ``/``) or carries a ``..`` segment. A safe input is a relative path
-    with no ``..`` segment."""
+    """Whether an id/path input is unsafe to pass to the provider.
+
+    Unsafe means absolute (a leading ``/``) or carrying a ``..`` segment. A safe
+    input is a relative path with no ``..`` segment.
+    """
     return value.startswith("/") or ".." in value.split("/")
 
 
@@ -84,10 +88,12 @@ def _reject_unsafe(kind: str, value: str) -> None:
 
 
 def _content_disposition(filename: str) -> str:
-    """A ``Content-Disposition: attachment`` header with a well-formed quoted
-    ``filename``. Per RFC 6266 / RFC 2616 quoted-string rules a literal ``"`` or
-    ``\\`` must be backslash-escaped and control characters are not permitted, so the
-    basename is sanitized before interpolation."""
+    r"""A ``Content-Disposition: attachment`` header with a well-formed quoted ``filename``.
+
+    Per RFC 6266 / RFC 2616 quoted-string rules a literal ``"`` or ``\\`` must be
+    backslash-escaped and control characters are not permitted, so the basename is
+    sanitized before interpolation.
+    """
     sanitized = "".join(ch for ch in filename if ch >= " " and ch != "\x7f")
     sanitized = sanitized.replace("\\", "\\\\").replace('"', '\\"')
     return f'attachment; filename="{sanitized}"'
@@ -95,8 +101,10 @@ def _content_disposition(filename: str) -> str:
 
 @operation(summary="Get the storage provider identity", tags=["storage"], response_model=StorageInfo)
 async def storage_info() -> dict:
-    """Report the registered provider's identity, or ``present: false`` when none is
-    installed (a ``200``, so the UI renders the empty state without an error)."""
+    """Report the registered provider's identity, or ``present: false`` when none is installed.
+
+    A ``200``, so the UI renders the empty state without an error.
+    """
     provider = _provider()
     if provider is None:
         return {"present": False, "provider": None, "module": None}
@@ -151,7 +159,8 @@ async def upload_resource(
     The type/shape validation the tool schema cannot express — a non-empty ``id``,
     exactly one content field, and each field's type — is enforced here so the MCP
     tool edge carries it too; the HTTP route's extractor passes the raw body through
-    to the same checks."""
+    to the same checks.
+    """
     if not isinstance(resource_id, str) or not resource_id:
         raise BadRequestError("body must contain a non-empty string 'id'")
     _reject_unsafe("resource id", resource_id)

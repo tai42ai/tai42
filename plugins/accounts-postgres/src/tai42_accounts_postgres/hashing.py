@@ -41,14 +41,19 @@ def hash_password(password: str) -> str:
 
 
 async def hash_password_async(password: str) -> str:
-    """Hash off the event loop. Ungated — the write paths that call it are gated or
-    authed, not an unauthenticated flood vector like the login verify."""
+    """Hash off the event loop.
+
+    Ungated — the write paths that call it are gated or authed, not an unauthenticated flood vector
+    like the login verify.
+    """
     return await asyncio.to_thread(hash_password, password)
 
 
 def _verify_sync(hash_: str, password: str) -> bool:
-    """Blocking argon2 verify: ``True`` on match, ``False`` on mismatch; other
-    argon2 errors propagate (a corrupt hash is not a wrong password)."""
+    """Blocking argon2 verify: ``True`` on match, ``False`` on mismatch.
+
+    Other argon2 errors propagate (a corrupt hash is not a wrong password).
+    """
     try:
         return _hasher.verify(hash_, password)
     except VerifyMismatchError:
@@ -59,10 +64,12 @@ class HashGate:
     """A semaphore bounding concurrent off-loop argon2 verifies with load-shed."""
 
     def __init__(self, concurrency: int, wait_seconds: float) -> None:
+        """Bound to ``concurrency`` in-flight verifies; shed a request that waits past ``wait_seconds``."""
         self._sem = asyncio.Semaphore(concurrency)
         self._wait = wait_seconds
 
     async def run(self, fn: Callable[..., bool], *args: object) -> bool:
+        """Run ``fn(*args)`` off the loop under the gate; raise :class:`HashCapacityError` when at capacity."""
         try:
             await asyncio.wait_for(self._sem.acquire(), timeout=self._wait)
         except TimeoutError as exc:
@@ -94,7 +101,8 @@ def reset_hash_gate() -> None:
     Registered as a settings reset so a config reload (which resets settings before the
     epoch rebuilds) re-reads ``login_hash_concurrency`` / ``login_hash_wait_seconds``
     rather than pinning the boot values for the process lifetime. Safe to fire anytime:
-    ``_get_gate`` rebuilds lazily on next use, so a stray reset never leaves a hole."""
+    ``_get_gate`` rebuilds lazily on next use, so a stray reset never leaves a hole.
+    """
     global _gate
     _gate = None
 

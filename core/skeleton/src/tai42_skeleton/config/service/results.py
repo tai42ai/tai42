@@ -1,6 +1,8 @@
-"""The manifest-mutation pipeline's structural seams and result DTOs — the config-manager
-/ reload / fleet-publish Protocols the pipeline drives, and the structured outcomes it
-returns."""
+"""The manifest-mutation pipeline's structural seams and result DTOs.
+
+The config-manager / reload / fleet-publish Protocols the pipeline drives, and the structured outcomes
+it returns.
+"""
 
 from __future__ import annotations
 
@@ -17,8 +19,7 @@ if TYPE_CHECKING:
 
 
 class OrphanEnvWriteError(RuntimeError):
-    """A combined env+manifest op whose manifest persist FAILED after the env
-    write already landed.
+    """A combined env+manifest op whose manifest persist FAILED after the env write already landed.
 
     Env-first/manifest-second ordering: on a manifest-persist failure there is NO
     rollback — the env write STANDS as an inert, re-runnable orphan (rolling it back
@@ -26,13 +27,16 @@ class OrphanEnvWriteError(RuntimeError):
     NAMES the orphan env key(s) and the manifest pointer they now reference no persisted
     marker at, and states the env write stands / re-run to complete. A ``RuntimeError``
     (not a ``ValueError``) so the op layer does not fold it into a 400 — a partial
-    failure is loud, not a client input error."""
+    failure is loud, not a client input error.
+    """
 
 
 class _ManifestStore(Protocol):
-    """The config-manager surface the pipeline drives — the transactional seams plus
-    the reads the env-change validation needs. The concrete provider is the active
-    :class:`~tai42_contract.config.manager.ConfigManager`."""
+    """The config-manager surface the pipeline drives.
+
+    The transactional seams plus the reads the env-change validation needs. The concrete provider is the
+    active :class:`~tai42_contract.config.manager.ConfigManager`.
+    """
 
     def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]: ...
 
@@ -54,10 +58,11 @@ class _ReloadAdmin(Protocol):
 
 
 class _FleetPublisher(Protocol):
-    """The worker-bus publish surface the pipeline broadcasts through, plus the op-start
-    census it reads BEFORE each local apply — ``publish`` censuses only when it is
-    called, so the membership a report is judged against is captured through
-    ``expected_at_start`` and handed back in."""
+    """The worker-bus publish surface the pipeline broadcasts through, plus the op-start census it reads.
+
+    The census is read BEFORE each local apply — ``publish`` censuses only when it is called, so the
+    membership a report is judged against is captured through ``expected_at_start`` and handed back in.
+    """
 
     async def expected_at_start(self) -> dict[str, int]: ...
 
@@ -92,17 +97,20 @@ class ApplyResult:
 
     @property
     def fanout(self) -> dict[str, Any]:
-        """The mode-wrapped fan-out summary of this run's broadcast — the same shape
-        :func:`~tai42_skeleton.operations._broadcast.apply_response` embeds under
-        ``fanout`` (local-only / fleet / unreachable). A writer that returns a bare
-        result (not the ``apply_response`` merge) embeds this value directly."""
+        """The mode-wrapped fan-out summary of this run's broadcast.
+
+        The same shape :func:`~tai42_skeleton.operations._broadcast.apply_response` embeds under ``fanout``
+        (local-only / fleet / unreachable). A writer that returns a bare result (not the ``apply_response``
+        merge) embeds this value directly.
+        """
         return fleet_fanout(self.fleet)
 
 
 @dataclass(frozen=True)
 class ProfileApplyOutcome:
-    """The structured outcome of one profile-APPLY pipeline run — the raw material the
-    operations layer folds into the dedicated ``profileApplyResponse``.
+    """The structured outcome of one profile-APPLY pipeline run.
+
+    The raw material the operations layer folds into the dedicated ``profileApplyResponse``.
 
     ``hot`` is the hot-class diff key NAMES (names only — never values). ``recycle`` is
     the fleet recycle report (``None`` when the diff carried no recycle-class key, so no

@@ -1,6 +1,8 @@
-"""The caller's session and the transcript-store gate: resolve the cookie to its
-registration, decide whether it serves a route, mint a fresh one, and refuse when no
-store is configured."""
+"""The caller's session and the transcript-store gate.
+
+Resolve the cookie to its registration, decide whether it serves a route, mint a fresh
+one, and refuse when no store is configured.
+"""
 
 from __future__ import annotations
 
@@ -44,8 +46,11 @@ _CROSS_ORIGIN_CODE = "origin_mismatch"
 
 
 def _store_configured() -> bool:
-    """Whether a transcript store is configured. Without one a session cannot be
-    registered, so every door but the asset door refuses with 501."""
+    """Whether a transcript store is configured.
+
+    Without one a session cannot be registered, so every door but the asset door refuses
+    with 501.
+    """
     return bool(web_redis_settings().redis_url)
 
 
@@ -57,10 +62,12 @@ def _store_off() -> JSONResponse | None:
 
 
 async def _session(request: Request, settings: WebSettings) -> SessionRegistration | None:
-    """The caller's session: the registration their cookie token stands for — the
-    conversation address to use, and the web route it was minted on. ``None`` when
-    there is no cookie, its value is not a minted token, or nothing is registered for
-    it — an invented or planted token is never adopted as a session."""
+    """The caller's session: the registration their cookie token stands for.
+
+    Carries the conversation address to use, and the web route it was minted on. ``None``
+    when there is no cookie, its value is not a minted token, or nothing is registered for
+    it — an invented or planted token is never adopted as a session.
+    """
     token = session_token(request, settings)
     if token is None:
         return None
@@ -76,18 +83,22 @@ async def _session(request: Request, settings: WebSettings) -> SessionRegistrati
 
 
 def _serves(registration: SessionRegistration | None, identity: str) -> bool:
-    """Whether this session may act on ``identity``. A session minted on another web
-    route is refused exactly as a missing one is: a caller must not be able to tell a
-    foreign session from no session, or the refusal itself would say which routes a
-    stolen cookie is good for."""
+    """Whether this session may act on ``identity``.
+
+    A session minted on another web route is refused exactly as a missing one is: a caller
+    must not be able to tell a foreign session from no session, or the refusal itself would
+    say which routes a stolen cookie is good for.
+    """
     return registration is not None and registration.identity == identity
 
 
 def _mount_base(request: Request, route_path: str) -> str:
-    """This deployment's absolute mount prefix for the web channel, read from the
-    request path by dropping this route's own relative tail. A remapped base is
-    followed rather than the default assumed — the served page's asset URLs and the
-    session cookie's ``Path`` both derive from it."""
+    """This deployment's absolute mount prefix for the web channel.
+
+    Read from the request path by dropping this route's own relative tail. A remapped base
+    is followed rather than the default assumed — the served page's asset URLs and the
+    session cookie's ``Path`` both derive from it.
+    """
     depth = len(route_path.strip("/").split("/"))
     return "/".join(request.url.path.split("/")[:-depth])
 
@@ -95,16 +106,21 @@ def _mount_base(request: Request, route_path: str) -> str:
 async def _mint_session(
     response: Response, identity: str, settings: WebSettings, params: dict[str, str], mount_base: str
 ) -> None:
-    """Register a fresh token/visitor-id pair for one web route, with the entry's link
-    params, and set the cookie. The registration lands first: a cookie whose token
-    resolves to nothing is not a session."""
+    """Register a fresh token/visitor-id pair for one web route and set the cookie.
+
+    Carries the entry's link params. The registration lands first: a cookie whose token
+    resolves to nothing is not a session.
+    """
     token = mint_session_token()
     await register_session(token, mint_visitor_id(), identity, params)
     set_session_cookie(response, token, settings, mount_base)
 
 
 def _client_bucket(request: Request) -> str:
-    """The accountable network client bucket for a request — the same value the
-    public-door rate limiter derives, keyed on the network peer, never a resettable
-    visitor id. It is what the turn cap and the entry-gate throttle hold accountable."""
+    """The accountable network client bucket for a request.
+
+    The same value the public-door rate limiter derives, keyed on the network peer, never
+    a resettable visitor id. It is what the turn cap and the entry-gate throttle hold
+    accountable.
+    """
     return client_bucket(request.client.host if request.client else None, request.headers.get(XFF_HEADER, ""))

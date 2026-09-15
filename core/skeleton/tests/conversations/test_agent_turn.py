@@ -15,7 +15,7 @@ from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.states.context import current_state_context
 
 from .conftest import (
@@ -38,7 +38,7 @@ async def test_denied_turn_delivers_an_error_outcome(env, monkeypatch):
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
 
     async def _deny(identity, agent_name, **kwargs):
-        raise PermissionDenied("no run grant")
+        raise PermissionDeniedError("no run grant")
 
     monkeypatch.setattr(agent_turn_module, "authorize_execution_agent_run", _deny)
 

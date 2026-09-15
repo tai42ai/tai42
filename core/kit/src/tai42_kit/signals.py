@@ -37,6 +37,7 @@ class SignalSubscription:
     __slots__ = ("_cancelled", "_chain", "callback", "name", "sig")
 
     def __init__(self, chain: SignalChain, sig: signal.Signals, callback: Callable[[], object], name: str) -> None:
+        """Record the owning ``chain``, the ``sig`` subscribed to, the ``callback``, and its ``name``."""
         self._chain = chain
         self.sig = sig
         self.callback = callback
@@ -44,14 +45,18 @@ class SignalSubscription:
         self._cancelled = False
 
     def cancel(self) -> None:
-        """Leave the chain. Idempotent: a subscriber unwinding through several
-        ``finally`` blocks must not have to track whether it already left."""
+        """Leave the chain.
+
+        Idempotent: a subscriber unwinding through several ``finally`` blocks must
+        not have to track whether it already left.
+        """
         if self._cancelled:
             return
         self._cancelled = True
         self._chain._remove(self)
 
     def __repr__(self) -> str:
+        """Name and signal of this subscription, for logs and diagnostics."""
         return f"<SignalSubscription {self.name!r} on {self.sig.name}>"
 
 
@@ -64,6 +69,7 @@ class SignalChain:
     """
 
     def __init__(self) -> None:
+        """Start with no subscribers and no bound loop; the first :meth:`add` adopts the loop."""
         # Subscribers per signal, in registration order; dispatch walks them
         # backwards. A signal with no subscribers carries no entry, so the dict
         # being empty is exactly "this chain owns no asyncio handler".
@@ -142,9 +148,11 @@ class SignalChain:
                 logger.error("signal-chain subscriber %r raised on %s", sub.name, sig.name, exc_info=True)
 
     def _remove(self, sub: SignalSubscription) -> None:
-        """Drop one subscriber, uninstalling the asyncio handler only when it was
-        the last one for its signal — an earlier uninstall would restore SIGTERM
-        to ``SIG_DFL`` under the subscribers that stayed."""
+        """Drop one subscriber, uninstalling the asyncio handler only when it was the last for its signal.
+
+        An earlier uninstall would restore SIGTERM to ``SIG_DFL`` under the
+        subscribers that stayed.
+        """
         subs = self._subs.get(sub.sig)
         if subs is None or sub not in subs:
             return

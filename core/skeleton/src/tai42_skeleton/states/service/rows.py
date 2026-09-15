@@ -23,25 +23,31 @@ _SCHEMA_BODY_ADAPTER = TypeAdapter(TemplatedText | dict[str, Any])
 
 
 async def _resolve_state_schema(field: str, stored: TemplatedText | dict[str, Any]) -> dict[str, Any]:
-    """Resolve a state's authored base ``schema`` — the ``TemplatedText | dict`` union — to the
-    plain schema dict every composition, validation and narrowing check works on.
+    """Resolve a state's authored base ``schema`` to the plain schema dict callers work on.
+
+    The ``TemplatedText | dict`` union becomes the plain schema dict every composition,
+    validation and narrowing check works on.
 
     An in-memory value already typed by the declaration model is used as-is; a value read raw
     from the store (a JSON object) is RE-PARSED into the union first, so a stored
     ``{"id": …}`` / ``{"content": …}`` body is recognized as a stored schema reference rather
     than mistaken for an inline schema. A :class:`~tai42_contract.template.TemplatedText` is then
     rendered and parsed to its schema; an unfetchable id or a body that does not render to a JSON
-    object raises loudly (naming ``field``), never a silent empty schema."""
+    object raises loudly (naming ``field``), never a silent empty schema.
+    """
     typed = stored if isinstance(stored, TemplatedText) else _SCHEMA_BODY_ADAPTER.validate_python(stored)
     resolved = await resolve_schema_body(field, typed)
-    assert resolved is not None  # a base schema is never None (its unset value is an empty dict)
+    if resolved is None:
+        raise AssertionError
     return resolved
 
 
 def _page_limit(limit: Any) -> int:
-    """The clamped page size for the listing/search doors — ``None`` takes the default; a
-    non-positive or non-integer limit is a loud client error; anything above the hard cap
-    is clamped."""
+    """The clamped page size for the listing/search doors.
+
+    ``None`` takes the default; a non-positive or non-integer limit is a loud client
+    error; anything above the hard cap is clamped.
+    """
     if limit is None:
         return _DEFAULT_PAGE
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:

@@ -1,4 +1,3 @@
-import { describe, expect, it } from 'vitest';
 import type {
   NavEntryContribution,
   PageContribution,
@@ -6,6 +5,8 @@ import type {
   SettingsTabContribution,
   ToolPanelContribution,
 } from '@tai42/studio-sdk';
+import { describe, expect, it } from 'vitest';
+
 import { register } from './index';
 
 /**

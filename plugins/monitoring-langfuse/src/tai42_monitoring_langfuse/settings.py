@@ -47,4 +47,5 @@ class LangfuseSettings(TaiBaseSettings):
 
 @settings_cache
 def langfuse_settings() -> LangfuseSettings:
+    """The cached Langfuse monitoring settings."""
     return LangfuseSettings()

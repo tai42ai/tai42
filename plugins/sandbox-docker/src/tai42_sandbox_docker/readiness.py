@@ -37,8 +37,7 @@ PROBE_EXEC_TIMEOUT_SECONDS = PROBE_DIAL_WAIT_SECONDS + 20
 
 
 def is_engine_unreachable(status: int) -> bool:
-    """Whether an engine ``DockerError`` status is aiodocker's connection-failure
-    code — the signal that the daemon went away."""
+    """Whether an engine ``DockerError`` status is aiodocker's connection-failure code — the daemon went away."""
     return status == ENGINE_UNREACHABLE_STATUS
 
 
@@ -49,7 +48,8 @@ def engine_control_address(host: str) -> tuple[str, int]:
     engine's own control address across the firewall. A local-socket endpoint
     (``unix://`` / ``npipe://`` / a bare path) has no network address to probe, so an
     enabled probe against one is refused loudly rather than run against a target that
-    does not exist."""
+    does not exist.
+    """
     if host.startswith(("unix://", "npipe://", "/")):
         raise SandboxError(
             "the egress-firewall readiness probe needs a network engine endpoint to derive its deny "
@@ -67,7 +67,8 @@ def resolve_ipv4(host: str) -> str:
     The probe hands the SESSION an address, not a name: an inner egress container does
     not share the app's DNS view of the control network, so the app resolves the
     engine host here. A host that resolves to no address is a loud refusal, never a
-    silent skip."""
+    silent skip.
+    """
     try:
         infos = socket.getaddrinfo(host, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
     except OSError as exc:
@@ -80,14 +81,14 @@ def resolve_ipv4(host: str) -> str:
 
 
 def resolver_from_resolv_conf(resolv_conf: str) -> str:
-    """The probe container's own DNS resolver — the first ``nameserver`` in its
-    ``/etc/resolv.conf`` — the readiness ALLOW target.
+    """The probe container's own DNS resolver — the first ``nameserver`` in its ``/etc/resolv.conf``.
 
-    On the rootless-dind engine this address sits inside the private range the firewall
+    The readiness ALLOW target. On the rootless-dind engine this address sits inside the private range the firewall
     drops and stays reachable only because the firewall accepts the daemon's own subnets
     above those drops, so a reachable resolver is a statement about that ordering. A
     resolv.conf carrying no nameserver cannot yield a sound allow target, so the probe
-    refuses loudly rather than probe a target it could not derive."""
+    refuses loudly rather than probe a target it could not derive.
+    """
     for line in resolv_conf.splitlines():
         fields = line.split()
         if len(fields) >= 2 and fields[0] == "nameserver":

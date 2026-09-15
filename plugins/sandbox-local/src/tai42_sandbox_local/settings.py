@@ -47,4 +47,5 @@ class SandboxLocalSettings(SandboxDispatchSettings):
 
 @settings_cache
 def sandbox_local_settings() -> SandboxLocalSettings:
+    """The cached ``SandboxLocalSettings`` for this process."""
     return SandboxLocalSettings()

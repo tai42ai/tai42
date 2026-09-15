@@ -64,9 +64,11 @@ State = Literal["active", "default", "off"]
 
 
 class KindStatus(BaseModel):
-    """One pluggable kind's live status. ``plugin`` is the serving module/provider
-    name when a real implementation is registered, else ``None``; ``detail`` is a
-    short human string (provider names, channel names, or the absence reason)."""
+    """One pluggable kind's live status.
+
+    ``plugin`` is the serving module/provider name when a real implementation is registered, else ``None``;
+    ``detail`` is a short human string (provider names, channel names, or the absence reason).
+    """
 
     kind: str
     state: State
@@ -75,13 +77,16 @@ class KindStatus(BaseModel):
 
 
 def _identity_provider_registered(name: str) -> bool:
-    """Whether an identity provider is registered under ``name`` — the registry's
-    ``KeyError``-on-miss lookup reported as a boolean."""
+    """Whether an identity provider is registered under ``name``.
+
+    The registry's ``KeyError``-on-miss lookup reported as a boolean.
+    """
     try:
         get_identity_provider_factory_staged(name)
-        return True
     except KeyError:
         return False
+    else:
+        return True
 
 
 def _identity_row() -> KindStatus:
@@ -221,8 +226,9 @@ def _studio_plugins_row() -> KindStatus:
 
 @dataclass(frozen=True)
 class GatedFeature:
-    """One DB-backed feature gate's registration — the single source both the live
-    ``kinds`` table and the generated OFF-behavior doc read.
+    """One DB-backed feature gate's registration.
+
+    The single source both the live ``kinds`` table and the generated OFF-behavior doc read.
 
     ``kind`` is the pluggable-kind name the row reports; ``label`` is the human name
     the docs table shows; ``configured`` is the predicate reading the same fresh
@@ -316,9 +322,11 @@ _GATED_FEATURES: list[GatedFeature] = [
 
 
 def _gated_feature_row(feature: GatedFeature) -> KindStatus:
-    """One DB-backed feature's live status: ``active`` when its store is configured,
-    ``off`` (a legal, reported state — never an error) when it is not, naming the env
-    var that turns it on."""
+    """One DB-backed feature's live status.
+
+    ``active`` when its store is configured, ``off`` (a legal, reported state — never an error) when it is
+    not, naming the env var that turns it on.
+    """
     var = feature.enabling_var()
     if feature.configured():
         return KindStatus(kind=feature.kind, state="active", plugin=None, detail=f"{var} configured")
@@ -326,9 +334,11 @@ def _gated_feature_row(feature: GatedFeature) -> KindStatus:
 
 
 def _connectors_row(feature: GatedFeature) -> KindStatus:
-    """The connectors feature row: the shared store-configured gate, with the count of
-    registered providers appended so the table shows how many providers are wired even
-    when the store — and thus the connectors surface — is off."""
+    """The connectors feature row: the shared store-configured gate, with the count of registered providers appended.
+
+    The count is shown so the table reveals how many providers are wired even when the store — and thus the
+    connectors surface — is off.
+    """
     row = _gated_feature_row(feature)
     return row.model_copy(update={"detail": f"{row.detail}, {len(list_providers_staged())} provider(s)"})
 
@@ -364,10 +374,12 @@ def collect_kind_status() -> list[KindStatus]:
 
 
 def warn_if_noop_monitoring(rows: list[KindStatus], log: logging.Logger) -> None:
-    """Emit the once-per-process NoOp-monitoring warning when the monitoring row is
-    ``default`` (NoOp is the active backend). A no-op after the first warning and
-    when a real recorder is installed, so a monitoring-less deployment warns exactly
-    once across boots/reloads and a configured deployment never warns."""
+    """Emit the once-per-process NoOp-monitoring warning when the monitoring row is ``default``.
+
+    ``default`` means NoOp is the active backend. A no-op after the first warning and when a real recorder
+    is installed, so a monitoring-less deployment warns exactly once across boots/reloads and a configured
+    deployment never warns.
+    """
     global _NOOP_WARNED
     if _NOOP_WARNED:
         return

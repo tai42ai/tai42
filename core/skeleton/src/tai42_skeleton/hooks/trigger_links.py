@@ -1,5 +1,4 @@
-"""Trigger links — minted, token-bearing PUBLIC capability URLs that fire a hook
-topic.
+"""Trigger links — minted, token-bearing PUBLIC capability URLs that fire a hook topic.
 
 A trigger link resolves a raw token to a hook TOPIC (plus optional per-link
 ``tool_kwargs``, which fill only the arguments each fired hook's author left unpinned)
@@ -204,9 +203,11 @@ class TriggerLinkError(Exception):
 
     ``status`` is 400 (an invalid ttl/name/params or verifier-bound topic), 404
     (the uniform door/revoke miss), 409 (a taken explicit name), or 501 (the
-    in-memory-mode refusal). The message is the operator-facing text."""
+    in-memory-mode refusal). The message is the operator-facing text.
+    """
 
     def __init__(self, status: int, message: str) -> None:
+        """Carry the HTTP ``status`` the adapters map this failure to and the operator-facing ``message``."""
         super().__init__(message)
         self.status = status
         self.message = message
@@ -218,7 +219,8 @@ class ResolvedTrigger:
 
     ``execution_key`` gates the dispatch and must still carry ``execution_key_fingerprint``
     (a revoke+remint fails this and denies the fire). ``tool_kwargs`` merges BELOW each
-    fired hook's own static ``tool_kwargs``."""
+    fired hook's own static ``tool_kwargs``.
+    """
 
     topic: str
     execution_key: str
@@ -228,8 +230,10 @@ class ResolvedTrigger:
 
 
 class _TriggerRecord(BaseModel):
-    """The stored record body, validated on restore so a malformed backup never
-    revives a live URL that 500s at every fire."""
+    """The stored record body, validated on restore.
+
+    Validated so a malformed backup never revives a live URL that 500s at every fire.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -274,8 +278,10 @@ def _validate_name(name: str) -> None:
 
 
 def _validate_ttl(ttl_seconds: int | None) -> int:
-    """The Lua ``ttl`` arg: 0 for a permanent link, else the positive seconds. A
-    non-positive or over-physical-bound ttl is a loud 400, never a silent clamp."""
+    """The Lua ``ttl`` arg: 0 for a permanent link, else the positive seconds.
+
+    A non-positive or over-physical-bound ttl is a loud 400, never a silent clamp.
+    """
     if ttl_seconds is None:
         return 0
     if ttl_seconds <= 0:
@@ -290,9 +296,11 @@ def _validate_ttl(ttl_seconds: int | None) -> int:
 
 
 async def _verifier_bound(manager: Any, topic: str) -> bool:
-    """Whether ``topic`` carries a webhook-verifier binding. A lookup ERROR
-    propagates (a 500) — never treated as unbound, which would create/fire on a
-    verified topic."""
+    """Whether ``topic`` carries a webhook-verifier binding.
+
+    A lookup ERROR propagates (a 500) — never treated as unbound, which would
+    create/fire on a verified topic.
+    """
     return await manager.get_topic_verifier(topic) is not None
 
 
@@ -319,7 +327,8 @@ async def create_trigger_link(
     token ever appears.
 
     Empty ``topic``/``execution_key`` are refused HERE, the one point every minting edge
-    passes through, so a minted record can never be one the restore path would reject."""
+    passes through, so a minted record can never be one the restore path would reject.
+    """
     manager = _redis_manager()
     settings: HooksSettings = manager.settings
 
@@ -341,7 +350,8 @@ async def create_trigger_link(
 
     explicit_name = name is not None
     if explicit_name:
-        assert name is not None
+        if name is None:
+            raise AssertionError
         _validate_name(name)
 
     now = datetime.now(UTC)
@@ -402,13 +412,16 @@ def _default_name() -> str:
 
 
 async def list_trigger_links() -> dict:
-    """Every live trigger link's record plus its hash PREFIX (never a raw token,
-    none is stored) and its DERIVED ``trigger_auth`` — how the door authenticates its
-    caller, derived from the record AND the topic verifier bindings as they stand NOW, so
-    a topic that gained a verifier after the mint reads ``out-of-service``, not open.
-    A name key whose record is absent is a PERMANENT orphan (a corrupt backup) — logged at
-    WARNING and skipped, not left invisibly 409-squatting its name; a name key whose
-    value is nil (expired between SCAN and MGET) is a pure TTL race, skipped silently."""
+    """Every live trigger link's record plus its hash PREFIX and its DERIVED ``trigger_auth``.
+
+    The hash prefix never exposes a raw token (none is stored). ``trigger_auth`` — how the
+    door authenticates its caller — is derived from the record AND the topic verifier
+    bindings as they stand NOW, so a topic that gained a verifier after the mint reads
+    ``out-of-service``, not open. A name key whose record is absent is a PERMANENT orphan
+    (a corrupt backup) — logged at WARNING and skipped, not left invisibly 409-squatting
+    its name; a name key whose value is nil (expired between SCAN and MGET) is a pure TTL
+    race, skipped silently.
+    """
     manager = _redis_manager()
     settings: HooksSettings = manager.settings
     prefix = settings.trigger_name_key_prefix
@@ -451,9 +464,12 @@ async def list_trigger_links() -> dict:
 
 
 async def revoke_trigger_link(name: str) -> None:
-    """Revoke a link by name — DEL the record + name keys and write the permanent
-    tombstone in ONE atomic script (so a revoke racing a same-name re-create cannot
-    orphan a live record key). A missing name is a loud 404."""
+    """Revoke a link by name.
+
+    DELs the record + name keys and writes the permanent tombstone in ONE atomic script
+    (so a revoke racing a same-name re-create cannot orphan a live record key). A missing
+    name is a loud 404.
+    """
     manager = _redis_manager()
     settings: HooksSettings = manager.settings
     async with client_ctx(RedisClient, settings.redis) as r:
@@ -471,14 +487,15 @@ async def revoke_trigger_link(name: str) -> None:
 
 
 async def resolve_trigger_token(token: str) -> ResolvedTrigger:
-    """Resolve a raw token to the dispatch facts of its link for a fire — multi-use,
-    NO burn. ONE ``MGET`` of record + tombstone: a record miss OR a tombstone
-    present ⇒ the uniform 404 (a tombstoned hash is dead at the door itself, not
-    only at backup import). A corrupt stored record — one carrying no ``execution_key``
-    included — raises (a 500, nothing dispatched). The verifier binding is re-checked: a
-    topic verified after the link was minted answers the SAME 404 + a server log naming
-    the cause. ``require_api_key`` rides back for the door to decide — only it holds the
-    request."""
+    """Resolve a raw token to the dispatch facts of its link for a fire — multi-use, NO burn.
+
+    ONE ``MGET`` of record + tombstone: a record miss OR a tombstone present ⇒ the uniform
+    404 (a tombstoned hash is dead at the door itself, not only at backup import). A
+    corrupt stored record — one carrying no ``execution_key`` included — raises (a 500,
+    nothing dispatched). The verifier binding is re-checked: a topic verified after the
+    link was minted answers the SAME 404 + a server log naming the cause.
+    ``require_api_key`` rides back for the door to decide — only it holds the request.
+    """
     manager = get_hooks_manager()
     if isinstance(manager, InMemoryHooksManager):
         # Trigger links cannot exist in-memory; the CRUD refuses them, so a resolve
@@ -524,11 +541,13 @@ async def resolve_trigger_token(token: str) -> ResolvedTrigger:
 
 
 async def export_trigger_links() -> dict:
-    """The trigger-link records (each with its FULL token hash) plus the tombstone
-    hashes, for the ``webhooks`` backup section. The full hash rides here by
-    construction (hash-not-token); the list route keeps returning only the prefix.
-    On an in-memory deployment the store provably holds none, so this returns
-    truthfully empty rather than refusing (hooks export is unaffected)."""
+    """The trigger-link records (each with its FULL token hash) plus the tombstone hashes.
+
+    For the ``webhooks`` backup section. The full hash rides here by construction
+    (hash-not-token); the list route keeps returning only the prefix. On an in-memory
+    deployment the store provably holds none, so this returns truthfully empty rather than
+    refusing (hooks export is unaffected).
+    """
     manager = get_hooks_manager()
     if isinstance(manager, InMemoryHooksManager):
         return {"trigger_links": [], "tombstones": []}
@@ -564,15 +583,17 @@ async def export_trigger_links() -> dict:
 
 
 async def bound_hashes_by_name() -> dict[str, str]:
-    """Every ``name:*`` index binding on the store — ``name`` -> token hash —
-    INCLUDING orphans (a name key whose ``rec:*`` record is gone). This is the
-    "what hash is bound under ANY name" view the import duplicate-hash refusal needs:
-    revoke reads a name key's hash and DELs that record whether or not the record
-    still exists, so an orphaned binding is authoritative. If import ignored orphans,
-    a NEW name binding an already-orphaned hash would slip past the refusal, and later
-    revoking the orphan would destroy the new name's live record. A name key nil
-    between SCAN and MGET (a pure TTL race) is skipped. An in-memory deployment holds
-    none, so this returns truthfully empty."""
+    """Every ``name:*`` index binding on the store — ``name`` -> token hash, INCLUDING orphans.
+
+    An orphan is a name key whose ``rec:*`` record is gone. This is the "what hash is
+    bound under ANY name" view the import duplicate-hash refusal needs: revoke reads a
+    name key's hash and DELs that record whether or not the record still exists, so an
+    orphaned binding is authoritative. If import ignored orphans, a NEW name binding an
+    already-orphaned hash would slip past the refusal, and later revoking the orphan would
+    destroy the new name's live record. A name key nil between SCAN and MGET (a pure TTL
+    race) is skipped. An in-memory deployment holds none, so this returns truthfully
+    empty.
+    """
     manager = get_hooks_manager()
     if isinstance(manager, InMemoryHooksManager):
         return {}
@@ -594,17 +615,20 @@ async def bound_hashes_by_name() -> dict[str, str]:
 
 
 async def restore_trigger_link(*, name: str, token_hash: str, record: dict, scan: ExecutionKeyScan) -> str:
-    """Restore one exported record atomically. Refuses malformed triples loudly (name
-    mismatch, pattern-violating name, non-hex hash, an ``expires_at`` that is unparseable
-    or naive, a body failing model validation, an execution key that is unusable, whose
-    live fingerprint no longer matches, or whose policy a tokenless fire cannot evaluate);
-    refuses a tombstoned hash (``skipped_tombstoned``) and a hash already live under a
-    different name; skips an already-expired record (``skipped_expired``). Returns one of
-    created / updated / skipped_tombstoned / skipped_expired.
+    """Restore one exported record atomically.
+
+    Refuses malformed triples loudly (name mismatch, pattern-violating name, non-hex
+    hash, an ``expires_at`` that is unparseable or naive, a body failing model validation,
+    an execution key that is unusable, whose live fingerprint no longer matches, or whose
+    policy a tokenless fire cannot evaluate); refuses a tombstoned hash
+    (``skipped_tombstoned``) and a hash already live under a different name; skips an
+    already-expired record (``skipped_expired``). Returns one of created / updated /
+    skipped_tombstoned / skipped_expired.
 
     Key usability and token-free evaluability are asserted here exactly as at the mint
     door; the pass-role half is not — this route is admin-only fenced. ``scan`` batches
-    those reads so one execution key is read once across the whole restore."""
+    those reads so one execution key is read once across the whole restore.
+    """
     manager = _redis_manager()
     settings: HooksSettings = manager.settings
 
@@ -625,7 +649,8 @@ async def restore_trigger_link(*, name: str, token_hash: str, record: dict, scan
     ttl = _remaining_ttl(model.expires_at)
     if ttl is _EXPIRED:
         return "skipped_expired"
-    assert isinstance(ttl, int)
+    # Type-narrowing invariant; the ``_EXPIRED`` case returned above (assert keeps the complexity floor).
+    assert isinstance(ttl, int)  # noqa: S101
 
     # Settle the tombstone BEFORE reading the key, so an unusable key on an already-revoked
     # record stays a benign ``skipped_tombstoned`` instead of an import error. The check
@@ -662,13 +687,15 @@ async def restore_trigger_link(*, name: str, token_hash: str, record: dict, scan
 
 
 async def restore_tombstone(token_hash: str) -> None:
-    """Restore a tombstone marker (idempotent). Refuses loudly in-memory and on a
-    non-hex hash — an imported tombstone is a permanent kill switch, never written
-    for garbage.
+    """Restore a tombstone marker (idempotent).
+
+    Refuses loudly in-memory and on a non-hex hash — an imported tombstone is a permanent
+    kill switch, never written for garbage.
 
     The kill is ATOMIC with the marker: a link still live locally under that hash is
     deleted with it, record and name index together — otherwise the pair keeps showing
-    up in listings and later backups while its door already answers the uniform 404."""
+    up in listings and later backups while its door already answers the uniform 404.
+    """
     manager = _redis_manager()
     settings: HooksSettings = manager.settings
     if not isinstance(token_hash, str):
@@ -693,21 +720,25 @@ async def restore_tombstone(token_hash: str) -> None:
 
 
 class _Expired:
-    """A distinct sentinel so a computed ``ttl`` of "already expired" never collides
-    with a real positive ttl."""
+    """A distinct sentinel for a computed ``ttl`` of "already expired".
+
+    Kept distinct so it never collides with a real positive ttl.
+    """
 
 
 _EXPIRED = _Expired()
 
 
 def _remaining_ttl(expires_at: str | None) -> int | _Expired:
-    """The Lua ``ttl`` arg for a restore: 0 for a permanent link; ``_EXPIRED`` when
-    nothing remains; else the whole seconds remaining, CEILed so a sub-second
-    remainder restores with EX 1 (never EX 0, a Redis error).
+    """The Lua ``ttl`` arg for a restore: 0 permanent, ``_EXPIRED`` when nothing remains, else seconds left.
+
+    The remaining seconds are CEILed so a sub-second remainder restores with EX 1 (never
+    EX 0, a Redis error).
 
     An ``expires_at`` that is unparseable, or parseable but NAIVE, is a loud typed
     refusal: the subtraction below would otherwise raise a bare ``TypeError`` that escapes
-    the caller's per-record ``TriggerLinkError`` handler and tears the section mid-write."""
+    the caller's per-record ``TriggerLinkError`` handler and tears the section mid-write.
+    """
     if expires_at is None:
         return 0
     try:
@@ -723,10 +754,12 @@ def _remaining_ttl(expires_at: str | None) -> int | _Expired:
 
 
 async def _scan_all(r: Any, pattern: str) -> list[str]:
-    """Every key matching ``pattern`` once, across ALL SCAN pages (a first-page-only
-    cursor bug would silently drop live links from the management surface and from
-    backups; SCAN may also return a key more than once under a concurrent rehash, so
-    duplicates are collapsed while first-seen order is preserved)."""
+    """Every key matching ``pattern`` once, across ALL SCAN pages.
+
+    A first-page-only cursor bug would silently drop live links from the management
+    surface and from backups; SCAN may also return a key more than once under a
+    concurrent rehash, so duplicates are collapsed while first-seen order is preserved.
+    """
     keys: list[str] = []
     cursor = 0
     while True:
@@ -738,6 +771,9 @@ async def _scan_all(r: Any, pattern: str) -> list[str]:
 
 
 def _as_str(value: Any) -> str:
-    """Redis may hand back ``bytes`` or ``str`` depending on decode settings; the key
-    and record strings are ascii-safe, so normalize to ``str``."""
+    """Normalize Redis's ``bytes``-or-``str`` return to ``str``.
+
+    Redis may hand back ``bytes`` or ``str`` depending on decode settings; the key and
+    record strings are ascii-safe, so normalizing is safe.
+    """
     return value.decode() if isinstance(value, bytes) else value

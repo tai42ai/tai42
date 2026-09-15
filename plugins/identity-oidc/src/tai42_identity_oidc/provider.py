@@ -74,6 +74,7 @@ class OidcIdentityProvider(IdentityProvider):
     """
 
     def __init__(self, settings: IdentityProviderSettings) -> None:
+        """Read the ``TAI_IDENTITY_OIDC_*`` config, raising on a missing issuer/audience; ``settings`` is unused."""
         # The injected AC settings object satisfies the factory contract but is
         # unused; a missing required issuer/audience raises loudly here.
         self._settings = OidcIdentitySettings()
@@ -94,6 +95,7 @@ class OidcIdentityProvider(IdentityProvider):
             return self._jwks
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
+        """Verify a JWT against the issuer's JWKS and map it to an :class:`AuthIdentity`, or ``None`` if not a JWT."""
         # Structural gate: a non-JWT credential is not ours — return None so it falls
         # through the provider chain with no verification attempt and no fetch.
         if not looks_like_jwt(token):
@@ -129,6 +131,7 @@ class OidcIdentityProvider(IdentityProvider):
         return AuthIdentity(user_id=user_id, claims=claims)
 
     async def healthcheck(self) -> None:
+        """Prove the issuer's discovery and JWKS are reachable and well-formed; a transport/parse failure raises."""
         # Prove the issuer's discovery + JWKS are reachable and well-formed at boot.
         # ``get_key`` forces a real fetch; a missing probe kid is not a failure (the
         # JWKS was fetched and parsed), but a transport/parse/size failure propagates.

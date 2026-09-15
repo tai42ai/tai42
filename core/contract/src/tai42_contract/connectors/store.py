@@ -55,8 +55,10 @@ class ConnectorTokenStore(ABC):
         provider_id: str | None = None,
         alias: str | None = None,
     ) -> bool:
-        """Write the blob. Returns ``True`` when the write committed, ``False``
-        when an ``expected_blob`` compare-and-set lost (see below).
+        """Write the blob.
+
+        Returns ``True`` when the write committed, ``False`` when an ``expected_blob`` compare-and-set
+        lost (see below).
 
         ``create_only=True`` requires the record to be new — an existing record
         at this key raises :class:`ConnectorError` (dup-connection guard).

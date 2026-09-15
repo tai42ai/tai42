@@ -1,5 +1,4 @@
-"""Alias-aware ``state_records`` reads — subject resolution, single-record and view reads,
-and the backup exporter's record/alias reads."""
+"""Alias-aware ``state_records`` reads — subject resolution, single-record and view reads, and export reads."""
 
 from __future__ import annotations
 
@@ -17,10 +16,11 @@ class _RecordReadStore(_StoreBase):
     """Alias-aware reads over ``state_records`` and ``state_subject_aliases``."""
 
     async def _resolve_subject(self, cur: Any, state: str, subject: StateSubject) -> tuple[str, str]:
-        """The canonical ``(kind, key)`` for ``subject`` — one indexed lookup on the
-        CALLER's cursor, so it joins the caller's transaction (and its declaration-row
-        lock, which serializes against every fold). No alias row ⇒ the subject IS its own
-        canonical. Target scope never changes across a fold."""
+        """The canonical ``(kind, key)`` for ``subject`` — one indexed lookup on the CALLER's cursor.
+
+        Joins the caller's transaction (and its declaration-row lock, which serializes against every fold).
+        No alias row ⇒ the subject IS its own canonical. Target scope never changes across a fold.
+        """
         await cur.execute(
             "SELECT canonical_kind, canonical_key FROM state_subject_aliases "
             "WHERE state = %s AND target_kind = %s AND target_name = %s AND alias_kind = %s AND alias_key = %s",
@@ -30,8 +30,10 @@ class _RecordReadStore(_StoreBase):
         return (subject.kind, subject.key) if row is None else (row["canonical_kind"], row["canonical_key"])
 
     async def read_record(self, state: str, subject: StateSubject) -> tuple[dict[str, Any] | None, float | None]:
-        """``(data, seq)`` for ``subject`` — the subject resolves through the alias table
-        (a folded key lands on the surviving record); ``(None, None)`` when absent."""
+        """``(data, seq)`` for ``subject``, resolved through the alias table; ``(None, None)`` when absent.
+
+        A folded key lands on the surviving record.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -49,10 +51,11 @@ class _RecordReadStore(_StoreBase):
     async def read_record_view(
         self, state: str, subject: StateSubject, *, conn: AsyncConnection[Any] | None = None
     ) -> dict[str, Any] | None:
-        """The read door's view: ``{data, seq, canonical_subject, folded_from}`` —
-        ``folded_from`` is every alias pointing at the canonical — or ``None`` when no
-        record exists. With ``conn`` the read joins the caller's transaction (a attach
-        reconciler reading its own in-flight merges)."""
+        """The read door's view: ``{data, seq, canonical_subject, folded_from}``, or ``None`` when absent.
+
+        ``folded_from`` is every alias pointing at the canonical. With ``conn`` the read joins the caller's
+        transaction (an attach reconciler reading its own in-flight merges).
+        """
         async with self._read_cursor(conn) as cur:
             kind, key = await self._resolve_subject(cur, state, subject)
             await cur.execute(
@@ -89,8 +92,10 @@ class _RecordReadStore(_StoreBase):
             }
 
     async def export_records(self, state: str) -> list[dict[str, Any]]:
-        """Every record of a state as export rows ``{target_kind, target_name,
-        subject_kind, subject_key, data}`` — the backup exporter's read."""
+        """Every record of a state as export rows ``{target_kind, target_name, subject_kind, subject_key, data}``.
+
+        The backup exporter's read.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,

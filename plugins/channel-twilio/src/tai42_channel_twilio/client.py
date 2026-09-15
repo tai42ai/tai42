@@ -58,8 +58,10 @@ async def send_message(to: str, from_number: str, body: str, media_urls: list[st
 
 
 def _error_detail(response: httpx.Response) -> str:
-    """Twilio's ``code``/``message`` when the body is JSON, else raw text; bounded
-    to 500 chars so an HTML error page cannot flood the exception."""
+    """Twilio's ``code``/``message`` when the body is JSON, else raw text.
+
+    Bounded to 500 chars so an HTML error page cannot flood the exception.
+    """
     try:
         payload = response.json()
     except ValueError:

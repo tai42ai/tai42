@@ -1,5 +1,4 @@
-"""Manifest secret seal — retag resolved ``!ENV`` values back to their markers and
-refuse any stranded resolved secret before a manifest document persists.
+"""Manifest secret seal — retag resolved ``!ENV`` values and refuse stranded secrets before a manifest persists.
 
 A manifest's only read surface for the ``mcp`` section is the RESOLVED view
 (``!ENV`` markers materialized), so the natural round-trip — read the resolved view,
@@ -218,9 +217,11 @@ def _contains_secret(node: Any, secrets: set[str]) -> bool:
 
 
 def _oauth_secret_names(manifest: Mapping[str, Any]) -> set[str]:
-    """Every ``connectors[*].client_secret_env`` NAME in a manifest dict whose connector
-    is ``kind == "oauth"`` — the env key names whose values the platform masks by
-    derivation. A missing/malformed ``connectors`` key contributes nothing."""
+    """Every ``connectors[*].client_secret_env`` NAME whose connector is ``kind == "oauth"``.
+
+    These are the env key names whose values the platform masks by derivation. A
+    missing/malformed ``connectors`` key contributes nothing.
+    """
     names: set[str] = set()
     connectors = manifest.get("connectors")
     if isinstance(connectors, list):
@@ -235,18 +236,23 @@ def _oauth_secret_names(manifest: Mapping[str, Any]) -> set[str]:
 def _leaving_connector_secrets(
     preserved_manifest: Mapping[str, Any], candidate_manifest: Mapping[str, Any]
 ) -> set[str]:
-    """The oauth ``client_secret_env`` NAMES the change DROPS from the manifest: present in
-    ``preserved`` (before), absent from ``candidate`` (after). A set difference of NAMES, not
-    of connector ids — an ``oauth -> none`` update keeps the connector id but drops the name.
+    """The oauth ``client_secret_env`` NAMES the change DROPS from the manifest.
+
+    Present in ``preserved`` (before), absent from ``candidate`` (after). A set difference
+    of NAMES, not of connector ids — an ``oauth -> none`` update keeps the connector id but
+    drops the name.
 
     When a connector leaves, its secret env VALUE is not deleted (mcp-server parity), so its
     name must stay masked: the pipeline persists these names into the stored
     ``TAI_ENV_SECRET_KEYS`` through the one locked env+manifest seam so the value keeps its
-    mask even though it is no longer a live ``client_secret_env`` derivation."""
+    mask even though it is no longer a live ``client_secret_env`` derivation.
+    """
     return _oauth_secret_names(preserved_manifest) - _oauth_secret_names(candidate_manifest)
 
 
 def _parse_marks(value: str | None) -> list[str]:
-    """The comma-separated ``TAI_ENV_SECRET_KEYS`` value as an ordered, de-duplicated,
-    whitespace-trimmed list (empty segments dropped)."""
+    """The comma-separated ``TAI_ENV_SECRET_KEYS`` value as an ordered, de-duplicated, trimmed list.
+
+    Empty segments are dropped.
+    """
     return list(dict.fromkeys(mark.strip() for mark in (value or "").split(",") if mark.strip()))

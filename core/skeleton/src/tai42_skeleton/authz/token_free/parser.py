@@ -1,7 +1,9 @@
-"""The recursive-descent grammar for the allowlisted condition language: the parser
-that recognizes exactly the constructs the taint analysis can reason about and its
-grammar vocabulary (keyword literals, operator precedence classes, builtin allowlist,
-named refusals)."""
+"""The recursive-descent grammar for the allowlisted condition language.
+
+The parser recognizes exactly the constructs the taint analysis can reason
+about, along with its grammar vocabulary (keyword literals, operator precedence
+classes, builtin allowlist, named refusals).
+"""
 
 from __future__ import annotations
 
@@ -126,7 +128,8 @@ class _Parser:
         Paired with a ``finally`` that leaves the level again. The three self-recursive
         rules — the pipe, the alternative and the unary prefixes — call it, and every
         other nested construct (parentheses, brackets, object values, ``as`` bodies)
-        re-enters the grammar through the pipe, so one bound covers them all."""
+        re-enters the grammar through the pipe, so one bound covers them all.
+        """
         self._budget.descend(self._text, self._peek().position)
 
     def _pipe(self) -> _Node:
@@ -349,9 +352,12 @@ class _Parser:
         return _Call(token.position, token.text, tuple(arguments))
 
     def _interpolation(self, interpolation: _Interpolation) -> _Node:
-        """The body of a ``\\(...)`` hole, parsed as the jq code it is — under the
-        ENCLOSING scan's budget, so its tokens are spent from the same allowance and its
-        nesting continues from the depth the hole sits at."""
+        r"""The body of a ``\\(...)`` hole, parsed as the jq code it is.
+
+        Parsed under the ENCLOSING scan's budget, so its tokens are spent from
+        the same allowance and its nesting continues from the depth the hole sits
+        at.
+        """
         self._budget.descend(self._text, interpolation.start)
         try:
             tokens = _lex(self._text, self._budget, interpolation.start, interpolation.end)

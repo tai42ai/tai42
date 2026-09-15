@@ -62,6 +62,8 @@ def _merged_selected_tools(left: list[str], right: list[str]) -> list[str]:
 
 
 class State(MessagesState):
+    """The graph state: the message history plus the accumulating selected-tool ids."""
+
     selected_tool_ids: Annotated[list[str], _merged_selected_tools]
 
 
@@ -122,7 +124,7 @@ def _terminal_status(content: str) -> str:
     except json.JSONDecodeError as exc:
         raise ValueError(f"retrieval agent terminal message is not valid status JSON: {content!r}") from exc
     if not isinstance(parsed, dict):
-        raise ValueError(f"retrieval agent terminal payload is not a JSON object: {content!r}")
+        raise ValueError(f"retrieval agent terminal payload is not a JSON object: {content!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     status = parsed.get("status")
     if status not in ("continue", "success", "error"):
         raise ValueError(
@@ -154,6 +156,7 @@ class RetrievalToolsGraph:
         tools_limit: int = 10,
         system_prompt: str | None = None,
     ):
+        """Configure the graph with its ``tools``, ``llm``, store, checkpoint, and per-run prompt."""
         self.tools = list(tools)
         self.llm = llm
         self.store = store
@@ -183,6 +186,7 @@ class RetrievalToolsGraph:
         self._context_middlewares: list[AgentMiddleware] = []
 
     async def abuild(self) -> Any:
+        """Embed every tool's description into the store, compile the graph, and return it."""
         store = self.store
         if store is None:
             raise ValueError("RetrievalToolsGraph requires a store to embed tool descriptions into")
@@ -209,6 +213,7 @@ class RetrievalToolsGraph:
         return builder.compile(store=store, checkpointer=self.checkpoint)
 
     async def add_to_store(self, store: BaseStore, key: str, tool: BaseTool) -> None:
+        """Embed one tool's ``name: description`` into ``store`` under this tool-set's namespace."""
         item = None
         if self._overwrite_store:
             await store.adelete(namespace=self.namespace, key=key)
@@ -235,6 +240,7 @@ class RetrievalToolsGraph:
         return tool
 
     def retrieve_tools_tool(self) -> StructuredTool:
+        """The single ``retrieve_tools`` semantic-search tool, built once and cached."""
         if self._retrieve_tools_tool:
             return self._retrieve_tools_tool
 
@@ -249,6 +255,7 @@ class RetrievalToolsGraph:
         return self._retrieve_tools_tool
 
     def agent_node(self) -> RunnableCallable:
+        """The model-call node: binds the retrieved tools and invokes the LLM for one turn."""
         if self._agent_node:
             return self._agent_node
 
@@ -275,6 +282,7 @@ class RetrievalToolsGraph:
         return self._agent_node
 
     def context_node(self) -> RunnableCallable:
+        """The history-reduction node: applies the context-overflow strategies before each turn."""
         if self._context_node:
             return self._context_node
 
@@ -292,6 +300,7 @@ class RetrievalToolsGraph:
         return self._context_node
 
     def execute_tools_node(self) -> ToolNode:
+        """The node that runs the tools the model selected, built once and cached."""
         if self._execute_tools_node:
             return self._execute_tools_node
 
@@ -304,6 +313,7 @@ class RetrievalToolsGraph:
         return self._execute_tools_node
 
     def select_tools_node(self) -> RunnableCallable:
+        """The node that runs ``retrieve_tools`` searches and feeds the found tool names back."""
         if self._select_tools_node:
             return self._select_tools_node
 
@@ -347,6 +357,7 @@ class RetrievalToolsGraph:
         return self._select_tools_node
 
     def should_continue_node(self) -> Callable[..., Any]:
+        """The routing node: dispatch pending tool calls, else act on the terminal status JSON."""
         if self._should_continue_node:
             return self._should_continue_node
 
@@ -376,6 +387,7 @@ class RetrievalToolsGraph:
         return self._should_continue_node
 
     def build(self) -> StateGraph:
+        """Assemble the ``StateGraph`` wiring context → agent → tool nodes and the conditional edges."""
         builder = StateGraph(State)
         builder.add_node(self.context_node_name, self.context_node())
         builder.add_node(self.agent_node_name, self.agent_node())

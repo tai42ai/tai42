@@ -29,9 +29,11 @@ logger = logging.getLogger(__name__)
 
 
 async def wait_job_result(job: Job, timeout: float | None = None) -> Any:
-    """``Job.result``, but a replayed stored abort surfaces as ``TaskFailedError``
-    rather than a raw ``CancelledError`` (which would read as a cancellation of
-    the caller). A genuine cancellation of the CALLING task re-raises as-is."""
+    """``Job.result``, but a replayed stored abort surfaces as ``TaskFailedError``.
+
+    Rather than a raw ``CancelledError`` (which would read as a cancellation of the
+    caller). A genuine cancellation of the CALLING task re-raises as-is.
+    """
     try:
         return await job.result(timeout=timeout)
     except asyncio.CancelledError as exc:
@@ -42,8 +44,10 @@ async def wait_job_result(job: Job, timeout: float | None = None) -> Any:
 
 
 async def abort_job(job: Job, timeout: float) -> bool:
-    """``Job.abort``, but a cancellation of the CALLING task re-raises instead of
-    being swallowed as the job's confirmed-abort verdict."""
+    """``Job.abort``, but a cancellation of the CALLING task re-raises.
+
+    Instead of being swallowed as the job's confirmed-abort verdict.
+    """
     aborted = await job.abort(timeout=timeout)
     task = asyncio.current_task()
     if task is not None and task.cancelling():
@@ -89,9 +93,11 @@ _SCHEDULE_DEFINITION_FIELDS = frozenset({"target", "args", "kwargs", "schedule",
 
 
 def schedule_lock(redis: Any, schedule_name: str) -> Any:
-    """The per-schedule mutation lock: every state change (transition, flag write,
-    delete) acquires it, so an existence check made under it stays true for the
-    write that follows."""
+    """The per-schedule mutation lock.
+
+    Every state change (transition, flag write, delete) acquires it, so an
+    existence check made under it stays true for the write that follows.
+    """
     return redis.lock(arq_settings().arq_schedule_lock_key(schedule_name), timeout=5, blocking_timeout=20)
 
 
@@ -151,9 +157,11 @@ async def safe_schedule_transition(
 
 
 async def abort_schedule_task(key: str) -> None:
-    """Abort the pending job of the schedule hash at ``key``. The ``aborted``
-    marker is set to the job id first, so even a job whose cancellation is never
-    processed exits without effect. Failures propagate."""
+    """Abort the pending job of the schedule hash at ``key``.
+
+    The ``aborted`` marker is set to the job id first, so even a job whose
+    cancellation is never processed exits without effect. Failures propagate.
+    """
     arq_redis: Any = await RedisPoolManager.get()
 
     if await arq_redis.exists(key):
@@ -165,9 +173,11 @@ async def abort_schedule_task(key: str) -> None:
 
 
 async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:
-    """Startup watchdog: restart enabled schedules whose pending job is missing,
-    not found, or complete, each under a short recovery lock so concurrent
-    startups recover it once. A per-schedule failure is logged, not fatal."""
+    """Startup watchdog: restart enabled schedules whose pending job is missing, not found, or complete.
+
+    Each runs under a short recovery lock so concurrent startups recover it once. A
+    per-schedule failure is logged, not fatal.
+    """
     redis = ctx["redis"]
     settings = arq_settings()
     logger.info("Watchdog: checking for stalled schedules...")
@@ -220,11 +230,13 @@ async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:
 
 
 async def task_scheduler(ctx: dict[str, Any], schedule_name: str) -> Any:
-    """Self-rescheduling worker function driving one schedule. When due it
-    enqueues the target (if enabled), waits for the result, then defers its own
-    replacement conditioned on this job still being the recorded pending job. A
-    stale invocation exits without running the target, so a schedule never fires
-    twice."""
+    """Self-rescheduling worker function driving one schedule.
+
+    When due it enqueues the target (if enabled), waits for the result, then defers
+    its own replacement conditioned on this job still being the recorded pending
+    job. A stale invocation exits without running the target, so a schedule never
+    fires twice.
+    """
     settings = arq_settings()
     key = settings.arq_schedule_key(schedule_name)
 

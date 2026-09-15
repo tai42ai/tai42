@@ -1,5 +1,6 @@
-"""HTTP surface for the hooks feature — the inbound event ingress plus the
-authed management doors the Studio's hooks UI consumes.
+"""HTTP surface for the hooks feature: the inbound event ingress plus the authed management doors.
+
+The management doors are the ones the Studio's hooks UI consumes.
 
 - ``POST|GET /universal_webhook/{topic}`` (PUBLIC ingress) — external systems
   deliver events here; the payload is parsed and dispatched to the topic's
@@ -71,7 +72,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookRegister
 from tai42_contract.webhooks import FreshnessWindow, SeenSetClaim, WebhookVerificationError
-from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
+from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.authz.execution import bind_execution_identity
@@ -80,7 +81,7 @@ from tai42_skeleton.hooks.payload_parser import parse_any_payload
 from tai42_skeleton.hooks.trigger_links import ResolvedTrigger, TriggerLinkError, resolve_trigger_token
 from tai42_skeleton.operations import (
     BadRequestError,
-    PermissionDenied,
+    PermissionDeniedError,
     operation_metadata_of,
     register_operation_route,
 )
@@ -122,9 +123,11 @@ def _ingress_json(payload: dict, status_code: int = 200, background: BackgroundT
 
 
 def _sanitize_topic_for_log(topic: str) -> str:
-    """Strip CR and LF so a crafted topic path param cannot forge extra log lines
-    (log injection). Both are removed — a lone carriage return can rewrite a line
-    on many terminals, not only a newline."""
+    """Strip CR and LF so a crafted topic path param cannot forge extra log lines (log injection).
+
+    Both are removed — a lone carriage return can rewrite a line on many terminals,
+    not only a newline.
+    """
     return topic.replace("\r", "").replace("\n", "")
 
 
@@ -132,9 +135,12 @@ def _sanitize_topic_for_log(topic: str) -> str:
 
 
 class WebhookIngressResult(BaseModel):
-    """The webhook ingress door's raw (non-enveloped) 200 body: the delivery's
-    disposition (``accepted`` for a dispatched delivery, ``already_seen`` for an
-    idempotent replay that dispatched nothing) and the topic it addressed."""
+    """The webhook ingress door's raw (non-enveloped) 200 body.
+
+    The delivery's disposition (``accepted`` for a dispatched delivery,
+    ``already_seen`` for an idempotent replay that dispatched nothing) and the topic it
+    addressed.
+    """
 
     status: str
     topic: str
@@ -150,6 +156,7 @@ class WebhookIngressResult(BaseModel):
     authed=False,
 )
 async def universal_webhook(request: Request) -> Response:
+    """Ingest a public webhook delivery for ``{topic}`` and dispatch it in the background."""
     topic = request.path_params["topic"]
     logger.info("--- INCOMING EVENT ON TOPIC: %s ---", _sanitize_topic_for_log(topic))
 
@@ -160,7 +167,7 @@ async def universal_webhook(request: Request) -> Response:
         return _error("payload too large", 413)
     try:
         raw = await read_bounded_body(request, cap)
-    except PayloadTooLarge:
+    except RequestBodyTooLargeError:
         return _error("payload too large", 413)
     # Cache the bounded bytes on the request so ``parse_any_payload`` re-reads them
     # (json/xml/form) without re-consuming the already-drained stream. The verifier
@@ -192,9 +199,10 @@ async def universal_webhook(request: Request) -> Response:
 
 
 class TriggerResult(BaseModel):
-    """The trigger-link door's raw (non-enveloped) 200 body: the delivery's
-    disposition. It carries NO topic — a trigger link hides its topic from the URL
-    holder."""
+    """The trigger-link door's raw (non-enveloped) 200 body: the delivery's disposition.
+
+    It carries NO topic — a trigger link hides its topic from the URL holder.
+    """
 
     status: str
 
@@ -209,15 +217,15 @@ class TriggerResult(BaseModel):
     authed=False,
 )
 async def trigger_link(request: Request) -> Response:
-    """Fire a hook topic from a minted, token-bearing PUBLIC URL (a QR scan is a GET;
-    POST comes free for curl symmetry — an anonymous token holder reaches both alike,
-    while a caller that PRESENTS a credential is additionally subject to the ordinary
-    route gate, which for a ROLE-governed principal derives ``read`` from GET and
-    ``write`` from POST — the governing policy is the OWNER's for an owned key, so a key
-    escapes that pass exactly when its governing policy is admin or carries no role
-    pointer).
-    The token is the capability — whoever holds the URL fires the topic's registered
-    hooks.
+    """Fire a hook topic from a minted, token-bearing PUBLIC URL.
+
+    A QR scan is a GET; POST comes free for curl symmetry — an anonymous token holder
+    reaches both alike, while a caller that PRESENTS a credential is additionally
+    subject to the ordinary route gate, which for a ROLE-governed principal derives
+    ``read`` from GET and ``write`` from POST — the governing policy is the OWNER's for
+    an owned key, so a key escapes that pass exactly when its governing policy is admin
+    or carries no role pointer. The token is the capability — whoever holds the URL
+    fires the topic's registered hooks.
 
     Every miss is the SAME 404 ``"unknown or expired trigger link"`` (unknown /
     expired / revoked / verifier-bound / in-memory-mode are deliberately
@@ -230,7 +238,8 @@ async def trigger_link(request: Request) -> Response:
     static ``tool_kwargs``, filling only the arguments its author left unpinned — a
     link can never restate an argument the hook pinned. Every route-emitted
     response (accepted / 404 / 403 / 400 / 413) carries ``nosniff`` + ``no-store`` — a
-    capability-URL response must never be cached."""
+    capability-URL response must never be cached.
+    """
     token = request.path_params["token"]
 
     cap = webhook_ingress_settings().max_body_bytes
@@ -238,7 +247,7 @@ async def trigger_link(request: Request) -> Response:
         return _error("payload too large", 413)
     try:
         raw = await read_bounded_body(request, cap)
-    except PayloadTooLarge:
+    except RequestBodyTooLargeError:
         return _error("payload too large", 413)
     request._body = raw
 
@@ -268,12 +277,13 @@ async def trigger_link(request: Request) -> Response:
 
 
 def _authenticated_caller(request: Request) -> bool:
-    """Whether the request carries a valid authenticated principal — and, with access
-    control DISABLED, unconditionally ``True``.
+    """Whether the request carries a valid authenticated principal.
 
+    With access control DISABLED, unconditionally ``True``.
     The door is registered ``authed=False`` (a static flag a per-record requirement cannot
     flip), but the authentication backend still runs and has already denied every
-    credential it does not admit — so ``request.user`` is the decision here."""
+    credential it does not admit — so ``request.user`` is the decision here.
+    """
     if not access_control_settings().enable:
         return True
     return bool(request.user.is_authenticated)
@@ -287,7 +297,8 @@ async def _dispatch_trigger_link(resolved: ResolvedTrigger, payload: dict) -> No
     runs; each fired hook then re-binds its OWN key inside its own task.
 
     That refusal is a routine revocation outcome landing after the ``accepted`` response,
-    so it is logged as an error outcome rather than raised. Everything else propagates."""
+    so it is logged as an error outcome rather than raised. Everything else propagates.
+    """
     try:
         async with bind_execution_identity(
             resolved.execution_key, bound_fingerprint=resolved.execution_key_fingerprint
@@ -295,8 +306,9 @@ async def _dispatch_trigger_link(resolved: ResolvedTrigger, payload: dict) -> No
             await get_hooks_manager().on_event(
                 topic=resolved.topic, payload=payload, tool_kwargs_override=resolved.tool_kwargs
             )
-    except PermissionDenied as exc:
-        logger.error(
+    except PermissionDeniedError as exc:
+        # A routine revocation outcome, not a crash: log the cause without a stack trace.
+        logger.error(  # noqa: TRY400 routine refusal outcome, not an unexpected error — no traceback
             "hooks: trigger dispatch refused topic=%r execution_key=%r cause=%s",
             resolved.topic,
             resolved.execution_key,
@@ -307,17 +319,19 @@ async def _dispatch_trigger_link(resolved: ResolvedTrigger, payload: dict) -> No
 async def _verify_ingress(
     request: Request, raw: bytes, binding: dict, topic: str, manager
 ) -> tuple[Response | None, bool]:
-    """Verify the topic's bound verifier over the raw body, then enforce its replay
-    defense. Return ``(terminal_response, False)`` when the door must answer without
-    dispatching — a verification failure OR a refused replay — or ``(None, post_only)``
-    for a legitimate first delivery, where ``post_only`` tells the caller whether to
-    drop the unauthenticated query string (True for a body-signature verifier).
+    """Verify the topic's bound verifier over the raw body, then enforce its replay defense.
+
+    Return ``(terminal_response, False)`` when the door must answer without dispatching
+    — a verification failure OR a refused replay — or ``(None, post_only)`` for a
+    legitimate first delivery, where ``post_only`` tells the caller whether to drop the
+    unauthenticated query string (True for a body-signature verifier).
 
     Fails CLOSED on every failure path: a signature failure -> 401 (constant message);
     a ``post_only`` (body-signature) verifier rejecting GET -> 405; an unknown verifier
     name / missing secret env / verifier bug / replay-store error -> 500. A refused
     REPLAY is NOT a failure: it returns the idempotent already-seen 200 (nothing
-    dispatched), because the sender's redelivery of an id already handled is correct."""
+    dispatched), because the sender's redelivery of an id already handled is correct.
+    """
     # ``get_topic_verifier`` validates the stored binding against
     # ``TopicVerifierBinding`` (whose ``verifier`` carries ``min_length=1``), so
     # ``verifier`` is a guaranteed non-empty str and ``config`` a dict here — no
@@ -330,7 +344,7 @@ async def _verify_ingress(
     except Exception:
         # A bound name that no longer resolves (verifier module dropped from the
         # manifest) must deny, not dispatch unverified. Loud 500, logged.
-        logger.error("webhook verify: no registered verifier %r for topic %s", name, safe_topic)
+        logger.exception("webhook verify: no registered verifier %r for topic %s", name, safe_topic)
         return _error("webhook verification error", 500), False
 
     post_only = bool(getattr(verifier, "post_only", False))
@@ -385,19 +399,22 @@ async def _verify_ingress(
 
 
 async def _extract_list_query(request: Request) -> dict:
-    """The optional ``?topic=`` filter as the operation's flat ``topic`` argument
-    (a GET reads its parameters from the query string, never a body)."""
+    """The optional ``?topic=`` filter as the operation's flat ``topic`` argument.
+
+    A GET reads its parameters from the query string, never a body.
+    """
     return {"topic": request.query_params.get("topic")}
 
 
 async def _extract_hook_params(request: Request) -> dict:
-    """Parse + validate the client-facing hook body into the operation's flat fields,
-    rejecting a malformed body before the operation runs (the adapter's plain parse
-    would yield 422; this yields an explicit 400 surface).
+    """Parse + validate the client-facing hook body into the operation's flat fields.
 
+    Rejects a malformed body before the operation runs (the adapter's plain parse would
+    yield 422; this yields an explicit 400 surface).
     Validated against ``HookRegister``, which carries no ``execution_key_fingerprint`` —
     the operation derives that server-side; a client-set one would pin an authorization
-    anchor the server never verified."""
+    anchor the server never verified.
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -417,10 +434,11 @@ async def _extract_hook_params(request: Request) -> dict:
 
 
 async def _extract_trigger_link_params(request: Request) -> dict:
-    """Parse + validate the ``TriggerLinkCreate`` body into the operation's flat
-    fields, rejecting a malformed body with an explicit 400 (the adapter's plain
-    parse would yield 422; the ttl contract demands 400 for an absent/invalid
-    ``ttl_seconds``)."""
+    """Parse + validate the ``TriggerLinkCreate`` body into the operation's flat fields.
+
+    Rejects a malformed body with an explicit 400 (the adapter's plain parse would
+    yield 422; the ttl contract demands 400 for an absent/invalid ``ttl_seconds``).
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -435,9 +453,11 @@ async def _extract_trigger_link_params(request: Request) -> dict:
 
 
 async def _extract_binding(request: Request) -> dict:
-    """Parse + structurally validate a PUT binding body into the operation's flat
-    ``verifier`` / ``config`` arguments (the unknown-verifier check is the
-    operation's, so the projected tool and CLI carry it too)."""
+    """Parse + structurally validate a PUT binding body into the operation's flat ``verifier`` / ``config`` args.
+
+    The unknown-verifier check is the operation's, so the projected tool and CLI carry
+    it too.
+    """
     try:
         body = await request.json()
     except ValueError as exc:

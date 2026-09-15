@@ -22,7 +22,7 @@ from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.app.route_registry import route_registry
 from tai42_skeleton.authz.execution import authorize_execution_agent_run
 from tai42_skeleton.authz.identity import CallerIdentity
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 
 # alru caches are held across the several ``asyncio.run`` loops each test opens — a benign
 # loop-reset artifact, since a real process serves one loop for its lifetime.
@@ -71,7 +71,7 @@ def test_an_authorized_exec_key_may_run_the_agent(ac_env, bound_app) -> None:
 def test_a_key_lacking_the_run_scope_is_denied(ac_env, bound_app) -> None:
     ac_env.add_route(_RUN_PATH, _SCOPE)
     ac_env.add_policy("k-none", scopes=["other"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-none"})
-    with pytest.raises(PermissionDenied, match="insufficient scope"):
+    with pytest.raises(PermissionDeniedError, match="insufficient scope"):
         asyncio.run(authorize_execution_agent_run(_identity("k-none"), _AGENT, settings=_settings()))
 
 
@@ -84,14 +84,14 @@ def test_a_fingerprint_mismatched_key_is_denied(ac_env, bound_app) -> None:
     ac_env.add_route(_RUN_PATH, _SCOPE)
     ac_env.add_policy("k-run", scopes=[_SCOPE], policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-run"})
     stale = _identity("k-run", fingerprint="fp-STALE")
-    with pytest.raises(PermissionDenied, match="no longer matches the bound key identity"):
+    with pytest.raises(PermissionDeniedError, match="no longer matches the bound key identity"):
         asyncio.run(authorize_execution_agent_run(stale, _AGENT, settings=_settings()))
 
 
 def test_a_deleted_key_is_denied(ac_env, bound_app) -> None:
     # A key deleted after the fire opened reads as an empty policy and is refused.
     ac_env.add_route(_RUN_PATH, _SCOPE)
-    with pytest.raises(PermissionDenied, match="principal has no policy"):
+    with pytest.raises(PermissionDeniedError, match="principal has no policy"):
         asyncio.run(authorize_execution_agent_run(_identity("ghost"), _AGENT, settings=_settings()))
 
 
@@ -105,7 +105,7 @@ def test_a_fenced_run_door_is_admin_only(ac_env, bound_app) -> None:
     ac_env.add_policy("k-admin", scopes=["*"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-admin"})
     settings = _settings()
     with _run_door_action("fenced"):
-        with pytest.raises(PermissionDenied, match="is not permitted"):
+        with pytest.raises(PermissionDeniedError, match="is not permitted"):
             asyncio.run(authorize_execution_agent_run(_identity("k-run"), _AGENT, settings=settings))
         # ALLOW parity: the deny above is the fence, not an unreachable route.
         asyncio.run(authorize_execution_agent_run(_identity("k-admin"), _AGENT, settings=settings))

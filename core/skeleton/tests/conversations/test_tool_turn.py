@@ -20,7 +20,7 @@ from tai42_skeleton.conversations.turn import keys as keys_module
 from tai42_skeleton.conversations.turn import outcome as outcome_module
 from tai42_skeleton.conversations.turn import record as record_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from .conftest import (
     FakeChannel,
@@ -381,7 +381,7 @@ async def test_tool_target_denied_dispatch_is_an_error(env, monkeypatch):
 
     @asynccontextmanager
     async def _deny_bind(execution_key, *, bound_fingerprint):
-        raise PermissionDenied("the execution key carries no authority")
+        raise PermissionDeniedError("the execution key carries no authority")
         yield  # pragma: no cover - makes this an async generator
 
     monkeypatch.setattr(agent_turn_module, "bind_execution_identity", _deny_bind)

@@ -18,7 +18,7 @@ from tai42_accounts_oidc.settings import OidcProviderConfig
 
 # GitHub's plain-OAuth2 endpoints (no discovery document exists).
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
-GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
+GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"  # noqa: S105 constant identifier, not a secret value
 GITHUB_USERINFO_URL = "https://api.github.com/user"
 
 # GitHub maps identity by the numeric account ``id`` (``sub`` is OIDC-only), so a
@@ -123,8 +123,10 @@ def _resolve_oidc(config: OidcProviderConfig) -> ResolvedProvider:
 
 
 def _label(config: OidcProviderConfig, preset_label: str | None) -> str:
-    """The button label: an explicit operator label wins, else the preset's, else
-    a generic fallback (a raw provider with no preset and no label)."""
+    """The button label: an explicit operator label wins, else the preset's, else a generic fallback.
+
+    The generic fallback covers a raw provider with no preset and no label.
+    """
     if config.display.label:
         return config.display.label
     if preset_label is not None:

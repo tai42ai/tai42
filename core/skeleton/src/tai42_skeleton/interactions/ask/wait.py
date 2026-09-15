@@ -1,6 +1,8 @@
-"""The synchronous answer wait: block for the reply on a fresh connection within the
-remaining budget, prune on cancel/timeout, and return the typed answer (a sensitive
-answer wrapped) or raise the timeout."""
+"""The synchronous answer wait for an interaction question.
+
+Block for the reply on a fresh connection within the remaining budget, prune on cancel/timeout, and
+return the typed answer (a sensitive answer wrapped) or raise the timeout.
+"""
 
 from __future__ import annotations
 
@@ -30,12 +32,13 @@ async def await_answer(
     question: str,
     sensitive: bool,
 ) -> Any:
-    """Block for the answer within what is LEFT of the budget after delivery — the same
-    monotonic ``deadline`` the delivery attempts ran against — and return the typed
-    answer, wrapping a ``sensitive`` answer in ``SecretValue``. On timeout or cancel the
-    question is pruned (else it inflates the group count and stays claimable by a late
-    callback); a timeout then raises ``InteractionTimeoutError`` naming which of the
-    three end states the question reached."""
+    """Block for the answer within what is LEFT of the budget after delivery, returning the typed answer.
+
+    Uses the same monotonic ``deadline`` the delivery attempts ran against, wrapping a ``sensitive`` answer
+    in ``SecretValue``. On timeout or cancel the question is pruned (else it inflates the group count and
+    stays claimable by a late callback); a timeout then raises ``InteractionTimeoutError`` naming which of
+    the three end states the question reached.
+    """
     loop = asyncio.get_running_loop()
     # Redis BLPOP reads its timeout at 1ms resolution and a 0/negative timeout as
     # "block forever", so a sub-millisecond remainder degrades to 0 = block-forever too

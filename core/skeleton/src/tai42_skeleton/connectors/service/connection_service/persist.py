@@ -1,5 +1,4 @@
-"""The encrypted compare-and-set write shared by every connection read-modify-write,
-and the lost-race error a CAS miss raises."""
+"""The encrypted compare-and-set connection write and the lost-race error a CAS miss raises."""
 
 from __future__ import annotations
 
@@ -12,12 +11,15 @@ from tai42_skeleton.connectors.store.persistence import session_expires_at_for
 
 
 class ConcurrentConnectionUpdateError(ConnectorError):
-    """A read-modify-write lost its compare-and-set: a concurrent writer
-    rotated the stored record between this operation's load and its persist.
+    """A read-modify-write lost its compare-and-set.
+
+    A concurrent writer rotated the stored record between this operation's load and its persist.
     Nothing was written — the caller should re-read the connection and retry
-    the operation against its current state."""
+    the operation against its current state.
+    """
 
     def __init__(self, connection_id: str):
+        """Build the error naming the ``connection_id`` that was modified concurrently."""
         super().__init__(
             f"connection {connection_id} was modified concurrently; "
             f"nothing was written — re-read the connection and retry"

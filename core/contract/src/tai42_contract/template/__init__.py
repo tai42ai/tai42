@@ -111,11 +111,13 @@ class TemplatedText(BaseModel):
 
     @model_serializer(mode="wrap")
     def _serialize_canonical(self, handler: Any) -> dict[str, Any]:
-        """The single wire shape every door emits: exactly the ONE source key that is set
-        (``content`` or ``id``) and ``kwargs`` only when it carries render parameters. The
-        unset source key and an empty ``kwargs`` are dropped, so the wire never carries a
-        null source or empty noise regardless of the caller's dump flags — a strict consumer
-        sees exactly one source and no nulls."""
+        """The single wire shape every door emits.
+
+        Exactly the ONE source key that is set (``content`` or ``id``) and ``kwargs`` only when it carries
+        render parameters. The unset source key and an empty ``kwargs`` are dropped, so the wire never
+        carries a null source or empty noise regardless of the caller's dump flags — a strict consumer
+        sees exactly one source and no nulls.
+        """
         data = handler(self)
         data.pop("content" if self.content is None else "id", None)
         if not self.kwargs:
@@ -124,6 +126,8 @@ class TemplatedText(BaseModel):
 
 
 class ConditionMixin(BaseModel):
+    """Mixin adding an optional ``condition`` expression whose truthy result gates the surface's action."""
+
     # The generic payload is the TRUTHY common denominator: a non-overriding
     # inheriting surface (hook registration) evaluates ``condition`` over its own
     # input document and proceeds on a truthy result. It is NOT the universal
@@ -147,6 +151,8 @@ class ConditionMixin(BaseModel):
 
 
 class ExprMixin(BaseModel):
+    """Mixin adding an optional ``expr`` expression whose transformed result the surface consumes."""
+
     # Same generic-honesty rule as ``ConditionMixin.condition``: every inheriting
     # surface evaluates ``expr`` over its own input document and consumes the
     # transformed result; surfaces with sharper facts override the field.

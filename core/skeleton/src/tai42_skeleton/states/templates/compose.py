@@ -28,7 +28,8 @@ def compose_effective_schema(
     ``path`` — creating intermediate ``{"type": "object", "properties": {}}`` levels. An
     attachment path that collides with an existing base property, or that overlaps another
     attachment's path, is refused with
-    :class:`~tai42_contract.states.errors.AttachConflictError`."""
+    :class:`~tai42_contract.states.errors.AttachConflictError`.
+    """
     for i, (template_a, path_a, _pa) in enumerate(attachments):
         for template_b, path_b, _pb in attachments[i + 1 :]:
             if _paths_prefix_overlap(path_a, path_b):
@@ -52,8 +53,10 @@ def compose_effective_schema(
 
 
 def _paths_prefix_overlap(a: list[str], b: list[str]) -> bool:
-    """Whether two concrete attachment paths overlap — one is equal to, or a prefix of, the
-    other (attachment paths carry no wildcards)."""
+    """Whether two concrete attachment paths overlap — one is equal to, or a prefix of, the other.
+
+    Attachment paths carry no wildcards.
+    """
     n = min(len(a), len(b))
     return a[:n] == b[:n]
 

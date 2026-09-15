@@ -24,9 +24,12 @@ class PostgresStatesStore(
     _RestoreStore,
     _RetentionStore,
 ):
-    """One class over the record substrate's tables, composed from the per-table concern
-    mixins. It holds no instance state: each method opens its own pooled connection, and a
-    multi-statement operation runs in one explicit transaction. A caller that must span
-    several writes atomically opens :meth:`begin` and threads the yielded connection into the
-    write methods' ``conn`` parameter — they join that transaction instead of opening their
-    own. A mixin method reaches a sibling table's method through the composed instance."""
+    """One class over the record substrate's tables, composed from the per-table concern mixins.
+
+    It holds no instance state: each method opens its own pooled connection, and
+    a multi-statement operation runs in one explicit transaction. A caller that
+    must span several writes atomically opens :meth:`begin` and threads the
+    yielded connection into the write methods' ``conn`` parameter — they join that
+    transaction instead of opening their own. A mixin method reaches a sibling
+    table's method through the composed instance.
+    """

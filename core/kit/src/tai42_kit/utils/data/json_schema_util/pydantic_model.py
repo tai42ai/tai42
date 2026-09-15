@@ -121,9 +121,11 @@ def _handle_nullable_type_schema(
 
 
 def _sanitize_field_name(prop_name: str) -> str:
-    """The pydantic-legal field name for a JSON property key: strip a leading
-    ``$``, rewrite ``-``/``@``/non-alnum runs, letter-prefix a digit/underscore
-    start, and suffix a reserved word so it never shadows a builtin or keyword."""
+    """Return a pydantic-legal field name for a JSON property key.
+
+    Strips a leading ``$``, rewrites ``-``/``@``/non-alnum runs, letter-prefixes a digit/underscore
+    start, and suffixes a reserved word so it never shadows a builtin or keyword.
+    """
     sanitized_name = prop_name
     sanitized_name = sanitized_name.removeprefix("$")
     sanitized_name = re.sub(r"^-", "neg_", sanitized_name)
@@ -166,9 +168,11 @@ def _build_property_field(
     max_depth: int,
     depth: int,
 ) -> tuple[Any, Any]:
-    """One property's ``(annotation, Field)`` — the recursed model with its value
-    constraints carried, the optional ``| None`` wrap, the default, and the alias
-    that keeps the original JSON key when the field name was sanitized."""
+    """Build one property's ``(annotation, Field)`` pair.
+
+    The recursed model with its value constraints carried, the optional ``| None`` wrap, the default,
+    and the alias that keeps the original JSON key when the field name was sanitized.
+    """
     prop_model: Any = json_schema_to_pydantic_model(
         prop_schema, f"{model_name}_{prop_name}", parent_models, max_depth=max_depth, _depth=depth + 1
     )
@@ -288,8 +292,10 @@ def _handle_array_schema(
 
 
 def _register_defs(schema: dict[str, Any], parent_models: dict[str, type], max_depth: int, depth: int) -> None:
-    """Build and register each ``$defs`` entry into ``parent_models`` (once each);
-    a schema with no ``$defs`` registers nothing."""
+    """Build and register each ``$defs`` entry into ``parent_models`` (once each).
+
+    A schema with no ``$defs`` registers nothing.
+    """
     for def_name, def_schema in schema.get("$defs", {}).items():
         if def_name not in parent_models:
             parent_models[def_name] = json_schema_to_pydantic_model(
@@ -332,6 +338,10 @@ def json_schema_to_pydantic_model(
     max_depth: int = 50,
     _depth: int = 0,
 ) -> Any:
+    """Convert a JSON Schema into a pydantic model class (or the type annotation for a non-object schema).
+
+    ``model_name`` names the generated model; ``max_depth`` bounds nesting and raises when exceeded.
+    """
     if _depth > max_depth:
         raise ValueError(f"JSON schema nesting exceeds max_depth={max_depth} (at {model_name!r})")
 

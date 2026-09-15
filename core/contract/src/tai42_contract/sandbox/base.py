@@ -61,9 +61,11 @@ class SandboxExecHandle(ABC):
     @property
     @abstractmethod
     def output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
-        """The interleaved stdout/stderr stream, terminated by one
-        :class:`SandboxStreamExit`. On ``timeout_seconds`` expiry the provider
-        kills the exec and the iterator raises :class:`SandboxExecTimeoutError`."""
+        """The interleaved stdout/stderr stream, terminated by one :class:`SandboxStreamExit`.
+
+        On ``timeout_seconds`` expiry the provider kills the exec and the iterator raises
+        :class:`SandboxExecTimeoutError`.
+        """
 
     @abstractmethod
     async def kill(self) -> None:
@@ -85,7 +87,8 @@ class SandboxSession(ABC):
 
         Also carried on :class:`SandboxSessionInfo` so a caller can read it off
         ``info()`` too. Anchors the workspace-relative resolution of ``cwd`` /
-        ``path`` (see the module path contract)."""
+        ``path`` (see the module path contract).
+        """
 
     @abstractmethod
     async def info(self) -> SandboxSessionInfo:
@@ -107,7 +110,8 @@ class SandboxSession(ABC):
         raises :class:`SandboxExecTimeoutError`. ``env`` overlays the session's
         base ``spec.env`` (per-exec keys override on collision). ``cwd`` is
         WORKSPACE-RELATIVE by default (resolved against ``workspace_path``; unset
-        defaults to ``workspace_path``) per the module path contract."""
+        defaults to ``workspace_path``) per the module path contract.
+        """
 
     @abstractmethod
     async def exec_start(
@@ -118,22 +122,23 @@ class SandboxSession(ABC):
         env: dict[str, SecretStr] | None = None,
         timeout_seconds: float,
     ) -> SandboxExecHandle:
-        """Start ``argv`` as an INTERACTIVE exec, returning a
-        :class:`SandboxExecHandle`.
+        """Start ``argv`` as an INTERACTIVE exec, returning a :class:`SandboxExecHandle`.
 
         ``timeout_seconds`` is REQUIRED: on expiry the provider kills the exec and
         the handle's ``output`` iterator raises :class:`SandboxExecTimeoutError`.
-        ``env`` and ``cwd`` follow the same rules as :meth:`exec`."""
+        ``env`` and ``cwd`` follow the same rules as :meth:`exec`.
+        """
 
     @abstractmethod
     async def put_file(self, path: str, data: bytes) -> None:
-        """Write ``data`` to ``path`` (WORKSPACE-RELATIVE by default) in the
-        workspace."""
+        """Write ``data`` to ``path`` (WORKSPACE-RELATIVE by default) in the workspace."""
 
     @abstractmethod
     async def get_file(self, path: str) -> bytes:
-        """Read ``path`` (WORKSPACE-RELATIVE by default) from the workspace. Raise
-        a typed :class:`SandboxError` on a miss."""
+        """Read ``path`` (WORKSPACE-RELATIVE by default) from the workspace.
+
+        Raise a typed :class:`SandboxError` on a miss.
+        """
 
     @abstractmethod
     async def touch(self) -> None:
@@ -156,13 +161,14 @@ class Sandbox(ABC):
 
     @abstractmethod
     async def create_session(self, spec: SandboxSessionSpec) -> SandboxSession:
-        """Create a session from ``spec`` or REJECT it with
-        :class:`SandboxSpecRejectedError`."""
+        """Create a session from ``spec`` or REJECT it with :class:`SandboxSpecRejectedError`."""
 
     @abstractmethod
     async def get_session(self, session_id: str) -> SandboxSession:
-        """Fetch a live session by id. Raise
-        :class:`SandboxSessionNotFoundError` if absent."""
+        """Fetch a live session by id.
+
+        Raise :class:`SandboxSessionNotFoundError` if absent.
+        """
 
     @abstractmethod
     async def list_sessions(self) -> list[SandboxSessionInfo]:
@@ -174,5 +180,4 @@ class Sandbox(ABC):
 
     @abstractmethod
     async def reap(self) -> list[str]:
-        """Destroy every session past its ``expires_at`` and return the destroyed
-        ids."""
+        """Destroy every session past its ``expires_at`` and return the destroyed ids."""

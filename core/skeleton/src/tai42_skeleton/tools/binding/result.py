@@ -1,5 +1,7 @@
-"""Reduces a tool-run return (``ToolResult`` or raw value) to the JSON-able value
-each door expects, keeping ``SecretValue`` wrapped."""
+"""Reduce a tool-run return (``ToolResult`` or raw value) to the JSON-able value each door expects.
+
+Keeps ``SecretValue`` wrapped.
+"""
 
 from typing import Any
 
@@ -10,9 +12,9 @@ from tai42_contract.secrets import SecretValue
 
 
 def _tool_result_value(result: Any) -> Any:
-    """Reduce a ``ToolResult`` (a transformed tool's ``run`` output) to the same
-    raw, JSON-able value the callable run path returns.
+    """Reduce a ``ToolResult`` to the same raw, JSON-able value the callable run path returns.
 
+    A ``ToolResult`` is a transformed tool's ``run`` output.
     ``structured_content`` is the structured form of the tool's return; for a
     non-object return FastMCP WRAPS it as ``{"result": <value>}`` and flags the
     wrap on ``_meta.fastmcp.wrap_result`` — unwrap that so a scalar/string preset
@@ -20,7 +22,8 @@ def _tool_result_value(result: Any) -> Any:
     no structured content, fall back to the text blocks; a media return
     (Image/Audio/File) carries no structured and no text, so serialize its
     remaining content blocks to their JSON wire dicts — the same media shape the
-    direct-run path preserves. Only a genuinely empty result reduces to ``None``."""
+    direct-run path preserves. Only a genuinely empty result reduces to ``None``.
+    """
     structured = result.structured_content
     meta = result.meta or {}
     if isinstance(structured, dict) and meta.get("fastmcp", {}).get("wrap_result"):
@@ -42,7 +45,8 @@ def _jsonable_keeping_secrets(value: Any) -> Any:
     The shared in-process seam keeps the wrapper so each door decides: the sync
     run-tool door reveals it, the tool-run recorder masks it. Recursion mirrors the
     ``mask``/``unwrap`` walk (dict/list/tuple); every OTHER non-JSON-native leaf
-    still raises loudly through ``to_jsonable_python``."""
+    still raises loudly through ``to_jsonable_python``.
+    """
     if isinstance(value, SecretValue):
         return value
     if isinstance(value, dict):
@@ -67,7 +71,8 @@ def _serialize_result(result: Any) -> Any:
 
     A ``SecretValue`` is deliberately not JSON-serializable, so a result carrying
     one keeps the wrapper through the seam (revealed at the sync door, masked by the
-    recorder); every other unserializable type still raises loudly."""
+    recorder); every other unserializable type still raises loudly.
+    """
     if isinstance(result, SuspendedInteraction):
         # An async ask_user parks the caller and returns this sentinel; keep the
         # object through the direct-run seam (never flattened to a plain dict) so the

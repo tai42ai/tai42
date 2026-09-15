@@ -176,8 +176,11 @@ class ToolsAgentInput(BaseModel):
     @field_validator("system_content_kwargs", "user_content_kwargs")
     @classmethod
     def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """An empty dict carries no content-block keys — normalize {} to None so it
-        reads as unset, matching the builders that treat {} as no mark."""
+        """Normalize an empty dict to ``None`` so it reads as unset.
+
+        An empty dict carries no content-block keys, matching the builders that treat ``{}`` as no
+        mark.
+        """
         return value or None
 
 
@@ -194,6 +197,8 @@ register_chained_park_tool()
 
 @tai42_app.agents.agent("tools_agent", tags={"agents"})
 class ToolsAgent(Agent):
+    """A LangGraph tools agent: loads tools by name (and optional presets) and runs system/user messages."""
+
     tool_name: ClassVar[str] = "tools_agent"
     tool_description: ClassVar[str] = (
         "Create and run a LangGraph tools agent. Loads tools by name (and optional "
@@ -566,15 +571,17 @@ class ToolsAgent(Agent):
         llm_kwargs: dict[str, Any] | None,
         langgraph_config: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """The JSON-serializable subset of a run's inputs that determines graph
-        compilation — the identity a cross-worker resume recompiles the same graph from.
+        """The JSON-serializable subset of a run's inputs that determines graph compilation.
+
+        The identity a cross-worker resume recompiles the same graph from.
 
         Every value is a ``ToolsAgentInput`` field name (presets dumped to JSON, the
         system message the already-RENDERED text carried as inline ``content`` so a resume
         never re-renders differently), so :meth:`aresume_park` reconstructs the run inputs
         with ``ToolInput.model_validate``. The checkpoint provider is pinned separately by
         :func:`~tai42_agents._internal.park.build_park_identity` (the resolved durable
-        one), so it is deliberately absent here."""
+        one), so it is deliberately absent here.
+        """
         return {
             "tool_names": list(tool_names),
             "presets": [spec.model_dump(mode="json") for spec in (presets or [])],
@@ -601,8 +608,7 @@ class ToolsAgent(Agent):
         langgraph_config: dict[str, Any] | None,
         recursion_limit: int | None,
     ) -> ParkBuilder | None:
-        """The park builder for the streaming face, or ``None`` when no resumed-answer
-        delivery path is bound.
+        """The park builder for the streaming face, or ``None`` when no resumed-answer path is bound.
 
         The streaming face returns its stream to a caller that cannot receive a late
         answer, so it binds a resume path — and lets an async ask park — ONLY when a
@@ -612,7 +618,8 @@ class ToolsAgent(Agent):
         refuses loudly pre-persist.
 
         The binding's opaque context is stored beside the tool name and merged into the
-        completion fire verbatim, so the delivery tool receives the address it routes by."""
+        completion fire verbatim, so the delivery tool receives the address it routes by.
+        """
         completion_tool, completion_context = get_park_completion()
         if completion_tool is None:
             return None
@@ -648,9 +655,10 @@ class ToolsAgent(Agent):
         thread_id: str,
         resume_map: dict[str, dict[str, Any]],
     ) -> Any:
-        """Rebuild the parked graph from its stored identity and resume its park interrupts BY
-        ID with all answers — the tools-agent resume face the ``agent_resume`` continuation
-        drives.
+        """Rebuild the parked graph from its stored identity and resume its park interrupts BY ID.
+
+        The tools-agent resume face the ``agent_resume`` continuation drives, resuming every park
+        interrupt with its answers.
 
         ``resume_map`` is ``{interrupt_id: {interaction_id: answer}}`` over every park interrupt
         the super-step suspended on — one key for a single park, several for parallel subagent
@@ -663,7 +671,8 @@ class ToolsAgent(Agent):
 
         The LangGraph ``recursion_limit`` is an engine extra carried INSIDE ``rebuild_kwargs``
         (the provider-free park identity holds no engine facts), popped out here before the
-        JSON inputs validate against ``ToolsAgentInput``."""
+        JSON inputs validate against ``ToolsAgentInput``.
+        """
         rebuild = dict(rebuild_kwargs)
         recursion_limit = rebuild.pop("recursion_limit", None)
         validated = ToolsAgentInput.model_validate(rebuild)

@@ -53,9 +53,11 @@ exchange_claim_token = register_operation_route(
 
 
 async def _logout_candidates(request: Request) -> dict:
-    """The credential candidates the logout dispatcher fans out over — every value
-    presented in ``Authorization`` / ``X-Api-Key`` / a session cookie, in the
-    registry-order the operation iterates."""
+    """The credential candidates the logout dispatcher fans out over.
+
+    Every value presented in ``Authorization`` / ``X-Api-Key`` / a session cookie, in
+    the registry-order the operation iterates.
+    """
     return {"candidates": extract_credential_candidates(request)}
 
 

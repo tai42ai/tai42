@@ -1,6 +1,7 @@
-"""The plugin prefix: a persistent install root for marketplace plugin
-distributions, kept apart from the platform's own environment packages (the
-wp-content principle — plugin files live separate from the platform's packages).
+"""The plugin prefix: a persistent install root for marketplace plugin distributions.
+
+Kept apart from the platform's own environment packages (the wp-content principle — plugin files live
+separate from the platform's packages).
 
 ``TAI_PLUGINS_PREFIX`` unset -> installs go into the running interpreter
 environment, which a container image discards on restart (today's behavior).
@@ -61,6 +62,7 @@ class PluginPrefixSettings(TaiBaseSettings):
 
 @settings_cache
 def plugin_prefix_settings() -> PluginPrefixSettings:
+    """Return the cached :class:`PluginPrefixSettings` instance."""
     return PluginPrefixSettings()
 
 
@@ -70,9 +72,11 @@ def configured_prefix() -> str | None:
 
 
 def prefix_site_dirs(prefix: str) -> list[str]:
-    """The site-package directories a ``pip install --prefix <prefix>`` populates —
-    the prefix scheme's ``purelib`` and ``platlib`` (identical on posix). These are
-    the exact directories boot adds to ``sys.path`` and uninstall scans."""
+    """The site-package directories a ``pip install --prefix <prefix>`` populates.
+
+    The prefix scheme's ``purelib`` and ``platlib`` (identical on posix). These are the exact directories
+    boot adds to ``sys.path`` and uninstall scans.
+    """
     paths = sysconfig.get_paths(vars={"base": prefix, "platbase": prefix})
     dirs: list[str] = []
     for key in ("purelib", "platlib"):
@@ -83,8 +87,7 @@ def prefix_site_dirs(prefix: str) -> list[str]:
 
 
 def ensure_prefix_writable(prefix: str) -> None:
-    """Create the prefix's site directories if missing and confirm the prefix is
-    writable, before an install touches it.
+    """Create the prefix's site directories if missing and confirm the prefix is writable, before an install.
 
     A set-but-uncreatable/unwritable prefix is a loud deployment fault
     (:class:`PluginPrefixError`), never a silent fall back to installing into the
@@ -129,19 +132,19 @@ def activate_prefix() -> None:
 
 
 def prefix_has_distribution(package: str, prefix: str) -> bool:
-    """Whether ``package``'s own distribution is installed under ``prefix`` — its
-    prefix site dirs ONLY, never an environment copy that also sits on ``sys.path``
-    at runtime."""
+    """Whether ``package``'s own distribution is installed under ``prefix``.
+
+    Its prefix site dirs ONLY, never an environment copy that also sits on ``sys.path`` at runtime.
+    """
     site_dirs = [str(Path(site)) for site in prefix_site_dirs(prefix)]
     target = canonicalize_name(package)
     return any(canonicalize_name(dist.name) == target for dist in importlib.metadata.distributions(path=site_dirs))
 
 
 def environment_distribution_version(package: str, prefix: str) -> str | None:
-    """``package``'s version as installed in the running ENVIRONMENT — every
-    ``sys.path`` entry that is NOT a prefix site dir — or ``None`` when the
-    environment does not provide it.
+    """``package``'s version as installed in the running ENVIRONMENT, or ``None`` when it is not provided.
 
+    Reads every ``sys.path`` entry that is NOT a prefix site dir.
     Both the environment and the prefix sit on ``sys.path`` at runtime (the prefix
     appended at the END), so the prefix site dirs are excluded here to read the
     environment copy alone. The first match wins, mirroring import shadowing order.
@@ -201,8 +204,10 @@ def uninstall_from_prefix(package: str, prefix: str) -> None:
 
 
 def _prune_empty(directory: Path, root: Path) -> None:
-    """Remove ``directory`` and its now-empty ancestors up to (not including)
-    ``root``. Stops at the first non-empty directory."""
+    """Remove ``directory`` and its now-empty ancestors up to (not including) ``root``.
+
+    Stops at the first non-empty directory.
+    """
     current = directory
     while current != root and root in current.parents:
         if current.is_dir() and not any(current.iterdir()):

@@ -15,9 +15,13 @@ logger = logging.getLogger(__name__)
 
 
 class McpReprobeMixin(LifecycleState):
+    """Lifecycle mixin owning the failed-MCP exponential-backoff re-probe loop."""
+
     def _spawn_reprobe_task(self) -> None:
-        """Start the failed-MCP re-probe loop on the serving loop. Owned by
-        ``app_context``; runs until cancelled at shutdown."""
+        """Start the failed-MCP re-probe loop on the serving loop.
+
+        Owned by ``app_context``; runs until cancelled at shutdown.
+        """
         self._reprobe_task = asyncio.create_task(
             self._reprobe_failed_mcps_loop(),
             name="tai-failed-mcp-reprobe",
@@ -27,13 +31,15 @@ class McpReprobeMixin(LifecycleState):
         self._reprobe_task.add_done_callback(self._on_perpetual_task_done)
 
     async def _cancel_reprobe_task(self) -> None:
-        """Cancel the re-probe task and await its termination — the shutdown
-        counterpart of ``_spawn_reprobe_task``.
+        """Cancel the re-probe task and await its termination.
+
+        The shutdown counterpart of ``_spawn_reprobe_task``.
 
         A task that died with a non-``CancelledError`` exception was already
         surfaced at ERROR by its done-callback, so it is awaited-and-swallowed
         here rather than re-raised — this runs inside ``app_context``'s shutdown
-        ``finally``, and re-raising would skip the remaining teardown."""
+        ``finally``, and re-raising would skip the remaining teardown.
+        """
         task = self._reprobe_task
         self._reprobe_task = None
         if task is None:
@@ -43,19 +49,21 @@ class McpReprobeMixin(LifecycleState):
             await task
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
             # Already logged at ERROR by the done-callback; swallowed so a dead
             # re-probe task cannot abort the remaining shutdown steps.
             pass
 
     async def _reprobe_sleep(self, seconds: float) -> None:
-        """The re-probe loop's inter-pass sleep, isolated so tests can drive the
-        backoff with a controllable clock instead of real time."""
+        """The re-probe loop's inter-pass sleep.
+
+        Isolated so tests can drive the backoff with a controllable clock instead of
+        real time.
+        """
         await asyncio.sleep(seconds)
 
     async def _probe_and_apply_failed(self, snapshot: dict[str, TaiMCPConfig]) -> tuple[list[dict[str, Any]], set[str]]:
-        """Re-probe the snapshotted failed MCP servers OFF the reload gate, then bind
-        the recovered ones back UNDER it.
+        """Re-probe the snapshotted failed MCP servers OFF the reload gate, then bind the recovered ones back UNDER it.
 
         ``snapshot`` is the ``{title: config}`` a reprobe pass captured under the
         gate. The probe is a network read that mutates no shared state, so it runs

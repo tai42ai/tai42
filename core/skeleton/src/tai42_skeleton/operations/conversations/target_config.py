@@ -1,5 +1,7 @@
-"""Per-target conversation-config doors — the multichannel opt-in + first-contact greeting
-keyed ``(target_kind, target_name)`` — with their key validator and config-store accessor."""
+"""Per-target conversation-config doors keyed ``(target_kind, target_name)``.
+
+The multichannel opt-in + first-contact greeting, with their key validator and config-store accessor.
+"""
 
 from __future__ import annotations
 
@@ -26,9 +28,11 @@ _TARGET_KINDS = get_args(ConversationTargetKind)
 
 
 def _validate_target_key(target_kind: str, target_name: str) -> None:
-    """A well-formed config key: a known ``target_kind`` and a non-blank ``target_name``. A
-    malformed key is the caller's own 400, told apart from a well-formed key that names no
-    stored config (a 404)."""
+    """Validate a config key: a known ``target_kind`` and a non-blank ``target_name``.
+
+    A malformed key is the caller's own 400, told apart from a well-formed key that names no stored config
+    (a 404).
+    """
     if target_kind not in _TARGET_KINDS:
         raise BadRequestError(f"target_kind must be one of {list(_TARGET_KINDS)}: {target_kind!r}")
     if not target_name.strip():
@@ -36,8 +40,10 @@ def _validate_target_key(target_kind: str, target_name: str) -> None:
 
 
 def _config_store() -> ConversationTargetConfigStore:
-    """The config store over the live conversations settings. Called only after
-    :func:`_require_backend`, so its own backend guard never fires here."""
+    """The config store over the live conversations settings.
+
+    Called only after :func:`_require_backend`, so its own backend guard never fires here.
+    """
     from tai42_skeleton.conversations.settings import ConversationsSettings
     from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 
@@ -65,9 +71,11 @@ async def list_conversation_configs() -> dict[str, Any]:
     response_model=TargetConversationConfig,
 )
 async def get_conversation_config(target_kind: str, target_name: str) -> dict[str, Any]:
-    """One per-target config by ``(target_kind, target_name)``. An unknown key is a loud
-    404; a key whose ``target_kind`` is not a known kind, or whose ``target_name`` is blank,
-    is a 400."""
+    """One per-target config by ``(target_kind, target_name)``.
+
+    An unknown key is a loud 404; a key whose ``target_kind`` is not a known kind, or whose ``target_name``
+    is blank, is a 400.
+    """
     _validate_target_key(target_kind, target_name)
     _require_backend()
     config = await _config_store().get(target_kind, target_name)
@@ -91,8 +99,9 @@ async def set_conversation_config(
     greeting_template: str | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
-    """Create or replace the per-target config for ``(target_kind, target_name)`` — an
-    UPSERT, so this is the create path AND the edit path for a config of that key.
+    """Create or replace the per-target config for ``(target_kind, target_name)`` — an UPSERT.
+
+    This is the create path AND the edit path for a config of that key.
 
     The target must merely EXIST — the agent (``target_kind=agent``) or tool
     (``target_kind=tool``) — exactly as the route create checks it. ``greeting_template``
@@ -138,8 +147,10 @@ async def set_conversation_config(
     response_model=ConversationConfigDeleteResult,
 )
 async def delete_conversation_config(target_kind: str, target_name: str) -> dict[str, Any]:
-    """Delete the per-target config for ``(target_kind, target_name)``. An unknown key is a
-    loud 404; a malformed key is a 400. Returns ``{"removed", "target_kind", "target_name"}``."""
+    """Delete the per-target config for ``(target_kind, target_name)``.
+
+    An unknown key is a loud 404; a malformed key is a 400. Returns ``{"removed", "target_kind", "target_name"}``.
+    """
     _validate_target_key(target_kind, target_name)
     _require_backend()
     removed = await _config_store().delete(target_kind, target_name)

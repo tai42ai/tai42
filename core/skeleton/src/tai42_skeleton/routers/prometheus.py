@@ -49,9 +49,10 @@ if sys.platform == "win32":
         while True:
             try:
                 msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                return
             except OSError:
                 continue
+            else:
+                return
 
     def _unlock(fd: int) -> None:
         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
@@ -199,8 +200,10 @@ def assert_multiproc_value_class() -> None:
 
 
 def render_multiproc_metrics() -> bytes:
-    """Collect the multiproc db and render the Prometheus exposition text —
-    the shared body behind every multiproc ``/metrics`` scrape."""
+    """Collect the multiproc db and render the Prometheus exposition text.
+
+    The shared body behind every multiproc ``/metrics`` scrape.
+    """
     registry = CollectorRegistry()
     MultiProcessCollector(registry)
     return generate_latest(registry)

@@ -36,8 +36,10 @@ CLIENT_TOOL_NAME_MAX_LEN = 64
 
 
 class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
-    """Exposes bound tools as langchain ``StructuredTool``s an in-process agent
-    invokes, gating each dispatch on the execution identity and masking secrets."""
+    """Exposes bound tools as langchain ``StructuredTool``s an in-process agent invokes.
+
+    Gates each dispatch on the execution identity and masks secrets.
+    """
 
     async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
         tools = await self.get_tools()
@@ -94,11 +96,10 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
         return client_tools
 
     def _client_args_schema(self, tool_obj: Tool) -> dict[str, Any] | None:
-        """The explicit input JSON schema a client tool must advertise when the
-        tool's fn signature cannot be round-tripped through langchain's inferred
-        args model — otherwise ``None`` (langchain infers the schema from the
-        presented signature).
+        """The explicit input JSON schema a client tool must advertise, or ``None`` to use langchain inference.
 
+        Needed when the tool's fn signature cannot be round-tripped through langchain's inferred args model;
+        otherwise ``None`` (langchain infers the schema from the presented signature).
         Two signature shapes need the explicit ``.parameters`` instead of
         inference:
 
@@ -114,7 +115,8 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
 
         A tool with an ordinary concrete signature returns ``None`` and keeps the
         signature-inference path (injected Context/``Depends`` stripping included)
-        unchanged."""
+        unchanged.
+        """
         if not isinstance(tool_obj, FunctionTool):
             return None
         resolved = without_injected_parameters(tool_obj.fn)
@@ -126,8 +128,7 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
         return None
 
     def _client_runnable(self, tool_obj: Tool) -> Callable[..., Any]:
-        """The callable langchain builds a client tool over, for an in-process
-        agent to invoke.
+        """The callable langchain builds a client tool over, for an in-process agent to invoke.
 
         Resolves the tool's typed callable via ``_branch_base_callable``
         (``FunctionTool`` → ``fn``; a preset ``TransformedTool`` → its baked
@@ -157,7 +158,8 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
         Under a fire the body is re-resolved from the name LIVE, so the registration
         decided about is the one that runs — a client-tool snapshot outlives an agent
         turn, and a preset re-based or deleted mid-turn would otherwise run its stale
-        baked body; a vanished registration fails loudly as an unknown tool."""
+        baked body; a vanished registration fails loudly as an unknown tool.
+        """
         base_callable = self._branch_base_callable(tool_obj)
         resolved = without_injected_parameters(base_callable)
         resolved_sig = inspect.signature(resolved)

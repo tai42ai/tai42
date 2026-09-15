@@ -43,9 +43,11 @@ async def callback_job(
     previous_job_id: str,
     callback: CallbackSchema | dict[str, Any],
 ) -> Any:
-    """Wait for ``previous_job_id`` to complete, then run ``callback`` over its
-    result. Reports an error/not-finished status when the predecessor is
-    missing, times out, or fails."""
+    """Wait for ``previous_job_id`` to complete, then run ``callback`` over its result.
+
+    Reports an error/not-finished status when the predecessor is missing, times out, or
+    fails.
+    """
     # The schema crosses the queue as JSON, so it arrives as a plain mapping.
     if not isinstance(callback, CallbackSchema):
         callback = CallbackSchema.model_validate(callback)
@@ -85,9 +87,11 @@ async def callback_job(
 
 
 async def tool_execution(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
-    """Run the tool named by the ``tool_name_arg`` kwarg; when ``callback_kwargs``
-    rode along, chain a callback job keyed to this job's id — even when the tool
-    raised, so the callback can react to the failure."""
+    """Run the tool named by the ``tool_name_arg`` kwarg.
+
+    When ``callback_kwargs`` rode along, chain a callback job keyed to this job's id — even
+    when the tool raised, so the callback can react to the failure.
+    """
     callback = kwargs.pop("callback_kwargs", None)
 
     try:

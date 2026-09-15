@@ -25,18 +25,17 @@ TriggerAuth = Literal["public", "verifier", "token", "token+api_key", "out-of-se
 
 
 def webhook_trigger_auth(*, verifier_bound: bool) -> TriggerAuth:
-    """The axis value of a topic's webhook ingress door, from whether that topic
-    currently has a verifier binding."""
+    """The axis value of a topic's webhook ingress door, from whether that topic has a verifier binding."""
     return "verifier" if verifier_bound else "public"
 
 
 def link_trigger_auth(*, require_api_key: bool, verifier_bound: bool) -> TriggerAuth:
-    """The axis value of a trigger link's door, from the record's stored
-    ``require_api_key`` and whether its topic currently carries a verifier binding.
+    """The axis value of a trigger link's door, from its ``require_api_key`` and its topic's verifier binding.
 
     A verifier binding wins (the door admits nobody). The api-key requirement is reported
     only where the door can enforce it: with access control disabled the axis says
-    ``"token"`` while the record keeps its stored requirement."""
+    ``"token"`` while the record keeps its stored requirement.
+    """
     if verifier_bound:
         return "out-of-service"
     if require_api_key and access_control_settings().enable:

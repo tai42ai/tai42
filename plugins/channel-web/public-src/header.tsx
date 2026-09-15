@@ -6,8 +6,8 @@
  * put in the document title — read from there rather than re-plumbed through the
  * bundle, so the tab and the header can never disagree.
  */
-import type { ReactElement } from 'react';
 import { Button } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
 
 export interface HeaderProps {
   readonly title: string;

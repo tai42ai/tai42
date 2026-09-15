@@ -1,6 +1,8 @@
-"""Analysing a member pyproject into the first-party specifier rewrites to apply,
-the pinned caps preserved across a major, and the unpinned cross-major warnings —
-and applying the rewrites to the raw file text."""
+"""Analyse a member pyproject into the first-party specifier rewrites, and apply them to the file text.
+
+The analysis yields the rewrites to apply, the pinned caps preserved across a major,
+and the unpinned cross-major warnings.
+"""
 
 from __future__ import annotations
 
@@ -33,9 +35,11 @@ class Preserved:
 
 @dataclass
 class PyprojectAnalysis:
-    """The outcome of analysing one pyproject: the rewrites to apply, the
-    pinned caps preserved across a major, and the unpinned caps that crossed a
-    major (a subset of ``changes``, surfaced as ``--check`` warnings)."""
+    """The outcome of analysing one pyproject.
+
+    The rewrites to apply, the pinned caps preserved across a major, and the unpinned
+    caps that crossed a major (a subset of ``changes``, surfaced as ``--check`` warnings).
+    """
 
     changes: list[SpecChange]
     preserved: list[Preserved]
@@ -43,9 +47,10 @@ class PyprojectAnalysis:
 
 
 def pinned_deps(pyproject: dict) -> set[str]:
-    """The normalized first-party names marked deliberate in this member's
-    ``[tool.range-sync] pinned`` list. Raises loudly if the table value is not a
-    list of strings."""
+    """The normalized first-party names marked deliberate in this member's ``[tool.range-sync] pinned`` list.
+
+    Raises loudly if the table value is not a list of strings.
+    """
     table = pyproject.get("tool", {}).get(PIN_TABLE, {})
     raw = table.get(PIN_KEY, [])
     if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
@@ -54,8 +59,10 @@ def pinned_deps(pyproject: dict) -> set[str]:
 
 
 def _first_party_dep_names(pyproject: dict, first_party: dict[str, str]) -> set[str]:
-    """Normalized names of this member's first-party dependencies (any table
-    scanned as a source), regardless of whether they carry a specifier."""
+    """Normalized names of this member's first-party dependencies (any table scanned as a source).
+
+    Included regardless of whether they carry a specifier.
+    """
     present: set[str] = set()
     for raw in _requirement_strings(pyproject):
         parsed = parse_requirement(raw)
@@ -70,14 +77,17 @@ def _first_party_dep_names(pyproject: dict, first_party: dict[str, str]) -> set[
 def analyze_pyproject(
     pyproject: dict, first_party: dict[str, str], member_label: str = "<pyproject>"
 ) -> PyprojectAnalysis:
-    """Analyse one parsed pyproject. Version-less and non-first-party refs are
-    skipped; a rewrite is computed only when old != derived. A guarded rewrite
-    (floor or cap major crosses, or the existing spec's major structure is
-    unparseable) is preserved for a pinned dep (kept out of ``changes``); an
-    unpinned guarded rewrite still applies but is also flagged as a warning.
+    """Analyse one parsed pyproject.
 
-    Raises if a ``pinned`` name is not a first-party dependency of this member —
-    a malformed annotation is never silently ignored."""
+    Version-less and non-first-party refs are skipped; a rewrite is computed only when
+    old != derived. A guarded rewrite (floor or cap major crosses, or the existing
+    spec's major structure is unparseable) is preserved for a pinned dep (kept out of
+    ``changes``); an unpinned guarded rewrite still applies but is also flagged as a
+    warning.
+
+    Raises if a ``pinned`` name is not a first-party dependency of this member — a
+    malformed annotation is never silently ignored.
+    """
     pinned = pinned_deps(pyproject)
     unknown = pinned - _first_party_dep_names(pyproject, first_party)
     if unknown:
@@ -120,19 +130,22 @@ def analyze_pyproject(
 
 
 def compute_pyproject_changes(pyproject: dict, first_party: dict[str, str]) -> list[SpecChange]:
-    """Return the set of first-party specifier rewrites for one parsed
-    pyproject (the rewrites to apply, with pinned cross-major caps excluded)."""
+    """Return the set of first-party specifier rewrites for one parsed pyproject.
+
+    The rewrites to apply, with pinned cross-major caps excluded.
+    """
     return analyze_pyproject(pyproject, first_party).changes
 
 
 def _replace_quoted(text: str, old: str, new: str) -> tuple[str, int]:
-    """Replace the quoted literal ``old`` with ``new`` everywhere in *text*,
-    preserving the quote style (single or double) used in the file. The match is
-    the full quoted requirement literal (name+extras+specifier), which in a
-    pyproject occurs only as a dependency entry — never in a comment — so a
-    first-party pin repeated verbatim (e.g. under [dependency-groups]) is
-    normalized too, keeping every first-party range in sync. Returns (text,
-    count)."""
+    """Replace the quoted literal ``old`` with ``new`` everywhere in *text*, preserving the quote style.
+
+    The single or double quote style used in the file is kept. The match is the full
+    quoted requirement literal (name+extras+specifier), which in a pyproject occurs only
+    as a dependency entry — never in a comment — so a first-party pin repeated verbatim
+    (e.g. under [dependency-groups]) is normalized too, keeping every first-party range
+    in sync. Returns (text, count).
+    """
     for quote in ('"', "'"):
         literal = f"{quote}{old}{quote}"
         if literal in text:
@@ -142,8 +155,11 @@ def _replace_quoted(text: str, old: str, new: str) -> tuple[str, int]:
 
 
 def rewrite_pyproject_text(text: str, changes: list[SpecChange]) -> tuple[str, int]:
-    """Apply *changes* to the raw pyproject *text*. Returns (text, n_replaced).
-    Raises if a change's literal is not found (guards silent no-ops)."""
+    """Apply *changes* to the raw pyproject *text*.
+
+    Returns (text, n_replaced). Raises if a change's literal is not found (guards silent
+    no-ops).
+    """
     total = 0
     for change in changes:
         text, count = _replace_quoted(text, change.old_req, change.new_req)

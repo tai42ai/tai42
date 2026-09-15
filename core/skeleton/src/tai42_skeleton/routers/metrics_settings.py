@@ -1,3 +1,5 @@
+"""Settings for the Prometheus metrics exporter and the shared multiproc directory."""
+
 import os
 import tempfile
 
@@ -6,6 +8,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class MetricsSettings(TaiBaseSettings):
+    """The metrics exporter bind address and the Prometheus multiproc directory."""
+
     # The exporter bind is deployment-spec identity and the metrics process has no
     # bus subscription, so a recycle op can never reach it — each field is excluded
     # from the reload boundary.
@@ -40,6 +44,7 @@ class MetricsSettings(TaiBaseSettings):
 
 @settings_cache
 def metrics_settings() -> MetricsSettings:
+    """The cached :class:`MetricsSettings` for this process."""
     return MetricsSettings()
 
 

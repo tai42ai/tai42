@@ -42,8 +42,10 @@ def proxy_settings() -> ProxySettings:
 
 
 def _redact_userinfo(proxy_url: str) -> str:
-    """Return ``proxy_url`` with any ``user:pass@`` credentials replaced by ``***@`` so an
-    error echoing the URL never leaks a proxy password. Operates on the raw netloc."""
+    """Return ``proxy_url`` with any ``user:pass@`` credentials replaced by ``***@``.
+
+    So an error echoing the URL never leaks a proxy password. Operates on the raw netloc.
+    """
     parsed = urlparse(proxy_url)
     if "@" not in parsed.netloc:
         return proxy_url
@@ -73,7 +75,7 @@ def _select_proxy_url(proxies: list[str] | None, settings: ProxySettings) -> str
 
     if not candidates:
         raise ValueError("No proxies available")
-    return random.choice(candidates)
+    return random.choice(candidates)  # noqa: S311 non-cryptographic randomness (jitter/backoff/id)
 
 
 async def build_route(proxies: list[str] | None) -> RouteConfig:

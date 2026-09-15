@@ -1,5 +1,4 @@
-"""The first-key bootstrap operation — mint the first admin api key on a fresh
-deployment behind the secure-by-default token gate.
+"""The first-key bootstrap operation — mint the first admin api key behind the secure-by-default token gate.
 
 A deployment with access control ON and the api-key identity provider has no
 authenticated door to mint its first credential: ``POST /api/auth/api-keys`` is itself
@@ -22,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.bootstrap import (
-    BootstrapContended,
+    BootstrapContendedError,
     bootstrap_mint_lock,
     bootstrap_throttle_locked,
     clear_bootstrap_failures,
@@ -101,7 +100,7 @@ async def bootstrap_admin_key(
             if await management.get_all_existing_tokens_payload():
                 raise ConflictError("Already initialized")
             raw_key, _body, _fingerprint = await management.add_user_api_key(user_id, description, ["*"])
-    except BootstrapContended as exc:
+    except BootstrapContendedError as exc:
         raise ConflictError("Already initialized") from exc
 
     await clear_bootstrap_failures(client_ip)

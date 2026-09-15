@@ -1,5 +1,7 @@
-"""Structural body readers that raise the byte-stable 400 on malformed nested
-combo / output-schema / state-binding payloads before any store write."""
+"""Structural body readers that raise the byte-stable 400 before any store write.
+
+They reject malformed nested combo / output-schema / state-binding payloads.
+"""
 
 from __future__ import annotations
 
@@ -14,12 +16,13 @@ from tai42_skeleton.operations import BadRequestError
 
 
 def read_element(element: Any) -> ExtensionElement:
-    """One combo element, structurally validated: a non-empty extension NAME
-    (bare string), or a ``{"name": <non-empty str>, "config": <dict>}`` mapping
-    binding author config (``config`` REQUIRED — a config-less selection is the
-    bare-string form, so a config-free dict is malformed) with no other keys.
-    Anything else is a loud 400. Registration of the name is checked later against
-    the live registry."""
+    """One combo element, structurally validated.
+
+    A non-empty extension NAME (bare string), or a ``{"name": <non-empty str>, "config": <dict>}``
+    mapping binding author config (``config`` REQUIRED — a config-less selection is the bare-string
+    form, so a config-free dict is malformed) with no other keys. Anything else is a loud 400.
+    Registration of the name is checked later against the live registry.
+    """
     if isinstance(element, str):
         if not element:
             raise BadRequestError("an extension name must be a non-empty string")
@@ -39,9 +42,11 @@ def read_element(element: Any) -> ExtensionElement:
 
 
 def read_combos(extensions: Any) -> list[list[ExtensionElement]]:
-    """A list of extension combos, each a non-empty list of combo elements. The
-    empty INNER combo (``[[]]`` or any ``[]`` member) is rejected — mirrors the
-    view's rule so a create/edit is guarded before any store write."""
+    """A list of extension combos, each a non-empty list of combo elements.
+
+    The empty INNER combo (``[[]]`` or any ``[]`` member) is rejected — mirrors the view's rule so
+    a create/edit is guarded before any store write.
+    """
     result: list[list[ExtensionElement]] = []
     for combo in extensions:
         if not isinstance(combo, list) or not combo:
@@ -51,9 +56,11 @@ def read_combos(extensions: Any) -> list[list[ExtensionElement]]:
 
 
 def read_create_extensions(present: bool, value: Any) -> list[list[ExtensionElement]]:
-    """Create's extension combos: an absent field means no extensions, an explicit
-    ``extensions: []`` is REJECTED (nothing to clear on create), and an empty inner
-    combo is rejected."""
+    """Create's extension combos.
+
+    An absent field means no extensions, an explicit ``extensions: []`` is REJECTED (nothing to
+    clear on create), and an empty inner combo is rejected.
+    """
     if not present:
         return []
     if not isinstance(value, list):
@@ -64,9 +71,10 @@ def read_create_extensions(present: bool, value: Any) -> list[list[ExtensionElem
 
 
 def read_edit_extensions(present: bool, value: Any) -> list[list[ExtensionElement]] | None:
-    """Save-version's extension combos under the carry-forward sentinel: absent or
-    ``null`` carries forward (``None``); ``[]`` clears; an empty inner combo is
-    rejected."""
+    """Save-version's extension combos under the carry-forward sentinel.
+
+    Absent or ``null`` carries forward (``None``); ``[]`` clears; an empty inner combo is rejected.
+    """
     if not present or value is None:
         return None
     if not isinstance(value, list):
@@ -75,12 +83,14 @@ def read_edit_extensions(present: bool, value: Any) -> list[list[ExtensionElemen
 
 
 def _read_schema_body(field: str, value: Any) -> TemplatedText | dict[str, Any] | None:
-    """The optional author-set schema body — the ``TemplatedText | dict`` union — from a
-    request value: ``null`` → ``None``; a ``{content|id, kwargs}`` object → the parsed
+    """The optional author-set schema body — the ``TemplatedText | dict`` union — from a request value.
+
+    ``null`` → ``None``; a ``{content|id, kwargs}`` object → the parsed
     :class:`~tai42_contract.template.TemplatedText` (a stored schema named by id, or inline
     templated content); any other JSON object → the inline schema dict itself; anything else
     → a loud 400. A by-id resource is not fetched here — it is rendered, parsed and validated
-    at the save-time dry-run bake and at the point of use."""
+    at the save-time dry-run bake and at the point of use.
+    """
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -102,9 +112,12 @@ def read_input_schema(value: Any) -> TemplatedText | dict[str, Any] | None:
 
 
 def read_state_binding(value: Any) -> StateBinding | None:
-    """The optional door-layer state binding from a request value: ``null`` → ``None``; a
-    binding object → the parsed :class:`StateBinding`; a malformed shape → a loud 400. The
-    HTTP-edge extractor uses this so a body binding is not silently dropped before the op."""
+    """The optional door-layer state binding from a request value.
+
+    ``null`` → ``None``; a binding object → the parsed :class:`StateBinding`; a malformed shape → a
+    loud 400. The HTTP-edge extractor uses this so a body binding is not silently dropped before
+    the op.
+    """
     if value is None:
         return None
     try:

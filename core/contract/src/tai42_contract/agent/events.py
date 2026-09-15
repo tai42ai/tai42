@@ -20,9 +20,11 @@ from pydantic import BaseModel, ConfigDict
 
 
 class StreamEvent(BaseModel):
-    """Base class for every event an :class:`Agent` streams. ``type`` is a stable
-    discriminator; ``final`` marks a terminal event (see the terminal rule in
-    :meth:`Agent._drain`)."""
+    """Base class for every event an :class:`Agent` streams.
+
+    ``type`` is a stable discriminator; ``final`` marks a terminal event (see the terminal
+    rule in :meth:`Agent._drain`).
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
     type: str
@@ -30,16 +32,20 @@ class StreamEvent(BaseModel):
 
 
 class ReasoningStep(StreamEvent):
-    """A chunk of the model's intermediate reasoning ("thinking") for one step
-    of the agent loop. Empty/whitespace-only reasoning is never emitted."""
+    """A chunk of the model's intermediate reasoning ("thinking") for one step of the agent loop.
+
+    Empty/whitespace-only reasoning is never emitted.
+    """
 
     type: Literal["reasoning_step"] = "reasoning_step"  # pyright: ignore[reportIncompatibleVariableOverride]
     text: str
 
 
 class ToolCallStep(StreamEvent):
-    """One tool invocation the agent decided to make. ``call_id`` is the
-    model-assigned id the matching :class:`ToolResultStep` carries."""
+    """One tool invocation the agent decided to make.
+
+    ``call_id`` is the model-assigned id the matching :class:`ToolResultStep` carries.
+    """
 
     type: Literal["tool_call_step"] = "tool_call_step"  # pyright: ignore[reportIncompatibleVariableOverride]
     tool: str
@@ -48,8 +54,10 @@ class ToolCallStep(StreamEvent):
 
 
 class ToolResultStep(StreamEvent):
-    """The value one tool call returned, matched to a :class:`ToolCallStep` by
-    ``call_id``. ``result`` is passed through untouched."""
+    """The value one tool call returned, matched to a :class:`ToolCallStep` by ``call_id``.
+
+    ``result`` is passed through untouched.
+    """
 
     type: Literal["tool_result_step"] = "tool_result_step"  # pyright: ignore[reportIncompatibleVariableOverride]
     tool: str
@@ -84,9 +92,11 @@ class RunUsage(StreamEvent):
 
 
 class StructuredFinal(StreamEvent):
-    """The agent's structured (non-text) output. ``data`` is the object the
-    agent produced — typically the validated ``response_format`` instance. A
-    plain-text answer is carried by :class:`MessageFinal` instead. Terminal."""
+    """The agent's structured (non-text) output.
+
+    ``data`` is the object the agent produced — typically the validated ``response_format``
+    instance. A plain-text answer is carried by :class:`MessageFinal` instead. Terminal.
+    """
 
     type: Literal["structured_final"] = "structured_final"  # pyright: ignore[reportIncompatibleVariableOverride]
     data: Any = None
@@ -105,7 +115,8 @@ class SuspendedFinal(StreamEvent):
     ``expiry_at`` is the earliest park deadline (ISO-8601, or ``None`` when no park
     carried one); ``thread_id`` is the parked run's thread. The vocabulary is
     generic — it names no driver, engine, or resume state, only the parked
-    interaction ids the flow-blind platform already holds."""
+    interaction ids the flow-blind platform already holds.
+    """
 
     type: Literal["suspended_final"] = "suspended_final"  # pyright: ignore[reportIncompatibleVariableOverride]
     interaction_ids: list[str]
@@ -122,7 +133,8 @@ class InterruptFinal(StreamEvent):
     ``reason`` is an optional human-facing label. This event is emitted verbatim
     as one SSE frame (``type: "interrupt_final"``); a consumer reads
     ``interrupt_id``, ``payload`` and ``reason`` off it — do NOT rename ``payload``
-    or drop ``reason``."""
+    or drop ``reason``.
+    """
 
     type: Literal["interrupt_final"] = "interrupt_final"  # pyright: ignore[reportIncompatibleVariableOverride]
     interrupt_id: str

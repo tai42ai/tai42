@@ -118,8 +118,9 @@ async def notify_in_order(
     *,
     on_sent: Callable[[int, list[str]], None] | None = None,
 ) -> list[list[str]]:
-    """Deliver ``notifications`` to ``channel`` STRICTLY in order, returning the
-    per-message ids of each (one ``list[str]`` per notification, in the same order).
+    """Deliver ``notifications`` to ``channel`` STRICTLY in order, returning the per-message ids of each.
+
+    One ``list[str]`` per notification, in the same order.
 
     The default sequential in-order primitive every channel "inherits" by a caller using
     this helper — the place a Protocol default can actually reach a structural

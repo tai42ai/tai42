@@ -1,5 +1,4 @@
-"""Start an OAuth authorize flow: persist the signed :class:`OAuthFlowState` and build
-the provider authorize URL."""
+"""Start an OAuth authorize flow: persist the signed :class:`OAuthFlowState` and build the provider authorize URL."""
 
 from __future__ import annotations
 

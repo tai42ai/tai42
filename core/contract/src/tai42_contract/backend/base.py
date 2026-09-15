@@ -1,3 +1,5 @@
+"""Abstract execution-backend interface a Tai app's task runtime implements."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -20,5 +22,4 @@ class Backend(ABC):
 
     @abstractmethod
     async def launch(self, args: Sequence[str]) -> None:
-        """Start the worker runtime for the backend registered via
-        ``@tai42_app.backends.register_backend``."""
+        """Start the worker runtime for the backend registered via ``@tai42_app.backends.register_backend``."""

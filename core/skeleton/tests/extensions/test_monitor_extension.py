@@ -94,13 +94,13 @@ class _RecordingWriter(NoOpWriter):
         name: str,
         kind: SpanKind,
         trace_context: TraceContext | None = None,
-        input: Any = None,
+        input_: Any = None,
         model: str | None = None,
         model_parameters: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Iterator[Span]:
         span = _RecordingSpan()
-        self.spans.append({"name": name, "kind": kind, "input": input, "span": span})
+        self.spans.append({"name": name, "kind": kind, "input": input_, "span": span})
         yield span
 
 

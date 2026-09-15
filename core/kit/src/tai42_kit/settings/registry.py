@@ -1,10 +1,11 @@
-"""Registry of every concrete ``TaiBaseSettings`` subclass, captured as plain
-data so a UI can list the env-configurable groups without importing live model
-classes.
+"""Registry of every concrete ``TaiBaseSettings`` subclass, captured as plain data.
+
+A UI can list the env-configurable groups from this data without importing live model classes.
 
 A subclass self-registers through ``TaiBaseSettings.__pydantic_init_subclass__``
 (base.py). This module holds the storage and the extraction that turns a model's
-``model_fields`` into JSON-safe field metadata."""
+``model_fields`` into JSON-safe field metadata.
+"""
 
 import enum
 import inspect
@@ -85,7 +86,8 @@ def _strip_annotated(annotation: Any) -> Any:
 
     A nullable classified type (e.g. ``KeyMaterial | None``) leaves its non-null
     branch as ``Annotated[SecretStr, FieldInfo(...)]``; unwrap it so the subclass
-    check that identifies a secret reaches the ``SecretStr`` underneath."""
+    check that identifies a secret reaches the ``SecretStr`` underneath.
+    """
     if getattr(annotation, "__metadata__", None) is not None:
         return annotation.__origin__
     return annotation
@@ -98,7 +100,8 @@ def _extra_dicts(field_info: FieldInfo) -> list[dict[str, Any]]:
     metadata nested inside an ``Optional``/``Union`` annotation. Pydantic tucks a
     classified type's flag-bearing ``FieldInfo`` into the union member's metadata
     rather than onto the outer field, so ``KeyMaterial | None`` would otherwise
-    lose its ``key_material``/``secret``/``reload`` flags."""
+    lose its ``key_material``/``secret``/``reload`` flags.
+    """
     dicts: list[dict[str, Any]] = []
     own = field_info.json_schema_extra
     if isinstance(own, dict):
@@ -121,11 +124,14 @@ def _settings_member(annotation: Any) -> type[BaseSettings] | None:
 
 
 def _is_secret(field_info: FieldInfo) -> bool:
-    """A field is secret if its annotation is/contains ``SecretStr``/``SecretBytes``,
-    or it is explicitly flagged via ``json_schema_extra={"secret": True}``.
+    """Whether a field holds a secret value.
+
+    True if its annotation is/contains ``SecretStr``/``SecretBytes``, or it is explicitly flagged
+    via ``json_schema_extra={"secret": True}``.
 
     Union members are unwrapped through ``Annotated`` so ``KeyMaterial | None``
-    (whose non-null branch is ``Annotated[SecretStr, ...]``) is still recognized."""
+    (whose non-null branch is ``Annotated[SecretStr, ...]``) is still recognized.
+    """
     for member in _union_members(field_info.annotation):
         stripped = _strip_annotated(member)
         if isinstance(stripped, type) and issubclass(stripped, (SecretStr, SecretBytes)):
@@ -134,25 +140,32 @@ def _is_secret(field_info: FieldInfo) -> bool:
 
 
 def _is_key_material(field_info: FieldInfo) -> bool:
-    """A field holds key material when flagged via
-    ``json_schema_extra={"key_material": True}`` (the ``KeyMaterial`` type)."""
+    """Whether a field holds key material.
+
+    True when flagged via ``json_schema_extra={"key_material": True}`` (the ``KeyMaterial`` type).
+    """
     return any(extra.get("key_material") is True for extra in _extra_dicts(field_info))
 
 
 def _as_reload_class(value: Any, source: str) -> ReloadClass:
-    """Narrow an untyped declaration to a ``ReloadClass``, raising with ``source``
-    on any value outside the literal set — never a silent coercion to a default."""
+    """Narrow an untyped declaration to a ``ReloadClass``.
+
+    Raises with ``source`` on any value outside the literal set — never a silent coercion to a
+    default.
+    """
     if value in get_args(ReloadClass):
         return cast("ReloadClass", value)
     raise ValueError(f"{source} reload class {value!r} is not one of {get_args(ReloadClass)}")
 
 
 def _reload_override(field_info: FieldInfo) -> Any | None:
-    """The field's own ``json_schema_extra={"reload": ...}`` value, or ``None`` when
-    it carries no override and so takes its class's ``reload_class``.
+    """The field's own ``json_schema_extra={"reload": ...}`` value, or ``None`` when it has none.
+
+    A field with no override takes its class's ``reload_class``.
 
     Reads through ``Annotated`` metadata nested in an ``Optional``/``Union`` so a
-    per-field override composes with a nullable classified type."""
+    per-field override composes with a nullable classified type.
+    """
     for extra in _extra_dicts(field_info):
         if "reload" in extra:
             return extra["reload"]
@@ -163,7 +176,8 @@ def _resolve_ref(ref: str, defs: dict[str, Any]) -> dict[str, Any]:
     """Resolve a local ``#/$defs/Name`` reference against a schema's ``$defs``.
 
     Raises on any reference that cannot be resolved — an unresolvable ``$ref`` is
-    a bug to surface, never a silent fallback."""
+    a bug to surface, never a silent fallback.
+    """
     prefix = "#/$defs/"
     if not ref.startswith(prefix):
         raise ValueError(f"unsupported schema reference {ref!r}")
@@ -182,7 +196,8 @@ def _resolve_type(schema: dict[str, Any], defs: dict[str, Any], visited: frozens
 
     ``visited`` tracks the ``$ref`` names on the current resolution stack; a
     ``$ref`` re-encountered while already resolving is a cyclic definition and
-    raises rather than recursing without bound."""
+    raises rather than recursing without bound.
+    """
     if "$ref" in schema:
         ref = schema["$ref"]
         if ref in visited:
@@ -207,7 +222,8 @@ def _field_type(name: str, field_info: FieldInfo) -> str:
     """JSON-schema type string for a scalar field annotation.
 
     Raises with the field name on an unexpected schema — a scalar with no
-    resolvable type is a bug to surface, not to paper over with a default."""
+    resolvable type is a bug to surface, not to paper over with a default.
+    """
     try:
         schema = TypeAdapter(field_info.annotation).json_schema()
         return _resolve_type(schema, schema.get("$defs", {}))
@@ -223,7 +239,8 @@ def _env_var(name: str, field_info: FieldInfo, env_prefix: str, case_sensitive: 
     A string alias wins verbatim. An ``AliasChoices`` reports its first string
     choice — the primary env var pydantic-settings reads, which overrides
     ``env_prefix``. With no alias, the name is ``env_prefix + name``, upper-cased
-    unless ``case_sensitive`` is set on the model config."""
+    unless ``case_sensitive`` is set on the model config.
+    """
     alias = field_info.validation_alias or field_info.alias
     if isinstance(alias, str):
         return alias
@@ -252,7 +269,8 @@ def _factory_needs_validated_data(factory: Any) -> bool:
     this returns ``False`` via the ``except`` to do the same. Builtins like
     ``list`` and ``set`` DO expose a signature (a lone positional parameter that
     carries a default), so they reach ``False`` through the no-default clause
-    below rather than the ``except``; either way the result is the same."""
+    below rather than the ``except``; either way the result is the same.
+    """
     try:
         signature = inspect.signature(factory)
     except (TypeError, ValueError):
@@ -271,7 +289,8 @@ def _resolve_default(field_info: FieldInfo) -> Any | None:
     it yields no determinable default (``None``). A plain 0-arg factory is called
     and ANY error it raises propagates loudly — a broken factory is a real bug to
     surface, never something to hide behind a display default. Fields with a
-    plain (non-factory) default return that value."""
+    plain (non-factory) default return that value.
+    """
     factory = field_info.default_factory
     if factory is not None:
         if _factory_needs_validated_data(factory):
@@ -365,5 +384,6 @@ def _clear_registry() -> None:
 def registered_settings() -> list[SettingsClassInfo]:
     """Snapshot of every registered settings group, in registration order.
 
-    Returns model copies so callers cannot mutate the registry's internals."""
+    Returns model copies so callers cannot mutate the registry's internals.
+    """
     return [info.model_copy(deep=True) for info in _REGISTRY.values()]

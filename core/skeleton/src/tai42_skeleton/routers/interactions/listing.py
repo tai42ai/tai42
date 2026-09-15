@@ -1,5 +1,4 @@
-"""Paged pending-list and parked-interactions audit door adapters for the
-interactions surface."""
+"""Paged pending-list and parked-interactions audit door adapters for the interactions surface."""
 
 from __future__ import annotations
 
@@ -16,9 +15,11 @@ from tai42_skeleton.operations.interactions import list_pending_interactions as 
 
 
 async def _extract_page_window(request: Request) -> dict:
-    """The ``?page=`` / ``?pageSize=`` window as the list door's flat arguments (a GET
-    reads its parameters from the query string, never a body). A non-integer is a loud
-    400 here; the operation range-checks the pair and caps the size."""
+    """The ``?page=`` / ``?pageSize=`` window as the list door's flat arguments.
+
+    A GET reads its parameters from the query string, never a body. A non-integer
+    is a loud 400 here; the operation range-checks the pair and caps the size.
+    """
     page = request.query_params.get("page", "1")
     page_size = request.query_params.get("pageSize", "50")
     try:
@@ -38,9 +39,11 @@ list_interactions = register_operation_route(
 
 
 async def _extract_pending_limit(request: Request) -> dict:
-    """The ``?limit=`` slice as the audit door's flat argument (a GET reads its
-    parameters from the query string, never a body). A non-integer is a loud 400 here;
-    the operation clamps the value into range."""
+    """The ``?limit=`` slice as the audit door's flat argument.
+
+    A GET reads its parameters from the query string, never a body. A non-integer
+    is a loud 400 here; the operation clamps the value into range.
+    """
     raw = request.query_params.get("limit")
     if raw is None:
         return {}

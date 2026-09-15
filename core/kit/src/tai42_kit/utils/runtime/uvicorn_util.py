@@ -1,3 +1,5 @@
+"""Parse ``--key value`` CLI arguments and cast them to the uvicorn ``Config`` schema."""
+
 import json
 import logging
 from typing import Any, get_args, get_origin, get_type_hints
@@ -24,8 +26,8 @@ def _is_value_token(token: str) -> bool:
 
 
 def _get_cli_pairs(items: tuple[str, ...]) -> dict[str, str]:
-    """
-    Step 1: Structural Parse.
+    """Step 1: Structural Parse.
+
     Extracts --key value or --key=value into a raw string dictionary.
     """
     pairs = {}
@@ -58,8 +60,8 @@ def _get_cli_pairs(items: tuple[str, ...]) -> dict[str, str]:
 
 
 def _infer_and_cast(value_str: str, target_type: Any) -> Any:
-    """
-    Step 2: Smart Casting.
+    """Step 2: Smart Casting.
+
     Handles JSON inference and Uvicorn-specific boolean logic.
     """
     # A parameterized generic (``list[tuple[str, str]]``, ``dict[str, int]``)

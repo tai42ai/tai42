@@ -54,7 +54,8 @@ def ask_external(
 
     ``config`` is the author-supplied extension config: its optional ``verifier``
     binds a webhook verifier to the callback so the signed answer is authenticated.
-    It is closed over here, never surfaced as an LLM-facing param."""
+    It is closed over here, never surfaced as an LLM-facing param.
+    """
     config = config or {}
     unknown = sorted(set(config) - _CONFIG_KEYS)
     if unknown:

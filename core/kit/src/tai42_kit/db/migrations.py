@@ -97,10 +97,12 @@ class ChecksumMismatchError(MigrationError):
 
 
 class SchemaOutOfDateError(MigrationError):
-    """A schema-owning component has pending migrations or a checksum mismatch, so a
-    boot gate refuses to start the process. Raised by :func:`assert_chain_applied`
+    """A schema-owning component has pending migrations or a checksum mismatch.
+
+    A boot gate refuses to start the process. Raised by :func:`assert_chain_applied`
     from the non-raising :func:`migration_status` verdict; recovery is the caller's
-    supplied remediation (kit hard-codes no CLI verb)."""
+    supplied remediation (kit hard-codes no CLI verb).
+    """
 
 
 @dataclass(frozen=True)
@@ -116,8 +118,10 @@ class MigrationScript:
 
 @dataclass(frozen=True)
 class MigrationEntry:
-    """A chain to run: a component name, its packaged migrations directory, and
-    the DDL-privileged connection settings for the database it targets."""
+    """A chain to run: a component name, its packaged migrations directory, and its DB settings.
+
+    The settings are the DDL-privileged connection settings for the database the chain targets.
+    """
 
     component: str
     migrations_dir: Traversable
@@ -136,8 +140,10 @@ class AppliedMigration:
 
 @dataclass(frozen=True)
 class ChecksumMismatch:
-    """A recorded version whose file changed (``current_checksum`` differs) or
-    disappeared (``current_checksum`` is ``None``)."""
+    """A recorded version whose file changed or disappeared.
+
+    ``current_checksum`` differs when the file changed, or is ``None`` when it disappeared.
+    """
 
     component: str
     version: int
@@ -148,8 +154,10 @@ class ChecksumMismatch:
 
 @dataclass(frozen=True)
 class ComponentStatus:
-    """Non-raising verdict for one component: what is applied, what is pending,
-    and any integrity mismatch. Consumed by ``tai db status`` and boot gates."""
+    """Non-raising verdict for one component: what is applied, what is pending, and any integrity mismatch.
+
+    Consumed by ``tai db status`` and boot gates.
+    """
 
     component: str
     applied_versions: tuple[int, ...]
@@ -303,8 +311,10 @@ async def _apply_component(conn: AsyncConnection, entry: MigrationEntry) -> list
 
 
 def _group_by_dsn(entries: Sequence[MigrationEntry]) -> list[list[MigrationEntry]]:
-    """Group entries by resolved DSN, preserving first-seen order. Each group
-    shares one connection, one history table, and one lock."""
+    """Group entries by resolved DSN, preserving first-seen order.
+
+    Each group shares one connection, one history table, and one lock.
+    """
     groups: dict[str, list[MigrationEntry]] = {}
     for entry in entries:
         groups.setdefault(entry.settings.pg_dsn, []).append(entry)
@@ -328,8 +338,7 @@ async def _release_lock(conn: AsyncConnection) -> None:
 
 
 async def apply_migrations(entries: Sequence[MigrationEntry]) -> list[AppliedMigration]:
-    """Apply every pending migration across ``entries``, returning one outcome
-    per file applied.
+    """Apply every pending migration across ``entries``, returning one outcome per file applied.
 
     Entries are grouped by database; each group runs under its own session-scoped
     advisory lock on a single pinned connection, creating its ``tai_schema_history``
@@ -351,8 +360,9 @@ async def apply_migrations(entries: Sequence[MigrationEntry]) -> list[AppliedMig
 
 
 async def migration_status(entries: Sequence[MigrationEntry]) -> list[ComponentStatus]:
-    """Report applied/pending/mismatch state per entry without applying or writing
-    anything, one :class:`ComponentStatus` per input entry, in input order.
+    """Report applied/pending/mismatch state per entry without applying or writing anything.
+
+    Returns one :class:`ComponentStatus` per input entry, in input order.
 
     Purely READ-ONLY: it issues NO DDL, so it runs under a lesser-privileged role
     that owns neither the history table nor CREATE on the schema (a boot gate reads

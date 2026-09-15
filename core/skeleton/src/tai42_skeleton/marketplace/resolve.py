@@ -1,7 +1,6 @@
-"""Turn a registry resolve-response — or a stored attribution row — into a
-validated :class:`PluginSpec` with its pin provenance, parsed ref, and running-core
-version stamps.
+"""Translate a registry resolve-response or stored attribution row into a validated :class:`PluginSpec`.
 
+Adds its pin provenance, parsed ref, and running-core version stamps.
 Every function here is a pure translation of registry/local data with no I/O and
 no app handle: it validates the shipped spec, vets advisories and source, parses a
 ``namespace/name`` ref, and reads the running core versions, so the flows can order
@@ -80,8 +79,7 @@ def prepare_resolved(resolved: dict[str, Any]) -> tuple[PluginSpec, str]:
 
 
 def check_contract(contract_range: str) -> None:
-    """Require the installed ``tai42-contract`` version to satisfy the plugin's
-    declared ``contract_range``.
+    """Require the installed ``tai42-contract`` version to satisfy the plugin's declared ``contract_range``.
 
     ``prereleases=True`` so a dev-versioned tai42-contract (an editable checkout
     reporting e.g. ``0.5.0.dev3``) inside the range still passes — a developer
@@ -123,9 +121,11 @@ def parse_ref(ref: str) -> tuple[str, str]:
 
 
 def spec_from_row(row: InstallRecord) -> PluginSpec:
-    """Reconstruct the stored ``PluginSpec`` from an attribution row — LOCAL
-    truth, no registry call. A row that no longer validates is corrupt local
-    state (:class:`LocalStateError`, a 500), never the caller's request."""
+    """Reconstruct the stored ``PluginSpec`` from an attribution row — LOCAL truth, no registry call.
+
+    A row that no longer validates is corrupt local state
+    (:class:`LocalStateError`, a 500), never the caller's request.
+    """
     try:
         return PluginSpec.model_validate(row.spec)
     except ValidationError as exc:
@@ -133,12 +133,14 @@ def spec_from_row(row: InstallRecord) -> PluginSpec:
 
 
 def pin_provenance(resolved: dict[str, Any], source: str) -> tuple[str | None, str | None, str | None, str | None]:
-    """The ``(repository_url, tag, artifact_ref, sha256)`` to store for the pin:
-    the resolve values for a github OR a ``spec`` source (both carry the pointer
+    """The ``(repository_url, tag, artifact_ref, sha256)`` to store for the pin.
+
+    The resolve values for a github OR a ``spec`` source (both carry the pointer
     fields), else all ``None`` — so a pypi row keeps every pin column NULL even when
     the resolve response carries them. The stored ``artifact_ref`` + ``sha256`` are
-    what let update-unwind reinstall the old github pin through the same verified
-    fetch path (a descriptor ``spec`` pin stores them for provenance/integrity)."""
+    what let update-unwind reinstall the prior github pin through the same verified
+    fetch path (a descriptor ``spec`` pin stores them for provenance/integrity).
+    """
     if source in ("github", "spec"):
         return (
             resolved.get("repository_url"),
@@ -150,14 +152,15 @@ def pin_provenance(resolved: dict[str, Any], source: str) -> tuple[str | None, s
 
 
 def core_version_stamps() -> tuple[str, str]:
-    """The ``(tai42-contract, tai42-skeleton)`` versions running right now — the
-    diagnostics stamp every attribution write carries."""
+    """The ``(tai42-contract, tai42-skeleton)`` versions running right now.
+
+    The diagnostics stamp every attribution write carries.
+    """
     return running_contract_version(), importlib.metadata.version("tai42-skeleton")
 
 
 def require(resolved: dict[str, Any], key: str) -> Any:
-    """A required resolve-response field — present AND non-null — or a typed
-    registry-data fault (502).
+    """A required resolve-response field — present AND non-null — or a typed registry-data fault (502).
 
     The client boundary type-checks a field only when it is present and non-null
     (a null there is legitimate for the github-only optional pins and for a
@@ -165,7 +168,8 @@ def require(resolved: dict[str, Any], key: str) -> Any:
     here: a null in an always-present field (``version``, ``spec``, ``source``) is
     missing data, and rejecting it keeps the ``str``-typed parsers downstream honest —
     they never see ``None``. (``contract_range`` is NOT required here: a contract-less
-    plugin legitimately carries a null one, gated by presence at its own use site.)"""
+    plugin legitimately carries a null one, gated by presence at its own use site.)
+    """
     value = resolved.get(key)
     if value is None:
         raise RegistryResponseError(f"registry resolve response is missing {key!r}", status=None)
@@ -173,8 +177,7 @@ def require(resolved: dict[str, Any], key: str) -> Any:
 
 
 def require_list(resolved: dict[str, Any], key: str) -> list[Any]:
-    """A required list-shaped resolve-response field, or a typed registry-data
-    fault (502)."""
+    """A required list-shaped resolve-response field, or a typed registry-data fault (502)."""
     value = require(resolved, key)
     if not isinstance(value, list):
         raise RegistryResponseError(f"registry resolve response {key!r} is not a list", status=None)

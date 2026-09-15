@@ -1,3 +1,5 @@
+"""Kit base for env-sourced settings groups and their reload disposition."""
+
 import json
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -16,6 +18,8 @@ KeyMaterial = Annotated[SecretStr, Field(json_schema_extra={"key_material": True
 
 
 class TaiBaseSettings(BaseSettings):
+    """Base for env-configurable settings groups; concrete subclasses self-register."""
+
     # ``env_file=".env"`` is read only if the file exists (absent under K8s,
     # where the cluster injects env vars) — a side-effect-free replacement for
     # an import-time ``load_dotenv()``. ``model_config`` merges down the MRO, so
@@ -34,6 +38,7 @@ class TaiBaseSettings(BaseSettings):
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        """Self-register each concrete subclass with fields as an env-configurable group."""
         # Runs after pydantic has built the model (``model_fields`` populated) —
         # unlike ``__init_subclass__``, which fires before. Every concrete
         # subclass self-registers as an env-configurable group.
@@ -61,4 +66,5 @@ class TaiBaseSettings(BaseSettings):
         return {**defaults, **(user_config or {})}  # user_config always wins on conflict
 
     def load_with_fallbacks(self, user_config: str) -> dict:
+        """Parse ``user_config`` JSON (or empty) and merge it over the defaults."""
         return self.with_fallbacks(json.loads(user_config) if user_config else {})

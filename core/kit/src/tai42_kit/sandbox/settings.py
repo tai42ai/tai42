@@ -8,8 +8,7 @@ from tai42_kit.settings import TaiBaseSettings
 
 
 class SandboxDispatchSettings(TaiBaseSettings):
-    """The lifecycle knobs the kit sandbox base reads: the default session TTL,
-    the reap sweep interval, and the default per-``exec`` timeout.
+    """The lifecycle knobs the kit sandbox base reads: default session TTL, reap sweep interval, exec timeout.
 
     Mixed into a concrete provider group's own env group rather than shared as one
     group, so the NAMES, DEFAULTS and RELOAD CLASSES are declared once while each

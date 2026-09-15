@@ -1,5 +1,8 @@
-"""The preset reference graph and the agent-name space: which tools a preset body
-composes, the uses / used_by maps, and the rename / delete referee unions."""
+"""The preset reference graph and the agent-name space.
+
+Which tools a preset body composes, the uses / used_by maps, and the rename /
+delete referee unions.
+"""
 
 from __future__ import annotations
 
@@ -19,13 +22,16 @@ def _agent_tool_names() -> set[str]:
     binds under the REGISTRATION name (so that name is already a live tool the
     ``name_conflicts`` guard catches), but the ``tool_name`` may not be a bound tool.
     Keeping the authored-agent name off BOTH sets keeps one unambiguous agent-name
-    space."""
+    space.
+    """
     return {agent.tool_name for agent in instance.app.agents.all_agents().values()}
 
 
 def _check_tool_names(node: dict[str, Any], tools: set[str], where: str) -> str | None:
-    """The ``tool_names`` leg of one spec node: a list whose every entry is a string
-    naming a registered tool, or the first violation message."""
+    """The ``tool_names`` leg of one spec node, or the first violation message.
+
+    A list whose every entry is a string naming a registered tool.
+    """
     tool_names = node.get("tool_names", [])
     if not isinstance(tool_names, list):
         return f"{where}.tool_names must be a list of tool names"
@@ -40,9 +46,11 @@ def _check_tool_names(node: dict[str, Any], tools: set[str], where: str) -> str 
 def _check_inline_presets(
     node: dict[str, Any], tools: set[str], preset_names: frozenset[str], where: str
 ) -> str | None:
-    """The inline ``presets`` leg of one spec node: a list of self-contained
-    :class:`PresetSpec`, each with a non-empty description and a ``base_tool`` that is
-    a registered NON-preset tool (the flat-preset create rule), or the first violation."""
+    """The inline ``presets`` leg of one spec node, or the first violation.
+
+    A list of self-contained :class:`PresetSpec`, each with a non-empty description and
+    a ``base_tool`` that is a registered NON-preset tool (the flat-preset create rule).
+    """
     presets = node.get("presets", [])
     if not isinstance(presets, list):
         return f"{where}.presets must be a list of preset specs"
@@ -64,9 +72,11 @@ def _check_inline_presets(
 
 
 def _check_subagents(node: dict[str, Any], tools: set[str], preset_names: frozenset[str], where: str) -> str | None:
-    """The recursive ``subagents`` leg of one spec node: each entry an object whose own
-    references resolve at every depth (recurses into :func:`_spec_reference_error`), or
-    the first violation."""
+    """The recursive ``subagents`` leg of one spec node, or the first violation.
+
+    Each entry is an object whose own references resolve at every depth (recurses into
+    :func:`_spec_reference_error`).
+    """
     subagents = node.get("subagents", [])
     if not isinstance(subagents, list):
         return f"{where}.subagents must be a list of sub-agent specs"
@@ -88,7 +98,8 @@ def _spec_reference_error(
     ``presets`` (each a self-contained ``PresetSpec`` whose ``base_tool`` is a
     registered NON-preset tool — the same flat-preset rule as the create route), and
     recurses into every inline ``subagents`` spec, so a bad reference at ANY depth is
-    caught loudly rather than silently dropped."""
+    caught loudly rather than silently dropped.
+    """
     return (
         _check_tool_names(node, tools, where)
         or _check_inline_presets(node, tools, preset_names, where)
@@ -97,12 +108,14 @@ def _spec_reference_error(
 
 
 def _referenced_tool_names(node: dict[str, Any]) -> set[str]:
-    """Every tool name a spec node composes in its ``tool_names`` at any depth,
-    recursing ``subagents`` — the SAME traversal :func:`_spec_reference_error` walks,
-    read-only. Only ``tool_names`` can name a preset: inline ``presets`` entries and a
-    ``base_tool`` are rejected at authoring if they name a preset, so neither is
-    scanned here. This is the builtin ``fixed_kwargs`` walk the combined collector
-    :func:`_preset_references` unions with the base tool's declared extractor."""
+    """Every tool name a spec node composes in its ``tool_names`` at any depth, recursing ``subagents``.
+
+    The SAME traversal :func:`_spec_reference_error` walks, read-only. Only
+    ``tool_names`` can name a preset: inline ``presets`` entries and a ``base_tool`` are
+    rejected at authoring if they name a preset, so neither is scanned here. This is the
+    builtin ``fixed_kwargs`` walk the combined collector :func:`_preset_references`
+    unions with the base tool's declared extractor.
+    """
     names: set[str] = set()
     tool_names = node.get("tool_names", [])
     if isinstance(tool_names, list):
@@ -116,13 +129,15 @@ def _referenced_tool_names(node: dict[str, Any]) -> set[str]:
 
 
 def _preset_references(body: PresetBody) -> set[str]:
-    """Every tool name a preset body composes as tools: the UNION of the builtin
-    ``fixed_kwargs`` walk (:func:`_referenced_tool_names`) and the names the base
-    tool's DECLARED ``tool_refs`` extractor reads from ``fixed_kwargs`` (only when one
-    is registered for ``body.base_tool``). Population intersection, self-exclusion and
-    sorting are the callers' concern. The extractor is called raw: an exception
-    propagates loudly, and a non-string entry it returns is a plugin bug raised here —
-    never silently dropped, never an empty-list fallback."""
+    """Every tool name a preset body composes as tools.
+
+    The UNION of the builtin ``fixed_kwargs`` walk (:func:`_referenced_tool_names`) and
+    the names the base tool's DECLARED ``tool_refs`` extractor reads from
+    ``fixed_kwargs`` (only when one is registered for ``body.base_tool``). Population
+    intersection, self-exclusion and sorting are the callers' concern. The extractor is
+    called raw: an exception propagates loudly, and a non-string entry it returns is a
+    plugin bug raised here — never silently dropped, never an empty-list fallback.
+    """
     names = _referenced_tool_names(body.fixed_kwargs)
     extractor = instance.app.tools.tool_refs_extractor(body.base_tool)
     if extractor is not None:
@@ -136,12 +151,14 @@ def _preset_references(body: PresetBody) -> set[str]:
 
 
 def _reference_maps(bodies: dict[str, PresetBody]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """The ``uses`` and ``used_by`` maps over the active preset population, built in one
-    pass. ``uses[X]`` is the sorted OTHER preset names X's active body composes as tools
-    (the combined collector :func:`_preset_references`, intersected with the population
-    so base and foreign tools never appear); ``used_by[X]`` is the sorted OTHER presets
+    """The ``uses`` and ``used_by`` maps over the active preset population, built in one pass.
+
+    ``uses[X]`` is the sorted OTHER preset names X's active body composes as tools (the
+    combined collector :func:`_preset_references`, intersected with the population so
+    base and foreign tools never appear); ``used_by[X]`` is the sorted OTHER presets
     whose active bodies compose X. Self is never listed on either side. Every population
-    name is a key on both maps, empty when it has no references."""
+    name is a key on both maps, empty when it has no references.
+    """
     population = set(bodies)
     uses: dict[str, set[str]] = {name: set() for name in bodies}
     used_by: dict[str, set[str]] = {name: set() for name in bodies}
@@ -158,23 +175,27 @@ def _reference_maps(bodies: dict[str, PresetBody]) -> tuple[dict[str, list[str]]
 
 
 def _referencing_presets(old_name: str, bodies: dict[str, PresetBody]) -> list[str]:
-    """Every OTHER preset whose ACTIVE body composes ``old_name`` as a tool (the
-    combined collector :func:`_preset_references`, so a DECLARED reference counts too),
-    sorted for a stable, fully-listed answer. This is the PRESET-BODY leg of the rename
-    referee union — :func:`_rename_referees` unions it with every registered referee
-    (platform wiring + plugin providers). Only active bodies are walked: a non-active
-    historical version may still name the old tool, loud at authoring / run time if ever
-    rolled back (delete's existing posture)."""
+    """Every OTHER preset whose ACTIVE body composes ``old_name`` as a tool, sorted.
+
+    Uses the combined collector :func:`_preset_references`, so a DECLARED reference
+    counts too; sorted for a stable, fully-listed answer. This is the PRESET-BODY leg of
+    the rename referee union — :func:`_rename_referees` unions it with every registered
+    referee (platform wiring + plugin providers). Only active bodies are walked: a
+    non-active historical version may still name the old tool, loud at authoring / run
+    time if ever rolled back (delete's existing posture).
+    """
     return sorted(name for name, body in bodies.items() if name != old_name and old_name in _preset_references(body))
 
 
 async def _rename_referees(name: str) -> list[str]:
-    """Every live reference a rename of ``name`` would strand — the full union the rename
-    gate blocks on and the referees preview door reports: the OTHER presets whose active
-    body composes ``name`` (:func:`_referencing_presets`) plus every registered rename
-    referee's descriptions (the platform-internal wiring referees + any plugin provider).
-    Each referee is consulted for the OLD name; a referee RAISING propagates loudly — a
-    rename never proceeds past an unreadable holder store (no silent bypass)."""
+    """Every live reference a rename of ``name`` would strand — the full union the rename gate blocks on.
+
+    Also what the referees preview door reports: the OTHER presets whose active body
+    composes ``name`` (:func:`_referencing_presets`) plus every registered rename
+    referee's descriptions (the platform-internal wiring referees + any plugin
+    provider). Each referee is consulted for the OLD name; a referee RAISING propagates
+    loudly — a rename never proceeds past an unreadable holder store (no silent bypass).
+    """
     holders = _referencing_presets(name, await instance.app.presets.list_active_bodies())
     for referee in instance.app.tools.rename_referees():
         holders.extend(await referee(name))
@@ -182,11 +203,14 @@ async def _rename_referees(name: str) -> list[str]:
 
 
 async def _delete_referees(name: str) -> list[str]:
-    """Every VETO a delete of preset ``name`` draws from the registered delete referees
-    (plugin providers holding resources keyed on the name — e.g. per-node state bindings
-    referencing the preset). Each referee either CASCADES its own cleanup and returns empty
-    (allow) or returns non-empty descriptions to block; a referee RAISING propagates loudly
-    — a delete never proceeds past an unreadable holder store (no silent bypass)."""
+    """Every VETO a delete of preset ``name`` draws from the registered delete referees.
+
+    Referees are plugin providers holding resources keyed on the name — e.g. per-node
+    state bindings referencing the preset. Each referee either CASCADES its own cleanup
+    and returns empty (allow) or returns non-empty descriptions to block; a referee
+    RAISING propagates loudly — a delete never proceeds past an unreadable holder store
+    (no silent bypass).
+    """
     blockers: list[str] = []
     for referee in instance.app.tools.delete_referees():
         blockers.extend(await referee(name))

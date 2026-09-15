@@ -42,8 +42,10 @@ def _empty_report() -> _SectionReport:
 
 
 async def export_connector_categories() -> dict[str, Any]:
-    """Export the ``connector_category`` grouping rows as a faithful row copy;
-    ``created_at`` is carried so the original creation time survives a round-trip."""
+    """Export the ``connector_category`` grouping rows as a faithful row copy.
+
+    ``created_at`` is carried so the original creation time survives a round-trip.
+    """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
@@ -110,9 +112,10 @@ async def import_connector_categories(
 
 
 async def export_connector_connections() -> list[dict[str, Any]]:
-    """Export every connection record, ``encrypted_blob`` base64-encoded AS-IS (never
-    decrypted, so the KEK boundary is never crossed). ``cache_version`` and timestamps are
-    store-regenerated on restore and omitted.
+    """Export every connection record, ``encrypted_blob`` base64-encoded AS-IS.
+
+    Never decrypted, so the KEK boundary is never crossed. ``cache_version`` and timestamps
+    are store-regenerated on restore and omitted.
     """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,

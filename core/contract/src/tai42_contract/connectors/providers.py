@@ -49,6 +49,7 @@ class McpServerDescriptor(BaseModel):
         return value
 
     def model_post_init(self, _ctx: Any) -> None:
+        """Enforce the transport rule: ``url`` for http/websocket, ``command`` + ``args`` for stdio."""
         if self.type == "stdio":
             if not self.command:
                 raise ValueError("stdio MCP server requires command")
@@ -84,6 +85,8 @@ class ConfigFieldSpec(BaseModel):
 
 
 class SubServiceDescriptor(BaseModel):
+    """One sub-service a provider exposes, with its scopes and a single launch path."""
+
     id: str
     display_name: str
     description: str = ""
@@ -115,12 +118,16 @@ class SubServiceDescriptor(BaseModel):
 
 
 class OAuthEndpoints(BaseModel):
+    """The OAuth endpoint URLs a provider authorizes against, exchanges tokens at, and optionally revokes."""
+
     authorize: str
     token: str
     revoke: str | None = None
 
 
 class ProviderDescriptor(BaseModel):
+    """The universal connector-provider contract, registered from the manifest ``connectors`` list at boot/reload."""
+
     id: str
     display_name: str
     description: str = ""

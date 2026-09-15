@@ -38,10 +38,12 @@ logger = logging.getLogger(__name__)
 
 
 def _active_accounts_providers() -> list[AccountsProvider]:
-    """The CURRENT epoch's live accounts-provider instances, name-sorted for a
-    deterministic aggregate. Filters the epoch's recorded identity providers to the
-    accounts ones (an accounts provider IS an identity provider); reads through the
-    serving core so a build in flight resolves the epoch being built, else the live one."""
+    """The CURRENT epoch's live accounts-provider instances, name-sorted for a deterministic aggregate.
+
+    Filters the epoch's recorded identity providers to the accounts ones (an accounts
+    provider IS an identity provider); reads through the serving core so a build in flight
+    resolves the epoch being built, else the live one.
+    """
     from tai42_skeleton.app.instance import app
 
     recorded = app._serving_core.active_auth_providers
@@ -63,7 +65,8 @@ async def login_methods() -> dict:
     ``model_dump(exclude_none=True)`` so a ``None``-valued optional (icon/autocomplete)
     is OMITTED, never ``null`` (the Studio's zod schemas accept absent but reject
     ``null``). No active provider yields ``{"methods": [], "bootstrap": false}``.
-    Provider errors propagate (loud, never a silently empty methods list)."""
+    Provider errors propagate (loud, never a silently empty methods list).
+    """
     methods: list[dict] = []
     bootstrap = False
     for provider in _active_accounts_providers():
@@ -82,9 +85,10 @@ async def login_methods() -> dict:
     response_model=ClaimExchangeResult,
 )
 async def exchange_claim_token(token: str) -> dict:
-    """Burn a one-time claim token and return the raw API key it carried — the public
-    exchange leg of QR onboarding (``authed=False``; runtime public-ness comes from the
-    always-public ``/api/login`` prefix).
+    """Burn a one-time claim token and return the raw API key it carried — the public exchange leg.
+
+    The public exchange leg of QR onboarding (``authed=False``; runtime public-ness comes
+    from the always-public ``/api/login`` prefix).
 
     The claim record is single-use: a used / unknown / expired token all answer the SAME
     404 (no oracle distinguishing them). The handed-out key is guaranteed not-REVOKED
@@ -94,7 +98,8 @@ async def exchange_claim_token(token: str) -> dict:
 
     ``authority_changing=True`` keeps this OFF the default MCP tool surface: a
     credential-exchange login door is not an agent tool (it sits outside the
-    ``/api/auth/*`` prefix, so the flag is what excludes it, not the prefix)."""
+    ``/api/auth/*`` prefix, so the flag is what excludes it, not the prefix).
+    """
     try:
         return await _exchange_claim_token(token)
     except ClaimLinkError as exc:
@@ -110,8 +115,10 @@ async def exchange_claim_token(token: str) -> dict:
     response_model=LogoutResult,
 )
 async def logout(candidates: list[str]) -> dict:
-    """Revoke the caller's session by fanning ``revoke_session`` out over every
-    presented credential candidate and every registered accounts provider.
+    """Revoke the caller's session by fanning ``revoke_session`` out over every candidate and provider.
+
+    Fans out over every presented credential candidate and every registered accounts
+    provider.
 
     Iterating all candidates is required: a client may present a stale value in
     ``Authorization`` alongside its live session in ``X-Api-Key``, so checking only the
@@ -119,7 +126,8 @@ async def logout(candidates: list[str]) -> dict:
     Only when EVERY candidate against EVERY provider returns ``False`` → 404 (an
     ``sk-`` API key cannot "log out" — loud, not a silent no-op), with a server-side
     log naming the caller so probing/replay stays visible. Provider errors propagate
-    (fail closed)."""
+    (fail closed).
+    """
     providers = _active_accounts_providers()
 
     # Tokens outer, providers inner (registry order): the first provider to own any

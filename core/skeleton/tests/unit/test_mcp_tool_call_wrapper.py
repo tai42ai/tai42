@@ -255,10 +255,10 @@ def test_force_refresh_failure_propagates():
     """force_refresh raising → the failure propagates (no swallowing)."""
     resolver = AsyncMock(return_value=ManagedAuth(access_token="t1"))
 
-    class _RefreshOutage(RuntimeError):
+    class _RefreshOutageError(RuntimeError):
         pass
 
-    refresher = AsyncMock(side_effect=_RefreshOutage("upstream OAuth down"))
+    refresher = AsyncMock(side_effect=_RefreshOutageError("upstream OAuth down"))
 
     client = _FakeMcpClient(
         responses=[
@@ -266,7 +266,7 @@ def test_force_refresh_failure_propagates():
         ]
     )
 
-    with patch(_RESOLVER, new=resolver), patch(_REFRESHER, new=refresher), pytest.raises(_RefreshOutage):
+    with patch(_RESOLVER, new=resolver), patch(_REFRESHER, new=refresher), pytest.raises(_RefreshOutageError):
         asyncio.run(_run_wrapper(client=client, config=_managed_config()))
 
 
@@ -608,12 +608,12 @@ def test_non_disconnect_error_is_never_retried():
     """A non-disconnect error is never retried — the reconnect one-shot is scoped
     to ``ClientDisconnectedError`` alone."""
 
-    class _Boom(RuntimeError):
+    class _BoomError(RuntimeError):
         pass
 
-    client = _FakeMcpClient(responses=[_Boom("unrelated failure")])
+    client = _FakeMcpClient(responses=[_BoomError("unrelated failure")])
 
-    with pytest.raises(_Boom, match="unrelated failure"):
+    with pytest.raises(_BoomError, match="unrelated failure"):
         asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
 
     assert client.call_count == 1, "a non-disconnect error must not trigger the reconnect retry"
@@ -714,16 +714,16 @@ def test_dispatch_seam_records_failure_on_raw_propagation():
     then re-raises unchanged."""
     mcp_health._HEALTH.clear()
 
-    class _Boom(RuntimeError):
+    class _BoomError(RuntimeError):
         pass
 
-    client = _FakeMcpClient(responses=[_Boom("unrelated failure")])
+    client = _FakeMcpClient(responses=[_BoomError("unrelated failure")])
 
-    with pytest.raises(_Boom, match="unrelated failure"):
+    with pytest.raises(_BoomError, match="unrelated failure"):
         asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
 
     health = mcp_health.snapshot("local_http")
-    assert health["last_error"]["type"] == "_Boom"
+    assert health["last_error"]["type"] == "_BoomError"
     assert health["consecutive_failures"] == 1
 
 

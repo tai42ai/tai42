@@ -16,17 +16,21 @@ from tai42_contract.states.binding import StateBinding
 
 
 class PairCodeInvalidError(Exception):
-    """A submitted pair code did not resolve to a live single-use record. Deliberately
-    UNIFORM across unknown / expired / already-redeemed: the three are indistinguishable to
-    the caller (no oracle), so a redeem reply never reveals whether a code ever existed."""
+    """A submitted pair code did not resolve to a live single-use record.
+
+    Deliberately UNIFORM across unknown / expired / already-redeemed: the three are indistinguishable to
+    the caller (no oracle), so a redeem reply never reveals whether a code ever existed.
+    """
 
     # The submitted code did not work; deliberately uniform across unknown/expired/redeemed (no oracle).
     __tai_error_kind__ = ErrorKind.BAD_INPUT
 
 
 class NotLinkedError(Exception):
-    """An unlink was asked of an address that is not part of a multi-address person — it is
-    already its own provisional person, so there is nothing to detach."""
+    """An unlink was asked of an address that is not part of a multi-address person.
+
+    It is already its own provisional person, so there is nothing to detach.
+    """
 
     # A state-dependent refusal: the address is not part of a multi-address person, so there is nothing to detach.
     __tai_error_kind__ = ErrorKind.CONFLICT
@@ -34,17 +38,21 @@ class NotLinkedError(Exception):
 
 class MultichannelDisabledError(Exception):
     """A pairing operation was attempted against a target whose multichannel support is off.
+
     The pairing tool refuses with this; the ``/link`` and ``/unlink`` commands instead pass
-    through as ordinary text on such a target."""
+    through as ordinary text on such a target.
+    """
 
     # The target's multichannel capability is off — a capability refusal, mirroring NotSupported -> UNAVAILABLE.
     __tai_error_kind__ = ErrorKind.UNAVAILABLE
 
 
 class CrossTargetMergeError(Exception):
-    """A merge was attempted across two different targets. Persons are per-target and can
-    never span targets; a NAMED type so a pairing turn scopes it distinctly from an
-    infrastructure fault."""
+    """A merge was attempted across two different targets.
+
+    Persons are per-target and can never span targets; a NAMED type so a pairing turn scopes it
+    distinctly from an infrastructure fault.
+    """
 
     # Structurally impossible by construction (persons never span targets) — an
     # invalid request, not a current-state conflict.
@@ -62,7 +70,8 @@ def _check_greeting_placeholders(template: str) -> None:
     Parsed exactly as :meth:`str.format` would render it, so a malformed template (an
     unbalanced brace), an auto-numbered ``{}``, a foreign field name, or a
     ``{pairing_code}`` carrying a conversion/format-spec/attribute access is refused here —
-    at the write — rather than rendering wrong or raising when the greeting fires."""
+    at the write — rather than rendering wrong or raising when the greeting fires.
+    """
     try:
         parsed = list(string.Formatter().parse(template))
     except ValueError as exc:
@@ -79,9 +88,9 @@ def _check_greeting_placeholders(template: str) -> None:
 
 
 class TargetConversationConfig(BaseModel):
-    """Per-target configuration for the conversation bridge, keyed by
-    ``(target_kind, target_name)`` — the agent or tool an inbound turn is routed to.
+    """Per-target configuration for the conversation bridge, keyed by ``(target_kind, target_name)``.
 
+    The key names the agent or tool an inbound turn is routed to.
     ``multichannel`` opts the target into person linking; ``greeting_template`` is the
     first-contact greeting, which may reference at most the ``{pairing_code}`` placeholder
     (minted at greeting time). The row carries no server-derived fields, so it IS its own

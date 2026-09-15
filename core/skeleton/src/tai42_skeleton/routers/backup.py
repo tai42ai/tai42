@@ -53,7 +53,8 @@ class BackupExportDocument(BaseModel):
     ``sections`` maps each successfully exported section name to its exporter's
     payload (an arbitrary JSON value per section). ``errors`` maps a section whose
     exporter raised to its error message — a failing section lands here and is
-    omitted from ``sections``, never a 500 and never a silent drop."""
+    omitted from ``sections``, never a 500 and never a silent drop.
+    """
 
     version: int
     created_at: str
@@ -97,6 +98,11 @@ list_sections = register_operation_route(
     ),
 )
 async def export_backup(request: Request) -> Response:
+    """Export the requested backup ``sections`` as a downloadable JSON document.
+
+    A failed section exporter is recorded under ``errors`` rather than aborting the export; a
+    malformed request body or an unknown section name is a loud 400.
+    """
     try:
         body = await request.json()
     except ValueError:
@@ -135,9 +141,11 @@ async def export_backup(request: Request) -> Response:
 
 
 async def _extract_import(request: Request) -> dict:
-    """Parse + validate the import body into the operation's flat
-    ``document``/``sections``/``mode`` arguments, rejecting a malformed envelope with a
-    loud 400 (the document CONTENT is the operation's own validation)."""
+    """Parse + validate the import body into the operation's flat arguments.
+
+    Yields the ``document``/``sections``/``mode`` arguments, rejecting a malformed envelope with a
+    loud 400 (the document CONTENT is the operation's own validation).
+    """
     try:
         body = await request.json()
     except ValueError as exc:

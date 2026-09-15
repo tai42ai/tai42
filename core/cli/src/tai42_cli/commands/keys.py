@@ -126,7 +126,7 @@ def bootstrap_key(
     Example: ``tai keys bootstrap --user alice --description 'root key' --token -``
     """
     ctx_obj = app_context(ctx)
-    if token == "-":
+    if token == "-":  # noqa: S105 constant identifier, not a secret value
         token = sys.stdin.readline().strip()
     body = {"user_id": user, "description": description, "bootstrap_token": token}
     # The caller has no key yet — the whole point — so the mint runs over the
@@ -276,7 +276,7 @@ def validate_condition(
         str | None, typer.Option("--sample-context", help="A JqAuthContext-shaped sample to evaluate against, as JSON.")
     ] = None,
 ) -> None:
-    """Compile (and optionally sample-evaluate) a jq policy condition without saving.
+    r"""Compile (and optionally sample-evaluate) a jq policy condition without saving.
 
     Example: ``tai keys validate-condition --condition '{"content": ".method == \\"GET\\""}'``
     """

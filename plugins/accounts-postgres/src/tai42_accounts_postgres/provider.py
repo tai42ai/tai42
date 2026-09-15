@@ -51,12 +51,18 @@ class PostgresAccountsProvider(AccountsProvider):
     """Validate sessions, declare login methods, and own the bootstrap gate."""
 
     def __init__(self, settings: AccountsProviderSettings) -> None:
+        """Bind the injected ``settings`` (Postgres + Redis connection) to this provider instance."""
         # The injected settings live on the INSTANCE; the epoch records this provider so
         # the routes resolve it through the accounts facet — no module holder to leak on
         # a failed build.
         self.settings = settings
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
+        """The :class:`AuthIdentity` for a live session ``token``, or ``None`` when it is not ours or invalid.
+
+        Fails CLOSED: a store error raises rather than reading as an invalid credential. An
+        expired or idle-timed-out session is deleted and reads as ``None``.
+        """
         # Fast-reject non-session tokens without a DB hit so resolution moves on.
         if not token.startswith(service.SESSION_TOKEN_PREFIX):
             return None
@@ -65,9 +71,9 @@ class PostgresAccountsProvider(AccountsProvider):
         store = service.sessions_store()
         try:
             row = await store.resolve(token_hash)
-        except Exception as exc:
+        except Exception:
             # Fail closed: RAISE, never return None (which reads as invalid-credential).
-            logger.error("accounts: session resolve failed: %s", exc)
+            logger.exception("accounts: session resolve failed")
             raise
 
         if row is None:
@@ -100,6 +106,7 @@ class PostgresAccountsProvider(AccountsProvider):
         )
 
     def login_methods(self) -> list[LoginMethod]:
+        """The login methods the sign-in UI renders: password sign-in, first-owner bootstrap, and invite."""
         # Static config-derived metadata. The bootstrap form declares a
         # bootstrap_token field unless the gate is explicitly opened. Submit paths
         # resolve through the login router's mount base (captured at its import) so an
@@ -151,16 +158,19 @@ class PostgresAccountsProvider(AccountsProvider):
         ]
 
     async def needs_bootstrap(self) -> bool:
+        """Whether no user exists yet, so the first-owner bootstrap screen should show."""
         # Live count so the owner screen disappears the moment the owner exists.
         return await service.users_store().count() == 0
 
     async def revoke_session(self, token: str) -> bool:
+        """Delete the session for ``token``; returns ``False`` when the token is not ours to revoke."""
         if not token.startswith(service.SESSION_TOKEN_PREFIX):
             # Not ours — the logout dispatcher moves on.
             return False
         return await service.sessions_store().delete(service.token_hash(token))
 
     async def healthcheck(self) -> None:
+        """Boot-time gate: assert the schema chain is applied and apply the once-per-deployment token fix."""
         # Runs once at boot: the schema-chain gate and the once-per-deployment
         # bootstrap-token fix.
         await assert_accounts_schema_applied()
@@ -174,6 +184,7 @@ class PostgresAccountsProvider(AccountsProvider):
             await service.ensure_bootstrap_token(self.settings.redis)
 
     def readiness_targets(self) -> tuple[ReadinessTarget, ReadinessTarget]:
+        """The provider's backing stores probed by the readiness check: its Postgres and the injected Redis."""
         # Both backing stores: the plugin's own Postgres and the injected Redis.
         return (
             ReadinessTarget("accounts", PostgresClient, component_store_settings(COMPONENT)),

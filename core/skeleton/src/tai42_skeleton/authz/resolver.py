@@ -1,5 +1,4 @@
-"""Resolve a dispatched tool name to the operation it runs, with the arguments it runs
-with.
+"""Resolve a dispatched tool name to the operation it runs and the arguments it runs with.
 
 A projected operation can be reached under a DIFFERENT name: an extension branch
 (``_extend_tools``) or a preset baked over it (``PresetManager._specs[name]
@@ -28,8 +27,7 @@ if TYPE_CHECKING:
 
 
 class OperationSurfaceUnsettledError(UnavailableError):
-    """A dispatched name cannot be resolved to an authorizable target, because the
-    operation surface is being rebuilt.
+    """A dispatched name cannot be resolved to an authorizable target while the operation surface rebuilds.
 
     A reload clears the registry, repopulates it, and only then lets the routers re-attach
     each record's route, all while the serving loop keeps dispatching. Inside that window
@@ -39,16 +37,17 @@ class OperationSurfaceUnsettledError(UnavailableError):
 
 
 class ResolvedDispatch(NamedTuple):
-    """What a dispatched tool name actually runs: the base operation, and the arguments
-    that reach it once every preset in the chain has applied its baked kwargs."""
+    """What a dispatched tool name actually runs.
+
+    The base operation, and the arguments that reach it once every preset in the chain has applied its baked kwargs.
+    """
 
     operation: OperationMetadata
     call_arguments: dict[str, Any]
 
 
 def _assert_capability_decidable(name: str, base: str, registry: Any) -> None:
-    """Assert that ``registry`` not holding ``base`` really does mean ``base`` is a
-    capability tool, rather than the operation surface being mid-rebuild.
+    """Assert that ``base`` missing from ``registry`` means it is a capability tool, not a mid-rebuild surface.
 
     Keyed on the registry's own SETTLED flag — no rebuild in flight AND non-empty. A
     reload that holds the process reload gate without touching the operation surface is
@@ -63,8 +62,7 @@ def _assert_capability_decidable(name: str, base: str, registry: Any) -> None:
 
 
 def _assert_record_usable(name: str, base: str, registry: Any) -> None:
-    """Assert that a record ``registry`` DOES hold for ``base`` is one a decision may be
-    made against, rather than a half-rebuilt one.
+    """Assert that the record ``registry`` holds for ``base`` is decidable, not a half-rebuilt one.
 
     A record is usable only once the routers have re-attached its route template and
     method, which happens after the replay puts it back. Read inside that window it
@@ -87,9 +85,9 @@ def resolve_dispatch(
     preset_manager: Any | None,
     registry: Any = None,
 ) -> ResolvedDispatch | None:
-    """The operation a dispatched tool ``name`` ultimately runs and the arguments it
-    ultimately runs with, or ``None`` when the settled base is a registered
-    NON-operation tool.
+    """The operation a dispatched tool ``name`` ultimately runs and the arguments it runs with, or ``None``.
+
+    ``None`` is returned when the settled base is a registered NON-operation tool.
 
     Raises :class:`OperationSurfaceUnsettledError` whenever the operation surface is
     mid-rebuild — neither its silence about the base nor a record it does hold is an

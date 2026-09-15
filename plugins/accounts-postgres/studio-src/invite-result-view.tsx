@@ -2,8 +2,9 @@
  * The one-time invite link, shown once with its shown-once warning. Shared by the
  * create flow and invite regeneration.
  */
-import type { ReactElement } from 'react';
 import { CopyField } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
+
 import type { InviteResult } from '@/api';
 
 export function InviteResultView({ result }: { result: InviteResult }): ReactElement {

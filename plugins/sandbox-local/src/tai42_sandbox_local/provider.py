@@ -62,8 +62,11 @@ class LocalSandbox(ManagedSandbox):
     """
 
     def _settings(self) -> SandboxLocalSettings:
-        """Read the provider settings LIVE (``root`` is recycle-class, so a settings
-        epoch flip is honored on the next create rather than frozen at import)."""
+        """Read the provider settings LIVE.
+
+        ``root`` is recycle-class, so a settings epoch flip is honored on the next create
+        rather than frozen at import.
+        """
         return sandbox_local_settings()
 
     # -- create -------------------------------------------------------------------
@@ -101,7 +104,8 @@ class LocalSandbox(ManagedSandbox):
         """REJECT loudly every spec facet this direct-host provider cannot honor.
 
         ``spec`` arrives policy-resolved, so ``isolation`` is the concrete effective
-        tier (never ``None``)."""
+        tier (never ``None``).
+        """
         if spec.isolation != "none":
             raise SandboxSpecRejectedError(
                 f"provider cannot enforce: isolation {spec.isolation!r} — the direct/host provider "
@@ -121,18 +125,22 @@ class LocalSandbox(ManagedSandbox):
             )
 
     def _make_workspace(self, path: str, root: str) -> None:
-        """Create ``path`` idempotently (adopt-on-race), or raise a typed error naming
-        the configured root — NEVER a silent downgrade to a scratch dir."""
+        """Create ``path`` idempotently (adopt-on-race), or raise a typed error naming the root.
+
+        NEVER a silent downgrade to a scratch dir.
+        """
         try:
             os.makedirs(path, exist_ok=True)
         except OSError as exc:
             raise SandboxError(f"sandbox workspace root {root!r} is not writable: {exc}") from exc
 
     def _write_sidecar(self, root: str, spec: SandboxSessionSpec) -> str:
-        """Persist a persistent session's kit label set OUTSIDE the workspace tree, so
-        the workspace stays pristine for the agent and an orphan sweep after a recycle
-        can rediscover the durable workspace. A pre-existing sidecar is left as-is
-        (adopt-on-race)."""
+        """Persist a persistent session's kit label set OUTSIDE the workspace tree.
+
+        The workspace stays pristine for the agent and an orphan sweep after a recycle can
+        rediscover the durable workspace. A pre-existing sidecar is left as-is
+        (adopt-on-race).
+        """
         sidecar_dir = os.path.join(root, _SIDECAR_SUBDIR)
         self._make_workspace(sidecar_dir, root)
         sidecar_path = os.path.join(sidecar_dir, f"{spec.workspace_key}.json")
@@ -176,8 +184,11 @@ class LocalSandbox(ManagedSandbox):
         return session
 
     def _remove_tree(self, path: str) -> None:
-        """Remove a directory tree. A missing directory is the contract's idempotent
-        no-op; a genuine OSError (e.g. a permission failure) still raises typed."""
+        """Remove a directory tree.
+
+        A missing directory is the contract's idempotent no-op; a genuine OSError (e.g. a
+        permission failure) still raises typed.
+        """
         try:
             shutil.rmtree(path)
         except FileNotFoundError:
@@ -196,10 +207,13 @@ class LocalSandbox(ManagedSandbox):
     # -- orphan recovery ----------------------------------------------------------
 
     async def _list_orphan_resources(self) -> list[str]:
-        """List persistent workspaces the live ledger does not know (LEFT in place —
-        durable state) and destroy leftover ephemeral scratch dirs (a crashed
-        process's residue). The dot-prefixed control subdirs are skipped so they are
-        never mistaken for orphan workspaces."""
+        """List unknown persistent workspaces and destroy leftover ephemeral scratch dirs.
+
+        Persistent workspaces the live ledger does not know are LEFT in place (durable
+        state); leftover ephemeral scratch dirs (a crashed process's residue) are
+        destroyed. The dot-prefixed control subdirs are skipped so they are never mistaken
+        for orphan workspaces.
+        """
         root = self._settings().root
         if not os.path.isdir(root):
             return []

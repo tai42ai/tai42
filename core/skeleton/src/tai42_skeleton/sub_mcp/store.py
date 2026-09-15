@@ -1,5 +1,4 @@
-"""The durable sub-MCP registration store — the source of truth for every
-``slug -> RouteConfig`` binding.
+"""The durable sub-MCP registration store — the source of truth for every ``slug -> RouteConfig`` binding.
 
 Sub-MCP routing state is uvicorn-worker-scoped: only the HTTP/MCP workers serve
 the ``/app/{slug}`` mount, so only they register/rehydrate here. Backend workers
@@ -34,11 +33,17 @@ from tai42_skeleton.utils.redis_typing import awaited
 class SubMcpStore(Protocol):
     """The durable-registration seam both store impls satisfy."""
 
-    async def get_route(self, slug: str) -> RouteConfig | None: ...
+    async def get_route(self, slug: str) -> RouteConfig | None:
+        """Return the ``RouteConfig`` bound to ``slug``, or ``None`` when unbound."""
+        ...
 
-    async def list_routes(self) -> dict[str, RouteConfig]: ...
+    async def list_routes(self) -> dict[str, RouteConfig]:
+        """Return every ``slug -> RouteConfig`` binding."""
+        ...
 
-    async def save_route(self, slug: str, config: RouteConfig) -> None: ...
+    async def save_route(self, slug: str, config: RouteConfig) -> None:
+        """Persist ``config`` under ``slug``, overwriting any existing binding."""
+        ...
 
     async def delete_route(self, slug: str) -> bool:
         """Delete ``slug``; return whether the field existed."""
@@ -46,14 +51,18 @@ class SubMcpStore(Protocol):
 
 
 class RedisSubMcpStore:
-    """Stateless Redis-hash view of the registrations. Every op opens a pooled
-    client and touches the one ``routes_key`` hash, so a fresh instance per call is
-    cheap and holds no connection of its own."""
+    """Stateless Redis-hash view of the registrations.
+
+    Every op opens a pooled client and touches the one ``routes_key`` hash, so a fresh instance
+    per call is cheap and holds no connection of its own.
+    """
 
     def __init__(self, settings: SubMcpSettings) -> None:
+        """Bind the store to ``settings`` (its Redis connection and ``routes_key``)."""
         self._settings = settings
 
     async def get_route(self, slug: str) -> RouteConfig | None:
+        """Return the ``RouteConfig`` bound to ``slug``, or ``None`` when unbound."""
         async with client_ctx(RedisClient, self._settings.redis) as r:
             raw = await awaited(r.hget(self._settings.routes_key, slug))
         if raw is None:
@@ -62,37 +71,47 @@ class RedisSubMcpStore:
         return RouteConfig.model_validate_json(raw)
 
     async def list_routes(self) -> dict[str, RouteConfig]:
+        """Return every ``slug -> RouteConfig`` binding from the hash."""
         async with client_ctx(RedisClient, self._settings.redis) as r:
             data = await awaited(r.hgetall(self._settings.routes_key))
         return {slug: RouteConfig.model_validate_json(raw) for slug, raw in data.items()}
 
     async def save_route(self, slug: str, config: RouteConfig) -> None:
+        """Persist ``config`` under ``slug`` in the hash."""
         async with client_ctx(RedisClient, self._settings.redis) as r:
             await awaited(r.hset(self._settings.routes_key, slug, config.model_dump_json()))
 
     async def delete_route(self, slug: str) -> bool:
+        """Delete ``slug``; return whether the field existed."""
         async with client_ctx(RedisClient, self._settings.redis) as r:
             removed = await awaited(r.hdel(self._settings.routes_key, slug))
         return removed > 0
 
 
 class InMemorySubMcpStore:
-    """A per-process dict over the same surface. ``list_routes`` returns a fresh
-    copy so a concurrent write never mutates a caller's iteration."""
+    """A per-process dict over the same surface.
+
+    ``list_routes`` returns a fresh copy so a concurrent write never mutates a caller's iteration.
+    """
 
     def __init__(self) -> None:
+        """Start with an empty in-process route map."""
         self._routes: dict[str, RouteConfig] = {}
 
     async def get_route(self, slug: str) -> RouteConfig | None:
+        """Return the ``RouteConfig`` bound to ``slug``, or ``None`` when unbound."""
         return self._routes.get(slug)
 
     async def list_routes(self) -> dict[str, RouteConfig]:
+        """Return a fresh copy of every ``slug -> RouteConfig`` binding."""
         return dict(self._routes)
 
     async def save_route(self, slug: str, config: RouteConfig) -> None:
+        """Persist ``config`` under ``slug``."""
         self._routes[slug] = config
 
     async def delete_route(self, slug: str) -> bool:
+        """Delete ``slug``; return whether it existed."""
         return self._routes.pop(slug, None) is not None
 
 

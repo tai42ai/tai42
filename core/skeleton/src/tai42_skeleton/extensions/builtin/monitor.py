@@ -60,7 +60,7 @@ def monitor(func: Callable[..., Any], name: str, description: str) -> Callable[.
         with writer.start_span(
             name=name,
             kind=SpanKind.TOOL,
-            input={"args": mask_secrets(args), "kwargs": mask_secrets(kwargs)},
+            input_={"args": mask_secrets(args), "kwargs": mask_secrets(kwargs)},
         ) as span:
             try:
                 result = await _call()

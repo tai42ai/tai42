@@ -18,6 +18,7 @@ class PresetError(Exception):
     __tai_error_kind__ = ErrorKind.UPSTREAM_ERROR
 
     def __init__(self, name: str, message: str):
+        """Record the preset ``name`` the failure concerns and its ``message``."""
         super().__init__(message)
         self.name = name
 
@@ -29,6 +30,7 @@ class PresetNotFoundError(PresetError):
     __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, name: str):
+        """Record the missing preset ``name``."""
         super().__init__(name, f"preset {name!r} not found")
 
 
@@ -39,6 +41,7 @@ class PresetExistsError(PresetError):
     __tai_error_kind__ = ErrorKind.CONFLICT
 
     def __init__(self, name: str):
+        """Record the conflicting preset ``name``."""
         super().__init__(name, f"preset {name!r} already exists")
 
 
@@ -49,6 +52,7 @@ class PresetVersionNotFoundError(PresetError):
     __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, name: str, version: int | None = None):
+        """Record the preset ``name`` and the missing ``version`` (``None`` means no active version)."""
         self.version = version
         detail = "" if version is None else f" version {version}"
         super().__init__(name, f"preset {name!r} has no{detail} version")
@@ -65,4 +69,5 @@ class PresetNameConflictError(PresetError):
     __tai_error_kind__ = ErrorKind.CONFLICT
 
     def __init__(self, name: str):
+        """Record the preset ``name`` that collides with an existing tool."""
         super().__init__(name, f"preset name {name!r} collides with an existing tool")

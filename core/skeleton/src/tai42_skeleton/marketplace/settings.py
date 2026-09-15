@@ -41,4 +41,5 @@ class MarketplaceSettings(TaiBaseSettings):
 
 @settings_cache
 def marketplace_settings() -> MarketplaceSettings:
+    """Return the process-cached :class:`MarketplaceSettings`."""
     return MarketplaceSettings()

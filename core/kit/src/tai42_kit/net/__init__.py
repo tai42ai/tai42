@@ -41,8 +41,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
-    """Load :func:`fetch_url` on first access so importing a lighter ``net`` utility
-    never pulls in the ``httpx``/``httpcore`` backend it rides on.
+    """Load :func:`fetch_url` on first access.
+
+    Importing a lighter ``net`` utility never pulls in the ``httpx``/``httpcore`` backend it
+    rides on.
 
     The name is cached in the module globals so the FUNCTION (not the same-named
     submodule that importing it binds on the package) is what ``net.fetch_url``
@@ -51,7 +53,8 @@ def __getattr__(name: str) -> object:
     Import it only as ``from tai42_kit.net import fetch_url`` (this package), never as
     the submodule ``tai42_kit.net.fetch_url``: a direct submodule import binds the
     MODULE onto the package's ``fetch_url`` attribute, so this hook never runs and a
-    later package-level import yields the module instead of the function."""
+    later package-level import yields the module instead of the function.
+    """
     if name == "fetch_url":
         from tai42_kit.net.fetch_url import fetch_url
 

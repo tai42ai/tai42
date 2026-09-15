@@ -1,5 +1,6 @@
-"""Response models for the states operations (``/api/states*``, ``/api/state-templates*``
-and ``/api/state-retention/prune``).
+"""Response models for the states operations.
+
+Cover ``/api/states*``, ``/api/state-templates*`` and ``/api/state-retention/prune``.
 
 Each model DESCRIBES the inner payload a states operation returns today — the shape the
 route adapter wraps in the ``{"data": ...}`` success envelope — and never re-declares the
@@ -30,16 +31,18 @@ from tai42_contract.states import (
 
 
 class StateDeclarationList(RootModel[list[StateDeclaration]]):
-    """The bare-list body of ``list_states`` — every declared state as its full
-    ``StateDeclaration`` (base + composed effective schema, regimes and ``updated_at``
-    included)."""
+    """The bare-list body of ``list_states`` — every declared state as its full ``StateDeclaration``.
+
+    Base + composed effective schema, regimes and ``updated_at`` included.
+    """
 
 
 class StateAttachmentView(BaseModel):
-    """One template attached on a state, as the served declaration read carries it: the
-    ``template`` name, the ``path`` in the document where its fragment lands, and the
-    attachment's resolved ``parameters`` and static ``declarations`` (both arbitrary
-    per-template JSON)."""
+    """One template attached on a state, as the served declaration read carries it.
+
+    The ``template`` name, the ``path`` in the document where its fragment lands, and the
+    attachment's resolved ``parameters`` and static ``declarations`` (both arbitrary per-template JSON).
+    """
 
     template: str
     path: list[str]
@@ -48,14 +51,17 @@ class StateAttachmentView(BaseModel):
 
 
 class ServedStateView(BaseModel):
-    """The full served declaration read of ``get_state``: the base ``schema`` and the
+    """The full served declaration read of ``get_state``.
+
+    The base ``schema`` and the
     composed ``effective_schema`` (both open JSON-Schema objects), the ``subject_kinds``
     the state serves and its ``default_subject_kind``, an optional ``retention_days``
     (``null`` to keep records forever), the state's ``attachments``, the absolute write-regime
     rules ``regimes`` (each ``{path, regime}``), and ``updated_at`` (the ISO timestamp of
     the last write, ``null`` before any). The Python attribute for the wire ``schema`` key
     is suffixed to avoid shadowing a ``BaseModel`` member; the wire key stays ``schema``
-    via the alias."""
+    via the alias.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -72,17 +78,18 @@ class ServedStateView(BaseModel):
 
 
 class StateDeleteResult(BaseModel):
-    """A state (or state-template) delete confirmation — ``deleted`` and the ``name``
-    removed."""
+    """A state (or state-template) delete confirmation — ``deleted`` and the ``name`` removed."""
 
     deleted: bool
     name: str
 
 
 class StateStats(BaseModel):
-    """A state's record statistics: the total ``records`` count, the ``per_field`` and
-    ``per_kind`` breakdowns (each a name-keyed count map), and the number of live
-    ``consumers`` binding the state."""
+    """A state's record statistics.
+
+    The total ``records`` count, the ``per_field`` and ``per_kind`` breakdowns (each a name-keyed count map),
+    and the number of live ``consumers`` binding the state.
+    """
 
     records: int
     per_field: dict[str, int]
@@ -96,15 +103,16 @@ class StateStats(BaseModel):
 
 
 class StateAttachmentRow(StateAttachmentView):
-    """One attachment as the ``list_state_attachments`` listing carries it — the served
-    :class:`StateAttachmentView` fields plus the ``state`` the attachment sits on."""
+    """One attachment as the ``list_state_attachments`` listing carries it.
+
+    The served :class:`StateAttachmentView` fields plus the ``state`` the attachment sits on.
+    """
 
     state: str
 
 
 class StateAttachmentList(RootModel[list[StateAttachmentRow]]):
-    """The bare-list body of ``list_state_attachments`` — every template attached on the
-    state."""
+    """The bare-list body of ``list_state_attachments`` — every template attached on the state."""
 
 
 class AttachAck(BaseModel):
@@ -116,8 +124,7 @@ class AttachAck(BaseModel):
 
 
 class AttachUpdateAck(BaseModel):
-    """An attachment-declarations update confirmation — the ``state`` and ``template``
-    updated."""
+    """An attachment-declarations update confirmation — the ``state`` and ``template`` updated."""
 
     updated: bool
     state: str
@@ -138,32 +145,37 @@ class DetachAck(BaseModel):
 
 
 class StateSubjectEntry(BaseModel):
-    """One subject holding a record for the state: its ``subject`` identity and the
-    ``updated_at`` epoch seconds of its last write."""
+    """One subject holding a record for the state.
+
+    Its ``subject`` identity and the ``updated_at`` epoch seconds of its last write.
+    """
 
     subject: StateSubject
     updated_at: float
 
 
 class StateSubjectsPage(BaseModel):
-    """One keyset page of a state's subjects (``list_state_subjects``). ``next_cursor``
-    is the cursor the next page reads from, ``null`` on the last page."""
+    """One keyset page of a state's subjects (``list_state_subjects``).
+
+    ``next_cursor`` is the cursor the next page reads from, ``null`` on the last page.
+    """
 
     subjects: list[StateSubjectEntry]
     next_cursor: str | None
 
 
 class StateSearchPage(BaseModel):
-    """One keyset page of a state's containment-matched records (``search_state_records``)
-    — the matching subjects. ``next_cursor`` is ``null`` on the last page."""
+    """One keyset page of a state's containment-matched records (``search_state_records``) — the matching subjects.
+
+    ``next_cursor`` is ``null`` on the last page.
+    """
 
     matches: list[StateSubjectEntry]
     next_cursor: str | None
 
 
 class StateRecordOrNull(RootModel[StateRecord | None]):
-    """The ``read_state_record`` body: one subject's record as a ``StateRecord``, or
-    ``null`` when the subject holds none."""
+    """The ``read_state_record`` body: one subject's record as a ``StateRecord``, or ``null`` when it holds none."""
 
 
 class EraseAck(BaseModel):
@@ -180,12 +192,14 @@ class FoldSubjectRef(BaseModel):
 
 
 class FoldReport(BaseModel):
-    """The ``fold_state_record`` report: the fold ``mode``, the ``from`` and ``into``
-    subjects, whether the fold was ``already`` in place (a quiet no-op), and the number
-    of aliases ``flattened`` onto the survivor. ``merged_members`` — the survivor's
+    """The ``fold_state_record`` report.
+
+    The fold ``mode``, the ``from`` and ``into`` subjects, whether the fold was ``already`` in place (a quiet
+    no-op), and the number of aliases ``flattened`` onto the survivor. ``merged_members`` — the survivor's
     newly-filled top-level members — rides ONLY a ``merge`` fold; a ``switch`` omits it.
     The Python attribute for the wire ``from`` key is suffixed (``from`` is a keyword);
-    the wire key stays ``from`` via the alias."""
+    the wire key stays ``from`` via the alias.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -198,9 +212,11 @@ class FoldReport(BaseModel):
 
 
 class StateConsumerList(RootModel[list[ConsumerRow]]):
-    """The bare-list body of ``state_consumers`` — everything that binds the state (flows,
-    hooks, schedules, agents), each a ``ConsumerRow`` (an unlistable consumer family is a
-    labelled ``unavailable`` row)."""
+    """The bare-list body of ``state_consumers`` — everything that binds the state.
+
+    Each is a ``ConsumerRow`` (hooks, schedules, agents, and any consumer engine); an unlistable consumer family
+    is a labelled ``unavailable`` row.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -209,21 +225,24 @@ class StateConsumerList(RootModel[list[ConsumerRow]]):
 
 
 class StateTemplateCatalogEntry(StateTemplateDocument):
-    """One state-template document in the catalog listing — the stored
-    :class:`StateTemplateDocument` plus ``attached_to`` (the number of states it is attached
-    on) and ``shipped_default`` (true when it is an unedited shipped default)."""
+    """One state-template document in the catalog listing.
+
+    The stored :class:`StateTemplateDocument` plus ``attached_to`` (the number of states it is attached
+    on) and ``shipped_default`` (true when it is an unedited shipped default).
+    """
 
     attached_to: int
     shipped_default: bool
 
 
 class StateTemplateCatalog(RootModel[list[StateTemplateCatalogEntry]]):
-    """The bare-list body of ``list_state_templates`` — every platform state-template
-    document with its catalog columns."""
+    """The bare-list body of ``list_state_templates`` — every platform state-template document with catalog columns."""
 
 
 class PruneResult(BaseModel):
-    """The ``prune_state_retention`` report: ``pruned`` maps each state whose records were
-    swept to the number deleted (empty when nothing was past its horizon)."""
+    """The ``prune_state_retention`` report.
+
+    ``pruned`` maps each state whose records were swept to the number deleted (empty when nothing was past its horizon).
+    """
 
     pruned: dict[str, int]

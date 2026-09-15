@@ -1,5 +1,7 @@
-"""Redis value coercion and state-hash deserialization: the bytes/str normalizer
-and the state-hash-to-model reader shared by every read path."""
+"""Redis value coercion and state-hash deserialization.
+
+The bytes/str normalizer and the state-hash-to-model reader shared by every read path.
+"""
 
 from __future__ import annotations
 
@@ -20,8 +22,11 @@ def as_str(value: str | bytes | bytearray | None) -> str | None:
 
 
 def state_from_raw(raw: dict[str | bytes, str | bytes]) -> InteractionState | None:
-    """Build an ``InteractionState`` from a raw state-hash mapping (as returned
-    by ``HGETALL``), or ``None`` when the hash is empty (missing/expired)."""
+    """Build an ``InteractionState`` from a raw state-hash mapping.
+
+    Reads the mapping ``HGETALL`` returns, or ``None`` when the hash is empty
+    (missing/expired).
+    """
     if not raw:
         return None
     fields = {as_str(k): as_str(v) for k, v in raw.items()}

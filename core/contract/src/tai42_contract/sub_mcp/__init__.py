@@ -1,6 +1,7 @@
 """Sub-MCP app routing contract — the registration + ASGI seam.
 
-Implementations build/cache per-slug ASGI sub-apps and apply auth middleware."""
+Implementations build/cache per-slug ASGI sub-apps and apply auth middleware.
+"""
 
 from __future__ import annotations
 
@@ -21,17 +22,25 @@ Send = Callable[[Message], Awaitable[None]]
 
 
 class RouteConfig(BaseModel):
+    """The tools and transport exposed by one registered sub-MCP app."""
+
     tools: list[str]
     transport: str = "http"
 
 
 @runtime_checkable
 class SubMcpAppRouter(Protocol):
-    @property
-    def root_prefix(self) -> str: ...
+    """Registration and ASGI-dispatch seam for per-slug sub-MCP apps."""
 
     @property
-    def routes(self) -> dict[str, RouteConfig]: ...
+    def root_prefix(self) -> str:
+        """The URL prefix every sub-MCP app mounts under."""
+        ...
+
+    @property
+    def routes(self) -> dict[str, RouteConfig]:
+        """The registered routes keyed by slug."""
+        ...
 
     async def register_sub_mcp_app(self, slug: str, tools: list[str], transport: str = "http") -> None:
         """Register (or reload) a sub-MCP app exposing ``tools`` under ``slug``."""

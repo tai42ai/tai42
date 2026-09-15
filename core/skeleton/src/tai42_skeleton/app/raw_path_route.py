@@ -29,11 +29,14 @@ from tai42_skeleton.access_control.path_canon import strip_root_path
 
 
 class RawPathRoute(Route):
-    """A :class:`~starlette.routing.Route` whose match runs against the raw request path
-    so a percent-encoded slash keeps a path parameter to one segment; the matched
-    parameters are decoded once after the match."""
+    """A :class:`~starlette.routing.Route` whose match runs against the raw request path.
+
+    A percent-encoded slash keeps a path parameter to one segment; the matched parameters are decoded
+    once after the match.
+    """
 
     def matches(self, scope: Scope) -> tuple[Match, Scope]:
+        """Match ``scope`` against the raw request path, decoding the matched parameters once."""
         raw_path = scope.get("raw_path")
         if scope["type"] != "http" or raw_path is None:
             # No raw target to reason about (a non-HTTP scope, or an ASGI server that
@@ -63,7 +66,8 @@ class RawPathRoute(Route):
 
 
 def _raw_route_path(raw_path: bytes, root_path: str) -> str:
-    """The raw request path as a router-matchable string, with any mounted ``root_path``
-    stripped by the same rule access control applies (:func:`strip_root_path`), so both
-    match one form."""
+    """Return the raw request path as a router-matchable string, with any mounted ``root_path`` stripped.
+
+    Stripped by the same rule access control applies (:func:`strip_root_path`), so both match one form.
+    """
     return strip_root_path(raw_path.decode("ascii"), root_path)

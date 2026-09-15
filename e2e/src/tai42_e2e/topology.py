@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from tai42_e2e.variants import BrokerLease, Variants
 
 
-class InfraUnavailable(RuntimeError):
+class InfraUnavailableError(RuntimeError):
     """The shared infra (Redis / Postgres / a backend's broker) could not be
     reached, or a variant selection is unknown; carries the compose hint. Raised
     at session start so a misconfiguration fails loudly, never cryptically

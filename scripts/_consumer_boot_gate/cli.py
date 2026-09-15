@@ -1,6 +1,6 @@
-"""Consumer boot gate: fail a platform release whose candidate core breaks the
-BOOT of a previously published consumer — a behavioural check the textual
-API-diff gate cannot see.
+r"""Consumer boot gate: fail a platform release whose candidate core breaks a published consumer's BOOT.
+
+This is a behavioural check the textual API-diff gate cannot see.
 
 The API-diff gate (``tai42_cli.api_gate``) classifies a public-symbol diff. A change
 that removes no symbol yet refuses a previously valid route or lifecycle at
@@ -93,7 +93,7 @@ from _consumer_boot_gate.consumers import Consumer, collect_consumers, enumerate
 from _consumer_boot_gate.install import (
     _install_venv,
     _report_unresolvable_consumers,
-    _ResolutionConflict,
+    _ResolutionConflictError,
 )
 from _consumer_boot_gate.provides import read_provides
 from _consumer_boot_gate.versioning import _fail, break_is_accepted, governing_bump, read_project_version
@@ -105,14 +105,16 @@ _DEFAULT_CORE_DIRS = ("core/contract", "core/kit", "core/skeleton", "core/cli")
 
 
 def _load_plugin_yaml(venv_bin: Path, dist_name: str) -> dict:
-    """Read the named consumer distribution's ``tai-plugin.yml`` from the boot venv —
-    the descriptor the deployment actually ships, not a tree copy. Located through the
+    """Read the named consumer distribution's ``tai-plugin.yml`` from the boot venv.
+
+    The descriptor the deployment actually ships, not a tree copy. Located through the
     distribution's own file manifest (never by importing its package: a plugin whose
     ``__init__`` registers against ``tai42_app`` at import raises before the app binds,
     which is exactly the plugins this gate must read), so a co-installed plugin's
     descriptor is never mistaken for it. A consumer that ships no descriptor cannot
     declare a boot surface to exercise; the caller treats that as a hard error, never a
-    silent skip."""
+    silent skip.
+    """
     script = (
         "import importlib.metadata as m, sys\n"
         f"dist = m.distribution({dist_name!r})\n"
@@ -123,7 +125,7 @@ def _load_plugin_yaml(venv_bin: Path, dist_name: str) -> dict:
         "        break\n"
         "sys.stdout.write(found)\n"
     )
-    result = subprocess.run([str(venv_bin / "python"), "-c", script], capture_output=True, text=True)
+    result = subprocess.run([str(venv_bin / "python"), "-c", script], capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
     if result.returncode != 0:
         _fail(f"could not read the {dist_name} descriptor from the boot venv: {result.stderr.strip()[-400:]}")
     if not result.stdout.strip():
@@ -140,10 +142,12 @@ def _resolve_version(args: argparse.Namespace, repo_root: Path) -> str:
 
 
 def _emit_matrix(repo_root: Path) -> None:
-    """Print a GitHub-Actions matrix of the first-party consumers to boot (one entry
-    per distribution, each ``{label, req}``) as ``{"include": [...]}`` on stdout, and a
-    ``::notice::`` per plugin skipped for having no PyPI release yet. An empty include
-    is valid — the matrix job then has no combinations and is skipped."""
+    """Print a GitHub-Actions matrix of the first-party consumers to boot, plus skip notices.
+
+    One include entry per distribution, each ``{label, req}``, emitted as ``{"include": [...]}`` on
+    stdout, with a ``::notice::`` per plugin skipped for having no PyPI release yet. An empty include
+    is valid — the matrix job then has no combinations and is skipped.
+    """
     consumers, notices = enumerate_first_party(repo_root)
     for notice in notices:
         print(f"::notice::consumer-boot-gate: {notice}", file=sys.stderr)
@@ -179,8 +183,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def _boot_all(
     header: str, consumers: list[Consumer], venv_bin: Path, workdir: Path, infra: Infra
 ) -> tuple[int, int, int, list[tuple[Consumer, BootFailure]]]:
-    """Boot every supplied consumer against the candidate core, returning the counts of
-    booted / install-only / install-only-external plus the list of real boot failures."""
+    """Boot every supplied consumer against the candidate core.
+
+    Returns the counts of booted / install-only / install-only-external plus the list of real boot
+    failures.
+    """
     print(f"{header}: booting {len(consumers)} consumer(s) against the candidate core.")
     booted = 0
     install_only = 0
@@ -237,8 +244,10 @@ def _report_and_exit(
     external_only: int,
     failures: list[tuple[Consumer, BootFailure]],
 ) -> None:
-    """Print the final tally and decide the gate: a clean run or a major-bump-accepted
-    break passes; any other boot failure fails the gate loudly."""
+    """Print the final tally and decide the gate.
+
+    A clean run or a major-bump-accepted break passes; any other boot failure fails the gate loudly.
+    """
     tally = f"{booted} booted, {install_only} install-only, {external_only} install-only (external service)"
     if not failures:
         print(f"{header}: every supplied consumer accounted for ({tally}) — gate passes.")
@@ -282,7 +291,7 @@ def main() -> None:
     venv = workdir / "venv"
     try:
         venv_bin = _install_venv(repo_root, core_dirs, args.identity_package, consumers, venv)
-    except _ResolutionConflict as conflict:
+    except _ResolutionConflictError as conflict:
         _report_unresolvable_consumers(
             header,
             bump,

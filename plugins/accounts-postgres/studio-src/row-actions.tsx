@@ -2,8 +2,9 @@
  * The per-row action buttons and the action they raise. Regenerate-invite shows
  * only while the user's invite is still pending (a set password 409s that route).
  */
-import type { ReactElement } from 'react';
 import { Button } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
+
 import type { AdminUser } from '@/api';
 
 export type RowAction =

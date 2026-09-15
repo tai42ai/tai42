@@ -28,10 +28,11 @@ def _marker_name(node: dict[str, Any]) -> str:
 
 
 def substitute_parameters(fragment: Any, values: Mapping[str, Any]) -> Any:
-    """Replace every ``{"$parameter": "<name>"}`` marker whose ``<name>`` is in ``values``
-    with a deep copy of that value; a marker whose name is absent is left intact (the
-    validation path substitutes only DEFAULTS and leaves no-default markers standing).
-    Pure — the input is never mutated."""
+    """Replace every ``{"$parameter": "<name>"}`` marker named in ``values`` with a deep copy of that value.
+
+    A marker whose name is absent is left intact (the validation path substitutes only DEFAULTS and leaves
+    no-default markers standing). Pure — the input is never mutated.
+    """
     if _is_marker(fragment):
         name = _marker_name(fragment)
         return copy.deepcopy(values[name]) if name in values else {"$parameter": name}

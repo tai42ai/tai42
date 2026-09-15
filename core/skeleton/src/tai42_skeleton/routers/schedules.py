@@ -36,10 +36,11 @@ from tai42_skeleton.operations.schedules import server_datetime as _server_datet
 
 
 async def _extract_create(request: Request) -> dict[str, Any]:
-    """Parse and validate the create body at the HTTP edge, preserving the door's
-    hand-authored 400 messages (a plain request-model parse would answer 422 with a
-    different shape). Yields the operation's flat ``tool_name`` / ``tool_kwargs`` /
-    ``schedule_kwargs`` kwargs."""
+    """Parse and validate the create body at the HTTP edge, preserving the door's hand-authored 400 messages.
+
+    A plain request-model parse would answer 422 with a different shape. Yields the operation's flat
+    ``tool_name`` / ``tool_kwargs`` / ``schedule_kwargs`` kwargs.
+    """
     try:
         body = await request.json()
     except ValueError as exc:

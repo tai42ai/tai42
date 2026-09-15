@@ -1,3 +1,5 @@
+"""Access-control settings: the auth gate's Redis connection and policy configuration."""
+
 import re
 from re import Pattern
 from typing import Any
@@ -11,8 +13,11 @@ from tai42_skeleton.access_control.path_canon import MalformedPathError, canonic
 
 
 def _prefix_overlaps(a: str, b: str) -> bool:
-    """Whether path prefixes ``a`` and ``b`` overlap — equal, or one nested under the
-    other (a prefix that is a path-segment ancestor of the other)."""
+    """Whether path prefixes ``a`` and ``b`` overlap.
+
+    True when they are equal or one is nested under the other (a path-segment
+    ancestor of the other).
+    """
     return a == b or a.startswith(f"{b}/") or b.startswith(f"{a}/")
 
 
@@ -38,6 +43,8 @@ class AccessControlRedisSettings(RedisConnectionSettings):
 
 
 class AccessControlSettings(TaiBaseSettings):
+    """Settings for the access-control auth gate, read from the ``ACCESS_CONTROL_`` env prefix."""
+
     model_config = SettingsConfigDict(env_prefix="ACCESS_CONTROL_")
 
     enable: bool = True
@@ -76,7 +83,7 @@ class AccessControlSettings(TaiBaseSettings):
     # config (a local/dev opt-out that mints without a token), never the default.
     bootstrap_token: SecretStr | None = None
     bootstrap_open: bool = False
-    bootstrap_token_key: str = "ac:bootstrap:token"
+    bootstrap_token_key: str = "ac:bootstrap:token"  # noqa: S105 constant identifier, not a secret value
 
     # The mint mutex: the existence-check-and-mint of the first key runs under this
     # single AC-Redis lock, so two concurrent bootstraps can never both mint. The TTL
@@ -202,6 +209,7 @@ class AccessControlSettings(TaiBaseSettings):
     compiled_always_public_route_patterns: list[Pattern] = []  # noqa: RUF012
 
     def model_post_init(self, __context):
+        """Validate cross-field invariants and compile the path patterns after model init."""
         self._check_provider_present()
         self._check_prefix_sets_disjoint()
         self._check_authenticated_allowed_paths()
@@ -338,4 +346,5 @@ class AccessControlSettings(TaiBaseSettings):
 
 @settings_cache
 def access_control_settings() -> AccessControlSettings:
+    """Return the cached access-control settings."""
     return AccessControlSettings()

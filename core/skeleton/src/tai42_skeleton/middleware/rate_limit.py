@@ -106,7 +106,8 @@ def warn_if_rate_limiting_off(log: logging.Logger) -> None:
     warning is a no-op after its first firing and when Redis IS configured, so a
     Redis-less deployment warns exactly once across boots/reloads and a configured
     deployment never warns. WARNING, not a boot refusal — public doors merely go
-    unthrottled."""
+    unthrottled.
+    """
     global _RATE_LIMIT_OFF_WARNED
     # Read both fresh (not the cached singletons) so they reflect the live env at this
     # boot/reload, and before the once-per-process OFF guard so the roster validator
@@ -124,15 +125,17 @@ def warn_if_rate_limiting_off(log: logging.Logger) -> None:
 
 
 def family_of(path: str) -> str:
-    """The door family a route path belongs to: its leading STATIC path segments
-    (at most :data:`_FAMILY_SEGMENTS`, stopping at the first ``{parameter}``), with
+    """The door family a route path belongs to: its leading STATIC path segments.
+
+    At most :data:`_FAMILY_SEGMENTS` segments, stopping at the first ``{parameter}``, with
     the shared ``/api`` namespace segment dropped and the rest joined by ``_``.
 
     ``/trigger/{token}`` → ``trigger``; ``/universal_webhook/{topic}`` →
     ``universal_webhook``; ``/api/interactions/callback/{ticket}`` →
     ``interactions_callback``; every ``/api/channels/web/*`` door → ``channels_web``.
     A path parameterised from its first segment has no stem and folds into
-    :data:`_ROOT_FAMILY`."""
+    :data:`_ROOT_FAMILY`.
+    """
     segments = [segment for segment in path.split("/") if segment]
     if segments and segments[0] == _API_SEGMENT:
         segments = segments[1:]
@@ -148,8 +151,11 @@ def family_of(path: str) -> str:
 
 @dataclass(frozen=True)
 class _Door:
-    """One registered route as the limiter needs it: how to recognise a request for
-    it, whether it is public, and — when it is — which family's budget it charges."""
+    """One registered route as the limiter needs it.
+
+    How to recognise a request for it, whether it is public, and — when it is — which
+    family's budget it charges.
+    """
 
     pattern: re.Pattern[str]
     methods: frozenset[str]
@@ -171,9 +177,11 @@ _door_table: tuple[int, tuple[_Door, ...]] | None = None
 
 
 def _build_door_table() -> tuple[_Door, ...]:
-    """Compile every registered route into a matcher, most specific first. Both authed
-    and public routes are compiled: an authed route must be able to out-match the
-    public catch-all that also covers its path, or the limiter would throttle it."""
+    """Compile every registered route into a matcher, most specific first.
+
+    Both authed and public routes are compiled: an authed route must be able to out-match
+    the public catch-all that also covers its path, or the limiter would throttle it.
+    """
     doors: list[_Door] = []
     for meta in load_all_routes():
         pattern, template, _ = compile_path(meta.path)
@@ -197,9 +205,11 @@ def _build_door_table() -> tuple[_Door, ...]:
 
 
 def _door_for(path: str, method: str) -> _Door | None:
-    """The most specific registered route covering this request, or ``None`` when the
-    registered surface holds none (an unrouted path, or one served by a mounted app
-    the registry does not describe — neither is a declared public door)."""
+    """The most specific registered route covering this request, or ``None`` when none matches.
+
+    ``None`` when the registered surface holds none (an unrouted path, or one served by a
+    mounted app the registry does not describe — neither is a declared public door).
+    """
     global _door_table
     if _door_table is None or _door_table[0] != route_registry.version:
         # The version is read BEFORE the build, so the memo can only ever UNDER-claim: a
@@ -217,19 +227,24 @@ def _door_for(path: str, method: str) -> _Door | None:
 
 
 def _reset_door_table_cache() -> None:
-    """Drop the memoized table so the next request recompiles it. Production
-    invalidation rides the registry version; this is for a test that swaps the route
-    surface underneath the middleware without recording into the live registry."""
+    """Drop the memoized table so the next request recompiles it.
+
+    Production invalidation rides the registry version; this is for a test that swaps the
+    route surface underneath the middleware without recording into the live registry.
+    """
     global _door_table
     _door_table = None
 
 
 async def _retry_after(r: AsyncRedis, prefix: str, family: str, bucket: str, limit: int, burst: int) -> int | None:
-    """Fixed-window Redis limiter. Returns the ``Retry-After`` seconds when either
-    window is over its limit, else ``None``. INCR + EXPIRE are one pipeline with
-    EXPIRE issued UNCONDITIONALLY (a pipeline cannot branch on INCR's result;
-    re-setting the TTL every hit is harmless). Key TTL = 2x the window. The
-    ``family`` segment keeps the public door families' counters disjoint."""
+    """Fixed-window Redis limiter.
+
+    Returns the ``Retry-After`` seconds when either window is over its limit, else
+    ``None``. INCR + EXPIRE are one pipeline with EXPIRE issued UNCONDITIONALLY (a pipeline
+    cannot branch on INCR's result; re-setting the TTL every hit is harmless). Key TTL =
+    2x the window. The ``family`` segment keeps the public door families' counters
+    disjoint.
+    """
     now = time.time()
     unix_minute = int(now // 60)
     unix_10s = int(now // 10)
@@ -255,9 +270,11 @@ class RateLimitMiddleware:
     """Rate-limits every public door; passes everything else through."""
 
     def __init__(self, app: ASGIApp) -> None:
+        """Wrap the downstream ASGI ``app`` this middleware rate-limits."""
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Rate-limit the request when it matches an enabled public door, else pass it through."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return

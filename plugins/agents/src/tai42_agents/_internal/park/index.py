@@ -160,17 +160,20 @@ def compute_superstep_id(interaction_ids: Iterable[str]) -> str:
     """Deterministic id for a parked super-step from its interaction ids.
 
     Sorting makes the id insensitive to enumeration order, so every one of the M
-    concurrent continuations derives the same id and routes to the same barrier."""
+    concurrent continuations derives the same id and routes to the same barrier.
+    """
     joined = ",".join(sorted(interaction_ids))
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 def barrier_ttl_seconds(expiries: Iterable[datetime | None]) -> int:
-    """TTL for a super-step barrier: at least the park-entry backstop, extended to cover
-    the latest ask deadline plus a margin. Flooring at the park-entry backstop keeps the
+    """TTL for a super-step barrier: the park-entry backstop, extended to cover the latest ask deadline plus a margin.
+
+    Flooring at the park-entry backstop keeps the
     barrier alive for at least as long as the park entries it coordinates, so a late
     answer never finds an entry with no barrier. Because it sizes to the LATEST deadline
-    with the same margin every per-entry TTL uses, the barrier outlives every entry."""
+    with the same margin every per-entry TTL uses, the barrier outlives every entry.
+    """
     deadlines = [e for e in expiries if e is not None]
     if not deadlines:
         return _PARK_ENTRY_TTL_SECONDS
@@ -179,10 +182,12 @@ def barrier_ttl_seconds(expiries: Iterable[datetime | None]) -> int:
 
 
 def park_entry_ttl_seconds(expiry: datetime | None) -> int:
-    """TTL for one park entry: the backstop floor, extended to outlast this ask's OWN deadline
-    plus the same margin the barrier uses. A deadline-less entry keeps the bare floor. Sizing to
+    """TTL for one park entry: the backstop floor, extended to outlast this ask's OWN deadline plus a margin.
+
+    The margin matches the one the barrier uses. A deadline-less entry keeps the bare floor. Sizing to
     the deadline keeps the entry alive at least as long as its answer/expiry continuation can
-    fire, so under keep-forever checkpoint retention a valid in-window answer always finds it."""
+    fire, so under keep-forever checkpoint retention a valid in-window answer always finds it.
+    """
     if expiry is None:
         return _PARK_ENTRY_TTL_SECONDS
     horizon = int((expiry - datetime.now(UTC)).total_seconds()) + _BARRIER_TTL_MARGIN_SECONDS
@@ -190,8 +195,10 @@ def park_entry_ttl_seconds(expiry: datetime | None) -> int:
 
 
 async def read_park_entry(interaction_id: str) -> dict[str, Any] | None:
-    """The park entry for ``interaction_id``, or ``None`` when no entry exists (never
-    parked here, already resumed, or its thread ended)."""
+    """The park entry for ``interaction_id``, or ``None`` when no entry exists.
+
+    No entry exists when never parked here, already resumed, or its thread ended.
+    """
     async with _park_client() as client:
         raw = await client.get(_park_key(interaction_id))
     if raw is None:
@@ -204,16 +211,18 @@ async def finalize_resolved_superstep(
     superstep_id: str,
     item_interaction_ids: Iterable[str],
 ) -> None:
-    """Finalize a cleanly-driven super-step in ONE Redis MULTI/EXEC: replace every one of its M
-    park entries with a short-TTL resolved tombstone AND drop the barrier plus its drive-claim
-    lease, all-or-nothing. Atomicity closes the crash window a per-key loop would leave — a hard
+    """Finalize a cleanly-driven super-step in ONE Redis MULTI/EXEC.
+
+    Replaces every one of its M park entries with a short-TTL resolved tombstone AND drops the barrier plus its
+    drive-claim lease, all-or-nothing. Atomicity closes the crash window a per-key loop would leave — a hard
     crash mid-loop could tombstone only some siblings, and a redelivery of an un-tombstoned
     sibling would re-claim and storm on a not-pending resume until the interaction group's 24h
     give-up. Each tombstone keeps its own ``_RESOLVED_TOMBSTONE_TTL_SECONDS`` TTL so a resolved
     slot never lingers. A lapped redelivery of any sibling's orphaned due-record reads a resolved
     marker and clears benignly instead of mistaking an absent key for a permanently dropped
     resume. Called only after a successful drive; a crash mid-drive skips this and leaves every
-    entry LIVE for a normal reclaim."""
+    entry LIVE for a normal reclaim.
+    """
     tombstone = json.dumps({_RESOLVED_TOMBSTONE_FIELD: True})
     async with _park_client() as client, client.pipeline(transaction=True) as pipe:
         for interaction_id in item_interaction_ids:
@@ -231,16 +240,18 @@ async def persist_superstep(
     expiries: dict[str, datetime | None],
     barrier_ttl_seconds: int,
 ) -> None:
-    """Persist a suspended super-step in ONE Redis MULTI/EXEC: every one of its M park entries
-    AND the barrier they converge on, all-or-nothing. Atomicity closes the crash window a
-    per-key loop would leave — a hard crash mid-loop could write some entries without the
+    """Persist a suspended super-step in ONE Redis MULTI/EXEC.
+
+    Writes every one of its M park entries AND the barrier they converge on, all-or-nothing. Atomicity closes the
+    crash window a per-key loop would leave — a hard crash mid-loop could write some entries without the
     barrier, or the barrier without every entry, stranding a resume that finds an entry with no
     barrier (buffer raises not-found) or a barrier expecting an interaction whose entry is
     missing. Each entry's TTL is ``park_entry_ttl_seconds`` of ITS ask's deadline (``expiries``,
     keyed by interaction id) — the backstop floor extended to outlast that deadline; the barrier's
     TTL floors above the LATEST of them so it outlives every entry it coordinates. The entries are
     written whole and keyed by interaction id, so a re-run super-step re-parking the same
-    interaction rewrites identically rather than corrupting the index."""
+    interaction rewrites identically rather than corrupting the index.
+    """
     async with _park_client() as client, client.pipeline(transaction=True) as pipe:
         for interaction_id, entry in entries.items():
             pipe.set(
@@ -267,7 +278,8 @@ async def detach_chained_parks(keys: Iterable[str]) -> None:
     Written ``NX``, so it can never overwrite live state: a key that DOES hold a park entry (a
     concurrent re-drive that reached the persist first) or an existing tombstone is left exactly
     as it is. Called with the drive's leftover claims, so a drive that parked on everything it
-    claimed writes nothing."""
+    claimed writes nothing.
+    """
     tombstone = json.dumps({_RESOLVED_TOMBSTONE_FIELD: True})
     async with _park_client() as client, client.pipeline(transaction=True) as pipe:
         for key in keys:
@@ -295,13 +307,15 @@ return extended
 
 
 async def extend_park_horizon(interaction_id: str, thread_id: str, superstep_id: str, expiry: datetime) -> bool:
-    """Extend a park entry AND its super-step barrier to outlive ``expiry``, never shortening
-    either. Returns whether anything was extended.
+    """Extend a park entry AND its super-step barrier to outlive ``expiry``, never shortening either.
+
+    Returns whether anything was extended.
 
     Sized by the SAME :func:`park_entry_ttl_seconds` / :func:`barrier_ttl_seconds` the persist
     uses, so an extended park is indistinguishable from one persisted at the new deadline. The
     barrier is sized to the same deadline as the entry, keeping the invariant that it outlives
-    every entry it coordinates."""
+    every entry it coordinates.
+    """
     async with _park_client() as client:
         extended = await _eval(
             client,
@@ -316,8 +330,10 @@ async def extend_park_horizon(interaction_id: str, thread_id: str, superstep_id:
 
 
 def is_resolved_tombstone(entry: dict[str, Any]) -> bool:
-    """True when a park-key read returned a resolved tombstone rather than a live park entry —
-    the super-step already drove to completion."""
+    """True when a park-key read returned a resolved tombstone rather than a live park entry.
+
+    The super-step already drove to completion.
+    """
     return entry.get(_RESOLVED_TOMBSTONE_FIELD) is True
 
 
@@ -326,9 +342,10 @@ def _output_field(interaction_id: str) -> str:
 
 
 async def read_barrier(thread_id: str, superstep_id: str) -> dict[str, Any] | None:
-    """The super-step barrier as ``{"expected": {...}, "outputs": {interaction: answer}}``,
-    or ``None`` when no barrier exists. ``outputs`` holds only the answers buffered so far
-    (the buffered answer JSON is decoded back to its value)."""
+    """The super-step barrier as ``{"expected": {...}, "outputs": {interaction: answer}}``, or ``None`` when absent.
+
+    ``outputs`` holds only the answers buffered so far (the buffered answer JSON is decoded back to its value).
+    """
     from tai42_kit.clients.impl.redis import hgetall
 
     key = _barrier_key(thread_id, superstep_id)
@@ -356,7 +373,8 @@ async def buffer_answer(
     ``(present, total)``: how many of the M expected interactions now hold an answer, and
     M. Raises ``AgentResumeBarrierNotFoundError`` when the barrier is gone, and
     ``KeyError`` (surfaced by the caller as a not-pending rejection) when the interaction
-    is not one this super-step expects."""
+    is not one this super-step expects.
+    """
     key = _barrier_key(thread_id, superstep_id)
     async with _park_client() as client:
         expected_raw = await _hget(client, key, "expected")
@@ -372,9 +390,11 @@ async def buffer_answer(
 
 
 async def try_claim_drive(thread_id: str, superstep_id: str, token: str) -> bool:
-    """Attempt to win the single drive of a completed barrier. ``SET NX EX`` grants the
-    lease to exactly one caller; a stale (crashed-winner) lease has already expired, so a
-    later redelivery reclaims here. ``True`` iff this caller won."""
+    """Attempt to win the single drive of a completed barrier.
+
+    ``SET NX EX`` grants the lease to exactly one caller; a stale (crashed-winner) lease has already expired, so a
+    later redelivery reclaims here. ``True`` iff this caller won.
+    """
     key = _claim_key(thread_id, superstep_id)
     async with _park_client() as client:
         won = await client.set(key, token, nx=True, ex=_DRIVE_LEASE_SECONDS)
@@ -382,10 +402,11 @@ async def try_claim_drive(thread_id: str, superstep_id: str, token: str) -> bool
 
 
 async def renew_claim(thread_id: str, superstep_id: str, token: str) -> bool:
-    """Heartbeat the drive lease: extend the TTL only while this caller still holds it, in
-    a single atomic compare-and-expire so a stale holder cannot bump a reclaimer's TTL.
-    ``False`` (holder changed or lease gone) tells the heartbeat loop to stop — the drive
-    was superseded."""
+    """Heartbeat the drive lease: extend the TTL only while this caller still holds it.
+
+    A single atomic compare-and-expire so a stale holder cannot bump a reclaimer's TTL.
+    ``False`` (holder changed or lease gone) tells the heartbeat loop to stop — the drive was superseded.
+    """
     key = _claim_key(thread_id, superstep_id)
     async with _park_client() as client:
         renewed = await _eval(client, _RENEW_CLAIM_SCRIPT, 1, key, token, str(_DRIVE_LEASE_SECONDS))
@@ -393,10 +414,12 @@ async def renew_claim(thread_id: str, superstep_id: str, token: str) -> bool:
 
 
 async def heartbeat_drive_claim(thread_id: str, superstep_id: str, token: str) -> None:
-    """Renew the drive lease at a fixed interval while the winner drives, so a slow but
-    live drive is never reclaimed. Exits when the lease is no longer held by this token
+    """Renew the drive lease at a fixed interval while the winner drives, so a slow but live drive is never reclaimed.
+
+    Exits when the lease is no longer held by this token
     (superseded) — a drive that lost its lease must not renew it. Run as a background task
-    cancelled when the drive returns."""
+    cancelled when the drive returns.
+    """
     while True:
         await asyncio.sleep(_DRIVE_LEASE_HEARTBEAT_SECONDS)
         if not await renew_claim(thread_id, superstep_id, token):
@@ -404,9 +427,11 @@ async def heartbeat_drive_claim(thread_id: str, superstep_id: str, token: str) -
 
 
 async def release_claim(thread_id: str, superstep_id: str, token: str) -> None:
-    """Release the drive lease on a caught drive failure so a retry reclaims at once (a
-    hard crash leaves the lease to expire instead). A single atomic compare-and-delete,
-    token-checked so a reclaimer's fresh lease is never dropped."""
+    """Release the drive lease on a caught drive failure so a retry reclaims at once.
+
+    A hard crash leaves the lease to expire instead. A single atomic compare-and-delete,
+    token-checked so a reclaimer's fresh lease is never dropped.
+    """
     key = _claim_key(thread_id, superstep_id)
     async with _park_client() as client:
         await _eval(client, _RELEASE_CLAIM_SCRIPT, 1, key, token)

@@ -363,7 +363,12 @@ class FakeRedis:
         return True
 
     async def xrange(
-        self, key: str, min: str = "-", max: str = "+", count: int | None = None
+        # ``min``/``max`` mirror the redis-py xrange(name, min, max, count) client signature.
+        self,
+        key: str,
+        min: str = "-",  # noqa: A002
+        max: str = "+",  # noqa: A002
+        count: int | None = None,
     ) -> list[tuple[str, dict[str, str]]]:
         entries = [entry for entry in self.streams.get(key, []) if _in_range(entry[0], min, max)]
         return entries[:count] if count is not None else entries

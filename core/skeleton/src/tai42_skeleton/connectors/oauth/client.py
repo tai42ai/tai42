@@ -1,5 +1,4 @@
-"""OAuth 2.0 + PKCE primitives for Connectors (stdlib + pooled HTTP, no
-3rd-party OAuth lib).
+"""OAuth 2.0 + PKCE primitives for Connectors (stdlib + pooled HTTP, no 3rd-party OAuth lib).
 
 Covers PKCE pair generation, authorize-URL construction with redirect-URI
 allow-list enforcement, code/refresh token exchange, and revocation. Every
@@ -43,14 +42,19 @@ _ERROR_DESCRIPTION_MAX_LEN = 64
 
 
 def _http() -> AbstractAsyncContextManager[httpx.AsyncClient]:
-    """The app-pooled OAuth HTTP client (one TLS session-cache + connection pool
-    shared across all OAuth calls, closed centrally at shutdown)."""
+    """The app-pooled OAuth HTTP client.
+
+    One TLS session-cache + connection pool shared across all OAuth calls,
+    closed centrally at shutdown.
+    """
     return client_ctx(HttpxClient, timeout=_OAUTH_HTTP_TIMEOUT_SECONDS)
 
 
 def _error_detail(resp: httpx.Response) -> str:
-    """Log-safe summary of a non-2xx OAuth body: only ``error`` + a truncated
-    ``error_description``; everything else is dropped to avoid leaking tokens."""
+    """Log-safe summary of a non-2xx OAuth body: only ``error`` + a truncated ``error_description``.
+
+    Everything else is dropped to avoid leaking tokens.
+    """
     try:
         payload = resp.json()
     except Exception:
@@ -137,6 +141,7 @@ class TokenRefreshFailedError(OAuthError):
         reason: str,
         http_status: int | None = None,
     ):
+        """Build the error with ``reason`` (``"invalid_grant"`` or ``"transient"``) and the optional ``http_status``."""
         super().__init__(message)
         self.reason = reason
         self.http_status = http_status
@@ -250,6 +255,8 @@ def build_authorize_url(
 
 @dataclass(frozen=True)
 class TokenResponse:
+    """A parsed OAuth token response: access/refresh tokens, expiry, granted scopes, and the raw body."""
+
     access_token: str
     refresh_token: str | None
     expires_at: datetime
@@ -258,10 +265,13 @@ class TokenResponse:
 
 
 def _token_error_suffix(payload: dict) -> str:
-    """A ``: error=... error_description=...`` suffix built from the provider's RFC 6749
-    ``error`` / ``error_description`` fields when present, else ``""`` — so a vendor that
-    signals failure in a 200 body carrying no ``access_token`` is loud with its reason.
-    The description is truncated to bound a misbehaving provider echoing the code/token."""
+    """Build a ``: error=... error_description=...`` suffix from the provider's RFC 6749 error fields.
+
+    Uses the ``error`` / ``error_description`` fields when present, else ``""``
+    — so a vendor that signals failure in a 200 body carrying no ``access_token``
+    is loud with its reason. The description is truncated to bound a misbehaving
+    provider echoing the code/token.
+    """
     error = payload.get("error")
     desc = payload.get("error_description")
     parts: list[str] = []
@@ -475,13 +485,18 @@ async def refresh(*, descriptor: ProviderDescriptor, refresh_token: str) -> Toke
 
 @dataclass(frozen=True)
 class RevokeOutcome:
+    """The result of an upstream token revocation attempt, with any HTTP status."""
+
     outcome: UpstreamRevokeOutcome
     http_status: int | None = None
 
 
 async def revoke(*, descriptor: ProviderDescriptor, token: str) -> RevokeOutcome:
-    """Best-effort upstream token revocation. NEVER raises — the caller proceeds
-    with the local purge regardless of outcome."""
+    """Best-effort upstream token revocation.
+
+    Never raises — the caller proceeds with the local purge regardless of
+    outcome.
+    """
     if descriptor.oauth is None or not descriptor.oauth.revoke:
         return RevokeOutcome(outcome="skipped")
 

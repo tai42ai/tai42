@@ -245,7 +245,7 @@ def test_the_seeded_role_conditions_bind_freely(condition: str) -> None:
 def test_the_seeded_role_conditions_cost_what_the_budget_comment_says(condition: str, tokens: int, depth: int) -> None:
     # The seeded conditions are the platform's real worst case (VIEWER_JQ spends 53% of the
     # token allowance, 69% of the depth). An edit eating the margin must fail here rather
-    # than as a PermissionDenied on every fire under a viewer-role key.
+    # than as a PermissionDeniedError on every fire under a viewer-role key.
     budget = _Budget()
     peak = 0
     descend = _Budget.descend

@@ -99,17 +99,17 @@ def build_document_schemas() -> dict[str, Any]:
 
 
 def bundle_json(bundle: dict[str, Any]) -> str:
-    """The canonical on-disk form of a bundle — sorted keys, two-space indent, non-ASCII
-    left un-escaped, a trailing newline. Emitting raw UTF-8 rather than ``\\uXXXX``
-    escapes keeps the committed bytes identical to what the release tooling's JSON
-    version-bump rewrites, so cutting a release touches only the ``contract_version`` line.
+    r"""The canonical on-disk form of a bundle — sorted keys, two-space indent, non-ASCII un-escaped, trailing newline.
+
+    Emitting raw UTF-8 rather than ``\\uXXXX`` escapes keeps the committed bytes identical to what
+    the release tooling's JSON version-bump rewrites, so cutting a release touches only the
+    ``contract_version`` line.
     """
     return json.dumps(bundle, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
 def bundle_drift(fresh: dict[str, Any], committed: dict[str, Any]) -> list[str]:
-    """The loud, distinct reasons the committed bundle is stale against a fresh rebuild,
-    or an empty list when it is fresh.
+    """The loud, distinct reasons the committed bundle is stale against a fresh rebuild, or empty when it is fresh.
 
     Freshness is judged on the parsed STRUCTURE, never on bytes: each served document and
     the shared ``$defs`` block of the committed bundle must equal the fresh build's. The
@@ -142,8 +142,10 @@ def bundle_drift(fresh: dict[str, Any], committed: dict[str, Any]) -> list[str]:
 
 
 def committed_bundle_path() -> Path:
-    """The committed bundle inside the installed package (the repo source under an
-    editable install, the wheel's package data otherwise)."""
+    """The committed bundle inside the installed package.
+
+    The repo source under an editable install, the wheel's package data otherwise.
+    """
     resource = files("tai42_contract")
     for part in BUNDLE_RESOURCE:
         resource = resource.joinpath(part)

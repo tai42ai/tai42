@@ -1,5 +1,6 @@
-"""Pure helpers for the observability router, kept out of ``observability.py``
-so the router holds only route registration, reader glue, and handlers.
+"""Pure helpers for the observability router.
+
+Kept out of ``observability.py`` so the router holds only route registration, reader glue, and handlers.
 
 Two groups, neither of which owns a reader instance:
 
@@ -43,9 +44,11 @@ logger = logging.getLogger(__name__)
 
 
 class RequestParseError(Exception):
-    """A query parameter is missing or malformed — the handler maps it to a
-    loud 400. Distinct from a reader/backend failure, which propagates as a 500
-    (or the two typed monitoring errors, which map to 501/404)."""
+    """A query parameter is missing or malformed — the handler maps it to a loud 400.
+
+    Distinct from a reader/backend failure, which propagates as a 500 (or the two typed monitoring errors,
+    which map to 501/404).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -99,8 +102,10 @@ PAGE_CHUNK = 100
 
 
 def one_of(values: tuple[str, ...]) -> str:
-    """A closed value set as refusal prose — ``'a' or 'b'``, ``'a', 'b' or 'c'`` — so the
-    message names the same tuple the check reads."""
+    """A closed value set as refusal prose — ``'a' or 'b'``, ``'a', 'b' or 'c'``.
+
+    So the message names the same tuple the check reads.
+    """
     quoted = [repr(value) for value in values]
     head, last = quoted[:-1], quoted[-1]
     return f"{', '.join(head)} or {last}" if head else last
@@ -111,8 +116,7 @@ def _now_utc() -> datetime:
 
 
 def _parse_instant(value: str, *, now: datetime, field: str) -> datetime:
-    """Resolve an absolute ISO instant or a relative token (e.g. ``7d`` = 7 days
-    ago), normalized to UTC."""
+    """Resolve an absolute ISO instant or a relative token (e.g. ``7d`` = 7 days ago), normalized to UTC."""
     match = _RELATIVE_RE.match(value)
     if match:
         amount, unit = int(match.group(1)), match.group(2)
@@ -125,9 +129,10 @@ def _parse_instant(value: str, *, now: datetime, field: str) -> datetime:
 
 
 def parse_time_range(request: Request) -> tuple[datetime, datetime]:
-    """The ``from`` / ``to`` window: each is an ISO instant or a relative token
-    (``\\d+[hdw]``). ``from`` defaults to ``30d`` ago, ``to`` to now. ``from``
-    at or after ``to`` is a 400."""
+    r"""The ``from`` / ``to`` window: each is an ISO instant or a relative token (``\\d+[hdw]``).
+
+    ``from`` defaults to ``30d`` ago, ``to`` to now. ``from`` at or after ``to`` is a 400.
+    """
     q = request.query_params
     now = _now_utc()
     t0 = _parse_instant(q.get("from") or _DEFAULT_FROM, now=now, field="from")
@@ -138,10 +143,11 @@ def parse_time_range(request: Request) -> tuple[datetime, datetime]:
 
 
 def select_granularity(t0: datetime, t1: datetime, override: str | None) -> str:
-    """≤2 days → hourly, ≤90 days → daily, else weekly — unless pinned to one of
-    hour/day/week. An explicit granularity outside that set is malformed and raises
-    ``RequestParseError`` (→ 400, same as a bad from/to); auto-selection applies
-    only when it is absent."""
+    """≤2 days → hourly, ≤90 days → daily, else weekly — unless pinned to one of hour/day/week.
+
+    An explicit granularity outside that set is malformed and raises ``RequestParseError`` (→ 400, same as
+    a bad from/to); auto-selection applies only when it is absent.
+    """
     if override:
         if override not in GRANULARITIES:
             raise RequestParseError(f"granularity must be one of {', '.join(GRANULARITIES)}: {override!r}")
@@ -168,7 +174,8 @@ def _parse_tags(raw: str | None) -> list[str]:
     """Tags as either a JSON list (``["a","b"]``) or a comma-separated string.
 
     A value opening with ``[`` is decoded as JSON (the list/dict query-param
-    encoding); anything else is split on commas. Empty entries are dropped."""
+    encoding); anything else is split on commas. Empty entries are dropped.
+    """
     if not raw:
         return []
     text = raw.strip()
@@ -184,13 +191,13 @@ def _parse_tags(raw: str | None) -> list[str]:
 
 
 def _parse_meta(q: Any) -> dict[str, str]:
-    """Collect the ``meta.<key>=<value>`` query params into the neutral
-    ``MonitoringFilter.metadata`` equality map.
+    """Collect the ``meta.<key>=<value>`` query params into the neutral ``MonitoringFilter.metadata`` map.
 
     Each ``meta.<key>`` param is one string-equality clause on the trace's
     ``metadata`` (the reader maps it to the backend's per-key metadata filter). A
     bare ``meta.`` prefix with no key, or an empty value, is malformed (→ 400) — a
-    keyless or valueless equality would match nothing meaningfully."""
+    keyless or valueless equality would match nothing meaningfully.
+    """
     meta: dict[str, str] = {}
     for raw_key in q:
         if not raw_key.startswith("meta."):
@@ -206,10 +213,9 @@ def _parse_meta(q: Any) -> dict[str, str]:
 
 
 def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy | None]:
-    """Build the neutral ``MonitoringFilter`` + ``OrderBy`` for the run list from
-    the query string. Every clause is optional; an all-empty query yields
-    ``(None, None)`` (a plain newest-first listing).
+    """Build the neutral ``MonitoringFilter`` + ``OrderBy`` for the run list from the query string.
 
+    Every clause is optional; an all-empty query yields ``(None, None)`` (a plain newest-first listing).
     List- or dict-typed params are JSON-encoded in the query string (``tags`` may
     be a JSON list or a comma-separated string). ``status=error`` maps to a
     level==ERROR clause; ``status=success`` is unfiltered (the absence of errors
@@ -221,7 +227,8 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
     ``maxTokens`` / ``minLatencyMs`` / ``maxLatencyMs`` ranges are inclusive;
     latency is exposed in ms and converted to the contract's seconds. An inverted
     range is rejected by the contract (→ 400). Sort: ``sort`` ∈ {createdAt, cost,
-    latencyMs, totalTokens} with ``dir`` ∈ {asc, desc} (default desc)."""
+    latencyMs, totalTokens} with ``dir`` ∈ {asc, desc} (default desc).
+    """
     q = request.query_params
 
     tags = _parse_tags(q.get("tags"))
@@ -293,11 +300,12 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
 
 
 def parse_paging(request: Request) -> tuple[int, int]:
-    """``page`` (default 1) and ``pageSize`` (default 50). A ``page`` or
-    ``pageSize`` below 1 is malformed and raises ``RequestParseError`` (→ 400),
-    consistent with the from/to and granularity checks — never silently clamped.
-    ``pageSize`` above ``PAGE_CHUNK`` is capped to that documented server limit
-    (valid data, not an error). A non-integer value is a 400."""
+    """``page`` (default 1) and ``pageSize`` (default 50), validated and capped.
+
+    A ``page`` or ``pageSize`` below 1 is malformed and raises ``RequestParseError`` (→ 400), consistent
+    with the from/to and granularity checks — never silently clamped. ``pageSize`` above ``PAGE_CHUNK`` is
+    capped to that documented server limit (valid data, not an error). A non-integer value is a 400.
+    """
     q = request.query_params
     try:
         page = int(q.get("page", "1"))
@@ -321,6 +329,7 @@ _CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
 def csv_safe(value: Any) -> Any:
+    """Prefix a formula-leading string cell with ``'`` so a spreadsheet renders it as text."""
     if isinstance(value, str) and value[:1] in _CSV_FORMULA_PREFIXES:
         return "'" + value
     return value
@@ -341,9 +350,11 @@ def _num(value: Any) -> float:
 
 
 def extract_bucket(row: Any) -> str | None:
-    """Find the time-bucket value in a granularity row. The contract does not
-    standardize the time-field key, so search dimensions then metrics for the
-    first ISO-date-like string."""
+    """Find the time-bucket value in a granularity row.
+
+    The contract does not standardize the time-field key, so search dimensions then metrics for the
+    first ISO-date-like string.
+    """
     for source in (row.dimensions, row.metrics):
         for value in source.values():
             if isinstance(value, str) and _ISO_LIKE.match(value):
@@ -357,7 +368,8 @@ def metric_value(metrics: dict[str, Any], measure: str) -> float:
     The backend names output columns by measure + aggregation (e.g.
     ``count_count``, ``totalCost_sum``, ``latency_avg``), and the order is not
     standardized across versions — so match by measure-name substring, with an
-    exact-key fast path when present."""
+    exact-key fast path when present.
+    """
     if measure in metrics:
         return _num(metrics[measure])
     needle = measure.lower()
@@ -372,7 +384,8 @@ def summary_from_rows(rows: list[Any]) -> dict[str, Any]:
 
     Empty rows → all zeros. ``avgCostPerRun`` / ``avgTokensPerRun`` are derived
     from the totals; ``timeToFirstTokenMs`` is always ``None`` (no neutral
-    measure for it — the field is kept for a stable response shape)."""
+    measure for it — the field is kept for a stable response shape).
+    """
     m = rows[0].metrics if rows else {}
     total_runs = int(metric_value(m, "count"))
     total_cost = metric_value(m, "totalCost")
@@ -403,8 +416,10 @@ def time_series_from_rows(rows: list[Any]) -> list[dict[str, Any]]:
 
 
 def map_model_rows(res: MetricsResult | None) -> list[dict[str, Any]]:
-    """Per-model breakdown rows, top 8 by cost. Empty when unavailable (the
-    by-model sub-query is optional — see ``_safe_query``)."""
+    """Per-model breakdown rows, top 8 by cost.
+
+    Empty when unavailable (the by-model sub-query is optional — see ``_safe_query``).
+    """
     if res is None:
         return []
     rows = [
@@ -422,10 +437,11 @@ def map_model_rows(res: MetricsResult | None) -> list[dict[str, Any]]:
 
 
 async def _safe_query(reader: MonitoringReader, f: MetricsFilter) -> MetricsResult | None:
-    """Run an OPTIONAL metrics sub-query, returning ``None`` (logged, not raised)
-    if the backend rejects it — so an unsupported measure/dimension cannot break
-    the core tiles. This is the single deliberate, visible degrade path; every
-    other reader error propagates."""
+    """Run an OPTIONAL metrics sub-query, returning ``None`` (logged, not raised) if the backend rejects it.
+
+    So an unsupported measure/dimension cannot break the core tiles. This is the single deliberate, visible
+    degrade path; every other reader error propagates.
+    """
     try:
         return await reader.query_metrics(f)
     except Exception as exc:
@@ -447,7 +463,8 @@ def derive_run(row: MonitoringTraceSummary) -> dict[str, Any]:
     the backend's server-bounded JSON values, latency / tokens / status come from
     its batched aggregates. ``status`` maps ``error`` -> ``error`` and ``ok`` ->
     ``success``; a malformed backend row never reaches here — it fails the page
-    loudly at the reader."""
+    loudly at the reader.
+    """
     return {
         "id": row.id,
         "traceId": row.id,

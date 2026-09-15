@@ -41,8 +41,10 @@ DEFAULT_LOCAL_PORT = 8000
 
 
 def config_path() -> Path:
-    """The CLI config file location: ``$XDG_CONFIG_HOME/tai/config.toml`` when
-    ``XDG_CONFIG_HOME`` is set, else ``~/.config/tai/config.toml``."""
+    """Resolve the CLI config file location.
+
+    ``$XDG_CONFIG_HOME/tai/config.toml`` when ``XDG_CONFIG_HOME`` is set, else ``~/.config/tai/config.toml``.
+    """
     base = os.environ.get("XDG_CONFIG_HOME")
     root = Path(base) if base else Path.home() / ".config"
     return root / "tai" / "config.toml"
@@ -69,6 +71,7 @@ def default_server_url() -> str:
 
 
 def resolve_server_url(override: str | None) -> str:
+    """Resolve the server URL: ``override`` → ``TAI_SERVER_URL`` env → config file → the local default."""
     if override:
         return override
     from_env = os.environ.get(SERVER_URL_ENV)
@@ -81,6 +84,7 @@ def resolve_server_url(override: str | None) -> str:
 
 
 def resolve_api_key(*, from_stdin: bool) -> str:
+    """Resolve the API key: stdin (when ``from_stdin``) → ``TAI_API_KEY`` env → config file → an interactive prompt."""
     if from_stdin:
         key = sys.stdin.readline().strip()
         if not key:
@@ -121,8 +125,11 @@ def resolve_timeout(override: float | None) -> float:
 
 
 class AppContext:
-    """Per-invocation CLI state: the global flags plus lazy access to the
-    resolved server URL, API key, and a configured :class:`ApiClient`."""
+    """Per-invocation CLI state for the ``tai`` commands.
+
+    Holds the global flags plus lazy access to the resolved server URL, API key, and a configured
+    :class:`ApiClient`.
+    """
 
     def __init__(
         self,
@@ -132,6 +139,7 @@ class AppContext:
         api_key_stdin: bool,
         timeout_override: float | None,
     ) -> None:
+        """Store the global flags; the server URL, API key, and timeout resolve lazily on first access."""
         self.json_output = json_output
         self._server_override = server_override
         self._api_key_stdin = api_key_stdin
@@ -142,18 +150,21 @@ class AppContext:
 
     @property
     def server_url(self) -> str:
+        """The resolved server URL, computed once on first access."""
         if self._server_url is None:
             self._server_url = resolve_server_url(self._server_override)
         return self._server_url
 
     @property
     def api_key(self) -> str:
+        """The resolved API key, computed once on first access."""
         if self._api_key is None:
             self._api_key = resolve_api_key(from_stdin=self._api_key_stdin)
         return self._api_key
 
     @property
     def read_timeout(self) -> float:
+        """The resolved read-timeout window in seconds, computed once on first access."""
         if self._read_timeout is None:
             self._read_timeout = resolve_timeout(self._timeout_override)
         return self._read_timeout
@@ -163,7 +174,8 @@ class AppContext:
 
         With ``anonymous=True`` the client carries NO credential — the api-key
         resolution (and its interactive prompt) is never triggered — for the single
-        public door the CLI calls (``tai auth claim``, which has no key yet)."""
+        public door the CLI calls (``tai auth claim``, which has no key yet).
+        """
         return ApiClient(
             self.server_url,
             None if anonymous else self.api_key,

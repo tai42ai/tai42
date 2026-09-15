@@ -15,10 +15,12 @@ class InteractionsFacet(_Facet):
 
     @property
     def ask_user(self) -> AskUser:
-        """The bound, ``AskUser``-typed ``ask_user`` callable, so an in-process plugin asks
-        a human without importing the skeleton. A facade EXPOSURE of the existing helper —
-        its rich signature and return contract are forwarded verbatim, no new ask
-        semantics."""
+        """The bound, ``AskUser``-typed ``ask_user`` callable for an in-process plugin.
+
+        Lets a plugin ask a human without importing the skeleton. A facade EXPOSURE of the
+        existing helper — its rich signature and return contract are forwarded verbatim, no
+        new ask semantics.
+        """
         from tai42_skeleton.interactions.helper import ask_user
 
         return ask_user

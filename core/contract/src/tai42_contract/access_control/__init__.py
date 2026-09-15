@@ -1,5 +1,4 @@
-"""Access-control contract: identity, policy/context models, and the ``Verifier``
-/ ``PolicyEnforcer`` protocols."""
+"""Access-control contract: identity, policy/context models, and the ``Verifier`` / ``PolicyEnforcer`` protocols."""
 
 from __future__ import annotations
 

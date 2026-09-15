@@ -7,7 +7,7 @@ import sys
 
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
+from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -29,15 +29,16 @@ _pkg = sys.modules["tai42_skeleton.routers.interactions"]
 
 
 async def _extract_answer(request: Request) -> dict:
-    """Read + bound the human-answer body at the HTTP edge into the operation's flat
-    ``answer`` argument. The byte cap (413), invalid JSON (400), and a missing
-    ``answer`` key (400) are the same loud rejections the door has always answered —
-    reproduced here so the operation receives an already-parsed answer value (the
-    adapter's plain parse would yield 422)."""
+    """Read + bound the human-answer body at the HTTP edge into the operation's flat ``answer`` argument.
+
+    The byte cap (413), invalid JSON (400), and a missing ``answer`` key (400) are the same loud
+    rejections the door has always answered — reproduced here so the operation receives an
+    already-parsed answer value (the adapter's plain parse would yield 422).
+    """
     settings = _pkg.interactions_settings()
     try:
         raw = await read_bounded_body(request, settings.callback_max_body_bytes)
-    except PayloadTooLarge as exc:
+    except RequestBodyTooLargeError as exc:
         raise PayloadTooLargeError("payload too large") from exc
     request._body = raw
     try:

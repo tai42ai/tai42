@@ -36,7 +36,8 @@ class BusRedisSettings(RedisConnectionSettings):
 
     Connection values come from the ``TAI_BUS_REDIS_*`` env (``TAI_BUS_REDIS_URL``
     …); with no ``redis_url`` the bus is off and the process runs on
-    :meth:`WorkerBus.local`."""
+    :meth:`WorkerBus.local`.
+    """
 
     model_config = SettingsConfigDict(env_prefix="TAI_BUS_")
 
@@ -46,6 +47,8 @@ class BusRedisSettings(RedisConnectionSettings):
 
 
 class BusSettings(TaiBaseSettings):
+    """Worker-bus settings, read from the ``TAI_BUS_`` environment."""
+
     model_config = SettingsConfigDict(env_prefix="TAI_BUS_", frozen=True)
 
     # Bus infrastructure converges only through a process recycle (boot resync

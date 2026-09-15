@@ -26,19 +26,22 @@ if TYPE_CHECKING:
 
 
 def plugin_owner(binding: MountBinding) -> RouteOwner:
-    """The route owner identity a declared plugin route records under — one per bound
-    module. The SINGLE source of that identity, shared by ``custom_route`` (which
-    stamps it on each recorded row), the rollback (which deregisters by it), and the
-    reload's route-preservation audit (which resolves expected owners through it), so
-    they never drift."""
+    """The route owner identity a declared plugin route records under — one per bound module.
+
+    The SINGLE source of that identity, shared by ``custom_route`` (which stamps it on each recorded row),
+    the rollback (which deregisters by it), and the reload's route-preservation audit (which resolves
+    expected owners through it), so they never drift.
+    """
     return RouteOwner(kind="plugin", owner_ref=binding.owner_ref, item_name=binding.item_name)
 
 
 def record_sub_mcp_mount(prefix: str) -> None:
-    """Record the sub-MCP router's served surface — everything BENEATH the mount prefix,
-    which is what a Starlette ``Mount`` serves — as a mounted, credential-gated one, so
-    the registry describes it instead of leaving its GETs to the Studio SPA catch-all
-    that also matches them (see :meth:`RouteRegistry.record_mounted`)."""
+    """Record the sub-MCP router's served surface as a mounted, credential-gated one.
+
+    Everything BENEATH the mount prefix (what a Starlette ``Mount`` serves) is recorded, so the registry
+    describes it instead of leaving its GETs to the Studio SPA catch-all that also matches them
+    (see :meth:`RouteRegistry.record_mounted`).
+    """
     route_registry.record_mounted(
         path=f"{prefix.rstrip('/')}/{{path:path}}",
         methods=MOUNT_METHODS,
@@ -51,6 +54,7 @@ class HttpSurface:
     """Middleware + custom-route registration over the app's FastMCP server."""
 
     def __init__(self, app: "TaiMCP") -> None:
+        """Bind the FastMCP ``app`` this surface registers middleware and custom routes on."""
         self._app = app
         # Keyed by the middleware class's qualified name so a module re-import
         # (each start() re-imports the middleware modules) replaces rather than
@@ -67,6 +71,7 @@ class HttpSurface:
         self._middlewares[key] = Middleware(cast(Any, cls), **options)
 
     def middleware(self, cls: type | None = None, **options: Any):
+        """Register ``cls`` as app middleware, callable directly or as a class decorator."""
         if cls and inspect.isclass(cls):
             self._register_middleware(cls, options)
             return cls
@@ -173,14 +178,13 @@ class HttpSurface:
         return decorator
 
     def use_raw_path_key(self, path_prefix: str) -> None:
-        """Upgrade every already-registered route whose template starts with
-        ``path_prefix`` to a :class:`RawPathRoute`, so it matches against the raw request
-        path: a path parameter whose values carry ``/`` (a state record's ``{key}``) stays
-        ONE segment when the client percent-encodes the slash, instead of splitting once
-        the ASGI server has decoded ``%2F``; the matched parameters are decoded once after
-        the match. Called AFTER the routes are registered, over their shared prefix, so a
-        family of doors (the plain record doors and their sub-actions) is covered at one
-        seam.
+        """Upgrade every already-registered route under ``path_prefix`` to a :class:`RawPathRoute`.
+
+        It then matches against the raw request path: a path parameter whose values carry ``/``
+        (a state record's ``{key}``) stays ONE segment when the client percent-encodes the slash,
+        instead of splitting once the ASGI server has decoded ``%2F``; the matched parameters are
+        decoded once after the match. Called AFTER the routes are registered, over their shared prefix,
+        so a family of doors (the plain record doors and their sub-actions) is covered at one seam.
 
         This surface owns every write into the FastMCP additional-route table (see
         ``route_table_savepoint``), so it owns the in-place upgrade too; each upgrade keeps
@@ -192,7 +196,8 @@ class HttpSurface:
         (metadata capture, route discovery) serves no request and keeps no route table, so
         only the registry marking runs there — the served-router upgrade is skipped. A REAL
         served ``FastMCP`` that exposes no route table is a torn surface: raise rather than
-        silently leave the record doors matched on the decoded path."""
+        silently leave the record doors matched on the decoded path.
+        """
         from fastmcp import FastMCP
 
         route_registry.mark_raw_path_matched(path_prefix)
@@ -216,10 +221,11 @@ class HttpSurface:
                 )
 
     def mount_base(self) -> str:
-        """The resolved absolute mount base of the module importing now — ``/api/``
-        plus the mount binding's base, no trailing slash. Raises off a binding (a
-        core or operator-authored module) or from a route-less item's module —
-        neither owns a declared mount. See :class:`tai42_contract.app.facets.AppHttp`.
+        """The resolved absolute mount base of the module importing now.
+
+        It is ``/api/`` plus the mount binding's base, no trailing slash. Raises off a binding (a
+        core or operator-authored module) or from a route-less item's module — neither owns a declared
+        mount. See :class:`tai42_contract.app.facets.AppHttp`.
         """
         binding = current_mount_binding()
         if binding is None:
@@ -235,27 +241,30 @@ class HttpSurface:
         return binding.resolved_path("")
 
     def route_table_savepoint(self) -> int:
-        """The current length of the FastMCP additional-route table — a savepoint the
-        additive-plugin import captures BEFORE a bound module imports. A module import
+        """The current length of the FastMCP additional-route table — a plugin-import savepoint.
+
+        Captured BEFORE a bound module imports. A module import
         only ever APPENDS routes (one per ``custom_route``), so truncating back to this
         length drops exactly the routes that module registered and nothing earlier.
 
         Reaches the FastMCP-private route list because FastMCP affords no route-removal
         API; this surface already owns every write into that list, so it owns the
-        savepoint too."""
+        savepoint too.
+        """
         return len(self._app._fast_mcp._additional_http_routes)
 
     def rollback_module_routes(self, binding: MountBinding, savepoint: int) -> None:
-        """Undo every route a failed/quarantined bound module registered, across all
-        three surfaces, so ``RouteRegistry.match()``, the cross-owner collision math,
-        and the OpenAPI enumeration all see nothing from it: truncate the FastMCP
-        route table back to ``savepoint`` and deregister every ``route_registry`` row
-        owned by the module.
+        """Undo every route a failed/quarantined bound module registered, across all three surfaces.
+
+        So ``RouteRegistry.match()``, the cross-owner collision math, and the OpenAPI enumeration all
+        see nothing from it: truncate the FastMCP route table back to ``savepoint`` and deregister every
+        ``route_registry`` row owned by the module.
 
         Fires for BOTH failure shapes — a ``custom_route`` that raised mid-import
         (undeclared row / explicit ``authed=`` / route-less item) and a post-import
         ``_verify_all_registered`` raise — since both leave the rows committed before
-        the fault standing. A misused savepoint (outside the current table) raises."""
+        the fault standing. A misused savepoint (outside the current table) raises.
+        """
         routes = self._app._fast_mcp._additional_http_routes
         if not 0 <= savepoint <= len(routes):
             raise ValueError(f"route-table savepoint {savepoint} is outside the current table of {len(routes)} routes")
@@ -287,8 +296,7 @@ class HttpSurface:
 
 
 def http_surface() -> HttpSurface:
-    """The bound concrete :class:`HttpSurface`, carrying the
-    ``declared`` / ``destructive`` metadata seam.
+    """The bound concrete :class:`HttpSurface`, carrying the ``declared`` / ``destructive`` metadata seam.
 
     A native ``/api/*`` handler registers through this so it can declare its
     OpenAPI metadata explicitly (its ``reload_gated`` / ``reads_body`` / error

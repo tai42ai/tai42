@@ -45,43 +45,55 @@ _current_identity_claims: ContextVar[Mapping[str, Any] | None] = ContextVar(
 
 
 def get_request_effective_scopes() -> tuple[str, ...] | None:
-    """The current caller's owner-attenuated effective scopes, or ``None`` when no
-    caller is bound (an anonymous request, or code outside a bound request)."""
+    """The current caller's owner-attenuated effective scopes, or ``None`` when unbound.
+
+    ``None`` for an anonymous request, or code outside a bound request.
+    """
     return _current_effective_scopes.get()
 
 
 def set_request_effective_scopes(scopes: tuple[str, ...] | None) -> Token[tuple[str, ...] | None]:
-    """Bind ``scopes`` as the current caller's effective scopes and return the reset
-    token. The guard middleware calls this once per authenticated request, paired
-    with :func:`~tai42_contract.access_control.context.set_request_user_id`; pass the
+    """Bind ``scopes`` as the current caller's effective scopes and return the reset token.
+
+    The guard middleware calls this once per authenticated request, paired with
+    :func:`~tai42_contract.access_control.context.set_request_user_id`; pass the
     returned token to :func:`reset_request_effective_scopes` to restore the previous
-    value."""
+    value.
+    """
     return _current_effective_scopes.set(scopes)
 
 
 def reset_request_effective_scopes(token: Token[tuple[str, ...] | None]) -> None:
-    """Restore the effective scopes to the value captured in ``token`` by the
-    matching :func:`set_request_effective_scopes` call."""
+    """Restore the effective scopes to the value captured in ``token``.
+
+    ``token`` is the one returned by the matching :func:`set_request_effective_scopes` call.
+    """
     _current_effective_scopes.reset(token)
 
 
 def get_request_identity_claims() -> Mapping[str, Any] | None:
-    """The current caller's verified token claims (the ``.identity.*`` a policy
-    condition reads, and the owner reference the owner second-pass enforce needs),
-    or ``None`` when no caller is bound."""
+    """The current caller's verified token claims, or ``None`` when no caller is bound.
+
+    Includes the ``.identity.*`` a policy condition reads, and the owner reference
+    the owner second-pass enforce needs.
+    """
     return _current_identity_claims.get()
 
 
 def set_request_identity_claims(claims: Mapping[str, Any] | None) -> Token[Mapping[str, Any] | None]:
-    """Bind ``claims`` as the current caller's verified token claims and return the
-    reset token. The guard middleware calls this once per authenticated request,
-    paired with :func:`~tai42_contract.access_control.context.set_request_user_id`;
-    pass the returned token to :func:`reset_request_identity_claims` to restore the
-    previous value."""
+    """Bind ``claims`` as the current caller's verified token claims and return the reset token.
+
+    The guard middleware calls this once per authenticated request, paired with
+    :func:`~tai42_contract.access_control.context.set_request_user_id`; pass the
+    returned token to :func:`reset_request_identity_claims` to restore the previous
+    value.
+    """
     return _current_identity_claims.set(claims)
 
 
 def reset_request_identity_claims(token: Token[Mapping[str, Any] | None]) -> None:
-    """Restore the identity claims to the value captured in ``token`` by the
-    matching :func:`set_request_identity_claims` call."""
+    """Restore the identity claims to the value captured in ``token``.
+
+    ``token`` is the one returned by the matching :func:`set_request_identity_claims` call.
+    """
     _current_identity_claims.reset(token)

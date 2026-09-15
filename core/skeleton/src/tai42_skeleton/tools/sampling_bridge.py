@@ -32,8 +32,9 @@ logger = logging.getLogger(__name__)
 
 def platform_llm() -> BaseChatModel:
     """The platform's own configured default chat model — the sampling fallback.
-    Built from the provider + LLM settings, the same construction the platform's
-    LLM middleware uses."""
+
+    Built from the provider + LLM settings, the same construction the platform's LLM middleware uses.
+    """
     from tai42_kit.llm.models import get_llm
     from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 
@@ -57,7 +58,7 @@ def _to_langchain_messages(
         # generic chat model, so it raises rather than being dropped.
         content = item.content
         if not isinstance(content, TextContent):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
                 f"sampling fallback supports text content only; got {type(content).__name__} "
                 "in a SamplingMessage — the platform LLM fallback cannot forward it."
             )
@@ -84,7 +85,8 @@ async def platform_sample(
     passing none gets the cap as the default; a caller asking for more is refused
     loudly (never silently clamped). Any delegate with no invocation scope of its
     own (a single downstream sample per call) inherits this token cap here — it
-    has no per-invocation call budget."""
+    has no per-invocation call budget.
+    """
     if tools:
         raise NotImplementedError(
             "sampling fallback to the platform LLM does not support a tool loop; "

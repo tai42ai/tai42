@@ -1,6 +1,8 @@
-"""The presets contract: the :class:`~tai42_contract.agent.base.PresetSpec` data
-model, the :class:`PresetBody` persisted shape, the preset-specific errors, and
-the :class:`PresetStore` Protocol.
+"""The presets contract: the ``PresetSpec`` model, ``PresetBody`` shape, errors, and store.
+
+Covers the :class:`~tai42_contract.agent.base.PresetSpec` data model, the
+:class:`PresetBody` persisted shape, the preset-specific errors, and the
+:class:`PresetStore` Protocol.
 
 A *preset* is a base tool with a partial set of keyword arguments baked in,
 exposed as a new named, versioned tool. It is the FIRST typed VIEW over the
@@ -64,14 +66,17 @@ class PresetStore(Protocol):
         state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
     ) -> DocumentRecord:
-        """Create a versioned preset. ``spec`` carries ``name``/``description``/
+        """Create a versioned preset.
+
+        ``spec`` carries ``name``/``description``/
         ``base_tool``/``fixed_kwargs``; ``extensions`` (the combos list) and the
         optional ``output_schema`` / ``input_schema`` ride alongside — all of them
         land in the persisted :class:`PresetBody`. ``tags`` labels version 1 in the
         SAME create commit (``None`` leaves it untagged); a caller that must tag the
         first version does so atomically, never through a separate follow-up write.
         Raise :class:`PresetExistsError` on a duplicate name,
-        :class:`PresetNameConflictError` if the name collides with a base tool."""
+        :class:`PresetNameConflictError` if the name collides with a base tool.
+        """
         ...
 
     async def save_version(
@@ -111,7 +116,8 @@ class PresetStore(Protocol):
         docstring. An empty INNER combo
         (``[[]]`` or any ``[]`` member of ``extensions``) is REJECTED. The new body
         never DROPS a field. Raise :class:`PresetNotFoundError` if the preset is
-        absent."""
+        absent.
+        """
         ...
 
     async def list_presets(self) -> list[DocumentRecord]:
@@ -119,51 +125,67 @@ class PresetStore(Protocol):
         ...
 
     async def get_preset(self, name: str) -> DocumentRecord:
-        """Fetch a preset's active record. Raise :class:`PresetNotFoundError` if
-        absent."""
+        """Fetch a preset's active record.
+
+        Raise :class:`PresetNotFoundError` if absent.
+        """
         ...
 
     async def get_active_kwargs(self, name: str) -> dict[str, Any]:
-        """Return the active version's baked ``fixed_kwargs``. Raise
-        :class:`PresetNotFoundError` if absent."""
+        """Return the active version's baked ``fixed_kwargs``.
+
+        Raise :class:`PresetNotFoundError` if absent.
+        """
         ...
 
     async def list_versions(self, name: str) -> list[DocumentVersion]:
-        """List every version of the preset, each carrying its ``is_current``
-        signal. Raise :class:`PresetNotFoundError` if the preset is absent."""
+        """List every version of the preset, each carrying its ``is_current`` signal.
+
+        Raise :class:`PresetNotFoundError` if the preset is absent.
+        """
         ...
 
     async def get_version(self, name: str, version: int) -> DocumentVersion:
-        """Fetch one version. Raise :class:`PresetVersionNotFoundError` if that
-        version does not exist."""
+        """Fetch one version.
+
+        Raise :class:`PresetVersionNotFoundError` if that version does not exist.
+        """
         ...
 
     async def get_active_body(self, name: str) -> PresetBody:
-        """Return the FULL active-version body (``{base_tool, description,
-        fixed_kwargs, extensions}``) so reload/startup can re-register from
-        the whole body, not just ``fixed_kwargs``. Raise
-        :class:`PresetNotFoundError` if absent."""
+        """Return the FULL active-version body (``{base_tool, description, fixed_kwargs, extensions}``).
+
+        So reload/startup can re-register from the whole body, not just
+        ``fixed_kwargs``. Raise :class:`PresetNotFoundError` if absent.
+        """
         ...
 
     async def rollback(self, name: str, version: int) -> DocumentRecord:
-        """Re-point the active version to ``version`` (no data copy). Raise
-        :class:`PresetVersionNotFoundError` if that version does not exist."""
+        """Re-point the active version to ``version`` (no data copy).
+
+        Raise :class:`PresetVersionNotFoundError` if that version does not exist.
+        """
         ...
 
     async def soft_delete(self, name: str) -> None:
-        """Soft-delete the preset, keeping its version history (audit). Raise
-        :class:`PresetNotFoundError` if absent."""
+        """Soft-delete the preset, keeping its version history (audit).
+
+        Raise :class:`PresetNotFoundError` if absent.
+        """
         ...
 
     async def rename_preset(self, name: str, new_name: str) -> DocumentRecord:
-        """Re-key a preset from ``name`` to ``new_name``, delegating to the generic
-        store's rename under ``kind="preset"``. The version history, every per-version
+        """Re-key a preset from ``name`` to ``new_name``.
+
+        Delegates to the generic store's rename under
+        ``kind="preset"``. The version history, every per-version
         ``tags`` label, and the ``active_version`` pointer are preserved by the store
         contract — a rename moves a key, it never rewrites the body. Raise
         :class:`PresetNotFoundError` for an absent ``name``, :class:`PresetExistsError`
         when ``new_name`` is already a live preset, and :class:`PresetNameConflictError`
         when the injected collision predicate says ``new_name`` is held by a live
-        non-preset tool (the same predicate :meth:`create_preset` consults)."""
+        non-preset tool (the same predicate :meth:`create_preset` consults).
+        """
         ...
 
 

@@ -15,10 +15,12 @@ from tai42_skeleton.marketplace.provides import env_selected_items, mcp_entry_it
 
 
 def install_notes(spec: PluginSpec) -> list[str]:
-    """Activation notes: one per env-selected item (installed but inactive until
-    ``TAI_CONFIG_MODE`` selects it — ``file`` is built in, every other mode resolves
-    by convention to the installed provider's module), plus one per mcp-server item
-    naming the mounted server title."""
+    """Activation notes: one per env-selected item, plus one per mcp-server item.
+
+    An env-selected item is installed but inactive until ``TAI_CONFIG_MODE`` selects it —
+    ``file`` is built in, every other mode resolves by convention to the installed
+    provider's module. Each mcp-server note names the mounted server title.
+    """
     notes = [
         f"{item.name!r} is installed but inactive: TAI_CONFIG_MODE selects the config provider — "
         "'file' is built in, every other mode resolves by convention to the "
@@ -33,19 +35,22 @@ def install_notes(spec: PluginSpec) -> list[str]:
 
 
 def uninstall_notes(spec: PluginSpec) -> list[str]:
-    """Removal notes: one per env-selected item (if ``TAI_CONFIG_MODE`` currently
-    selects the removed provider, the next boot fails importing it until re-pointed
-    or unset), plus one per mcp-server item — its manifest entry is removed but the
-    stored env values its ``!ENV`` markers referenced are LEFT (never silently
-    delete operator secrets); the note names those orphaned vars, scanned from the
-    entry BEFORE removal."""
+    """Removal notes: one per env-selected item, plus one per mcp-server item.
+
+    For an env-selected item, if ``TAI_CONFIG_MODE`` currently selects the removed
+    provider, the next boot fails importing it until re-pointed or unset. For an mcp-server
+    item, its manifest entry is removed but the stored env values its ``!ENV`` markers
+    referenced are LEFT (never silently delete operator secrets); the note names those
+    orphaned vars, scanned from the entry BEFORE removal.
+    """
     notes = [
         f"{item.name!r} was a config provider: if TAI_CONFIG_MODE currently selects it, the next boot will "
         "fail importing the removed provider until you re-point or unset TAI_CONFIG_MODE"
         for item in env_selected_items(spec)
     ]
     for item in mcp_entry_items(spec):
-        assert item.mcp is not None  # guaranteed for the mcp-server kind
+        if item.mcp is None:
+            raise AssertionError
         orphaned = sorted({ref.var for ref in scan_env_marker_refs(item.mcp.model_dump(exclude_none=True))})
         if orphaned:
             notes.append(

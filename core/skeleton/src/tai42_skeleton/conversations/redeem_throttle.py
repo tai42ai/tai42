@@ -33,26 +33,33 @@ _NO_BACKEND = "conversation redeem throttling requires the redis conversations b
 
 
 class ConversationRedeemThrottle:
-    """The Redis-backed per-(target, source) redeem backoff. Construction refuses with a loud
-    501 without the redis conversations backend — a brute-force guard must not live in
-    per-worker state a restart clears."""
+    """The Redis-backed per-(target, source) redeem backoff.
+
+    Construction refuses with a loud 501 without the redis conversations backend — a
+    brute-force guard must not live in per-worker state a restart clears.
+    """
 
     def __init__(self, settings: ConversationsSettings) -> None:
+        """Bind the throttle to ``settings``, refusing with a loud 501 without the Redis backend."""
         if settings.in_memory:
             raise NotSupportedError(_NO_BACKEND)
         self.settings = settings
 
     async def is_locked(self, target: PairingTarget, source_key: str) -> bool:
-        """Whether this source's redeems are currently backed off for ``target``. Checked
-        BEFORE the code store is touched, so a locked attempt burns no code."""
+        """Whether this source's redeems are currently backed off for ``target``.
+
+        Checked BEFORE the code store is touched, so a locked attempt burns no code.
+        """
         lock_key = self.settings.redeem_lock_key(target.target_kind, target.target_name, source_key)
         async with client_ctx(RedisClient, self.settings.redis) as r:
             return bool(await awaited(r.exists(lock_key)))
 
     async def record_failure(self, target: PairingTarget, source_key: str) -> None:
-        """Count one invalid redeem and, past the threshold, (re)arm the backoff lock with
-        capped exponential duration. The counter's own TTL is the cap, so a source that stops
-        for that long decays back to un-escalated."""
+        """Count one invalid redeem and, past the threshold, (re)arm the backoff lock with capped exponential duration.
+
+        The counter's own TTL is the cap, so a source that stops for that long decays back
+        to un-escalated.
+        """
         cap = self.settings.redeem_backoff_cap_seconds
         threshold = self.settings.redeem_backoff_threshold
         fail_key = self.settings.redeem_fail_key(target.target_kind, target.target_name, source_key)
@@ -67,8 +74,10 @@ class ConversationRedeemThrottle:
                 await awaited(r.set(lock_key, "1", ex=backoff))
 
     async def clear(self, target: PairingTarget, source_key: str) -> None:
-        """Reset a source's failure counter and lock after a VALID redeem, so an honest user
-        who fat-fingered a code first is not left throttled."""
+        """Reset a source's failure counter and lock after a VALID redeem.
+
+        An honest user who fat-fingered a code first is not left throttled.
+        """
         fail_key = self.settings.redeem_fail_key(target.target_kind, target.target_name, source_key)
         lock_key = self.settings.redeem_lock_key(target.target_kind, target.target_name, source_key)
         async with client_ctx(RedisClient, self.settings.redis) as r:

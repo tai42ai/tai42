@@ -1,5 +1,4 @@
-"""Resolve a spec's declared route mounts, gate them for the flows, and build the
-preview response body.
+"""Resolve a spec's declared route mounts, gate them, and build the preview response body.
 
 The gate is applied BEFORE any state change: an unknown-item / bad-base override is
 a 400, a resolved PUBLIC route under a reserved prefix or a collision against the
@@ -27,16 +26,20 @@ from tai42_skeleton.marketplace.store import InstallRecord
 
 
 def live_owned_routes() -> list[routes_mod.OwnedRoute]:
-    """The live route registry's committed ``/api`` ownership generation — the
-    routes a candidate install/update is collision-checked against."""
+    """The live route registry's committed ``/api`` ownership generation.
+
+    The routes a candidate install/update is collision-checked against.
+    """
     from tai42_skeleton.app.route_registry import route_registry
 
     return routes_mod.owned_routes_from_registry(route_registry)
 
 
 def live_reserved_prefixes() -> Sequence[str]:
-    """The deployment's reserved never-public route prefixes — a resolved public
-    route may not mount under any of them."""
+    """The deployment's reserved never-public route prefixes.
+
+    A resolved public route may not mount under any of them.
+    """
     from tai42_skeleton.access_control.settings import access_control_settings
 
     return access_control_settings().reserved_public_pin_prefixes
@@ -85,9 +88,11 @@ def route_preflight(
 
 
 def approved_public_of(row: InstallRecord) -> set[tuple[str, tuple[str, ...]]]:
-    """The public route rows the installed version already approved — its stored
-    spec resolved at its stored mount bases. An update asks acceptance only for
-    public rows not in this set."""
+    """The public route rows the installed version already approved.
+
+    Its stored spec resolved at its stored mount bases. An update asks acceptance
+    only for public rows not in this set.
+    """
     old_spec = spec_from_row(row)
     old_mounts = routes_mod.resolve_mounts(old_spec, {}, prior=row.route_mounts)
     old_resolved = routes_mod.resolved_routes(old_spec, old_mounts)
@@ -104,11 +109,14 @@ def build_route_preview(
     reserved_prefixes: Callable[[], Sequence[str]],
     effective_env: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """The preview response body: the resolved routes per item, collisions against
-    the live registry (excluding the plugin's OWN routes on an update preview), the
-    public rows, the ``new`` public rows not already approved, and the env picture
-    (``required_env`` / ``missing_env`` computed against the resolved ``effective_env``
-    the flow supplies) plus ``delivery``."""
+    """The preview response body.
+
+    The resolved routes per item, collisions against the live registry (excluding
+    the plugin's OWN routes on an update preview), the public rows, the ``new``
+    public rows not already approved, and the env picture (``required_env`` /
+    ``missing_env`` computed against the resolved ``effective_env`` the caller
+    supplies) plus ``delivery``.
+    """
     prior = existing.route_mounts if existing is not None else None
     mounts = routes_mod.resolve_mounts(spec, route_mounts, prior=prior)
     resolved = routes_mod.resolved_routes(spec, mounts)

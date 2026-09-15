@@ -41,9 +41,10 @@ def _utcnow_iso() -> str:
 
 
 def _beat_age_seconds(beat_at: str) -> float | None:
-    """Seconds since a presence row's last worker-stamped beat, for a gap row's
-    cosmetic detail only — never a freshness gate (that reads the raw PTTL). ``None``
-    when the stamp does not parse."""
+    """Seconds since a presence row's last worker-stamped beat, or ``None`` when the stamp does not parse.
+
+    For a gap row's cosmetic detail only — never a freshness gate (that reads the raw PTTL).
+    """
     try:
         then = datetime.fromisoformat(beat_at)
         return (datetime.now(UTC) - then).total_seconds()
@@ -52,13 +53,14 @@ def _beat_age_seconds(beat_at: str) -> float | None:
 
 
 class SlotLostError(Exception):
-    """This process's slot claim was lost — a compare-token renew missed (token
-    mismatch or absent claim key), so the slot already belongs to a new holder.
+    """This process's slot claim was lost — the slot already belongs to a new holder.
 
+    A compare-token renew missed (token mismatch or absent claim key).
     Raised from the heartbeat and routed through a DEDICATED ``subscribe`` reconnect
     branch (never the transport-error tuple: a lost slot on a healthy connection is
     not an outage) so the held identity is abandoned and a NEW life is re-minted via
-    subscription re-entry. A lost slot is never resumed."""
+    subscription re-entry. A lost slot is never resumed.
+    """
 
 
 class OpOutcome(StrEnum):
@@ -73,7 +75,8 @@ class OpOutcome(StrEnum):
     and converges on its resync), ``recycling`` (departing, converging by
     old-life-gone + fresh capacity), or ``stale`` (a quiet row past the freshness
     bound — reconnecting or dead, carrying no convergence promise). A decayed row is
-    ``stale`` regardless of its written state."""
+    ``stale`` regardless of its written state.
+    """
 
     applied = "applied"
     failed = "failed"
@@ -96,7 +99,8 @@ class WorkerState(StrEnum):
     """The lifecycle state a worker advertises in its presence value.
 
     ``resyncing`` while its boot/reconnect resync runs, ``ready`` once converged,
-    ``recycling`` once it has begun a graceful self-exit."""
+    ``recycling`` once it has begun a graceful self-exit.
+    """
 
     ready = "ready"
     resyncing = "resyncing"
@@ -117,7 +121,8 @@ class WorkerIdentity(BaseModel):
     ``name`` is a slot ``{kind}-{n}`` (the lowest free ordinal), ``generation`` the
     monotonic life counter minted with the claim. ``member`` is ``False`` only for a
     fork child's derived non-member identity (it claims and registers nothing); it is
-    a process-local flag, never serialized onto the wire or into presence."""
+    a process-local flag, never serialized onto the wire or into presence.
+    """
 
     name: str
     kind: WorkerKind
@@ -132,7 +137,8 @@ class WorkerRow(BaseModel):
     ``pttl_ms`` is the raw remaining PTTL captured ALONGSIDE the value at scan time —
     an internal freshness measurement, excluded from ``model_dump`` so it never leaks
     into an API payload, and never part of the presence value on Redis. Staleness is
-    NOT stored here: it is computed from ``pttl_ms`` by :func:`presence_fresh`."""
+    NOT stored here: it is computed from ``pttl_ms`` by :func:`presence_fresh`.
+    """
 
     name: str
     kind: WorkerKind
@@ -152,7 +158,8 @@ def presence_fresh(pttl_ms: int | None, heartbeat_ttl: float) -> bool:
     every ``ttl/3``, so a remaining PTTL at or below ``ttl - 2*(ttl/3) = ttl/3`` means
     the last beat was over two intervals ago. Clock-independent — it reads the raw
     redis PTTL, never a worker-stamped ``beat_at`` against the reader's clock. A row
-    with no measured PTTL (absent/expired between scan and read) is not fresh."""
+    with no measured PTTL (absent/expired between scan and read) is not fresh.
+    """
     if pttl_ms is None:
         return False
     interval = heartbeat_ttl / 3
@@ -166,7 +173,8 @@ class _PresenceValue(BaseModel):
     ALL presence writes (heartbeat ``beat_at``, state transitions, the ``last_op``
     stamp) mutate this ONE object and serialize it whole on every SET — no writer
     reconstructs the value from a redis read, so independent writers never silently
-    drop each other's fields. ``name`` lives in the presence KEY, not this value."""
+    drop each other's fields. ``name`` lives in the presence KEY, not this value.
+    """
 
     kind: WorkerKind
     pid: int
@@ -178,13 +186,15 @@ class _PresenceValue(BaseModel):
 
 
 class LocalApplyResult(BaseModel):
-    """The publisher's own already-completed self-apply outcome, handed to
-    :meth:`WorkerBus.publish` so the bus can synthesize a truthful self entry.
+    """The publisher's own already-completed self-apply outcome, handed to :meth:`WorkerBus.publish`.
+
+    Lets the bus synthesize a truthful self entry.
 
     ``outcome`` is terminal — ``applied`` on success, ``failed`` (with ``error``
     attached) on the publish-anyway path where the broadcast still goes out after a
     failed local apply. ``payload`` rides the same optional shape as a wire reply so
-    the serving worker's own query data appears in a query op's fleet result."""
+    the serving worker's own query data appears in a query op's fleet result.
+    """
 
     outcome: OpOutcome
     payload: Any | None = None
@@ -205,7 +215,8 @@ class WorkerResult(BaseModel):
 
     ``payload`` carries query-op data (a read rides the same fan-out shape as a
     mutation); ``error`` carries a failed apply's message; ``detail`` carries the
-    publisher's report text for a computed ``missing``/``departed``/``timed_out``."""
+    publisher's report text for a computed ``missing``/``departed``/``timed_out``.
+    """
 
     name: str
     outcome: OpOutcome
@@ -223,7 +234,8 @@ class FleetResult(BaseModel):
     fresh gate — each carried as its actual condition rather than dropped.
     Bus-unreachable (``reachable=False``): the transport failed before any worker
     could reply, so there is NO worker list — only ``error``. ``local_only`` marks
-    the result of the no-op :meth:`WorkerBus.local` variant."""
+    the result of the no-op :meth:`WorkerBus.local` variant.
+    """
 
     op: str
     reachable: bool = True
@@ -255,7 +267,8 @@ def _merge_terminal(terminal: dict[str, WorkerResult], name: str, result: Worker
 
     A terminal reply supersedes nothing but another terminal; among terminals a
     failure is never overridden by a later same-worker success, so a genuinely
-    failed apply cannot be masked."""
+    failed apply cannot be masked.
+    """
     existing = terminal.get(name)
     if existing is not None and existing.outcome == OpOutcome.failed:
         return

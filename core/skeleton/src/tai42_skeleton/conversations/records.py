@@ -1,5 +1,6 @@
-"""The answer/record store — keyspaces 1, 2, 3, 6, 7 and 8 of the conversation bridge, all
-transient runtime state (NOT a backup section) and all Redis-backed:
+"""The answer/record store — keyspaces 1, 2, 3, 6, 7 and 8 of the conversation bridge.
+
+All transient runtime state (NOT a backup section) and all Redis-backed:
 
 1. Inbound dedupe: ``conversations:dedupe:{channel}:{provider_message_id}`` → the
    ``message_id`` that first claimed the pair, plus its event sibling
@@ -96,11 +97,14 @@ class ConversationRecordStore(
     RecordQueryMixin,
     RecordPruneMixin,
 ):
-    """The Redis-backed answer/record store (keyspaces 1, 2, 3, 6, 7 and 8), one persistence
-    concern per mixin. Construction refuses with a loud 501 without the redis conversations
-    backend — nothing here may be persisted to state that vanishes with the process."""
+    """The Redis-backed answer/record store (keyspaces 1, 2, 3, 6, 7 and 8), one persistence concern per mixin.
+
+    Construction refuses with a loud 501 without the redis conversations backend — nothing here may be
+    persisted to state that vanishes with the process.
+    """
 
     def __init__(self, settings: ConversationsSettings) -> None:
+        """Bind the conversations ``settings``, refusing a loud 501 when no Redis backend is configured."""
         if settings.in_memory:
             raise NotSupportedError(_NO_BACKEND)
         self.settings = settings

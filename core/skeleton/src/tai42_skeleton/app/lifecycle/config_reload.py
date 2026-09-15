@@ -8,13 +8,16 @@ from tai42_skeleton.app.lifecycle.state import LifecycleState
 
 
 class ConfigReloadMixin(LifecycleState):
+    """The soft config-reload lifecycle step: build and swap a fresh serving epoch in place."""
+
     def _reload_config(self) -> dict[str, Any]:
-        """Soft restart: build a FRESH serving epoch under the persisted env and swap
-        it in atomically — env refresh + settings reset + registry rebuild +
-        fresh serving surface + retire of the previous generation, all in the one
-        ``build_and_swap_epoch`` primitive. Heavy but in-process — no pod restart. A
-        reload-added router serves after the swap (the epoch's fresh FastMCP snapshots
-        the new route table); a failed build keeps the old epoch serving untouched.
+        """Soft restart: build a FRESH serving epoch under the persisted env and swap it in atomically.
+
+        Env refresh + settings reset + registry rebuild + fresh serving surface + retire of the
+        previous generation, all in the one ``build_and_swap_epoch`` primitive. Heavy but
+        in-process — no pod restart. A reload-added router serves after the swap (the epoch's
+        fresh FastMCP snapshots the new route table); a failed build keeps the old epoch serving
+        untouched.
 
         The build's fresh FastMCP lifespan is loop-affine, so the swap runs ON the
         serving loop even though this body is driven from a reload-gate worker thread.
@@ -54,7 +57,9 @@ class ConfigReloadMixin(LifecycleState):
         return asyncio.run(_swap())
 
     async def _close_llm_registries(self) -> None:
-        """Close the langgraph checkpoint + store resource pools — the release a
-        settings reset requires before it can drop the per-loop registries."""
+        """Close the langgraph checkpoint + store resource pools.
+
+        The release a settings reset requires before it can drop the per-loop registries.
+        """
         await _lifecycle.checkpoint_registry().close_all()
         await _lifecycle.store_registry().close_all()

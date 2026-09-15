@@ -48,7 +48,7 @@ _DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 
 # The env var each auth mode injects into the session — the SDK reads these natively.
 ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
-CLAUDE_CODE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+CLAUDE_CODE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"  # noqa: S105 constant identifier, not a secret value
 
 
 class ClaudeCodeSettings(TaiBaseSettings):
@@ -120,17 +120,21 @@ class ClaudeCodeSettings(TaiBaseSettings):
         return self
 
     def model_credential(self) -> tuple[str, SecretStr]:
-        """The one model credential ``(env_name, secret)`` to inject — the exactly-one auth the
-        after-validator already guaranteed is set."""
+        """The one model credential ``(env_name, secret)`` to inject.
+
+        The exactly-one auth the after-validator already guaranteed is set.
+        """
         if self.api_key is not None:
             return ANTHROPIC_API_KEY_ENV, self.api_key
-        assert self.oauth_token is not None  # guaranteed by _validate_auth_and_image
+        if self.oauth_token is None:
+            raise AssertionError
         return CLAUDE_CODE_OAUTH_TOKEN_ENV, self.oauth_token
 
 
 class _CrashResumeMeta(TaiBaseSettings):
-    """A lightweight read of ONLY ``TAI_AGENTS_CLAUDE_CRASH_RESUME`` for the registration-time
-    meta declaration, requiring NONE of the full model's creds/image.
+    """A lightweight read of ONLY ``TAI_AGENTS_CLAUDE_CRASH_RESUME`` for the registration-time meta.
+
+    Requires NONE of the full model's creds/image.
 
     Importing ``claude_code.agent`` must NOT trigger the full ``ClaudeCodeSettings`` validation:
     the exactly-one-auth + digest-image config errors are declared to fire at RUN START, before
@@ -151,11 +155,15 @@ class _CrashResumeMeta(TaiBaseSettings):
 
 
 def claude_code_crash_resume() -> bool:
-    """Read the ``crash_resume`` recycle-class setting for the registration meta WITHOUT the full
-    ``ClaudeCodeSettings`` validation — importing the agent module must not require creds/image."""
+    """Read the ``crash_resume`` recycle-class setting for the registration meta, skipping full validation.
+
+    Runs WITHOUT the full ``ClaudeCodeSettings`` validation — importing the agent module
+    must not require creds/image.
+    """
     return _CrashResumeMeta().crash_resume
 
 
 @settings_cache
 def claude_code_settings() -> ClaudeCodeSettings:
+    """The cached full :class:`ClaudeCodeSettings`, read from the environment."""
     return ClaudeCodeSettings()  # type: ignore[call-arg]  # required fields come from env

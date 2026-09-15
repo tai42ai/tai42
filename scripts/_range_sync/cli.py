@@ -1,6 +1,6 @@
-"""Derive first-party ``tai42-*`` version ranges from the released member
-versions and rewrite them in place, so ranges never go stale by hand.
+"""Derive first-party ``tai42-*`` version ranges from released member versions and rewrite them in place.
 
+Ranges never go stale by hand.
 Two surfaces are kept in lockstep with the released versions:
 
   (A) first-party ``tai42-*`` dependency ranges in every workspace member's

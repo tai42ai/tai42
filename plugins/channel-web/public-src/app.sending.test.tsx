@@ -1,4 +1,3 @@
-import { StrictMode } from 'react';
 import {
   act,
   cleanup,
@@ -9,20 +8,21 @@ import {
   waitFor,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ChatApiError } from '@/api';
-import type { ChatItem } from '@/transcript-model';
 import {
-  CLIENT_MESSAGE_ID,
-  TS,
   agentSaid,
   agentSentMedia,
   app,
+  CLIENT_MESSAGE_ID,
   send,
   streamState,
+  TS,
   visitorSaid,
 } from '@/app.test-support';
+import type { ChatItem } from '@/transcript-model';
 
 const api = vi.hoisted(() => ({
   sendMessage: vi.fn(),

@@ -8,10 +8,12 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class ScheduleRecord(BaseModel):
-    """One schedule in a backend-neutral, JSON-serializable form: ``name``, the
-    scheduled call's ``args``/``kwargs``, the canonical interval-or-crontab
-    ``schedule`` dict, and the ``enabled`` flag. Round-trips through a backup
-    document via ``model_dump`` / ``model_validate``."""
+    """One schedule in a backend-neutral, JSON-serializable form.
+
+    Carries ``name``, the scheduled call's ``args``/``kwargs``, the canonical
+    interval-or-crontab ``schedule`` dict, and the ``enabled`` flag. Round-trips through a
+    backup document via ``model_dump`` / ``model_validate``.
+    """
 
     name: str
     args: list[Any] = Field(default_factory=list)

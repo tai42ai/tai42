@@ -4,12 +4,12 @@
  * a link out to the question's own callback page. The dispatch switch has NO default
  * arm: a new answer format has to be given a widget here before it type-checks.
  */
-import type { ReactElement } from 'react';
-import { Button, ExternalLinkButton, Spinner, TextInput } from '@tai42/studio-sdk';
 import type { JsonSchema } from '@tai42/studio-sdk';
+import { Button, ExternalLinkButton, Spinner, TextInput } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
 
-import type { ChatItem, FormPage, FormPrefill } from '@/transcript-model';
 import { MalformedNotice, SchemaFormAnswer } from '@/schema-form-answer';
+import type { ChatItem, FormPage, FormPrefill } from '@/transcript-model';
 
 /** The transcript item this card renders. */
 export type QuestionItem = Extract<ChatItem, { kind: 'question' }>;

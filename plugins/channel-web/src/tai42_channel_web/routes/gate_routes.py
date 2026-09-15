@@ -1,5 +1,4 @@
-"""The entry-gate management doors (authed, platform api key): read/toggle the gate,
-mint and revoke entry codes.
+"""The entry-gate management doors (authed, platform api key): read/toggle the gate, mint/revoke entry codes.
 
 Unlike the public chat doors these require the platform api key (declared ``public:
 false``) and declare an explicit ``read``/``write`` action-class — an authed route
@@ -41,8 +40,10 @@ from tai42_channel_web.store.entry_gate import (
 
 
 def _managed_identity(request: Request) -> str | None:
-    """The canonical identity a management door acts on, or ``None`` when the path
-    segment is unusable (the door answers a 422)."""
+    """The canonical identity a management door acts on, or ``None`` when the path segment is unusable.
+
+    The door answers a 422 for the ``None`` case.
+    """
     return _clean_identity(request.path_params["identity"])
 
 
@@ -64,8 +65,10 @@ def _code_view(code: EntryCode) -> dict[str, Any]:
     action="read",
 )
 async def web_gate_read(request: Request) -> Response:
-    """The gate flag for a web route and the live codes minted for it (never the raw
-    codes — only their ids and metadata)."""
+    """The gate flag for a web route and the live codes minted for it.
+
+    Never the raw codes — only their ids and metadata.
+    """
     identity = _managed_identity(request)
     if identity is None:
         return _error(_IDENTITY_REQUIREMENT, 422)
@@ -87,8 +90,11 @@ async def web_gate_read(request: Request) -> Response:
     action="write",
 )
 async def web_gate_toggle(request: Request) -> Response:
-    """Set the explicit gate flag. Turning it off does not touch the codes; turning it
-    on with no live code makes the route unreachable until one is minted."""
+    """Set the explicit gate flag.
+
+    Turning it off does not touch the codes; turning it on with no live code makes the
+    route unreachable until one is minted.
+    """
     identity = _managed_identity(request)
     if identity is None:
         return _error(_IDENTITY_REQUIREMENT, 422)
@@ -117,8 +123,11 @@ async def web_gate_toggle(request: Request) -> Response:
     action="write",
 )
 async def web_gate_mint_code(request: Request) -> Response:
-    """Mint a multi-use entry code. The raw code is returned ONCE, here — only its hash
-    is stored, so it can never be read back."""
+    """Mint a multi-use entry code.
+
+    The raw code is returned ONCE, here — only its hash is stored, so it can never be
+    read back.
+    """
     identity = _managed_identity(request)
     if identity is None:
         return _error(_IDENTITY_REQUIREMENT, 422)

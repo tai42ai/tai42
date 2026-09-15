@@ -13,7 +13,7 @@ the whole chain against a live server (not the skeleton's in-process unit tests)
 * a tier-2 ``/api/auth/*`` op is off the default surface but returns once named in
   ``api_tools.include``;
 * a non-privileged key dispatching a projected op over MCP is DENIED at the tool
-  edge — a ``PermissionDenied``-backed ``ToolError`` — while a privileged key is
+  edge — a ``PermissionDeniedError``-backed ``ToolError`` — while a privileged key is
   allowed through the same door.
 """
 
@@ -111,7 +111,7 @@ async def test_authz_denies_underscoped_key_over_mcp(
     projection_authz_stack: tuple[TaiStack, str, str],
 ) -> None:
     """End-to-end authz through MCP dispatch: a non-privileged key calling a
-    projected op is denied at the tool edge (a PermissionDenied-backed ToolError),
+    projected op is denied at the tool edge (a PermissionDeniedError-backed ToolError),
     while the privileged key is allowed through the same door."""
     stack, root_token, limited_token = projection_authz_stack
 

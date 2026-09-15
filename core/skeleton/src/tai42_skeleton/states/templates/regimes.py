@@ -17,16 +17,21 @@ REGIMES = frozenset({"single", "composing", "free"})
 
 
 def _pattern_prefix_matches(pattern: list[str], path: list[Any]) -> bool:
-    """Whether ``pattern`` (with ``"*"`` wildcards) matches a leading run of ``path`` —
-    the regime is declared AT or ABOVE the fill; ``"*"`` matches one index or key."""
+    """Whether ``pattern`` (with ``"*"`` wildcards) matches a leading run of ``path``.
+
+    The regime is declared AT or ABOVE the fill; ``"*"`` matches one index or key.
+    """
     if len(pattern) > len(path):
         return False
     return all(seg == "*" or seg == path[i] for i, seg in enumerate(pattern))
 
 
 def regime_for(template: StateTemplate, relative_path: list[Any]) -> str:
-    """The regime governing ``relative_path`` — the ``regime`` of the LONGEST (most
-    specific) declared regime path that matches it as a prefix, else ``"free"``."""
+    """The regime governing ``relative_path``.
+
+    The ``regime`` of the LONGEST (most specific) declared regime path that matches it as a prefix, else
+    ``"free"``.
+    """
     best = "free"
     best_len = -1
     for rule in template.regimes:
@@ -37,15 +42,19 @@ def regime_for(template: StateTemplate, relative_path: list[Any]) -> str:
 
 
 def path_overlaps(a: list[Any], b: list[Any]) -> bool:
-    """Whether two paths overlap — equal, one a prefix/descendant of the other —
-    comparing ``"*"`` in either as a match for one segment on the other side."""
+    """Whether two paths overlap — equal, or one a prefix/descendant of the other.
+
+    ``"*"`` in either side matches one segment on the other.
+    """
     n = min(len(a), len(b))
     return all(a[i] == "*" or b[i] == "*" or a[i] == b[i] for i in range(n))
 
 
 def _descend_wildcard(node: dict[str, Any], path: list[str]) -> Any:
-    """The ``"*"`` step: descend through ``items`` / ``additionalProperties`` / an open
-    object, returning the next node or raising."""
+    """The ``"*"`` step: descend through ``items`` / ``additionalProperties`` / an open object.
+
+    Returns the next node or raises.
+    """
     items = node.get("items")
     addl = node.get("additionalProperties")
     if isinstance(items, dict):
@@ -60,8 +69,10 @@ def _descend_wildcard(node: dict[str, Any], path: list[str]) -> Any:
 
 
 def _descend_key(node: dict[str, Any], seg: str, path: list[str]) -> Any:
-    """The literal-key step: descend through a declared property / ``additionalProperties``
-    / an open object, returning the next node or raising."""
+    """The literal-key step: descend through a declared property / ``additionalProperties`` / an open object.
+
+    Returns the next node or raises.
+    """
     props = node.get("properties")
     addl = node.get("additionalProperties")
     if isinstance(props, dict) and seg in props:
@@ -74,11 +85,12 @@ def _descend_key(node: dict[str, Any], seg: str, path: list[str]) -> Any:
 
 
 def _validate_regime_path(fragment: dict[str, Any], path: list[str]) -> None:
-    """Walk a regime ``path`` statically over the (defaults-substituted) fragment: a
-    literal key must be a declared property (or admitted by an open object), and ``"*"``
-    is allowed ONLY where the schema has ``items`` or ``additionalProperties``. A
-    no-default parameter marker is opaque — traversal into it accepts the remaining
-    segments."""
+    """Walk a regime ``path`` statically over the (defaults-substituted) fragment.
+
+    A literal key must be a declared property (or admitted by an open object), and ``"*"`` is allowed ONLY
+    where the schema has ``items`` or ``additionalProperties``. A no-default parameter marker is opaque —
+    traversal into it accepts the remaining segments.
+    """
     node: Any = fragment
     for seg in path:
         if _is_marker(node):

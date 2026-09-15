@@ -58,7 +58,8 @@ def _normalize_url(url: str) -> str:
     ``AccessControlVerifier.resolve_resource_ids`` strips a trailing slash before
     every lookup (when the path is longer than ``/``), so a route stored with a
     trailing slash could never match a request. Normalizing on write with the same
-    rule keeps one canonical form on both sides."""
+    rule keeps one canonical form on both sides.
+    """
     if len(url) > 1 and url.endswith("/"):
         return url.rstrip("/")
     return url
@@ -68,7 +69,8 @@ def _policy_body(row: tuple[Any, ...]) -> dict[str, Any]:
     """Assemble the canonical policy body from a ``_POLICY_COLUMNS`` row.
 
     ``condition`` is the stored templated-text document (``{content|id, kwargs}``) or
-    ``None`` when no condition is configured."""
+    ``None`` when no condition is configured.
+    """
     scopes, policy_data, condition = row
     return {
         "scopes": list(scopes or []),
@@ -86,8 +88,10 @@ class PostgresAccessControlStore:
     # -- route / scope enumeration -------------------------------------------
 
     async def get_all_existing_scopes(self) -> dict[str, str]:
-        """Every NON-public route mapping as ``{url: scope_id}``. The public marker
-        names no scope, so a public route is excluded."""
+        """Every NON-public route mapping as ``{url: scope_id}``.
+
+        The public marker names no scope, so a public route is excluded.
+        """
         public = self._settings().public_resource_id
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -102,10 +106,11 @@ class PostgresAccessControlStore:
         return dict(rows)
 
     async def get_all_route_mappings(self) -> dict[str, str]:
-        """Every route mapping as ``{url: scope_id}``, INCLUDING public routes whose
-        value is the public marker (which ``get_all_existing_scopes`` filters out).
-        The full faithful set a backup needs so an explicit public mapping
-        round-trips instead of silently reverting to protected on restore."""
+        """Every route mapping as ``{url: scope_id}``, including public routes marked with the public marker.
+
+        ``get_all_existing_scopes`` filters those out; this is the full faithful set a backup needs so an explicit
+        public mapping round-trips instead of silently reverting to protected on restore.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -116,9 +121,11 @@ class PostgresAccessControlStore:
         return dict(rows)
 
     async def get_all_existing_patterns(self) -> dict[str, str]:
-        """Every dynamic route's ``{url: pattern}`` mapping — the regex an operator
-        registered for a url so the verifier matches request paths onto that url's
-        scope. Empty when no url carries a dynamic pattern."""
+        """Every dynamic route's ``{url: pattern}`` mapping.
+
+        The regex an operator registered for a url so the verifier matches request paths onto that url's scope.
+        Empty when no url carries a dynamic pattern.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -131,8 +138,10 @@ class PostgresAccessControlStore:
     # -- runtime reads (backing the verifier's version-keyed caches) ---------
 
     async def fetch_route(self, path: str) -> str | None:
-        """The scope id a request ``path`` maps to (exact route), or ``None`` when
-        the path has no mapping (a legitimately-unknown route → denied downstream)."""
+        """The scope id a request ``path`` maps to (exact route), or ``None`` when the path has no mapping.
+
+        A legitimately-unknown route is denied downstream.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -143,9 +152,11 @@ class PostgresAccessControlStore:
         return row[0] if row is not None else None
 
     async def fetch_dynamic_patterns(self) -> dict[str, str]:
-        """Every dynamic pattern as ``{regex: url_template}`` — the verifier compiles
-        each regex and, on a full match, resolves the url template's route. Empty
-        when no dynamic pattern is registered."""
+        """Every dynamic pattern as ``{regex: url_template}``.
+
+        The verifier compiles each regex and, on a full match, resolves the url template's route.
+        Empty when no dynamic pattern is registered.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -158,13 +169,15 @@ class PostgresAccessControlStore:
     # -- route / scope mutations ---------------------------------------------
 
     async def add_url_to_scope(self, scope_id: str, url: str, pattern: str | None = None) -> None:
-        """Map ``url`` to ``scope_id``, optionally registering the dynamic route
-        ``pattern`` the verifier matches request paths against. When ``scope_id`` is
+        """Map ``url`` to ``scope_id``, optionally registering a dynamic route ``pattern``.
+
+        The verifier matches request paths against ``pattern``. When ``scope_id`` is
         the public marker the url is mapped public (the marker is an ordinary column
         value, not a scope). Any prior binding for ``url`` — its scope AND its
         pattern — is replaced by the upsert, so a re-point, a pattern change, and a
         pattern drop all leave exactly what this call writes. The url is normalized
-        to the verifier's canonical form; the ``pattern`` regex is stored verbatim."""
+        to the verifier's canonical form; the ``pattern`` regex is stored verbatim.
+        """
         url = _normalize_url(url)
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -178,15 +191,17 @@ class PostgresAccessControlStore:
             )
 
     async def remove_url_from_scope(self, url: str) -> tuple[bool, list[tuple[str, dict[str, Any]]]]:
-        """Unmap ``url``. If its scope has no urls left afterwards, cascade the scope
-        out of every token policy that references it.
+        """Unmap ``url``.
+
+        If its scope has no urls left afterwards, cascade the scope out of every token policy that references it.
 
         Returns ``(existed, [(user_id, committed_body), …])`` — whether ``url`` was
         mapped at all (so the caller can 404 a typo'd unmap) and, for each token the
         cascade rewrote, the exact policy body committed so the caller records it as
         a new durable policy version. Empty list when no cascade fired. A url mapped
         to the public marker owns no scope, so its removal skips the cascade. The
-        delete, the emptiness check, and the cascade all commit in one transaction."""
+        delete, the emptiness check, and the cascade all commit in one transaction.
+        """
         url = _normalize_url(url)
         public = self._settings().public_resource_id
         async with (
@@ -214,9 +229,10 @@ class PostgresAccessControlStore:
     # -- public route pins ---------------------------------------------------
 
     async def get_public_route_pins(self) -> list[str]:
-        """The sorted urls whose route value is the public marker — the same rows
-        ``get_all_existing_scopes`` filters out. Empty when no route is pinned
-        public."""
+        """The sorted urls whose route value is the public marker.
+
+        The same rows ``get_all_existing_scopes`` filters out. Empty when no route is pinned public.
+        """
         public = self._settings().public_resource_id
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -231,8 +247,9 @@ class PostgresAccessControlStore:
         return [row[0] for row in rows]
 
     async def pin_route_public(self, url: str, pattern: str | None = None) -> None:
-        """Pin ``url`` public: set its route value to the public marker, replacing any
-        prior scope binding AND any prior dynamic pattern in one upsert. The marker is
+        """Pin ``url`` public: set its route value to the public marker.
+
+        This replaces any prior scope binding AND any prior dynamic pattern in one upsert. The marker is
         an ordinary column value, not a scope, so NO scope-membership row is written;
         re-pointing a previously scope-mapped url OFF its scope keeps a later
         ``remove_scope`` on that scope from blind-deleting the now-public route. When
@@ -245,7 +262,8 @@ class PostgresAccessControlStore:
         pinnable public, so the sole public-pin writer refuses to de-authenticate it.
         The verifier also drops the public marker for a reserved-prefix path at
         resolution, so the invariant holds even against a pattern or a direct write that
-        does not pass through this door — this loud reject is the operator-facing half."""
+        does not pass through this door — this loud reject is the operator-facing half.
+        """
         settings = self._settings()
         url = _normalize_url(url)
         for prefix in settings.reserved_public_pin_prefixes:
@@ -268,15 +286,16 @@ class PostgresAccessControlStore:
             )
 
     async def unpin_public_route(self, url: str) -> bool:
-        """Unpin ``url``: delete its route row (and, with it, any dynamic pattern) only
-        when its stored value is EXACTLY the public marker. Returns ``False`` — writing
-        nothing — for an absent or scope-mapped url (those are not unpinnable through
-        this path; the router 404s). Never touches scope rows. Committed in one
-        transaction.
+        """Unpin ``url`` only when its value is EXACTLY the public marker.
+
+        Deletes its route row and any dynamic pattern.
+        Returns ``False`` — writing nothing — for an absent or scope-mapped url (those are not unpinnable through
+        this path; the router 404s). Never touches scope rows. Committed in one transaction.
 
         The row is locked ``FOR UPDATE`` before the marker check so a concurrent
         re-point of the same url cannot commit between the check and the delete: the
-        stricter "only when public" contract holds even under a racing writer."""
+        stricter "only when public" contract holds even under a racing writer.
+        """
         url = _normalize_url(url)
         public = self._settings().public_resource_id
         async with (
@@ -292,8 +311,9 @@ class PostgresAccessControlStore:
             return True
 
     async def remove_scope(self, scope_id: str) -> tuple[int, list[tuple[str, dict[str, Any]]]]:
-        """Delete a scope: strip it from every token policy and delete every route
-        that maps to it (their dynamic patterns go with the rows).
+        """Delete a scope: strip it from every token policy and delete every route that maps to it.
+
+        Their dynamic patterns go with the deleted rows.
 
         Returns ``(deleted_count, [(user_id, committed_body), …])`` — the count of
         route rows deleted PLUS token policies stripped (0 = the scope was truly
@@ -301,7 +321,8 @@ class PostgresAccessControlStore:
         still strips those references, so the count is non-zero and the caller treats
         it as found), and, for each token the cascade rewrote, the exact committed
         body. The public marker names no scope, so removing it raises ``ValueError``.
-        All of it commits as one transaction."""
+        All of it commits as one transaction.
+        """
         public = self._settings().public_resource_id
         if scope_id == public:
             raise ValueError(f"{scope_id!r} is the public marker, not a removable scope")
@@ -321,14 +342,15 @@ class PostgresAccessControlStore:
             return routes_deleted + len(affected), affected
 
     async def _strip_scope_from_policies(self, cur: Any, scope_id: str) -> list[tuple[str, dict[str, Any]]]:
-        """Strip ``scope_id`` from every policy that lists it in ONE
-        ``UPDATE ... array_remove ... RETURNING`` and return ``[(user_id,
-        committed_body), …]`` — the exact rows the strip changed, each the caller
+        """Strip ``scope_id`` from every policy that lists it in one ``UPDATE ... array_remove ... RETURNING``.
+
+        Returns ``[(user_id, committed_body), …]`` — the exact rows the strip changed, each the caller
         records as a new version. Deriving the affected set from the UPDATE's own
         RETURNING (not a prior SELECT) keeps the recorded history in lockstep with the
-        rows the strip actually committed, even under a concurrent grant."""
+        rows the strip actually committed, even under a concurrent grant.
+        """
         await cur.execute(
-            f"UPDATE access_control_policies SET scopes = array_remove(scopes, %s) "
+            f"UPDATE access_control_policies SET scopes = array_remove(scopes, %s) "  # noqa: S608 query built from constant, code-defined identifiers, not user input
             f"WHERE %s = ANY(scopes) RETURNING user_id, {_POLICY_COLUMNS}",
             (scope_id, scope_id),
         )
@@ -338,28 +360,31 @@ class PostgresAccessControlStore:
     # -- policy reads / writes -----------------------------------------------
 
     async def get_policy_body(self, user_id: str) -> dict[str, Any] | None:
-        """The full policy body enforcement serves for ``user_id`` (the canonical
-        record the durable version history mirrors verbatim), or ``None`` when the
-        user has no policy row."""
+        """The full policy body enforcement serves for ``user_id``, or ``None`` when the user has no policy row.
+
+        This is the canonical record the durable version history mirrors verbatim.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
-                f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s",
+                f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s",  # noqa: S608 query built from constant, code-defined identifiers, not user input
                 (user_id,),
             )
             row = await cur.fetchone()
         return _policy_body(row) if row is not None else None
 
     async def count_policies_with_role(self, role_name: str, pointer_key: str) -> int:
-        """How many enforced policies currently point at role ``role_name`` (the LIVE
-        role pointer under ``policy_data[pointer_key]``) — the fail-closed read seam the
+        """How many enforced policies currently point at role ``role_name``.
+
+        The LIVE role pointer lives under ``policy_data[pointer_key]``. This is the fail-closed read seam the
         delete-of-assigned guard consults so a role still assigned to any principal can
         never be deleted. ``pointer_key`` is passed in by the caller (the single source of
         truth ``ROLE_POINTER_KEY``) rather than hardcoded here, so the JSON key can never
-        drift from the pointer the assignment writes."""
+        drift from the pointer the assignment writes.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -389,14 +414,16 @@ class PostgresAccessControlStore:
         policy_data: dict[str, Any] | None = None,
         condition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Write the policy row for a freshly-minted key and return the committed
-        body. ``condition`` is the stored templated-text document (``{content|id,
+        """Write the policy row for a freshly-minted key and return the committed body.
+
+        ``condition`` is the stored templated-text document (``{content|id,
         kwargs}``) or ``None``. The ``UNIQUE (user_id)`` constraint rejects a racing
         duplicate mint as the authority; that surfaces loudly (never a silent second
         row). Any supplied scope is validated against live routes and its route rows
         are locked ``FOR SHARE`` in the same transaction, so a scope's last route
         cannot be removed between the check and the write — the grant-vs-remove race is
-        closed. Raises ``ValueError`` if any supplied scope has no live route."""
+        closed. Raises ``ValueError`` if any supplied scope has no live route.
+        """
         body = {
             "scopes": scopes,
             "policy_data": policy_data or {},
@@ -422,15 +449,15 @@ class PostgresAccessControlStore:
         return body
 
     async def update_policy_fields(self, user_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
-        """Partially update a key's POLICY fields in place and return the committed
-        body, or ``None`` if ``user_id`` has no policy row (a falsy sentinel the
-        route's 404 guard tests). ``updates`` carries only the fields the caller
+        """Partially update a key's POLICY fields and return the committed body (``None`` when the row is absent).
+
+        ``None`` is a falsy sentinel the route's 404 guard tests. ``updates`` carries only the fields the caller
         actually supplied (keys ⊆ ``scopes``/``policy_data``/``condition``); an absent
         field keeps its stored value. Supplied scopes are validated against live routes
-        with their route
-        rows locked ``FOR SHARE`` in the same transaction, so a concurrent removal
+        with their route rows locked ``FOR SHARE`` in the same transaction, so a concurrent removal
         of a scope's last route serializes rather than committing against a dead
-        scope. Raises ``ValueError`` if any supplied scope does not exist."""
+        scope. Raises ``ValueError`` if any supplied scope does not exist.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -439,7 +466,7 @@ class PostgresAccessControlStore:
                 if updates.get("scopes"):
                     await self._lock_and_validate_scopes(cur, updates["scopes"])
                 await cur.execute(
-                    f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s FOR UPDATE",
+                    f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s FOR UPDATE",  # noqa: S608 query built from constant, code-defined identifiers, not user input
                     (user_id,),
                 )
                 row = await cur.fetchone()
@@ -466,8 +493,9 @@ class PostgresAccessControlStore:
             return body
 
     async def restore_policy_body(self, user_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
-        """Write a prior policy ``body`` back as the enforced policy — the store side
-        of a version rollback. Returns the restored body, or ``None`` if ``user_id``
+        """Write a prior policy ``body`` back as the enforced policy — the store side of a version rollback.
+
+        Returns the restored body, or ``None`` if ``user_id``
         has no live policy row (a revoke deletes it, so a rollback after revoke 404s
         rather than resurrecting a revoked key). Unlike ``update_policy_fields`` the
         restored scopes are NOT re-validated against live routes: a historical body
@@ -478,7 +506,8 @@ class PostgresAccessControlStore:
         the live key's identity, not policy content. The live-stored value is forced onto
         the restored ``policy_data``, since restoring a historical body's old fingerprint
         verbatim would revive a hook bound to a revoked key. A never-minted row has none
-        to preserve. Committed in one transaction."""
+        to preserve. Committed in one transaction.
+        """
         resolved = {
             "scopes": list(body.get("scopes") or []),
             "policy_data": dict(body.get("policy_data") or {}),
@@ -490,7 +519,7 @@ class PostgresAccessControlStore:
         ):
             async with conn.transaction(), conn.cursor() as cur:
                 await cur.execute(
-                    f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s FOR UPDATE",
+                    f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s FOR UPDATE",  # noqa: S608 query built from constant, code-defined identifiers, not user input
                     (user_id,),
                 )
                 row = await cur.fetchone()
@@ -505,8 +534,10 @@ class PostgresAccessControlStore:
             return resolved
 
     async def delete_policy(self, user_id: str) -> bool:
-        """Delete ``user_id``'s policy row (the store half of revoke). Returns
-        whether a row existed. A real backend error propagates loudly."""
+        """Delete ``user_id``'s policy row (the store half of revoke).
+
+        Returns whether a row existed. A real backend error propagates loudly.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -518,8 +549,9 @@ class PostgresAccessControlStore:
     # -- helpers -------------------------------------------------------------
 
     async def _lock_and_validate_scopes(self, cur: Any, scopes: list[str]) -> None:
-        """Lock every route row backing the granted ``scopes`` ``FOR SHARE`` and
-        reject any scope not backed by a live (non-public) route mapping.
+        """Lock every route row backing the granted ``scopes`` ``FOR SHARE`` and reject any unbacked scope.
+
+        A scope must be backed by a live (non-public) route mapping.
 
         The universal wildcard ``"*"`` is ALWAYS valid to write, mirroring the read
         side (``middleware`` treats ``"*"`` as "everything"): it names no routed scope,
@@ -534,7 +566,8 @@ class PostgresAccessControlStore:
         serialize instead of interleaving. A grant that runs after a removal sees no
         route for the scope and raises here; a grant that commits first is caught by
         the removal's post-delete cascade. Callers run this inside their own
-        transaction so the lock is held until the policy write commits."""
+        transaction so the lock is held until the policy write commits.
+        """
         public = self._settings().public_resource_id
         concrete = [scope for scope in scopes if scope != "*"]
         if not concrete:

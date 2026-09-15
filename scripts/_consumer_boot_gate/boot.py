@@ -1,5 +1,4 @@
-"""The boot runtime: the shared infra coordinates, the serve manifest + child
-env a consumer boots under, and booting one consumer to health."""
+"""The boot runtime: infra coordinates, the serve manifest + child env, and booting one consumer to health."""
 
 from __future__ import annotations
 
@@ -24,9 +23,11 @@ _HEALTH_DEADLINE_S = 90.0
 
 
 def _db_binding_env(provides: Provides) -> dict[str, str]:
-    """Pin a store-backed consumer's migration component to the default database so
-    ``tai db migrate`` applies its chain and its boot-time schema gate passes (an
-    unbound component is skipped by the migrator and then fails the gate at boot)."""
+    """Pin a store-backed consumer's migration component to the default database.
+
+    So ``tai db migrate`` applies its chain and its boot-time schema gate passes (an unbound
+    component is skipped by the migrator and then fails the gate at boot).
+    """
     if not provides.db_component:
         return {}
     slug = re.sub(r"[^A-Z0-9]", "_", provides.db_component.upper())
@@ -34,9 +35,11 @@ def _db_binding_env(provides: Provides) -> dict[str, str]:
 
 
 def auth_providers(provides: Provides) -> list[str]:
-    """The access-control auth-provider chain for a boot: the gate's own identity
-    provider plus every provider the consumer registers (so the accounts-provider
-    boot check passes for an accounts/identity plugin)."""
+    """The access-control auth-provider chain for a boot.
+
+    The gate's own identity provider plus every provider the consumer registers (so the
+    accounts-provider boot check passes for an accounts/identity plugin).
+    """
     return [_IDENTITY_PROVIDER_NAME, *dict.fromkeys(provides.providers)]
 
 
@@ -54,12 +57,14 @@ _CORE_ROUTERS = (
 
 
 def build_manifest(provides: Provides) -> dict:
-    """The serve manifest for one consumer: the core routers plus the consumer's
-    declared surface — the additive modules (routers, tools, channels, extensions,
-    lifecycle) AND the exclusive slots it selects (``backend_module`` /
-    ``storage_module`` / ``sandbox_module`` / ``monitoring_module`` / ``agents``), so
-    the plugin's module is imported and registers. The identity provider's lifecycle
-    module is always present so access control resolves a provider."""
+    """The serve manifest for one consumer: the core routers plus the consumer's declared surface.
+
+    The additive modules (routers, tools, channels, extensions, lifecycle) AND the exclusive
+    slots it selects (``backend_module`` / ``storage_module`` / ``sandbox_module`` /
+    ``monitoring_module`` / ``agents``), so the plugin's module is imported and registers. The
+    identity provider's lifecycle module is always present so access control resolves a
+    provider.
+    """
     lifecycle = [_IDENTITY_LIFECYCLE_MODULE, *provides.lifecycle]
     routers = [*_CORE_ROUTERS, *provides.routers]
     manifest: dict = {
@@ -105,11 +110,12 @@ _BOOT_PLACEHOLDER_ENV: dict[str, dict[str, str]] = {
 
 
 def _slot_env(provides: Provides, dist_name: str, infra: Infra) -> dict[str, str]:
-    """The env an exclusive-slot consumer's boot needs beyond the base: a registered
-    task backend refuses to boot without the worker bus (the backend-runtime and
-    server processes must converge on config reloads), so its queue Redis — the CI
-    job's — is pinned; a provider built eagerly at registration gets its documented
-    placeholder config."""
+    """The env an exclusive-slot consumer's boot needs beyond the base.
+
+    A registered task backend refuses to boot without the worker bus (the backend-runtime and
+    server processes must converge on config reloads), so its queue Redis — the CI job's — is
+    pinned; a provider built eagerly at registration gets its documented placeholder config.
+    """
     env: dict[str, str] = {}
     if provides.backend_module:
         env["TAI_BUS_REDIS_URL"] = infra.redis_url
@@ -118,16 +124,19 @@ def _slot_env(provides: Provides, dist_name: str, infra: Infra) -> dict[str, str
 
 
 def _channel_env(provides: Provides, redis_url: str) -> dict[str, str]:
-    """Each mounted channel binds its own Redis (``CHANNEL_<NAME>_REDIS_URL``) — a
-    channel refuses to register its inbound doors without one, so a channel consumer
-    could never reach the route-registration surface the gate exercises."""
+    """Each mounted channel binds its own Redis (``CHANNEL_<NAME>_REDIS_URL``).
+
+    A channel refuses to register its inbound doors without one, so a channel consumer could
+    never reach the route-registration surface the gate exercises.
+    """
     return {f"CHANNEL_{name.upper()}_REDIS_URL": redis_url for name, _module in provides.channels if name}
 
 
 def _external_service_env(dist_name: str, blackhole_url: str) -> dict[str, str]:
-    """The deployment config a network-declaring consumer needs to boot far enough to
-    reach its external service, with every OUTBOUND endpoint pointed at ``blackhole_url``
-    (a closed loopback port the gate allocates).
+    """The deployment config a network-declaring consumer needs to boot far enough to reach its service.
+
+    Every OUTBOUND endpoint is pointed at ``blackhole_url`` (a closed loopback port the gate
+    allocates).
 
     A deployment supplies these credentials; the gate has no live messaging API or
     identity provider to point them at, so the endpoint is a black hole by design. The
@@ -204,9 +213,12 @@ def _infra_from_args(args: argparse.Namespace) -> Infra:
 def _boot_env(
     config_dir: Path, manifest_path: Path, venv_bin: Path, db_name: str, infra: Infra, providers: list[str]
 ) -> dict[str, str]:
-    """The child environment a served app boots under: the file config source, one
-    Postgres database serving every component (each component binds to ``default``),
-    the shared Redis, and access control on with the ``providers`` chain selected."""
+    """The child environment a served app boots under.
+
+    The file config source, one Postgres database serving every component (each component
+    binds to ``default``), the shared Redis, and access control on with the ``providers``
+    chain selected.
+    """
     return {
         "PATH": os.pathsep.join([str(venv_bin), "/usr/local/bin", "/usr/bin", "/bin"]),
         "HOME": os.environ.get("HOME", str(config_dir)),
@@ -237,16 +249,20 @@ def _boot_env(
 
 
 def _run_venv_py(venv_bin: Path, code: str, payload: dict) -> subprocess.CompletedProcess[str]:
-    """Run a short Python snippet in the boot venv (which carries the Postgres and
-    Redis clients), passing ``payload`` as a JSON argv. The gate's own runtime env
-    therefore needs neither client — the infra writes ride the same interpreter the
-    app boots under."""
-    return subprocess.run([str(venv_bin / "python"), "-c", code, json.dumps(payload)], capture_output=True, text=True)
+    """Run a short Python snippet in the boot venv (which carries the Postgres and Redis clients).
+
+    Passes ``payload`` as a JSON argv. The gate's own runtime env therefore needs neither
+    client — the infra writes ride the same interpreter the app boots under.
+    """
+    return subprocess.run([str(venv_bin / "python"), "-c", code, json.dumps(payload)], capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
 
 
 def _create_database(venv_bin: Path, infra: Infra) -> str:
-    """A fresh, empty database for one boot, so the migration chain and the
-    access-control seed always start clean and boots never collide."""
+    """A fresh, empty database for one boot.
+
+    So the migration chain and the access-control seed always start clean and boots never
+    collide.
+    """
     code = (
         "import json,sys,secrets,psycopg\n"
         "p=json.loads(sys.argv[1])\n"
@@ -263,11 +279,13 @@ def _create_database(venv_bin: Path, infra: Infra) -> str:
 
 
 def _seed_access_control(venv_bin: Path, db_name: str, infra: Infra) -> None:
-    """Seed the minimum access-control state a health probe needs to answer 200:
-    a root key in the identity provider's store and a policy row, plus a route
-    table pinning the readiness probes public and mapping every other path to a
-    scope the root satisfies. Without it, access control answers /health 403 and
-    readiness could never confirm a healthy boot."""
+    """Seed the minimum access-control state a health probe needs to answer 200.
+
+    A root key in the identity provider's store and a policy row, plus a route table pinning
+    the readiness probes public and mapping every other path to a scope the root satisfies.
+    Without it, access control answers /health 403 and readiness could never confirm a
+    healthy boot.
+    """
     code = (
         "import json,sys,secrets,hashlib,psycopg,redis\n"
         "p=json.loads(sys.argv[1])\n"
@@ -311,9 +329,11 @@ def _allocate_port() -> int:
 def boot_consumer(
     consumer: Consumer, venv_bin: Path, provides: Provides, workdir: Path, infra: Infra
 ) -> BootFailure | None:
-    """Boot one consumer against the candidate core and wait for health. Returns
-    ``None`` on a healthy boot, or the parsed :class:`BootFailure` when the serve
-    process exits before health or never becomes ready."""
+    """Boot one consumer against the candidate core and wait for health.
+
+    Returns ``None`` on a healthy boot, or the parsed :class:`BootFailure` when the serve
+    process exits before health or never becomes ready.
+    """
     import signal
     import time
     import urllib.error
@@ -337,7 +357,7 @@ def boot_consumer(
         **(_external_service_env(consumer.dist_name, blackhole_url) if provides.network else {}),
     }
 
-    migrate = subprocess.run([str(tai), "db", "migrate"], env=env, capture_output=True, text=True)
+    migrate = subprocess.run([str(tai), "db", "migrate"], env=env, capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
     if migrate.returncode != 0:
         return BootFailure(handlers=(), routes=(), detail=f"tai db migrate failed: {migrate.stderr.strip()[-500:]}")
     _seed_access_control(venv_bin, db_name, infra)
@@ -345,7 +365,7 @@ def boot_consumer(
     port = _allocate_port()
     log_path = workdir / "serve.log"
     with log_path.open("w") as log_file:
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # noqa: S603 fixed, trusted argv; no shell and no user input
             [
                 str(tai),
                 "serve",

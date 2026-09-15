@@ -1,5 +1,4 @@
-"""tai42-kit — generic leaf helpers, LLM factories, pooled clients, and settings
-for the TAI ecosystem.
+"""tai42-kit — generic leaf helpers, LLM factories, pooled clients, and settings for the TAI ecosystem.
 
 Utilities (data/runtime/langchain helpers), LLM provider + checkpoint/store
 factories, pooled clients + MCP transports, and co-located pydantic-settings.

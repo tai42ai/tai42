@@ -59,10 +59,9 @@ _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _dotenv_serialize_value(value: str) -> str:
-    """Serialize *value* as a double-quoted ``.env`` literal that ``dotenv_values``
-    parses back to the exact string — the write side of :meth:`read_env`.
+    """Serialize *value* as a double-quoted ``.env`` literal that ``dotenv_values`` parses back to the exact string.
 
-    Backslash is escaped first (so real backslashes survive), then the double
+    The write side of :meth:`read_env`. Backslash is escaped first (so real backslashes survive), then the double
     quote and newline/carriage-return that would otherwise break out of the quote
     or split the line. Every other character rides through the quotes verbatim.
     """
@@ -80,6 +79,7 @@ class FileConfigManager(ConfigManager):
     """
 
     def __init__(self, config_dir_path: str | None = None) -> None:
+        """Anchor the manager at ``config_dir_path``, else ``TAI_CONFIG_DIR_PATH``, else ``/app``."""
         # ``TAI_CONFIG_DIR_PATH`` is a bootstrap path read here directly; it is
         # classified excluded on ``ConfigModeSettings.config_dir_path`` so the
         # reload boundary refuses any profile that tries to carry it.
@@ -271,8 +271,10 @@ class FileConfigManager(ConfigManager):
             return parse_config(data=fh.read()) or {}
 
     def _load_yaml_preserved(self, path: str) -> CommentedMap:
-        """``!ENV`` tags preserved as ``"!ENV <expr>"`` marker strings — round-trip
-        view. Comments, key ordering, and formatting are kept for a later dump."""
+        """Load ``path`` with ``!ENV`` tags preserved as ``"!ENV <expr>"`` marker strings (round-trip view).
+
+        Comments, key ordering, and formatting are kept for a later dump.
+        """
         with open(path) as fh:
             return load_manifest(fh.read())
 
@@ -294,8 +296,10 @@ class FileConfigManager(ConfigManager):
         return self._load_yaml_expanded(path)
 
     def read_manifest_preserved(self) -> dict:
-        """Read ``manifest.yml`` with ``!ENV`` tags PRESERVED as ``"!ENV <expr>"``
-        marker strings (round-trip view) — no secret values are resolved."""
+        """Read ``manifest.yml`` with ``!ENV`` tags PRESERVED as ``"!ENV <expr>"`` marker strings (round-trip view).
+
+        No secret values are resolved.
+        """
         path = self._manifest_path
         if not os.path.exists(path):
             raise FileNotFoundError(f"Manifest not found: {path}")

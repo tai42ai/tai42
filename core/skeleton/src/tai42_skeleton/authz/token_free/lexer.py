@@ -1,5 +1,7 @@
-"""Tokenizing the condition text into the token stream the parser consumes: the token
-loop, one scanner per lexical class, and the character-class vocabulary they read."""
+"""Tokenizing the condition text into the token stream the parser consumes.
+
+The token loop, one scanner per lexical class, and the character-class vocabulary they read.
+"""
 
 from __future__ import annotations
 
@@ -73,12 +75,14 @@ _STRING_ESCAPES: dict[str, str] = {
 
 
 def _lex_string(condition_text: str, start: int, budget: _Budget) -> tuple[_Token, int]:
-    """Lex the string literal opening at ``start``, returning it and the offset just
-    past its closing quote. ``text`` is the DECODED literal value, meaningful only when
-    the string carries no interpolation.
+    r"""Lex the string literal opening at ``start``, returning it and the offset past its closing quote.
+
+    ``text`` is the DECODED literal value, meaningful only when the string carries no
+    interpolation.
 
     Mutually recursive with :func:`_scan_interpolation` once per nested ``\\(...)`` hole,
-    so it takes a level of ``budget``."""
+    so it takes a level of ``budget``.
+    """
     budget.descend(condition_text, start)
     try:
         parts: list[str] = []
@@ -113,11 +117,13 @@ def _lex_string(condition_text: str, start: int, budget: _Budget) -> tuple[_Toke
 
 def _scan_interpolation(condition_text: str, start: int, budget: _Budget) -> int:
     """The offset of the ``)`` closing the interpolation body that opens at ``start``.
+
     Nested strings are skipped exactly as the lexer skips them, so a parenthesis inside
     one never closes the body.
 
     Mutually recursive with :func:`_lex_string` over those nested strings, so it takes a
-    level of ``budget`` too."""
+    level of ``budget`` too.
+    """
     budget.descend(condition_text, start - 2)
     try:
         depth = 1
@@ -166,8 +172,10 @@ def _lex_identifier(condition_text: str, index: int, stop: int) -> tuple[_Token,
 
 
 def _is_field_start(condition_text: str, index: int, stop: int) -> bool:
-    """Whether the ``.`` at ``index`` opens a ``.name`` or ``."name"`` field suffix
-    (rather than the ``.`` / ``..`` operators)."""
+    """Whether the ``.`` at ``index`` opens a ``.name``/``."name"`` field suffix, not an operator.
+
+    Distinguished from the ``.`` / ``..`` operators.
+    """
     if index + 1 >= stop:
         return False
     following = condition_text[index + 1]
@@ -176,7 +184,9 @@ def _is_field_start(condition_text: str, index: int, stop: int) -> bool:
 
 def _lex_field(condition_text: str, index: int, stop: int, budget: _Budget) -> tuple[_Token, int]:
     """Scan a ``.name`` or ``."name"`` field suffix, refusing an interpolated field name.
-    Only called when :func:`_is_field_start` holds at ``index``."""
+
+    Only called when :func:`_is_field_start` holds at ``index``.
+    """
     if condition_text[index + 1] in _IDENT_START:
         name_end = index + 1
         while name_end < stop and condition_text[name_end] in _IDENT_CHARS:
@@ -189,8 +199,7 @@ def _lex_field(condition_text: str, index: int, stop: int, budget: _Budget) -> t
 
 
 def _lex_operator(condition_text: str, index: int) -> tuple[_Token, int]:
-    """Match the longest punctuation operator at the cursor, refusing an unrecognized
-    character."""
+    """Match the longest punctuation operator at the cursor, refusing an unrecognized character."""
     operator = next((candidate for candidate in _OPERATORS if condition_text.startswith(candidate, index)), None)
     if operator is None:
         raise _refusal(
@@ -220,8 +229,10 @@ def _lex_number(condition_text: str, start: int, stop: int) -> tuple[_Token, int
 
 
 def _scan_token(condition_text: str, index: int, stop: int, budget: _Budget) -> tuple[_Token, int]:
-    """Classify the character at ``index`` and delegate to the matching scanner,
-    returning the token and the offset just past it."""
+    """Classify the character at ``index`` and delegate to the matching scanner.
+
+    Returns the token and the offset just past it.
+    """
     char = condition_text[index]
     if char == '"':
         return _lex_string(condition_text, index, budget)
@@ -239,10 +250,11 @@ def _scan_token(condition_text: str, index: int, stop: int, budget: _Budget) -> 
 
 
 def _lex(condition_text: str, budget: _Budget, start: int = 0, end: int | None = None) -> list[_Token]:
-    """Tokenize ``condition_text[start:end]``, with every token carrying its offset in
-    the WHOLE condition so a refusal points at the real text. Every token emitted is
-    spent from ``budget``, whether it sits in the outer text or inside an interpolation
-    body."""
+    """Tokenize ``condition_text[start:end]``, each token carrying its offset in the WHOLE condition.
+
+    The offset makes a refusal point at the real text. Every token emitted is spent from
+    ``budget``, whether it sits in the outer text or inside an interpolation body.
+    """
     stop = len(condition_text) if end is None else end
     tokens: list[_Token] = []
     index = start

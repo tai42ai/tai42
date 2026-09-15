@@ -19,14 +19,17 @@ class Monitoring(Protocol):
     """
 
     @property
-    def writer(self) -> MonitoringWriter: ...
+    def writer(self) -> MonitoringWriter:
+        """The writer face, always present; every backend can emit."""
+        ...
 
     @property
-    def reader(self) -> MonitoringReader: ...
+    def reader(self) -> MonitoringReader:
+        """The reader face; its methods raise ``MonitoringReadNotSupportedError`` on a read-incapable backend."""
+        ...
 
     def add_project(self, project: ProjectConfig) -> None:
-        """Register an additional project, selectable via
-        ``writer.scope(project.public_key)``.
+        """Register an additional project, selectable via ``writer.scope(project.public_key)``.
 
         Mirrors a single-backend multi-project switch: an in-process component
         sharing this backend emits to its own project. A backend with no

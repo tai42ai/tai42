@@ -52,10 +52,10 @@ _PRESET_KIND = "preset"
 
 #: The Studio route tokens each family's ``Open`` link points at (the shell resolves the
 #: token to a path; all four feature pages take no search parameters).
-_HOOKS_TOKEN = "hooks"
-_SCHEDULING_TOKEN = "scheduling"
-_AGENTS_TOKEN = "agents"
-_PRESETS_TOKEN = "presets"
+_HOOKS_TOKEN = "hooks"  # noqa: S105 constant identifier, not a secret value
+_SCHEDULING_TOKEN = "scheduling"  # noqa: S105 constant identifier, not a secret value
+_AGENTS_TOKEN = "agents"  # noqa: S105 constant identifier, not a secret value
+_PRESETS_TOKEN = "presets"  # noqa: S105 constant identifier, not a secret value
 
 #: The builtin state tools share this name prefix; an agent that binds one consumes state.
 _STATE_TOOL_PREFIX = "state_"
@@ -65,8 +65,10 @@ _NO_SCHEDULING_BACKEND = "no scheduling backend"
 
 
 async def _declared_subject_kinds(state: str) -> set[str] | None:
-    """The state's declared ``subject_kinds`` as a set, or ``None`` when no such state is
-    declared — the listers report nothing for an undeclared state."""
+    """The state's declared ``subject_kinds`` as a set, or ``None`` when no such state is declared.
+
+    The listers report nothing for an undeclared state.
+    """
     decl = await instance.app.states.get_declaration(state)
     return None if decl is None else set(decl.subject_kinds)
 
@@ -93,10 +95,11 @@ def hook_consumer_rows(hooks: Iterable[HookParams], subject_kinds: set[str]) -> 
 
 
 def schedule_consumer_rows(records: Iterable[dict[str, Any]], subject_kinds: set[str]) -> list[ConsumerRow]:
-    """The schedule rows for a state: one per exported ``ScheduleRecord`` whose stamped
-    subject's ``kind`` is declared. A malformed stamped subject raises loudly inside
-    :func:`pop_schedule_subject` — a schedule that could never resolve is a bug, not a
-    silently dropped row."""
+    """The schedule rows for a state: one per exported ``ScheduleRecord`` whose stamped subject's ``kind`` is declared.
+
+    A malformed stamped subject raises loudly inside :func:`pop_schedule_subject` — a schedule that could never
+    resolve is a bug, not a silently dropped row.
+    """
     from tai42_kit.utils.schedule_subject import pop_schedule_subject
 
     rows: list[ConsumerRow] = []
@@ -119,7 +122,8 @@ def _agent_state_tools(agent: Agent) -> list[str]:
 
     Read from the agent's declared ``tool_names`` (the fixed tool set an agent binds).
     An agent that resolves its tools at run time declares none, so it names no state
-    tool here — the truthful answer, never a guess."""
+    tool here — the truthful answer, never a guess.
+    """
     declared = getattr(agent, "tool_names", None)
     if declared is None:
         field = agent.ToolInput.model_fields.get("tool_names")
@@ -130,8 +134,10 @@ def _agent_state_tools(agent: Agent) -> list[str]:
 
 
 def agent_consumer_rows(agents: Mapping[str, Agent]) -> list[ConsumerRow]:
-    """The agent rows: one per registered agent whose tool set names a ``state_*``
-    builtin (the state builtins address any state, so such an agent consumes them all)."""
+    """The agent rows: one per registered agent whose tool set names a ``state_*`` builtin.
+
+    The state builtins address any state, so such an agent consumes them all.
+    """
     rows: list[ConsumerRow] = []
     for name, agent in agents.items():
         tools = _agent_state_tools(agent)
@@ -152,7 +158,8 @@ def _preset_state_tools(body: PresetBody) -> list[str]:
 
     An agent-run-tool preset bakes its agent base's ``tool_names`` under
     ``fixed_kwargs``; a preset that bakes none (or a non-agent base whose kwargs carry no
-    ``tool_names`` list) names no state tool here — the truthful answer, never a guess."""
+    ``tool_names`` list) names no state tool here — the truthful answer, never a guess.
+    """
     baked = body.fixed_kwargs.get("tool_names")
     if not isinstance(baked, list):
         return []
@@ -160,9 +167,11 @@ def _preset_state_tools(body: PresetBody) -> list[str]:
 
 
 def preset_consumer_rows(bodies: Mapping[str, PresetBody]) -> list[ConsumerRow]:
-    """The preset rows: one per preset whose baked ``tool_names`` name a ``state_*``
-    builtin (the preset bakes those tools onto its agent base, so the authored agent tool
-    consumes every declared state — the same reach as :func:`agent_consumer_rows`)."""
+    """The preset rows: one per preset whose baked ``tool_names`` name a ``state_*`` builtin.
+
+    The preset bakes those tools onto its agent base, so the authored agent tool consumes every declared state —
+    the same reach as :func:`agent_consumer_rows`.
+    """
     rows: list[ConsumerRow] = []
     for name, body in sorted(bodies.items()):
         tools = _preset_state_tools(body)
@@ -182,6 +191,7 @@ def preset_consumer_rows(bodies: Mapping[str, PresetBody]) -> list[ConsumerRow]:
 # The registered listers (process registries in, rows out)                     #
 # --------------------------------------------------------------------------- #
 async def hooks_lister(state: str) -> Sequence[ConsumerRow]:
+    """The hook consumer rows for ``state``, or empty when it is undeclared."""
     kinds = await _declared_subject_kinds(state)
     if kinds is None:
         return []
@@ -192,6 +202,7 @@ async def hooks_lister(state: str) -> Sequence[ConsumerRow]:
 
 
 async def schedules_lister(state: str) -> Sequence[ConsumerRow]:
+    """The schedule consumer rows for ``state``; a muted row when no scheduling backend is installed."""
     kinds = await _declared_subject_kinds(state)
     if kinds is None:
         return []
@@ -213,12 +224,14 @@ async def schedules_lister(state: str) -> Sequence[ConsumerRow]:
 
 
 async def agents_lister(state: str) -> Sequence[ConsumerRow]:
+    """The agent consumer rows for ``state``, or empty when it is undeclared."""
     if await _declared_subject_kinds(state) is None:
         return []
     return agent_consumer_rows(instance.app.agents.all_agents())
 
 
 async def presets_lister(state: str) -> Sequence[ConsumerRow]:
+    """The preset consumer rows for ``state``, or empty when it is undeclared or store-less."""
     if await _declared_subject_kinds(state) is None:
         return []
     from tai42_kit.db import component_store_configured
@@ -237,7 +250,8 @@ def register_platform_consumer_listers() -> None:
 
     Called each ``start()``/reload (the consumer-lister registry is reset each epoch), so
     the platform families re-arm alongside the plugin re-registrations — the
-    platform-rename-referee pattern."""
+    platform-rename-referee pattern.
+    """
     states = instance.app.states
     states.register_consumer_lister(_HOOK_KIND, hooks_lister)
     states.register_consumer_lister(_SCHEDULE_KIND, schedules_lister)

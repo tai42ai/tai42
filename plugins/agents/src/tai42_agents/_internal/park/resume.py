@@ -1,5 +1,4 @@
-"""The ``agent_resume`` continuation the flow-blind platform fires, and the abandonment
-counterpart it registers.
+"""The ``agent_resume`` continuation the flow-blind platform fires, and the abandonment counterpart.
 
 :func:`agent_resume` buffers one answer into its super-step barrier and, when the barrier is
 complete, wins the single drive lease and drives the parked run to completion or the next park
@@ -52,15 +51,15 @@ AGENT_RESUME_TOOL_NAME: Final[str] = "agent_resume"
 
 
 def is_suspended_receipt(result: Any) -> bool:
-    """Whether a drive outcome is a re-park RECEIPT (the run parked again) rather than a
-    clean terminal answer — the discriminator for whether a completion fires now or is
-    carried forward to the new park entry."""
+    """Whether a drive outcome is a re-park RECEIPT (the run parked again) rather than a clean terminal answer.
+
+    The discriminator for whether a completion fires now or is carried forward to the new park entry.
+    """
     return isinstance(result, dict) and result.get("status") == "suspended"
 
 
 def _completion_context(entry: dict[str, Any], thread_id: str) -> Mapping[str, Any] | None:
-    """The opaque routing context a stored park entry's completion fire carries — and the
-    binding a re-park rebinds.
+    """The opaque routing context a stored park entry's completion fire carries — and the re-park binding.
 
     The FIELD is authoritative wherever it is present (every entry this driver writes carries
     it): its value is used verbatim, an explicit ``None`` meaning the binder wired no routing
@@ -74,7 +73,8 @@ def _completion_context(entry: dict[str, Any], thread_id: str) -> Mapping[str, A
     deliberately no wider. A field-less park taken under the TOOL-route completion binding stays
     undeliverable: that tool keys its address differently (``delivery_thread_id`` + the pinned
     route), and this driver knows no delivery tool's parameters, so nothing here can reconstruct
-    an address the entry never recorded."""
+    an address the entry never recorded.
+    """
     if "completion_context" in entry:
         context: Mapping[str, Any] | None = entry["completion_context"]
         return context
@@ -82,17 +82,19 @@ def _completion_context(entry: dict[str, Any], thread_id: str) -> Mapping[str, A
 
 
 def _completion_id(thread_id: str, superstep_id: str) -> str:
-    """A deterministic completion-delivery id for a resolved super-step, so a lease-lapse
-    re-drive fires the completion under the SAME id and the delivery ledger dedupes it to one
-    record. Derived from the (thread_id, superstep_id) that uniquely name the super-step every
-    redelivery re-drives."""
+    """A deterministic completion-delivery id for a resolved super-step.
+
+    So a lease-lapse re-drive fires the completion under the SAME id and the delivery ledger dedupes it to
+    one record. Derived from the (thread_id, superstep_id) that uniquely name the super-step every
+    redelivery re-drives.
+    """
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"tai42:agent-park-completion:{thread_id}:{superstep_id}"))
 
 
 async def agent_resume(interaction_id: str, answer: Any) -> Any:
-    """Buffer one answer into its super-step barrier and, when it is the LAST of the M
-    answers, drive the parked run to completion or the next park — exactly once.
+    """Buffer one answer into its super-step barrier and, at the LAST of the M answers, drive it once.
 
+    Drives the parked run to completion or the next park — exactly once.
     This is the driver continuation the flow-blind platform invokes when an async
     ``ask_user`` is answered (or expires): it carries only ``{interaction_id, answer}``.
     The park index reverses the id to the parked thread, the super-step, and the interrupt
@@ -128,7 +130,8 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
     closed at the platform's PERMANENT give-up instead: when the continuation-due record is dropped
     for good, :func:`fire_park_failed_completion` fires the non-success terminal ONCE, at the one
     point where no later success can be deduped away (the record is gone and nothing can re-drive
-    the run)."""
+    the run).
+    """
     entry = await read_park_entry(interaction_id)
     if entry is None:
         raise AgentResumeParkEntryNotFoundError(interaction_id)
@@ -184,9 +187,9 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
 
 
 async def fire_park_failed_completion(interaction_id: str) -> None:
-    """Fire the bound completion with the FAILED terminal for a park whose resume the platform
-    has PERMANENTLY abandoned — the tail :func:`agent_resume` cannot close from its error branch.
+    """Fire the bound completion with the FAILED terminal for a park whose resume was PERMANENTLY abandoned.
 
+    Closes the tail :func:`agent_resume` cannot close from its error branch.
     Registered (:func:`~tai42_agents._internal.park.resume_tool.register_agent_resume_tool`) as the
     continuation-abandonment handler the platform's redelivery reaper fires by interaction id when a
     park's durable continuation-due record is dropped for good. A park that never drove cleanly
@@ -229,7 +232,8 @@ async def fire_park_failed_completion(interaction_id: str) -> None:
     index and belongs raised (the caller's abandonment fire is guarded and logs it), not silently
     read as 'nothing to deliver'. The identity fields use ``get``: an entry without a recorded
     identity fires its abandonment completion UNBOUND (authz skipped), distinct from a corrupt
-    entry missing a structural field."""
+    entry missing a structural field.
+    """
     entry = await read_park_entry(interaction_id)
     if entry is None or is_resolved_tombstone(entry):
         return
@@ -268,8 +272,9 @@ async def _drive_completed_barrier(
     superstep_id: str,
     token: str,
 ) -> tuple[Any, dict[str, Any]]:
-    """Drive a completed super-step once, holding the drive lease. Reads the M buffered
-    answers, verifies the stored interrupt is still pending, then feeds the whole
+    """Drive a completed super-step once, holding the drive lease.
+
+    Reads the M buffered answers, verifies the stored interrupt is still pending, then feeds the whole
     ``{interaction_id: answer}`` map into a single resume. Returns ``(result, expected)`` — the
     drive outcome and the ``{interaction_id: expiry}`` map its caller finalizes over (after any
     clean-terminal completion handoff). On failure releases the lease and leaves the index so a
@@ -280,7 +285,8 @@ async def _drive_completed_barrier(
     cold compile that outruns the lease TTL must not lapse the lease while this caller still
     holds the drive, or a redelivery would reclaim and double-drive. The heartbeat is always
     stopped in the ``finally``, its own failure suppressed so it can never mask an
-    already-computed drive result."""
+    already-computed drive result.
+    """
     heartbeat = asyncio.create_task(heartbeat_drive_claim(thread_id, superstep_id, token))
     try:
         barrier = await read_barrier(thread_id, superstep_id)
@@ -345,10 +351,12 @@ async def _drive_completed_barrier(
 
 
 async def _stop_drive_heartbeat(heartbeat: asyncio.Task) -> None:
-    """Cancel and await the lease-heartbeat task. A ``CancelledError`` is the expected stop;
-    any OTHER exception the heartbeat raised is suppressed and logged, never re-raised — the
-    drive already has its result and a dying heartbeat must not overwrite it with a
-    failure."""
+    """Cancel and await the lease-heartbeat task.
+
+    A ``CancelledError`` is the expected stop; any OTHER exception the heartbeat raised is suppressed and
+    logged, never re-raised — the drive already has its result and a dying heartbeat must not overwrite it
+    with a failure.
+    """
     heartbeat.cancel()
     try:
         await heartbeat

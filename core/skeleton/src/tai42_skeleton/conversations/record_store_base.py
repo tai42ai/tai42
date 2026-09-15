@@ -1,6 +1,8 @@
-"""The shared surface every record-store concern mixin is typed against — the settings a
-mixin reads and the key-layout/codec primitives one concern implements and the others call
-on the composed store."""
+"""The shared surface every record-store concern mixin is typed against.
+
+The settings a mixin reads and the key-layout/codec primitives one concern implements and the others call
+on the composed store.
+"""
 
 from __future__ import annotations
 
@@ -11,9 +13,11 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 
 
 class RecordStoreBase(ABC):
-    """The persistence contract every concern mixin shares: the conversations settings and
-    the three key-layout/codec primitives implemented once (by the write concern) and reached
-    through ``self`` by the delivery, index and query concerns on the composed store."""
+    """The persistence contract every concern mixin shares.
+
+    The conversations settings and the three key-layout/codec primitives implemented once (by the write concern)
+    and reached through ``self`` by the delivery, index and query concerns on the composed store.
+    """
 
     settings: ConversationsSettings
 
@@ -26,8 +30,11 @@ class RecordStoreBase(ABC):
         *,
         route_row: bool = False,
     ) -> list[str]:
-        """``[record key, every status index, the target status index, the record's two
-        thread indexes, the routing row]`` for a record-mutating script."""
+        """The keys a record-mutating script touches.
+
+        ``[record key, every status index, the target status index, the record's two thread indexes,
+        the routing row]``.
+        """
 
     @abstractmethod
     def _index_score(self, status: DeliveryStatus, now: float) -> str:

@@ -23,10 +23,12 @@ class SandboxHolder:
     """Holds the process's single registered :class:`Sandbox` provider instance."""
 
     def __init__(self) -> None:
+        """Start with no sandbox provider registered."""
         self._sandbox: Sandbox | None = None
 
     @property
     def sandbox(self) -> Sandbox | None:
+        """The registered sandbox provider instance, or ``None`` when none has been registered."""
         return self._sandbox
 
     def register_sandbox(self, cls: type[Sandbox]) -> type[Sandbox]:
@@ -42,7 +44,8 @@ class SandboxHolder:
         loudly. The resolved :class:`SandboxPolicy` is bound onto the instance via the kit
         ``bind_policy`` so the kit session-create chokepoint holds it; a provider that
         does not extend :class:`ManagedSandbox` cannot carry the bind and is refused here
-        rather than silently unenforced."""
+        rather than silently unenforced.
+        """
         if self._sandbox is not None and (
             (type(self._sandbox).__module__, type(self._sandbox).__qualname__) != (cls.__module__, cls.__qualname__)
         ):
@@ -65,7 +68,8 @@ class SandboxHolder:
 
         The ONE acquisition chokepoint every consumer reaches — a constant-message,
         loud raise naming the selecting setting and the manifest field when no provider
-        backs the slot, never a silent ``None``."""
+        backs the slot, never a silent ``None``.
+        """
         if self._sandbox is None:
             raise SandboxUnavailableError(
                 "no sandbox provider is registered: set the manifest 'sandbox_module' scalar slot "

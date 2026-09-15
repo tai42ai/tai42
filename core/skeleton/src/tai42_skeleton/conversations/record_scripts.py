@@ -1,7 +1,8 @@
-"""The atomic Redis Lua steps every record transition runs, their step builders, and the
-hash-field / key-layout constants they are parameterised by. Each exactly-once transition
-is a single Lua step guarded on the record's current ``delivery_status``, so racing writers
-produce ONE outcome, never two."""
+"""The atomic Redis Lua steps for record transitions, their step builders, and the layout constants.
+
+Each exactly-once transition is a single Lua step guarded on the record's current
+``delivery_status``, so racing writers produce ONE outcome, never two.
+"""
 
 from __future__ import annotations
 
@@ -36,8 +37,10 @@ _NO_EXPIRY_SCORE = "+inf"
 
 
 def _reindex(member_argv: str, score_argv: str) -> str:
-    """Lua moving the record's id into the target status index and out of every other, so
-    exactly one index names it and a listing never walks the record keyspace."""
+    """Lua moving the record's id into the target status index and out of every other.
+
+    So exactly one index names it and a listing never walks the record keyspace.
+    """
     return f"""
 for i = 2, {1 + len(_INDEXED_STATUSES)} do redis.call('ZREM', KEYS[i], {member_argv}) end
 redis.call('ZADD', {_TARGET_INDEX_KEY}, {score_argv}, {member_argv})
@@ -170,9 +173,11 @@ return 1
 
 
 def _foreign_lease_guard(now_argv: str, token_argv: str) -> str:
-    """Lua that returns -3 when a DIFFERENT worker holds a live delivery lease — the check
-    every delivery-state write takes before it mutates, so a worker whose lease lapsed and
-    was taken over cannot overwrite the holder's progress."""
+    """Lua that returns -3 when a DIFFERENT worker holds a live delivery lease.
+
+    The check every delivery-state write takes before it mutates, so a worker whose lease lapsed and
+    was taken over cannot overwrite the holder's progress.
+    """
     return f"""
 local claim = redis.call('HGET', KEYS[1], 'claim')
 if claim and claim ~= '' then

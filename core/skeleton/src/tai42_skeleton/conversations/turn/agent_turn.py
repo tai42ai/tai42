@@ -23,17 +23,19 @@ from tai42_skeleton.conversations.turn.outcome import (
     _ToolOutcome,
 )
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
 
 async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _AgentParked:
-    """Run the agent to its terminal event and return the answer text, or the
-    :data:`_AGENT_PARKED` sentinel when the agent parked on an async ``ask_user``. A
+    """Run the agent to its terminal event and return the answer text (or the ``_AGENT_PARKED`` sentinel).
+
+    The :data:`_AGENT_PARKED` sentinel is returned when the agent parked on an async ``ask_user``. A
     structured final is serialized; an interrupt is not answerable by a background turn and
-    is raised."""
+    is raised.
+    """
     structured: StructuredFinal | None = None
     message: MessageFinal | None = None
     # Route the live-caller drive through the shared seam so the turn is budgeted and its
@@ -47,7 +49,7 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _Agent
             # thread — the turn produces no reply now.
             return _AGENT_PARKED
         if isinstance(event, InterruptFinal):
-            raise RuntimeError(f"agent raised an interrupt ({event.interrupt_id}) a background turn cannot answer")
+            raise RuntimeError(f"agent raised an interrupt ({event.interrupt_id}) a background turn cannot answer")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         if isinstance(event, StructuredFinal):
             structured = event
         elif isinstance(event, MessageFinal):
@@ -66,8 +68,9 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _Agent
 
 
 async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, client_address: str) -> _ToolOutcome:
-    """Run one agent turn as the route's execution key and return its resolved outcome. The
-    identity is bound for the turn's duration and the run authorized against it before the
+    """Run one agent turn as the route's execution key and return its resolved outcome.
+
+    The identity is bound for the turn's duration and the run authorized against it before the
     agent runs. A denied run, a mid-turn error or an empty answer becomes a client-safe
     ``error`` outcome; a run that PARKS on an async ``ask_user`` becomes a silent outcome —
     its resumed answer delivers out of band through the completion continuation.
@@ -79,7 +82,8 @@ async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, c
     for the run's duration too, carrying this turn's ``thread_id`` as the opaque delivery
     address: it is the deferred-response delivery path that lets an async ask_user PARK here (a
     run with none bound refuses the ask loudly pre-persist), and a resumed run's final answer
-    fires it with that address to post the reply back into this thread."""
+    fires it with that address to post the reply back into this thread.
+    """
     # ``completion_delivery`` imports this module, so the constant is read lazily to keep
     # the door↔turn package free of an import cycle.
     from tai42_skeleton.conversations.turn.completion_delivery import COMPLETION_TOOL_NAME
@@ -111,11 +115,11 @@ async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, c
                     answer = await _drain_answer(agent, text, thread_id)
                 finally:
                     reset_park_completion(completion_token)
-    except PermissionDenied as exc:
+    except PermissionDeniedError as exc:
         return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:
         # A failed turn becomes a logged error OUTCOME, not a swallowed error.
-        logger.error("conversations: turn for route %r failed", route.route_name, exc_info=exc)
+        logger.exception("conversations: turn for route %r failed", route.route_name, exc_info=exc)
         return _tool_error(f"turn error: {exc}", route)
     if isinstance(answer, _AgentParked):
         return _SilentOutcome()

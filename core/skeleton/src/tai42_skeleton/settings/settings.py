@@ -1,3 +1,5 @@
+"""Core process settings and app-argument settings for the MCP server."""
+
 from typing import Literal
 
 from pydantic import Field
@@ -8,6 +10,8 @@ from tai42_kit.settings import TaiBaseSettings
 
 
 class CoreSettings(TaiBaseSettings):
+    """Core process settings, read from the ``TAI_MCP_`` env prefix."""
+
     model_config = SettingsConfigDict(
         env_prefix="TAI_MCP_",
     )
@@ -66,6 +70,8 @@ class CoreSettings(TaiBaseSettings):
 
 
 class AppArgsSettings(TaiBaseSettings):
+    """App-argument settings, read from the ``APP_ARGS_`` env prefix."""
+
     model_config = SettingsConfigDict(
         env_prefix="APP_ARGS_",
     )

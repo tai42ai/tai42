@@ -34,7 +34,9 @@ class AppVersioning(Protocol):
     """
 
     @property
-    def store(self) -> VersionedStore: ...
+    def store(self) -> VersionedStore:
+        """The append-only versioned-document store backing this namespace."""
+        ...
 
 
 @runtime_checkable
@@ -68,7 +70,8 @@ class AppPresets(Protocol):
         ``response_format`` (forcing structured output) or advertised + validated on
         a plain tool base. ``bind`` is async because it must resolve the base
         ``Tool`` object (via ``app.tools.get_tool(base_tool)``) to feed the
-        transform."""
+        transform.
+        """
         ...
 
     async def create(
@@ -95,7 +98,8 @@ class AppPresets(Protocol):
         caller-authorization tier fence is OFF — the registration-tier fence authorizes a
         request principal at the HTTP doors; an in-process caller authorizes its own callers
         and passes only the base tools it is entitled to author — while every content check
-        stays on."""
+        stays on.
+        """
         ...
 
     async def save_version(
@@ -118,48 +122,54 @@ class AppPresets(Protocol):
         value forward (``input_schema`` via the ``CARRY_FORWARD`` sentinel;
         ``output_schema`` only when ``output_schema_provided`` is ``True``). A body that
         cannot bind is a loud error that commits nothing; the tier fence is OFF for the
-        reason :meth:`create` states."""
+        reason :meth:`create` states.
+        """
         ...
 
     def register_write_validator(self, base_tool: str, validator: PresetWriteValidator) -> None:
-        """Register the write validator for ``base_tool`` (one per base tool;
-        duplicate registration raises).
+        """Register the write validator for ``base_tool`` (one per base tool; duplicate registration raises).
 
         A base-tool plugin calls this through the ``tai42_app`` handle when its tool
         module loads. The validator runs on every write that persists a body —
         create / save-version / rollback — and in the dry-run ``validate`` verdict,
         so a body its base tool cannot accept is a loud 400 that never persists. A
-        base tool with no registered validator gets no extra check."""
+        base tool with no registered validator gets no extra check.
+        """
         ...
 
     def register_input_schema_support(self, base_tool: str, support: PresetInputSchemaSupport) -> None:
-        """Declare that ``base_tool`` ACCEPTS a per-preset input schema (one per base
-        tool; duplicate registration raises).
+        """Declare that ``base_tool`` ACCEPTS a per-preset input schema (one per base tool; duplicate raises).
 
         A base-tool plugin calls this through the ``tai42_app`` handle when its tool
         module loads. A preset that sets an ``input_schema`` over a base tool with no
         registered support is a loud authoring error at the shared preset-authoring
-        chokepoint, never a silently-ignored schema."""
+        chokepoint, never a silently-ignored schema.
+        """
         ...
 
     def input_schema_support(self, base_tool: str) -> PresetInputSchemaSupport | None:
-        """The input-schema support ``base_tool`` declared, or ``None`` if it declared
-        none (its typed schema is fixed)."""
+        """The input-schema support ``base_tool`` declared, or ``None`` if it declared none.
+
+        When ``None``, the base tool's typed schema is fixed.
+        """
         ...
 
     def register_registration_tier(self, base_tool: str, tier: RouteAction) -> None:
-        """Declare the authz character required to AUTHOR (create/save/rollback/rename)
-        a preset over ``base_tool`` (one per base tool; duplicate registration raises).
+        """Declare the authz tier required to author a preset over ``base_tool`` (one per base tool).
 
+        Governs create/save/rollback/rename; duplicate registration raises.
         Default authoring is the presets' own ``write`` action; a base tool with no
         declaration keeps that default. A base tool declaring ``fenced`` requires the
         admin fence to author a preset over it. The shared preset-authoring chokepoint
-        reads this and enforces it BEFORE any store write on every authoring door."""
+        reads this and enforces it BEFORE any store write on every authoring door.
+        """
         ...
 
     def registration_tier(self, base_tool: str) -> RouteAction | None:
-        """The authoring authz tier ``base_tool`` declared, or ``None`` if it declared
-        none (authoring keeps the presets' default ``write`` action)."""
+        """The authoring authz tier ``base_tool`` declared, or ``None`` if it declared none.
+
+        When ``None``, authoring keeps the presets' default ``write`` action.
+        """
         ...
 
     def register_seed(self, seed: PresetSeed) -> None:
@@ -169,26 +179,31 @@ class AppPresets(Protocol):
         The declared seeds are applied by the startup/reload seed applier — created
         when absent, a preset already present left untouched. Declaring two seeds
         under the same ``name`` raises loudly — a silent overwrite could drop one
-        plugin's default under another's."""
+        plugin's default under another's.
+        """
         ...
 
     @property
-    def store(self) -> PresetStore: ...
+    def store(self) -> PresetStore:
+        """The typed preset view over ``app.versioning.store`` (``kind="preset"``)."""
+        ...
 
 
 @runtime_checkable
 class AppToolMeta(Protocol):
-    """The tool-metadata namespace (``app.tool_meta``) — the organizational overlay
-    over any live tool: a folder tree plus a per-tool row (display name, folder
-    placement, tags, badges, a hidden override).
+    """The tool-metadata namespace (``app.tool_meta``) — the organizational overlay over any live tool.
 
+    The overlay is a folder tree plus a per-tool row (display name, folder
+    placement, tags, badges, a hidden override).
     ``store`` is the :class:`~tai42_contract.tool_meta.ToolMetaStore` view the routes
     and the preset lifecycle cascade read and write. ``patch`` is the in-process edit
     seam beside the HTTP PATCH door.
     """
 
     @property
-    def store(self) -> ToolMetaStore: ...
+    def store(self) -> ToolMetaStore:
+        """The tool-metadata overlay store the routes and preset cascade read and write."""
+        ...
 
     async def patch(
         self,
@@ -204,5 +219,6 @@ class AppToolMeta(Protocol):
         arguments given are written: ``folder_id`` places the tool, and a ``tags`` list
         REPLACES the whole tag set (array values are set replacements, not merges).
         ``tags=None`` leaves the tag set untouched; ``folder_id=None`` leaves the
-        placement untouched."""
+        placement untouched.
+        """
         ...

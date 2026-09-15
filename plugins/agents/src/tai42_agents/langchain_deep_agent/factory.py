@@ -53,8 +53,7 @@ _DEEPAGENTS_BUILTIN_TOOLS = frozenset(
 
 
 def _general_purpose_subagent(skills: list[str] | None = None) -> SubAgent:
-    """deepagents' auto-added general-purpose subagent, carrying the shared tool-error
-    middleware on its own tool node.
+    """Deepagents' auto-added general-purpose subagent, carrying the shared tool-error middleware on its own tool node.
 
     Supplying it explicitly (deepagents skips its auto-add when a subagent named
     ``general-purpose`` is present) is the only way to reach that stack — deepagents'
@@ -78,8 +77,7 @@ def _general_purpose_subagent(skills: list[str] | None = None) -> SubAgent:
 
 
 def _validate_subagent_names(subagents: list[ResolvedSubAgentSpec]) -> None:
-    """Reject duplicate subagent names, over-deep nesting, and subagent names that
-    collide with deepagents built-in tool names.
+    """Reject duplicate subagent names, over-deep nesting, and built-in tool-name collisions.
 
     The harness routes to subagents by name, so a duplicate or a built-in collision
     would be ambiguous. Nesting is supported one level deep only.

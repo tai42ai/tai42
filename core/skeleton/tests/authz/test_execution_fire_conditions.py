@@ -29,7 +29,7 @@ from tai42_skeleton.authz.token_free import TokenFreeConditionError
 from tai42_skeleton.operations import OperationRegistry, operation
 from tai42_skeleton.operations import _authority as authority
 from tai42_skeleton.operations import api_keys as api_keys_ops
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.template import TemplateNotFoundError
 
 from ..access_control.conftest import FakeRedis, make_client_ctx
@@ -153,7 +153,7 @@ def test_a_policy_row_edited_after_the_bind_is_denied_at_the_next_fire(
     # The stored row really did change — the edit landed.
     assert ac_env.policy("k-fire")["condition"] == TemplatedText(content=_FAIL_OPEN).model_dump()
 
-    with pytest.raises(PermissionDenied, match="policy condition for 'k-fire' is not evaluable at a fire"):
+    with pytest.raises(PermissionDeniedError, match="policy condition for 'k-fire' is not evaluable at a fire"):
         asyncio.run(_fire("k-fire", probe_op, settings))
 
 
@@ -166,7 +166,7 @@ def test_the_bind_scan_and_the_fire_assertion_are_one_rule(ac_env, renderer, pro
 
     with pytest.raises(TokenFreeConditionError, match="unusable at a fire"):
         asyncio.run(assert_execution_key_evaluable(_bind_enforcer(), "k-fire"))
-    with pytest.raises(PermissionDenied, match="not evaluable at a fire"):
+    with pytest.raises(PermissionDeniedError, match="not evaluable at a fire"):
         asyncio.run(_fire("k-fire", probe_op, settings))
 
 
@@ -191,7 +191,7 @@ def test_a_template_edited_after_the_bind_is_denied_with_no_policy_row_write(
 
     assert ac_env.policy("k-fire") == row_before
 
-    with pytest.raises(PermissionDenied, match="policy condition for 'k-fire' is not evaluable at a fire"):
+    with pytest.raises(PermissionDeniedError, match="policy condition for 'k-fire' is not evaluable at a fire"):
         asyncio.run(_fire("k-fire", probe_op, settings))
 
 
@@ -209,7 +209,7 @@ def test_the_owners_condition_is_re_asserted_too(ac_env, renderer, probe_op, set
 
     renderer.templates["owner-cond"] = _FAIL_OPEN
 
-    with pytest.raises(PermissionDenied, match="policy condition for 'alice' is not evaluable at a fire"):
+    with pytest.raises(PermissionDeniedError, match="policy condition for 'alice' is not evaluable at a fire"):
         asyncio.run(_fire("k-fire", probe_op, settings))
 
 
@@ -228,7 +228,7 @@ def test_the_negative_predicate_would_have_allowed_the_fire(ac_env, renderer, pr
     asyncio.run(_request(CallerIdentity(user_id="k-fire", effective_scopes=(_SCOPE,), claims={}), probe_op, settings))
 
     # Bound: same condition, same policy, same route — DENIED.
-    with pytest.raises(PermissionDenied, match="not evaluable at a fire"):
+    with pytest.raises(PermissionDeniedError, match="not evaluable at a fire"):
         asyncio.run(_fire("k-fire", probe_op, settings))
 
 
@@ -242,7 +242,7 @@ def test_a_normal_authed_request_with_the_same_condition_is_unaffected(ac_env, r
     suspended = CallerIdentity(user_id="alice", effective_scopes=(_SCOPE,), claims={"suspended": True})
 
     asyncio.run(_request(active, probe_op, settings))  # allowed by the condition
-    with pytest.raises(PermissionDenied, match="policy condition rejected"):
+    with pytest.raises(PermissionDeniedError, match="policy condition rejected"):
         asyncio.run(_request(suspended, probe_op, settings))  # denied by the condition
 
 
@@ -259,11 +259,11 @@ def test_a_condition_that_no_longer_renders_denies_the_fire(ac_env, renderer, pr
 
     del renderer.templates["cond"]  # the template is deleted out from under the key
 
-    with pytest.raises(PermissionDenied, match="the policy condition of 'k-fire' does not render"):
+    with pytest.raises(PermissionDeniedError, match="the policy condition of 'k-fire' does not render"):
         asyncio.run(_fire("k-fire", probe_op, settings))
 
     # The render failure is not a fire-only rule: a real request denies identically.
-    with pytest.raises(PermissionDenied, match="the policy condition of 'k-fire' does not render"):
+    with pytest.raises(PermissionDeniedError, match="the policy condition of 'k-fire' does not render"):
         asyncio.run(
             _request(CallerIdentity(user_id="k-fire", effective_scopes=(_SCOPE,), claims={}), probe_op, settings)
         )

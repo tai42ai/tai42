@@ -78,7 +78,8 @@ async def refresh_cooldown_active(connection_id: str) -> bool:
     Best-effort like the lock: a Redis error is logged at WARNING and treated as
     "no cooldown" (proceed to attempt the refresh) — a Redis outage already
     disables the connection lock too, so the fail-open posture is consistent and
-    visible, never silent."""
+    visible, never silent.
+    """
     try:
         async with client_ctx(RedisClient, connector_store_settings().redis) as client:
             return bool(await awaited(client.exists(_refresh_cooldown_key(connection_id))))
@@ -95,7 +96,8 @@ async def open_refresh_cooldown(connection_id: str) -> None:
     """Open the refresh cooldown breaker for :data:`REFRESH_COOLDOWN_SECONDS`.
 
     Best-effort: a Redis error is logged at WARNING (the storm-suppression is
-    lost until the next failing refresh re-arms it), never silently swallowed."""
+    lost until the next failing refresh re-arms it), never silently swallowed.
+    """
     try:
         async with client_ctx(RedisClient, connector_store_settings().redis) as client:
             await client.set(
@@ -112,9 +114,11 @@ async def open_refresh_cooldown(connection_id: str) -> None:
 
 
 async def clear_refresh_cooldown(connection_id: str) -> None:
-    """Clear the refresh cooldown breaker after a successful refresh, so a
-    connection whose fresh token is already inside the safety margin is not
-    fast-failed by a still-live breaker. Best-effort (WARNING on error)."""
+    """Clear the refresh cooldown breaker after a successful refresh.
+
+    So a connection whose fresh token is already inside the safety margin is not
+    fast-failed by a still-live breaker. Best-effort (WARNING on error).
+    """
     try:
         async with client_ctx(RedisClient, connector_store_settings().redis) as client:
             await client.delete(_refresh_cooldown_key(connection_id))

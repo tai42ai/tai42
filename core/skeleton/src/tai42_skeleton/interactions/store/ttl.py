@@ -1,5 +1,8 @@
-"""Deadline/TTL/media-id computation from a request: the millisecond clocks, the
-served-media id extraction, and the per-key TTL an async park's horizon needs."""
+"""Deadline, TTL and media-id computation from a request.
+
+The millisecond clocks, the served-media id extraction, and the per-key TTL an async
+park's horizon needs.
+"""
 
 from __future__ import annotations
 
@@ -50,12 +53,14 @@ def _media_ids_of(request: InteractionRequest) -> list[str]:
 
 
 def _key_ttl(request: InteractionRequest, idle_ttl: int, now_ms: int, expiry_margin_s: int) -> int:
-    """The TTL a question's own keys need. An async park with an ``expiry_at`` beyond
-    the idle horizon must survive to its expiry PLUS a reaper-pass margin, or its
-    state hash would expire before the reaper reads it — leaving the question
-    unanswerable in the ``idle_ttl``..``expiry_at`` gap and stranding the
-    continuation. Every other question (sync, or a park expiring within the idle
-    horizon) uses the flat ``idle_ttl``."""
+    """Return the TTL a question's own keys need.
+
+    An async park with an ``expiry_at`` beyond the idle horizon must survive to its expiry
+    PLUS a reaper-pass margin, or its state hash would expire before the reaper reads it —
+    leaving the question unanswerable in the ``idle_ttl``..``expiry_at`` gap and stranding
+    the continuation. Every other question (sync, or a park expiring within the idle horizon)
+    uses the flat ``idle_ttl``.
+    """
     if request.mode == "async" and request.expiry_at is not None:
         horizon = math.ceil((_expiry_ms(request) - now_ms) / 1000) + expiry_margin_s
         return max(idle_ttl, horizon)

@@ -44,7 +44,7 @@ from tai42_skeleton.authz.execution_identity import reset_execution_identity, se
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.authz.resolver import resolve_dispatch
 from tai42_skeleton.authz.token_free import TokenFreeConditionError, assert_token_free_evaluable
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.template import TemplateNotFoundError
 
 if TYPE_CHECKING:
@@ -52,8 +52,7 @@ if TYPE_CHECKING:
 
 
 async def build_execution_identity(execution_key: str, *, bound_fingerprint: str) -> CallerIdentity:
-    """The identity a fire bound to ``execution_key`` runs as, built from that key's
-    CURRENT stored grants.
+    """The identity a fire bound to ``execution_key`` runs as, built from that key's current stored grants.
 
     ``bound_fingerprint`` is the record's captured per-mint key identity; the live key must
     still carry it, and it is carried onto the built identity so a mid-turn re-read asserts
@@ -62,7 +61,7 @@ async def build_execution_identity(execution_key: str, *, bound_fingerprint: str
     credential. No ``effective_scopes`` is carried: the check re-derives the owner
     attenuation live at every dispatch, which is what makes a mid-fire de-scope land.
 
-    Raises :class:`PermissionDenied` when the key cannot carry authority at all (no stored
+    Raises :class:`PermissionDeniedError` when the key cannot carry authority at all (no stored
     policy, disabled, disabled/policy-less owner, fingerprint mismatch) — refusing here,
     rather than returning an authority-less identity, is what stops a capability-tool fire
     from running under a key that no longer exists. With access control disabled the
@@ -79,9 +78,8 @@ async def build_execution_identity(execution_key: str, *, bound_fingerprint: str
     return CallerIdentity(user_id=execution_key, claims=claims, execution_key_fingerprint=bound_fingerprint)
 
 
-class ExecutionKeyAuthorityError(PermissionDenied):
-    """A key cannot carry authority AT ALL — the refusal
-    :func:`assert_key_carries_authority` raises.
+class ExecutionKeyAuthorityError(PermissionDeniedError):
+    """A key cannot carry authority AT ALL — the refusal :func:`assert_key_carries_authority` raises.
 
     ``principal`` is whose defect it is (the key or its owner); ``defect`` is the phrase
     naming it ("is disabled") and carries NO principal id, so a door answering an untrusted
@@ -89,6 +87,7 @@ class ExecutionKeyAuthorityError(PermissionDenied):
     """
 
     def __init__(self, message: str, *, principal: str, defect: str) -> None:
+        """Build the refusal with ``message``, the offending ``principal``, and the ``defect`` phrase."""
         super().__init__(message)
         self.principal = principal
         self.defect = defect
@@ -104,12 +103,11 @@ def _authority_refusal(execution_key: str, principal: str, defect: str) -> Execu
 
 
 def assert_policy_matches_fingerprint(policy: AccessPolicy, execution_key: str, *, bound_fingerprint: str) -> None:
-    """Assert the LIVE ``policy`` of ``execution_key`` still carries the exact per-mint
-    fingerprint the binding anchored to, raising :class:`ExecutionKeyAuthorityError`
-    otherwise.
+    """Assert the LIVE ``policy`` of ``execution_key`` still carries the per-mint fingerprint the binding anchored to.
 
-    A ``user_id`` is reusable across a revoke+remint; the fingerprint is not, so the
-    reminted key never inherits the old record's authority. The ONE spelling of this
+    Raises :class:`ExecutionKeyAuthorityError` otherwise. A ``user_id`` is
+    reusable across a revoke+remint; the fingerprint is not, so the reminted key
+    never inherits the old record's authority. The ONE spelling of this
     equality — every seam branch routes through it.
 
     A FINGERPRINT-LESS principal (an account user — never minted, so no per-mint
@@ -138,10 +136,10 @@ def assert_policy_matches_fingerprint(policy: AccessPolicy, execution_key: str, 
 async def assert_key_carries_authority(
     enforcer: PolicyEnforcer, execution_key: str, *, bound_fingerprint: str
 ) -> str | None:
-    """Assert that ``execution_key`` can carry authority AT ALL — and is still the SAME
-    minted key the binding named — and answer its owner reference (``None`` if unowned).
+    """Assert ``execution_key`` can carry authority at all and answer its owner reference (``None`` if unowned).
 
-    Raises :class:`ExecutionKeyAuthorityError` for a key with no stored policy, a disabled
+    Also asserts it is still the SAME minted key the binding named. Raises
+    :class:`ExecutionKeyAuthorityError` for a key with no stored policy, a disabled
     key, an owner that is disabled or has no policy, or a live fingerprint that is not
     ``bound_fingerprint``. The ONE spelling of that refusal set: write doors run it so no
     record names a key every fire would refuse, and a capability-tool dispatch runs it to
@@ -172,10 +170,10 @@ async def assert_key_carries_authority(
 
 
 async def resolve_execution_key_secret_capability(execution_key: str) -> bool:
-    """The secret-read capability a fire bound to ``execution_key`` runs with: the ADMIN
-    status of the KEY's OWN stored policy, read live at the fire.
+    """The secret-read capability a fire bound to ``execution_key`` runs with.
 
-    The capability equals the admin status of the identity the fire RUNS AS, never the
+    The ADMIN status of the KEY's OWN stored policy, read live at the fire. The
+    capability equals the admin status of the identity the fire RUNS AS, never the
     triggerer's request-scope value — so a NON-admin execution key reads ``False`` even
     when an admin triggered the fire (the escalation guard), and an admin execution key
     reads ``True``. Gate off -> ``True``: every principal is then the synthetic admin,
@@ -197,11 +195,12 @@ async def resolve_execution_key_secret_capability(execution_key: str) -> bool:
 
 @asynccontextmanager
 async def bind_execution_identity(execution_key: str, *, bound_fingerprint: str) -> AsyncIterator[CallerIdentity]:
-    """Run the ``async with`` body AS ``execution_key``, binding the identity built from
-    that key's current grants into the ``execution_identity`` contextvar and releasing it
-    in a ``finally`` so the binding never outlives the dispatch.
+    """Run the ``async with`` body AS ``execution_key``, binding its built identity for the dispatch.
 
-    ``bound_fingerprint`` is the firing record's captured per-mint key identity; the build
+    The identity built from that key's current grants is bound into the
+    ``execution_identity`` contextvar and released in a ``finally`` so the
+    binding never outlives the dispatch. ``bound_fingerprint`` is the firing
+    record's captured per-mint key identity; the build
     is refused unless the live key still carries it.
 
     Contextvar semantics matter here: opening this block INSIDE each concurrently-fired
@@ -216,7 +215,7 @@ async def bind_execution_identity(execution_key: str, *, bound_fingerprint: str)
     refused a host-secret-exposing primitive even when an admin triggered it. Restored in
     the ``finally`` so the triggering request's own capability is unchanged after the fire.
 
-    Raises :class:`~tai42_skeleton.operations.errors.PermissionDenied`, body never entered,
+    Raises :class:`~tai42_skeleton.operations.errors.PermissionDeniedError`, body never entered,
     when the key cannot carry authority at all.
     """
     identity = await build_execution_identity(execution_key, bound_fingerprint=bound_fingerprint)
@@ -232,10 +231,10 @@ async def bind_execution_identity(execution_key: str, *, bound_fingerprint: str)
 
 
 async def rebuild_execution_identity(execution_key: str) -> CallerIdentity | None:
-    """Rebuild the synthetic execution identity for ``execution_key`` from its
-    CURRENT live grants, or ``None`` when they no longer carry authority.
+    """Rebuild the synthetic execution identity for ``execution_key`` from its current live grants.
 
-    The caller holds only the ``user_id`` string (never the mint fingerprint), so
+    Returns ``None`` when they no longer carry authority. The caller holds only
+    the ``user_id`` string (never the mint fingerprint), so
     the reconstruction reads the key's live fingerprint and builds the identity
     from the current grants — a mid-life de-scope/revocation therefore lands on
     the rebuild. A key with no live policy / disabled / grantless yields ``None``
@@ -249,7 +248,8 @@ async def rebuild_execution_identity(execution_key: str) -> CallerIdentity | Non
     "no mint identity to anchor": the bind, the mid-turn re-assert, and the
     continuation rebind all match it against a policy that carries none, while
     the surrounding authority checks (policy exists, not disabled) keep refusing
-    a deleted or disabled principal."""
+    a deleted or disabled principal.
+    """
     settings = access_control_settings()
     if not settings.enable:
         # Gate off: every principal is the synthetic admin; the identity carries the key
@@ -265,28 +265,28 @@ async def rebuild_execution_identity(execution_key: str) -> CallerIdentity | Non
         fingerprint = ""
     try:
         return await build_execution_identity(execution_key, bound_fingerprint=fingerprint)
-    except PermissionDenied:
+    except PermissionDeniedError:
         return None
 
 
 class ExecutionConditionError(TokenFreeConditionError):
-    """A NAMED principal's stored policy condition cannot be evaluated by a tokenless
-    background execution — the one refusal type :func:`assert_execution_key_evaluable`
-    and :class:`ExecutionKeyScan` raise.
+    """A named principal's stored policy condition cannot be evaluated by a tokenless background execution.
 
-    The message quotes a bounded excerpt of the RAW jq condition, which is store-secret;
-    ``principal`` is a separate field so a door answering an untrusted caller can log the
+    The one refusal type :func:`assert_execution_key_evaluable` and
+    :class:`ExecutionKeyScan` raise. The message quotes a bounded excerpt of the
+    RAW jq condition, which is store-secret; ``principal`` is a separate field so
+    a door answering an untrusted caller can log the
     diagnostic and answer with the principal alone.
     """
 
     def __init__(self, message: str, *, principal: str) -> None:
+        """Build the refusal with ``message`` and the offending ``principal``."""
         super().__init__(message)
         self.principal = principal
 
 
 async def _assert_condition_evaluable(policy: AccessPolicy, *, principal: str) -> None:
-    """Assert that ``policy``'s condition, RENDERED, can be evaluated by a tokenless
-    background execution.
+    """Assert that ``policy``'s condition, rendered, can be evaluated by a tokenless background execution.
 
     Rendered with the identical render enforcement runs, since that text — not the stored
     template reference — is what a fire evaluates. A render failure is a loud refusal,
@@ -344,11 +344,11 @@ async def assert_execution_key_evaluable(enforcer: PolicyEnforcer, execution_key
 
 
 class ExecutionKeyScan:
-    """The RECORD-level halves of the execution-key bind gate across ONE batch of records,
-    reading each distinct execution key exactly once.
+    """The RECORD-level halves of the execution-key bind gate across one batch of records.
 
-    The same two key questions the single-record bind door asks — can carry a fire at all,
-    and is token-free-evaluable. The door's third question (pass-role) is not asked: the
+    Reads each distinct execution key exactly once. The same two key questions the
+    single-record bind door asks — can carry a fire at all, and is
+    token-free-evaluable. The door's third question (pass-role) is not asked: the
     restore route is admin-fenced. Batching gives every record naming a key ONE verdict,
     rather than two store states either side of a mid-batch policy edit.
 
@@ -357,12 +357,12 @@ class ExecutionKeyScan:
     """
 
     def __init__(self) -> None:
+        """Build the scan over a fresh policy enforcer with an empty per-key verdict cache."""
         self._enforcer = PolicyEnforcer(access_control_settings())
         self._verdict: dict[tuple[str, str], ExecutionKeyAuthorityError | ExecutionConditionError | None] = {}
 
     async def assert_usable(self, execution_key: str, *, bound_fingerprint: str) -> None:
-        """Assert that a record may name ``execution_key`` under ``bound_fingerprint``,
-        taking the verdict this batch already reached for that pair when it has one.
+        """Assert a record may name ``execution_key`` under ``bound_fingerprint``, reusing the batch verdict if cached.
 
         Raises :class:`ExecutionKeyAuthorityError` for a key no fire could run under (or a
         fingerprint mismatch) and :class:`ExecutionConditionError` for one a tokenless fire
@@ -408,7 +408,7 @@ async def authorize_execution_tool_call(
 ) -> None:
     """Authorize ``identity`` to dispatch ``tool_name`` with ``call_arguments``.
 
-    Returns on an allow; raises :class:`PermissionDenied` on a deny.
+    Returns on an allow; raises :class:`PermissionDeniedError` on a deny.
 
     ``tool_name`` is resolved through presets and extension branches to the operation it
     ultimately runs and the arguments it receives. An operation gets the full edge decision
@@ -434,12 +434,12 @@ async def authorize_execution_tool_call(
         if identity.is_internal:
             return
         if identity.user_id is None:
-            raise PermissionDenied("access denied: no caller identity for an external tool dispatch")
+            raise PermissionDeniedError("access denied: no caller identity for an external tool dispatch")
         if identity.execution_key_fingerprint is None:
             # An invariant breach: a gate-on execution identity always carries one — ""
             # for a fingerprint-less ACCOUNT principal (resolved by the ONE equality),
             # None never. Refuse rather than re-read with no anchor at all.
-            raise PermissionDenied("access denied: bound execution identity carries no key fingerprint")
+            raise PermissionDeniedError("access denied: bound execution identity carries no key fingerprint")
         await assert_key_carries_authority(
             PolicyEnforcer(settings), identity.user_id, bound_fingerprint=identity.execution_key_fingerprint
         )
@@ -451,17 +451,17 @@ async def authorize_execution_tool_call(
 async def authorize_execution_agent_run(
     identity: CallerIdentity, agent_name: str, *, settings: AccessControlSettings | None = None
 ) -> None:
-    """Authorize ``identity`` to run the agent ``agent_name`` through the base run door
-    ``POST /api/agents/{agent_name}/runs``.
+    """Authorize ``identity`` to run the agent ``agent_name`` through its base run door.
 
-    The run door is a ``custom_route``, so it has no ``OperationMetadata`` and
+    The door is ``POST /api/agents/{agent_name}/runs``. The run door is a
+    ``custom_route``, so it has no ``OperationMetadata`` and
     :func:`~tai42_skeleton.authz.check.check` cannot decide it. This names the concrete
     path directly and runs the SAME shared tail
     (:func:`~tai42_skeleton.authz.check._authorize_pinned_route`), so the door is no easier
     reached this way than over HTTP.
 
     Always a fire, so the tail's fire-mode guards all run. Returns on an allow; raises
-    :class:`PermissionDenied` on a deny. Access control disabled allows, as does the
+    :class:`PermissionDeniedError` on a deny. Access control disabled allows, as does the
     internal principal; an identity with no user id denies fail-closed. A path resolving
     to no registered route is a fail-closed deny — the run door IS registered, so a miss
     means a torn surface, not an ungated one.
@@ -473,16 +473,18 @@ async def authorize_execution_agent_run(
         return
     user_id = identity.user_id
     if user_id is None:
-        raise PermissionDenied("access denied: no caller identity for an agent run")
+        raise PermissionDeniedError("access denied: no caller identity for an agent run")
 
     path = f"/api/agents/{agent_name}/runs"
     method = "POST"
     try:
         route = resolve_route_meta(canonicalize_path(path), method)
     except MalformedPathError as exc:
-        raise PermissionDenied(f"access denied: {method} {path} is not a well-formed path for an agent run") from exc
+        raise PermissionDeniedError(
+            f"access denied: {method} {path} is not a well-formed path for an agent run"
+        ) from exc
     if route is None:
-        raise PermissionDenied(f"access denied: {method} {path} does not resolve to a registered route")
+        raise PermissionDeniedError(f"access denied: {method} {path} does not resolve to a registered route")
 
     await _authorize_pinned_route(
         identity,

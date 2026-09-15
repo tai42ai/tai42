@@ -31,12 +31,13 @@ class ReservedThreadNamespaceError(ValueError):
 
 
 def reserved_thread_namespace_error(run_kwargs: dict[str, Any]) -> str | None:
-    """The message for a caller-supplied ``bridge:``-prefixed ``thread_id``/``checkpoint_id``
-    anywhere in ``run_kwargs``, or ``None`` when none is present.
+    """The message for a caller-supplied ``bridge:``-prefixed ``thread_id``/``checkpoint_id``, or ``None``.
 
+    Returns the message when such an id appears anywhere in ``run_kwargs``, else ``None``.
     These ids ride inside a ``configurable`` mapping on a config-shaped run kwarg, and a run
-    can carry several (``langgraph_config``, a voting agent's ``judge_``/``voter_``
-    variants), each an equal steering vector — so EVERY config-bearing value is scanned."""
+    can carry several (``langgraph_config``, a voting agent's ``judge_``/``voter_`` variants),
+    each an equal steering vector — so EVERY config-bearing value is scanned.
+    """
     for value in run_kwargs.values():
         if not isinstance(value, dict):
             continue
@@ -51,10 +52,12 @@ def reserved_thread_namespace_error(run_kwargs: dict[str, Any]) -> str | None:
 
 
 def run_kwargs_from_tool_input(agent: Agent, validated: BaseModel) -> dict[str, Any]:
-    """Map ``validated`` to ``agent``'s run kwargs and refuse a reserved thread id — the one
-    seam every caller-driven agent run passes, so no door dispatches around the reservation.
-    Raises :class:`ReservedThreadNamespaceError` on a reserved id, ``ValueError`` on an input
-    the agent's own mapping rejects."""
+    """Map ``validated`` to ``agent``'s run kwargs and refuse a reserved thread id.
+
+    The one seam every caller-driven agent run passes, so no door dispatches around the
+    reservation. Raises :class:`ReservedThreadNamespaceError` on a reserved id, ``ValueError``
+    on an input the agent's own mapping rejects.
+    """
     run_kwargs = agent.from_tool_input(validated)
     message = reserved_thread_namespace_error(run_kwargs)
     if message is not None:

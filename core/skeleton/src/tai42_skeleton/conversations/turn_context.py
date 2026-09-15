@@ -22,9 +22,12 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class BridgeTurnContext:
-    """The current bridge turn's conversation identifiers. ``thread_id`` is the memory/mode
-    key; ``route_name``/``channel``/``our_identity``/``client_address`` describe the medium
-    the turn is on, carried for builtins that need to name it."""
+    """The current bridge turn's conversation identifiers.
+
+    ``thread_id`` is the memory/mode key;
+    ``route_name``/``channel``/``our_identity``/``client_address`` describe the medium the
+    turn is on, carried for builtins that need to name it.
+    """
 
     thread_id: str
     route_name: str
@@ -43,8 +46,11 @@ def current_bridge_turn() -> BridgeTurnContext | None:
 
 @contextlib.contextmanager
 def bridge_turn_context(context: BridgeTurnContext) -> Iterator[None]:
-    """Bind ``context`` as the current bridge turn for the block's duration, restoring the
-    previous value (per-context, so a task spawned inside keeps it for its own lifetime)."""
+    """Bind ``context`` as the current bridge turn for the block's duration.
+
+    Restores the previous value on exit (per-context, so a task spawned inside keeps it
+    for its own lifetime).
+    """
     token = _current_bridge_turn.set(context)
     try:
         yield

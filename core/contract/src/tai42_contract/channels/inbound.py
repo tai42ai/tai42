@@ -10,8 +10,10 @@ from tai42_contract.entry_params import validate_entry_params
 
 
 class InboundAnswerOutcome(StrEnum):
-    """What the shared inbound-answer ladder decided for one inbound reply on a
-    correlation key. A channel maps this to its own transport ack."""
+    """What the shared inbound-answer ladder decided for one inbound reply on a correlation key.
+
+    A channel maps this to its own transport ack.
+    """
 
     NO_CORRELATION = "no_correlation"  # no pending ask on this key — the CALLER bridges it as a normal turn
     FORWARDED = "forwarded"  # the door accepted the answer; the correlation was released

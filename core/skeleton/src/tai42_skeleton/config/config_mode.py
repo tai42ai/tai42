@@ -36,7 +36,8 @@ class ConfigMode(StrEnum):
 
     Only ``file`` is built in. Any other mode is an open string resolved by the
     factory's naming convention to a separately-installed ``tai42-config-<mode>``
-    provider plugin, so it is deliberately not enumerated here."""
+    provider plugin, so it is deliberately not enumerated here.
+    """
 
     file = "file"
 
@@ -63,6 +64,7 @@ class ConfigModeSettings(TaiBaseSettings):
     @field_validator("config_mode", mode="before")
     @classmethod
     def validate_config_mode(cls, v: object) -> str:
+        """Validate ``config_mode`` is ``file`` or a well-formed provider mode name, returning it."""
         if not isinstance(v, str) or _MODE_PATTERN.fullmatch(v) is None:
             raise ValueError(
                 f"Invalid TAI_CONFIG_MODE={v!r}: expected 'file' (built-in) or a config-provider "
@@ -76,5 +78,6 @@ def config_mode() -> str:
     """Return the active config mode as a plain string.
 
     ``'file'`` selects the built-in provider; any other value resolves by
-    convention to the ``tai42-config-<mode>`` plugin."""
+    convention to the ``tai42-config-<mode>`` plugin.
+    """
     return str(ConfigModeSettings().config_mode)

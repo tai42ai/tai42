@@ -13,7 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 
-class WaitTimeout(TimeoutError):
+class WaitTimeoutError(TimeoutError):
     """A ``wait_for`` deadline elapsed before the predicate returned truthy."""
 
 
@@ -26,7 +26,7 @@ def wait_for[T](
 ) -> T:
     """Poll ``predicate`` every ``interval`` seconds until it returns a truthy
     value or ``deadline`` seconds elapse. Returns the truthy value. Raises
-    :class:`WaitTimeout` naming the last falsy result on timeout.
+    :class:`WaitTimeoutError` naming the last falsy result on timeout.
 
     The predicate is expected to be cheap and side-effect free; it may raise a
     transient connection error while a service warms, which is treated as "not
@@ -39,7 +39,7 @@ def wait_for[T](
         if last:
             return last
         if time.monotonic() - start >= deadline:
-            raise WaitTimeout(f"{message} (after {deadline:.1f}s; last result: {last!r})")
+            raise WaitTimeoutError(f"{message} (after {deadline:.1f}s; last result: {last!r})")
         time.sleep(interval)  # noqa: TID251 — the sanctioned poll interval; every other sleep is banned
 
 
@@ -59,7 +59,7 @@ async def wait_for_async[T](
         if last:
             return last
         if time.monotonic() - start >= deadline:
-            raise WaitTimeout(f"{message} (after {deadline:.1f}s; last result: {last!r})")
+            raise WaitTimeoutError(f"{message} (after {deadline:.1f}s; last result: {last!r})")
         await asyncio.sleep(interval)  # noqa: TID251 — the sanctioned poll interval; every other sleep is banned
 
 

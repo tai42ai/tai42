@@ -1,5 +1,4 @@
-"""Tier 1 of the send-outcome monitoring layer: one structured span per platform
-send attempt at the send seams.
+"""Tier 1 of the send-outcome monitoring layer: one structured span per platform send attempt at the send seams.
 
 A single conditional-emit helper, :func:`send_span`, that every send seam wraps its
 one ``channel.notify`` / ``channel.deliver`` call in — so the channel plugins stay
@@ -40,18 +39,21 @@ _MESSAGING_OPERATION_SEND = "send"
 
 
 def active_trace_id() -> str | None:
-    """The ambient trace id, or ``None`` — the guard the send seams gate their
-    tier-2 index write on (an index entry is only useful when a trace exists to
-    correlate a later receipt back to)."""
+    """Return the ambient trace id, or ``None``.
+
+    The guard the send seams gate their tier-2 index write on (an index entry is only useful when a trace
+    exists to correlate a later receipt back to).
+    """
     return get_monitoring().writer.current_trace_id()
 
 
 def _error_metadata(exc: BaseException) -> dict[str, Any]:
-    """The structured failure detail lifted off a typed channel error: the exception
-    type, its platform ``error.kind`` (``ChannelDeliveryError`` /
-    ``ChannelInputError`` both carry ``__tai_error_kind__``), and — for a delivery
-    failure — whether it is ``retryable`` and any medium-requested ``retry_after``. An
-    input error is never retryable (a permanent shape refusal)."""
+    """Lift the structured failure detail off a typed channel error.
+
+    Carries the exception type, its platform ``error.kind`` (``ChannelDeliveryError`` / ``ChannelInputError``
+    both carry ``__tai_error_kind__``), and — for a delivery failure — whether it is ``retryable`` and any
+    medium-requested ``retry_after``. An input error is never retryable (a permanent shape refusal).
+    """
     metadata: dict[str, Any] = {"error.type": type(exc).__name__}
     kind = getattr(exc, "__tai_error_kind__", None)
     if kind is not None:
@@ -67,8 +69,7 @@ def _error_metadata(exc: BaseException) -> dict[str, Any]:
 
 @contextlib.contextmanager
 def send_span(channel: str, *, recipient: str | None, attempt: int | None = None) -> Iterator[Span | None]:
-    """Wrap ONE send attempt to ``channel`` in a ``send:<channel>`` span, or run it
-    unwrapped when no trace is ambient.
+    """Wrap ONE send attempt to ``channel`` in a ``send:<channel>`` span, or run it unwrapped when no trace is ambient.
 
     Yields the open :class:`Span` handle (so the caller can set the success ``output`` —
     the provider message ids it alone knows) inside a trace, or ``None`` outside one. A
@@ -77,7 +78,8 @@ def send_span(channel: str, *, recipient: str | None, attempt: int | None = None
     re-raised unchanged — the caller's own success/retry/failure control flow is never
     altered. ``attempt`` stamps the retry ordinal when the seam retries (one span per
     attempt), so a "attempt 1 failed retryable, attempt 2 accepted" sequence is visible
-    rather than collapsed."""
+    rather than collapsed.
+    """
     if active_trace_id() is None:
         # No ambient trace: emit nothing (a rootless send span would attach to no run),
         # just run the wrapped call.
@@ -96,7 +98,7 @@ def send_span(channel: str, *, recipient: str | None, attempt: int | None = None
     with writer.start_span(
         name=f"send:{channel}",
         kind=SpanKind.TOOL,
-        input=mask_secrets({"recipient": recipient}),
+        input_=mask_secrets({"recipient": recipient}),
         metadata=metadata,
     ) as span:
         try:

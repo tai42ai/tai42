@@ -48,9 +48,11 @@ list_workers = register_operation_route(
 
 
 async def _reload_targets(request: Request) -> dict[str, Any]:
-    """Parse the reload-config body into the operation's flat ``targets`` argument,
-    rejecting a malformed body / non-string-list targets with a loud 400 before the
-    operation runs."""
+    """Parse the reload-config body into the operation's flat ``targets`` argument.
+
+    Rejects a malformed body / non-string-list targets with a loud 400 before the operation
+    runs.
+    """
     try:
         body = await request.json()
     except ValueError as exc:

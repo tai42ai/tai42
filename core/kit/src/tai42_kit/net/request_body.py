@@ -19,29 +19,34 @@ from collections.abc import AsyncIterator
 from typing import Protocol
 
 
-class PayloadTooLarge(Exception):
-    """The request body streamed past the door's byte cap — a loud 413, never a
-    truncated shorter body."""
+class RequestBodyTooLargeError(Exception):
+    """The request body streamed past the door's byte cap.
+
+    A loud 413, never a truncated shorter body.
+    """
 
 
 class _StreamableRequest(Protocol):
-    """The one thing the reader needs of a request: an async byte stream. Typing it
-    here rather than as ``starlette.requests.Request`` keeps ``kit`` free of a
-    starlette runtime dependency (every caller passes a starlette request, which
-    satisfies this)."""
+    """The one thing the reader needs of a request: an async byte stream.
+
+    Typing it here rather than as ``starlette.requests.Request`` keeps ``kit`` free of a starlette runtime
+    dependency (every caller passes a starlette request, which satisfies this).
+    """
 
     def stream(self) -> AsyncIterator[bytes]: ...
 
 
 async def read_bounded_body(request: _StreamableRequest, cap: int) -> bytes:
     """Read the body counting ACTUAL bytes, never a client ``Content-Length``.
-    Raise :class:`PayloadTooLarge` the moment the stream crosses ``cap`` — the read
-    stops there, so nothing is ever truncated into a shorter valid body."""
+
+    Raise :class:`RequestBodyTooLargeError` the moment the stream crosses ``cap`` — the read stops there,
+    so nothing is ever truncated into a shorter valid body.
+    """
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
         total += len(chunk)
         if total > cap:
-            raise PayloadTooLarge(f"request body exceeds the {cap}-byte cap")
+            raise RequestBodyTooLargeError(f"request body exceeds the {cap}-byte cap")
         chunks.append(chunk)
     return b"".join(chunks)

@@ -30,12 +30,13 @@ from .models import AgentsEntriesAdd, McpConfigUpdate, McpEntriesAdd, ToolsEntri
     response_model=ApplyResponse,
 )
 async def set_mcp_config(mcp: list[Any]) -> dict:
-    # Replace the manifest's ``mcp`` section through the pipeline: the mutator edits
-    # the PRESERVED document in place, then ConfigService validates, persists, reloads
-    # locally, and broadcasts the reload to the whole fleet. A malformed entry fails
-    # validation inside the transaction (nothing persisted) and maps to a loud 400.
-    # (No docstring here, so the route description in projection falls back to the
-    # operation summary.)
+    """Replace the manifest's ``mcp`` section through the pipeline and hot-reload the fleet.
+
+    The mutator edits the PRESERVED document in place, then ConfigService validates, persists,
+    reloads locally, and broadcasts the reload to the whole fleet. A malformed entry fails
+    validation inside the transaction (nothing persisted) and maps to a loud 400.
+    """
+
     def mutator(document: dict[str, Any]) -> None:
         document["mcp"] = mcp
 
@@ -53,15 +54,17 @@ async def set_mcp_config(mcp: list[Any]) -> dict:
 
 
 def _merged_entries(current: list[Any], entries: list[Any], replace: bool) -> list[Any]:
-    """The new section list from ``current`` + incoming ``entries``. Every entry must be
-    a dict carrying a non-empty ``title`` string (else a ``ValueError`` naming the
-    position); duplicate incoming titles are refused. A title already present is refused
-    unless ``replace`` swaps the entry in at its current index; non-colliding entries
-    append in given order. Pure / re-runnable: builds a fresh list from the arguments."""
+    """The new section list from ``current`` + incoming ``entries``.
+
+    Every entry must be a dict carrying a non-empty ``title`` string (else a ``ValueError`` naming
+    the position); duplicate incoming titles are refused. A title already present is refused unless
+    ``replace`` swaps the entry in at its current index; non-colliding entries append in given
+    order. Pure / re-runnable: builds a fresh list from the arguments.
+    """
     incoming_titles: list[str] = []
     for position, entry in enumerate(entries):
         if not isinstance(entry, dict):
-            raise ValueError(f"entry at position {position} must be a mapping carrying a 'title'")
+            raise ValueError(f"entry at position {position} must be a mapping carrying a 'title'")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         title = entry.get("title")
         if not isinstance(title, str) or not title:
             raise ValueError(f"entry at position {position} must carry a non-empty 'title' string")
@@ -84,8 +87,10 @@ def _merged_entries(current: list[Any], entries: list[Any], replace: bool) -> li
 
 
 def _without_entry(current: list[Any], title: str) -> list[Any]:
-    """``current`` minus the entry whose ``title`` matches; a missing title is a
-    ``LookupError`` (the mutator aborts the transaction). Pure / re-runnable."""
+    """``current`` minus the entry whose ``title`` matches.
+
+    A missing title is a ``LookupError`` (the mutator aborts the transaction). Pure / re-runnable.
+    """
     result = [e for e in current if not (isinstance(e, dict) and e.get("title") == title)]
     if len(result) == len(current):
         raise LookupError(title)
@@ -98,7 +103,7 @@ async def _apply_entries_add(section: str, entries: list[Any], replace: bool) ->
     with translate_orphan_env_write():
         try:
             if not entries:
-                raise ValueError("entries must be a non-empty list")
+                raise ValueError("entries must be a non-empty list")  # noqa: TRY301 in-try so the except maps it to a 400 identically on the projection path
 
             def mutator(document: dict[str, Any]) -> None:
                 document[section] = _merged_entries(document.get(section) or [], entries, replace)
@@ -138,6 +143,7 @@ async def _apply_entry_remove(section: str, title: str) -> dict:
     response_model=ApplyResponse,
 )
 async def add_mcp_entries(entries: list[Any], replace: bool = False) -> dict:
+    """Add ``entries`` to the manifest's ``mcp`` section (``replace`` swaps colliding titles) and reload."""
     return await _apply_entries_add("mcp", entries, replace)
 
 
@@ -150,6 +156,7 @@ async def add_mcp_entries(entries: list[Any], replace: bool = False) -> dict:
     response_model=ApplyResponse,
 )
 async def remove_mcp_entry(title: str) -> dict:
+    """Remove the ``mcp`` entry named ``title`` and hot-reload; an unknown title is a 404."""
     return await _apply_entry_remove("mcp", title)
 
 
@@ -163,6 +170,7 @@ async def remove_mcp_entry(title: str) -> dict:
     response_model=ApplyResponse,
 )
 async def add_tools_entries(entries: list[Any], replace: bool = False) -> dict:
+    """Add ``entries`` to the manifest's ``tools`` section (``replace`` swaps colliding titles) and reload."""
     return await _apply_entries_add("tools", entries, replace)
 
 
@@ -175,6 +183,7 @@ async def add_tools_entries(entries: list[Any], replace: bool = False) -> dict:
     response_model=ApplyResponse,
 )
 async def remove_tools_entry(title: str) -> dict:
+    """Remove the ``tools`` entry named ``title`` and hot-reload; an unknown title is a 404."""
     return await _apply_entry_remove("tools", title)
 
 
@@ -188,6 +197,7 @@ async def remove_tools_entry(title: str) -> dict:
     response_model=ApplyResponse,
 )
 async def add_agents_entries(entries: list[Any], replace: bool = False) -> dict:
+    """Add ``entries`` to the manifest's ``agents`` section (``replace`` swaps colliding titles) and reload."""
     return await _apply_entries_add("agents", entries, replace)
 
 
@@ -200,4 +210,5 @@ async def add_agents_entries(entries: list[Any], replace: bool = False) -> dict:
     response_model=ApplyResponse,
 )
 async def remove_agents_entry(title: str) -> dict:
+    """Remove the ``agents`` entry named ``title`` and hot-reload; an unknown title is a 404."""
     return await _apply_entry_remove("agents", title)

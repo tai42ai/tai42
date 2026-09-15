@@ -32,10 +32,12 @@ _API_ROOT = "/api/"
 
 @dataclass(frozen=True)
 class ResolvedRoute:
-    """One declared route with its mount base applied: the owning ``item`` and its
-    ``kind``, the resolved ``base`` (override, stored, or default) and the
-    ``default_base`` it declares, the relative ``path``, its resolved ``full_path``,
-    the ``methods``, and whether it is ``public`` (answers unauthenticated)."""
+    """One declared route with its mount base applied.
+
+    The owning ``item`` and its ``kind``, the resolved ``base`` (override, stored, or
+    default) and the ``default_base`` it declares, the relative ``path``, its resolved
+    ``full_path``, the ``methods``, and whether it is ``public`` (answers unauthenticated).
+    """
 
     item: str
     kind: str
@@ -49,10 +51,12 @@ class ResolvedRoute:
 
 @dataclass(frozen=True)
 class OwnedRoute:
-    """One ``/api`` route the live registry already owns: its parsed ``shape`` and
-    served ``methods``, the ``owner_label`` (``core`` or ``plugin:<ref>``), the
-    owning ``owner_ref`` (``None`` for core), and the registered ``path`` — the
-    identity a candidate route is collision-checked against."""
+    """One ``/api`` route the live registry already owns.
+
+    Its parsed ``shape`` and served ``methods``, the ``owner_label`` (``core`` or
+    ``plugin:<ref>``), the owning ``owner_ref`` (``None`` for core), and the registered
+    ``path`` — the identity a candidate route is collision-checked against.
+    """
 
     shape: Shape
     methods: frozenset[str]
@@ -62,14 +66,18 @@ class OwnedRoute:
 
 
 def _route_carrying_items(spec: PluginSpec) -> dict[str, PluginItem]:
-    """The spec's items that declare HTTP routes, keyed by item name (a router
-    always declares routes, a channel optionally does)."""
+    """The spec's items that declare HTTP routes, keyed by item name.
+
+    A router always declares routes, a channel optionally does.
+    """
     return {item.name: item for item in spec.provides if item.routes is not None}
 
 
 def _validate_base(base: str, item_name: str) -> None:
-    """Reject a mount base that is not the contract's relative base charset —
-    a leading/trailing slash or a segment outside :data:`ROUTE_BASE_SEGMENT_RE`."""
+    """Reject a mount base that is not the contract's relative base charset.
+
+    A leading/trailing slash or a segment outside :data:`ROUTE_BASE_SEGMENT_RE`.
+    """
     if base.startswith("/") or base.endswith("/"):
         raise RouteMountError(
             f"route_mounts base {base!r} for item {item_name!r} must be relative (no leading or trailing '/')"
@@ -104,7 +112,8 @@ def resolve_mounts(
     prior = prior or {}
     mounts: dict[str, str] = {}
     for name, item in items.items():
-        assert item.routes is not None  # guaranteed by _route_carrying_items
+        if item.routes is None:
+            raise AssertionError
         if name in overrides:
             mounts[name] = overrides[name]
         elif name in prior:
@@ -115,8 +124,10 @@ def resolve_mounts(
 
 
 def resolved_routes(spec: PluginSpec, mounts: Mapping[str, str]) -> list[ResolvedRoute]:
-    """Every declared route of the spec resolved against ``mounts`` (which must
-    cover every route-carrying item — see :func:`resolve_mounts`)."""
+    """Every declared route of the spec resolved against ``mounts``.
+
+    ``mounts`` must cover every route-carrying item — see :func:`resolve_mounts`.
+    """
     out: list[ResolvedRoute] = []
     for item in spec.provides:
         if item.routes is None:
@@ -140,8 +151,10 @@ def resolved_routes(spec: PluginSpec, mounts: Mapping[str, str]) -> list[Resolve
 
 
 def owned_routes_from_registry(registry: Any) -> list[OwnedRoute]:
-    """The live registry's committed ``/api`` shape generation as
-    :class:`OwnedRoute` rows — the ownership set a candidate is checked against."""
+    """The live registry's committed ``/api`` shape generation as :class:`OwnedRoute` rows.
+
+    The ownership set a candidate is checked against.
+    """
     result: list[OwnedRoute] = []
     for entry in registry.api_shape_index():
         owner = entry.meta.owner
@@ -169,11 +182,13 @@ def find_collisions(
     *,
     exclude_ref: str | None,
 ) -> list[dict[str, Any]]:
-    """Each candidate route that collides (shape overlap + method intersection)
-    with an already-owned route, as ``{item, full_path, methods, conflict_owner,
-    conflict_path}``. Routes owned by ``exclude_ref`` are skipped — an update
-    excludes the plugin's OWN currently-installed routes so a surviving route never
-    self-collides. At most one clash is reported per candidate (the first found)."""
+    """Each candidate route that collides with an already-owned route (shape overlap + method intersection).
+
+    Reported as ``{item, full_path, methods, conflict_owner, conflict_path}``. Routes
+    owned by ``exclude_ref`` are skipped — an update excludes the plugin's OWN
+    currently-installed routes so a surviving route never self-collides. At most one
+    clash is reported per candidate (the first found).
+    """
     out: list[dict[str, Any]] = []
     for route in routes:
         candidate = parse_shape(route.full_path)
@@ -199,8 +214,10 @@ def reserved_public_offenders(
     routes: Sequence[ResolvedRoute],
     reserved_prefixes: Sequence[str],
 ) -> list[ResolvedRoute]:
-    """The public routes that resolve under a reserved never-public prefix (a
-    resolved path equal to a prefix or nested beneath it)."""
+    """The public routes that resolve under a reserved never-public prefix.
+
+    A resolved path equal to a prefix or nested beneath it.
+    """
     offenders: list[ResolvedRoute] = []
     for route in routes:
         if not route.public:
@@ -225,8 +242,11 @@ def public_rows(routes: Sequence[ResolvedRoute]) -> list[dict[str, Any]]:
 
 
 def mounted_rows(routes: Sequence[ResolvedRoute]) -> list[dict[str, Any]]:
-    """The install/update receipt's route list: ``{item, full_path, methods,
-    public}`` for every mounted route (empty when the plugin declares none)."""
+    """The install/update receipt's route list.
+
+    ``{item, full_path, methods, public}`` for every mounted route (empty when the
+    plugin declares none).
+    """
     return [
         {"item": route.item, "full_path": route.full_path, "methods": list(route.methods), "public": route.public}
         for route in routes
@@ -234,8 +254,11 @@ def mounted_rows(routes: Sequence[ResolvedRoute]) -> list[dict[str, Any]]:
 
 
 def preview_items(routes: Sequence[ResolvedRoute]) -> list[dict[str, Any]]:
-    """The preview's per-item projection: one entry per route-carrying item with
-    its resolved ``base``, declared ``default_base``, and its routes."""
+    """The preview's per-item projection: one entry per route-carrying item.
+
+    Each entry carries the item's resolved ``base``, declared ``default_base``, and
+    its routes.
+    """
     items: list[dict[str, Any]] = []
     index: dict[str, dict[str, Any]] = {}
     for route in routes:
@@ -262,6 +285,8 @@ def preview_items(routes: Sequence[ResolvedRoute]) -> list[dict[str, Any]]:
 
 
 def row_key(row: Mapping[str, Any]) -> tuple[str, tuple[str, ...]]:
-    """The identity of an acceptance row for delta comparison across versions: its
-    resolved ``full_path`` and sorted ``methods``."""
+    """The identity of an acceptance row for delta comparison across versions.
+
+    Its resolved ``full_path`` and sorted ``methods``.
+    """
     return (row["full_path"], tuple(sorted(row["methods"])))

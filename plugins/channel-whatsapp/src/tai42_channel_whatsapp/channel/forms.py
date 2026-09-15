@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # pending on the same pair — while an ask's flow token stays its interaction id
 # verbatim and never enters this namespace. The prefix is wire-visible in every
 # delivered form's token; changing it orphans the forms already sitting in chats.
-_NOTIFY_FORM_TOKEN_PREFIX = "tai42-nf:"
+_NOTIFY_FORM_TOKEN_PREFIX = "tai42-nf:"  # noqa: S105 constant identifier, not a secret value
 
 # A Flow's name on Meta, the schema-hash suffix making it a deterministic label
 # for operator legibility — NOT a uniqueness key: Meta does not enforce flow-name
@@ -48,9 +48,11 @@ _FORM_ENTRY_SCREEN = "SCREEN_0"
 
 
 async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, Any]) -> str:
-    """The published flow id for this schema under ``waba_id``: the cached id, else
-    create + publish + store a new Flow. Every step is loud — a create, publish, or
-    store failure raises and never falls back to another answer format.
+    """The published flow id for this schema under ``waba_id``.
+
+    The cached id, else create + publish + store a new Flow. Every step is loud —
+    a create, publish, or store failure raises and never falls back to another
+    answer format.
 
     A publish or cache failure AFTER a successful create strands the draft on Meta,
     and the central retry re-enters create under the same name — so the draft is
@@ -74,9 +76,11 @@ async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, 
 
 
 def _form_pages_list(send: ChannelDelivery | ChannelNotification) -> list[dict[str, Any]] | None:
-    """The form's step layout as plain JSON — each page ``{"title", "fields"}`` — or
-    ``None`` when the send carried one page. Shared by the form ask and the ask-less form
-    notification, whose ``pages`` field is the identical shape."""
+    """The form's step layout as plain JSON, or ``None`` when the send carried one page.
+
+    Each page is ``{"title", "fields"}``. Shared by the form ask and the ask-less
+    form notification, whose ``pages`` field is the identical shape.
+    """
     if send.pages is None:
         return None
     return [{"title": page.title, "fields": list(page.fields)} for page in send.pages]
@@ -85,10 +89,12 @@ def _form_pages_list(send: ChannelDelivery | ChannelNotification) -> list[dict[s
 def _form_values_and_options(
     send: ChannelDelivery | ChannelNotification,
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
-    """The form's per-send ``values`` and ``options`` as plain JSON — each option
-    ``{"value", "label"?}`` (label omitted when absent). Empty when the send carried no
-    data. Shared by the form ask and the ask-less form notification, whose ``data`` field
-    is the identical shape."""
+    """The form's per-send ``values`` and ``options`` as plain JSON.
+
+    Each option is ``{"value", "label"?}`` (label omitted when absent). Empty when
+    the send carried no data. Shared by the form ask and the ask-less form
+    notification, whose ``data`` field is the identical shape.
+    """
     if send.data is None:
         return {}, {}
     options: dict[str, list[dict[str, Any]]] = {}
@@ -157,12 +163,12 @@ async def _deliver_form(
 async def _send_form_notification(
     settings: WhatsAppSettings, phone_number_id: str, target: str, notification: ChannelNotification
 ) -> list[str]:
-    """Send an ask-less form notification: any display media as the standard prelude
-    (the ``link`` items as one text line-block, each ``image`` as its own message),
-    then the Flow message LAST — the actionable prompt stays at the foot of the chat.
-    Returns every ``wamid`` in send order.
+    """Send an ask-less form notification, returning every ``wamid`` in send order.
 
-    The Flow is resolved exactly like a form ask's (one published Flow per answer
+    Any display media rides as the standard prelude (the ``link`` items as one
+    text line-block, each ``image`` as its own message), then the Flow message
+    LAST — the actionable prompt stays at the foot of the chat. The Flow is
+    resolved exactly like a form ask's (one published Flow per answer
     schema, cached under the WABA id), and the answer schema itself is cached beside
     the flow id — the submission's reply carries only the schema hash inside its
     flow token, so that sidecar is the ONLY place the inbound side can recover the

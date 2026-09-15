@@ -13,10 +13,11 @@ from starlette.requests import Request
 
 
 class ToolCallRequestError(Exception):
-    """A malformed tool-call request body — carries the loud ``(message,
-    status_code)`` the door returns unchanged. Shared by the synchronous
-    ``/api/run-tool`` door and the background ``/api/tool-runs`` submit door so
-    both reject a bad body identically."""
+    """A malformed tool-call request body — carries the loud ``(message, status_code)`` the door returns.
+
+    Shared by the synchronous ``/api/run-tool`` door and the background ``/api/tool-runs`` submit door so
+    both reject a bad body identically.
+    """
 
     def __init__(self, message: str, status_code: int) -> None:
         super().__init__(message)
@@ -32,7 +33,8 @@ async def read_tool_call(request: Request) -> tuple[str, dict[str, object]]:
     ``arguments`` defaults to ``{}`` when absent. Raises
     :class:`ToolCallRequestError` on invalid JSON, a non-object body, a
     missing/empty ``tool_name``, or a non-object ``arguments`` — the caller maps
-    it to the same loud 4xx both doors share."""
+    it to the same loud 4xx both doors share.
+    """
     try:
         body = await request.json()
     except ValueError as exc:

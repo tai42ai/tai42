@@ -12,9 +12,9 @@
  * countdown it is presentational, and what is SPOKEN changes only at coarse
  * thresholds so a keystroke cannot announce a keystroke.
  */
+import { ArrowUpIcon, Button, Textarea } from '@tai42/studio-sdk';
 import type { KeyboardEvent, ReactElement, Ref } from 'react';
 import { useLayoutEffect, useRef } from 'react';
-import { ArrowUpIcon, Button, Textarea } from '@tai42/studio-sdk';
 
 import { MAX_MESSAGE_CHARS } from '@/api';
 

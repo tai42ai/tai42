@@ -4,10 +4,11 @@
  * A load is aborted if the component unmounts or a reload supersedes it, and a
  * failure surfaces as a message rather than a blank list.
  */
-import { useCallback, useEffect, useState } from 'react';
 import { errorMessage } from '@tai42/studio-sdk';
-import { useUsersAdminApi } from '@/api';
+import { useCallback, useEffect, useState } from 'react';
+
 import type { AdminUser, RoleTemplate, UsersAdminApi } from '@/api';
+import { useUsersAdminApi } from '@/api';
 
 export interface UsersAdmin {
   readonly api: UsersAdminApi;

@@ -1,5 +1,4 @@
-"""Monitoring impl owned by the skeleton: the process-global registry and the
-no-op default backend.
+"""Monitoring impl owned by the skeleton: the process-global registry and the no-op default backend.
 
 The vendor-neutral monitoring *contract* (protocols, models, errors) lives in
 ``tai42_contract.monitoring`` — import interfaces from there. This package owns

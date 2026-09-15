@@ -68,13 +68,18 @@ from tai42_skeleton.settings_profiles.store import SettingsProfileStoreView, set
 
 
 class EnvUpdate(RootModel[dict[str, str]]):
-    """An env override map — a ``{name: value}`` object whose values are all
-    strings, merged into the stored env config before a hot reload."""
+    """An env override map — a ``{name: value}`` object whose values are all strings.
+
+    Merged into the stored env config before a hot reload.
+    """
 
 
 class ReloadConfigRequest(BaseModel):
-    """A local reload-config request — an optional ``targets`` list restricting the
-    fan-out of the soft-restart to named workers (all workers when omitted)."""
+    """A local reload-config request.
+
+    An optional ``targets`` list restricts the fan-out of the soft-restart to named workers (all workers
+    when omitted).
+    """
 
     targets: list[str] | None = None
 
@@ -110,6 +115,7 @@ async def read_env() -> dict:
 
 @operation(summary="Read the active config backend mode", tags=["config"], response_model=ConfigModeView)
 async def read_mode() -> dict:
+    """Return the active config backend mode."""
     return {"config_mode": config_mode()}
 
 
@@ -191,6 +197,7 @@ async def read_settings_schema() -> dict:
     response_model=ApplyResponse,
 )
 async def write_env(env: dict[str, str]) -> dict:
+    """Merge env overrides into the stored config and hot-reload this worker and the fleet."""
     # Merge the env overrides through the pipeline: ConfigService validates the
     # effective (resolved) config against the backend-needs-bus invariant, writes the
     # env, reloads locally, and broadcasts the reload to the whole fleet. An invalid
@@ -214,9 +221,10 @@ async def write_env(env: dict[str, str]) -> dict:
     response_model=FleetResult,
 )
 async def reload_config(targets: list[str] | None = None) -> Any:
-    """Soft-restart: refresh env from the config manager, reset every settings cache,
-    and re-initialize from the manifest — in-process, no pod restart. Applied on this
-    worker (when it is a target) and broadcast to the fleet (all workers, or only
+    """Soft-restart the process from its manifest, in-process with no pod restart.
+
+    Refreshes env from the config manager, resets every settings cache, and re-initializes from the
+    manifest. Applied on this worker (when it is a target) and broadcast to the fleet (all workers, or only
     ``targets``); the response embeds the per-worker fleet report.
 
     Heavy (a full re-init); meant for env/config saves, not tool edits. A convergence
@@ -273,25 +281,31 @@ def _profile_store() -> SettingsProfileStoreView:
 
 
 def _require_profile_store() -> None:
-    """Refuse a profile door cleanly (501) on a store-less deploy — the same
-    predicate the preset doors gate on — rather than open an absent Postgres and
-    fail with an opaque 500."""
+    """Refuse a profile door cleanly (501) on a store-less deploy.
+
+    The same predicate the preset doors gate on — rather than open an absent Postgres and fail with an
+    opaque 500.
+    """
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_PROFILE_STORE_NOUN), extra={"code": _PROFILE_STORE_CODE})
 
 
 def _reload_class_by_env_var() -> dict[str, str]:
-    """Map each registered field's ``env_var`` to its resolved ``reload_class`` — the
-    live-registry recycle classification shared with the apply pipeline
-    (:func:`~tai42_skeleton.config.boundary.reload_class_by_env_var`)."""
+    """Map each registered field's ``env_var`` to its resolved ``reload_class``.
+
+    The live-registry recycle classification shared with the apply pipeline
+    (:func:`~tai42_skeleton.config.boundary.reload_class_by_env_var`).
+    """
     return reload_class_by_env_var()
 
 
 @operation(summary="List settings profiles", tags=["config"], response_model=ProfileListResponse)
 async def list_profiles() -> list[dict[str, Any]]:
-    """One ``{name, description}`` row per active settings profile, EXCLUDING the
-    reserved ``@``-prefixed snapshots (e.g. ``@previous``). A store-less deploy holds
-    no profiles, so it serves an empty list rather than opening an absent store."""
+    """One ``{name, description}`` row per active settings profile, excluding reserved ``@``-prefixed snapshots.
+
+    Reserved snapshots include e.g. ``@previous``. A store-less deploy holds no profiles, so it serves an
+    empty list rather than opening an absent store.
+    """
     if not component_store_configured(SKELETON_COMPONENT):
         return []
     store = _profile_store()
@@ -315,9 +329,11 @@ async def list_profiles() -> list[dict[str, Any]]:
     response_model=SettingsProfileBody,
 )
 async def get_profile(name: str) -> dict[str, Any]:
-    """The profile's active body — ``{description, env, secret_keys}`` with REAL env
-    values (this authed ``secret``-fenced door round-trips values through the editor;
-    masking is display-side only, never on the wire). 404 for an absent name."""
+    """The profile's active body — ``{description, env, secret_keys}`` with REAL env values.
+
+    This authed ``secret``-fenced door round-trips values through the editor; masking is display-side only,
+    never on the wire. 404 for an absent name.
+    """
     _require_profile_store()
     try:
         body = await _profile_store().get_active_body(name)
@@ -334,12 +350,13 @@ async def get_profile(name: str) -> dict[str, Any]:
     response_model=ProfileWriteResult,
 )
 async def put_profile(name: str, description: str, env: dict[str, str], secret_keys: list[str]) -> dict[str, Any]:
-    """Create the profile, or append a new version when it exists (whole-body
-    replace). Returns ``{ok: true, version}`` — NEVER the stored body, so a secret
-    never re-emits on the write path. A reserved ``@``-prefixed name is a loud 400.
-    The profile's DECLARED env is run through the shared boundary validator
-    (``ConfigService._validate_replace``): a payload carrying an X-band key or leaving
-    a manifest ``!ENV`` marker dangling is refused at save time, naming the key."""
+    """Create the profile, or append a new version when it exists (whole-body replace).
+
+    Returns ``{ok: true, version}`` — NEVER the stored body, so a secret never re-emits on the write path.
+    A reserved ``@``-prefixed name is a loud 400. The profile's DECLARED env is run through the shared
+    boundary validator (``ConfigService._validate_replace``): a payload carrying an X-band key or leaving
+    a manifest ``!ENV`` marker dangling is refused at save time, naming the key.
+    """
     if name.startswith(_RESERVED_PREFIX):
         raise BadRequestError(
             f"settings profile name {name!r} is reserved: names starting with {_RESERVED_PREFIX!r} are not allowed"
@@ -360,13 +377,14 @@ async def put_profile(name: str, description: str, env: dict[str, str], secret_k
     except SettingsProfileNotFoundError:
         try:
             created = await store.create_profile(name, body)
-            return {"ok": True, "version": created.active_version}
         except SettingsProfileExistsError:
             # A concurrent PUT created the profile between the existence probe and this
             # create (the store's active-name unique index rejects the second create).
             # Converge idempotently: fall through to append a version to the now-existing
             # profile rather than surfacing an opaque 500.
             pass
+        else:
+            return {"ok": True, "version": created.active_version}
     version = await store.save_version(name, body)
     return {"ok": True, "version": version.version}
 
@@ -378,8 +396,10 @@ async def put_profile(name: str, description: str, env: dict[str, str], secret_k
     response_model=OkResult,
 )
 async def delete_profile(name: str) -> dict[str, Any]:
-    """Soft-delete the profile, keeping its version history (audit). 404 for an
-    absent name."""
+    """Soft-delete the profile, keeping its version history (audit).
+
+    404 for an absent name.
+    """
     _require_profile_store()
     try:
         await _profile_store().soft_delete(name)
@@ -395,13 +415,13 @@ async def delete_profile(name: str) -> dict[str, Any]:
     response_model=ProfileDiff,
 )
 async def diff_profile(name: str) -> dict[str, Any]:
-    """The saved profile's env vs the CURRENT stored env, with REAL values (the UI
-    masks) — a preview, not a report. ``added`` / ``removed`` are key names, ``changed``
-    is ``[{key, old, new}]``. ``recycle_keys`` are the diff keys whose registry
-    ``reload_class`` is ``recycle``; ``refused_keys`` are the diff keys the recycle
-    policy refuses upfront on this deployment shape
-    (``recycle_policy.capability_report().refused_keys``), named. 404 for an absent
-    name."""
+    """The saved profile's env vs the CURRENT stored env, with REAL values (the UI masks) — a preview, not a report.
+
+    ``added`` / ``removed`` are key names, ``changed`` is ``[{key, old, new}]``. ``recycle_keys`` are the
+    diff keys whose registry ``reload_class`` is ``recycle``; ``refused_keys`` are the diff keys the
+    recycle policy refuses upfront on this deployment shape
+    (``recycle_policy.capability_report().refused_keys``), named. 404 for an absent name.
+    """
     _require_profile_store()
     try:
         body = await _profile_store().get_active_body(name)
@@ -437,9 +457,10 @@ async def diff_profile(name: str) -> dict[str, Any]:
     response_model=ProfileVersionListResponse,
 )
 async def list_profile_versions(name: str) -> list[dict[str, Any]]:
-    """The profile's version history as a bare array of
-    ``{version, tags, created_at, is_current}`` rows — NO body. 404 for an absent
-    name."""
+    """The profile's version history as a bare array of ``{version, tags, created_at, is_current}`` rows — NO body.
+
+    404 for an absent name.
+    """
     _require_profile_store()
     try:
         versions = await _profile_store().list_versions(name)
@@ -457,9 +478,11 @@ async def list_profile_versions(name: str) -> list[dict[str, Any]]:
     response_model=ProfileVersionView,
 )
 async def get_profile_version(name: str, version: str) -> dict[str, Any]:
-    """One version row extended with its full ``body`` (``{description, env,
-    secret_keys}``, REAL values — this door is ``secret``-fenced). A non-integer
-    segment is a 400, an unknown version a 404."""
+    """One version row extended with its full ``body`` (REAL values — this door is ``secret``-fenced).
+
+    The body is ``{description, env, secret_keys}``. A non-integer segment is a 400, an unknown version
+    a 404.
+    """
     _require_profile_store()
     try:
         version_num = int(version)
@@ -486,10 +509,11 @@ async def get_profile_version(name: str, version: str) -> dict[str, Any]:
     response_model=ProfileWriteResult,
 )
 async def rollback_profile(name: str, version: int) -> dict[str, Any]:
-    """Re-point the active version to ``version`` (no data copy), making it the
-    current body. Returns ``{ok: true, version}``. 404 for an absent name or version.
-    A store-only re-point — the live process is realigned by a later apply, not by
-    this door."""
+    """Re-point the active version to ``version`` (no data copy), making it the current body.
+
+    Returns ``{ok: true, version}``. 404 for an absent name or version. A store-only re-point — the live
+    process is realigned by a later apply, not by this door.
+    """
     _require_profile_store()
     try:
         record = await _profile_store().rollback(name, version)
@@ -506,7 +530,8 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
     (:func:`~tai42_skeleton.settings.env_secret_marks.effective_secret_keys`: stored marks
     UNIONED with every live ``connectors[*].client_secret_env``) so a rollback re-applies
     with the same masking, including a connector secret with no operator mark. Never carries
-    env VALUES onto any report — this is a store write, not a response."""
+    env VALUES onto any report — this is a store write, not a response.
+    """
     store = _profile_store()
     body = SettingsProfileBody(
         description="Auto-saved snapshot of the stored env before the last settings-profile apply.",
@@ -531,10 +556,11 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
     response_model=ProfileApplyResponse,
 )
 async def apply_profile(name: str) -> OperationResponse:
-    """Apply the profile's active env as the WHOLE stored env band (a key the profile
-    omits is deleted, save the carried deployment X band), build+swap a fresh serving
-    epoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet
-    for recycle-class diffs. NO request body.
+    """Apply the profile's active env as the WHOLE stored env band and reload the fleet.
+
+    A key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving
+    epoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class
+    diffs. NO request body.
 
     The response is the dedicated ``profileApplyResponse``
     ``{hot, recycle:[{name, kind, status, generation_before}], fresh:[{name, kind,
@@ -547,7 +573,8 @@ async def apply_profile(name: str) -> OperationResponse:
     the key, before anything is snapshotted, built, or persisted. When the diff carries
     serve-affecting recycle keys the applier's OWN recycle is armed as a post-response
     graceful self-exit (a Starlette ``BackgroundTask``) — its supervisor respawns it on
-    the new env. 404 for an absent name."""
+    the new env. 404 for an absent name.
+    """
     _require_profile_store()
     try:
         body = await _profile_store().get_active_body(name)

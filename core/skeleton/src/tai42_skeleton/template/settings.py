@@ -25,6 +25,8 @@ class FileLoadingSettings(TaiBaseSettings):
 
 
 class TemplateCacheSettings(TaiBaseSettings):
+    """Config for the rendered-template cache: its TTL and max size."""
+
     model_config = SettingsConfigDict(
         env_prefix="TEMPLATE_CACHE_",
     )
@@ -35,6 +37,7 @@ class TemplateCacheSettings(TaiBaseSettings):
     @field_validator("ttl", "max_size", mode="before")
     @classmethod
     def parse_empty_or_none(cls, v: Any) -> Any:
+        """Read an empty or ``none``/``null``/``undefined`` string as ``None`` (cache disabled)."""
         if v == "":
             return None
 
@@ -46,9 +49,11 @@ class TemplateCacheSettings(TaiBaseSettings):
 
 @settings_cache
 def template_cache_settings() -> TemplateCacheSettings:
+    """The cached :class:`TemplateCacheSettings` for this process."""
     return TemplateCacheSettings()
 
 
 @settings_cache
 def file_loading_settings() -> FileLoadingSettings:
+    """The cached :class:`FileLoadingSettings` for this process."""
     return FileLoadingSettings()

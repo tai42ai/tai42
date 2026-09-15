@@ -1,6 +1,7 @@
-"""Sandbox contract: the neutral session models, the resolved
-:class:`SandboxPolicy`, the error family, and the :class:`Sandbox` /
-:class:`SandboxSession` / :class:`SandboxExecHandle` ABCs.
+"""Sandbox contract.
+
+Exposes the neutral session models, the resolved :class:`SandboxPolicy`, the error family, and
+the :class:`Sandbox` / :class:`SandboxSession` / :class:`SandboxExecHandle` ABCs.
 
 WHAT THE CONTRACT CARRIES: the shape of a session request/result, the security
 policy the kit enforces, the failure family, and the provider face — no logic.

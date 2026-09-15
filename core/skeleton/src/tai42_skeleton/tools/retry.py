@@ -1,5 +1,4 @@
-"""The tool-level retry seam: the declared-policy registry + the attempt loop
-``run_tool``'s dispatch runs a policy-armed invocation through.
+"""The tool-level retry seam: the declared-policy registry and the attempt loop the dispatch runs through.
 
 THE SEAM
 --------
@@ -80,40 +79,48 @@ _MAX_RETRY_AFTER_SECONDS = 300.0
 
 
 class ToolRetryRegistry:
-    """The process-wide per-tool retry-policy registry — the body behind a base
-    tool's ``retry`` declaration on ``@app.tools.tool``.
+    """The process-wide per-tool retry-policy registry.
 
+    The body behind a base tool's ``retry`` declaration on ``@app.tools.tool``.
     Reset on every ``start()`` (like the tool-references registry) so a reload
     re-imports the tool modules and re-registers cleanly; a duplicate name within
     one load raises loudly (a silent overwrite could swap a tool's declared
-    idempotency claim out from under it)."""
+    idempotency claim out from under it).
+    """
 
     def __init__(self) -> None:
+        """Create an empty registry."""
         self._policies: dict[str, ToolRetryPolicy] = {}
 
     def register(self, name: str, policy: ToolRetryPolicy) -> None:
+        """Register ``policy`` for tool ``name``; a duplicate name raises loudly."""
         if name in self._policies:
             raise ValueError(f"retry policy for tool {name!r} is already registered")
         self._policies[name] = policy
 
     def get(self, name: str) -> ToolRetryPolicy | None:
+        """The retry policy registered for ``name``, or ``None`` when none is."""
         return self._policies.get(name)
 
     def reset(self) -> None:
+        """Clear every registered policy (called on each ``start()``)."""
         self._policies.clear()
 
 
 def _explicit_retry_verdict(exc: BaseException) -> bool | None:
-    """The error's OWN boolean ``retryable`` verdict (the ``ChannelDeliveryError``
-    shape), or ``None`` when it carries none. Only a real bool counts — any other
-    value on the attribute is no verdict, never a truthy accident."""
+    """The error's OWN boolean ``retryable`` verdict (the ``ChannelDeliveryError`` shape), or ``None``.
+
+    Only a real bool counts — any other value on the attribute is no verdict, never a truthy accident.
+    """
     verdict = getattr(exc, "retryable", None)
     return verdict if isinstance(verdict, bool) else None
 
 
 def _declared_retry_after(exc: BaseException) -> float | None:
-    """The seconds the server asked the caller to wait, when the error carries a
-    positive numeric ``retry_after`` — else ``None``."""
+    """The seconds the server asked the caller to wait.
+
+    When the error carries a positive numeric ``retry_after`` — else ``None``.
+    """
     value = getattr(exc, "retry_after", None)
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
         return float(value)
@@ -121,10 +128,12 @@ def _declared_retry_after(exc: BaseException) -> float | None:
 
 
 def _kind_allowlist(policy: ToolRetryPolicy) -> frozenset[ErrorKind]:
-    """The error kinds ``policy`` admits for kind-based retry: the contract's
-    default transient set for ``retryable=True``, nothing for ``retryable=False``,
+    """The error kinds ``policy`` admits for kind-based retry.
+
+    The contract's default transient set for ``retryable=True``, nothing for ``retryable=False``,
     the declared tuple otherwise (the model already rejected the never-retryable
-    kinds at declaration; subtracting them keeps the door honest regardless)."""
+    kinds at declaration; subtracting them keeps the door honest regardless).
+    """
     if policy.retryable is True:
         return DEFAULT_RETRYABLE_KINDS
     if policy.retryable is False:
@@ -133,15 +142,17 @@ def _kind_allowlist(policy: ToolRetryPolicy) -> frozenset[ErrorKind]:
 
 
 def _retry_delay(exc: Exception, policy: ToolRetryPolicy, attempt: int) -> float | None:
-    """Seconds to wait before re-firing a failed attempt, or ``None`` when it must
-    not be retried: a non-idempotent policy (the double-send belt behind the
+    """Seconds to wait before re-firing a failed attempt, or ``None`` when it must not be retried.
+
+    Not retried on a non-idempotent policy (the double-send belt behind the
     model's structural guard), a spent attempt budget, or an error the
     classification door refuses — an explicit ``retryable=False`` verdict, or no
     verdict and a kind outside the policy's allowlist. The wait is the capped
     exponential backoff, widened to the error's ``retry_after`` when the server
     asked for longer (widen-only: a shorter ask never narrows the backoff), the
     honored ``retry_after`` itself bounded by :data:`_MAX_RETRY_AFTER_SECONDS` so
-    a downstream's runaway ask can't park a detached dispatch."""
+    a downstream's runaway ask can't park a detached dispatch.
+    """
     if not policy.idempotent:
         return None
     if attempt >= policy.max_attempts:
@@ -160,10 +171,12 @@ def _retry_delay(exc: Exception, policy: ToolRetryPolicy, attempt: int) -> float
 
 
 def _attempt_error_metadata(exc: BaseException) -> dict[str, Any]:
-    """The structured failure detail stamped on a failed attempt's span: the
-    exception type, its resolved ``error.kind``, and — when the error vouches its
+    """The structured failure detail stamped on a failed attempt's span.
+
+    The exception type, its resolved ``error.kind``, and — when the error vouches its
     own verdict — the ``retryable``/``retry_after`` pair (the ``send_span``
-    metadata shape, attribute-generic)."""
+    metadata shape, attribute-generic).
+    """
     metadata: dict[str, Any] = {"error.type": type(exc).__name__, "error.kind": error_kind(exc).value}
     verdict = _explicit_retry_verdict(exc)
     if verdict is not None:
@@ -176,11 +189,13 @@ def _attempt_error_metadata(exc: BaseException) -> dict[str, Any]:
 
 @contextlib.contextmanager
 def _attempt_span(tool_name: str, attempt: int, max_attempts: int) -> Iterator[None]:
-    """Wrap ONE attempt of a policy-armed dispatch in a ``tool-attempt:<name>``
-    span, or run it unwrapped when no trace is ambient (a rootless attempt span
+    """Wrap ONE attempt of a policy-armed dispatch in a ``tool-attempt:<name>`` span.
+
+    Runs it unwrapped when no trace is ambient (a rootless attempt span
     would attach to no run — the ``send_span`` conditional-emit idiom). A raised
     exception marks the span ERROR with the typed detail and propagates
-    unchanged; the retry decision is never made here."""
+    unchanged; the retry decision is never made here.
+    """
     from tai42_skeleton.monitoring import get_monitoring
 
     writer = get_monitoring().writer
@@ -202,15 +217,17 @@ def _attempt_span(tool_name: str, attempt: int, max_attempts: int) -> Iterator[N
 async def dispatch_with_retry(
     tool_name: str, policy: ToolRetryPolicy | None, attempt_fn: Callable[[], Awaitable[Any]]
 ) -> Any:
-    """Run one logical tool dispatch under ``policy``: fire ``attempt_fn`` up to
-    ``max_attempts`` times, sleeping the classified backoff between attempts and
-    propagating the LAST error (honest — never an earlier one replayed) when the
+    """Run one logical tool dispatch under ``policy``.
+
+    Fires ``attempt_fn`` up to ``max_attempts`` times, sleeping the classified backoff between
+    attempts and propagating the LAST error (honest — never an earlier one replayed) when the
     budget is spent or the failure is not admitted for retry.
 
     With ``policy=None`` this IS ``await attempt_fn()`` — one attempt, no span,
     no sleep, nothing added: the no-policy byte-identical guarantee. Only an
     ``Exception`` enters the retry decision; ``asyncio.CancelledError`` and any
-    other ``BaseException`` propagate immediately."""
+    other ``BaseException`` propagate immediately.
+    """
     if policy is None:
         return await attempt_fn()
     attempt = 0

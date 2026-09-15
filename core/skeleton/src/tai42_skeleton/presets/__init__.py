@@ -1,6 +1,6 @@
-"""Presets: the concrete typed store view over the generic versioned-document
-store, plus the bind kernel every preset builds its live tool through.
+"""Presets: the concrete typed store view over the generic versioned-document store, plus the bind kernel.
 
+The bind kernel is the seam every preset builds its live tool through.
 A *preset* is a base tool with a partial set of keyword arguments baked in,
 exposed as a new named tool. :func:`preset_bind` is the kernel that builds the
 live tool (a hidden/fixed transform of the base tool); :class:`PresetStoreView`

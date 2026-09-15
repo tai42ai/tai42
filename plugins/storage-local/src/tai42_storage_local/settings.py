@@ -7,6 +7,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class LocalStorageSettings(TaiBaseSettings):
+    """``STORAGE_LOCAL_*`` settings for the local-filesystem storage backend."""
+
     model_config = SettingsConfigDict(
         env_prefix="STORAGE_LOCAL_",
     )
@@ -17,4 +19,5 @@ class LocalStorageSettings(TaiBaseSettings):
 
 @settings_cache
 def storage_settings() -> LocalStorageSettings:
+    """The cached local-storage settings, re-read on a settings reload."""
     return LocalStorageSettings()

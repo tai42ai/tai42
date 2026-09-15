@@ -1,5 +1,4 @@
-"""The concrete :class:`~tai42_contract.tool_meta.ToolMetaStore` — two plain
-Postgres tables behind the folder + overlay contract.
+"""The concrete :class:`~tai42_contract.tool_meta.ToolMetaStore` — two plain Postgres tables behind the contract.
 
 ``tool_folders`` is a tree of real folder entities; ``tool_meta`` is a per-tool
 overlay row keyed by tool name. Postgres is reached through the app-pooled
@@ -70,6 +69,10 @@ class PostgresToolMetaStore(ToolMetaStore):
     # -- folders --------------------------------------------------------------
 
     async def create_folder(self, name: str, parent_id: str | None = None) -> FolderRecord:
+        """Create a folder under ``parent_id`` (root when ``None``).
+
+        A duplicate sibling name raises ``FolderNameConflictError``.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -88,6 +91,7 @@ class PostgresToolMetaStore(ToolMetaStore):
             return _folder_record(_require_row(await cur.fetchone()))
 
     async def rename_folder(self, folder_id: str, name: str) -> FolderRecord:
+        """Rename ``folder_id`` to ``name``; a duplicate sibling name raises ``FolderNameConflictError``."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -105,6 +109,10 @@ class PostgresToolMetaStore(ToolMetaStore):
             return _folder_record(_require_row(await cur.fetchone()))
 
     async def move_folder(self, folder_id: str, parent_id: str | None) -> FolderRecord:
+        """Move ``folder_id`` under ``parent_id`` (root when ``None``).
+
+        A cycle raises ``FolderCycleError``; a destination name clash raises ``FolderNameConflictError``.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -130,6 +138,7 @@ class PostgresToolMetaStore(ToolMetaStore):
             return _folder_record(_require_row(await cur.fetchone()))
 
     async def delete_folder(self, folder_id: str) -> None:
+        """Delete an empty ``folder_id``; raises ``FolderNotEmptyError`` when it holds subfolders or overlay rows."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -146,6 +155,7 @@ class PostgresToolMetaStore(ToolMetaStore):
             await cur.execute("DELETE FROM tool_folders WHERE id = %s", (folder_id,))
 
     async def list_folders(self) -> list[FolderRecord]:
+        """Every folder, ordered by name."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -166,6 +176,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         hidden: bool | None,
         badges: list[str] | None = None,
     ) -> ToolMetaRecord:
+        """Insert or replace the overlay row for ``tool_name``, preserving ``created_at`` on conflict."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -189,6 +200,7 @@ class PostgresToolMetaStore(ToolMetaStore):
             return _meta_record(_require_row(await cur.fetchone()))
 
     async def merge_meta(self, tool_name: str, *, patch: dict[str, Any]) -> ToolMetaRecord:
+        """Apply ``patch`` to ``tool_name``'s overlay row atomically, materializing the row when absent."""
         # Atomic read-modify-write: the whole merge-patch runs in ONE transaction so
         # two concurrent patches to the same tool serialize on a row lock instead of
         # racing on separate connections (a get-then-upsert split loses an update).
@@ -249,6 +261,7 @@ class PostgresToolMetaStore(ToolMetaStore):
             return _meta_record(_require_row(await cur.fetchone()))
 
     async def get_meta(self, tool_name: str) -> ToolMetaRecord | None:
+        """The overlay row for ``tool_name``, or ``None`` when it owns none."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -262,6 +275,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         return None if row is None else _meta_record(row)
 
     async def list_meta(self) -> list[ToolMetaRecord]:
+        """Every overlay row, ordered by tool name."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -273,6 +287,7 @@ class PostgresToolMetaStore(ToolMetaStore):
             return [_meta_record(row) for row in await cur.fetchall()]
 
     async def delete_meta(self, tool_name: str) -> None:
+        """Delete ``tool_name``'s overlay row; a no-op when it owns none."""
         # NO-OP when no row exists (most tools never own one, and this runs on every
         # preset delete) — a missing row is not an error here.
         async with (
@@ -284,6 +299,7 @@ class PostgresToolMetaStore(ToolMetaStore):
             await cur.execute("DELETE FROM tool_meta WHERE tool_name = %s", (tool_name,))
 
     async def rename_tool(self, old_name: str, new_name: str) -> None:
+        """Re-key ``old_name``'s overlay row to ``new_name``, clearing any pre-existing destination row first."""
         # Clean slate: delete any pre-existing destination row FIRST (a freed name must
         # never inherit a ghost's overlay), then re-key — both in one transaction so
         # the re-key can never hit a PK violation. When ``old_name`` owns no row the
@@ -301,10 +317,11 @@ class PostgresToolMetaStore(ToolMetaStore):
 
     @staticmethod
     async def _require_folder(cur: Any, folder_id: str) -> tuple[str, str | None]:
-        """Assert ``folder_id`` exists, returning its ``(name, parent_id)``; raise
-        :class:`FolderNotFoundError` otherwise. The name is returned so a caller can
-        build a :class:`FolderNameConflictError` from values in hand, without a query
-        in an already-aborted transaction."""
+        """Assert ``folder_id`` exists, returning its ``(name, parent_id)``, else raise :class:`FolderNotFoundError`.
+
+        The name is returned so a caller can build a :class:`FolderNameConflictError` from values in hand, without a
+        query in an already-aborted transaction.
+        """
         await cur.execute("SELECT name, parent_id FROM tool_folders WHERE id = %s", (folder_id,))
         row = await cur.fetchone()
         if row is None:
@@ -313,8 +330,10 @@ class PostgresToolMetaStore(ToolMetaStore):
 
     @staticmethod
     async def _reject_cycle(cur: Any, folder_id: str, new_parent_id: str) -> None:
-        """Refuse a move that would make ``folder_id`` its own ancestor. Walks the
-        parent chain up from ``new_parent_id``: reaching ``folder_id`` is a cycle."""
+        """Refuse a move that would make ``folder_id`` its own ancestor.
+
+        Walks the parent chain up from ``new_parent_id``: reaching ``folder_id`` is a cycle.
+        """
         await cur.execute("SELECT id, parent_id FROM tool_folders")
         parents = {str(fid): (None if pid is None else str(pid)) for fid, pid in await cur.fetchall()}
         cursor: str | None = new_parent_id
@@ -325,8 +344,10 @@ class PostgresToolMetaStore(ToolMetaStore):
 
 
 def _require_row(row: tuple[Any, ...] | None) -> tuple[Any, ...]:
-    """Return ``row`` or fail loudly — a ``RETURNING`` read the store issued must
-    always produce a row; a ``None`` is a broken invariant, never a normal path."""
+    """Return ``row`` or fail loudly.
+
+    A ``RETURNING`` read the store issued must always produce a row; a ``None`` is a broken invariant, never normal.
+    """
     if row is None:
         raise RuntimeError("expected a row from a RETURNING statement, got none")
     return row

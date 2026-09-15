@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def managed_title(provider_id: str, sub_service: str, alias: str) -> str:
+    """The manifest title for a managed entry: ``{provider_id}_{sub_service}_{alias}``."""
     return f"{provider_id}_{sub_service}_{alias}"
 
 
@@ -79,11 +80,11 @@ def add_managed_entries(
     alias: str,
     connection_id: str,
 ) -> list[str]:
-    """Append one managed entry per sub-service to the preserved manifest
-    ``document`` in place; return the titles added.
+    """Append one managed entry per sub-service to the preserved manifest ``document`` in place.
 
-    Idempotent: an entry already owned by this connection is left in place. A
-    title owned by a different connection raises (collision is operator-visible).
+    Returns the titles added. Idempotent: an entry already owned by this connection is
+    left in place. A title owned by a different connection raises (collision is
+    operator-visible).
     """
     entries: list[Any] = list(document.get("mcp") or [])
     existing_by_title = {entry["title"]: entry for entry in entries}
@@ -123,11 +124,11 @@ def remove_managed_entries(
     connection_id: str,
     sub_services: Iterable[str] | None = None,
 ) -> list[str]:
-    """Remove managed entries owned by ``connection_id`` from the preserved
-    manifest ``document`` in place; return the titles removed.
+    """Remove managed entries owned by ``connection_id`` from the preserved manifest ``document`` in place.
 
-    ``sub_services is None`` removes all of the connection's entries (Disconnect);
-    otherwise only those whose ``sub_service`` is in the set (toggle-off).
+    Returns the titles removed. ``sub_services is None`` removes all of the connection's
+    entries (Disconnect); otherwise only those whose ``sub_service`` is in the set
+    (toggle-off).
     """
     sub_set = set(sub_services) if sub_services is not None else None
     keep: list[Any] = []

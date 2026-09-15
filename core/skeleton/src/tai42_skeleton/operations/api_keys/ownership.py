@@ -14,8 +14,10 @@ from tai42_skeleton.operations._authority import Caller, owner_of
 
 
 def _check_scope_subset(caller: Caller, scopes: list[str]) -> None:
-    """A non-admin caller may only grant scopes ⊆ its OWN current scopes (a ``"*"``
-    caller may grant anything). Raises ``BadRequestError`` naming the offending scopes."""
+    """A non-admin caller may only grant scopes ⊆ its OWN current scopes (a ``"*"`` caller may grant anything).
+
+    Raises ``BadRequestError`` naming the offending scopes.
+    """
     if "*" in caller.policy.scopes:
         return
     excess = sorted(set(scopes) - set(caller.policy.scopes))
@@ -31,7 +33,8 @@ async def _authorize_key_edit(caller: Caller, user_id: str, updates: dict[str, A
     ``NotFoundError`` when the key is absent, ``ForbiddenError`` when the caller does not
     own it or the edit would change the immutable owner claim, and ``BadRequestError``
     when a non-admin's replacement scopes exceed its own. A no-op for an admin edit that
-    does not touch ``policy_data``."""
+    does not touch ``policy_data``.
+    """
     if not ((not caller.is_admin) or ("policy_data" in updates)):
         return
     stored_body = await management.get_policy_body(user_id)
@@ -54,8 +57,7 @@ async def _authorize_key_edit(caller: Caller, user_id: str, updates: dict[str, A
 
 
 async def _record_policy_version(user_id: str, body: dict[str, Any]) -> None:
-    """Record ``body`` — the exact policy the mutation just committed to the enforced
-    store — as durable version history.
+    """Record ``body`` — the exact policy the mutation just committed to the enforced store — as version history.
 
     The mutation returns the body it wrote inside its own transaction, so this
     appends that precise body to the ``ac_policy`` document (create-or-append)
@@ -65,5 +67,6 @@ async def _record_policy_version(user_id: str, body: dict[str, Any]) -> None:
     record), so history is not polluted. Any store error propagates loudly — the
     enforced store then leads the history (the safe direction: enforcement is already
     current, since the bump ran first), and the operator is told the audit write
-    failed rather than it being swallowed."""
+    failed rather than it being swallowed.
+    """
     await _pkg.ac_policy_store().write(user_id, body)

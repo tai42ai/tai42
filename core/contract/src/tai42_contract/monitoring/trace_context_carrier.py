@@ -49,23 +49,30 @@ def get_ambient_trace_context() -> TraceContext | None:
 
 
 def set_ambient_trace_context(ctx: TraceContext | None) -> Token[TraceContext | None]:
-    """Bind ``ctx`` as the current run's ambient trace context; pass the returned token to
-    :func:`reset_ambient_trace_context` to restore the previous value."""
+    """Bind ``ctx`` as the current run's ambient trace context.
+
+    Pass the returned token to :func:`reset_ambient_trace_context` to restore the previous
+    value.
+    """
     return _current_trace_context.set(ctx)
 
 
 def reset_ambient_trace_context(token: Token[TraceContext | None]) -> None:
-    """Restore the ambient trace context to the value captured in ``token`` by the matching
-    :func:`set_ambient_trace_context` call."""
+    """Restore the ambient trace context to the value captured in ``token``.
+
+    The token comes from the matching :func:`set_ambient_trace_context` call.
+    """
     _current_trace_context.reset(token)
 
 
 @contextmanager
 def ambient_trace_context(ctx: TraceContext) -> Generator[None]:
-    """Deposit ``ctx`` as the ambient trace context for the wrapped block, resetting it in a
-    ``finally``. A task created inside the block inherits it on a copy. Absent this wrap the
-    deposit stays ``None`` and a nested run mints its own fresh trace — byte-identical to the
-    pre-deposit behavior."""
+    """Deposit ``ctx`` as the ambient trace context for the wrapped block, resetting it in a ``finally``.
+
+    A task created inside the block inherits it on a copy. Absent this wrap the deposit stays
+    ``None`` and a nested run mints its own fresh trace — byte-identical to the pre-deposit
+    behavior.
+    """
     token = set_ambient_trace_context(ctx)
     try:
         yield

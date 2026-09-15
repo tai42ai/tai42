@@ -15,7 +15,7 @@ import logging
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
-from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
+from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 from tai42_kit.settings import require_secret
 
 from tai42_channel_whatsapp.settings import whatsapp_settings
@@ -33,9 +33,11 @@ class SignatureRejectedError(Exception):
 
 
 def _validate_signature(app_secret: str, body: bytes, provided: str | None) -> None:
-    """Validate ``X-Hub-Signature-256`` over the raw body or raise
-    ``SignatureRejectedError``. Header form ``sha256=<hex>``; compared
-    constant-time against the HMAC-SHA256 of the body under the app secret."""
+    """Validate ``X-Hub-Signature-256`` over the raw body or raise ``SignatureRejectedError``.
+
+    Header form ``sha256=<hex>``; compared constant-time against the HMAC-SHA256 of the body under the
+    app secret.
+    """
     if provided is None:
         raise SignatureRejectedError(f"missing {_SIGNATURE_HEADER} header")
     if not provided.startswith(_SIGNATURE_PREFIX):
@@ -53,20 +55,23 @@ def _validate_signature(app_secret: str, body: bytes, provided: str | None) -> N
 
 async def _authenticated_body(request: Request) -> bytes:
     """Bounded-read and signature-validate the POST body; return the RAW bytes.
-    Nothing in the body is trusted until the signature validates. Raises
-    ``ValueError`` (app secret unset → logged 500), ``PayloadTooLarge``
-    (→ 413), or ``SignatureRejectedError`` (→ 401)."""
+
+    Nothing in the body is trusted until the signature validates. Raises ``ValueError`` (app secret unset →
+    logged 500), ``RequestBodyTooLargeError`` (→ 413), or ``SignatureRejectedError`` (→ 401).
+    """
     app_secret = require_secret(whatsapp_settings().app_secret, "WhatsApp channel", "CHANNEL_WHATSAPP_APP_SECRET")
     raw = await read_bounded_body(request, _MAX_BODY_BYTES)
     _validate_signature(app_secret, raw, request.headers.get(_SIGNATURE_HEADER))
     return raw
 
 
-def _auth_error_response(exc: ValueError | PayloadTooLarge | SignatureRejectedError) -> Response:
-    """Map an ``_authenticated_body`` failure to its response: 413 oversize, 401
-    bad signature, 500 for an unset app secret (operator misconfig, never a 401
-    that reads like an ordinary bad signature)."""
-    if isinstance(exc, PayloadTooLarge):
+def _auth_error_response(exc: ValueError | RequestBodyTooLargeError | SignatureRejectedError) -> Response:
+    """Map an ``_authenticated_body`` failure to its response.
+
+    413 oversize, 401 bad signature, 500 for an unset app secret (operator misconfig, never a 401
+    that reads like an ordinary bad signature).
+    """
+    if isinstance(exc, RequestBodyTooLargeError):
         return PlainTextResponse("payload too large", status_code=413)
     if isinstance(exc, SignatureRejectedError):
         logger.warning("rejected whatsapp inbound: %s", exc)
@@ -76,16 +81,18 @@ def _auth_error_response(exc: ValueError | PayloadTooLarge | SignatureRejectedEr
 
 
 def _verify_handshake(request: Request) -> Response:
-    """Meta's GET subscription handshake: echo ``hub.challenge`` iff
-    ``hub.verify_token`` matches the configured token (constant-time), else 403.
-    An unset verify token is a loud misconfiguration (logged 500)."""
+    """Meta's GET subscription handshake: echo ``hub.challenge`` iff ``hub.verify_token`` matches, else 403.
+
+    The configured token is compared constant-time. An unset verify token is a loud misconfiguration
+    (logged 500).
+    """
     params = request.query_params
     if params.get("hub.mode") != "subscribe":
         return PlainTextResponse("unsupported hub.mode", status_code=403)
     try:
         expected = require_secret(whatsapp_settings().verify_token, "WhatsApp channel", "CHANNEL_WHATSAPP_VERIFY_TOKEN")
     except ValueError:
-        logger.error("whatsapp verify: CHANNEL_WHATSAPP_VERIFY_TOKEN is unset or empty; failing closed")
+        logger.exception("whatsapp verify: CHANNEL_WHATSAPP_VERIFY_TOKEN is unset or empty; failing closed")
         return JSONResponse({"error": "channel misconfigured"}, status_code=500)
     provided = params.get("hub.verify_token")
     # A non-ASCII token can never match the configured token and would raise a

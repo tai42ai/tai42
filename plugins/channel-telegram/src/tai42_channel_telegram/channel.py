@@ -170,10 +170,13 @@ def _media_send(chat_id: str, item: MediaItem) -> tuple[str, dict[str, Any]]:
 
 
 def _location_send(chat_id: str, location: LocationElement) -> tuple[str, dict[str, Any]]:
-    """The ``(method, payload)`` for a shared location: ``sendVenue`` when BOTH a name and
-    an address are present (Telegram's venue send requires a title AND an address), else
-    ``sendLocation`` for a bare pin (any lone name/address rides no native field and is
-    dropped — Telegram exposes no venue send without both)."""
+    """The ``(method, payload)`` for a shared location.
+
+    ``sendVenue`` when BOTH a name and an address are present (Telegram's venue send
+    requires a title AND an address), else ``sendLocation`` for a bare pin (any lone
+    name/address rides no native field and is dropped — Telegram exposes no venue send
+    without both).
+    """
     if location.name is not None and location.address is not None:
         return "sendVenue", {
             "chat_id": chat_id,
@@ -219,10 +222,12 @@ def _keyboard_from_records(records: list[StoredOption], link_buttons: list[dict[
 
 
 def _flat_options_keyboard(options: list[Option]) -> tuple[dict[str, Any], list[StoredOption]]:
-    """A native inline keyboard for a FLAT typed-option list, and the side records for its
-    callback buttons. Reply options render as callback buttons (each with a wire token and a
-    record carrying its author-set id/description); link options render as native url buttons
-    (no callback, no record)."""
+    """A native inline keyboard for a FLAT typed-option list, and the side records for its callback buttons.
+
+    Reply options render as callback buttons (each with a wire token and a record carrying
+    its author-set id/description); link options render as native url buttons (no callback,
+    no record).
+    """
     records: list[StoredOption] = []
     link_buttons: list[dict[str, Any]] = []
     used: set[str] = set()
@@ -243,7 +248,8 @@ def _sections_keyboard(sections: list[OptionSection]) -> tuple[dict[str, Any], l
 
     Telegram has no native sections, so the rows across every section render as callback
     buttons in section order (grouped by their source section); the section titles render as
-    text headers on the body (see :func:`_interactive_body`)."""
+    text headers on the body (see :func:`_interactive_body`).
+    """
     records: list[StoredOption] = []
     used: set[str] = set()
     for section in sections:
@@ -257,9 +263,11 @@ def _sections_keyboard(sections: list[OptionSection]) -> tuple[dict[str, Any], l
 
 
 def _text_options_keyboard(options: list[str]) -> tuple[dict[str, Any], list[StoredOption]]:
-    """A native inline keyboard for a select / suggested-reply ask (plain-string options),
-    and its side records. The wire token is the option's index (an ask carries no author-set
-    ids), and a tap submits the option's text through the correlation ladder."""
+    """A native inline keyboard for a select / suggested-reply ask (plain-string options), and its side records.
+
+    The wire token is the option's index (an ask carries no author-set ids), and a tap
+    submits the option's text through the correlation ladder.
+    """
     records = [StoredOption(callback_data=str(index), text=text) for index, text in enumerate(options)]
     return _keyboard_from_records(records, []), records
 
@@ -274,7 +282,8 @@ def _interactive_body(
     and — when a footer is present — a trailing muted italic line. A footer needs inline
     formatting, so the WHOLE body is HTML-escaped and sent with ``parse_mode=HTML`` ONLY when
     a footer is present; without a footer the body is plain text and no ``parse_mode`` is set,
-    leaving a plain interactive send byte-for-byte unchanged."""
+    leaving a plain interactive send byte-for-byte unchanged.
+    """
     lines: list[str] = []
     if message.strip():
         lines.append(message)
@@ -288,8 +297,9 @@ def _interactive_body(
 
 
 def _question_text(delivery: ChannelDelivery) -> str:
-    """Render the question for a plain-text chat: the question, any ``link`` media
-    as labelled lines, then the surfaced deadline.
+    """Render the question for a plain-text chat.
+
+    The question, any ``link`` media as labelled lines, then the surfaced deadline.
 
     Select / suggested-reply options are NOT enumerated here — they render as the
     inline keyboard (a clean native affordance), not numbered text.
@@ -304,8 +314,10 @@ def _question_text(delivery: ChannelDelivery) -> str:
 
 
 def _require_delivery[T](value: T | None, env_name: str) -> T:
-    """The configured value, or raise :class:`ChannelDeliveryError` naming the
-    missing env var (retyping :func:`require` for the deliver/notify path)."""
+    """The configured value, or raise :class:`ChannelDeliveryError` naming the missing env var.
+
+    Retypes :func:`require` for the deliver/notify path.
+    """
     try:
         return require(value, "the telegram channel", env_name)
     except ValueError as exc:
@@ -313,9 +325,10 @@ def _require_delivery[T](value: T | None, env_name: str) -> T:
 
 
 def _require_delivery_secret(value: SecretStr | None, env_name: str) -> str:
-    """The secret's plaintext, or raise :class:`ChannelDeliveryError` on
-    unset/EMPTY (fail CLOSED; retyping :func:`require_secret`, message names only
-    the env var)."""
+    """The secret's plaintext, or raise :class:`ChannelDeliveryError` on unset/EMPTY.
+
+    Fail CLOSED; retypes :func:`require_secret`, message names only the env var.
+    """
     try:
         return require_secret(value, "the telegram channel", env_name)
     except ValueError as exc:
@@ -323,8 +336,10 @@ def _require_delivery_secret(value: SecretStr | None, env_name: str) -> str:
 
 
 def _bot_identity(token: str) -> str:
-    """This bot's numeric id, or raise :class:`ChannelDeliveryError` on a
-    malformed token (retyping :func:`bot_numeric_id` for the send path)."""
+    """This bot's numeric id, or raise :class:`ChannelDeliveryError` on a malformed token.
+
+    Retypes :func:`bot_numeric_id` for the send path.
+    """
     try:
         return bot_numeric_id(token)
     except ValueError as exc:
@@ -437,6 +452,7 @@ class TelegramChannel:
     # refuses the matching send up front rather than the channel silently dropping it.
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
+        """Deliver an ask ticket over Telegram: the question with its options keyboard, or a form web_app button."""
         token = _require_delivery_secret(telegram_settings().bot_token, "CHANNEL_TELEGRAM_BOT_TOKEN")
         target = _resolve_target(delivery.recipient)
 
@@ -530,8 +546,9 @@ class TelegramChannel:
                 ) from exc
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
-        """Send a fire-and-forget message; raise ``ChannelDeliveryError`` on any
-        failure. Returns every ``message_id`` Telegram assigned, in send order.
+        """Send a fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.
+
+        Returns every ``message_id`` Telegram assigned, in send order.
 
         No reply is expected, so nothing touches the correlation store. The interactive
         surface (flat ``options`` or a sectioned list, with any ``header``/``footer``) is
@@ -589,17 +606,20 @@ class TelegramChannel:
 
     @staticmethod
     def _plain_body(notification: ChannelNotification) -> str:
-        """The text body of a NON-interactive notification: the message with any ``link``
-        media appended, or just the link lines for a media-only send (no leading blank line
-        from an empty message)."""
+        """The text body of a NON-interactive notification.
+
+        The message with any ``link`` media appended, or just the link lines for a
+        media-only send (no leading blank line from an empty message).
+        """
         link_lines = _link_lines(notification.media)
         if notification.message.strip():
             return "\n".join([notification.message, *link_lines])
         return "\n".join(link_lines)
 
     async def _send_interactive(self, token: str, target: str, notification: ChannelNotification) -> list[str]:
-        """Send one interactive notification (flat ``options`` or a sectioned list) and store
-        its option side record. Returns the ``message_id``(s) the send produced, in order.
+        """Send one interactive notification (flat ``options`` or a sectioned list) and store its option side record.
+
+        Returns the ``message_id``(s) the send produced, in order.
 
         The keyboard carries the reply/link buttons; the body carries the prompt, any
         section titles, link-media lines and an italic footer. A media ``header`` rides the
@@ -611,7 +631,8 @@ class TelegramChannel:
             keyboard, records = _flat_options_keyboard(notification.options)
             section_titles: list[str] = []
         else:
-            assert notification.sections is not None  # options XOR sections (contract)
+            if notification.sections is None:
+                raise AssertionError
             keyboard, records = _sections_keyboard(notification.sections)
             section_titles = [section.title for section in notification.sections]
 
@@ -651,8 +672,10 @@ class TelegramChannel:
         keyboard: dict[str, Any],
         sent: list[str],
     ) -> dict[str, Any]:
-        """Send the message that CARRIES the inline keyboard, appending each send's id to
-        ``sent`` and returning the response of the keyboard-carrying (anchor) message.
+        """Send the message that CARRIES the inline keyboard.
+
+        Appends each send's id to ``sent`` and returns the response of the
+        keyboard-carrying (anchor) message.
 
         With no header it is one ``sendMessage``. With a media header it rides the standard
         composition: the media sent WITH the body as its caption and the keyboard attached

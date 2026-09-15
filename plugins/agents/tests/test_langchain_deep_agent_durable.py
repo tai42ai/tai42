@@ -149,7 +149,7 @@ def test_append_thread_messages_acquires_no_sandbox(monkeypatch: pytest.MonkeyPa
 # ---- session threading + workspace tier ---------------------------------------
 
 
-class _Captured(Exception):
+class _CapturedError(Exception):
     """Short-circuits the drive once the session-threading is captured."""
 
     def __init__(self, session: Any) -> None:
@@ -161,10 +161,10 @@ def test_run_threads_a_live_session_into_the_backend(monkeypatch: pytest.MonkeyP
     ``SandboxSessionBackend`` — rather than leaving the in-graph ``StateBackend`` default."""
 
     async def capturing_resolve(self: DeepAgent, *, session: Any = None, **_: Any) -> object:
-        raise _Captured(session)
+        raise _CapturedError(session)
 
     monkeypatch.setattr(DeepAgent, "_resolve_and_build", capturing_resolve)
-    with pytest.raises(_Captured) as excinfo:
+    with pytest.raises(_CapturedError) as excinfo:
         asyncio.run(DeepAgent().run(user_message=TemplatedText(content="go")))
     # The run acquired a REAL session (not None) and threaded it into the backend build.
     assert isinstance(excinfo.value.session, SandboxSession)

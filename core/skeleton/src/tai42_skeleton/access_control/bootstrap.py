@@ -30,19 +30,22 @@ from tai42_skeleton.utils.redis_typing import awaited
 logger = logging.getLogger(__name__)
 
 
-class BootstrapContended(RuntimeError):
-    """The mint mutex is held by a concurrent bootstrap — exactly one may mint, so the
-    loser is turned away as already-initialized."""
+class BootstrapContendedError(RuntimeError):
+    """The mint mutex is held by a concurrent bootstrap.
+
+    Exactly one may mint, so the loser is turned away as already-initialized.
+    """
 
 
 def _bootstrap_serviceable(settings: AccessControlSettings) -> bool:
-    """Whether the ``/api/keys/bootstrap`` door can actually mint, mirroring the door's
-    own self-disable checks so boot never mints a token for a door that would 501/403.
+    """Whether the ``/api/keys/bootstrap`` door can actually mint.
 
-    Serviceable iff access control is on, a configured identity provider can mint api
+    Mirrors the door's own self-disable checks so boot never mints a token for a door that would
+    501/403. Serviceable iff access control is on, a configured identity provider can mint api
     keys, and the AC Redis (the home of the token, throttle, and mint lock) is set. A
     missing piece is logged, never raised: the door already refuses cleanly at request
-    time, so the startup handler does nothing for a deployment that does not use it."""
+    time, so the startup handler does nothing for a deployment that does not use it.
+    """
     if not settings.enable:
         return False
     if not any(mintable for _name, mintable in provider_capabilities()):
@@ -118,8 +121,11 @@ async def resolve_bootstrap_token() -> str:
 
 
 async def verify_bootstrap_token(presented: str) -> bool:
-    """Whether ``presented`` opens the gate. Constant-time compared against the
-    effective token; ``bootstrap_open`` opens the gate for any input (local/dev)."""
+    """Whether ``presented`` opens the gate.
+
+    Constant-time compared against the effective token; ``bootstrap_open`` opens the gate for any
+    input (local/dev).
+    """
     if access_control_settings().bootstrap_open:
         return True
     return secrets.compare_digest(presented, await resolve_bootstrap_token())
@@ -132,7 +138,7 @@ async def bootstrap_mint_lock() -> AsyncIterator[None]:
     Acquires ``bootstrap_lock_key`` with ``SET NX`` (TTL-bounded, so a crashed holder
     cannot deadlock the door forever) and releases it — only if still owned — on exit,
     so a failed mint frees the lock for a clean retry. A caller that cannot acquire it
-    raises :class:`BootstrapContended`: another bootstrap is mid-mint, so exactly one
+    raises :class:`BootstrapContendedError`: another bootstrap is mid-mint, so exactly one
     ever passes the check-and-mint.
     """
     settings = access_control_settings()
@@ -142,7 +148,7 @@ async def bootstrap_mint_lock() -> AsyncIterator[None]:
             r.set(settings.bootstrap_lock_key, owner, nx=True, ex=settings.bootstrap_lock_ttl_seconds)
         )
         if not acquired:
-            raise BootstrapContended("a concurrent first-key bootstrap holds the mint lock")
+            raise BootstrapContendedError("a concurrent first-key bootstrap holds the mint lock")
         try:
             yield
         finally:
@@ -153,17 +159,21 @@ async def bootstrap_mint_lock() -> AsyncIterator[None]:
 
 
 async def bootstrap_throttle_locked(client_ip: str) -> bool:
-    """Whether wrong-token attempts from ``client_ip`` are currently backed off. Checked
-    BEFORE the token is compared, so a locked attempt never reaches the comparison."""
+    """Whether wrong-token attempts from ``client_ip`` are currently backed off.
+
+    Checked BEFORE the token is compared, so a locked attempt never reaches the comparison.
+    """
     settings = access_control_settings()
     async with client_ctx(RedisClient, settings.redis) as r:
         return bool(await awaited(r.get(f"{settings.bootstrap_throttle_lock_prefix}{client_ip}")))
 
 
 async def record_bootstrap_failure(client_ip: str) -> None:
-    """Count one wrong-token attempt from ``client_ip`` and, past the threshold, arm a
-    capped exponential backoff lock. The counter carries the cap as its TTL, so an IP
-    that pauses that long decays back to un-escalated."""
+    """Count one wrong-token attempt from ``client_ip`` and, past the threshold, arm a backoff lock.
+
+    The backoff is a capped exponential; the counter carries the cap as its TTL, so an IP that
+    pauses that long decays back to un-escalated.
+    """
     settings = access_control_settings()
     cap = settings.bootstrap_throttle_cap_seconds
     fail_key = f"{settings.bootstrap_throttle_fail_prefix}{client_ip}"

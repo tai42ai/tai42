@@ -1,3 +1,5 @@
+"""The Starlette authentication backend that verifies a request's credential and authorizes its policy."""
+
 import logging
 import time
 from dataclasses import dataclass
@@ -25,9 +27,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _AuthorizedPolicy:
-    """The principal's policy resolved for a request: the caller's policy, the owner's
-    policy (for an owned key, else ``None``), the fresh live context, and the effective
-    owner-attenuated scopes the request is enforced and finalized with."""
+    """The principal's policy resolved for a request.
+
+    Carries the caller's policy, the owner's policy (for an owned key, else ``None``), the fresh live
+    context, and the effective owner-attenuated scopes the request is enforced and finalized with.
+    """
 
     policy: AccessPolicy
     owner_policy: AccessPolicy | None
@@ -36,12 +40,13 @@ class _AuthorizedPolicy:
 
 
 def extract_credential_candidates(conn) -> list[str]:
-    """Every presented credential candidate in the backend's priority order:
-    ``Authorization`` Bearer (or a raw ``Authorization`` value with no scheme) first,
-    then ``X-Api-Key``. Returns the FULL list, not the first match — the logout
-    dispatcher fans out over all of them so a stale value in one header cannot hide a
-    live session in the other. Any non-bearer scheme (Basic, Digest, …) is never a
-    candidate."""
+    """Every presented credential candidate in the backend's priority order.
+
+    ``Authorization`` Bearer (or a raw ``Authorization`` value with no scheme) first, then ``X-Api-Key``.
+    Returns the FULL list, not the first match — the logout dispatcher fans out over all of them so a stale
+    value in one header cannot hide a live session in the other. Any non-bearer scheme (Basic, Digest, …)
+    is never a candidate.
+    """
     candidates: list[str] = []
 
     auth_header = conn.headers.get("Authorization")
@@ -63,13 +68,13 @@ def extract_credential_candidates(conn) -> list[str]:
 
 
 def effective_scopes(key_scopes: list[str], owner_scopes: list[str]) -> list[str]:
-    """The scopes an owned key actually carries: its own scopes ∩ the owner's CURRENT
-    scopes, with ``"*"`` behaving as "everything" on BOTH sides (``"*" ∩ X = X``).
+    """The scopes an owned key actually carries: its own scopes ∩ the owner's CURRENT scopes.
 
-    Three explicit cases: a ``"*"`` owner caps nothing (the key keeps its scopes); a
-    ``"*"`` KEY under a scoped owner collapses to the owner's scopes (a plain membership
-    filter would wrongly yield ``[]`` here); otherwise a plain intersection preserving
-    the key's order."""
+    ``"*"`` behaves as "everything" on BOTH sides (``"*" ∩ X = X``). Three explicit cases: a ``"*"`` owner
+    caps nothing (the key keeps its scopes); a ``"*"`` KEY under a scoped owner collapses to the owner's
+    scopes (a plain membership filter would wrongly yield ``[]`` here); otherwise a plain intersection
+    preserving the key's order.
+    """
     if "*" in owner_scopes:
         return list(key_scopes)
     if "*" in key_scopes:
@@ -79,8 +84,9 @@ def effective_scopes(key_scopes: list[str], owner_scopes: list[str]) -> list[str
 
 
 class AuthorizationError(AuthenticationError):
-    """An already-authenticated caller is denied access — either the policy
-    condition rejected them or the policy decision could not be completed.
+    """An already-authenticated caller is denied access.
+
+    Either the policy condition rejected them or the policy decision could not be completed.
 
     It subclasses ``AuthenticationError`` so Starlette's ``AuthenticationMiddleware``
     still routes it through ``on_error``, but the distinct type lets the error
@@ -93,29 +99,35 @@ class AuthorizationError(AuthenticationError):
     """
 
     def __init__(self, *args: object, cause: DenialCause | None = None) -> None:
+        """Store the internal ``cause`` (a :class:`DenialCause`) alongside the base error args."""
         super().__init__(*args)
         self.cause = cause
 
 
 class IdentityProviderUnavailableError(Exception):
-    """No identity-provider factory resolved for a configured provider name — the
-    registry held none. Distinct from an invalid credential (a resolved provider
-    returning no identity): only THIS class is treated as a reload-window transient
-    when the reload gate is held; a bad key stays a 401 in every case."""
+    """No identity-provider factory resolved for a configured provider name — the registry held none.
+
+    Distinct from an invalid credential (a resolved provider returning no identity): only THIS class is
+    treated as a reload-window transient when the reload gate is held; a bad key stays a 401 in every case.
+    """
 
 
 class ReloadInProgressError(AuthenticationError):
-    """Authentication could not resolve its providers because a reload holds the gate
-    and cleared the identity registry (its reset->reimport window).
+    """Authentication could not resolve its providers because a reload holds the gate.
 
+    The reload cleared the identity registry (its reset->reimport window).
     Subclasses ``AuthenticationError`` so ``AuthenticationMiddleware`` still routes it
     through ``on_error``, where the handler renders the shared retriable ``reloading``
     envelope (HTTP 503) instead of a spurious 401 — the run surface's contract, now
-    honored on the auth path that runs before it."""
+    honored on the auth path that runs before it.
+    """
 
 
 class AccessControlAuthBackend(AuthenticationBackend):
+    """Starlette auth backend: verifies a request's credential and resolves its authorized policy."""
+
     def __init__(self, verifier: AccessControlVerifier, settings: AccessControlSettings):
+        """Bind the credential ``verifier`` and access-control ``settings``, building the policy enforcer."""
         self.verifier = verifier
         self.settings = settings
         self.enforcer = PolicyEnforcer(settings)
@@ -160,18 +172,20 @@ class AccessControlAuthBackend(AuthenticationBackend):
         raise AuthenticationError("Invalid API key")
 
     def _is_always_public_path(self, canonical: str | None) -> bool:
-        """Whether the request's ``canonical`` path is the pre-auth login surface, asked of
-        the ONE definition of that family over the SAME canonical form the resource guard
-        resolves on.
+        """Whether the request's ``canonical`` path is the pre-auth login surface.
 
+        Asked of the ONE definition of that family over the SAME canonical form the resource guard
+        resolves on.
         A malformed path (``canonical is None``) is NOT this surface: it falls through to
         the credential path and is denied downstream, never admitted unauthenticated on a
-        shape the guard itself refuses to reason about."""
+        shape the guard itself refuses to reason about.
+        """
         if canonical is None:
             return False
         return is_always_public_prefix(canonical, self.settings)
 
     async def authenticate(self, conn):
+        """Resolve the connection's credential to ``(AuthCredentials, user)``, or deny with a typed error."""
         # The canonical request path, from the RAW target so a record ``{key}``'s encoded
         # slash stays ONE segment — the SAME form the router and the resource guard reason
         # on. A malformed target has no canonical form (``None``): not the login surface,
@@ -250,13 +264,13 @@ class AccessControlAuthBackend(AuthenticationBackend):
             # principal would otherwise admit a revoked key.
             if policy_is_empty(policy):
                 logger.warning("access_control: denied principal %s — no policy", user_id)
-                raise AuthorizationError("Access Denied")
+                raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
 
             # Disabled principal (direct): a disabled account user's own session/key is
             # denied here — defense in depth beside the owned-key owner-disable check.
             if policy.policy_data.get("disabled") is True:
                 logger.warning("access_control: denied disabled principal %s", user_id)
-                raise AuthorizationError("Access Denied")
+                raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
 
             # Owned-key attenuation: a credential whose claims carry an owner is
             # capped by the owner's CURRENT policy at REQUEST time, so the cap holds over
@@ -268,10 +282,10 @@ class AccessControlAuthBackend(AuthenticationBackend):
                 owner_policy = await self.enforcer.get_policy(owner)
                 if owner_policy.policy_data.get("disabled") is True:
                     logger.warning("access_control: denied owned key %s — owner %s is disabled", user_id, owner)
-                    raise AuthorizationError("Access Denied")
+                    raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
                 if policy_is_empty(owner_policy):
                     logger.warning("access_control: denied owned key %s — owner %s has no policy", user_id, owner)
-                    raise AuthorizationError("Access Denied")
+                    raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
                 resolved_scopes = effective_scopes(policy.scopes, owner_policy.scopes)
         except AuthorizationError:
             raise

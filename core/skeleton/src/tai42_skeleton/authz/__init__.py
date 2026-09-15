@@ -1,7 +1,7 @@
-"""Tool-edge authorization — one decision, consumed at the MCP surface and by
-background executions at the shared tool-dispatch seam.
+"""Tool-edge authorization — one decision for the MCP surface and background executions.
 
-The ``access_control/`` primitives are the single implementation of the
+The decision is consumed at the MCP surface and by background executions at the
+shared tool-dispatch seam. The ``access_control/`` primitives are the single implementation of the
 permission decision; this package is their SECOND consumer (the HTTP middleware
 is the first). :func:`check` is the one entry point; ``AuthzMiddleware``
 installs it on every MCP-serving FastMCP instance.

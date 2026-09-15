@@ -46,15 +46,17 @@ class WhatsAppChannel:
     supports_form_delivery: ClassVar[bool] = True
 
     def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
-        """Enforce this channel's form-schema limits at ask-time, before any state
-        is written. The reserved ``flow_token`` property (Meta's own correlation
+        """Enforce this channel's form-schema limits at ask-time, before any state is written.
+
+        The reserved ``flow_token`` property (Meta's own correlation
         key) — and every subset rule the Flow mapping enforces — is refused here as
         a ``ValueError``, so a schema the delivery path could never render is
         rejected up front instead of persisting a question that only fails at
         delivery. ``build_flow`` is the single mapping definition; a delivery-time
         ``ChannelInputError`` becomes the ask-time ``ValueError``. The Flow body is
         ``interactive.body.text``, capped by Meta at ``_INTERACTIVE_BODY_MAX_CHARS``,
-        so an over-long ``question`` is refused here too."""
+        so an over-long ``question`` is refused here too.
+        """
         if len(question) > _INTERACTIVE_BODY_MAX_CHARS:
             raise ValueError(f"form question exceeds {_INTERACTIVE_BODY_MAX_CHARS} characters")
         try:
@@ -122,8 +124,9 @@ class WhatsAppChannel:
             raise
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
-        """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any
-        failure. Returns every ``wamid`` the Cloud API assigned, in send order.
+        """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.
+
+        Returns every ``wamid`` the Cloud API assigned, in send order.
 
         No reply is expected, so nothing touches the correlation store. Exactly one
         send attempt per part (a plain return means Meta ACCEPTED it, not that a

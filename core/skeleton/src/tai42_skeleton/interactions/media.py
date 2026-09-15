@@ -57,7 +57,8 @@ async def store_data_image(store: InteractionStore, r: Redis, data_url: str, ttl
     The id is 43 urlsafe-base64 chars (32 random bytes) — the capability secret the
     served-media route validates. The hash keeps the mime and the image as base64 text
     (binary-safe under a ``decode_responses`` client); the key expires after
-    ``ttl_seconds`` unless a later co-grouped ``add`` extends it."""
+    ``ttl_seconds`` unless a later co-grouped ``add`` extends it.
+    """
     mime, raw = _parse_data_image(data_url)
     media_id = secrets.token_urlsafe(32)
     key = store.media_key(media_id)
@@ -90,8 +91,9 @@ async def substitute_media(
     *,
     base_url: str | None = None,
 ) -> list[MediaItem]:
-    """Store every ``data:image/*`` image item by reference and, when ``base_url`` is set,
-    absolutize every SAME-ORIGIN served-media reference (``{MEDIA_ROUTE_PREFIX}{id}``, ANY
+    """Store every ``data:image/*`` image item by reference and absolutize same-origin served-media refs.
+
+    When ``base_url`` is set, absolutize every SAME-ORIGIN served-media reference (``{MEDIA_ROUTE_PREFIX}{id}``, ANY
     media kind), returning the list with each such item's url rewritten. Links and absolute
     ``https`` items pass through unchanged. Pure over the input (returns a new list; each item
     is coerced through ``MediaItem`` so its input shape is validated before any store).
@@ -102,7 +104,8 @@ async def substitute_media(
     prefixed with ``base_url``. When ``base_url`` is None (an inbox-only send) both keep the
     relative same-origin url the inbox renders — the pre-existing pass-through behavior. An
     already-absolute served url (it does not start with ``MEDIA_ROUTE_PREFIX``) is left
-    untouched, so the rewrite is idempotent."""
+    untouched, so the rewrite is idempotent.
+    """
     prefix = base_url.rstrip("/") + MEDIA_ROUTE_PREFIX if base_url is not None else MEDIA_ROUTE_PREFIX
     # Coerce (validating each item's shape) then apply the list-level caps BEFORE any
     # store write, so an over-count or over-budget request is refused before a single

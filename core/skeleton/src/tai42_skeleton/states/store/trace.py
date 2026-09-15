@@ -17,11 +17,13 @@ def _iso_now() -> str:
 
 
 def _abs_regime_paths(attachment_rows: list[dict[str, Any]]) -> list[tuple[list[Any], str, str]]:
-    """The absolute regime paths every attach on a state declares, from the stored template
-    bodies: for each attach ``(template at base_path)`` and each of the template's regime
-    rules, ``base_path + rule.path`` (wildcards preserved), its regime, and the template
-    name — the input the composing shape refusal walks. Reads the stored body directly
-    (validated at store time), so the hot write path never re-validates a template."""
+    """The absolute regime paths every attach on a state declares, from the stored template bodies.
+
+    For each attach ``(template at base_path)`` and each of the template's regime rules,
+    ``base_path + rule.path`` (wildcards preserved), its regime, and the template name — the input the
+    composing shape refusal walks. Reads the stored body directly (validated at store time), so the hot
+    write path never re-validates a template.
+    """
     out: list[tuple[list[Any], str, str]] = []
     for row in attachment_rows:
         base_path = list(row["path"] or [])
@@ -34,8 +36,10 @@ def _abs_regime_paths(attachment_rows: list[dict[str, Any]]) -> list[tuple[list[
 
 
 def _traced_paths(attachment_rows: list[dict[str, Any]]) -> tuple[tuple[str | int, ...], ...]:
-    """The attach paths whose template traces (``trace.enabled``) — the prefixes under which
-    a write stamps ``_trace``."""
+    """The attach paths whose template traces (``trace.enabled``).
+
+    The prefixes under which a write stamps ``_trace``.
+    """
     paths: list[tuple[str | int, ...]] = []
     for row in attachment_rows:
         body = row["body"] or {}
@@ -45,10 +49,12 @@ def _traced_paths(attachment_rows: list[dict[str, Any]]) -> tuple[tuple[str | in
 
 
 def _refuse_composing_shape(ops: list[dict[str, Any]], regime_paths: list[tuple[list[Any], str, str]]) -> None:
-    """Refuse a write whose SHAPE violates a ``composing`` path: a whole-path
-    ``set``/``remove`` over a composing path admits only a keyed op or an append ``set``
+    """Refuse a write whose SHAPE violates a ``composing`` path.
+
+    A whole-path ``set``/``remove`` over a composing path admits only a keyed op or an append ``set``
     (path ending ``"-"``). Anything else raises :class:`RegimeViolationError` naming the
-    path — BEFORE the ledger insert, so a refused batch consumes no op-id."""
+    path — BEFORE the ledger insert, so a refused batch consumes no op-id.
+    """
     for op in ops:
         path = op.get("path")
         if not isinstance(path, list):
@@ -68,8 +74,10 @@ def _refuse_composing_shape(ops: list[dict[str, Any]], regime_paths: list[tuple[
 
 
 def _under_traced_path(path: list[Any], traced_paths: tuple[tuple[str | int, ...], ...]) -> bool:
-    """Whether ``path`` lies at or under any tracing attach path (the attach path is a
-    prefix of the op path — the op writes into the attached subtree)."""
+    """Whether ``path`` lies at or under any tracing attach path.
+
+    The attach path is a prefix of the op path — the op writes into the attached subtree.
+    """
     for attach_path in traced_paths:
         if len(attach_path) <= len(path) and all(attach_path[i] == path[i] for i in range(len(attach_path))):
             return True
@@ -77,8 +85,10 @@ def _under_traced_path(path: list[Any], traced_paths: tuple[tuple[str | int, ...
 
 
 def _stamp_items(value: Any, stamp: dict[str, Any]) -> None:
-    """Stamp ``_trace`` into ``value`` when it is an object, or into each object item when
-    it is a list; non-objects are untouched."""
+    """Stamp ``_trace`` into ``value`` when it is an object, or into each object item when it is a list.
+
+    Non-objects are untouched.
+    """
     if isinstance(value, dict):
         value["_trace"] = dict(stamp)
     elif isinstance(value, list):
@@ -90,12 +100,13 @@ def _stamp_items(value: Any, stamp: dict[str, Any]) -> None:
 def stamp_trace(
     ops: list[dict[str, Any]], traced_paths: tuple[tuple[str | int, ...], ...], stamp: dict[str, Any]
 ) -> None:
-    """Stamp ``_trace`` into every object an op WRITES, for each op whose absolute path
-    lies under a tracing attach path. Mutates the ops in place before the apply, so the
-    effective schema's ``_trace`` property admits the stamped field. Keyed ops carry an
-    item object or a list of them; ``set_by_key_each`` carries a ``{key: [items…]}``
-    fan-out; a ``set`` (including a ``"-"`` append) carries the object value. Non-object
-    values — scalars, arrays of scalars, remove keys — are untouched."""
+    """Stamp ``_trace`` into every object an op WRITES, for each op under a tracing attach path.
+
+    Mutates the ops in place before the apply, so the effective schema's ``_trace`` property admits the
+    stamped field. Keyed ops carry an item object or a list of them; ``set_by_key_each`` carries a
+    ``{key: [items…]}`` fan-out; a ``set`` (including a ``"-"`` append) carries the object value. Non-object
+    values — scalars, arrays of scalars, remove keys — are untouched.
+    """
     for op in ops:
         path = op.get("path")
         if not isinstance(path, list) or not _under_traced_path(path, traced_paths):

@@ -71,10 +71,12 @@ class PostgresRunIndexStore:
         started_at: str,
     ) -> None:
         """Persist a run's START row: ``outcome='running'``, ``ended_at`` NULL.
+
         ``interaction_id`` is the ambient resume origin when this dispatch is a
         continuation fire (``None`` otherwise). The ``run_id`` primary key makes a
         re-insert of the same run a loud duplicate — a caller bug, since each dispatch
-        mints a fresh id."""
+        mints a fresh id.
+        """
         async with self._cursor() as cur:
             await cur.execute(
                 "INSERT INTO run_index "
@@ -93,14 +95,16 @@ class PostgresRunIndexStore:
         trace_id: str | None = None,
         interaction_id: str | None = None,
     ) -> None:
-        """Terminally update a run: set its ``outcome`` + ``ended_at`` and BACKFILL
-        ``trace_id`` when one is now available. ``COALESCE(%s, trace_id)`` keeps a
-        trace id captured at START and only fills a NULL — a later NULL sample never
-        clobbers a captured id. ``interaction_id`` (a park's sentinel id) fills the
-        OPPOSITE way — ``COALESCE(interaction_id, %s)``, first-set wins — so a resume
-        row keeps the ORIGIN id captured at START even when its own body parks again
-        (a single-park lifecycle joins fully; a re-park's new id is deliberately not
-        recorded, so deeper chains are not walkable by this column)."""
+        """Terminally update a run: set its ``outcome`` + ``ended_at`` and BACKFILL ``trace_id``.
+
+        ``trace_id`` is backfilled when one is now available. ``COALESCE(%s, trace_id)``
+        keeps a trace id captured at START and only fills a NULL — a later NULL sample
+        never clobbers a captured id. ``interaction_id`` (a park's sentinel id) fills the
+        OPPOSITE way — ``COALESCE(interaction_id, %s)``, first-set wins — so a resume row
+        keeps the ORIGIN id captured at START even when its own body parks again (a
+        single-park lifecycle joins fully; a re-park's new id is deliberately not
+        recorded, so deeper chains are not walkable by this column).
+        """
         async with self._cursor() as cur:
             await cur.execute(
                 "UPDATE run_index SET outcome = %s, ended_at = %s, trace_id = COALESCE(%s, trace_id), "
@@ -108,29 +112,31 @@ class PostgresRunIndexStore:
                 (outcome, ended_at, trace_id, interaction_id, run_id),
             )
 
-    async def list(self, filter: RunIndexFilter, *, page: int, page_size: int) -> list[RunRow]:
-        """A newest-first page of run rows matching ``filter``. ``page`` is 1-based;
-        the slice is ``LIMIT page_size OFFSET (page-1)*page_size``."""
+    async def list(self, filter_: RunIndexFilter, *, page: int, page_size: int) -> list[RunRow]:
+        """A newest-first page of run rows matching ``filter_``.
+
+        ``page`` is 1-based; the slice is ``LIMIT page_size OFFSET (page-1)*page_size``.
+        """
         offset = (page - 1) * page_size
-        version = filter.version
-        outcome = filter.outcome
+        version = filter_.version
+        outcome = filter_.outcome
         params = (
-            filter.preset,
-            filter.preset,
+            filter_.preset,
+            filter_.preset,
             version,
             version,
-            filter.user,
-            filter.user,
-            filter.session,
-            filter.session,
-            filter.interaction,
-            filter.interaction,
+            filter_.user,
+            filter_.user,
+            filter_.session,
+            filter_.session,
+            filter_.interaction,
+            filter_.interaction,
             outcome,
             outcome,
-            filter.t0,
-            filter.t0,
-            filter.t1,
-            filter.t1,
+            filter_.t0,
+            filter_.t0,
+            filter_.t1,
+            filter_.t1,
             page_size,
             offset,
         )
@@ -140,8 +146,10 @@ class PostgresRunIndexStore:
         return [_row(r) for r in rows]
 
     async def prune(self, cutoff: datetime) -> int:
-        """Delete every run whose ``started_at`` is strictly before ``cutoff``; return
-        the number deleted."""
+        """Delete every run whose ``started_at`` is strictly before ``cutoff``.
+
+        Returns the number deleted.
+        """
         async with self._cursor() as cur:
             await cur.execute("DELETE FROM run_index WHERE started_at < %s", (cutoff,))
             return cur.rowcount
@@ -175,13 +183,17 @@ def _row(row: Any) -> RunRow:
 
 
 def _iso(value: Any) -> str:
-    """Render a DB ``timestamptz`` as an ISO string, tolerating a store/fake that
-    already yields a string."""
+    """Render a DB ``timestamptz`` as an ISO string.
+
+    Tolerates a store/fake that already yields a string.
+    """
     return value if isinstance(value, str) else value.isoformat()
 
 
 def get_run_index_store() -> PostgresRunIndexStore:
-    """The process runs-index store. A plain constructor today (the store holds no
-    state — the pool is app-owned); a function so consumers and tests reach it through
-    one seam."""
+    """The process runs-index store.
+
+    A plain constructor (the store holds no state — the pool is app-owned); a function so
+    consumers and tests reach it through one seam.
+    """
     return PostgresRunIndexStore()

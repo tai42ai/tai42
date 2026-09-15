@@ -47,9 +47,12 @@ _KIND_ORDER: tuple[WorkerKind, ...] = (WorkerKind.backend, WorkerKind.serve)
 
 
 class RecycleRow(BaseModel):
-    """One recycled target's outcome: its pre-apply identity and terminal status
-    (:data:`RECYCLED` once convergence confirmed, :data:`TIMED_OUT` on the step budget).
-    ``generation_before`` is the life that was recycled — never a post-recycle life."""
+    """One recycled target's outcome: its pre-apply identity and terminal status.
+
+    The status is :data:`RECYCLED` once convergence is confirmed, or
+    :data:`TIMED_OUT` on the step budget. ``generation_before`` is the life that
+    was recycled — never a post-recycle life.
+    """
 
     name: str
     kind: str
@@ -58,9 +61,12 @@ class RecycleRow(BaseModel):
 
 
 class FreshLife(BaseModel):
-    """A NEW READY life of a kind observed on the census since the pre-apply snapshot —
-    a name absent from the snapshot, or a higher generation on a snapshot name. Surfaced
-    as evidence of fresh capacity, never claimed as any target's successor."""
+    """A NEW READY life of a kind observed on the census since the pre-apply snapshot.
+
+    A name absent from the snapshot, or a higher generation on a snapshot name.
+    Surfaced as evidence of fresh capacity, never claimed as any target's
+    successor.
+    """
 
     name: str
     kind: str
@@ -68,9 +74,11 @@ class FreshLife(BaseModel):
 
 
 class ApplierEntry(BaseModel):
-    """The applier's own deferred self-exit entry — present only when the diff carries
-    serve-affecting recycle keys. Carries the applier's own name and current generation;
-    it is unconfirmed by design (the applier cannot recycle itself in-band)."""
+    """The applier's own deferred self-exit entry, present only when the diff carries serve-affecting recycle keys.
+
+    Carries the applier's own name and current generation; it is unconfirmed by
+    design (the applier cannot recycle itself in-band).
+    """
 
     name: str
     generation: int
@@ -78,11 +86,13 @@ class ApplierEntry(BaseModel):
 
 
 class RecycleReport(BaseModel):
-    """The aggregate outcome of a recycle orchestration. ``rows`` is one entry per
-    recycled target (its ``generation_before`` and terminal status); ``fresh`` is the new
-    READY lives observed since the pre-apply snapshot, per kind — evidence of capacity,
-    never a claimed successor; ``applier`` (when set) is the applier's deferred
-    self-exit."""
+    """The aggregate outcome of a recycle orchestration.
+
+    ``rows`` is one entry per recycled target (its ``generation_before`` and
+    terminal status); ``fresh`` is the new READY lives observed since the
+    pre-apply snapshot, per kind — evidence of capacity, never a claimed
+    successor; ``applier`` (when set) is the applier's deferred self-exit.
+    """
 
     rows: list[RecycleRow] = Field(default_factory=list)
     fresh: list[FreshLife] = Field(default_factory=list)
@@ -90,20 +100,26 @@ class RecycleReport(BaseModel):
 
 
 class RecycleError(RuntimeError):
-    """A recycle step failed loudly; carries the partial :class:`RecycleReport` so the
-    caller can surface what converged before the failure."""
+    """A recycle step failed loudly, carrying the partial :class:`RecycleReport`.
+
+    So the caller can surface what converged before the failure.
+    """
 
     def __init__(self, message: str, report: RecycleReport) -> None:
+        """Build the error with ``message`` and attach the partial ``report``."""
         super().__init__(message)
         self.report = report
 
 
 class RecycleTimeoutError(RecycleError):
-    """A recycled target's convergence was not confirmed within the step budget. Names
-    the target and which fact stayed unsatisfied (old life still present, or fresh READY
-    capacity short); the whole apply aborts."""
+    """A recycled target's convergence was not confirmed within the step budget.
+
+    Names the target and which fact stayed unsatisfied (old life still present,
+    or fresh READY capacity short); the whole apply aborts.
+    """
 
     def __init__(self, name: str, unsatisfied: str, report: RecycleReport) -> None:
+        """Build the error naming ``name`` and the ``unsatisfied`` fact, attaching the partial ``report``."""
         super().__init__(
             f"recycle: convergence for {name!r} was not confirmed within the step budget ({unsatisfied})",
             report,
@@ -180,12 +196,15 @@ async def _await_ready(
     poll_interval: float,
     report: RecycleReport,
 ) -> int:
-    """Wait for a gap-row target to return ``state=ready`` with a fresh beat before the
-    recycle op is published, returning the generation observed when it becomes ready — the
-    life the recycle op will actually target (a gap row that re-mints during the wait is
-    recycled at its NEW generation). A target already ready+fresh returns its current
-    generation at once. This ready-wait gets its OWN per-phase budget (reset here); if it
-    lapses, a loud :class:`RecycleTimeoutError` names the slot and its last-seen state."""
+    """Wait for a gap-row target to return ``state=ready`` with a fresh beat before the recycle op is published.
+
+    Returns the generation observed when it becomes ready — the life the recycle
+    op will actually target (a gap row that re-mints during the wait is recycled
+    at its NEW generation). A target already ready+fresh returns its current
+    generation at once. This ready-wait gets its OWN per-phase budget (reset
+    here); if it lapses, a loud :class:`RecycleTimeoutError` names the slot and
+    its last-seen state.
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + step_timeout
     while True:
@@ -200,9 +219,11 @@ async def _await_ready(
 
 
 async def _recycle_one(bus: WorkerBus, name: str, generation: int, kind: WorkerKind, report: RecycleReport) -> None:
-    """Publish the recycle op to a single target and require its ``applied`` terminal,
-    then record the recycled row. A bus-unreachable publish or a non-applied outcome
-    raises loudly before any row is recorded."""
+    """Publish the recycle op to a single target, require its ``applied`` terminal, and record the recycled row.
+
+    A bus-unreachable publish or a non-applied outcome raises loudly before any
+    row is recorded.
+    """
     result = await bus.publish({"op": "recycle"}, targets=[name], local=None)
     if not result.reachable:
         raise RecycleError(f"recycle: bus unreachable while recycling {name!r}: {result.error}", report)
@@ -225,7 +246,7 @@ async def _await_convergence(
     poll_interval: float,
     report: RecycleReport,
 ) -> None:
-    """Await the two acceptance facts within a fresh per-step deadline:
+    """Await the two acceptance facts within a fresh per-step deadline.
 
     - **old life gone** for ``(name, generation)``: presence[name] is absent/expired OR
       shows a generation greater than the target's (its row vanishing after
@@ -237,7 +258,8 @@ async def _await_convergence(
       documented window.
 
     On the deadline the recycled row is marked :data:`TIMED_OUT` and a loud
-    :class:`RecycleTimeoutError` names which fact stayed unsatisfied."""
+    :class:`RecycleTimeoutError` names which fact stayed unsatisfied.
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + step_timeout
     while True:
@@ -257,17 +279,23 @@ async def _await_convergence(
 
 
 def _old_life_gone(rows: list[WorkerRow], name: str, generation: int) -> bool:
-    """The target's old life is gone when its presence row is absent/expired, or a
-    generation greater than the target's holds the name (a replacement took the slot)."""
+    """Whether the target's old life is gone from the census.
+
+    True when its presence row is absent/expired, or a generation greater than
+    the target's holds the name (a replacement took the slot).
+    """
     row = _row(rows, name)
     return row is None or row.generation > generation
 
 
 def _new_ready_lives(rows: list[WorkerRow], kind: WorkerKind, snapshot: dict[str, int], ttl: float) -> list[FreshLife]:
-    """The ready+fresh rows of ``kind`` whose life is NEW vs the snapshot — a name absent
-    from it, or a generation greater than that name's snapshot generation. A ready-but-
-    decayed row fails the freshness gate and is not counted as capacity, matching the
-    ready+fresh discipline every other consumer applies."""
+    """The ready+fresh rows of ``kind`` whose life is NEW vs the snapshot.
+
+    A name absent from it, or a generation greater than that name's snapshot
+    generation. A ready-but-decayed row fails the freshness gate and is not
+    counted as capacity, matching the ready+fresh discipline every other consumer
+    applies.
+    """
     return [
         FreshLife(name=row.name, kind=row.kind.value, generation=row.generation)
         for row in rows
@@ -279,8 +307,10 @@ def _new_ready_lives(rows: list[WorkerRow], kind: WorkerKind, snapshot: dict[str
 
 
 def _mark_timed_out(report: RecycleReport, name: str) -> None:
-    """Flip the recorded recycled row for ``name`` to :data:`TIMED_OUT` (its recycle op
-    applied, but convergence was not confirmed)."""
+    """Flip the recorded recycled row for ``name`` to :data:`TIMED_OUT`.
+
+    Its recycle op applied, but convergence was not confirmed.
+    """
     for row in report.rows:
         if row.name == name:
             row.status = TIMED_OUT

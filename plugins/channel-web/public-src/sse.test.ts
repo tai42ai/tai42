@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { SseFrameParser, readSseFrames, sseOpenToken } from '@/sse';
+import { readSseFrames, SseFrameParser, sseOpenToken } from '@/sse';
 
 function stream(...chunks: string[]): Response {
   const encoder = new TextEncoder();

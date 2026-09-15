@@ -3,8 +3,8 @@
  * is switched off (terminal, no retry), or a backlog that never arrived (offered a
  * retry that re-opens the stream).
  */
-import type { ReactElement } from 'react';
 import { ErrorState } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
 
 export function BrokenBody({
   disabled,

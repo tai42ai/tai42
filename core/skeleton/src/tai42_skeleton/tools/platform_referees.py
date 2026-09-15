@@ -1,7 +1,8 @@
-"""Platform-internal referees — the in-house holders of tool-name references (the
-rename gate) and of door bindings that name state templates (the template-detach gate),
-armed skeleton-side at boot (never through the public ``register_*_referee`` seams; they
-are not plugins).
+"""Platform-internal referees for the rename gate and the template-detach gate.
+
+The in-house holders of tool-name references (the rename gate) and of door bindings that
+name state templates (the template-detach gate), armed skeleton-side at boot (never
+through the public ``register_*_referee`` seams; they are not plugins).
 
 Each RENAME referee answers the rename gate for the OLD tool name with human-readable
 descriptions of the live references it still has: a schedule firing it, a hook
@@ -174,9 +175,11 @@ async def _states_referee(old_name: str) -> list[str]:
 
 
 def register_platform_rename_referees() -> None:
-    """Arm the platform-internal referees on the live app's referee collection — a
-    startup/reload handler (the collection is reset each ``start()``, so this re-arms
-    every epoch). One registration per in-house holder surface."""
+    """Arm the platform-internal referees on the live app's referee collection.
+
+    A startup/reload handler (the collection is reset each ``start()``, so this re-arms
+    every epoch). One registration per in-house holder surface.
+    """
     for referee in (
         _schedule_referee,
         _hook_referee,
@@ -192,8 +195,11 @@ def register_platform_rename_referees() -> None:
 # Template-detach referees                                                     #
 # --------------------------------------------------------------------------- #
 def _binding_names_template(binding: StateBinding | None, state: str, template: str) -> bool:
-    """Whether ``binding`` still names ``template`` on ``state`` — a live reference a detach
-    of that template would strand (the named template_jq/attachment would vanish)."""
+    """Whether ``binding`` still names ``template`` on ``state``.
+
+    A live reference a detach of that template would strand (the named
+    template_jq/attachment would vanish).
+    """
     return binding is not None and any(
         attach.state == state and template in attach.templates for attach in binding.states
     )
@@ -296,9 +302,11 @@ async def _schedule_detach_referee(state: str, template: str) -> list[str]:
 
 
 def register_platform_detach_referees() -> None:
-    """Arm the platform-internal template-detach referees on the live app's referee
-    collection — a startup/reload handler (the collection is reset each ``start()``, so this
-    re-arms every epoch). One registration per in-house binding-holder surface."""
+    """Arm the platform-internal template-detach referees on the live app's referee collection.
+
+    A startup/reload handler (the collection is reset each ``start()``, so this re-arms
+    every epoch). One registration per in-house binding-holder surface.
+    """
     for referee in (
         _preset_detach_referee,
         _conversation_config_detach_referee,

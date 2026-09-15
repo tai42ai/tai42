@@ -48,10 +48,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from re import _parser as _re_parser  # type: ignore[attr-defined]
 from typing import Any
 
 from async_lru import alru_cache
@@ -66,6 +64,7 @@ from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.policy import PolicyEnforcer
+from tai42_skeleton.access_control.projection_pattern_sampling import _sample_path_for_pattern
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.access_control.user import is_admin_policy
@@ -97,8 +96,11 @@ class RouteEntry(BaseModel):
 
 
 class PatternEntry(BaseModel):
-    """A dynamic route pattern the caller can reach — a mount/pattern surface that is
-    NOT enumerable into concrete paths, projected only when its scope AND jq admit it."""
+    """A dynamic route pattern the caller can reach.
+
+    A mount/pattern surface that is NOT enumerable into concrete paths, projected
+    only when its scope AND jq admit it.
+    """
 
     pattern: str
     scope_id: str
@@ -136,8 +138,10 @@ def _registry_routes() -> list[RouteMetadata]:
 
 
 async def _sub_mcp_routes() -> dict[str, Any]:
-    """The durable sub-MCP registrations as ``{slug: RouteConfig}`` (coherent across
-    workers, not this worker's in-process cache)."""
+    """The durable sub-MCP registrations as ``{slug: RouteConfig}``.
+
+    Coherent across workers, not this worker's in-process cache.
+    """
     return await get_sub_mcp_store().list_routes()
 
 
@@ -157,23 +161,27 @@ def _all_agent_names() -> list[str]:
 
 
 def _claims_digest(claims: Mapping[str, Any]) -> str:
-    """Collapse the whole claims mapping into one hashable token so the cache key
-    captures EVERYTHING a jq ``.identity.*`` condition could read (not just the owner
-    claim) and can never serve a stale or wrong-identity projection. A non-serializable
-    claim value RAISES loudly (the failure doctrine), never a silent digest of a partial
-    view."""
+    """Collapse the whole claims mapping into one hashable token for the cache key.
+
+    So the cache key captures EVERYTHING a jq ``.identity.*`` condition could read (not
+    just the owner claim) and can never serve a stale or wrong-identity projection. A
+    non-serializable claim value RAISES loudly (the failure doctrine), never a silent
+    digest of a partial view.
+    """
     canonical = json.dumps(dict(claims), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class _FrozenClaims:
-    """A frozen wrapper carrying the full (unhashable) claims INTO the cached body while
-    hashing/comparing ONLY on the claims digest.
+    """A frozen wrapper carrying the full (unhashable) claims into the cached body.
+
+    Hashes and compares ONLY on the claims digest.
 
     ``alru_cache`` hashes every argument, so the raw claims dict cannot be a cache arg;
     this wrapper keys solely on the digest (which already captures the whole claims), so
     the cached body reads ``wrapper.claims`` to build the jq contexts without the dict
-    itself entering the hash."""
+    itself entering the hash.
+    """
 
     __slots__ = ("claims", "digest")
 
@@ -189,8 +197,9 @@ class _FrozenClaims:
 
 
 class _FrozenScopes:
-    """Carries the ORIGINAL-order effective scopes into the cached build while
-    hashing/comparing ONLY on the SORTED tuple.
+    """Carries the ORIGINAL-order effective scopes into the cached build.
+
+    Hashes and compares ONLY on the SORTED tuple.
 
     The cache key must stay order-independent (a given caller's effective-scope order is
     a deterministic function of its policy + version, so two order-variants of one set
@@ -198,7 +207,8 @@ class _FrozenScopes:
     backend gate does — the backend enforces over ``resolved_scopes`` in original order,
     so an order-sensitive condition (``.scopes[0]``) would otherwise diverge between
     projection and gate. This wrapper keys on the sorted tuple but hands the build the
-    unsorted list."""
+    unsorted list.
+    """
 
     __slots__ = ("_key", "scopes")
 
@@ -213,171 +223,6 @@ class _FrozenScopes:
         return isinstance(other, _FrozenScopes) and self._key == other._key
 
 
-# -- representative-path derivation for dynamic patterns ---------------------
-#
-# A dynamic route pattern is a regex, non-enumerable into concrete paths. To jq-check it
-# a single concrete path that PROVABLY matches the pattern is derived from the
-# regex AST and validated with ``fullmatch`` before use — a pattern whose representative
-# cannot be derived is EXCLUDED (under-showing is safe; over-showing is the topology-leak
-# bug), never emitted unfiltered.
-
-_NEGATE_CANDIDATES = "abcdefghijkxyz0123456789-_"
-
-
-def _category_sample(name: str) -> str | None:
-    return {
-        "CATEGORY_DIGIT": "1",
-        "CATEGORY_WORD": "a",
-        "CATEGORY_SPACE": " ",
-        "CATEGORY_NOT_DIGIT": "a",
-        "CATEGORY_NOT_WORD": "-",
-        "CATEGORY_NOT_SPACE": "x",
-    }.get(name)
-
-
-def _category_matches(name: str, char: str) -> bool:
-    if name == "CATEGORY_DIGIT":
-        return char.isdigit()
-    if name == "CATEGORY_WORD":
-        return char.isalnum() or char == "_"
-    if name == "CATEGORY_SPACE":
-        return char.isspace()
-    if name == "CATEGORY_NOT_DIGIT":
-        return not char.isdigit()
-    if name == "CATEGORY_NOT_WORD":
-        return not (char.isalnum() or char == "_")
-    if name == "CATEGORY_NOT_SPACE":
-        return not char.isspace()
-    return False
-
-
-def _member_matches(members: list[tuple[Any, Any]], char: str) -> bool:
-    for op, arg in members:
-        if op.name == "LITERAL" and arg == ord(char):
-            return True
-        if op.name == "RANGE" and arg[0] <= ord(char) <= arg[1]:
-            return True
-        if op.name == "CATEGORY" and _category_matches(arg.name, char):
-            return True
-    return False
-
-
-def _first_member_char(members: list[tuple[Any, Any]]) -> str | None:
-    for op, arg in members:
-        if op.name == "LITERAL":
-            return chr(arg)
-        if op.name == "RANGE":
-            return chr(arg[0])
-        if op.name == "CATEGORY":
-            return _category_sample(arg.name)
-    return None
-
-
-def _emit_in(items: list[tuple[Any, Any]]) -> str | None:
-    negate = bool(items) and items[0][0].name == "NEGATE"
-    members = items[1:] if negate else items
-    if negate:
-        for candidate in _NEGATE_CANDIDATES:
-            if not _member_matches(members, candidate):
-                return candidate
-        return None
-    return _first_member_char(members)
-
-
-def _emit_literal(arg: Any) -> str | None:
-    return chr(arg)
-
-
-def _emit_not_literal(arg: Any) -> str | None:
-    return "a" if arg != ord("a") else "b"
-
-
-def _emit_any(arg: Any) -> str | None:
-    return "x"
-
-
-def _emit_repeat(arg: Any) -> str | None:
-    minimum, _maximum, subpattern = arg
-    sub = _emit_seq(subpattern)
-    if sub is None:
-        return None
-    return sub * (minimum if minimum > 0 else 1)
-
-
-def _emit_subpattern(arg: Any) -> str | None:
-    return _emit_seq(arg[3])
-
-
-def _emit_branch(arg: Any) -> str | None:
-    for branch in arg[1]:
-        emitted = _emit_seq(branch)
-        if emitted is not None:
-            return emitted
-    return None
-
-
-def _emit_at(arg: Any) -> str | None:
-    return ""
-
-
-def _emit_category(arg: Any) -> str | None:
-    return _category_sample(arg.name)
-
-
-def _emit_range(arg: Any) -> str | None:
-    return chr(arg[0])
-
-
-# regex opcode name → the sampler that produces one matching character/run for it.
-# MAX_REPEAT and MIN_REPEAT share a sampler; IN delegates to the member-set sampler.
-_OPCODE_SAMPLERS: Mapping[str, Callable[[Any], str | None]] = {
-    "LITERAL": _emit_literal,
-    "NOT_LITERAL": _emit_not_literal,
-    "ANY": _emit_any,
-    "IN": _emit_in,
-    "MAX_REPEAT": _emit_repeat,
-    "MIN_REPEAT": _emit_repeat,
-    "SUBPATTERN": _emit_subpattern,
-    "BRANCH": _emit_branch,
-    "AT": _emit_at,
-    "CATEGORY": _emit_category,
-    "RANGE": _emit_range,
-}
-
-
-def _emit_node(name: str, arg: Any) -> str | None:
-    sampler = _OPCODE_SAMPLERS.get(name)
-    if sampler is None:
-        # Backreferences, look-arounds, and any opcode without a concrete sample are
-        # unsupported: the pattern is excluded rather than guessed.
-        return None
-    return sampler(arg)
-
-
-def _emit_seq(seq: Any) -> str | None:
-    parts: list[str] = []
-    for op, arg in seq:
-        piece = _emit_node(op.name, arg)
-        if piece is None:
-            return None
-        parts.append(piece)
-    return "".join(parts)
-
-
-def _sample_path_for_pattern(regex: str) -> str | None:
-    """A concrete path that PROVABLY matches ``regex`` (validated with ``fullmatch``), or
-    ``None`` when no representative can be safely derived."""
-    try:
-        parsed = _re_parser.parse(regex)
-        compiled = re.compile(regex)
-    except re.error:
-        return None
-    sample = _emit_seq(parsed)
-    if sample is None:
-        return None
-    return sample if compiled.fullmatch(sample) is not None else None
-
-
 # -- gate-faithful reachability + jq -----------------------------------------
 
 
@@ -389,9 +234,11 @@ async def _path_reachable(
     version: int,
     path: str,
 ) -> bool:
-    """Whether ``path`` clears the route-resolution + scope-coverage gate (or the
-    authenticated-always-allowed carve-out) — the SAME decision ``ResourceGuardMiddleware``
-    reaches, jq excluded (jq is a separate per-method pass)."""
+    """Whether ``path`` clears the route-resolution + scope-coverage gate or the carve-out.
+
+    The carve-out is the authenticated-always-allowed one. This is the SAME decision
+    ``ResourceGuardMiddleware`` reaches, jq excluded (jq is a separate per-method pass).
+    """
     # The carve-out is checked BEFORE resolution, exactly as the middleware does, so a
     # carve-out path that ALSO carries a route row is not under-shown by falling through
     # to a scope-coverage test the middleware never reaches.
@@ -409,14 +256,16 @@ async def _path_reachable(
 
 
 class _PreparedPass:
-    """A single enforce pass (the key's, or the owner's) with everything that is
-    INVARIANT across the whole build pre-computed once: the rendered condition string,
-    the configured flag, and the ``JqAuthContext`` body sans the per-probe ``request``.
+    """A single enforce pass (the key's, or the owner's) with the build-invariant parts precomputed.
+
+    Precomputed once across the whole build: the rendered condition string, the
+    configured flag, and the ``JqAuthContext`` body sans the per-probe ``request``.
 
     Only ``.request`` varies per ``(path, method)`` probe, so a probe shallow-copies the
     base body and substitutes ``request`` rather than re-rendering the condition (a
     storage read for a stored ``condition`` id) and rebuilding+dumping the whole context
-    on every pass — mirroring how the backend renders once per request."""
+    on every pass — mirroring how the backend renders once per request.
+    """
 
     __slots__ = ("base", "condition", "configured")
 
@@ -434,8 +283,10 @@ async def _prepare_pass(
     user_id: str,
     now: float,
 ) -> _PreparedPass:
-    """Render ``policy``'s condition ONCE and build the invariant jq-context body ONCE
-    for reuse across every per-probe pass in this build."""
+    """Render ``policy``'s condition ONCE and build the invariant jq-context body ONCE.
+
+    For reuse across every per-probe pass in this build.
+    """
     condition = ""
     if policy.condition is not None:
         condition = await tai42_app.storage.resource_manager.render_templated_text(policy.condition)
@@ -459,12 +310,14 @@ async def _jq_admits(
     path: str,
     method: str,
 ) -> bool:
-    """Whether the caller's (and, for an owned key, the owner's) jq condition admits
-    ``(path, method)`` — the SAME two-pass evaluation the backend runs, so a fenced route
-    is denied here exactly as it is at the edge. A genuine policy DENY returns ``False``;
+    """Whether the caller's (and, for an owned key, the owner's) jq condition admits the probe.
+
+    Probes ``(path, method)`` with the SAME two-pass evaluation the backend runs, so a
+    fenced route is denied here exactly as it is at the edge. A genuine policy DENY returns ``False``;
     a jq/render/store INFRASTRUCTURE fault (a ``PolicyEvaluationError``, which is NOT an
     ``AuthenticationError``) propagates loudly rather than being swallowed as a deny that
-    would silently drop the route from a 200 projection."""
+    would silently drop the route from a 200 projection.
+    """
     request = {"method": method, "path": path}
     try:
         await enforcer.enforce(
@@ -485,9 +338,11 @@ async def _jq_admits(
 
 
 async def _read_policy_version(settings: AccessControlSettings) -> int:
-    """The current policy version (a cheap single-key GET), mirroring the policy cache's
-    own read. A backend error RAISES (fail-closed) rather than pinning the cache to one
-    slot; a successful read with no key yet is version 0."""
+    """The current policy version (a cheap single-key GET), mirroring the policy cache's own read.
+
+    A backend error RAISES (fail-closed) rather than pinning the cache to one slot; a
+    successful read with no key yet is version 0.
+    """
     async with client_ctx(RedisClient, settings.redis) as r:
         raw = await r.get(settings.policy_version_key)
     return int(raw) if raw is not None else 0
@@ -498,9 +353,11 @@ _cached_builder: _CachedBuilder | None = None
 
 
 def _get_cached_builder(settings: AccessControlSettings) -> _CachedBuilder:
-    """The memoized ``alru_cache``-wrapped builder, mirroring ``PolicyEnforcer``'s cache
-    (same ``cache_size`` / ``cache_ttl_seconds`` bound). Version participates in the key,
-    so a mutation-driven version bump yields a fresh slot — a cross-worker miss."""
+    """The memoized ``alru_cache``-wrapped builder, mirroring ``PolicyEnforcer``'s cache.
+
+    Same ``cache_size`` / ``cache_ttl_seconds`` bound. Version participates in the key, so
+    a mutation-driven version bump yields a fresh slot — a cross-worker miss.
+    """
     global _cached_builder
     if _cached_builder is None:
         _cached_builder = alru_cache(maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds)(_build_uncached)
@@ -514,7 +371,8 @@ def reset_projection_cache() -> None:
     Registered with the settings-reset registry so a config reload (which runs
     ``reset_all_settings()``) rebuilds it against the new ``cache_size`` /
     ``cache_ttl_seconds`` bound instead of serving from a builder bound to the stale
-    settings snapshot, mirroring the sibling ``@register_settings_reset`` caches."""
+    settings snapshot, mirroring the sibling ``@register_settings_reset`` caches.
+    """
     global _cached_builder
     _cached_builder = None
 
@@ -527,7 +385,8 @@ async def build_projection(user_id: str, effective_scopes: list[str], claims: Ma
 
     ``user_id``, ``effective_scopes``, and ``claims`` come from the request; the caller's
     policy — and, for an owned key, the owner's policy — are fetched INTERNALLY through
-    the version-keyed policy cache, so the handler never fetches policy itself."""
+    the version-keyed policy cache, so the handler never fetches policy itself.
+    """
     settings = access_control_settings()
     version = await _read_policy_version(settings)
     wrapper = _FrozenClaims(dict(claims), _claims_digest(claims))
@@ -594,13 +453,14 @@ async def _build_admits(
     admin: bool,
     version: int,
 ) -> Callable[[str, str], Awaitable[bool]]:
-    """Build the ``admits(path, method)`` predicate — the jq two-pass ∧ per-tag LEVEL
-    decision the request gate runs, so ``projection ⊆ gate`` holds.
+    """Build the ``admits(path, method)`` predicate the request gate runs, so ``projection ⊆ gate`` holds.
 
+    The predicate is the jq two-pass ∧ per-tag LEVEL decision the request gate runs.
     Render each condition and build each jq-context body ONCE per build (they are
     invariant across every path/method probe — only ``.request`` varies), then reuse them
     for every probe. The owner pass exists only for an owned key whose owner carries a
-    condition, matching the backend's key-then-owner two-pass enforce."""
+    condition, matching the backend's key-then-owner two-pass enforce.
+    """
     now = time.time()
     key_pass: _PreparedPass | None = None
     owner_pass: _PreparedPass | None = None
@@ -612,7 +472,8 @@ async def _build_admits(
     async def admits(path: str, method: str) -> bool:
         if admin:
             return True
-        assert key_pass is not None  # built for every non-admin caller above
+        if key_pass is None:
+            raise AssertionError
         if not await _jq_admits(enforcer, key_pass, owner_pass, path, method):
             return False
         # The per-tag LEVEL term — the SAME shared decision the request gate runs, so a
@@ -633,8 +494,10 @@ async def _project_routes(
     version: int,
     admits: Callable[[str, str], Awaitable[bool]],
 ) -> tuple[list[RouteEntry], set[tuple[str, str]]]:
-    """Every registry route whose resolution+scope gate admits it, then jq-filtered per
-    method. Returns the entries and the projected ``(method, path)`` pairs."""
+    """Every registry route whose resolution+scope gate admits it, then jq-filtered per method.
+
+    Returns the entries and the projected ``(method, path)`` pairs.
+    """
     routes: list[RouteEntry] = []
     projected_pairs: set[tuple[str, str]] = set()
     for meta in _registry_routes():
@@ -663,9 +526,10 @@ async def _project_route_patterns(
     version: int,
     admits: Callable[[str, str], Awaitable[bool]],
 ) -> list[PatternEntry]:
-    """Dynamic route patterns, scope- AND jq-filtered exactly like routes via a
-    representative path. A pattern with no derivable representative is excluded (logged),
-    never leaked."""
+    """Dynamic route patterns, scope- AND jq-filtered exactly like routes via a representative path.
+
+    A pattern with no derivable representative is excluded (logged), never leaked.
+    """
     patterns = await management.get_all_existing_patterns()
     mappings = await management.get_all_route_mappings()
     route_patterns: list[PatternEntry] = []
@@ -693,10 +557,12 @@ async def _project_sub_mcp(
     version: int,
     admits: Callable[[str, str], Awaitable[bool]],
 ) -> list[SubMcpEntry]:
-    """Sub-MCP mounts, scope- AND jq-filtered exactly like every other surface — coverage
-    on the mount root the gate resolves PLUS a jq GET-probe of the mount root, so a mount
-    whose jq condition denies it is not topology-leaked. Only a mount admitted by BOTH is
-    projected, and only its tools fold into the tool union."""
+    """Sub-MCP mounts, scope- AND jq-filtered exactly like every other surface.
+
+    Coverage on the mount root the gate resolves PLUS a jq GET-probe of the mount root, so
+    a mount whose jq condition denies it is not topology-leaked. Only a mount admitted by
+    BOTH is projected, and only its tools fold into the tool union.
+    """
     sub_mcp: list[SubMcpEntry] = []
     sub_routes = await _sub_mcp_routes()
     for slug in sorted(sub_routes):
@@ -711,8 +577,10 @@ async def _project_sub_mcp(
 
 
 async def _project_tools(projected_pairs: set[tuple[str, str]], sub_mcp: list[SubMcpEntry]) -> list[str]:
-    """Every registry tool iff a global tool-run door is projected; otherwise the union of
-    the allowed sub-MCP mounts' tools. No per-tool ACL exists or is invented."""
+    """Every registry tool iff a global tool-run door is projected; otherwise the union of allowed mounts' tools.
+
+    No per-tool ACL exists or is invented.
+    """
     if any(door in projected_pairs for door in _TOOL_RUN_DOORS):
         return await _all_registry_tools()
     tool_names: set[str] = set()
@@ -729,8 +597,10 @@ async def _project_agents(
     version: int,
     admits: Callable[[str, str], Awaitable[bool]],
 ) -> list[str]:
-    """Each agent whose per-agent run door passes the gate (resolution + jq POST), so a
-    path-specific jq fence projects per-agent truthfully."""
+    """Each agent whose per-agent run door passes the gate (resolution + jq POST).
+
+    A path-specific jq fence therefore projects per-agent truthfully.
+    """
     agents: list[str] = []
     for name in _all_agent_names():
         run_path = f"/api/agents/{name}/runs"
@@ -742,18 +612,21 @@ async def _project_agents(
 
 
 def _mintable() -> bool:
-    """Whether any configured identity provider can mint keys — independent of
-    ``settings.enable``, so a gate-off deployment whose provider physically cannot mint
-    reports ``False``."""
+    """Whether any configured identity provider can mint keys, independent of ``settings.enable``.
+
+    A gate-off deployment whose provider physically cannot mint reports ``False``.
+    """
     return any(mintable for _name, mintable in management.provider_capabilities())
 
 
 def synthetic_full_projection() -> ProjectionResult:
-    """The gate-OFF total projection: there is no identity to project, so every surface
-    is reachable. ``admin=True`` + ``scopes=["*"]`` under the named ``__no_auth__``
-    identity; the list fields are explicitly EMPTY (the Studio renders everything off the
-    full-projection flag). ``mintable`` is still DERIVED — a provider that physically
-    cannot mint reports ``False`` even here."""
+    """The gate-OFF total projection: with no identity to project, every surface is reachable.
+
+    ``admin=True`` + ``scopes=["*"]`` under the named ``__no_auth__`` identity; the list
+    fields are explicitly EMPTY (the Studio renders everything off the full-projection
+    flag). ``mintable`` is still DERIVED — a provider that physically cannot mint reports
+    ``False`` even here.
+    """
     return ProjectionResult(
         user_id=NO_AUTH_USER_ID,
         owner_user_id=None,

@@ -51,17 +51,21 @@ _CONTRACT_DIST = "tai42-contract"
 
 
 class CorePluginBootError(RuntimeError):
-    """A SCALAR-slot plugin (backend/storage/monitoring) is contract-incompatible
-    or failed to import. Raised to ABORT boot: the server cannot run without its
-    scalar slots, so they get a typed loud failure instead of a quarantine
-    entry. The message names the plugin, the versions in play, and the remedy."""
+    """A SCALAR-slot plugin (backend/storage/monitoring) is contract-incompatible or failed to import.
+
+    Raised to ABORT boot: the server cannot run without its scalar slots, so they
+    get a typed loud failure instead of a quarantine entry. The message names the
+    plugin, the versions in play, and the remedy.
+    """
 
 
 @dataclass(frozen=True)
 class CompatVerdict:
-    """One dist's (or module's) verdict against the running contract. ``reason``
-    is ``None`` only for ``compatible``; for ``incompatible`` it is the
-    operator-facing quarantine/abort text, for ``unknown`` the note to log."""
+    """One dist's (or module's) verdict against the running contract.
+
+    ``reason`` is ``None`` only for ``compatible``; for ``incompatible`` it is the
+    operator-facing quarantine/abort text, for ``unknown`` the note to log.
+    """
 
     status: Literal["compatible", "incompatible", "unknown"]
     reason: str | None = None
@@ -72,22 +76,27 @@ class CompatVerdict:
 
 
 def running_contract_version() -> str:
-    """The installed ``tai42-contract`` version — the value every verdict here
-    checks against and the ``contract`` param the resolve client sends."""
+    """The installed ``tai42-contract`` version.
+
+    The value every verdict here checks against and the ``contract`` param the
+    resolve client sends.
+    """
     return metadata.version(_CONTRACT_DIST)
 
 
 def distribution_map() -> dict[str, list[str]]:
-    """A snapshot of top-level package → owning distribution(s), for one boot
-    pass to reuse across every manifest module (the underlying read walks every
-    installed dist, so per-module fresh reads would be quadratic)."""
+    """A snapshot of top-level package → owning distribution(s), reusable across a boot pass.
+
+    The underlying read walks every installed dist, so per-module fresh reads would
+    be quadratic; one boot pass reuses this snapshot across every manifest module.
+    """
     return dict(metadata.packages_distributions())
 
 
 def _declared_contract_specifier(dist_name: str) -> SpecifierSet | None:
-    """The dist's declared ``tai42-contract`` specifier, or ``None`` when no
-    verdict is derivable (dist not installed, no metadata, no declaration).
+    """The dist's declared ``tai42-contract`` specifier, or ``None`` when no verdict is derivable.
 
+    ``None`` covers a dist not installed, no metadata, or no declaration.
     Extra-gated requirement lines are skipped (not part of the runtime set);
     multiple runtime declarations AND together. A malformed line is skipped with
     a warning — see the module docstring for why that is not a boot failure.
@@ -136,15 +145,14 @@ def dist_compat(dist_name: str) -> CompatVerdict:
 
 
 def module_compat(module: str, dist_map: dict[str, list[str]] | None = None) -> CompatVerdict:
-    """The verdict for a manifest MODULE: its top-level package is mapped to the
-    owning distribution(s) via ``importlib.metadata.packages_distributions`` and
-    each mapped dist is evaluated — any incompatible dist decides the verdict
-    (naming that dist), else compatible when at least one dist declared a range,
-    else unknown.
+    """The verdict for a manifest MODULE, from the owning distribution(s) of its top-level package.
 
-    ``dist_map`` lets one boot pass snapshot the (sys.path-scan-priced) mapping
-    once and reuse it across every manifest module; omitted, the mapping is read
-    fresh.
+    The top-level package is mapped to the owning distribution(s) via
+    ``importlib.metadata.packages_distributions`` and each mapped dist is evaluated —
+    any incompatible dist decides the verdict (naming that dist), else compatible when
+    at least one dist declared a range, else unknown. ``dist_map`` lets one boot pass
+    snapshot the (sys.path-scan-priced) mapping once and reuse it across every manifest
+    module; omitted, the mapping is read fresh.
     """
     top_level = module.partition(".")[0]
     mapping = metadata.packages_distributions() if dist_map is None else dist_map
@@ -165,14 +173,15 @@ def module_compat(module: str, dist_map: dict[str, list[str]] | None = None) -> 
 
 @dataclass(frozen=True)
 class UpdateTargets:
-    """The update picture for one installed ref, computed from the registry's
-    version rows against the running contract: the newest published version
-    (``latest``), the newest published COMPATIBLE version
-    (``latest_compatible``), whether that compatible version beats the installed
-    one (``update_available``), and the newest published INCOMPATIBLE version
-    newer than the installed one (``incompatible_newer`` — the "an update
-    exists, but it needs a newer core" signal), or ``None`` where no such
-    version exists."""
+    """The update picture for one installed ref, computed from the registry's version rows.
+
+    Computed against the running contract: the newest published version (``latest``),
+    the newest published COMPATIBLE version (``latest_compatible``), whether that
+    compatible version beats the installed one (``update_available``), and the newest
+    published INCOMPATIBLE version newer than the installed one (``incompatible_newer``
+    — the "an update exists, but it needs a newer core" signal), or ``None`` where no
+    such version exists.
+    """
 
     latest: str | None
     latest_compatible: str | None
@@ -181,8 +190,7 @@ class UpdateTargets:
 
 
 def _published_version(row: Any) -> Version | None:
-    """The published version of one registry version row, or ``None`` when the row
-    is not a ``published`` one.
+    """The published version of one registry version row, or ``None`` when the row is not published.
 
     A non-object element or a published row whose version is missing / non-PEP440 is
     garbled registry data → the typed registry-data fault (502), never a silent skip.
@@ -201,10 +209,12 @@ def _published_version(row: Any) -> Version | None:
 
 
 def _row_compatible(row: dict[str, Any], version: Version, contract_version: str) -> bool:
-    """Whether one published row supports the running contract, by its
-    ``contract_range``: an absent (``None``) range counts compatible, a present one
-    is checked with ``prereleases=True``. A non-string or malformed range is garbled
-    registry data → the typed registry-data fault (502)."""
+    """Whether one published row supports the running contract, by its ``contract_range``.
+
+    An absent (``None``) range counts compatible, a present one is checked with
+    ``prereleases=True``. A non-string or malformed range is garbled registry data →
+    the typed registry-data fault (502).
+    """
     contract_range = row.get("contract_range")
     if contract_range is None:
         return True

@@ -45,17 +45,21 @@ _INVALID_CODE_TEXT = "That pairing code is not valid. It may have expired or alr
 
 
 def _template_references_code(template: str) -> bool:
-    """Whether a validated greeting template references ``{pairing_code}`` (vs a fixed
-    string), so a code is minted ONLY when the greeting will actually carry one."""
+    """Whether a validated greeting template references ``{pairing_code}`` (vs a fixed string).
+
+    A code is minted ONLY when the greeting will actually carry one.
+    """
     return any(field == GREETING_PLACEHOLDER for _literal, field, _spec, _conv in string.Formatter().parse(template))
 
 
 async def _greeting_and_code(multichannel: _Multichannel) -> tuple[str | None, _MintedCode | None]:
-    """The rendered first-contact greeting for a created-now person and the code it minted, or
-    ``(None, None)`` when the target configures no template. ``{pairing_code}`` is substituted
-    with a freshly minted code (rotating any open one) that is RETURNED so a same-turn
-    ``/link`` can present that SAME live code instead of minting a second one; a template with
-    no placeholder mints nothing and returns no code."""
+    """The rendered first-contact greeting for a created-now person and the code it minted.
+
+    Returns ``(None, None)`` when the target configures no template. ``{pairing_code}``
+    is substituted with a freshly minted code (rotating any open one) that is RETURNED
+    so a same-turn ``/link`` can present that SAME live code instead of minting a
+    second one; a template with no placeholder mints nothing and returns no code.
+    """
     template = multichannel.greeting_template
     if template is None:
         return None, None
@@ -66,12 +70,14 @@ async def _greeting_and_code(multichannel: _Multichannel) -> tuple[str | None, _
 
 
 def _with_greeting(outcome: _ToolOutcome, greeting: str | None) -> _ToolOutcome:
-    """Prepend a due greeting as its own LEADING message. A greeting is a message of its
-    own, so it becomes the first ordered part ahead of the turn's parts; a silent outcome
-    due a greeting becomes an answered greeting-only reply — a greeting, once due, is never
-    silently dropped; an error outcome keeps the greeting ahead of its client-safe text. The
-    joined answer is byte-identical to the old ``f"{greeting}\n\n{answer}"`` prefix for a
-    single-part outcome."""
+    r"""Prepend a due greeting as its own LEADING message.
+
+    A greeting is a message of its own, so it becomes the first ordered part ahead of
+    the turn's parts; a silent outcome due a greeting becomes an answered greeting-only
+    reply — a greeting, once due, is never silently dropped; an error outcome keeps the
+    greeting ahead of its client-safe text. The joined answer for a single-part outcome
+    renders as ``f"{greeting}\n\n{answer}"``.
+    """
     if greeting is None:
         return outcome
     if isinstance(outcome, _SilentOutcome):
@@ -88,17 +94,19 @@ async def _run_pairing_turn(
     greeting_code: _MintedCode | None,
     route: ConversationRoute,
 ) -> _ToolOutcome:
-    """Dispatch a classified pairing action against the multichannel target and return its
-    resolved outcome. ``Link`` presents ``greeting_code`` when a first-contact greeting
-    already minted one this turn (so only ONE code is minted and the greeting's code stays
-    live), else mints its own; ``Redeem`` redeems then ensures BOTH sides and merges;
-    ``Unlink`` detaches the sending address.
+    """Dispatch a classified pairing action against the multichannel target and return its outcome.
+
+    ``Link`` presents ``greeting_code`` when a first-contact greeting already minted
+    one this turn (so only ONE code is minted and the greeting's code stays live), else
+    mints its own; ``Redeem`` redeems then ensures BOTH sides and merges; ``Unlink``
+    detaches the sending address.
 
     Error scoping: ONLY the named pairing domain errors (``PairCodeInvalidError``,
     ``CrossTargetMergeError``, ``NotLinkedError``) become the uniform answered refusal — it
     IS the answer, detail logged. ANY other exception (a redis fault, a reset) takes
     the platform's standard client-safe ``error`` outcome, so an infra fault never
-    masquerades as an invalid code."""
+    masquerades as an invalid code.
+    """
     try:
         if isinstance(action, Link):
             code, expires_at = greeting_code or await accessors._pair_code_store().mint(
@@ -122,17 +130,20 @@ async def _run_pairing_turn(
         logger.info("conversations: pairing refused on route %r: %s", multichannel.route_name, exc)
         return _pairing_reply(_INVALID_CODE_TEXT)
     except Exception as exc:
-        logger.error("conversations: pairing turn on route %r failed", multichannel.route_name, exc_info=exc)
+        logger.exception("conversations: pairing turn on route %r failed", multichannel.route_name, exc_info=exc)
         return _tool_error(f"pairing turn error: {exc}", route)
 
 
 async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Redeem) -> _ToolOutcome:
-    """Redeem a pair code and merge the two persons — behind the brute-force throttle. A
-    locked source, and an invalid code, both return the SAME uniform reply (no oracle); a
-    valid redeem clears the throttle. The minting side's provisional row is ensured from the
-    code's stored value (a tool-minted code may name an address with no admitted inbound
-    yet); such a row consumes no greeting — the person is already linked, and the greeting
-    predicate fires only at that address's OWN admitted inbound, which this is not."""
+    """Redeem a pair code and merge the two persons — behind the brute-force throttle.
+
+    A locked source, and an invalid code, both return the SAME uniform reply (no
+    oracle); a valid redeem clears the throttle. The minting side's provisional row is
+    ensured from the code's stored value (a tool-minted code may name an address with
+    no admitted inbound yet); such a row consumes no greeting — the person is already
+    linked, and the greeting predicate fires only at that address's OWN admitted
+    inbound, which this is not.
+    """
     throttle = accessors._redeem_throttle()
     source = multichannel.throttle_source_key()
     if await throttle.is_locked(multichannel.target, source):

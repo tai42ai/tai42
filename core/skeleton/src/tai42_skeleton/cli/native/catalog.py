@@ -129,14 +129,16 @@ _BUILTIN_ROWS: list[dict[str, str]] = [
 
 
 def _project(item: dict[str, Any]) -> dict[str, str]:
-    """One marketplace item row → the catalog columns. ``source`` is the owning
-    ``<namespace>/<listing>``; ``module`` is empty for an mcp-server item (its route
-    field is ``null``, never ``""``, so normalize here).
+    """Project one marketplace item row into the catalog columns.
+
+    ``source`` is the owning ``<namespace>/<listing>``; ``module`` is empty for an mcp-server item
+    (its route field is ``null``, never ``""``, so normalize here).
 
     A dict-shaped row missing any identity field is garbled registry data →
     :class:`RegistryResponseError` (a :class:`MarketplaceError`), so the caller renders
     the uniform CLI error rather than a bare ``KeyError`` traceback. ``description`` is
-    non-identifying and defaults to ``""``."""
+    non-identifying and defaults to ``""``.
+    """
     for field in _ITEM_IDENTITY_FIELDS:
         if field not in item:
             raise RegistryResponseError(f"marketplace item row is missing the required {field!r} field", status=None)
@@ -151,12 +153,13 @@ def _project(item: dict[str, Any]) -> dict[str, str]:
 
 
 def load_catalog() -> list[dict[str, Any]]:
-    """The full catalog: the static skeleton builtins followed by every listed
-    plugin's items, queried live from the marketplace registry.
+    """The full catalog: the static skeleton builtins followed by every listed plugin's items.
 
-    The network is required — a dead or garbled registry raises a
-    :class:`~tai42_skeleton.marketplace.errors.MarketplaceError`, never a silent empty
-    list or a cached snapshot."""
+    The plugin items are queried live from the marketplace registry. The network is required — a
+    dead or garbled registry raises a
+    :class:`~tai42_skeleton.marketplace.errors.MarketplaceError`, never a silent empty list or a
+    cached snapshot.
+    """
     items = asyncio.run(RegistryClient().items())
     return [*_BUILTIN_ROWS, *(_project(item) for item in items)]
 

@@ -38,10 +38,10 @@ _KIND = "ac_policy"
 
 
 class AcPolicyStore:
-    """Typed access-control-policy view delegating to a generic
-    :class:`VersionedStore` under ``kind="ac_policy"``."""
+    """Typed access-control-policy view delegating to a generic :class:`VersionedStore` under ``kind="ac_policy"``."""
 
     def __init__(self, store: VersionedStore) -> None:
+        """Bind the view to the generic versioned ``store`` it delegates to."""
         self._store = store
 
     async def write(self, user_id: str, body: dict[str, Any]) -> bool:
@@ -63,15 +63,19 @@ class AcPolicyStore:
         return True
 
     async def list_versions(self, user_id: str) -> list[DocumentVersion]:
+        """List this user's policy versions, newest first."""
         return await self._store.list_versions(_KIND, user_id)
 
     async def get_version(self, user_id: str, version: int) -> DocumentVersion:
+        """Fetch one numbered policy version for this user."""
         return await self._store.get_version(_KIND, user_id, version)
 
     async def get_active_body(self, user_id: str) -> dict[str, Any]:
+        """Return this user's active policy body."""
         return await self._store.get_active_body(_KIND, user_id)
 
     async def rollback(self, user_id: str, version: int) -> DocumentRecord:
+        """Make ``version`` active again by appending it as the newest version."""
         return await self._store.rollback(_KIND, user_id, version)
 
 

@@ -57,27 +57,31 @@ def compact(pairs: Mapping[str, Any]) -> dict[str, Any]:
     The single home for the "assemble a query/body from optional inputs" pattern:
     a caller maps each optional flag to its value (or ``None`` when unset) and this
     keeps only the ones that carry a value, so an omitted flag never reaches the
-    wire as an empty parameter."""
+    wire as an empty parameter.
+    """
     return {key: value for key, value in pairs.items() if value is not None}
 
 
 def seg(value: Any) -> str:
-    """A user-supplied value percent-encoded as ONE path segment (``safe=""`` encodes
-    ``/`` too), so a value that carries a reserved character — a state record ``key``
-    legitimately holds ``/``, a name a space or ``#`` — forms a single valid segment the
-    server routes to intact rather than splitting or truncating. A value with no reserved
-    character is unchanged. Every ``/api/...`` path built by interpolating user input into
-    a single-segment ``{name}`` parameter wraps it in this."""
+    """A user-supplied value percent-encoded as ONE path segment (``safe=""`` encodes ``/`` too).
+
+    A value that carries a reserved character — a state record ``key`` legitimately holds
+    ``/``, a name a space or ``#`` — forms a single valid segment the server routes to intact
+    rather than splitting or truncating. A value with no reserved character is unchanged. Every
+    ``/api/...`` path built by interpolating user input into a single-segment ``{name}``
+    parameter wraps it in this.
+    """
     return quote(str(value), safe="")
 
 
 def subpath(value: Any) -> str:
-    """A user-supplied value bound to a ``{name:path}`` route parameter — a multi-segment
-    path by contract. Each segment is percent-encoded while ``safe="/"`` keeps the ``/``
-    separators, so a reserved character inside a segment forms a valid segment and the
-    path structure the ``:path`` converter matches on survives on the wire. Contrast
-    :func:`seg`, which encodes a value as ONE segment (``/`` included) for a single-segment
-    ``{name}`` parameter."""
+    """A user-supplied value bound to a ``{name:path}`` route parameter — a multi-segment path.
+
+    Each segment is percent-encoded while ``safe="/"`` keeps the ``/`` separators, so a
+    reserved character inside a segment forms a valid segment and the path structure the
+    ``:path`` converter matches on survives on the wire. Contrast :func:`seg`, which encodes a
+    value as ONE segment (``/`` included) for a single-segment ``{name}`` parameter.
+    """
     return quote(str(value), safe="/")
 
 
@@ -85,7 +89,7 @@ def app_context(ctx: typer.Context) -> AppContext:
     """The :class:`AppContext` the root callback placed on the Typer context."""
     obj = ctx.obj
     if not isinstance(obj, AppContext):
-        raise RuntimeError("CLI invocation context is not initialized")
+        raise RuntimeError("CLI invocation context is not initialized")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     return obj
 
 
@@ -109,11 +113,12 @@ def parse_json_value(value: str, *, param_hint: str) -> Any:
 
 
 def parse_extension_element(element: Any, *, param_hint: str) -> ExtensionElement:
-    """One combo element in the lossless extension-combo syntax, structurally
-    validated: a non-empty extension NAME (a bare JSON string), or a
-    ``{"name": <non-empty str>, "config": <object>}`` object binding author config
-    to it (``config`` is REQUIRED — the config-less selection is the bare-string
-    form, so a config-free object is malformed) with no other keys.
+    """One combo element in the lossless extension-combo syntax, structurally validated.
+
+    It is a non-empty extension NAME (a bare JSON string), or a
+    ``{"name": <non-empty str>, "config": <object>}`` object binding author config to it
+    (``config`` is REQUIRED — the config-less selection is the bare-string form, so a
+    config-free object is malformed) with no other keys.
 
     This mirrors the ``ExtensionElement`` contract the
     ``/api/tools/{name}/extensions`` and ``/api/presets`` doors accept, so a combo
@@ -143,9 +148,10 @@ def parse_extension_element(element: Any, *, param_hint: str) -> ExtensionElemen
 
 
 def parse_extension_combo(value: str, *, param_hint: str) -> list[ExtensionElement]:
-    """Parse ONE extension combo — a JSON array of combo elements (see
-    :func:`parse_extension_element`). An empty combo is rejected: a combo names at
-    least one extension."""
+    """Parse ONE extension combo — a JSON array of combo elements (see :func:`parse_extension_element`).
+
+    An empty combo is rejected: a combo names at least one extension.
+    """
     parsed = parse_json_value(value, param_hint=param_hint)
     if not isinstance(parsed, list) or not parsed:
         raise typer.BadParameter("a combo must be a non-empty JSON array of extension elements", param_hint=param_hint)
@@ -153,10 +159,13 @@ def parse_extension_combo(value: str, *, param_hint: str) -> list[ExtensionEleme
 
 
 def parse_extension_combos(value: str, *, param_hint: str) -> list[list[ExtensionElement]]:
-    """Parse a full extension spec — a JSON array of combos, each itself a
-    non-empty array of combo elements (see :func:`parse_extension_element`). An
-    empty top-level array is legal (it clears the tool's/preset's extensions); an
-    empty inner combo is rejected, mirroring the doors' own shape rule."""
+    """Parse a full extension spec — a JSON array of combos of combo elements.
+
+    Each combo is itself a non-empty array of combo elements (see
+    :func:`parse_extension_element`). An empty top-level array is legal (it clears the
+    tool's/preset's extensions); an empty inner combo is rejected, mirroring the doors' own
+    shape rule.
+    """
     parsed = parse_json_value(value, param_hint=param_hint)
     if not isinstance(parsed, list):
         raise typer.BadParameter("must be a JSON array of extension combos", param_hint=param_hint)
@@ -171,9 +180,11 @@ def parse_extension_combos(value: str, *, param_hint: str) -> list[list[Extensio
 
 
 def _apply_kw_pairs(result: dict[str, Any], kw: Sequence[str] | None, *, param_hint: str) -> None:
-    """Merge repeated ``key=value`` pairs into ``result`` in place, each value parsed as
-    JSON and falling back to the literal string. A pair overrides the same key already
-    present. A token without ``=`` or with an empty key raises a usage error."""
+    """Merge repeated ``key=value`` pairs into ``result`` in place.
+
+    Each value is parsed as JSON and falls back to the literal string. A pair overrides the
+    same key already present. A token without ``=`` or with an empty key raises a usage error.
+    """
     for pair in kw or []:
         key, sep, raw = pair.partition("=")
         if not sep or not key:
@@ -185,9 +196,10 @@ def _apply_kw_pairs(result: dict[str, Any], kw: Sequence[str] | None, *, param_h
 
 
 def parse_kwargs(kwargs_json: str | None, kw: Sequence[str] | None) -> dict[str, Any]:
-    """Build a kwargs mapping from an optional ``--kwargs`` JSON object plus any
-    repeated ``--kw key=value`` pairs (each value parsed as JSON, falling back to
-    the literal string). A ``--kw`` pair overrides the same key from ``--kwargs``.
+    """Build a kwargs mapping from an optional ``--kwargs`` JSON object plus repeated ``--kw`` pairs.
+
+    Each ``--kw key=value`` value is parsed as JSON, falling back to the literal string. A
+    ``--kw`` pair overrides the same key from ``--kwargs``.
     """
     result: dict[str, Any] = {}
     if kwargs_json is not None:
@@ -205,8 +217,7 @@ def load_kwargs_arg(
     file_param_hint: str,
     kw_param_hint: str,
 ) -> dict[str, Any]:
-    """Build a kwargs mapping from an inline JSON object OR a file/stdin (``-``) source,
-    plus any repeated ``key=value`` pairs.
+    """Build a kwargs mapping from an inline JSON object or a file/stdin (``-``) source plus ``key=value`` pairs.
 
     The object source keeps a secret off the command line (a value on argv leaks via
     ``ps`` and shell history). Giving both the inline and file source is a usage error;
@@ -219,8 +230,10 @@ def load_kwargs_arg(
 
 
 def _split_assignment(text: str) -> tuple[str, str] | None:
-    """Split ``KEY=VALUE`` on the FIRST ``=`` — key stripped, value verbatim after
-    the ``=``. Returns ``None`` when there is no ``=`` or the key is empty."""
+    """Split ``KEY=VALUE`` on the FIRST ``=`` — key stripped, value verbatim.
+
+    Returns ``None`` when there is no ``=`` or the key is empty.
+    """
     key, sep, value = text.partition("=")
     key = key.strip()
     if not sep or not key:
@@ -257,8 +270,11 @@ def parse_env_lines(text: str, *, source: str) -> list[tuple[str, str]]:
 
 
 def merge_assignments(target: dict[str, str], pairs: Iterable[tuple[str, str]], *, source: str) -> None:
-    """Merge ``(key, value)`` pairs into ``target``, raising a usage error naming any
-    key already present — no silent last-wins precedence across or within sources."""
+    """Merge ``(key, value)`` pairs into ``target``, raising a usage error on any duplicate key.
+
+    A key already present names a usage error — there is no silent last-wins precedence across
+    or within sources.
+    """
     for key, value in pairs:
         if key in target:
             raise typer.BadParameter(f"key {key!r} was given more than once (via {source})")
@@ -358,7 +374,7 @@ def stream_frames(
     json_body: Any | None = None,
     params: Mapping[str, Any] | None = None,
 ) -> None:
-    """Stream an SSE run to stdout frame by frame — never buffering the whole run.
+    r"""Stream an SSE run to stdout frame by frame — never buffering the whole run.
 
     Each server frame is written on its own line and flushed as it arrives. A frame
     that carries an out-of-band ``event:`` type (the interactions stream) is rendered

@@ -1,5 +1,8 @@
-"""The proxied tool-call handler for ``claude_code``: run one tool the runner requested, write
-its result back, and surface (or loudly refuse) an async park."""
+"""The proxied tool-call handler for ``claude_code``.
+
+Run one tool the runner requested, write its result back, and surface (or loudly
+refuse) an async park.
+"""
 
 from __future__ import annotations
 
@@ -19,9 +22,10 @@ from tai42_agents.claude_code.protocol import ProtocolError, ToolCallFrame, Tool
 async def run_proxied_tool_call(
     frame: ToolCallFrame, *, handle: Any, allowlist: set[str], thread_id: str | None
 ) -> SuspendedInteraction | None:
-    """Run one proxied tool call and write its result back to the runner. Returns the park
-    sentinel when the tool async-parked (so the drive loop stops the runner and suspends),
-    else ``None``.
+    """Run one proxied tool call and write its result back to the runner.
+
+    Returns the park sentinel when the tool async-parked (so the drive loop stops
+    the runner and suspends), else ``None``.
 
     A tool that returns a :class:`SuspendedInteraction` async-parked its caller (a generic
     contract sentinel — this loop learns nothing of the tool's resume machinery). On a
@@ -45,7 +49,8 @@ async def run_proxied_tool_call(
     waiting on — a park on the CALL is not a shape its protocol can resume — so a nested
     run's park is refused here rather than waited on. The park surfaced up here is therefore
     the agent's own — raised outside the scoped call, and the ownership check above is what
-    keeps that true."""
+    keeps that true.
+    """
     if frame.tool_name not in allowlist:
         # A compromised session cannot widen its declared tool set — a loud protocol error.
         raise ProtocolError(

@@ -113,13 +113,15 @@ class PluginItem(BaseModel):
             # rather than letting an empty shell surface late at spawn. Its
             # own validator already guarantees at MOST one of
             # url/uds/command; this adds the at-least-one requirement.
-            assert self.mcp is not None
+            # Type-narrowing invariant guaranteed above; kept as assert to stay under the complexity floor.
+            assert self.mcp is not None  # noqa: S101
             if self.mcp.url is None and self.mcp.uds is None and self.mcp.command is None:
                 raise ValueError(f"kind {self.kind.value!r} 'mcp' must declare a transport (url/uds/command)")
         elif self.kind is PluginItemKind.CONNECTOR:
             # ``provider.id`` is the manifest ``connectors`` key and the
             # uninstall key, so the item name must equal it.
-            assert self.provider is not None
+            # Type-narrowing invariant guaranteed above; kept as assert to stay under the complexity floor.
+            assert self.provider is not None  # noqa: S101
             if self.name != self.provider.id:
                 raise ValueError(f"connector item name {self.name!r} must equal provider.id {self.provider.id!r}")
 

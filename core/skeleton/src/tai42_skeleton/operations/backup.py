@@ -42,8 +42,7 @@ _TEMPLATES_SECTION = "templates"
 
 
 class BackupImport(BaseModel):
-    """Import request — a backup ``document`` produced by the export route, the
-    section names to import from it, and the per-record ``mode``."""
+    """Import request: a backup ``document``, the section names to import, and the per-record ``mode``."""
 
     document: dict[str, Any]
     sections: list[str]
@@ -53,8 +52,7 @@ class BackupImport(BaseModel):
 
 
 async def _maybe_await(value: Any) -> Any:
-    """Await ``value`` when a section's exporter/importer was async; a sync
-    section returns its result directly."""
+    """Await ``value`` when a section's exporter/importer was async; a sync one returns directly."""
     if inspect.isawaitable(value):
         return await value
     return value
@@ -65,13 +63,13 @@ def _registered_section_names() -> set[str]:
 
 
 def _import_order(requested: list[str]) -> list[str]:
-    """``requested`` replayed in REGISTRATION order, with names this host does not
-    register appended so each still gets its report.
+    """Return ``requested`` replayed in REGISTRATION order, unknown names appended so each still gets a report.
 
     The list is a SET, and registration order is a declared DEPENDENCY order (e.g.
     ``access_control`` and ``templates`` before ``webhooks``, whose importer decides records
     against both live stores). Replaying in the caller's order would make one document
-    produce different stored state depending only on how the name list was typed."""
+    produce different stored state depending only on how the name list was typed.
+    """
     registered = [info.name for info in tai42_app.backup.sections()]
     selected = list(dict.fromkeys(requested))
     known = set(registered)
@@ -80,6 +78,7 @@ def _import_order(requested: list[str]) -> list[str]:
 
 @operation(summary="List backup sections", tags=["backup"], response_model=BackupSectionListing)
 async def list_sections() -> list:
+    """List the registered backup sections as ``{name, secret}`` entries."""
     return [{"name": info.name, "secret": info.secret} for info in tai42_app.backup.sections()]
 
 
@@ -94,6 +93,12 @@ async def list_sections() -> list:
     response_model=BackupImportResult,
 )
 async def import_backup(document: dict[str, Any], sections: list[str], mode: BackupMode = "skip") -> dict:
+    """Import each SELECTED section of ``document`` in registration order and return a per-section report.
+
+    ``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1
+    raises ``BadRequestError``; an unknown, absent, or failing section carries its error in
+    the report and makes ``ok`` false.
+    """
     # The envelope shape is validated at the HTTP edge; the document CONTENT (version,
     # its sections map) is the operation's own validation, raising ``BadRequestError``.
     if document.get("version") != _DOCUMENT_VERSION:
@@ -143,8 +148,10 @@ async def import_backup(document: dict[str, Any], sections: list[str], mode: Bac
 
 
 async def _evict_templates_fleetwide() -> dict[str, Any]:
-    """Broadcast a ``clear_template_cache`` so every worker cold-starts its compiled
-    cache after a template restore, returning the per-worker fan-out summary."""
+    """Broadcast a ``clear_template_cache`` so every worker cold-starts its compiled cache after a restore.
+
+    Returns the per-worker fan-out summary.
+    """
     manager = tai42_app.storage.resource_manager
 
     async def _apply() -> None:
@@ -155,7 +162,9 @@ async def _evict_templates_fleetwide() -> dict[str, Any]:
 
 
 def _absent_section_report(error: str) -> dict[str, Any]:
-    """A zero-count section report carrying a single ``error`` — for a section that
-    never ran (unknown, absent, or whose importer raised). Mirrors the importer report
-    shape so the per-section reports are uniform."""
+    """Return a zero-count section report carrying a single ``error`` for a section that never ran.
+
+    For a section that is unknown, absent, or whose importer raised. Mirrors the importer
+    report shape so the per-section reports are uniform.
+    """
     return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": [error]}

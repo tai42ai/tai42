@@ -36,8 +36,11 @@ from tai42_skeleton.sub_mcp.store import get_sub_mcp_store
 
 
 class SubMcpRegistration(BaseModel):
-    """A sub-MCP app registration: the ``slug`` to mount it under, the tool names
-    it exposes, and the optional ``transport`` (``http`` default)."""
+    """A sub-MCP app registration.
+
+    The ``slug`` to mount it under, the tool names it exposes, and the optional
+    ``transport`` (``http`` default).
+    """
 
     slug: str = Field(min_length=1)
     tools: list[str]
@@ -46,6 +49,7 @@ class SubMcpRegistration(BaseModel):
 
 @operation(summary="List the registered sub-MCP apps", tags=["sub-mcp"], response_model=SubMcpMapListing)
 async def list_sub_mcp() -> dict:
+    """List the registered sub-MCP apps from the durable store, keyed by slug."""
     # Read the durable store, not this worker's in-process cache, so the list is
     # coherent across workers. RouteConfig is a pydantic model; model_dump yields
     # the JSON-safe fields (tools + transport) so no live object leaks into the body.
@@ -63,6 +67,7 @@ async def list_sub_mcp() -> dict:
     response_model=SubMcpRegistrationResult,
 )
 async def register_sub_mcp(slug: str, tools: list[str], transport: str = "http") -> dict:
+    """Register or reload the sub-MCP app ``slug`` exposing ``tools`` on ``transport``; an unknown tool is a 404."""
     # Resolve every tool against the live registry BEFORE registering: an unknown
     # name would otherwise blow up in ``_build_sub_app`` on the FIRST request (a
     # generic 500 to a different caller), so reject it loudly here up front. The
@@ -90,6 +95,7 @@ async def register_sub_mcp(slug: str, tools: list[str], transport: str = "http")
     response_model=SubMcpRemovalResult,
 )
 async def unregister_sub_mcp(slug: str) -> dict:
+    """Unregister the sub-MCP app ``slug`` and tear down its lifespan; an unknown slug is a 404."""
     # The service deletes from the store and, if bound here, the local router. It
     # returns whether anything was removed (store OR local): a slug present in
     # neither is a loud 404, but a slug registered on a sibling worker is store-only

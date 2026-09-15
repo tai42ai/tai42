@@ -1,5 +1,4 @@
-"""Webhook-security surface: the verifier registry, per-topic bindings, ingress
-settings, and the builtin ``shared_secret`` verifier.
+"""Webhook-security surface: the verifier registry, per-topic bindings, ingress settings, and builtin verifier.
 
 The public webhook doors (``/universal_webhook/{topic}`` and the interactions
 callback) authenticate an inbound request over its raw bytes BEFORE parsing, via

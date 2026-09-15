@@ -1,5 +1,6 @@
-"""Block Kit builders for the non-form richer sends: display media, a shared
-location, and the tappable option vocabulary.
+"""Block Kit builders for the non-form richer sends.
+
+Display media, a shared location, and the tappable option vocabulary.
 
 Two option shapes reach this module from two contract seams:
 
@@ -84,17 +85,21 @@ def is_reply_action(action_id: str) -> bool:
 
 
 def is_option_tap(action_id: str) -> bool:
-    """Whether ``action_id`` is any option-button tap that SUBMITS a reply — an ask-path
-    select tap or a notify reply tap. A link button (``tai42_link:``) opens a url and
-    submits nothing, so it is NOT an option tap (the door acks and ignores it)."""
+    """Whether ``action_id`` is any option-button tap that SUBMITS a reply.
+
+    An ask-path select tap or a notify reply tap. A link button (``tai42_link:``) opens a
+    url and submits nothing, so it is NOT an option tap (the door acks and ignores it).
+    """
     return is_select_action(action_id) or is_reply_action(action_id)
 
 
 def encode_reply_value(text: str, option_id: str | None) -> str:
-    """The reply button ``value``: a compact JSON envelope of the submit ``text`` and the
-    author-set ``option_id`` (omitted when ``None``). Slack echoes ``value`` verbatim on a
-    tap, so this is how a stable reply id survives the round trip and returns as
-    ``params.reply_id`` (see :func:`decode_reply_value`)."""
+    """The reply button ``value``: a compact JSON envelope of the submit ``text`` and author-set id.
+
+    The ``option_id`` is omitted when ``None``. Slack echoes ``value`` verbatim on a tap,
+    so this is how a stable reply id survives the round trip and returns as
+    ``params.reply_id`` (see :func:`decode_reply_value`).
+    """
     envelope: dict[str, str] = {"text": text}
     if option_id is not None:
         envelope["id"] = option_id
@@ -102,15 +107,17 @@ def encode_reply_value(text: str, option_id: str | None) -> str:
 
 
 def decode_reply_value(value: str) -> tuple[str, str | None]:
-    """The ``(text, option_id)`` a reply button tap carried, from its JSON-envelope
-    ``value``. Defensive: a value that is not our envelope (no JSON object with a string
-    ``text``) is treated as plain submit text with no id, so a malformed tap still bridges
-    the visible string rather than failing.
+    """The ``(text, option_id)`` a reply button tap carried, from its JSON-envelope ``value``.
+
+    Defensive: a value that is not our envelope (no JSON object with a string ``text``) is
+    treated as plain submit text with no id, so a malformed tap still bridges the visible
+    string rather than failing.
 
     The id is clamped to :data:`~tai42_contract.channels.OPTION_ID_MAX_CHARS` — the same
     bound the contract enforces when an id is minted — so a forged-signed oversized id is
     dropped here (the reply text still bridges) and can never reach ``validate_entry_params``
-    to raise and 5xx-loop the webhook."""
+    to raise and 5xx-loop the webhook.
+    """
     try:
         parsed = json.loads(value)
     except ValueError:
@@ -135,17 +142,22 @@ def _mrkdwn_section(text: str) -> dict[str, Any]:
 
 
 def _escape_mrkdwn(text: str) -> str:
-    """Escape the three mrkdwn control characters in author/user text placed in an mrkdwn
-    context, so a literal ``&``/``<``/``>`` renders as itself instead of being parsed as
-    markup (or opening a stray ``<…>`` link). The ``&`` pass MUST come first — otherwise the
-    ``&amp;`` the ``<``/``>`` passes introduce would be double-escaped."""
+    """Escape the three mrkdwn control characters in author/user text.
+
+    Placed in an mrkdwn context so a literal ``&``/``<``/``>`` renders as itself instead of
+    being parsed as markup (or opening a stray ``<…>`` link). The ``&`` pass MUST come
+    first — otherwise the ``&amp;`` the ``<``/``>`` passes introduce would be
+    double-escaped.
+    """
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _escape_mrkdwn_url(url: str) -> str:
-    """A url placed inside an mrkdwn ``<url|…>`` link needs only its ``&`` escaped (an
-    unescaped ``&`` — e.g. the OpenStreetMap ``&mlon`` — is read as an HTML entity); the
-    ``<``/``>`` delimiters are ours and the url must keep its own path/query characters."""
+    """A url inside an mrkdwn ``<url|…>`` link needs only its ``&`` escaped.
+
+    An unescaped ``&`` — e.g. the OpenStreetMap ``&mlon`` — is read as an HTML entity; the
+    ``<``/``>`` delimiters are ours and the url must keep its own path/query characters.
+    """
     return url.replace("&", "&amp;")
 
 
@@ -171,9 +183,11 @@ def _file_media_mrkdwn(item: MediaItem) -> str:
 
 
 def build_media_blocks(media: list[MediaItem] | None) -> list[dict[str, Any]]:
-    """The display-media blocks for a message: each ``image`` item an image block, each
-    ``link`` item an mrkdwn section, each ``document``/``video``/``audio`` item a labelled
-    mrkdwn link line (Slack cannot inline those without an upload seam).
+    """The display-media blocks for a message.
+
+    Each ``image`` item an image block, each ``link`` item an mrkdwn section, each
+    ``document``/``video``/``audio`` item a labelled mrkdwn link line (Slack cannot inline
+    those without an upload seam).
 
     A ``data:`` image has no public url for Slack to fetch, so it is a permanent
     :class:`ChannelInputError` (never a retryable delivery failure) — refused here, before
@@ -203,9 +217,10 @@ def build_media_blocks(media: list[MediaItem] | None) -> list[dict[str, Any]]:
 
 
 def options_fit_buttons(options: list[str]) -> bool:
-    """Whether ``options`` render as a native actions block within Slack's caps
-    (button count and per-label length). Past them the caller keeps them as text —
-    never a truncated label that would submit a value different from what is shown.
+    """Whether ``options`` render as a native actions block within Slack's caps.
+
+    Bounded by button count and per-label length. Past them the caller keeps them as text
+    — never a truncated label that would submit a value different from what is shown.
     """
     return len(options) <= _MAX_OPTION_BUTTONS and all(
         len(option) <= _MAX_BUTTON_TEXT_LEN and len(option) <= _MAX_BUTTON_VALUE_LEN for option in options
@@ -213,8 +228,10 @@ def options_fit_buttons(options: list[str]) -> bool:
 
 
 def build_option_blocks(options: list[str] | None) -> list[dict[str, Any]]:
-    """An ``actions`` block of ask-path option buttons when the options fit Slack's caps,
-    else an empty list (no options, or past the caps — the caller renders them as text).
+    """An ``actions`` block of ask-path option buttons when the options fit Slack's caps.
+
+    An empty list when there are no options, or past the caps (the caller renders them as
+    text).
 
     Each button's ``value`` is the option text verbatim (mapped straight back on a tap) and
     its ``action_id`` is ``tai42_select:<index>`` (the interactivity door reads the prefix
@@ -235,11 +252,13 @@ def build_option_blocks(options: list[str] | None) -> list[dict[str, Any]]:
 
 
 def options_text_lines(options: list[str]) -> str:
-    """The ask-path options as bulleted suggestion lines — the text fallback a caller
-    appends when the options do not fit native buttons (so they are shown, never dropped).
-    Deliberately UNescaped: the sole consumer wraps these lines in a ``plain_text``
-    section, which Slack never mrkdwn-parses — escaping here would render literal
-    entities to the participant."""
+    """The ask-path options as bulleted suggestion lines for the text fallback.
+
+    Appended by a caller when the options do not fit native buttons (so they are shown,
+    never dropped). Deliberately UNescaped: the sole consumer wraps these lines in a
+    ``plain_text`` section, which Slack never mrkdwn-parses — escaping here would render
+    literal entities to the participant.
+    """
     return "\n".join(f"• {option}" for option in options)
 
 
@@ -321,18 +340,22 @@ def _option_group_blocks(options: list[Option] | list[ReplyOption], start_index:
 
 
 def build_flat_option_blocks(options: list[Option] | None) -> list[dict[str, Any]]:
-    """The Block Kit blocks for a flat typed option list (reply and/or link buttons),
-    with any reply descriptions folded into a preceding context block."""
+    """The Block Kit blocks for a flat typed option list (reply and/or link buttons).
+
+    Any reply descriptions are folded into a preceding context block.
+    """
     if not options:
         return []
     return _option_group_blocks(options, 0)
 
 
 def build_section_blocks(sections: list[OptionSection] | None) -> list[dict[str, Any]]:
-    """The Block Kit blocks for a sectioned option list: each section a titled mrkdwn
-    ``section`` header followed by its reply rows as buttons (descriptions folded into a
-    context block). A running index keeps every button's ``action_id`` unique across
-    sections."""
+    """The Block Kit blocks for a sectioned option list.
+
+    Each section a titled mrkdwn ``section`` header followed by its reply rows as buttons
+    (descriptions folded into a context block). A running index keeps every button's
+    ``action_id`` unique across sections.
+    """
     if not sections:
         return []
     blocks: list[dict[str, Any]] = []
@@ -361,17 +384,22 @@ def sections_text_lines(sections: list[OptionSection]) -> str:
 
 
 def build_header_blocks(header: MediaItem | None) -> list[dict[str, Any]]:
-    """A header display item shown ABOVE an interactive message: an image block, or a
-    labelled link line for a non-image kind (the header is never a ``link``, per the
-    contract). Reuses the media builder — a ``data:`` header image is refused here too."""
+    """A header display item shown ABOVE an interactive message.
+
+    An image block, or a labelled link line for a non-image kind (the header is never a
+    ``link``, per the contract). Reuses the media builder — a ``data:`` header image is
+    refused here too.
+    """
     if header is None:
         return []
     return build_media_blocks([header])
 
 
 def build_footer_block(footer: str) -> dict[str, Any]:
-    """A footer as a muted ``context`` block — the short trailing line under an interactive
-    message."""
+    """A footer as a muted ``context`` block.
+
+    The short trailing line under an interactive message.
+    """
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": _escape_mrkdwn(footer)}]}
 
 
@@ -390,8 +418,11 @@ def _osm_url(latitude: float, longitude: float) -> str:
 
 
 def build_location_block(location: LocationElement) -> dict[str, Any]:
-    """A shared geographic point as a ``section``: the optional place name (bold) and
-    address, then an OpenStreetMap link to the coordinates."""
+    """A shared geographic point as a ``section``.
+
+    The optional place name (bold) and address, then an OpenStreetMap link to the
+    coordinates.
+    """
     lines: list[str] = []
     if location.name:
         lines.append(f"*{_escape_mrkdwn(location.name)}*")
@@ -412,7 +443,9 @@ def location_text_line(location: LocationElement) -> str:
 
 
 def text_section(text: str) -> dict[str, Any]:
-    """A ``section`` block carrying ``text`` as plain_text — the message/question body
-    shown above media and option blocks (Slack renders blocks, not the ``text`` field,
-    once blocks are present)."""
+    """A ``section`` block carrying ``text`` as plain_text.
+
+    The message/question body shown above media and option blocks (Slack renders blocks,
+    not the ``text`` field, once blocks are present).
+    """
     return {"type": "section", "text": _plain(text)}

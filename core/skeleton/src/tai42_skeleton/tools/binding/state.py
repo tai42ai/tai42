@@ -1,6 +1,8 @@
-"""The ``ToolBinding`` composition root: the owning app reference, the
-live-app-state accessors the lifecycle swaps on every start, and the manifest
-requirement guard."""
+"""The ``ToolBinding`` composition root.
+
+The owning app reference, the live-app-state accessors the lifecycle swaps on every start, and the
+manifest requirement guard.
+"""
 
 from typing import TYPE_CHECKING
 

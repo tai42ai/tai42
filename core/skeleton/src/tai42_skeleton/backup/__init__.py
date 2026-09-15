@@ -1,5 +1,4 @@
-"""The backup subsystem — the concrete ``AppBackup`` registry plus the host's
-own core sections.
+"""The backup subsystem — the concrete ``AppBackup`` registry plus the host's own core sections.
 
 :class:`~tai42_skeleton.backup.registry.BackupRegistry` is the concrete
 ``tai42_contract.app.AppBackup`` impl exposed behind the ``app.backup`` facet: a

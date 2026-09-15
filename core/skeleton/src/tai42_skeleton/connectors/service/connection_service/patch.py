@@ -1,5 +1,8 @@
-"""Toggle which sub-services are enabled on a connection: remove/add inline under the
-lock, or fork a consent OAuth flow when a newly-enabled sub-service needs new scopes."""
+"""Toggle which sub-services are enabled on a connection.
+
+Remove/add inline under the lock, or fork a consent OAuth flow when a newly-enabled sub-service needs
+new scopes.
+"""
 
 from __future__ import annotations
 

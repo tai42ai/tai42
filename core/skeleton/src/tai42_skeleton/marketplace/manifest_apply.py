@@ -1,5 +1,4 @@
-"""Mutate the persisted manifest through :class:`ConfigService` and shape the
-reload/fanout report.
+"""Mutate the persisted manifest through :class:`ConfigService` and shape the reload/fanout report.
 
 Every manifest edit crosses the config-mutation pipeline: it validates the RESOLVED
 projection of the mutated document (``!ENV`` markers materialized), persists,
@@ -26,18 +25,18 @@ logger = logging.getLogger(__name__)
 
 
 def reload_report(result: ApplyResult) -> dict[str, Any]:
-    """The manifest apply's local reload result with the standard fleet fan-out
-    summary folded in under ``fanout`` — the ``reload`` field every
-    install/uninstall/update response carries. Reuses the shared
+    """The manifest apply's local reload result with the fleet fan-out summary folded in under ``fanout``.
+
+    The ``reload`` field every install/uninstall/update response carries. Reuses the shared
     :func:`~tai42_skeleton.operations._broadcast.fleet_fanout` shaper so the key AND the
     value shape match every other fleet-report-embedding writer (backup, the
-    operations ``apply_response``)."""
+    operations ``apply_response``).
+    """
     return {**result.local, "fanout": fleet_fanout(result.fleet)}
 
 
 async def apply_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
-    """Apply a manifest mutation through the pipeline, mapping a composed-manifest
-    fault to the typed compose error.
+    """Apply a manifest mutation through the pipeline, mapping a composed-manifest fault to the typed compose error.
 
     The pipeline validates the RESOLVED projection of the mutated document (``!ENV``
     markers materialized) before it persists, so a marker on a non-string field
@@ -51,7 +50,8 @@ async def apply_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]],
     500 rather than a bare one. Either raises inside the transaction, so nothing
     persists. A resolved-secret leak (a ``ResolvedSecretError``) cannot arise here:
     the structural provides patch ingests no resolved secret value, so the pipeline's
-    secret seal is a no-op."""
+    secret seal is a no-op.
+    """
     try:
         return await svc.apply_change(mutator)
     except (ValidationError, BackendNeedsBusError) as exc:
@@ -61,9 +61,9 @@ async def apply_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]],
 async def remount_reload(
     svc: ConfigService, read_manifest: Callable[[], dict[str, Any]], prior: ApplyResult
 ) -> ApplyResult:
-    """Re-reload AFTER the attribution row is persisted so the mount map re-reads the
-    store and (re)mounts route-carrying items at their PERSISTED base — the remap — in
-    THIS process, with no reboot.
+    """Re-reload AFTER the attribution row is persisted so the mount map re-reads the store.
+
+    (Re)mounts route-carrying items at their PERSISTED base — the remap — in THIS process, with no reboot.
 
     The forward provides reload runs BEFORE the attribution row exists (the record is
     the last committing step, so the unwind can restore the manifest when a record
@@ -82,7 +82,8 @@ async def remount_reload(
     forward reload's ``prior`` result stands in for the receipt. ``read_manifest`` is the
     caller's persisted-manifest read, kept a callable so the best-effort read still
     happens inside the guarded body. Returns the remount's result on success, else
-    ``prior``."""
+    ``prior``.
+    """
     try:
         return await svc.apply_replace(read_manifest())
     except Exception:

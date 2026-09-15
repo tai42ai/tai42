@@ -31,12 +31,15 @@ def _empty_report() -> _SectionReport:
 
 
 def _topological(folders: list[dict[str, Any]], existing_ids: set[str]) -> list[dict[str, Any]]:
-    """Order ``folders`` so each is emitted only after its parent — roots first,
-    then folders whose parent is already placed, pre-existing in the DB, or absent
-    from the payload (a reference to a folder already restored). ``existing_ids`` are
-    the folder ids already present in the DB before this restore. A payload the store
-    can never emit — a parent cycle — makes no progress; those rows are appended in
-    payload order so the FK surfaces the broken data loudly rather than looping."""
+    """Order ``folders`` so each is emitted only after its parent.
+
+    Roots first, then folders whose parent is already placed, pre-existing in the
+    DB, or absent from the payload (a reference to a folder already restored).
+    ``existing_ids`` are the folder ids already present in the DB before this
+    restore. A payload the store can never emit — a parent cycle — makes no
+    progress; those rows are appended in payload order so the FK surfaces the
+    broken data loudly rather than looping.
+    """
     by_id = {folder["id"]: folder for folder in folders}
     placed: set[str] = set()
     ordered: list[dict[str, Any]] = []

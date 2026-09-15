@@ -1,6 +1,8 @@
-"""Thread read doors — route thread listing, single-thread transcript (route-keyed and
-linked-person aggregate), route message search and the failed-delivery listing — plus their
-paging maths and filter parsers."""
+"""Thread read doors, plus their paging maths and filter parsers.
+
+Route thread listing, single-thread transcript (route-keyed and linked-person aggregate),
+route message search and the failed-delivery listing.
+"""
 
 from __future__ import annotations
 
@@ -40,9 +42,11 @@ _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
 def _page_bounds(page: int, page_size: int) -> tuple[int, int]:
-    """The ``(offset, limit)`` a page/pageSize pair names. Both must be at least 1 and
-    ``page`` at most :data:`MAX_THREAD_PAGE`; a page size above the cap is capped, never
-    refused."""
+    """Return the ``(offset, limit)`` a page/page_size pair names.
+
+    Both must be at least 1 and ``page`` at most :data:`MAX_THREAD_PAGE`; a page size above
+    the cap is capped, never refused.
+    """
     if page < 1 or page_size < 1:
         raise BadRequestError(f"page and page_size must be >= 1, got page={page} page_size={page_size}")
     if page > MAX_THREAD_PAGE:
@@ -52,15 +56,19 @@ def _page_bounds(page: int, page_size: int) -> tuple[int, int]:
 
 
 def _next_page(page: int, limit: int, total: int) -> int | None:
-    """The next page number, or ``None`` on the last page. Read from the INDEXED total, not
-    the returned count: a page shortened by rows that expired under it is not the end."""
+    """Return the next page number, or ``None`` on the last page.
+
+    Read from the INDEXED total, not the returned count: a page shortened by rows that
+    expired under it is not the end.
+    """
     return page + 1 if page * limit < total else None
 
 
 def _parse_status_filter(status: str | None):
-    """The delivery-status set a thread listing filters on, validated against the enum per the
-    observability ``parse_run_filter`` precedent — an unknown value is a loud 400, never a
-    silent-ignore. A blank/absent value is no filter."""
+    """Parse the delivery-status set a thread listing filters on, validated against the enum.
+
+    An unknown value is a loud 400, never a silent-ignore. A blank/absent value is no filter.
+    """
     if status is None or not status.strip():
         return None
     from tai42_skeleton.conversations.models import DeliveryStatus
@@ -72,8 +80,11 @@ def _parse_status_filter(status: str | None):
 
 
 def _parse_address_filter(address: str | None) -> str | None:
-    """The client-address substring a thread listing filters on. A blank/absent value is no
-    filter; otherwise the trimmed substring, matched literally against the thread-id suffix."""
+    """Parse the client-address substring a thread listing filters on.
+
+    A blank/absent value is no filter; otherwise the trimmed substring, matched literally
+    against the thread-id suffix.
+    """
     if address is None:
         return None
     trimmed = address.strip()
@@ -219,8 +230,10 @@ async def get_conversation_thread(
 
 
 def _transcript_response(transcript, caller: Caller, *, page: int, limit: int, order: str) -> dict[str, Any]:
-    """The shared transcript page shape both the route-keyed and the aggregated person read
-    return: an admin reads whole records, a non-admin the caller-safe projection."""
+    """Build the shared transcript page shape both the route-keyed and aggregated-person reads return.
+
+    An admin reads whole records, a non-admin the caller-safe projection.
+    """
     view = (lambda record: record.view()) if caller.is_admin else (lambda record: record.caller_view())
     return {
         "items": [view(record) for record in transcript.records],
@@ -245,15 +258,16 @@ async def _read_person_thread(
     order: str,
     q: str | None = None,
 ) -> dict[str, Any]:
-    """One page of a LINKED person's AGGREGATED transcript: the merged history across
-    every route the person has written under, keyed by ``bridge:@person:{person_id}``.
+    """Return one page of a LINKED person's AGGREGATED transcript, keyed by ``bridge:@person:{person_id}``.
 
+    The merged history across every route the person has written under.
     The supplied ``route_name`` must be one of the person's routes, while the fetch spans the
     indexes of ALL of them. An unknown ``route_name`` is a loud 404; a target mismatch, an
     unknown person, or a route the person never wrote under answers the uniform thread
     not-found. An empty aggregate is that 404 for an unfiltered read; under a ``q`` search it
     is an empty page (the person is real, the search simply matched nothing). An admin reads
-    whole records; a non-admin the caller-safe projection."""
+    whole records; a non-admin the caller-safe projection.
+    """
     person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
     route = await _require_route(manager, route_name)
     person = await _pkg._person_store().get_by_id(person_id)
@@ -282,9 +296,9 @@ async def _read_person_thread(
     response_model=MessageSearchEnvelope,
 )
 async def search_conversation_messages(route_name: str, q: str, page: int = 1, page_size: int = 50) -> dict[str, Any]:
-    """Every record on ``route_name`` whose inbound text or answer contains ``q``, across ALL
-    the route's threads, one page at a time.
+    """Return every record on ``route_name`` whose inbound text or answer contains ``q``, one page at a time.
 
+    Across ALL the route's threads.
     The search spans every caller and address on the route, so it is admin-only, and each item
     is the WHOLE record (the same shape the transcript serves an admin). ``q`` is REQUIRED and
     non-blank. There is no per-route record index, so the search is a BOUNDED nested scan of
@@ -295,7 +309,8 @@ async def search_conversation_messages(route_name: str, q: str, page: int = 1, p
     way whether the name routes or not. An unknown route is a loud 404 to an admin; a blank
     ``q``, a ``page``/``page_size`` below 1, or a ``page`` above the served maximum, is a 400.
     Returns ``{"items", "total", "page", "page_size", "next_page", "truncated"}``, where
-    ``total`` is the matches the bounded scan found."""
+    ``total`` is the matches the bounded scan found.
+    """
     _validate_route_name(route_name)
     if not q.strip():
         raise BadRequestError("q must be a non-blank search string")
@@ -326,8 +341,10 @@ async def search_conversation_messages(route_name: str, q: str, page: int = 1, p
     response_model=FailedConversationsEnvelope,
 )
 async def list_failed_conversations() -> dict[str, Any]:
-    """Every answer record whose delivery ended ``failed``. The listing spans every route and
-    caller, so it is admin-only. Returns ``{"items", "total"}``."""
+    """List every answer record whose delivery ended ``failed``.
+
+    The listing spans every route and caller, so it is admin-only. Returns ``{"items", "total"}``.
+    """
     _require_backend()
     require_admin(await _pkg.resolve_caller())
     from tai42_skeleton.conversations.models import DeliveryStatus

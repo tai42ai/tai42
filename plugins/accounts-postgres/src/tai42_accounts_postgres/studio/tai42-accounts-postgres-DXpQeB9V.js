@@ -1,121 +1,9 @@
-import { jsxs as h, jsx as e } from "react/jsx-runtime";
-import { useMemo as S, useState as o, useCallback as k, useEffect as $ } from "react";
-import { useAuth as x, useOnUnauthorized as B, errorMessage as N, Button as b, Spinner as U, ErrorState as w, EmptyState as V, Table as j, THead as H, TR as I, TH as C, TBody as M, TD as R, Badge as E, CopyField as q, Dialog as D, Field as T, TextInput as z, Select as A, ConfirmDialog as J } from "@tai42/studio-sdk";
-async function F(n, i, r, t) {
-  const l = new Headers({ accept: "application/json" });
-  i !== null && l.set("x-api-key", i), t?.body !== void 0 && l.set("content-type", "application/json");
-  const s = await fetch(n, {
-    method: t?.method ?? "GET",
-    headers: l,
-    body: t?.body !== void 0 ? JSON.stringify(t.body) : void 0,
-    signal: t?.signal
-  });
-  if (s.status === 401)
-    throw r(), new Error("Your session has expired — sign in again.");
-  const a = await s.text(), u = a === "" ? {} : JSON.parse(a);
-  if (!s.ok) {
-    const d = typeof u.error == "string" && u.error.length > 0 ? u.error : `Request failed (${String(s.status)})`;
-    throw new Error(d);
-  }
-  return u.data;
-}
-function G() {
-  const { token: n } = x(), i = B();
-  return S(() => {
-    const r = (t, l) => F(t, n, i, l);
-    return {
-      listUsers: (t) => r("/api/auth/users", { signal: t }).then((l) => l.users),
-      listRoles: (t) => r("/api/auth/roles", { signal: t }),
-      createUser: (t) => r("/api/auth/users", { method: "POST", body: t }),
-      setRole: (t, l) => r(`/api/auth/users/${encodeURIComponent(t)}`, {
-        method: "PUT",
-        body: { role: l }
-      }).then(() => {
-      }),
-      setDisabled: (t, l) => r(`/api/auth/users/${encodeURIComponent(t)}`, {
-        method: "PUT",
-        body: { disabled: l }
-      }).then(() => {
-      }),
-      deleteUser: (t) => r(`/api/auth/users/${encodeURIComponent(t)}`, {
-        method: "DELETE"
-      }).then(() => {
-      }),
-      regenerateInvite: (t) => r(`/api/auth/users/${encodeURIComponent(t)}/invite`, {
-        method: "POST"
-      })
-    };
-  }, [n, i]);
-}
-function W() {
-  const n = G(), [i, r] = o(null), [t, l] = o([]), [s, a] = o(null), [u, d] = o(!0), [m, p] = o(0), c = k(() => {
-    p((g) => g + 1);
-  }, []);
-  return $(() => {
-    const g = new AbortController();
-    return d(!0), a(null), Promise.all([n.listUsers(g.signal), n.listRoles(g.signal)]).then(
-      ([y, v]) => {
-        g.signal.aborted || (r(y), l(v), d(!1));
-      },
-      (y) => {
-        g.signal.aborted || (a(N(y)), d(!1));
-      }
-    ), () => {
-      g.abort();
-    };
-  }, [n, m]), { api: n, users: i, roles: t, loadError: s, loading: u, reload: c };
-}
-function Y({
-  user: n,
-  onAction: i
-}) {
-  return /* @__PURE__ */ h("div", { className: "users-row-actions", children: [
-    /* @__PURE__ */ e(b, { type: "button", onClick: () => i({ kind: "role", user: n }), children: "Change role" }),
-    /* @__PURE__ */ e(b, { type: "button", onClick: () => i({ kind: "disable", user: n }), children: n.disabled ? "Enable" : "Disable" }),
-    n.pending_invite ? /* @__PURE__ */ e(b, { type: "button", onClick: () => i({ kind: "invite", user: n }), children: "Regenerate invite" }) : null,
-    /* @__PURE__ */ e(b, { type: "button", variant: "danger", onClick: () => i({ kind: "delete", user: n }), children: "Delete" })
-  ] });
-}
-function K({ user: n }) {
-  return n.pending_invite ? /* @__PURE__ */ e(E, { variant: "warning", children: "Invite pending" }) : n.disabled ? /* @__PURE__ */ e(E, { variant: "danger", children: "Disabled" }) : /* @__PURE__ */ e(E, { variant: "success", children: "Active" });
-}
-function Q(n) {
-  const i = new Date(n);
-  return Number.isNaN(i.getTime()) ? n : i.toLocaleDateString();
-}
-function X({
-  loading: n,
-  users: i,
-  loadError: r,
-  reload: t,
-  onAction: l
-}) {
-  return n && i === null ? /* @__PURE__ */ e(U, { label: "Loading users" }) : r !== null && i === null ? /* @__PURE__ */ e(w, { message: r, onRetry: t }) : i !== null && i.length === 0 ? /* @__PURE__ */ e(
-    V,
-    {
-      title: "No users yet",
-      description: "Invite the first user to get them a one-time sign-in link."
-    }
-  ) : /* @__PURE__ */ h(j, { children: [
-    /* @__PURE__ */ e(H, { children: /* @__PURE__ */ h(I, { children: [
-      /* @__PURE__ */ e(C, { children: "Email" }),
-      /* @__PURE__ */ e(C, { children: "Role" }),
-      /* @__PURE__ */ e(C, { children: "Status" }),
-      /* @__PURE__ */ e(C, { children: "Created" }),
-      /* @__PURE__ */ e(C, { children: /* @__PURE__ */ e("span", { className: "users-cell-muted", children: "Actions" }) })
-    ] }) }),
-    /* @__PURE__ */ e(M, { children: (i ?? []).map((s) => /* @__PURE__ */ h(I, { children: [
-      /* @__PURE__ */ e(R, { children: s.email }),
-      /* @__PURE__ */ e(R, { children: /* @__PURE__ */ e(E, { variant: "primary", children: s.role }) }),
-      /* @__PURE__ */ e(R, { children: /* @__PURE__ */ e(K, { user: s }) }),
-      /* @__PURE__ */ e(R, { children: /* @__PURE__ */ e("span", { className: "users-cell-muted", children: Q(s.created_at) }) }),
-      /* @__PURE__ */ e(R, { children: /* @__PURE__ */ e(Y, { user: s, onAction: l }) })
-    ] }, s.user_id)) })
-  ] });
-}
+import { jsx as e, jsxs as h } from "react/jsx-runtime";
+import { CopyField as $, errorMessage as N, Dialog as D, Button as b, Field as T, TextInput as x, Select as A, ErrorState as U, Spinner as w, useAuth as B, useOnUnauthorized as V, ConfirmDialog as j, EmptyState as H, Table as M, THead as q, TR as I, TH as C, TBody as z, TD as R, Badge as E } from "@tai42/studio-sdk";
+import { useState as o, useMemo as S, useCallback as k, useEffect as J } from "react";
 function P({ result: n }) {
   return /* @__PURE__ */ e("div", { className: "users-dialog-body", children: /* @__PURE__ */ e(
-    q,
+    $,
     {
       label: "Invite link",
       value: n.login_path,
@@ -123,7 +11,7 @@ function P({ result: n }) {
     }
   ) });
 }
-function Z({
+function F({
   roles: n,
   api: i,
   onClose: r,
@@ -162,7 +50,7 @@ function Z({
       },
       children: /* @__PURE__ */ h("div", { className: "users-dialog-body", children: [
         /* @__PURE__ */ e(T, { label: "Email", children: /* @__PURE__ */ e(
-          z,
+          x,
           {
             type: "email",
             "aria-label": "Email",
@@ -183,17 +71,81 @@ function Z({
             disabled: v.length === 0
           }
         ) }),
-        p !== null ? /* @__PURE__ */ e(w, { message: p }) : null,
+        p !== null ? /* @__PURE__ */ e(U, { message: p }) : null,
         /* @__PURE__ */ h("div", { className: "users-dialog-actions", children: [
           /* @__PURE__ */ e(b, { type: "button", onClick: r, children: "Cancel" }),
           /* @__PURE__ */ h(b, { type: "button", variant: "primary", disabled: !O, onClick: L, children: [
-            d ? /* @__PURE__ */ e(U, { label: "Creating invite" }) : null,
+            d ? /* @__PURE__ */ e(w, { label: "Creating invite" }) : null,
             "Send invite"
           ] })
         ] })
       ] })
     }
   );
+}
+async function G(n, i, r, t) {
+  const l = new Headers({ accept: "application/json" });
+  i !== null && l.set("x-api-key", i), t?.body !== void 0 && l.set("content-type", "application/json");
+  const s = await fetch(n, {
+    method: t?.method ?? "GET",
+    headers: l,
+    body: t?.body !== void 0 ? JSON.stringify(t.body) : void 0,
+    signal: t?.signal
+  });
+  if (s.status === 401)
+    throw r(), new Error("Your session has expired — sign in again.");
+  const a = await s.text(), u = a === "" ? {} : JSON.parse(a);
+  if (!s.ok) {
+    const d = typeof u.error == "string" && u.error.length > 0 ? u.error : `Request failed (${String(s.status)})`;
+    throw new Error(d);
+  }
+  return u.data;
+}
+function W() {
+  const { token: n } = B(), i = V();
+  return S(() => {
+    const r = (t, l) => G(t, n, i, l);
+    return {
+      listUsers: (t) => r("/api/auth/users", { signal: t }).then((l) => l.users),
+      listRoles: (t) => r("/api/auth/roles", { signal: t }),
+      createUser: (t) => r("/api/auth/users", { method: "POST", body: t }),
+      setRole: (t, l) => r(`/api/auth/users/${encodeURIComponent(t)}`, {
+        method: "PUT",
+        body: { role: l }
+      }).then(() => {
+      }),
+      setDisabled: (t, l) => r(`/api/auth/users/${encodeURIComponent(t)}`, {
+        method: "PUT",
+        body: { disabled: l }
+      }).then(() => {
+      }),
+      deleteUser: (t) => r(`/api/auth/users/${encodeURIComponent(t)}`, {
+        method: "DELETE"
+      }).then(() => {
+      }),
+      regenerateInvite: (t) => r(`/api/auth/users/${encodeURIComponent(t)}/invite`, {
+        method: "POST"
+      })
+    };
+  }, [n, i]);
+}
+function Y() {
+  const n = W(), [i, r] = o(null), [t, l] = o([]), [s, a] = o(null), [u, d] = o(!0), [m, p] = o(0), c = k(() => {
+    p((g) => g + 1);
+  }, []);
+  return J(() => {
+    const g = new AbortController();
+    return d(!0), a(null), Promise.all([n.listUsers(g.signal), n.listRoles(g.signal)]).then(
+      ([y, v]) => {
+        g.signal.aborted || (r(y), l(v), d(!1));
+      },
+      (y) => {
+        g.signal.aborted || (a(N(y)), d(!1));
+      }
+    ), () => {
+      g.abort();
+    };
+  }, [n, m]), { api: n, users: i, roles: t, loadError: s, loading: u, reload: c };
 }
 function _({
   title: n,
@@ -216,7 +168,7 @@ function _({
     );
   }, [l, a]);
   return /* @__PURE__ */ e(
-    J,
+    j,
     {
       title: n,
       confirmLabel: i,
@@ -230,46 +182,7 @@ function _({
     }
   );
 }
-function ee({
-  user: n,
-  roles: i,
-  api: r,
-  onClose: t,
-  onDone: l
-}) {
-  const [s, a] = o(n.role), [u, d] = o(!1), [m, p] = o(null), c = S(() => i.map((v) => ({ value: v.name, label: v.name })), [i]), g = s !== n.role && !u, y = k(() => {
-    d(!0), p(null), r.setRole(n.user_id, s).then(
-      () => {
-        l();
-      },
-      (v) => {
-        p(N(v)), d(!1);
-      }
-    );
-  }, [r, n.user_id, s, l]);
-  return /* @__PURE__ */ e(
-    D,
-    {
-      title: `Change role — ${n.email}`,
-      open: !0,
-      onOpenChange: (v) => {
-        v || t();
-      },
-      children: /* @__PURE__ */ h("div", { className: "users-dialog-body", children: [
-        /* @__PURE__ */ e(T, { label: "Role", children: /* @__PURE__ */ e(A, { "aria-label": "Role", options: c, value: s, onValueChange: a }) }),
-        m !== null ? /* @__PURE__ */ e(w, { message: m }) : null,
-        /* @__PURE__ */ h("div", { className: "users-dialog-actions", children: [
-          /* @__PURE__ */ e(b, { type: "button", onClick: t, children: "Cancel" }),
-          /* @__PURE__ */ h(b, { type: "button", variant: "primary", disabled: !g, onClick: y, children: [
-            u ? /* @__PURE__ */ e(U, { label: "Saving role" }) : null,
-            "Save"
-          ] })
-        ] })
-      ] })
-    }
-  );
-}
-function ne({
+function K({
   user: n,
   api: i,
   onClose: r,
@@ -308,11 +221,11 @@ function ne({
       },
       children: /* @__PURE__ */ h("div", { className: "users-dialog-body", children: [
         /* @__PURE__ */ e("p", { style: { margin: 0 }, children: "This replaces the current invite link. The old link stops working immediately." }),
-        a !== null ? /* @__PURE__ */ e(w, { message: a }) : null,
+        a !== null ? /* @__PURE__ */ e(U, { message: a }) : null,
         /* @__PURE__ */ h("div", { className: "users-dialog-actions", children: [
           /* @__PURE__ */ e(b, { type: "button", onClick: r, children: "Cancel" }),
           /* @__PURE__ */ h(b, { type: "button", variant: "primary", disabled: l, onClick: p, children: [
-            l ? /* @__PURE__ */ e(U, { label: "Regenerating invite" }) : null,
+            l ? /* @__PURE__ */ e(w, { label: "Regenerating invite" }) : null,
             "Regenerate"
           ] })
         ] })
@@ -320,7 +233,46 @@ function ne({
     }
   );
 }
-function te({
+function Q({
+  user: n,
+  roles: i,
+  api: r,
+  onClose: t,
+  onDone: l
+}) {
+  const [s, a] = o(n.role), [u, d] = o(!1), [m, p] = o(null), c = S(() => i.map((v) => ({ value: v.name, label: v.name })), [i]), g = s !== n.role && !u, y = k(() => {
+    d(!0), p(null), r.setRole(n.user_id, s).then(
+      () => {
+        l();
+      },
+      (v) => {
+        p(N(v)), d(!1);
+      }
+    );
+  }, [r, n.user_id, s, l]);
+  return /* @__PURE__ */ e(
+    D,
+    {
+      title: `Change role — ${n.email}`,
+      open: !0,
+      onOpenChange: (v) => {
+        v || t();
+      },
+      children: /* @__PURE__ */ h("div", { className: "users-dialog-body", children: [
+        /* @__PURE__ */ e(T, { label: "Role", children: /* @__PURE__ */ e(A, { "aria-label": "Role", options: c, value: s, onValueChange: a }) }),
+        m !== null ? /* @__PURE__ */ e(U, { message: m }) : null,
+        /* @__PURE__ */ h("div", { className: "users-dialog-actions", children: [
+          /* @__PURE__ */ e(b, { type: "button", onClick: t, children: "Cancel" }),
+          /* @__PURE__ */ h(b, { type: "button", variant: "primary", disabled: !g, onClick: y, children: [
+            u ? /* @__PURE__ */ e(w, { label: "Saving role" }) : null,
+            "Save"
+          ] })
+        ] })
+      ] })
+    }
+  );
+}
+function X({
   action: n,
   roles: i,
   api: r,
@@ -328,7 +280,7 @@ function te({
   onFinish: l,
   onReload: s
 }) {
-  return n === null ? null : n.kind === "role" ? /* @__PURE__ */ e(ee, { user: n.user, roles: i, api: r, onClose: t, onDone: l }) : n.kind === "disable" ? /* @__PURE__ */ e(
+  return n === null ? null : n.kind === "role" ? /* @__PURE__ */ e(Q, { user: n.user, roles: i, api: r, onClose: t, onDone: l }) : n.kind === "disable" ? /* @__PURE__ */ e(
     _,
     {
       title: n.user.disabled ? "Enable user" : "Disable user",
@@ -340,7 +292,7 @@ function te({
       onDone: l,
       children: n.user.disabled ? `Re-enable ${n.user.email}? Their sessions were revoked when they were disabled and must sign in again.` : `Disable ${n.user.email}? This revokes their sessions and API keys immediately.`
     }
-  ) : n.kind === "invite" ? /* @__PURE__ */ e(ne, { user: n.user, api: r, onClose: t, onDone: s }) : /* @__PURE__ */ e(
+  ) : n.kind === "invite" ? /* @__PURE__ */ e(K, { user: n.user, api: r, onClose: t, onDone: s }) : /* @__PURE__ */ e(
     _,
     {
       title: "Delete user",
@@ -353,8 +305,56 @@ function te({
     }
   );
 }
+function Z({
+  user: n,
+  onAction: i
+}) {
+  return /* @__PURE__ */ h("div", { className: "users-row-actions", children: [
+    /* @__PURE__ */ e(b, { type: "button", onClick: () => i({ kind: "role", user: n }), children: "Change role" }),
+    /* @__PURE__ */ e(b, { type: "button", onClick: () => i({ kind: "disable", user: n }), children: n.disabled ? "Enable" : "Disable" }),
+    n.pending_invite ? /* @__PURE__ */ e(b, { type: "button", onClick: () => i({ kind: "invite", user: n }), children: "Regenerate invite" }) : null,
+    /* @__PURE__ */ e(b, { type: "button", variant: "danger", onClick: () => i({ kind: "delete", user: n }), children: "Delete" })
+  ] });
+}
+function ee({ user: n }) {
+  return n.pending_invite ? /* @__PURE__ */ e(E, { variant: "warning", children: "Invite pending" }) : n.disabled ? /* @__PURE__ */ e(E, { variant: "danger", children: "Disabled" }) : /* @__PURE__ */ e(E, { variant: "success", children: "Active" });
+}
+function ne(n) {
+  const i = new Date(n);
+  return Number.isNaN(i.getTime()) ? n : i.toLocaleDateString();
+}
+function te({
+  loading: n,
+  users: i,
+  loadError: r,
+  reload: t,
+  onAction: l
+}) {
+  return n && i === null ? /* @__PURE__ */ e(w, { label: "Loading users" }) : r !== null && i === null ? /* @__PURE__ */ e(U, { message: r, onRetry: t }) : i !== null && i.length === 0 ? /* @__PURE__ */ e(
+    H,
+    {
+      title: "No users yet",
+      description: "Invite the first user to get them a one-time sign-in link."
+    }
+  ) : /* @__PURE__ */ h(M, { children: [
+    /* @__PURE__ */ e(q, { children: /* @__PURE__ */ h(I, { children: [
+      /* @__PURE__ */ e(C, { children: "Email" }),
+      /* @__PURE__ */ e(C, { children: "Role" }),
+      /* @__PURE__ */ e(C, { children: "Status" }),
+      /* @__PURE__ */ e(C, { children: "Created" }),
+      /* @__PURE__ */ e(C, { children: /* @__PURE__ */ e("span", { className: "users-cell-muted", children: "Actions" }) })
+    ] }) }),
+    /* @__PURE__ */ e(z, { children: (i ?? []).map((s) => /* @__PURE__ */ h(I, { children: [
+      /* @__PURE__ */ e(R, { children: s.email }),
+      /* @__PURE__ */ e(R, { children: /* @__PURE__ */ e(E, { variant: "primary", children: s.role }) }),
+      /* @__PURE__ */ e(R, { children: /* @__PURE__ */ e(ee, { user: s }) }),
+      /* @__PURE__ */ e(R, { children: /* @__PURE__ */ e("span", { className: "users-cell-muted", children: ne(s.created_at) }) }),
+      /* @__PURE__ */ e(R, { children: /* @__PURE__ */ e(Z, { user: s, onAction: l }) })
+    ] }, s.user_id)) })
+  ] });
+}
 function ie(n) {
-  const { api: i, users: r, roles: t, loadError: l, loading: s, reload: a } = W(), [u, d] = o(!1), [m, p] = o(null), c = k(() => {
+  const { api: i, users: r, roles: t, loadError: l, loading: s, reload: a } = Y(), [u, d] = o(!1), [m, p] = o(null), c = k(() => {
     p(null);
   }, []), g = k(() => {
     p(null), a();
@@ -375,7 +375,7 @@ function ie(n) {
       )
     ] }),
     /* @__PURE__ */ e(
-      X,
+      te,
       {
         loading: s,
         users: r,
@@ -385,7 +385,7 @@ function ie(n) {
       }
     ),
     u ? /* @__PURE__ */ e(
-      Z,
+      F,
       {
         roles: t,
         api: i,
@@ -396,7 +396,7 @@ function ie(n) {
       }
     ) : null,
     /* @__PURE__ */ e(
-      te,
+      X,
       {
         action: m,
         roles: t,

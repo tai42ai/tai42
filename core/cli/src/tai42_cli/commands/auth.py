@@ -28,7 +28,8 @@ def _extract_claim_token(value: str) -> str:
     The token rides the URL FRAGMENT (``…/login#claim=<token>``), so pasting the whole
     link just works: take the tail after ``#claim=``. A bare token (no marker) is
     returned as-is. The token is NEVER matched by its mint prefix — the server validates
-    it, and a prefix check here would add nothing."""
+    it, and a prefix check here would add nothing.
+    """
     if _CLAIM_FRAGMENT_MARKER in value:
         value = value.rsplit(_CLAIM_FRAGMENT_MARKER, 1)[1]
     return value.strip()
@@ -70,7 +71,7 @@ def claim(
     Example: ``tai auth claim 'https://host/login#claim=<token>'``
     """
     ctx_obj = app_context(ctx)
-    if token == "-":
+    if token == "-":  # noqa: S105 constant identifier, not a secret value
         token = sys.stdin.read()
     claim_token = _extract_claim_token(token)
     # The caller has no key yet — this is the whole point — so the exchange runs over the

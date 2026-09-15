@@ -70,14 +70,16 @@ async def _lease_client() -> AsyncIterator[Any]:
 
 @contextlib.asynccontextmanager
 async def workspace_lease(workspace_key: str, *, lease_ms: int) -> AsyncIterator[None]:
-    """Hold the per-workspace drive lease for the body's duration, or raise
-    :class:`WorkspaceLeaseHeldError` when another worker already holds it.
+    """Hold the per-workspace drive lease for the body's duration.
+
+    Raises :class:`WorkspaceLeaseHeldError` when another worker already holds it.
 
     ``SET <token> NX PX lease_ms`` grants the lease to exactly one caller. The body runs
     while held; the ``finally`` releases it via the token-checked compare-and-delete, so a
     normal turn frees it at once and a crash lets it expire after ``lease_ms``. ``lease_ms``
     is sized by the engine to exceed one drive's max wall-clock plus its volume-cleanup
-    headroom, so the lease never expires under a live drive."""
+    headroom, so the lease never expires under a live drive.
+    """
     key = _wslock_key(workspace_key)
     token = str(uuid.uuid4())
     async with _lease_client() as client:

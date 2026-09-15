@@ -28,10 +28,11 @@ def prometheus_metrics(func, name, description):
                 result = await func(*args, **kwargs)
             else:
                 result = func(*args, **kwargs)
-            return result
         except Exception:
             success = False
             raise
+        else:
+            return result
         finally:
             duration = time.time() - start_time
             record_tool_metrics(

@@ -35,7 +35,7 @@ def test_emit_closed_span_drives_otel_tracer(monkeypatch):
         end=t1,
         trace_id="t1",
         parent_span_id="p1",
-        input={"a": 1},
+        input_={"a": 1},
         output="r",
     )
 

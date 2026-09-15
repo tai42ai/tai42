@@ -1,5 +1,7 @@
-"""The process route registry: record/match routes, stage the shape index, roll
-back an owner, and audit epoch route preservation."""
+"""The process route registry.
+
+Records and matches routes, stages the shape index, rolls back an owner, and audits epoch route preservation.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ from tai42_contract.app import DeclaredRouteMetadata
 
 from tai42_skeleton.app.route_registry.metadata import (
     CORE_OWNER,
-    CrossOwnerRouteCollision,
+    CrossOwnerRouteCollisionError,
     EpochRouteAuditError,
     RouteMetadata,
     RouteOwner,
@@ -49,6 +51,7 @@ class RouteRegistry:
     """
 
     def __init__(self) -> None:
+        """Initialize the empty route map, shape index, and owner-to-modules association."""
         self._routes: dict[tuple[str, tuple[str, ...]], RouteMetadata] = {}
         self._version = 0
         self._committed_shapes: list[_ShapeEntry] = []
@@ -65,10 +68,12 @@ class RouteRegistry:
 
     @property
     def version(self) -> int:
-        """Bumped by every :meth:`record`, so a consumer that derives a table from the
-        registry (the rate limiter's public-door coverage) can memoize against it and
-        rebuild when a reload re-records the surface. A re-import that records the
-        SAME metadata still bumps it — a rebuild is idempotent, a stale table is not."""
+        """The registry version, bumped by every :meth:`record`.
+
+        A consumer that derives a table from the registry (the rate limiter's public-door coverage) can
+        memoize against it and rebuild when a reload re-records the surface. A re-import that records the
+        SAME metadata still bumps it — a rebuild is idempotent, a stale table is not.
+        """
         return self._version
 
     def record(
@@ -101,7 +106,8 @@ class RouteRegistry:
         spec surface) records trivial defaults, since its behavioral metadata is
         never emitted. The per-method success media type is always derived from
         the handler source. Raises loudly on a missing minimum-bar field so a
-        route that fails to self-describe is caught at import, not in the gate."""
+        route that fails to self-describe is caught at import, not in the gate.
+        """
         if not summary:
             raise ValueError(f"route {'/'.join(methods)} {path} is missing a non-empty summary")
         if not tags:
@@ -183,10 +189,10 @@ class RouteRegistry:
         self._version += 1
 
     def record_mounted(self, *, path: str, methods: list[str], name: str, summary: str) -> None:
-        """Record one path TEMPLATE served by a mounted ASGI app — an MCP transport
-        route, the sub-MCP mount — as it is mounted, so the registry describes the whole
-        served surface instead of leaving these paths to whichever handler route happens
-        to also match them (the Studio SPA catch-all matches every GET).
+        """Record one path TEMPLATE served by a mounted ASGI app — an MCP transport route or the sub-MCP mount.
+
+        Recorded as it is mounted, so the registry describes the whole served surface instead of leaving these
+        paths to whichever handler route happens to also match them (the Studio SPA catch-all matches every GET).
 
         Always ``authed=True``: a mount serves protocol traffic behind its own credential
         gate, never a declared public door, so the flood limiter passes it through
@@ -229,9 +235,10 @@ class RouteRegistry:
         self._version += 1
 
     def mark_raw_path_matched(self, path_prefix: str) -> None:
-        """Mark every recorded route whose template starts with ``path_prefix`` as
-        raw-path-matched, so the access-control resolver knows these routes — and ONLY
-        these — may resolve a request whose canonical path carries an encoded slash.
+        """Mark every recorded route whose template starts with ``path_prefix`` as raw-path-matched.
+
+        So the access-control resolver knows these routes — and ONLY these — may resolve a request whose
+        canonical path carries an encoded slash.
 
         Called by ``HttpSurface.use_raw_path_key`` alongside the served-router upgrade, so
         the authz metadata and the serving router are marked at the SAME seam and can never
@@ -251,20 +258,26 @@ class RouteRegistry:
 
     @staticmethod
     def _served_methods(method_key: tuple[str, ...]) -> frozenset[str]:
-        """The methods a route is served on — ``GET`` implies ``HEAD`` (Starlette
-        adds it), so a public GET route answers HEAD probes on the same tier."""
+        """The methods a route is served on — ``GET`` implies ``HEAD`` (Starlette adds it).
+
+        So a public GET route answers HEAD probes on the same tier.
+        """
         declared = frozenset(method_key)
         return declared | {"HEAD"} if "GET" in declared else declared
 
     def _shape_target(self) -> list[_ShapeEntry]:
-        """The write-target shape list: the staged generation during an epoch build,
-        else the committed live one (cold boot writes committed directly)."""
+        """The write-target shape list: the staged generation during an epoch build, else the committed live one.
+
+        Cold boot writes committed directly.
+        """
         return self._staged_shapes if self._staged_shapes is not None else self._committed_shapes
 
     def _record_shape(self, meta: RouteMetadata, method_key: tuple[str, ...]) -> None:
-        """Index one ``/api`` handler route by shape, raising on a cross-owner
-        collision. Mounted surfaces (their own credential gate) and non-``/api``
-        routes (governed by the SPA-shell tier) are outside the ownership space."""
+        """Index one ``/api`` handler route by shape, raising on a cross-owner collision.
+
+        Mounted surfaces (their own credential gate) and non-``/api`` routes (governed by the SPA-shell
+        tier) are outside the ownership space.
+        """
         if meta.mounted or not meta.path.startswith("/api/"):
             return
         shape = parse_shape(meta.path)
@@ -272,7 +285,7 @@ class RouteRegistry:
         target = self._shape_target()
         for entry in target:
             if entry.meta.owner != meta.owner and collision(shape, served, entry.shape, entry.methods):
-                raise CrossOwnerRouteCollision(
+                raise CrossOwnerRouteCollisionError(
                     f"route {'/'.join(method_key)} {meta.path} (owner {meta.owner}) collides with "
                     f"{'/'.join(sorted(entry.methods))} {entry.meta.path} (owner {entry.meta.owner}) — "
                     "one owner per route shape; remap the mount base to resolve"
@@ -281,18 +294,20 @@ class RouteRegistry:
         target.append(_ShapeEntry(shape=shape, methods=served, meta=meta))
 
     def api_shape_index(self) -> list[_ShapeEntry]:
-        """The committed ``/api`` shape generation — each entry's parsed shape,
-        served methods, and owning metadata. The marketplace install pre-flight and
-        preview door read it to collision-check a candidate route against exactly
-        the ownership the live epoch serves (unlike :meth:`routes`, whose dedup map
-        keeps an uninstalled plugin's stale entry)."""
+        """The committed ``/api`` shape generation — each entry's parsed shape, served methods, and owning metadata.
+
+        The marketplace install pre-flight and preview door read it to collision-check a candidate route
+        against exactly the ownership the live epoch serves (unlike :meth:`routes`, whose dedup map keeps
+        an uninstalled plugin's stale entry).
+        """
         return list(self._committed_shapes)
 
     def match(self, path: str, method: str) -> RouteMetadata | None:
-        """The registered ``/api`` route that OWNS the concrete request ``(path,
-        method)``, or ``None``. Deterministic: cross-owner shapes never overlap, so
-        at most one owner matches; among a single owner's overlapping shapes the
-        most specific (most literal segments) wins."""
+        """The registered ``/api`` route that OWNS the concrete request ``(path, method)``, or ``None``.
+
+        Deterministic: cross-owner shapes never overlap, so at most one owner matches; among a single
+        owner's overlapping shapes the most specific (most literal segments) wins.
+        """
         concrete = parse_concrete(path)
         best: _ShapeEntry | None = None
         for entry in self._committed_shapes:
@@ -308,39 +323,42 @@ class RouteRegistry:
         return best.meta if best is not None else None
 
     def begin_shape_staging(self) -> None:
-        """Open a fresh staged shape generation for an epoch build; the committed
-        live one keeps answering match/collision until the atomic commit."""
+        """Open a fresh staged shape generation for an epoch build.
+
+        The committed live one keeps answering match/collision until the atomic commit.
+        """
         self._staged_shapes = []
 
     def commit_shape_staging(self) -> None:
-        """Promote the staged shape generation to committed — one reference flip in
-        the build's no-await swap stretch."""
+        """Promote the staged shape generation to committed — one reference flip in the build's no-await swap."""
         if self._staged_shapes is not None:
             self._committed_shapes = self._staged_shapes
             self._staged_shapes = None
 
     def abort_shape_staging(self) -> None:
-        """Drop the staged shape generation on a failed build; the committed live
-        one is untouched."""
+        """Drop the staged shape generation on a failed build; the committed live one is untouched."""
         self._staged_shapes = None
 
     def reset_shape_index(self) -> None:
-        """Clear the write-target shape generation before a registration pass
-        re-records it — the staged one during a build, the committed one at boot."""
+        """Clear the write-target shape generation before a registration pass re-records it.
+
+        The staged one during a build, the committed one at boot.
+        """
         self._shape_target().clear()
 
     def rollback_owner(self, owner: RouteOwner) -> None:
-        """Deregister EVERY route this owner recorded — from both the process-spine
-        dedup map (``_routes``) and the write-target shape generation — so a module
-        whose import/bind/verify failed leaves no trace the match/collision surface or
-        the OpenAPI enumeration can see. Paired by the caller with the FastMCP
-        route-table rollback so all three surfaces drop the module together.
+        """Deregister EVERY route this owner recorded — from the dedup map and the write-target shape generation.
+
+        So a module whose import/bind/verify failed leaves no trace the match/collision surface or the
+        OpenAPI enumeration can see. Paired by the caller with the FastMCP route-table rollback so all
+        three surfaces drop the module together.
 
         Keyed on the plugin owner identity, which is one-to-one with a bound module,
         so it removes exactly that module's rows (including any stale prior-epoch
         ``_routes`` entry the failed pass did not re-record). Refuses the core owner:
         core routes share one owner and are not owner-isolable, so a core rollback
-        would nuke the whole native surface — a misuse."""
+        would nuke the whole native surface — a misuse.
+        """
         if owner.kind != "plugin":
             raise ValueError(f"rollback_owner refuses the {owner.kind} owner — only a plugin owner is rollable")
         self._routes = {key: meta for key, meta in self._routes.items() if meta.owner != owner}
@@ -353,11 +371,13 @@ class RouteRegistry:
         self._version += 1
 
     def owner_route_modules(self, owner: RouteOwner) -> frozenset[str]:
-        """The import module(s) that registered ``owner``'s routes on the live epoch —
-        the modules a reload must pop+reimport under the owner's binding so their
-        ``@custom_route`` decorators re-fire. Empty for an owner that registered no
-        route yet (a first boot, or a never-loaded plugin). The reload uses this to
-        re-fire ONLY the owner's own route-registering module(s), never a wider set."""
+        """The import module(s) that registered ``owner``'s routes on the live epoch.
+
+        The modules a reload must pop+reimport under the owner's binding so their ``@custom_route``
+        decorators re-fire. Empty for an owner that registered no route yet (a first boot, or a
+        never-loaded plugin). The reload uses this to re-fire ONLY the owner's own route-registering
+        module(s), never a wider set.
+        """
         return frozenset(self._owner_route_modules.get(owner, frozenset()))
 
     def audit_plugin_routes_preserved(self, expected_owners: set[RouteOwner]) -> None:
@@ -379,7 +399,8 @@ class RouteRegistry:
         spec declares no routes, is not in ``expected_owners`` and never trips the
         guard; a remap or an update that keeps at least one route still passes (an
         owner's routes are all in one binding, so the sibling-cache bug drops them
-        all-or-nothing). A no-op outside an epoch build (no staged generation)."""
+        all-or-nothing). A no-op outside an epoch build (no staged generation).
+        """
         if self._staged_shapes is None:
             return
         staged_owners = {entry.meta.owner for entry in self._staged_shapes}

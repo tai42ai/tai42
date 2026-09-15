@@ -23,8 +23,10 @@ from tai42_skeleton.operations.response_models_group_c import AgentListing
 
 
 def _agents_registry() -> dict[str, Agent]:
-    """Every registered agent keyed by registration name — the process app's live
-    agent binding."""
+    """Every registered agent keyed by registration name.
+
+    Reads the process app's live agent binding.
+    """
     return instance.app.agents.all_agents()
 
 
@@ -44,14 +46,17 @@ def _agent_view(name: str, agent: Agent) -> dict[str, Any]:
 
 @operation(summary="List every registered agent", tags=["agents"], response_model=AgentListing)
 async def list_agents() -> dict:
+    """List every registered agent with its schema and spec-runnable marker, plus a total."""
     items = [_agent_view(name, agent) for name, agent in _agents_registry().items()]
     return {"items": items, "total": len(items)}
 
 
 @operation(summary="List the spec-runnable (authorable) agents", tags=["agents"], response_model=AgentListing)
 async def list_spec_runnable_agents() -> dict:
-    """Only the authorable agents (``spec_runnable`` True) — the compose UI's
-    base-agent picker. Filters on the marker, never on a known agent name; an empty
-    list means no authoring is possible."""
+    """Only the authorable agents (``spec_runnable`` True) — the compose UI's base-agent picker.
+
+    Filters on the marker, never on a known agent name; an empty list means no authoring
+    is possible.
+    """
     items = [_agent_view(name, agent) for name, agent in _agents_registry().items() if agent.spec_runnable]
     return {"items": items, "total": len(items)}

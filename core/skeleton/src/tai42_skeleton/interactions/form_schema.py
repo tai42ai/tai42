@@ -1,5 +1,7 @@
-"""The channel-deliverable form-schema subset — the ONE definition of the SHARED
-subset every ``form`` question delivered over a channel must satisfy.
+"""The channel-deliverable form-schema subset.
+
+The ONE definition of the SHARED subset every ``form`` question delivered over a
+channel must satisfy.
 
 A channel form is answered on the server-rendered callback page, a flat HTML form
 the human fills and submits. Only a schema that renders into such a form is
@@ -29,7 +31,7 @@ _SCALAR_TYPES = ("string", "boolean", "integer", "number")
 
 def _validate_property(name: str, prop: Any) -> None:
     if not isinstance(prop, dict):
-        raise ValueError(f"form schema property {name!r} must be an object")
+        raise ValueError(f"form schema property {name!r} must be an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     ptype = prop.get("type")
     if ptype not in _SCALAR_TYPES:
         raise ValueError(
@@ -49,13 +51,15 @@ def _validate_property(name: str, prop: Any) -> None:
 
 
 def channel_form_fields(schema: Any) -> list[tuple[str, dict, bool]]:
-    """Validate ``schema`` against the channel-deliverable form subset and return
-    its fields as ``(name, prop, is_required)`` in declared order.
+    """Validate ``schema`` against the channel-deliverable form subset and return its fields.
 
-    Raises ``ValueError`` naming the offending property (or the violated root
-    rule) on any deviation from the subset."""
+    Fields come back as ``(name, prop, is_required)`` in declared order.
+
+    Raises ``ValueError`` naming the offending property (or the violated root rule) on
+    any deviation from the subset.
+    """
     if not isinstance(schema, dict):
-        raise ValueError("form schema must be an object")
+        raise ValueError("form schema must be an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     if schema.get("type") != "object":
         raise ValueError(f"form schema top-level type must be 'object', got {schema.get('type')!r}")
     properties = schema.get("properties")
@@ -63,7 +67,7 @@ def channel_form_fields(schema: Any) -> list[tuple[str, dict, bool]]:
         raise ValueError("form schema must carry a non-empty object 'properties' map")
     required = schema.get("required", [])
     if not isinstance(required, list):
-        raise ValueError("form schema 'required' must be a list when present")
+        raise ValueError("form schema 'required' must be a list when present")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     undeclared = [name for name in required if name not in properties]
     if undeclared:
         raise ValueError(f"form schema 'required' names undeclared properties: {undeclared}")
@@ -77,18 +81,23 @@ def channel_form_fields(schema: Any) -> list[tuple[str, dict, bool]]:
 
 
 def validate_channel_form_schema(schema: dict) -> None:
-    """Raise ``ValueError`` (naming the offending property and rule) when ``schema``
-    falls outside the channel-deliverable form subset; return ``None`` when it
-    conforms. Callers pass a JSON-schema dict — normalize a pydantic model first."""
+    """Assert ``schema`` conforms to the channel-deliverable form subset.
+
+    Raises ``ValueError`` (naming the offending property and rule) when ``schema`` falls
+    outside the subset; returns ``None`` when it conforms. Callers pass a JSON-schema
+    dict — normalize a pydantic model first.
+    """
     channel_form_fields(schema)
 
 
 def effective_answer_schema(schema: dict[str, Any], data: Any) -> dict[str, Any]:
-    """Return ``schema`` with each per-send option list applied as its property's
-    ``enum`` for ANSWER validation: a per-send list replaces the published ``enum``
-    for one send, so a submitted value is judged against the choices the human was
-    actually shown. ``data`` is the stored :class:`FormData` dump (or ``None``);
-    absent options return ``schema`` unchanged. Non-mutating (shallow copies only)."""
+    """Return ``schema`` with each per-send option list applied as its property's ``enum`` for answer validation.
+
+    A per-send list replaces the published ``enum`` for one send, so a submitted value
+    is judged against the choices the human was actually shown. ``data`` is the stored
+    :class:`FormData` dump (or ``None``); absent options return ``schema`` unchanged.
+    Non-mutating (shallow copies only).
+    """
     options = (data or {}).get("options") if isinstance(data, dict) else None
     if not options:
         return schema

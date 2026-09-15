@@ -1,5 +1,6 @@
-"""The single-use pair-code store — mint a code in one conversation, redeem it in another to
-fold the two into one person on the same target.
+"""The single-use pair-code store: mint a code in one conversation, redeem it in another.
+
+Redeeming folds the two conversations into one person on the same target.
 
 Same single-use posture as the one-time claim-link store: a code is ``sha256``-at-rest, minted
 with ``SET ... EX NX`` (retry once on the astronomically rare collision, then raise) and redeemed
@@ -74,10 +75,13 @@ return 1
 
 @dataclass(frozen=True)
 class MintingConversation:
-    """The conversation a pair code was minted in — everything the redeem side needs to write a
-    complete :class:`~tai42_contract.conversations.PersonAddress` for it and know its target.
-    ``route_name`` is included because every mint site has just resolved its route, and the
-    redeem side would otherwise have no route to attribute the minting address to."""
+    """The conversation a pair code was minted in.
+
+    Everything the redeem side needs to write a complete
+    :class:`~tai42_contract.conversations.PersonAddress` for it and know its target. ``route_name``
+    is included because every mint site has just resolved its route, and the redeem side would
+    otherwise have no route to attribute the minting address to.
+    """
 
     target_kind: ConversationTargetKind
     target_name: str
@@ -94,19 +98,24 @@ def _generate_code() -> str:
 
 
 class ConversationPairCodeStore:
-    """The Redis-backed single-use pair-code store. Construction refuses with a loud 501 without
-    the redis conversations backend — a minted code must outlive the minting request in durable
-    state, never per-worker memory."""
+    """The Redis-backed single-use pair-code store.
+
+    Construction refuses with a loud 501 without the redis conversations backend — a minted code
+    must outlive the minting request in durable state, never per-worker memory.
+    """
 
     def __init__(self, settings: ConversationsSettings) -> None:
+        """Bind ``settings``, refusing with a loud 501 when no durable redis backend is configured."""
         if settings.in_memory:
             raise NotSupportedError(_NO_BACKEND)
         self.settings = settings
 
     async def mint(self, conversation: MintingConversation) -> tuple[str, datetime]:
-        """Mint a FRESH code for ``conversation`` (rotating out any code already open for it)
-        and return ``(code, expires_at)``. The raw code is returned once here and never stored;
-        only its sha256 keys the record."""
+        """Mint a FRESH code for ``conversation`` and return ``(code, expires_at)``.
+
+        Any code already open for the conversation is rotated out. The raw code is returned once
+        here and never stored; only its sha256 keys the record.
+        """
         ttl = self.settings.pair_code_ttl_seconds
         dak = _door_address_key(
             door=conversation.door,
@@ -137,9 +146,11 @@ class ConversationPairCodeStore:
         raise RuntimeError("conversations: pair code collided twice on mint; refusing to retry further")
 
     async def redeem(self, code: str) -> MintingConversation:
-        """Burn ``code`` and return the conversation it was minted in — an atomic ``GETDEL`` so
-        exactly one caller wins under concurrency. Unknown, expired, and already-redeemed all
-        raise the UNIFORM :class:`PairCodeInvalidError` (no oracle)."""
+        """Burn ``code`` and return the conversation it was minted in.
+
+        An atomic ``GETDEL`` so exactly one caller wins under concurrency. Unknown, expired, and
+        already-redeemed all raise the UNIFORM :class:`PairCodeInvalidError` (no oracle).
+        """
         async with client_ctx(RedisClient, self.settings.redis) as r:
             raw = await awaited(r.getdel(self.settings.pair_code_key(hash_api_key(code))))
         if raw is None:

@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 async def probe_identity_provider() -> None:
-    """Instantiate EVERY configured identity provider ONCE, record it on the epoch, and
-    probe its own storage — the per-epoch eager-instantiation the live verifier and the
-    provider's login routes both resolve against.
+    """Instantiate EVERY configured identity provider ONCE, record it on the epoch, and probe its own storage.
 
-    Resolves each name in ``auth_providers`` through the STAGED identity registry (the
-    generation THIS build assembled), instantiates the provider once against the
-    access-control settings (whose ``admin`` services the freshly-built AuthAdapter has
-    already installed), records it in the epoch core's ``active_auth_providers`` so a
-    later request never re-instantiates it nor reads a plugin module holder, then awaits
+    This is the per-epoch eager-instantiation the live verifier and the provider's login
+    routes both resolve against. Resolves each name in ``auth_providers`` through the
+    STAGED identity registry (the generation THIS build assembled), instantiates the
+    provider once against the access-control settings (whose ``admin`` services the
+    freshly-built AuthAdapter has already installed), records it in the epoch core's
+    ``active_auth_providers`` so a later request never re-instantiates it nor reads a
+    plugin module holder, then awaits
     its ``healthcheck()``. A provider whose storage needs no boot probe inherits the
     contract's default no-op; a key-minting provider probes its own record store. ANY
     provider's failure propagates, so a deployment against a backend a provider cannot
@@ -49,8 +49,7 @@ async def probe_identity_provider() -> None:
 
 
 async def seed_roles() -> None:
-    """Seed the default role templates (admin/editor/viewer) at startup whenever access
-    control is enabled.
+    """Seed the default role templates (admin/editor/viewer) at startup whenever access control is enabled.
 
     Idempotent create-only: an operator-edited template is never overwritten. Runs
     before the server accepts traffic so a bootstrap ``apply_role(user_id, "admin")``
@@ -177,9 +176,11 @@ async def check_spa_shell_public() -> None:
 
 @dataclass
 class _SpaShellAudit:
-    """The four buckets every registered non-/api GET route is sorted into by the
-    SPA-shell audit: consciously acknowledged, acknowledged-yet-authed (a contradiction),
-    authed-but-invisible-to-the-fallback, and public-by-declaration-yet-unacknowledged."""
+    """The four buckets every registered non-/api GET route is sorted into by the SPA-shell audit.
+
+    Consciously acknowledged, acknowledged-yet-authed (a contradiction),
+    authed-but-invisible-to-the-fallback, and public-by-declaration-yet-unacknowledged.
+    """
 
     acknowledged_present: list[str] = field(default_factory=list)
     acknowledged_but_authed: list[str] = field(default_factory=list)
@@ -188,8 +189,10 @@ class _SpaShellAudit:
 
 
 def _classify_spa_shell_routes(acknowledged: frozenset[str], derived: frozenset[str]) -> _SpaShellAudit:
-    """Bucket every registered non-mounted, non-/api GET route against the SPA-shell
-    fallback (see :func:`check_spa_shell_public` for the rule each bucket encodes)."""
+    """Bucket every registered non-mounted, non-/api GET route against the SPA-shell fallback.
+
+    See :func:`check_spa_shell_public` for the rule each bucket encodes.
+    """
     from tai42_skeleton.access_control.path_canon import canonicalize_path, under_prefix
     from tai42_skeleton.app.route_registry import route_registry
 
@@ -282,8 +285,7 @@ async def check_route_actions() -> None:
 
 
 async def check_fenced_routes_resolvable() -> None:
-    """Fail the boot — and every in-place reload — if a registered fenced/secret route
-    does not resolve back to itself.
+    """Fail the boot — and every in-place reload — if a registered fenced/secret route does not resolve to itself.
 
     The admin-only fence is enforced ONLY where ``resolve_route_meta`` returns the route:
     a genuinely-unregistered path resolves to ``None`` and the per-tag gate correctly
@@ -326,8 +328,7 @@ async def check_fenced_routes_resolvable() -> None:
 
 
 async def check_raw_path_routes_resolvable() -> None:
-    """Fail the boot — and every in-place reload — if a raw-path-matched route does not
-    resolve back to itself when its key carries an encoded slash.
+    """Fail the boot — and every reload — if an encoded-slash raw-path-matched route does not resolve to itself.
 
     A record ``{key}`` legitimately carries ``/`` (a thread key), sent as one ``%2F``
     segment; ``HttpSurface.use_raw_path_key`` marks these routes raw-path-matched so the
@@ -338,7 +339,8 @@ async def check_raw_path_routes_resolvable() -> None:
     ``resolve_route_meta``, back to ITSELF under an encoded-slash probe — else the marked
     door would refuse the exact keys it exists to serve, and the run refuses to proceed.
     Wired as both a startup and a reload handler; runs after the routers register so the
-    whole marked surface is audited (a raw-path family re-marked each epoch)."""
+    whole marked surface is audited (a raw-path family re-marked each epoch).
+    """
     import re
 
     from tai42_skeleton.access_control.path_canon import MalformedPathError

@@ -42,8 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 def _assert_unique_names(tools: list[StructuredTool]) -> None:
-    """Reject duplicate tool names — the agent dispatches by name, so a collision
-    would make selection ambiguous."""
+    """Reject duplicate tool names — the agent dispatches by name, so a collision makes selection ambiguous."""
     names = [tool.name for tool in tools]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -165,15 +164,17 @@ async def resolve_tools(
     tools: list[StructuredTool],
     presets: list[PresetSpec],
 ) -> list[StructuredTool]:
-    """Resolve ``tools`` + ``tool_names`` + ``presets`` into one deduplicated
-    ``StructuredTool`` list (live tools first, then resolved names, then
-    presets). ``app_tools`` is the app's tool facet (``tai42_app.tools``).
+    """Resolve ``tools`` + ``tool_names`` + ``presets`` into one deduplicated ``StructuredTool`` list.
+
+    Ordered live tools first, then resolved names, then presets. ``app_tools`` is the app's tool facet
+    (``tai42_app.tools``).
 
     Every tool comes back delivery-scoped: its body runs with the park-completion
     binding CLEARED, so a parking driver reached THROUGH the agent cannot claim the
     agent's own deferred-answer address (see
     :mod:`~tai42_agents._internal.nested_dispatch`). The agent's own park, raised
-    outside any tool body, is unaffected."""
+    outside any tool body, is unaffected.
+    """
     out: list[StructuredTool] = list(tools or [])
     if tool_names:
         out += await app_tools.get_client_tools(list(tool_names))

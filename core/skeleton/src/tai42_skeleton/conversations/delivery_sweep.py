@@ -1,6 +1,7 @@
-"""The background recovery sweep task lifecycle: a single per-generation loop the app boots and
-tears down that periodically re-drives stalled deliveries, adopts lapsed intakes, and prunes the
-terminal-status and route-thread indexes.
+"""The background recovery sweep task lifecycle.
+
+A single per-generation loop the app boots and tears down that periodically re-drives stalled
+deliveries, adopts lapsed intakes, and prunes the terminal-status and route-thread indexes.
 """
 
 from __future__ import annotations
@@ -23,10 +24,12 @@ _prune_cursor: PruneCursor = PRUNE_START
 
 
 def start_delivery_sweep() -> None:
-    """(Re)start the periodic recovery sweep — stalled deliveries and lapsed intakes —
-    the post-swap establisher body. Must be called ON the serving loop (the post-swap
-    hook runs there at boot and after every epoch swap), so the task attaches to the loop
-    its deliveries run on and retires with its generation. Cancels any previous task."""
+    """(Re)start the periodic recovery sweep — the post-swap establisher body.
+
+    Sweeps stalled deliveries and lapsed intakes. Must be called ON the serving loop (the post-swap
+    hook runs there at boot and after every epoch swap), so the task attaches to the loop its
+    deliveries run on and retires with its generation. Cancels any previous task.
+    """
     global _sweep_task
     task = _sweep_task
     if task is not None and not task.done():
@@ -39,10 +42,12 @@ def start_delivery_sweep() -> None:
 
 
 def _register_sweep_with_epoch(task: asyncio.Task[None]) -> None:
-    """Register this sweep task's cancel with the epoch under construction, so the epoch
-    retire cancels exactly the generation's own sweep and no timer outlives its epoch. A
-    no-op when no epoch is installed. The cancel awaits only a task on the retire's own
-    loop, so a task left on a torn-down build loop is cancelled without a cross-loop await."""
+    """Register this sweep task's cancel with the epoch under construction.
+
+    The epoch retire cancels exactly the generation's own sweep and no timer outlives its epoch. A
+    no-op when no epoch is installed. The cancel awaits only a task on the retire's own loop, so a
+    task left on a torn-down build loop is cancelled without a cross-loop await.
+    """
     from tai42_skeleton.app.epoch import epoch_under_construction_or_none
 
     epoch = epoch_under_construction_or_none()
@@ -61,8 +66,11 @@ def _register_sweep_with_epoch(task: asyncio.Task[None]) -> None:
 
 
 async def stop_delivery_sweep() -> None:
-    """Cancel and await the sweep task. Must be called ON the serving loop the task lives
-    on, so the await is loop-safe. Only ``CancelledError`` is suppressed."""
+    """Cancel and await the sweep task.
+
+    Must be called ON the serving loop the task lives on, so the await is loop-safe. Only
+    ``CancelledError`` is suppressed.
+    """
     global _sweep_task
     task = _sweep_task
     _sweep_task = None
@@ -73,21 +81,26 @@ async def stop_delivery_sweep() -> None:
 
 
 async def _redrive_lapsed_intakes() -> None:
-    """Adopt and resolve records whose turn worker died, through the turn engine's
-    lease-gated re-drive. Imported inside the call: the turn engine imports the delivery module."""
+    """Adopt and resolve records whose turn worker died, through the turn engine's lease-gated re-drive.
+
+    Imported inside the call: the turn engine imports the delivery module.
+    """
     from tai42_skeleton.conversations.turn import redrive_accepted
 
     await redrive_accepted()
 
 
 async def _prune_terminal_indexes() -> None:
-    """Drop the expired members of the terminal-status indexes that no listing reads, and
-    the reclaimable members of every route's thread indexes, so neither can outgrow the
-    retained keyspace it names.
+    """Drop expired terminal-status index members and reclaimable route thread-index members.
+
+    Drops the expired members of the terminal-status indexes that no listing reads, and the
+    reclaimable members of every route's thread indexes, so neither can outgrow the retained
+    keyspace it names.
 
     Every LIVE route is handed to the pass: a thread index the pass is not given is walked
     by nothing, so its members would grow forever. The pass is bounded, so it stops where
-    the budget runs out and the cursor it returns is what the next one resumes from."""
+    the budget runs out and the cursor it returns is what the next one resumes from.
+    """
     global _prune_cursor
     from tai42_skeleton.conversations import delivery
 
@@ -96,9 +109,11 @@ async def _prune_terminal_indexes() -> None:
 
 
 async def _sweep_loop(interval_seconds: float) -> None:
-    """Run every recovery pass every ``interval_seconds`` for the life of the process. A
-    failing pass is logged at ERROR and the others still run — a dead sweep is the silent
-    abandonment it exists to prevent."""
+    """Run every recovery pass every ``interval_seconds`` for the life of the process.
+
+    A failing pass is logged at ERROR and the others still run — a dead sweep is the silent
+    abandonment it exists to prevent.
+    """
     from tai42_skeleton.conversations import delivery
 
     passes = (

@@ -74,8 +74,10 @@ class TemplateDirDelete(BaseModel):
 
 
 class TemplateRender(BaseModel):
-    """Render the one authored ``text`` — inline ``content`` OR a stored ``id``,
-    plus its render ``kwargs`` — on demand."""
+    """Render the one authored ``text`` — inline ``content`` OR a stored ``id`` — on demand.
+
+    ``text`` carries its own render ``kwargs``.
+    """
 
     text: TemplatedText
 
@@ -270,8 +272,7 @@ async def delete_template_dir(path: str) -> dict:
     response_model=RenderedTemplate,
 )
 async def render_template(text: TemplatedText) -> dict:
-    """Render the one authored ``text`` — inline ``content`` OR a stored ``id`` — with
-    its ``kwargs``.
+    """Render the one authored ``text`` — inline ``content`` OR a stored ``id`` — with its ``kwargs``.
 
     ``text`` carries EXACTLY ONE source: its own type refuses neither and both, so a
     caller supplying the wrong shape is a loud ``400`` at the edge. A stored ``id`` that

@@ -41,10 +41,10 @@ _KIND_SEND_METHOD: dict[str, str] = {
 
 
 class SessionRegistry:
-    """Skeleton-owned registry of active MCP sessions + the ``list_changed``
-    broadcast helper FastMCP does not provide."""
+    """Skeleton-owned registry of active MCP sessions + the ``list_changed`` broadcast helper FastMCP omits."""
 
     def __init__(self) -> None:
+        """Initialize an empty weakly-held session set guarded by a non-reentrant lock."""
         # The active sessions, weakly held so a collected session falls out with no
         # disconnect hook. Broadcasts run on the sessions' own serving loop, so only
         # the session identity is tracked.
@@ -57,12 +57,15 @@ class SessionRegistry:
         self._lock = threading.Lock()
 
     def track(self, session: Any) -> None:
-        """Record ``session`` as active. Idempotent — re-tracking a known session
-        is a cheap set add."""
+        """Record ``session`` as active.
+
+        Idempotent — re-tracking a known session is a cheap set add.
+        """
         with self._lock:
             self._sessions.add(session)
 
     def active_count(self) -> int:
+        """The number of active sessions currently tracked."""
         with self._lock:
             return len(self._sessions)
 
@@ -84,7 +87,8 @@ class SessionRegistry:
         pruned (logged, a visible recovery, never a silent swallow) and the
         broadcast reaches the remaining sessions; one dead session never aborts
         the whole broadcast. Call this from a coroutine running on the sessions'
-        own loop (the in-process registration-mutation path)."""
+        own loop (the in-process registration-mutation path).
+        """
         method = self._send_method(kind)
         # Snapshot under the lock (quick dict work), then await each send OFF the
         # lock so a slow/awaiting send never holds it.
@@ -106,12 +110,14 @@ class SessionRegistry:
 
 
 class SessionTrackingMiddleware(Middleware):
-    """Register the calling session into the :class:`SessionRegistry` on every
-    incoming message — the skeleton's stand-in for the on-connect hook FastMCP
-    does not expose. Added once at construction and never re-added (the server
-    object outlives every reload)."""
+    """Register the calling session into the :class:`SessionRegistry` on every incoming message.
+
+    The skeleton's stand-in for the on-connect hook FastMCP does not expose. Added once at
+    construction and never re-added (the server object outlives every reload).
+    """
 
     def __init__(self, registry: SessionRegistry) -> None:
+        """Bind the ``registry`` calling sessions are tracked into."""
         self._registry = registry
 
     async def on_message(
@@ -119,6 +125,7 @@ class SessionTrackingMiddleware(Middleware):
         context: MiddlewareContext[Any],
         call_next: "Callable[[MiddlewareContext[Any]], Awaitable[Any]]",
     ) -> Any:
+        """Track the calling session (once established) before delegating to the next middleware."""
         ctx = context.fastmcp_context
         if ctx is not None:
             try:
@@ -149,9 +156,11 @@ class ReloadRejectionMiddleware(Middleware):
     raises a :class:`~fastmcp.exceptions.ToolError` carrying the shared reloading
     message (client-visible), rather than dispatching against registries a reload
     is tearing down and rebuilding. Registered once at construction alongside
-    :class:`SessionTrackingMiddleware`."""
+    :class:`SessionTrackingMiddleware`.
+    """
 
     def __init__(self, gate: ReloadGate) -> None:
+        """Bind the reload ``gate`` consulted on each tool call."""
         self._gate = gate
 
     async def on_call_tool(
@@ -159,6 +168,7 @@ class ReloadRejectionMiddleware(Middleware):
         context: MiddlewareContext[Any],
         call_next: "Callable[[MiddlewareContext[Any]], Awaitable[Any]]",
     ) -> Any:
+        """Reject the tool call with the reloading message while the gate is held, else delegate."""
         if self._gate.locked:
             raise ToolError(REJECT_MESSAGE)
         return await call_next(context)

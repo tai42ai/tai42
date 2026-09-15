@@ -77,7 +77,7 @@ async def test_list_spans_tag_filter_and_pagination(manager, mock_client, obs, o
 
     reader = LangfuseReader(manager)
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await reader.list_spans_in_window(now, now, filter=MonitoringFilter(tags=["run:7"]))
+    items = await reader.list_spans_in_window(now, now, filter_=MonitoringFilter(tags=["run:7"]))
 
     assert {i.id for i in items} == {"a", "b"}
     # tag filter is sent server-side via the traceTags advanced filter
@@ -97,7 +97,7 @@ async def test_span_filter_maps_native_and_advanced(manager, mock_client, obs_pa
     await LangfuseReader(manager).list_spans_in_window(
         now,
         now,
-        filter=MonitoringFilter(
+        filter_=MonitoringFilter(
             name="node",
             user_id="u1",
             level=None,
@@ -141,7 +141,7 @@ async def test_span_session_id_resolves_and_postfilters(manager, mock_client, ob
     )
     mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await LangfuseReader(manager).list_spans_in_window(now, now, filter=MonitoringFilter(session_id="s1"))
+    items = await LangfuseReader(manager).list_spans_in_window(now, now, filter_=MonitoringFilter(session_id="s1"))
     assert {i.id for i in items} == {"keep"}
     assert mock_client.api.trace.list.call_args.kwargs["session_id"] == "s1"
     assert mock_client.api.trace.list.call_args.kwargs["environment"] == "tai"
@@ -159,7 +159,7 @@ async def test_span_session_resolution_drains_all_pages(manager, mock_client, ob
     ]
     mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await LangfuseReader(manager).list_spans_in_window(now, now, filter=MonitoringFilter(session_id="s1"))
+    items = await LangfuseReader(manager).list_spans_in_window(now, now, filter_=MonitoringFilter(session_id="s1"))
     # Both pages of the session's trace ids were collected before filtering.
     assert {i.id for i in items} == {"p1", "p2"}
     assert mock_client.api.trace.list.call_count == 2

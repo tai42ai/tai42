@@ -43,9 +43,10 @@ from tai42_skeleton.operations.config import write_env as _write_env_op
 
 
 async def _extract_env_update(request: Request) -> dict[str, Any]:
-    """Parse and validate the env-merge body at the HTTP edge, preserving the door's
-    hand-authored 400 messages (a plain request-model parse would answer 422). Yields
-    the operation's flat ``env`` kwarg."""
+    """Parse and validate the env-merge body at the HTTP edge, preserving the door's hand-authored 400 messages.
+
+    A plain request-model parse would answer 422. Yields the operation's flat ``env`` kwarg.
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -58,10 +59,11 @@ async def _extract_env_update(request: Request) -> dict[str, Any]:
 
 
 async def _extract_profile_body(request: Request) -> dict[str, Any]:
-    """Parse and validate a ``SettingsProfileBody`` (``{description, env,
-    secret_keys}``) at the HTTP edge, preserving the door's hand-authored 400s (a
-    plain request-model parse would answer 422). ``description`` and ``secret_keys``
-    default to empty; ``env`` is a ``{str: str}`` map."""
+    """Parse and validate a ``SettingsProfileBody`` (``{description, env, secret_keys}``) at the HTTP edge.
+
+    Preserves the door's hand-authored 400s (a plain request-model parse would answer 422).
+    ``description`` and ``secret_keys`` default to empty; ``env`` is a ``{str: str}`` map.
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -81,8 +83,10 @@ async def _extract_profile_body(request: Request) -> dict[str, Any]:
 
 
 async def _extract_profile_rollback(request: Request) -> dict[str, Any]:
-    """The rollback body → the operation's flat ``version`` kwarg; a missing or
-    non-integer ``version`` is a loud 400."""
+    """The rollback body → the operation's flat ``version`` kwarg.
+
+    A missing or non-integer ``version`` is a loud 400.
+    """
     try:
         body = await request.json()
     except ValueError as exc:

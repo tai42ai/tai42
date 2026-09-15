@@ -45,13 +45,13 @@ ASK_EXPIRED_UNANSWERED_EVENT_TOPIC = "interactions_ask_expired_unanswered"
 
 
 async def _emit_ask_expired_unanswered(request: InteractionRequest, group_id: str, expired_at: datetime) -> None:
-    """Emit the ``interactions_ask_expired_unanswered`` platform event ONCE for a park
-    the reaper has just claimed by expiry.
+    """Emit the ``interactions_ask_expired_unanswered`` platform event ONCE for a just-claimed expired park.
 
     Core states the fact; a deployment wires a hook on this topic to decide what an
     operator sees. Best-effort: a hooks-manager failure is logged and swallowed so it
     never perturbs the reaper's claim/continuation flow or aborts the pass — the expiry
-    continuation has already been dispatched when this runs."""
+    continuation has already been dispatched when this runs.
+    """
     # Local import: reach the hooks-manager accessor only when emitting, mirroring the
     # inbound ladder's pattern (keeps a module-load import edge out of this module).
     from tai42_skeleton.hooks.cache import get_hooks_manager
@@ -75,9 +75,11 @@ async def _emit_ask_expired_unanswered(request: InteractionRequest, group_id: st
 
 
 async def reap_expired_parks_once() -> int:
-    """One reaper pass: resolve every due async park by expiry, returning how many
-    continuations this pass fired. A no-op (returns 0) when the interactions store is
-    unconfigured — the feature is OFF and no park can exist."""
+    """Run one reaper pass, resolving every due async park by expiry; return how many continuations fired.
+
+    A no-op (returns 0) when the interactions store is unconfigured — the feature is OFF and
+    no park can exist.
+    """
     if not interactions_store_configured():
         return 0
     settings = interactions_settings()
@@ -103,8 +105,10 @@ async def reap_expired_parks_once() -> int:
 async def _reap_one_expired_park(
     r: Redis, store: InteractionStore, settings: InteractionsSettings, interaction_id: str, now: datetime
 ) -> bool:
-    """Resolve a single due park by expiry, returning True when this call fired its
-    continuation. Vanished/answered/boundary members are reconciled or skipped."""
+    """Resolve a single due park by expiry; return True when this call fired its continuation.
+
+    Vanished/answered/boundary members are reconciled or skipped.
+    """
     state = await store.get_state(r, interaction_id)
     if state is None or state.status != "pending" or state.request.mode != "async" or state.request.expiry_at is None:
         # Vanished, already answered, or no longer an async park with a
@@ -148,14 +152,15 @@ async def _reap_one_expired_park(
 
 
 async def redeliver_due_continuations_once() -> int:
-    """One redelivery pass: re-fire every continuation-due record whose next-attempt
-    time has passed, returning how many this pass redelivered. These are resolves that
-    were durably recorded but whose ``run_tool`` never returned — a worker crash after
-    the claim, or an ordering race in which the resume tool raised because its target
-    state was not yet persisted (so its record was never cleared). Each
-    redelivery advances the record's backoff atomically before firing, so concurrent
-    passes don't storm the same record; a healthy fire clears it. A no-op (returns 0)
-    when the interactions store is unconfigured."""
+    """Run one redelivery pass, re-firing every due continuation-due record; return how many redelivered.
+
+    These are resolves that were durably recorded but whose ``run_tool`` never returned — a
+    worker crash after the claim, or an ordering race in which the resume tool raised because
+    its target state was not yet persisted (so its record was never cleared). Each redelivery
+    advances the record's backoff atomically before firing, so concurrent passes don't storm
+    the same record; a healthy fire clears it. A no-op (returns 0) when the interactions store
+    is unconfigured.
+    """
     if not interactions_store_configured():
         return 0
     settings = interactions_settings()
@@ -212,7 +217,8 @@ async def run_expiry_reaper_loop() -> None:
     never returned. A per-pass error is logged loudly and the loop survives to the next
     interval — a silently dead reaper would strand every async park past its expiry AND
     every crash-orphaned resume, the exact failures this loop removes — while a
-    cancellation (shutdown) propagates for a clean exit."""
+    cancellation (shutdown) propagates for a clean exit.
+    """
     while True:
         await asyncio.sleep(interactions_settings().expiry_reaper_interval_seconds)
         try:

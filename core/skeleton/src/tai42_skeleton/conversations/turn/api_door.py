@@ -68,7 +68,8 @@ async def submit_api_message(
     (``ConversationMessage.attachments``/``.location``) ride WITH ``text`` under the SAME
     record + payload semantics — validated defensively here, stored on the record's
     ``inbound_attachments``/``inbound_location``, and surfaced to a tool target's payload under
-    the stable ``attachments``/``location`` keys only when present."""
+    the stable ``attachments``/``location`` keys only when present.
+    """
     checked_params = _checked_params(params)
     checked_form = _checked_form(form)
     checked_attachments = _checked_attachments(attachments)

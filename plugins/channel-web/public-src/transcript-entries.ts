@@ -4,8 +4,8 @@
  * its entry kind, then the pending sends as visitor bubbles wearing their send
  * status (and a Retry id when they failed).
  */
-import type { ChatItem } from '@/transcript-model';
 import type { TranscriptEntry } from '@/transcript';
+import type { ChatItem } from '@/transcript-model';
 import type { OutboxItem } from '@/use-outbox';
 
 export function buildTranscriptEntries(

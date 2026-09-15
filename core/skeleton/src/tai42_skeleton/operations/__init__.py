@@ -18,13 +18,13 @@ from tai42_skeleton.operations.errors import (
     NotFoundError,
     NotSupportedError,
     OperationError,
-    OperationFailed,
+    OperationFailedError,
     PayloadTooLargeError,
-    PermissionDenied,
+    PermissionDeniedError,
     PreconditionFailedError,
     UnavailableError,
     UpstreamError,
-    ValidationRejected,
+    ValidationRejectedError,
 )
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.operations.registry import (
@@ -63,8 +63,9 @@ _leaf_snapshot: list[OperationMetadata] | None = None
 
 
 def reregister_operations() -> list[str]:
-    """Repopulate the cleared ``operation_registry`` with this package's leaf
-    operations; return the leaf module names re-imported (empty after the first call).
+    """Repopulate the cleared ``operation_registry`` with this package's leaf operations.
+
+    Returns the leaf module names re-imported (empty after the first call).
 
     The registry is process-global and a decorator fires exactly once per interpreter,
     so a plain re-import of a router that merely ``from operations.<domain> import <op>``
@@ -116,16 +117,16 @@ __all__ = [
     "NotFoundError",
     "NotSupportedError",
     "OperationError",
-    "OperationFailed",
+    "OperationFailedError",
     "OperationMetadata",
     "OperationRegistry",
     "OperationResponse",
     "PayloadTooLargeError",
-    "PermissionDenied",
+    "PermissionDeniedError",
     "PreconditionFailedError",
     "UnavailableError",
     "UpstreamError",
-    "ValidationRejected",
+    "ValidationRejectedError",
     "operation",
     "operation_leaf_modules",
     "operation_metadata_of",

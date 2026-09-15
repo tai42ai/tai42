@@ -1,9 +1,9 @@
-"""Caller resolution and the operations-layer authority rules keyed on it: may THIS caller
-do that to THAT principal?
+"""Caller resolution and the operations-layer authority rules keyed on it.
 
-Shared by the operation leaves, so it lives here rather than in one of them: a leaf is
-popped from ``sys.modules`` and re-imported on reload, and a rule held by one leaf and
-imported by another would leave the two holding different module objects.
+May THIS caller do that to THAT principal? Shared by the operation leaves, so it lives here
+rather than in one of them: a leaf is popped from ``sys.modules`` and re-imported on reload,
+and a rule held by one leaf and imported by another would leave the two holding different
+module objects.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from tai42_skeleton.authz.execution import (
     assert_key_carries_authority,
 )
 from tai42_skeleton.authz.execution_identity import get_execution_identity
-from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError, NotFoundError, OperationFailed
+from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError, NotFoundError, OperationFailedError
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +38,12 @@ GATE_OFF_EXECUTION_FINGERPRINT = "unanchored:access-control-disabled"
 
 
 def owner_of(policy_data: Mapping[str, Any] | None) -> str | None:
-    """The management/listing OWNER a principal's ``policy_data`` declares, or ``None``
-    for a top-level (unowned) key or an absent/empty mapping.
+    """Return the management/listing OWNER a principal's ``policy_data`` declares, or ``None``.
 
-    The one place the operations layer spells the ownership home, so every surface keying
-    on it moves together if that home ever does."""
+    ``None`` for a top-level (unowned) key or an absent/empty mapping. The one place the
+    operations layer spells the ownership home, so every surface keying on it moves together
+    if that home ever does.
+    """
     return (policy_data or {}).get(OWNER_USER_ID_CLAIM)
 
 
@@ -57,8 +58,7 @@ class Caller:
 
 
 async def resolve_caller() -> Caller:
-    """Resolve the ACTING principal of this dispatch and classify it for the ownership
-    rules.
+    """Resolve the ACTING principal of this dispatch and classify it for the ownership rules.
 
     Inside a background fire the acting principal is the bound EXECUTION identity, which
     takes precedence: the request-scope caller id is then unset or still the principal of
@@ -74,7 +74,8 @@ async def resolve_caller() -> Caller:
     Gate OFF ⇒ admin (nothing to classify; the surfaces are already open). Gate ON with NO
     principal bound is an invariant breach: RAISE the typed 500 rather than escalate
     silently, logging what was missing and answering generically — the typed error's text
-    reaches the caller."""
+    reaches the caller.
+    """
     settings = access_control_settings()
     if not settings.enable:
         return Caller(caller_id=None, policy=AccessPolicy(scopes=["*"]), is_admin=True, owner_claim=None)
@@ -87,7 +88,7 @@ async def resolve_caller() -> Caller:
             "background fire binds) nor the request-scoped caller user id (which the guard middleware binds "
             "on every authed request); refusing to resolve an acting principal"
         )
-        raise OperationFailed("access_control: internal authority-resolution failure")
+        raise OperationFailedError("access_control: internal authority-resolution failure")
 
     policy = await PolicyEnforcer(settings).get_policy(caller_id)
     owner_claim = owner_of(policy.policy_data)
@@ -100,9 +101,12 @@ async def resolve_caller() -> Caller:
 
 
 async def require_owned_by_caller(caller: Caller, user_id: str) -> None:
-    """A non-admin caller may act only on a key whose stored management/listing owner
+    """Assert a non-admin caller owns ``user_id``'s key, or raise.
+
+    A non-admin caller may act only on a key whose stored management/listing owner
     (``policy_data[OWNER_USER_ID_CLAIM]``) is the caller. Raises ``NotFoundError`` for an
-    unknown key and ``ForbiddenError`` for someone else's key."""
+    unknown key and ``ForbiddenError`` for someone else's key.
+    """
     body = await management.get_policy_body(user_id)
     if body is None:
         raise NotFoundError(f"user not found: {user_id!r}")
@@ -111,10 +115,12 @@ async def require_owned_by_caller(caller: Caller, user_id: str) -> None:
 
 
 def require_admin(caller: Caller) -> None:
-    """Admin-only gate for the control-plane surfaces (policy/role version history,
-    rollback, role management): a version body carries the raw jq condition, and a
-    rollback can restore a more-privileged definition. Raises ``ForbiddenError`` for a
-    non-admin. Allows with access control off, where every caller resolves as admin."""
+    """Admin-only gate for the control-plane surfaces (version history, rollback, role management).
+
+    A version body carries the raw jq condition, and a rollback can restore a more-privileged
+    definition. Raises ``ForbiddenError`` for a non-admin. Allows with access control off,
+    where every caller resolves as admin.
+    """
     if not caller.is_admin:
         raise ForbiddenError("this operation is restricted to administrators")
 
@@ -122,10 +128,9 @@ def require_admin(caller: Caller) -> None:
 def _unevaluable_key_refusal(
     caller: Caller, execution_key: str, policy: AccessPolicy, exc: ExecutionConditionError
 ) -> BadRequestError:
-    """The 400 the bind door owes a caller whose execution key carries a policy condition a
-    tokenless fire cannot evaluate — carrying the scan's DIAGNOSTIC only when it is the
-    caller's to read.
+    """Build the 400 the bind door owes a caller whose execution key carries an unevaluable policy condition.
 
+    Carries the scan's DIAGNOSTIC only when it is the caller's to read.
     The diagnostic quotes a RAW jq condition, which is store-secret, and the refusal may be
     about the key OR its owner. On a door reachable with ``hooks`` write alone, a non-admin
     would otherwise read its owner's id and condition excerpt out of a 400; that caller
@@ -151,13 +156,14 @@ def _unevaluable_key_refusal(
 
 
 def _unfireable_key_refusal(caller: Caller, execution_key: str, exc: ExecutionKeyAuthorityError) -> BadRequestError:
-    """The 400 the bind door owes a caller whose execution key cannot carry a fire at all
-    — naming the failing PRINCIPAL only when that principal is the caller's to name.
+    """Build the 400 the bind door owes a caller whose execution key cannot carry a fire at all.
 
+    Names the failing PRINCIPAL only when that principal is the caller's to name.
     The refusal may be about the key or its OWNER. A caller that cleared pass-role by
     binding its OWN identity is not that owner and would otherwise read the owner's id out
     of a 400 on a door reachable with ``hooks`` write alone; it is told the defect and
-    which side carries it, with the id logged server-side."""
+    which side carries it, with the id logged server-side.
+    """
     if caller.is_admin or exc.principal in (execution_key, caller.caller_id):
         subject = (
             f"execution key {execution_key!r}"
@@ -178,10 +184,10 @@ def _unfireable_key_refusal(caller: Caller, execution_key: str, exc: ExecutionKe
 
 
 async def assert_execution_key_bindable(caller: Caller, execution_key: str) -> str:
-    """Assert that ``caller`` may bind ``execution_key`` as the identity a background record
-    fires as, and return the key's server-derived per-mint fingerprint for the record to
-    store; gate off returns :data:`GATE_OFF_EXECUTION_FINGERPRINT`.
+    """Assert ``caller`` may bind ``execution_key`` and return the key's per-mint fingerprint to store.
 
+    The identity a background record fires as; the fingerprint is server-derived, and gate off
+    returns :data:`GATE_OFF_EXECUTION_FINGERPRINT`.
     A non-admin's refusal is a UNIFORM 403 across absent-key and not-yours, so this door is
     no probe for api-key ids; every check after the pass-role test runs only for a caller
     that cleared it.
@@ -210,7 +216,7 @@ async def assert_execution_key_bindable(caller: Caller, execution_key: str) -> s
             execution_key,
             KEY_FINGERPRINT_CLAIM,
         )
-        raise OperationFailed("access_control: internal key-fingerprint resolution failure")
+        raise OperationFailedError("access_control: internal key-fingerprint resolution failure")
 
     try:
         await assert_key_carries_authority(enforcer, execution_key, bound_fingerprint=fingerprint)

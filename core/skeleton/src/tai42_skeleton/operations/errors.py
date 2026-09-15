@@ -34,6 +34,7 @@ class OperationError(Exception):
     __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UPSTREAM_ERROR
 
     def __init__(self, message: str, *, extra: dict[str, object] | None = None) -> None:
+        """Build the error with ``message`` and optional ``extra`` fields merged into the error body."""
         super().__init__(message)
         self.message = message
         # Additional fields merged into the ``{"error": …}`` body the adapter emits
@@ -42,7 +43,7 @@ class OperationError(Exception):
         self.extra: dict[str, object] = extra or {}
 
 
-class ValidationRejected(OperationError):
+class ValidationRejectedError(OperationError):
     """The request was well-formed but failed the operation's own validation."""
 
     status: ClassVar[int] = 422
@@ -78,7 +79,7 @@ class PayloadTooLargeError(OperationError):
     __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.BAD_INPUT
 
 
-class PermissionDenied(OperationError):
+class PermissionDeniedError(OperationError):
     """The caller is authenticated but not authorized for this operation.
 
     The single denial type both edges share: the route adapter is never the
@@ -93,12 +94,13 @@ class PermissionDenied(OperationError):
 
 
 class ForbiddenError(OperationError):
-    """The authenticated caller is not authorized for this operation by the
-    operation's OWN rules — an ownership/administration gate the operation enforces
-    on itself (e.g. a non-admin acting on a key it does not own, or a non-admin
-    reaching an admin-only policy-administration door).
+    """The authenticated caller is not authorized for this operation by the operation's OWN rules.
 
-    Distinct from :class:`PermissionDenied`, which is the shared route-edge/tool-edge
+    An ownership/administration gate the operation enforces on itself (e.g. a
+    non-admin acting on a key it does not own, or a non-admin reaching an
+    admin-only policy-administration door).
+
+    Distinct from :class:`PermissionDeniedError`, which is the shared route-edge/tool-edge
     denial the access-control middleware and ``AuthzMiddleware`` raise: this ``403``
     is an in-operation business-authorization decision the operation itself makes and
     the adapter maps to a ``403`` response.
@@ -168,7 +170,7 @@ class UnavailableError(OperationError):
     __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UNAVAILABLE
 
 
-class OperationFailed(OperationError):
+class OperationFailedError(OperationError):
     """The operation was reached but failed while executing."""
 
     status: ClassVar[int] = 500
@@ -183,10 +185,10 @@ __all__ = [
     "NotFoundError",
     "NotSupportedError",
     "OperationError",
-    "OperationFailed",
+    "OperationFailedError",
     "PayloadTooLargeError",
-    "PermissionDenied",
+    "PermissionDeniedError",
     "UnavailableError",
     "UpstreamError",
-    "ValidationRejected",
+    "ValidationRejectedError",
 ]

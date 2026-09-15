@@ -37,8 +37,10 @@ _PROBE_KEY = "ac:__identity_probe__"
 
 
 class DuplicateIdentityError(ValueError):
-    """``provision`` was called for a ``user_id`` that already has an identity
-    record. A ``ValueError`` so the duplicate handling catches it uniformly."""
+    """``provision`` was called for a ``user_id`` that already has an identity record.
+
+    A ``ValueError`` so the duplicate handling catches it uniformly.
+    """
 
 
 def _generate_api_key() -> str:
@@ -49,6 +51,7 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
     """Validate and provision api keys against plain Redis hashes."""
 
     def __init__(self, settings: IdentityProviderSettings) -> None:
+        """Store the provider ``settings``."""
         self.settings = settings
 
     def _identity_key(self, hashed: str) -> str:
@@ -62,6 +65,10 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
         return cast("RedisConnectionSettings", self.settings.redis)
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
+        """Resolve ``token`` to an :class:`AuthIdentity`, or ``None`` when no identity is stored.
+
+        A backend error raises rather than reading as an invalid credential.
+        """
         hashed = hash_api_key(token)
         key = self._identity_key(hashed)
 
@@ -70,8 +77,8 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
         try:
             async with client_ctx(RedisClient, self._redis_settings()) as r:
                 data = await hgetall(r, key)
-        except Exception as e:
-            logger.error(f"Error validating redis token: {e}")
+        except Exception:
+            logger.exception("Error validating redis token")
             raise
 
         if not data or "user_id" not in data:
@@ -83,6 +90,10 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
         )
 
     async def provision(self, user_id: str, description: str, *, owner_user_id: str | None = None) -> str:
+        """Mint a new api key for ``user_id`` (optionally owned by ``owner_user_id``) and return the raw key.
+
+        A ``user_id`` that already has an identity raises :class:`DuplicateIdentityError`.
+        """
         raw_key = _generate_api_key()
         hashed = hash_api_key(raw_key)
         reverse_key = self._reverse_key(user_id)
@@ -121,6 +132,7 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
         return raw_key
 
     async def revoke(self, user_id: str) -> bool:
+        """Delete ``user_id``'s identity record and reverse lookup; return whether one existed."""
         reverse_key = self._reverse_key(user_id)
         async with client_ctx(RedisClient, self._redis_settings()) as r:
             # The reverse lookup holds the plain hash string (pin the loose read to str).
@@ -131,6 +143,7 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
         return True
 
     async def update_description(self, user_id: str, description: str) -> bool:
+        """Update ``user_id``'s stored description; return whether the identity existed."""
         async with client_ctx(RedisClient, self._redis_settings()) as r:
             hashed = cast("str | None", await r.get(self._reverse_key(user_id)))
             if not hashed:
@@ -145,6 +158,7 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
         return True
 
     async def list_identities(self) -> list[tuple[str, str]]:
+        """Every stored identity as ``(user_id, description)`` pairs."""
         identities: list[tuple[str, str]] = []
         async with client_ctx(RedisClient, self._redis_settings()) as r:
             async for key in scan_iter(r, f"{self.settings.key_prefix}*"):
@@ -158,12 +172,14 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
         return identities
 
     async def healthcheck(self) -> None:
+        """Probe the Redis record store with token validation's read shape; any error propagates."""
         # Probe the record store with token validation's exact read shape (one
         # ``HGETALL``); any Redis error propagates so a broken store fails startup.
         async with client_ctx(RedisClient, self._redis_settings()) as r:
             await hgetall(r, _PROBE_KEY)
 
     def readiness_targets(self) -> tuple[ReadinessTarget]:
+        """The provider's Redis record store as a readiness target under the ``access_control`` label."""
         # The provider's own Redis record store, pinged generically by core under the
         # "access_control" label.
         return (ReadinessTarget("access_control", RedisClient, self._redis_settings()),)

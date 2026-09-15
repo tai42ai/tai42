@@ -1,5 +1,4 @@
-"""The shared base for the Langfuse query objects: the client-manager handle,
-request options, and off-loop client access."""
+"""The shared base for the Langfuse query objects: handle, request options, and off-loop client access."""
 
 from __future__ import annotations
 

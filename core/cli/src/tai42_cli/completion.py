@@ -21,6 +21,8 @@ _COMPLETE_VAR = "_TAI_COMPLETE"
 
 
 class Shell(StrEnum):
+    """Shells the CLI can emit a completion script for."""
+
     bash = "bash"
     zsh = "zsh"
     fish = "fish"

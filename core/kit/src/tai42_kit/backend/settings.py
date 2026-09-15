@@ -8,10 +8,10 @@ from tai42_kit.settings import TaiBaseSettings
 
 
 class BackendDispatchSettings(TaiBaseSettings):
-    """The three fields tool dispatch needs both sides to name identically: the
-    env key the resolved manifest is exported under, the synchronous dispatch
-    result timeout, and the kwarg name carrying the target tool name into a
-    queued job.
+    """The three fields tool dispatch needs both sides to name identically.
+
+    They are the env key the resolved manifest is exported under, the synchronous dispatch
+    result timeout, and the kwarg name carrying the target tool name into a queued job.
 
     Mixed into each side's own env group rather than shared as one group, so the
     NAMES, DEFAULTS and RELOAD CLASSES are declared once while each side keeps

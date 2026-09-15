@@ -47,19 +47,23 @@ app = typer.Typer(
 
 
 def _target() -> str:
-    """A credential-free description of the skeleton component's bound database for
-    messages: the registry name plus host/port/db."""
+    """A credential-free description of the skeleton component's bound database for messages.
+
+    The registry name plus host/port/db.
+    """
     name = component_binding(SKELETON_COMPONENT)
     settings = component_migrator_settings(SKELETON_COMPONENT)
     return f"database {name!r} at {settings.pg_host}:{settings.pg_port}/{settings.pg_db}"
 
 
 async def _apply() -> list[AppliedMigration]:
-    """Apply the two skeleton-owned chains (the skeleton baseline and the ``states``
-    record store) FIRST, then discover and apply the plugin chains. Plugin discovery
-    reads skeleton-owned tables (the marketplace install store), so a fresh database
-    must receive the skeleton baseline before the plugin chains can even be
-    enumerated."""
+    """Apply the two skeleton-owned chains first, then discover and apply the plugin chains.
+
+    Applies the skeleton baseline and the ``states`` record store FIRST. Plugin
+    discovery reads skeleton-owned tables (the marketplace install store), so a fresh
+    database must receive the skeleton baseline before the plugin chains can even be
+    enumerated.
+    """
     applied = await apply_migrations([skeleton_entry(), states_entry()])
     plugin_entries = await installed_plugin_entries()
     if plugin_entries:
@@ -94,11 +98,12 @@ def _emit_status(statuses: list[ComponentStatus], *, json_output: bool) -> None:
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
-    """Run a migration coroutine, mapping the kit's connection and chain faults to
-    clean CLI failures. A connection error names the credential-free target; the
-    registry's not-configured and half-set-admin-identity errors and the
-    chain-integrity errors surface their own actionable messages; all exit non-zero
-    without a traceback."""
+    """Run a migration coroutine, mapping the kit's connection and chain faults to clean CLI failures.
+
+    A connection error names the credential-free target; the registry's not-configured
+    and half-set-admin-identity errors and the chain-integrity errors surface their own
+    actionable messages; all exit non-zero without a traceback.
+    """
     import psycopg
 
     try:

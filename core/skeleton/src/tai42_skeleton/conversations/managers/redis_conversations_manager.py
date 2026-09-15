@@ -1,3 +1,5 @@
+"""The Redis-backed conversation-route store, with atomic put/delete Lua scripts."""
+
 import logging
 from typing import Any
 
@@ -7,7 +9,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.conversations.managers.base_conversations_manager import (
     BaseConversationsManager,
-    DoorFlipRefused,
+    DoorFlipRefusedError,
 )
 from tai42_skeleton.utils.redis_typing import awaited, eval_script
 
@@ -57,7 +59,14 @@ def _as_str(value: Any) -> str:
 
 
 class RedisConversationsManager(BaseConversationsManager):
+    """A Redis-backed conversation-route store over :class:`BaseConversationsManager`."""
+
     async def put_route(self, route: ConversationRoute) -> bool:
+        """Store ``route`` atomically; return whether it was newly created (vs a replace).
+
+        Raises :class:`DoorFlipRefusedError` when the write would flip the door of a route
+        that still holds threads.
+        """
         async with client_ctx(RedisClient, self.settings.redis) as r:
             existed = await eval_script(
                 r,
@@ -73,11 +82,12 @@ class RedisConversationsManager(BaseConversationsManager):
         # A list reply is the refusal: ``{held, stored_door}``, and nothing was written.
         if isinstance(existed, list):
             held, stored_door = existed
-            raise DoorFlipRefused(route.route_name, _as_str(stored_door), route.door, int(held))
+            raise DoorFlipRefusedError(route.route_name, _as_str(stored_door), route.door, int(held))
         # ``existed`` truthy ⇒ a replace; falsy ⇒ a fresh create.
         return not bool(existed)
 
     async def get_route(self, route_name: str) -> ConversationRoute | None:
+        """The route named ``route_name``, or ``None`` when none is stored."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             raw = await awaited(r.get(self.settings.route_key(route_name)))
         if raw is None:
@@ -85,6 +95,7 @@ class RedisConversationsManager(BaseConversationsManager):
         return ConversationRoute.model_validate_json(_as_str(raw))
 
     async def delete_route(self, route_name: str) -> bool:
+        """Delete the route named ``route_name`` atomically; return whether a row was removed."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             removed = await eval_script(
                 r,
@@ -97,6 +108,7 @@ class RedisConversationsManager(BaseConversationsManager):
         return bool(removed)
 
     async def list_routes(self) -> dict[str, ConversationRoute]:
+        """Every stored route, keyed by route name."""
         routes: dict[str, ConversationRoute] = {}
         async with client_ctx(RedisClient, self.settings.redis) as r:
             names = await awaited(r.smembers(self.settings.route_names_key))

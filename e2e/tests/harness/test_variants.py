@@ -11,7 +11,7 @@ import pytest
 
 from tai42_e2e import StackResources
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.topology import InfraUnavailable
+from tai42_e2e.topology import InfraUnavailableError
 from tai42_e2e.variants import (
     BACKENDS,
     IDENTITIES,
@@ -67,7 +67,7 @@ def test_default_selection_resolves_to_the_arq_redis_local_triple() -> None:
 def test_resolve_variants_unknown_name_raises_naming_valid_values(
     settings: HarnessSettings, env_var: str, valid_name: str
 ) -> None:
-    with pytest.raises(InfraUnavailable) as exc:
+    with pytest.raises(InfraUnavailableError) as exc:
         resolve_variants(settings)
     message = str(exc.value)
     assert env_var in message

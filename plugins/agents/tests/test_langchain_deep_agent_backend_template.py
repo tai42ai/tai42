@@ -12,7 +12,7 @@ from deepagents.backends import CompositeBackend, StateBackend
 from tai42_contract.app import tai42_app
 from tests._langchain_deep_agent_backend_support import (
     _FakeResourceManager,
-    _TemplateMissing,
+    _TemplateMissingError,
 )
 
 from tai42_agents.langchain_deep_agent.backend import (
@@ -195,7 +195,7 @@ def test_template_agrep_propagates_vanished_listed_key(fake_tm: _FakeResourceMan
     async def go() -> None:
         fake_tm.phantom_keys.add("skills/gone/SKILL.md")
         skills = build_backend().routes[SKILLS_ROOT]
-        with pytest.raises(_TemplateMissing):
+        with pytest.raises(_TemplateMissingError):
             await skills.agrep("anything")
 
     asyncio.run(go())
@@ -209,11 +209,11 @@ def test_vanished_listed_key_propagates_across_read_grep_download(fake_tm: _Fake
     async def go() -> None:
         fake_tm.phantom_keys.add("skills/gone/SKILL.md")
         skills = build_backend().routes[SKILLS_ROOT]
-        with pytest.raises(_TemplateMissing):
+        with pytest.raises(_TemplateMissingError):
             await skills.aread("/gone/SKILL.md")
-        with pytest.raises(_TemplateMissing):
+        with pytest.raises(_TemplateMissingError):
             await skills.agrep("anything")
-        with pytest.raises(_TemplateMissing):
+        with pytest.raises(_TemplateMissingError):
             await skills.adownload_files(["/gone/SKILL.md"])
 
     asyncio.run(go())

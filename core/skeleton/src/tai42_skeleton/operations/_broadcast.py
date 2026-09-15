@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, UnknownFleetTargetsError
 from tai42_skeleton.app.recycle import SELF_DEFERRED
-from tai42_skeleton.operations.errors import BadRequestError, OperationFailed
+from tai42_skeleton.operations.errors import BadRequestError, OperationFailedError
 
 if TYPE_CHECKING:
     from tai42_skeleton.config.service import ApplyResult, ProfileApplyOutcome
@@ -51,22 +51,26 @@ logger = logging.getLogger(__name__)
 
 @contextmanager
 def translate_orphan_env_write() -> Iterator[None]:
-    """Map a combined env+manifest :class:`~tai42_skeleton.config.service.OrphanEnvWriteError`
-    to a typed :class:`~tai42_skeleton.operations.errors.OperationFailed` (500).
+    """Map a combined env+manifest orphan-env-write failure to a typed 500 operation error.
 
-    The one shared translation every door that crosses the combined env+manifest seam wraps
-    around its call: an oauth connector leaving the manifest (installer uninstall/update, a
-    hand ``manifest replace`` / backup restore), ``set_mcp_secret_env``, or any marks-write
-    that lands while the manifest persist exhausts its retries. The error is a partial
-    failure — the env write STANDS as an inert, re-runnable orphan — so it is LOUD (a 500),
-    never folded into a client-input 400. Imported lazily to avoid a config↔operations import
-    cycle (``config.service`` imports this module)."""
+    Maps :class:`~tai42_skeleton.config.service.OrphanEnvWriteError` to
+    :class:`~tai42_skeleton.operations.errors.OperationFailedError` (500).
+
+    The one shared translation every door that crosses the combined env+manifest seam
+    wraps around its call: an oauth connector leaving the manifest (installer
+    uninstall/update, a hand ``manifest replace`` / backup restore),
+    ``set_mcp_secret_env``, or any marks-write that lands while the manifest persist
+    exhausts its retries. The error is a partial failure — the env write STANDS as an
+    inert, re-runnable orphan — so it is LOUD (a 500), never folded into a client-input
+    400. Imported lazily to avoid a config↔operations import cycle (``config.service``
+    imports this module).
+    """
     from tai42_skeleton.config.service import OrphanEnvWriteError
 
     try:
         yield
     except OrphanEnvWriteError as exc:
-        raise OperationFailed(str(exc)) from exc
+        raise OperationFailedError(str(exc)) from exc
 
 
 def fleet_fanout(fleet: FleetResult) -> dict[str, Any]:
@@ -86,9 +90,11 @@ def fleet_fanout(fleet: FleetResult) -> dict[str, Any]:
 
 
 def apply_response(result: ApplyResult) -> dict[str, Any]:
-    """The standard mutation-op response: the local reload result merged with the
-    fan-out summary — the one shape every ConfigService writer returns from an
-    :class:`~tai42_skeleton.config.service.ApplyResult`."""
+    """The standard mutation-op response: the local reload result merged with the fan-out summary.
+
+    The one shape every ConfigService writer returns from an
+    :class:`~tai42_skeleton.config.service.ApplyResult`.
+    """
     return {**result.local, "fanout": result.fanout}
 
 
@@ -105,7 +111,8 @@ def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
     successor and never a post-recycle generation. ``refused`` is ``[]`` on success BY
     CONSTRUCTION — any refusal aborts the pipeline upfront, before a response is ever
     built. ``fanout`` is the reload broadcast's fleet-fanout summary. NAMES-ONLY: the
-    report enumerates key names + worker identities, never env VALUES."""
+    report enumerates key names + worker identities, never env VALUES.
+    """
     entries: list[dict[str, Any]] = []
     fresh: list[dict[str, Any]] = []
     recycle = outcome.recycle
@@ -137,11 +144,13 @@ def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
 
 
 class FleetBroadcastError(RuntimeError):
-    """Raised after a mutation has PERSISTED when the post-persist propagation does
-    not fully complete — the local reload raised, the fleet broadcast raised, or both.
-    The fleet report is attached (``reachable=False`` when the broadcast itself
-    raised) so the caller can surface it and knows the change already landed on disk;
-    the specific failure is the ``cause`` and the report's ``error``."""
+    """Raised after a mutation has PERSISTED when the post-persist propagation does not fully complete.
+
+    The local reload raised, the fleet broadcast raised, or both. The fleet report is
+    attached (``reachable=False`` when the broadcast itself raised) so the caller can
+    surface it and knows the change already landed on disk; the specific failure is the
+    ``cause`` and the report's ``error``.
+    """
 
     def __init__(self, op_name: str, report: FleetResult, cause: BaseException) -> None:
         super().__init__(f"{op_name}: change persisted but fleet propagation failed — {cause}")
@@ -149,15 +158,17 @@ class FleetBroadcastError(RuntimeError):
 
 
 def log_non_convergence(report: FleetResult) -> None:
-    """Loudly ERROR-log a reachable-but-non-converged fleet report: an unconfirmed
-    worker is a visible failure, never a silently stale sibling. A bus-unreachable
-    report is already logged inside :meth:`WorkerBus.publish`, and a fully converged
-    report logs nothing — so this is a no-op unless the bus was reached yet some
-    worker did not confirm ``applied``. Shared by every publisher (``broadcast`` and
-    the store-backed helpers that publish directly) so the message stays identical.
+    """Loudly ERROR-log a reachable-but-non-converged fleet report.
+
+    An unconfirmed worker is a visible failure, never a silently stale sibling. A
+    bus-unreachable report is already logged inside :meth:`WorkerBus.publish`, and a
+    fully converged report logs nothing — so this is a no-op unless the bus was reached
+    yet some worker did not confirm ``applied``. Shared by every publisher (``broadcast``
+    and the store-backed helpers that publish directly) so the message stays identical.
 
     Each unconfirmed entry carries the worker name, its outcome, and the verdict detail
-    — the detail names the superseding generation for a worker replaced mid-apply."""
+    — the detail names the superseding generation for a worker replaced mid-apply.
+    """
     if not (report.reachable and not report.ok):
         return
     unconfirmed = [(r.name, r.outcome.value, r.detail) for r in report.results if r.outcome != OpOutcome.applied]
@@ -165,16 +176,19 @@ def log_non_convergence(report: FleetResult) -> None:
 
 
 class CensusPublisher(Protocol):
-    """The op-start census seam :func:`snapshot_membership` reads — the one method of
-    :class:`~tai42_skeleton.app.bus.WorkerBus` it needs, so a publisher typed against a
-    narrower bus protocol satisfies it structurally."""
+    """The op-start census seam :func:`snapshot_membership` reads.
+
+    The one method of :class:`~tai42_skeleton.app.bus.WorkerBus` it needs, so a
+    publisher typed against a narrower bus protocol satisfies it structurally.
+    """
 
     async def expected_at_start(self) -> dict[str, int]: ...
 
 
 async def snapshot_membership(bus: CensusPublisher, op_name: str) -> dict[str, int] | None:
-    """Pin the expected-confirmation membership to op START, before the caller's local
-    side effect can age it out — the shared discipline for every UNTARGETED publisher.
+    """Pin the expected-confirmation membership to op START, before the local apply can age it out.
+
+    The shared discipline for every UNTARGETED publisher.
 
     Whole-fleet only, by construction: an untargeted op's expected set IS the census,
     and :meth:`~tai42_skeleton.app.bus.WorkerBus.publish` takes that census after the
@@ -193,7 +207,8 @@ async def snapshot_membership(bus: CensusPublisher, op_name: str) -> dict[str, i
     compensation-rolled-back upstream — the config-service reload doors and the
     store-backed preset fan-outs — takes it at its OWN pre-apply point and passes it
     in. Nothing enforces that from here; a new untargeted publisher that skips it
-    silently reports against its post-apply membership."""
+    silently reports against its post-apply membership.
+    """
     try:
         return await bus.expected_at_start()
     except Exception:
@@ -214,8 +229,7 @@ async def broadcast(
     publish_on_local_failure: bool = False,
     pre_mutation_errors: tuple[type[BaseException], ...] = (),
 ) -> dict[str, Any]:
-    """Validate targets, pin the expected membership, apply locally per the
-    self-targeting rule, then broadcast.
+    """Validate targets, pin the expected membership, apply locally per the self-targeting rule, then broadcast.
 
     ``op`` is the wire op dict (``{"op": <name>, ...}``); ``targets`` is ``None`` for
     the whole fleet or the explicit worker list; ``apply`` runs this worker's own

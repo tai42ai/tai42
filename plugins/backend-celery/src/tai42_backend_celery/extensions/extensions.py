@@ -1,5 +1,4 @@
-"""The three BACKEND tool extensions: ``sync_task``, ``schedule_task``,
-``async_task``.
+"""The three BACKEND tool extensions: ``sync_task``, ``schedule_task``, ``async_task``.
 
 Each factory receives ``(func, name, description)`` and returns a new-named branch
 tool bound alongside the original: ``<tool>_sync_task`` dispatches and blocks for
@@ -39,8 +38,10 @@ logger = logging.getLogger(__name__)
 
 
 def _apply_task_opts(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Split the Celery task options out of the tool kwargs; a callback schema
-    becomes a ``link`` signature running ``callback_task`` on the result."""
+    """Split the Celery task options out of the tool kwargs.
+
+    A callback schema becomes a ``link`` signature running ``callback_task`` on the result.
+    """
     task_kwargs = {k: kwargs.pop(k) for k in CELERY_TASK_OPTS if k in kwargs}
     apply_async_opts = {k: v for k, v in task_kwargs.items() if v is not None}
     callback: CallbackSchema | None = apply_async_opts.pop("callback_kwargs", None)

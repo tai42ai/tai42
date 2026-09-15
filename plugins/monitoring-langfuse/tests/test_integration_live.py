@@ -59,9 +59,9 @@ def backend() -> LangfuseMonitoring:
 def test_writer_emits_and_flushes(backend):
     writer = backend.writer
     with writer.trace_attributes(name="contract-smoke", tags=[_SMOKE_TAG]):
-        with writer.start_span(name="smoke_node", kind=SpanKind.TOOL, input={"ping": 1}) as span:
+        with writer.start_span(name="smoke_node", kind=SpanKind.TOOL, input_={"ping": 1}) as span:
             span.update(output={"pong": 2}, usage_details={"input": 1, "output": 1})
-        writer.create_event(name="smoke_event", input={"e": 1}, output={"e": 2})
+        writer.create_event(name="smoke_event", input_={"e": 1}, output={"e": 2})
         tid = writer.current_trace_id()
     writer.flush()
     assert tid is None or isinstance(tid, str)
@@ -131,7 +131,7 @@ def _trace_filters():
 async def test_list_traces_filter_columns_execute(backend, key):
     now = datetime.now(UTC)
     result = await backend.reader.list_traces(
-        from_timestamp=now - timedelta(days=7), limit=3, filter=_trace_filters()[key]
+        from_timestamp=now - timedelta(days=7), limit=3, filter_=_trace_filters()[key]
     )
     assert isinstance(result, list)
 
@@ -168,7 +168,7 @@ async def test_list_traces_metric_sort_tags_filter_round_trip(backend):
         order_by=OrderBy(field="total_cost", direction="desc"),
         from_timestamp=now - timedelta(days=14),
         limit=5,
-        filter=MonitoringFilter(tags=[_SMOKE_TAG]),
+        filter_=MonitoringFilter(tags=[_SMOKE_TAG]),
     )
     assert isinstance(result, list)
 
@@ -184,7 +184,7 @@ def _span_filters():
 async def test_list_spans_filter_columns_execute(backend, key):
     now = datetime.now(UTC)
     items = await backend.reader.list_spans_in_window(
-        now - timedelta(days=7), now + timedelta(minutes=1), filter=_span_filters()[key]
+        now - timedelta(days=7), now + timedelta(minutes=1), filter_=_span_filters()[key]
     )
     assert isinstance(items, list)
 
@@ -194,7 +194,7 @@ async def test_list_spans_session_resolution_executes(backend):
     items = await backend.reader.list_spans_in_window(
         now - timedelta(days=7),
         now + timedelta(minutes=1),
-        filter=MonitoringFilter(session_id="no-such-session"),
+        filter_=MonitoringFilter(session_id="no-such-session"),
     )
     assert isinstance(items, list)
 

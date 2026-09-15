@@ -1,5 +1,7 @@
-"""Apply / check: rewrite (or verify) every member pyproject's first-party ranges
-and every governed descriptor's ``contract:`` pin against the derived formula."""
+"""Rewrite (or verify) every member's first-party ranges and each governed descriptor's ``contract:`` pin.
+
+Apply mode rewrites, check mode verifies, both against the derived formula.
+"""
 
 from __future__ import annotations
 
@@ -34,7 +36,8 @@ class SyncReport:
     ``preserved``, ``warnings`` and ``descriptor_untouched`` are informational
     only: a preserved pin is not a drift, a warning does not fail the gate, and a
     descriptor left untouched under an underivable-floor pin is not a rewrite — so
-    none of them feed ``dirty``."""
+    none of them feed ``dirty``.
+    """
 
     spec_changes: list[tuple[str, SpecChange]]  # (member_path, change)
     contract_changes: list[tuple[str, str, str]]  # (yaml_path, old, new)
@@ -48,10 +51,11 @@ class SyncReport:
 
 
 def _assert_no_stray_pin_tables(root: Path, members: list[Path]) -> None:
-    """A ``[tool.range-sync]`` table is only honoured on a workspace MEMBER
-    pyproject. The same table on any non-member pyproject the script reads (the
-    root) would silently do nothing — raise so it is never mistaken for an
-    active pin."""
+    """A ``[tool.range-sync]`` table is only honoured on a workspace MEMBER pyproject.
+
+    The same table on any non-member pyproject the script reads (the root) would silently do nothing —
+    raise so it is never mistaken for an active pin.
+    """
     member_dirs = {m.resolve() for m in members}
     stray: list[str] = []
     root_py = root / "pyproject.toml"
@@ -74,8 +78,10 @@ def _empty_report() -> SyncReport:
 def _collect_pyproject_analysis(
     members: list[Path], first_party: dict[str, str], root: Path
 ) -> list[tuple[str, Path, str, PyprojectAnalysis]]:
-    """Analyse every member pyproject once — the shared read+analyse apply and check
-    both drive — returning ``(member_path, py_path, text, analysis)`` per member."""
+    """Analyse every member pyproject once — the shared read+analyse apply and check both drive.
+
+    Returns ``(member_path, py_path, text, analysis)`` per member.
+    """
     analyses: list[tuple[str, Path, str, PyprojectAnalysis]] = []
     for member in members:
         py_path = member / "pyproject.toml"
@@ -94,11 +100,12 @@ def _resolve_descriptor_target(
     contract_range: str,
     report: SyncReport,
 ) -> str | None:
-    """The contract range a plugin descriptor must advertise — the shared decision
-    apply and check both make. A member whose ``tai42-contract`` pin was preserved
-    follows the range derived from that pin; when the pin has no derivable floor the
-    descriptor is left untouched (recorded, and ``None`` returned so the caller skips
-    it). An unpinned member follows the global derived range."""
+    """The contract range a plugin descriptor must advertise — the shared decision apply and check both make.
+
+    A member whose ``tai42-contract`` pin was preserved follows the range derived from that pin; when the
+    pin has no derivable floor the descriptor is left untouched (recorded, and ``None`` returned so the
+    caller skips it). An unpinned member follows the global derived range.
+    """
     if member_path in preserved_contract:
         target = preserved_contract[member_path]
         if target is None:
@@ -111,8 +118,7 @@ def _resolve_descriptor_target(
 def _apply_pyproject_writes(
     analyses: list[tuple[str, Path, str, PyprojectAnalysis]], report: SyncReport
 ) -> list[tuple[Path, str]]:
-    """Record each member's preserved/warning/change rows and queue the rewritten
-    pyproject text for every member with changes."""
+    """Record each member's preserved/warning/change rows and queue rewritten pyproject text where changed."""
     writes: list[tuple[Path, str]] = []
     for member_path, py_path, text, analysis in analyses:
         for preserved in analysis.preserved:
@@ -134,9 +140,11 @@ def _apply_descriptor_writes(
     contract_range: str,
     report: SyncReport,
 ) -> list[tuple[Path, str]]:
-    """Queue the rewritten text for every governed descriptor whose ``contract:`` pin
-    changes: the plugin descriptors (honouring a preserved per-member range) and the
-    descriptor-only + scaffold descriptors (always the global range)."""
+    """Queue the rewritten text for every governed descriptor whose ``contract:`` pin changes.
+
+    The plugin descriptors (honouring a preserved per-member range) and the descriptor-only + scaffold
+    descriptors (always the global range).
+    """
     writes: list[tuple[Path, str]] = []
     for member, yml in plugin_descriptor_files(members, root):
         member_path = member.relative_to(root).as_posix()
@@ -162,9 +170,11 @@ def _apply_descriptor_writes(
 
 
 def apply(root: Path) -> SyncReport:
-    """Rewrite every member pyproject + every governed descriptor in place. Every
-    surface is derived and validated BEFORE any file is written, so a refused
-    surface leaves the tree exactly as it was. Idempotent."""
+    """Rewrite every member pyproject + every governed descriptor in place.
+
+    Every surface is derived and validated BEFORE any file is written, so a refused surface leaves the tree
+    exactly as it was. Idempotent.
+    """
     members = discover_members(root)
     _assert_no_stray_pin_tables(root, members)
     first_party = first_party_versions(members)
@@ -184,9 +194,10 @@ def apply(root: Path) -> SyncReport:
 
 
 def _self_assert(root: Path) -> None:
-    """After applying, re-derive and confirm every rewritten specifier and
-    contract pin now equals the formula output. Raises on any mismatch, naming
-    every surface still out of sync."""
+    """After applying, re-derive and confirm every rewritten specifier and contract pin equals the formula.
+
+    Raises on any mismatch, naming every surface still out of sync.
+    """
     drift = check(root)
     if drift.dirty:
         raise RuntimeError(f"self-assert failed after apply:\n{_format_drift(drift)}")
@@ -199,8 +210,10 @@ def _check_descriptors(
     contract_range: str,
     report: SyncReport,
 ) -> None:
-    """Record every governed descriptor whose ``contract:`` pin is out of sync with
-    the range it must advertise (never modifying any file)."""
+    """Record every governed descriptor whose ``contract:`` pin is out of sync with its required range.
+
+    Never modifies any file.
+    """
     for member, yml in plugin_descriptor_files(members, root):
         member_path = member.relative_to(root).as_posix()
         yaml_path = yml.relative_to(root).as_posix()
@@ -218,8 +231,10 @@ def _check_descriptors(
 
 
 def check(root: Path) -> SyncReport:
-    """Verify every first-party specifier and contract pin already equals the
-    formula output. Returns a report of any drift (does not modify files)."""
+    """Verify every first-party specifier and contract pin already equals the formula output.
+
+    Returns a report of any drift (does not modify files).
+    """
     members = discover_members(root)
     _assert_no_stray_pin_tables(root, members)
     first_party = first_party_versions(members)

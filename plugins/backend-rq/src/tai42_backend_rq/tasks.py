@@ -40,9 +40,11 @@ RQ_SCHEDULE_OPTS: dict[str, Any] = {
 
 
 async def tool_execution(*args: Any, **kwargs: Any) -> Any:
-    """Run one app tool inside a worker job. The target tool name arrives under
-    the ``tool_name_arg`` kwarg (its absence raises). The job's pooled clients are
-    closed before its fresh event loop is torn down."""
+    """Run one app tool inside a worker job.
+
+    The target tool name arrives under the ``tool_name_arg`` kwarg (its absence raises). The
+    job's pooled clients are closed before its fresh event loop is torn down.
+    """
     tool_name = kwargs.pop(rq_settings().tool_name_arg)
     # A worker executes a dequeued task with no live caller holding a
     # connection, so the turn budget does not apply, and no HTTP request bound

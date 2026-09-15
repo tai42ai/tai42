@@ -14,6 +14,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class RunIndexSettings(TaiBaseSettings):
+    """``TAI_RUNS_INDEX_*`` feature knobs: the retention window and the list page-size cap."""
+
     model_config = SettingsConfigDict(env_prefix="TAI_RUNS_INDEX_")
 
     # Opt-in retention window in DAYS. ``None`` (the default) keeps every run row
@@ -33,4 +35,5 @@ class RunIndexSettings(TaiBaseSettings):
 
 @settings_cache
 def run_index_settings() -> RunIndexSettings:
+    """Return the process-cached :class:`RunIndexSettings`."""
     return RunIndexSettings()

@@ -3,21 +3,22 @@
  * with a retry when it fails, an empty state when there are no users, else the
  * table of accounts with a status badge and per-row actions.
  */
-import type { ReactElement } from 'react';
 import {
   Badge,
   EmptyState,
   ErrorState,
   Spinner,
+  Table,
   TBody,
   TD,
   TH,
   THead,
   TR,
-  Table,
 } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
+
 import type { AdminUser } from '@/api';
-import { RowActions, type RowAction } from '@/row-actions';
+import { type RowAction, RowActions } from '@/row-actions';
 
 /** A user's live state, collapsed to one badge. A pending invite (no password set
  * yet) takes precedence over the enabled/disabled distinction. */

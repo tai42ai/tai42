@@ -49,11 +49,14 @@ class _DeclarationStore:
         retention_days: int | None,
         effective_schema: dict[str, Any] | None = None,
     ) -> None:
-        """The bare declaration upsert — no guard. Service-level writes go through
-        :meth:`upsert_declaration_guarded`; this raw op backs tests only.
+        """The bare declaration upsert — no guard.
+
+        Service-level writes go through :meth:`upsert_declaration_guarded`; this raw op backs
+        tests only.
 
         ``effective_schema`` defaults to ``schema`` (an unattached state's effective
-        schema IS its base), so a caller that never touches templates stays correct."""
+        schema IS its base), so a caller that never touches templates stays correct.
+        """
         effective = schema if effective_schema is None else effective_schema
         async with (
             _pool(_settings()) as pool,
@@ -97,7 +100,8 @@ class _DeclarationStore:
         ``FOR SHARE``, so no record can land mid-guard), reads the existing row and the
         per-kind record counts under that lock, then calls ``decide(existing_row |
         None, per_kind_counts)`` — awaited so the decision may resolve a by-id base schema under
-        the lock — which raises to refuse (aborting the txn) — and finally performs the upsert."""
+        the lock — which raises to refuse (aborting the txn) — and finally performs the upsert.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -141,10 +145,11 @@ class _DeclarationStore:
             )
 
     async def delete_declaration(self, name: str) -> bool:
-        """Delete a state with its records, attachments, aliases and write ledger in ONE txn
-        under the declaration lock. ``False`` when no declaration exists (nothing
-        deleted). The consumer-binding refusal is the service's (it consults the
-        registered consumer listers before calling this)."""
+        """Delete a state with its records, attachments, aliases and write ledger in ONE txn under the lock.
+
+        ``False`` when no declaration exists (nothing deleted). The consumer-binding refusal
+        is the service's (it consults the registered consumer listers before calling this).
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -172,9 +177,11 @@ class _DeclarationStore:
             return 0 if row is None else int(row["n"])
 
     async def count_records_for_target(self, target_kind: str, target_name: str) -> int:
-        """Records addressed under one conversation target ``(target_kind, target_name)``
-        across every state — the rename referee's evidence that renaming a ``tool`` target
-        would strand its subject records."""
+        """Records addressed under one conversation target ``(target_kind, target_name)`` across every state.
+
+        The rename referee's evidence that renaming a ``tool`` target would strand its
+        subject records.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -188,10 +195,12 @@ class _DeclarationStore:
             return 0 if row is None else int(row["n"])
 
     async def field_stats(self, state: str) -> tuple[int, dict[str, int], dict[str, int]]:
-        """``(record_count, per_field, per_kind)`` for the listing/stats dialog. A
-        top-level key is present in ``data`` only while it holds data, so a per-key count
-        IS the count of records holding that field; ``per_kind`` counts records by
-        subject kind."""
+        """``(record_count, per_field, per_kind)`` for the listing/stats dialog.
+
+        A top-level key is present in ``data`` only while it holds data, so a per-key count
+        IS the count of records holding that field; ``per_kind`` counts records by subject
+        kind.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,

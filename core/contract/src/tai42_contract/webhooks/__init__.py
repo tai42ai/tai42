@@ -18,8 +18,7 @@ from tai42_contract.errors import ErrorKind
 
 
 class WebhookVerificationError(Exception):
-    """Raised by a :class:`WebhookVerifier` when an inbound webhook fails
-    verification.
+    """Raised by a :class:`WebhookVerifier` when an inbound webhook fails verification.
 
     Every failure mode — a missing or malformed signature header, a wrong-length
     or mis-prefixed signature, a digest mismatch, a missing secret — raises this
@@ -32,15 +31,16 @@ class WebhookVerificationError(Exception):
 
 
 class ReplayDefense:
-    """A verifier's declaration of how the delivery it just authenticated is
-    defended against replay. ABSTRACT: :meth:`WebhookVerifier.replay_defense`
-    returns one of the two concrete forms below (:class:`SeenSetClaim` or
-    :class:`FreshnessWindow`); the base itself cannot be instantiated, so a
-    scheme cannot hand back a bare ReplayDefense that names no defense yet
-    slips past an ``isinstance(..., ReplayDefense)`` gate as if it declared one.
+    """A verifier's declaration of how the delivery it just authenticated is defended against replay.
+
+    ABSTRACT: :meth:`WebhookVerifier.replay_defense` returns one of the two concrete forms below
+    (:class:`SeenSetClaim` or :class:`FreshnessWindow`); the base itself cannot be instantiated,
+    so a scheme cannot hand back a bare ReplayDefense that names no defense yet slips past an
+    ``isinstance(..., ReplayDefense)`` gate as if it declared one.
     """
 
     def __init__(self) -> None:
+        """Refuse construction: the abstract base carries no defense and must not be instantiated."""
         # Abstract: only a concrete subclass carries a real defense declaration. A
         # bare instance would satisfy the ingress ``isinstance`` gate while defending
         # nothing, so it is refused at construction — the door then fails CLOSED.
@@ -49,20 +49,23 @@ class ReplayDefense:
 
 @dataclass(frozen=True)
 class SeenSetClaim(ReplayDefense):
-    """Defend replay by a seen-set: the ingress atomically claims ``key`` and
-    refuses a second delivery that presents the same ``key`` within
-    ``ttl_seconds``. ``key`` is a STABLE per-delivery id the sender supplies (a
+    """Defend replay by a seen-set claimed atomically on ``key`` within ``ttl_seconds``.
+
+    The ingress atomically claims ``key`` and refuses a second delivery that presents the same
+    ``key`` within ``ttl_seconds``. ``key`` is a STABLE per-delivery id the sender supplies (a
     delivery UUID, a nonce) — never a body hash, so two distinct deliveries that
     happen to carry identical bodies are not conflated. A scheme with no freshness
     of its own relies on the seen-set as its whole replay defense; a scheme that
     DOES sign a timestamp may still return this form to add within-window dedup on
     top of its own stale-rejection. Either way the seen-set is the replay defense
-    here and ``ttl_seconds`` is the bounded window over which it holds."""
+    here and ``ttl_seconds`` is the bounded window over which it holds.
+    """
 
     key: str
     ttl_seconds: int
 
     def __post_init__(self) -> None:
+        """Reject an empty ``key`` or a non-positive ``ttl_seconds`` so the claim always defends."""
         # A claim without a positive TTL would leak a permanent key (or, at zero,
         # defend nothing); an empty key would collapse every delivery to one slot.
         if not self.key:
@@ -77,10 +80,12 @@ class SeenSetClaim(ReplayDefense):
 
 @dataclass(frozen=True)
 class FreshnessWindow(ReplayDefense):
-    """Defend replay by the verifier's OWN signed freshness window: ``verify``
-    already rejected a delivery whose signed timestamp is outside the tolerance,
-    so a captured delivery replays only until it goes stale and the ingress needs
-    no seen-set. Returned by a scheme that signs a timestamp."""
+    """Defend replay by the verifier's OWN signed freshness window.
+
+    ``verify`` already rejected a delivery whose signed timestamp is outside the tolerance, so a
+    captured delivery replays only until it goes stale and the ingress needs no seen-set.
+    Returned by a scheme that signs a timestamp.
+    """
 
 
 @runtime_checkable
@@ -117,8 +122,9 @@ class WebhookVerifier(Protocol):
         ...
 
     def replay_defense(self, body: bytes, headers: Mapping[str, str], config: dict[str, Any]) -> ReplayDefense:
-        """Declare how the delivery :meth:`verify` just authenticated is defended
-        against replay — a per-scheme property, so no verifier can ship without one.
+        """Declare how the delivery :meth:`verify` just authenticated is defended against replay.
+
+        A per-scheme property, so no verifier can ship without one.
 
         Called by a fan-out door ONLY after :meth:`verify` returns success, over the
         SAME raw ``body``, ``headers`` and per-binding ``config``. Returns either a

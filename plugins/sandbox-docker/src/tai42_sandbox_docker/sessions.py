@@ -59,7 +59,8 @@ def engine_error(exc: DockerError) -> SandboxError:
     """Wrap an engine :class:`DockerError` as a typed :class:`SandboxError`.
 
     Carries the engine's own status and message (never any ``spec.env`` value — the
-    engine message describes the API failure, not the credential channel)."""
+    engine message describes the API failure, not the credential channel).
+    """
     return SandboxError(f"docker engine error [{exc.status}]: {exc.message}")
 
 
@@ -68,7 +69,8 @@ def resolve_workspace_path(path: str) -> str:
 
     A relative value resolves under :data:`WORKSPACE_PATH` with containment enforced
     (an escaping ``..`` is a loud :class:`SandboxError`); an absolute value is returned
-    unchanged as the caller's own responsibility (the contract path rule)."""
+    unchanged as the caller's own responsibility (the contract path rule).
+    """
     if path.startswith("/"):
         return path
     resolved = posixpath.normpath(posixpath.join(WORKSPACE_PATH, path))
@@ -78,8 +80,11 @@ def resolve_workspace_path(path: str) -> str:
 
 
 def merge_env(base: Mapping[str, SecretStr], overlay: Mapping[str, SecretStr] | None) -> dict[str, str]:
-    """Merge the session's base ``spec.env`` with a per-exec overlay, unwrapping each
-    secret ONLY here at the engine call. Per-exec keys override the base on collision."""
+    """Merge the session's base ``spec.env`` with a per-exec overlay, secrets unwrapped only here.
+
+    Each secret is unwrapped ONLY here at the engine call. Per-exec keys override the base
+    on collision.
+    """
     merged = {key: value.get_secret_value() for key, value in base.items()}
     if overlay:
         merged.update({key: value.get_secret_value() for key, value in overlay.items()})
@@ -97,9 +102,10 @@ async def read_exit_code(exec_obj: Any) -> int:
 
 
 async def half_close_stdin(stream: Any) -> None:
-    """Half-close the write (stdin) side of a live attach stream, leaving the read
-    side open so remaining output still drains — this is what delivers EOF to the
-    in-session process, so a ``cat``-style reader exits instead of hanging.
+    """Half-close the write (stdin) side of a live attach stream, leaving the read side open.
+
+    Remaining output still drains — this is what delivers EOF to the in-session process,
+    so a ``cat``-style reader exits instead of hanging.
 
     The aiodocker ``Stream`` exposes only a full ``close()`` (which tears down the
     read side too), so the half-close is issued on the underlying transport directly
@@ -112,7 +118,8 @@ async def half_close_stdin(stream: Any) -> None:
       half of the UNDERLYING socket: the daemon reads a FIN on the hijacked stream
       and closes the process's stdin, while the socket's read half stays open so the
       remaining stdout/stderr still drains. This is how the docker CLI half-closes an
-      interactive exec over a TLS control API."""
+      interactive exec over a TLS control API.
+    """
     resp = stream._resp
     if resp is None or resp.connection is None:
         return
@@ -139,6 +146,7 @@ class DockerSandboxExecHandle(SandboxExecHandle):
     """
 
     def __init__(self, *, container: Any, exec_obj: Any, stream: Any, timeout_seconds: float) -> None:
+        """Bind the handle to a started exec's ``stream`` on ``container`` with the host-side ``timeout_seconds``."""
         self._container = container
         self._exec = exec_obj
         self._stream = stream
@@ -150,6 +158,7 @@ class DockerSandboxExecHandle(SandboxExecHandle):
         self._stderr_len = 0
 
     async def write_stdin(self, data: bytes) -> None:
+        """Write ``data`` to the exec's stdin; raises once the exec has exited or its stream is closed."""
         if self._finished:
             raise SandboxError("cannot write stdin: the sandbox exec has exited")
         async with self._write_lock:
@@ -163,6 +172,7 @@ class DockerSandboxExecHandle(SandboxExecHandle):
                 raise engine_error(exc) from exc
 
     async def close_stdin(self) -> None:
+        """Half-close the exec's stdin so the in-session process reads EOF, leaving output draining."""
         if self._finished:
             return
         async with self._write_lock:
@@ -171,6 +181,7 @@ class DockerSandboxExecHandle(SandboxExecHandle):
 
     @property
     def output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
+        """The exec's demultiplexed output stream (stdout/stderr chunks then an exit), iterated once."""
         if self._output_iter is None:
             self._output_iter = self._iter_output()
         return self._output_iter
@@ -208,6 +219,7 @@ class DockerSandboxExecHandle(SandboxExecHandle):
         )
 
     async def kill(self) -> None:
+        """Kill the running exec's process; a no-op once the exec has already exited (idempotent)."""
         if self._finished:
             return
         info = await _inspect_exec(self._exec)
@@ -246,8 +258,10 @@ async def _signal_pid(container: Any, pid: int) -> bool:
 
 
 async def kill_exec_process(container: Any, pid: int | None) -> None:
-    """Terminate an exec's process, falling back to killing the container's main
-    process (the documented last resort) only when the process cannot be signalled."""
+    """Terminate an exec's process, falling back to killing the container's main process.
+
+    The container-kill last resort runs only when the process cannot be signalled.
+    """
     if pid is not None and await _signal_pid(container, pid):
         return
     try:
@@ -274,6 +288,7 @@ class DockerSandboxSession(ManagedSandboxSession):
         durability: SandboxDurability,
         base_env: Mapping[str, SecretStr],
     ) -> None:
+        """Bind the session to its engine ``container`` and workspace, carrying the base ``spec.env`` and durability."""
         super().__init__(sandbox=sandbox, session_id=session_id)
         self._container = container
         self._workspace_key = workspace_key
@@ -282,6 +297,7 @@ class DockerSandboxSession(ManagedSandboxSession):
 
     @property
     def workspace_path(self) -> str:
+        """The absolute container path the session workspace mounts at."""
         return WORKSPACE_PATH
 
     async def exec(
@@ -293,6 +309,7 @@ class DockerSandboxSession(ManagedSandboxSession):
         stdin: bytes | None = None,
         timeout_seconds: float,
     ) -> ExecResult:
+        """Run ``argv`` to completion and return its :class:`ExecResult`; a host-side timeout kills it and raises."""
         exec_obj = await self._make_exec(argv, cwd=cwd, env=env, stdin=stdin is not None)
         stdout = bytearray()
         stderr = bytearray()
@@ -319,6 +336,7 @@ class DockerSandboxSession(ManagedSandboxSession):
         env: dict[str, SecretStr] | None = None,
         timeout_seconds: float,
     ) -> DockerSandboxExecHandle:
+        """Start ``argv`` as a live interactive exec and return its :class:`DockerSandboxExecHandle`."""
         exec_obj = await self._make_exec(argv, cwd=cwd, env=env, stdin=True)
         stream = exec_obj.start(detach=False)
         return DockerSandboxExecHandle(
@@ -329,6 +347,7 @@ class DockerSandboxSession(ManagedSandboxSession):
         )
 
     async def put_file(self, path: str, data: bytes) -> None:
+        """Write ``data`` to ``path`` in the workspace, creating intermediate directories."""
         target = resolve_workspace_path(path)
         # docker's put_archive extracts a tar at ``base`` and requires that dir to
         # exist. For a workspace path we extract at the workspace ROOT with the member
@@ -349,6 +368,7 @@ class DockerSandboxSession(ManagedSandboxSession):
             raise self._sandbox._engine_error(exc) from exc
 
     async def get_file(self, path: str) -> bytes:
+        """Read and return the bytes of ``path`` in the workspace; a missing file is a loud :class:`SandboxError`."""
         target = resolve_workspace_path(path)
         try:
             tar = await self._container.get_archive(target)

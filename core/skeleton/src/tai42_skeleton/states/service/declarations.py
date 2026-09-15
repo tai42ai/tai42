@@ -47,7 +47,8 @@ class _DeclarationMixin(_StatesServiceBase):
         or change of an existing property is refused while records exist
         (:class:`NonAdditiveRedeclareError`), and removing a subject kind still present in
         records raises :class:`DeclarationInUseError`. ``retention_days`` is metadata, not
-        schema, so changing it alone is never gated."""
+        schema, so changing it alone is never gated.
+        """
         self._ensure_available()
         if decl.effective_schema is not None:
             raise ValueError("effective_schema is computed by the platform")
@@ -99,8 +100,10 @@ class _DeclarationMixin(_StatesServiceBase):
         return decl
 
     async def delete_declaration(self, name: str) -> None:
-        """Delete a state with its records, attachments and aliases; refuses while a registered
-        consumer still binds it (:class:`DeclarationInUseError`)."""
+        """Delete a state with its records, attachments and aliases.
+
+        Refuses while a registered consumer still binds it (:class:`DeclarationInUseError`).
+        """
         self._ensure_available()
         if await self._store.get_declaration(name) is None:
             raise StateNotFoundError(f"no state declared as {name!r}")

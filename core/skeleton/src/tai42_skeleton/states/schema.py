@@ -25,9 +25,11 @@ def _canonical(value: Any) -> str:
 
 
 def _validate_schema(schema: Any) -> None:
-    """Accept any VALID JSON Schema (draft 2020-12) that is object-rooted with ≥1
-    property; refuse everything else loudly. Nesting to any depth is the point — the
-    record document is validated WHOLE against this schema on every write."""
+    """Accept any valid, object-rooted JSON Schema (draft 2020-12) with at least one property.
+
+    Refuse everything else loudly. Nesting to any depth is the point — the record
+    document is validated WHOLE against this schema on every write.
+    """
     if not isinstance(schema, dict):
         raise SchemaValidationError("schema must be a JSON object")
     if schema.get("type") != "object":
@@ -43,9 +45,12 @@ def _validate_schema(schema: Any) -> None:
 
 
 def _validate_refs(schema: dict[str, Any]) -> None:
-    """Refuse ``$ref``s ``check_schema`` cannot vouch for (SYNTAX-only): a remote ref, a
-    dangling local one, and ``$dynamicRef`` are all declare-time refusals. Local support:
-    ``#`` (root), ``#/json/pointer`` (resolved against the document), and ``#anchor``."""
+    """Refuse ``$ref``s ``check_schema`` cannot vouch for (SYNTAX-only).
+
+    A remote ref, a dangling local one, and ``$dynamicRef`` are all declare-time
+    refusals. Local support: ``#`` (root), ``#/json/pointer`` (resolved against
+    the document), and ``#anchor``.
+    """
     if _uses_key(schema, "$dynamicRef"):
         raise SchemaValidationError("$dynamicRef is not supported — use $ref with root-level $defs")
     for ref in _iter_refs(schema):
@@ -102,8 +107,10 @@ def _anchor_exists(node: Any, anchor: str) -> bool:
 
 
 def _validate_document(schema: dict[str, Any], doc: dict[str, Any]) -> None:
-    """Validate the FULL record document against the effective schema; the error names the
-    offending JSON path. Loud on the first failure."""
+    """Validate the FULL record document against the effective schema.
+
+    The error names the offending JSON path. Loud on the first failure.
+    """
     try:
         Draft202012Validator(schema).validate(doc)
     except jsonschema.ValidationError as exc:
@@ -113,9 +120,12 @@ def _validate_document(schema: dict[str, Any], doc: dict[str, Any]) -> None:
 
 
 def _is_narrowing(old_schema: dict[str, Any], new_schema: dict[str, Any]) -> bool:
-    """Whether ``new_schema`` removes or changes any top-level property of ``old_schema`` —
-    OR changes any ROOT keyword outside ``properties``. Deliberately conservative: any
-    property-subtree edit or root-keyword edit registers as narrowing."""
+    """Whether ``new_schema`` removes or changes any top-level property of ``old_schema``.
+
+    Also true when it changes any ROOT keyword outside ``properties``.
+    Deliberately conservative: any property-subtree edit or root-keyword edit
+    registers as narrowing.
+    """
     old_props = old_schema.get("properties", {}) if isinstance(old_schema, dict) else {}
     new_props = new_schema.get("properties", {})
     for fname, fschema in old_props.items():

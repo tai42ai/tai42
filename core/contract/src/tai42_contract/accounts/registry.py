@@ -73,8 +73,10 @@ def register_accounts_provider(name: str, factory: Callable[..., AccountsProvide
 
 
 def get_accounts_provider_factory(name: str) -> Callable[..., AccountsProvider]:
-    """Return the factory registered under ``name`` in the COMMITTED generation;
-    unknown names raise KeyError."""
+    """Return the factory registered under ``name`` in the COMMITTED generation.
+
+    Unknown names raise KeyError.
+    """
     factory = _REGISTRY.get(name)
     if factory is None:
         raise KeyError(f"Unknown accounts provider: {name!r}")
@@ -91,16 +93,20 @@ def iter_accounts_provider_factories() -> list[tuple[str, Callable[..., Accounts
 
 
 def iter_accounts_provider_factories_staged() -> list[tuple[str, Callable[..., AccountsProvider]]]:
-    """Name-sorted snapshot of the STAGED generation if a build is staging, else the
-    committed one — the build's own accessor (the configured-providers boot check,
-    kind status)."""
+    """Name-sorted snapshot of the STAGED generation if a build is staging, else the committed one.
+
+    The build's own accessor (the configured-providers boot check, kind status).
+    """
     return sorted(_write_target().items())
 
 
 def reset_registry() -> None:
-    """Clear the write-target accounts registrations — the STAGED generation while a
-    build is staging (never the committed one), else the committed map (boot, test
-    isolation). Clears only this registry: the identity registry has its own lifecycle."""
+    """Clear the write-target accounts registrations — staged generation while staging, else committed.
+
+    The write target is the STAGED generation while a build is staging (never the
+    committed one), else the committed map (boot, test isolation). Clears only this
+    registry: the identity registry has its own lifecycle.
+    """
     _write_target().clear()
 
 

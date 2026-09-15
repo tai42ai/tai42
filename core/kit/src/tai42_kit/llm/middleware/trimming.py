@@ -1,3 +1,5 @@
+"""Agent middleware that trims conversation history to fit a token budget."""
+
 import logging
 import uuid
 from collections.abc import Callable, Sequence
@@ -17,8 +19,7 @@ _MAX_TOKENS_ENV = "TRIMMING_MIDDLEWARE_MAX_TOKENS"
 
 
 class TrimmingBudgetTooSmallError(Exception):
-    """The token budget cannot fit the per-run system prompt plus the newest human
-    message.
+    """The token budget cannot fit the per-run system prompt plus the newest human message.
 
     Trimming would drop the very turn being answered, leaving the model to reply
     from the system prompt alone — an unservable overflow. Carries the budget and
@@ -47,6 +48,11 @@ class TrimmingMiddleware(AgentMiddleware):
         token_counter: Callable[[Sequence[BaseMessage]], int] = count_tokens_approximately,
         **trim_kwargs,
     ) -> None:
+        """Configure trimming with an optional per-run ``system_prompt`` and token counter.
+
+        ``trim_kwargs`` override the configured trimming settings (``max_tokens``,
+        ``include_system``, and the rest passed through to ``trim_messages``).
+        """
         super().__init__()
         self.system_prompt = system_prompt
         self.token_counter = token_counter
@@ -55,6 +61,11 @@ class TrimmingMiddleware(AgentMiddleware):
         self.trim_kwargs.update(trim_kwargs)
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        """Trim the history to the budget before the model call, or return ``None`` to leave it.
+
+        Raises :class:`TrimmingBudgetTooSmallError` when the budget cannot keep the
+        newest human message.
+        """
         messages = state["messages"]
         for msg in messages:
             if msg.id is None:
@@ -109,5 +120,6 @@ class TrimmingMiddleware(AgentMiddleware):
         }
 
     async def abefore_model(self, state: AgentState, runtime: Runtime | None = None) -> dict[str, Any] | None:
+        """Async entry point for trimming; delegates to :meth:`before_model`."""
         # Trimming is pure CPU (no I/O); reuse the sync implementation.
         return self.before_model(state, cast(Runtime, runtime))

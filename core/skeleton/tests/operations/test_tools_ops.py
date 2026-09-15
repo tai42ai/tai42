@@ -4,8 +4,8 @@ Covers ``run_tool`` / ``reload_tool`` / ``remove_tool``. ``run_tool`` takes a
 ``tool_name`` argument (the route's request-model shape) and shares the
 ``/api/run-tool`` route's typed error surface — an unknown tool is a
 :class:`NotFoundError` (404), a typed error from the dispatch seam (a
-:class:`PermissionDenied` 403) passes through untouched, and any other raise DURING
-execution is an :class:`OperationFailed` (500). ``reload_tool`` / ``remove_tool`` apply
+:class:`PermissionDeniedError` 403) passes through untouched, and any other raise DURING
+execution is an :class:`OperationFailedError` (500). ``reload_tool`` / ``remove_tool`` apply
 locally when this worker is a target, then broadcast on the bus; the response is the per-origin
 fleet report. Projection: ``run_tool`` is tier-1 hardcode-blocked; ``reload_tool`` /
 ``remove_tool`` project with ``destructiveHint``.
@@ -28,12 +28,12 @@ from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
 from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
-    OperationFailed,
+    OperationFailedError,
     OperationRegistry,
     operation_metadata_of,
 )
 from tai42_skeleton.operations import tools as tools_ops
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.tools.binding import UnknownToolError
 
@@ -204,13 +204,13 @@ async def test_run_tool_unknown_is_404(monkeypatch: pytest.MonkeyPatch, caplog) 
 
 
 async def test_run_tool_raise_during_execution_is_500(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    # The op maps a raise DURING execution to a structured OperationFailed (500)
+    # The op maps a raise DURING execution to a structured OperationFailedError (500)
     # carrying the message, and records the failure server-side: one ERROR from this
     # module's logger carrying the caught exception, so the traceback survives whatever
     # the envelope shows.
     tools = _Tools({"calc"}, run_exc=RuntimeError("kaboom at 10.0.0.7:6379"))
     _install(monkeypatch, tools=tools)
-    with caplog.at_level(logging.ERROR, logger=tools_ops.logger.name), pytest.raises(OperationFailed) as caught:
+    with caplog.at_level(logging.ERROR, logger=tools_ops.logger.name), pytest.raises(OperationFailedError) as caught:
         await tools_ops.run_tool("calc", {})
     assert caught.value.message == "kaboom at 10.0.0.7:6379"
     _assert_logged_server_side(caplog, "kaboom at 10.0.0.7:6379")
@@ -251,27 +251,27 @@ async def test_run_tool_maps_inner_unknown_tool_to_structured_500(monkeypatch: p
     # The requested tool resolved and ran; an ``UnknownToolError`` naming a DIFFERENT
     # tool escaped its body. That is the inner dispatch's failure, not "the requested
     # tool does not exist", so it takes the execution-failure path — a structured
-    # OperationFailed (500) carrying the inner error — never a 404 for ``calc``. The
+    # OperationFailedError (500) carrying the inner error — never a 404 for ``calc``. The
     # failure is recorded server-side as one ERROR carrying the caught exception.
     tools = _Tools({"calc"}, run_exc=UnknownToolError("some_other_tool"))
     _install(monkeypatch, tools=tools)
     with (
         caplog.at_level(logging.ERROR, logger=tools_ops.logger.name),
-        pytest.raises(OperationFailed, match=re.escape("No such tool: some_other_tool.")),
+        pytest.raises(OperationFailedError, match=re.escape("No such tool: some_other_tool.")),
     ):
         await tools_ops.run_tool("calc", {})
     _assert_logged_server_side(caplog, "No such tool: some_other_tool.")
 
 
 async def test_run_tool_permission_denied_passes_through(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    # A ``PermissionDenied`` taken by the tool-dispatch seam is already the caller's
+    # A ``PermissionDeniedError`` taken by the tool-dispatch seam is already the caller's
     # answer (403); it passes through typed rather than being flattened into a 500, and
     # leaves no server record — it is the tool's own answer, not a failure.
-    tools = _Tools({"calc"}, run_exc=PermissionDenied("access denied: insufficient scope"))
+    tools = _Tools({"calc"}, run_exc=PermissionDeniedError("access denied: insufficient scope"))
     _install(monkeypatch, tools=tools)
     with (
         caplog.at_level(logging.DEBUG, logger=tools_ops.logger.name),
-        pytest.raises(PermissionDenied, match="insufficient scope"),
+        pytest.raises(PermissionDeniedError, match="insufficient scope"),
     ):
         await tools_ops.run_tool("calc", {})
     _assert_nothing_logged_server_side(caplog)
@@ -281,7 +281,7 @@ async def test_run_tool_message_less_raise_names_the_exception_class(monkeypatch
     # A bare raise stringifies to "", which would emit ``{"error": ""}``; the door falls
     # back to the class name so the envelope always carries something.
     _install(monkeypatch, tools=_Tools({"calc"}, run_exc=RuntimeError()))
-    with pytest.raises(OperationFailed, match="RuntimeError") as caught:
+    with pytest.raises(OperationFailedError, match="RuntimeError") as caught:
         await tools_ops.run_tool("calc", {})
     assert caught.value.message == "RuntimeError"
 
@@ -475,7 +475,7 @@ async def test_run_tool_releases_the_binding_when_the_tool_raises(monkeypatch: p
     _install(monkeypatch, tools=tools)
     _wire_caller(monkeypatch, CallerIdentity(user_id="usr-caller", execution_key_fingerprint="fp-live"))
 
-    with pytest.raises(OperationFailed):
+    with pytest.raises(OperationFailedError):
         await tools_ops.run_tool("calc", {"a": 1})
 
     assert get_execution_identity() is None

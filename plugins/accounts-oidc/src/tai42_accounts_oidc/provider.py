@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Prefix lets validate_token fast-reject non-session tokens without a Redis hit.
-SESSION_TOKEN_PREFIX = "tai-sess-"
+SESSION_TOKEN_PREFIX = "tai-sess-"  # noqa: S105 constant identifier, not a secret value
 
 # Redis key namespaces: authorize->callback state, one-time SSO hand-back, session.
 _STATE_KEY_PREFIX = "acc:oidc:state:"
@@ -68,14 +68,18 @@ _HEALTHCHECK_PROBE_KID = "__accounts_oidc_healthcheck_probe__"
 
 
 def _active_provider() -> OidcAccountsProvider | None:
-    """The current epoch's ``OidcAccountsProvider`` instance, or ``None`` when no OIDC
-    provider is active (access control disabled / not configured / build mid-flight)."""
+    """The current epoch's ``OidcAccountsProvider`` instance, or ``None`` when no OIDC provider is active.
+
+    ``None`` when access control is disabled, not configured, or a build is mid-flight.
+    """
     return cast("OidcAccountsProvider | None", tai42_app.accounts.active_provider("accounts-oidc"))
 
 
 def provider_settings() -> AccountsProviderSettings:
-    """The injected settings of the CURRENT epoch's provider instance; RAISE when no
-    provider is active (the accounts kind is disabled)."""
+    """The injected settings of the CURRENT epoch's provider instance.
+
+    RAISE when no provider is active (the accounts kind is disabled).
+    """
     provider = _active_provider()
     if provider is None:
         raise RuntimeError(
@@ -107,12 +111,14 @@ class ProviderRuntime:
     """
 
     def __init__(self, config: ResolvedProvider) -> None:
+        """Store the resolved ``config``; discovery and JWKS are fetched lazily."""
         self.config = config
         self._discovery: OidcDiscovery | None = None
         self._jwks: JwksCache | None = None
         self._lock = asyncio.Lock()
 
     async def discovery(self) -> OidcDiscovery:
+        """Fetch (once, cached) the issuer's OIDC discovery document."""
         if self.config.issuer is None:  # pragma: no cover - github never calls this
             raise RuntimeError(f"provider {self.config.name!r} is a plain-OAuth2 provider with no discovery")
         if self._discovery is None:
@@ -122,6 +128,7 @@ class ProviderRuntime:
         return self._discovery
 
     async def jwks(self) -> JwksCache:
+        """The cached JWKS for the issuer, built from its discovery document."""
         discovery = await self.discovery()
         if self._jwks is None:
             self._jwks = JwksCache(discovery.jwks_uri)
@@ -133,8 +140,10 @@ def _build_runtimes() -> dict[str, ProviderRuntime]:
 
 
 def get_runtime(name: str) -> ProviderRuntime | None:
-    """The runtime for a configured provider name on the CURRENT epoch's provider
-    instance, or ``None`` if no provider is active or the name is unknown."""
+    """The runtime for a configured provider name on the CURRENT epoch's provider instance.
+
+    ``None`` if no provider is active or the name is unknown.
+    """
     provider = _active_provider()
     if provider is None:
         return None
@@ -199,6 +208,7 @@ class OidcAccountsProvider(AccountsProvider):
     """Validate sessions, declare login buttons, and drive the OIDC login flow."""
 
     def __init__(self, settings: AccountsProviderSettings) -> None:
+        """Bind ``settings`` and build this epoch's per-provider runtimes; raise on missing required env."""
         # Fail loudly on the two REQUIRED env settings, naming the missing var.
         oidc = accounts_oidc_settings()
         if oidc.state_key is None:
@@ -213,6 +223,7 @@ class OidcAccountsProvider(AccountsProvider):
         self._runtimes = _build_runtimes()
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
+        """Validate a session ``token`` and return its identity, or ``None`` when not ours or invalid."""
         # Fast-reject non-session tokens without a Redis hit so resolution moves on.
         if not token.startswith(SESSION_TOKEN_PREFIX):
             return None
@@ -233,14 +244,15 @@ class OidcAccountsProvider(AccountsProvider):
                     return None
                 # Slide the idle TTL; the absolute deadline is never extended.
                 await r.pexpire(key, accounts_oidc_settings().session_idle_seconds * 1000)
-        except Exception as exc:
+        except Exception:
             # Fail closed: RAISE, never return None (which reads as invalid-credential).
-            logger.error("accounts-oidc: session validate failed: %s", exc)
+            logger.exception("accounts-oidc: session validate failed")
             raise
 
         return AuthIdentity(user_id=record["user_id"], claims=record)
 
     def login_methods(self) -> list[LoginMethod]:
+        """One login button per configured provider."""
         # Static config-derived metadata: one button per configured provider. The
         # authorize href resolves through the login router's mount base (captured at
         # its import) so an operator remap of the route base moves the button too.
@@ -257,10 +269,12 @@ class OidcAccountsProvider(AccountsProvider):
         ]
 
     async def needs_bootstrap(self) -> bool:
+        """Whether a first-owner bootstrap is needed — never, since accounts live at the issuer."""
         # Accounts live at the issuer — no first-owner concept here.
         return False
 
     async def revoke_session(self, token: str) -> bool:
+        """Revoke ``token``'s session; returns ``True`` when one was deleted, ``False`` when not ours."""
         if not token.startswith(SESSION_TOKEN_PREFIX):
             # Not ours — the logout dispatcher moves on.
             return False
@@ -269,6 +283,7 @@ class OidcAccountsProvider(AccountsProvider):
         return deleted > 0
 
     async def healthcheck(self) -> None:
+        """Verify each configured provider's issuer is reachable, raising on any failure."""
         # Runs once at boot: fetch each provider's discovery + JWKS (GitHub: HEAD the
         # authorize endpoint); any failure raises so a broken issuer fails the boot.
         for runtime in self._runtimes.values():

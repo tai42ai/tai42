@@ -21,6 +21,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class TwilioSettings(TaiBaseSettings):
+    """The ``CHANNEL_TWILIO_`` env settings group for the Twilio channel."""
+
     model_config = SettingsConfigDict(env_prefix="CHANNEL_TWILIO_")
 
     account_sid: str | None = None
@@ -44,9 +46,11 @@ class TwilioSettings(TaiBaseSettings):
     @field_validator("allowed_recipients", mode="before")
     @classmethod
     def _parse_allowed_recipients(cls, value: object) -> object:
-        """A list passes through; a string parses as JSON when it starts with
-        ``[`` else splits on commas (items stripped, empties dropped); anything
-        else is rejected loudly."""
+        """Parse ``allowed_recipients`` from a list or string, rejecting anything else loudly.
+
+        A list passes through; a string parses as JSON when it starts with ``[`` else
+        splits on commas (items stripped, empties dropped).
+        """
         if isinstance(value, list):
             return value
         if isinstance(value, str):
@@ -55,7 +59,7 @@ class TwilioSettings(TaiBaseSettings):
                 items = json.loads(text)
                 for item in items:
                     if not isinstance(item, str):
-                        raise ValueError(f"allowed_recipients JSON list items must be strings, got {item!r}")
+                        raise ValueError(f"allowed_recipients JSON list items must be strings, got {item!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
                 return [item for item in (part.strip() for part in items) if item]
             return [item for item in (part.strip() for part in text.split(",")) if item]
         raise ValueError("allowed_recipients must be a comma-separated string or a list")
@@ -63,6 +67,7 @@ class TwilioSettings(TaiBaseSettings):
 
 @settings_cache
 def twilio_settings() -> TwilioSettings:
+    """The cached Twilio channel settings."""
     return TwilioSettings()
 
 
@@ -74,20 +79,25 @@ class TwilioRedisSettings(RedisConnectionSettings):
 
 @settings_cache
 def twilio_redis_settings() -> TwilioRedisSettings:
+    """The cached Twilio correlation-store Redis settings."""
     return TwilioRedisSettings()
 
 
 def require_delivery_setting(value: str | None, env_name: str) -> str:
-    """The configured value an outbound send needs; raises ``ChannelDeliveryError``
-    (naming only the env var) when unset. Checked before any network work."""
+    """The configured value an outbound send needs, checked before any network work.
+
+    Raises ``ChannelDeliveryError`` (naming only the env var) when unset.
+    """
     if not value:
         raise ChannelDeliveryError(f"Twilio channel is not configured: set {env_name}.")
     return value
 
 
 def require_delivery_secret(value: SecretStr | None, env_name: str) -> str:
-    """The plaintext secret an outbound send needs; raises ``ChannelDeliveryError``
-    (naming only the env var, never the value) when unset."""
+    """The plaintext secret an outbound send needs.
+
+    Raises ``ChannelDeliveryError`` (naming only the env var, never the value) when unset.
+    """
     secret = value.get_secret_value() if value is not None else ""
     if not secret:
         raise ChannelDeliveryError(f"Twilio channel is not configured: set {env_name}.")

@@ -34,18 +34,24 @@ _current_execution_identity: ContextVar[CallerIdentity | None] = ContextVar(
 
 
 def get_execution_identity() -> CallerIdentity | None:
-    """The execution identity bound to the current fire, ``None`` outside a background
-    execution — the signal the tool-dispatch seam gates enforcement on."""
+    """The execution identity bound to the current fire, ``None`` outside a background execution.
+
+    The signal the tool-dispatch seam gates enforcement on.
+    """
     return _current_execution_identity.get()
 
 
 def set_execution_identity(identity: CallerIdentity | None) -> Token[CallerIdentity | None]:
-    """Bind ``identity`` as the current fire's execution identity; pass the returned token
-    to :func:`reset_execution_identity` to restore the previous value."""
+    """Bind ``identity`` as the current fire's execution identity.
+
+    Pass the returned token to :func:`reset_execution_identity` to restore the previous value.
+    """
     return _current_execution_identity.set(identity)
 
 
 def reset_execution_identity(token: Token[CallerIdentity | None]) -> None:
-    """Restore the execution identity to the value captured in ``token`` by the matching
-    :func:`set_execution_identity` call."""
+    """Restore the execution identity to the value captured in ``token``.
+
+    ``token`` is the one returned by the matching :func:`set_execution_identity` call.
+    """
     _current_execution_identity.reset(token)

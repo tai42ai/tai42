@@ -21,7 +21,7 @@ already-installed, or environment-shadowed-prefix conflict is a
 :class:`ConflictError` (409); a pip failure,
 a github artifact-integrity mismatch, a failed unwind, a manifest-compose fault,
 an unknown-item-kind binding drift, or corrupt local
-state is an :class:`OperationFailed` (500). A malformed ``ref`` is the caller's
+state is an :class:`OperationFailedError` (500). A malformed ``ref`` is the caller's
 own author error — a typed :class:`~tai42_skeleton.marketplace.errors.MalformedRefError`
 the boundary maps to :class:`BadRequestError` (400).
 
@@ -91,7 +91,7 @@ from tai42_skeleton.operations import (
     NotFoundError,
     NotSupportedError,
     OperationError,
-    OperationFailed,
+    OperationFailedError,
     UnavailableError,
     UpstreamError,
     operation,
@@ -122,8 +122,7 @@ _ENVELOPE_DETAIL_CHARS = 4000
 
 
 def _truncate(text: str) -> str:
-    """The last ``_ENVELOPE_DETAIL_CHARS`` of ``text``, prefixed with a visible cut
-    marker when anything was dropped."""
+    """The last ``_ENVELOPE_DETAIL_CHARS`` of ``text``, with a visible cut marker when text was dropped."""
     if len(text) <= _ENVELOPE_DETAIL_CHARS:
         return text
     return f"... (truncated) {text[-_ENVELOPE_DETAIL_CHARS:]}"
@@ -153,20 +152,25 @@ def _provided_items(spec: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _pip_failed_error(exc: MarketplaceError) -> OperationError:
-    """A pip failure → 500. The full captured output stays in the log; the envelope
-    carries the summary plus a truncated tail so the operator sees the failing lines."""
+    """A pip failure → 500.
+
+    The full captured output stays in the log; the envelope carries the summary plus
+    a truncated tail so the operator sees the failing lines.
+    """
     pip = cast("PipFailedError", exc)
     logger.error("marketplace pip failure: %s\n%s", pip, pip.output)
-    return OperationFailed(str(pip), extra={"pip_output": _truncate(pip.output)})
+    return OperationFailedError(str(pip), extra={"pip_output": _truncate(pip.output)})
 
 
 def _artifact_integrity_error(exc: MarketplaceError) -> OperationError:
-    """A github artifact whose sha256 disagrees with the registry's ingest digest — an
-    install-integrity failure (a possibly re-pointed release tag), a loud terminal 500
-    carrying the digests and the rejected URL."""
+    """A github artifact whose sha256 disagrees with the registry's ingest digest.
+
+    An install-integrity failure (a possibly re-pointed release tag), a loud terminal
+    500 carrying the digests and the rejected URL.
+    """
     art = cast("ArtifactIntegrityError", exc)
     logger.error("marketplace artifact integrity failure: %s", art)
-    return OperationFailed(
+    return OperationFailedError(
         str(art),
         extra={
             "artifact_ref": art.artifact_ref,
@@ -177,22 +181,28 @@ def _artifact_integrity_error(exc: MarketplaceError) -> OperationError:
 
 
 def _public_routes_error(exc: MarketplaceError) -> OperationError:
-    """Declared public routes need the operator's explicit acceptance — a 400 carrying a
-    stable code + the rows so the UI can render the acceptance gate."""
+    """Declared public routes need the operator's explicit acceptance — a 400.
+
+    Carries a stable code + the rows so the UI can render the acceptance gate.
+    """
     err = cast("PublicRoutesNotAcceptedError", exc)
     return BadRequestError(str(err), extra={"code": "PUBLIC_ROUTES_NOT_ACCEPTED", "public_routes": err.public_routes})
 
 
 def _route_collision_error(exc: MarketplaceError) -> OperationError:
-    """A declared route clashes with an already-owned one — a 409 carrying the collision
-    list; the remedy is to remap the item's base."""
+    """A declared route clashes with an already-owned one — a 409 carrying the collision list.
+
+    The remedy is to remap the item's base.
+    """
     err = cast("RouteCollisionError", exc)
     return ConflictError(str(err), extra={"code": "ROUTE_COLLISION", "collisions": err.collisions})
 
 
 def _reserved_prefix_error(exc: MarketplaceError) -> OperationError:
-    """A declared public route resolves under a reserved never-public prefix — a 409
-    carrying the offending paths; the remedy is to remap the base."""
+    """A declared public route resolves under a reserved never-public prefix — a 409.
+
+    Carries the offending paths; the remedy is to remap the base.
+    """
     err = cast("ReservedRoutePrefixError", exc)
     return ConflictError(str(err), extra={"code": "ROUTE_RESERVED_PREFIX", "routes": err.offenders})
 
@@ -206,7 +216,7 @@ def _install_state_error(exc: MarketplaceError) -> OperationError:
 # Ordered (predicate, builder) pairs in classification precedence order; the FIRST
 # matching predicate wins, so the classification keys on the typed class (and, for a
 # state conflict, its ``not_installed`` flag) — never on message text. A failure matching
-# none is the terminal ``OperationFailed`` below.
+# none is the terminal ``OperationFailedError`` below.
 _ERROR_RULES: tuple[tuple[Callable[[MarketplaceError], bool], Callable[[MarketplaceError], OperationError]], ...] = (
     # The caller's own author error — a malformed ref, an mcp-server install missing a
     # required !ENV value, or a route_mounts override naming a non-route item / bad base.
@@ -246,7 +256,7 @@ def _to_operation_error(exc: MarketplaceError) -> OperationError:
             return build(exc)
     # PipUnavailableError / InstallUnwindError / ManifestComposeError /
     # LocalStateError / the base: the deployment environment failed the operation.
-    return OperationFailed(_truncate(str(exc)))
+    return OperationFailedError(_truncate(str(exc)))
 
 
 class MarketplaceInstall(BaseModel):
@@ -263,7 +273,8 @@ class MarketplaceInstall(BaseModel):
 
     ``route_mounts`` remaps a route-carrying item's declared base (``{item_name:
     base}``); ``accept_public_routes`` acknowledges that the install's public routes
-    answer WITHOUT authentication (required when any public route is declared)."""
+    answer WITHOUT authentication (required when any public route is declared).
+    """
 
     ref: str
     version: str | None = None
@@ -286,7 +297,8 @@ class MarketplaceUpdate(BaseModel):
     adding a required ``!ENV`` marker or connector-env is loudly refused unless its
     value is supplied here. ``route_mounts`` remaps a route-carrying item's base (a
     surviving item with no override keeps its stored base); ``accept_public_routes``
-    acknowledges public routes NOT already approved in the installed version."""
+    acknowledges public routes NOT already approved in the installed version.
+    """
 
     ref: str
     version: str | None = None
@@ -297,8 +309,11 @@ class MarketplaceUpdate(BaseModel):
 
 
 class MarketplaceInstallPreview(BaseModel):
-    """Preview an install/update by ref: resolve the target spec and report its
-    routes with any ``route_mounts`` base overrides applied, WITHOUT changing state."""
+    """Preview an install/update by ref, WITHOUT changing state.
+
+    Resolve the target spec and report its routes with any ``route_mounts`` base
+    overrides applied.
+    """
 
     ref: str
     version: str | None = None
@@ -306,10 +321,10 @@ class MarketplaceInstallPreview(BaseModel):
 
 
 class MarketplaceSearchQuery(BaseModel):
-    """The marketplace search door's facets: a repeated ``?tags=`` array plus single-valued
-    facets.
+    """The marketplace search door's facets: a repeated ``?tags=`` array plus single-valued facets.
 
-    Spec metadata only — the door parses its query at the HTTP edge."""
+    Spec metadata only — the door parses its query at the HTTP edge.
+    """
 
     q: str | None = Field(default=None, description="Free-text search query.")
     kind: str | None = Field(default=None, description="Restrict to one item kind.")
@@ -335,9 +350,11 @@ def _search_params(
     page: str | None,
     page_size: str | None,
 ) -> dict[str, str | list[str]]:
-    """The whitelisted registry-search query: the single-valued facets in declared order
-    (dropping ``None``) plus the one multi-value facet ``tags`` (kept when truthy). One
-    job: build the forwarded query."""
+    """The whitelisted registry-search query.
+
+    The single-valued facets in declared order (dropping ``None``) plus the one
+    multi-value facet ``tags`` (kept when truthy). One job: build the forwarded query.
+    """
     facets: tuple[tuple[str, str | list[str] | None, bool], ...] = (
         ("q", q, False),
         ("kind", kind, False),
@@ -400,8 +417,9 @@ async def marketplace_search(
     response_model=OpaqueJson,
 )
 async def marketplace_plugin_detail(ns: str, name: str) -> dict[str, Any]:
-    """One listing's detail composed with its version rows in a single body, so
-    the detail view (listing + the Versions card) is one request. The registry's
+    """One listing's detail composed with its version rows in a single body.
+
+    So the detail view (listing + the Versions card) is one request. The registry's
     display metadata (``display_name``/``homepage_url``/``license``/``readme_md``)
     survives the spread.
     """
@@ -421,8 +439,7 @@ async def marketplace_plugin_detail(ns: str, name: str) -> dict[str, Any]:
     response_model=StringList,
 )
 async def marketplace_categories() -> list[str]:
-    """The registry's controlled category vocabulary — a plain array Studio
-    renders as facet chips."""
+    """The registry's controlled category vocabulary — a plain array Studio renders as facet chips."""
     try:
         return await RegistryClient().categories()
     except MarketplaceError as exc:
@@ -436,8 +453,7 @@ async def marketplace_categories() -> list[str]:
     response_model=StringList,
 )
 async def marketplace_kinds() -> list[str]:
-    """The registry's controlled item-kind vocabulary — a plain array Studio
-    renders as facet chips."""
+    """The registry's controlled item-kind vocabulary — a plain array Studio renders as facet chips."""
     try:
         return await RegistryClient().kinds()
     except MarketplaceError as exc:
@@ -447,12 +463,13 @@ async def marketplace_kinds() -> list[str]:
 @operation(
     summary="List installed marketplace plugins",
     tags=["marketplace"],
-    errors=[UpstreamError, OperationFailed],
+    errors=[UpstreamError, OperationFailedError],
     response_model=InstalledInventory,
 )
 async def marketplace_installed() -> dict[str, Any]:
-    """The installed inventory + the boot-quarantined plugins, in one body:
-    ``{"installed": [...], "quarantined": [{"name", "reason"}, ...]}``.
+    """The installed inventory + the boot-quarantined plugins, in one body.
+
+    Shaped ``{"installed": [...], "quarantined": [{"name", "reason"}, ...]}``.
 
     Each installed row carries the update picture computed from the registry's
     version rows against the RUNNING contract: ``latest`` (newest published
@@ -540,9 +557,11 @@ async def marketplace_installed() -> dict[str, Any]:
     response_model=AdvisorySnapshot,
 )
 async def marketplace_advisories() -> dict[str, Any]:
-    """The advisory snapshot for the installed plugins, no older than the
-    configured poll interval (a stale snapshot is refreshed on demand, and a
-    refresh failure raises a loud 502 rather than serving stale data)."""
+    """The advisory snapshot for the installed plugins, no older than the configured poll interval.
+
+    A stale snapshot is refreshed on demand, and a refresh failure raises a loud 502
+    rather than serving stale data.
+    """
     # OFF gate: advisories are computed for the installed inventory; with no store
     # there is nothing installed, so the honest answer is an empty snapshot fetched
     # now (never a Postgres open for an absent inventory).
@@ -568,7 +587,7 @@ async def marketplace_advisories() -> dict[str, Any]:
         UpstreamError,
         NotSupportedError,
         UnavailableError,
-        OperationFailed,
+        OperationFailedError,
     ],
     request_model=MarketplaceInstall,
     response_model=InstallResult,
@@ -581,13 +600,15 @@ async def marketplace_install(
     route_mounts: dict[str, str] | None = None,
     accept_public_routes: bool = False,
 ) -> dict[str, Any]:
-    """Resolve, pip install (nothing for a descriptor-only plugin), patch the manifest,
-    reload, and record attribution — aborting and unwinding on any failure (see
-    :meth:`Installer.install`). When the spec declares install-time env ``env`` /
-    ``secret_keys`` satisfy the required ``!ENV`` markers or connector-env in the same
-    combined transaction. ``route_mounts`` remaps declared route bases;
+    """Resolve, pip install, patch the manifest, reload, and record attribution.
+
+    Nothing is pip-installed for a descriptor-only plugin; aborts and unwinds on any
+    failure (see :meth:`Installer.install`). When the spec declares install-time env
+    ``env`` / ``secret_keys`` satisfy the required ``!ENV`` markers or connector-env in
+    the same combined transaction. ``route_mounts`` remaps declared route bases;
     ``accept_public_routes`` acknowledges public routes. The result's ``routes`` lists
-    every route the install mounted."""
+    every route the install mounted.
+    """
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # install cannot record, so it refuses with a named, machine-readable reason.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -622,11 +643,13 @@ async def marketplace_install_preview(
     version: str | None = None,
     route_mounts: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Resolve a candidate install/update and report its routes WITHOUT changing any
-    state: the resolved routes per item with ``route_mounts`` overrides applied, the
+    """Resolve a candidate install/update and report its routes WITHOUT changing any state.
+
+    The resolved routes per item with ``route_mounts`` overrides applied, the
     collisions against the live registry (excluding the plugin's own routes on an
     update preview), the public routes requiring acceptance, and the ``new`` public
-    rows an update has not already approved (see :meth:`Installer.preview`)."""
+    rows an update has not already approved (see :meth:`Installer.preview`).
+    """
     # OFF gate: preview is the install's dry-run; with no attribution store an install
     # cannot proceed, so the preview refuses with the same named reason.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -643,13 +666,15 @@ async def marketplace_install_preview(
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[NotFoundError, NotSupportedError, UnavailableError, OperationFailed],
+    errors=[NotFoundError, NotSupportedError, UnavailableError, OperationFailedError],
     request_model=MarketplaceUninstall,
     response_model=UninstallResult,
 )
 async def marketplace_uninstall(ref: str) -> dict[str, Any]:
-    """Unpatch the manifest, reload, pip uninstall, and drop attribution —
-    convergent and registry-free (see :meth:`Installer.uninstall`)."""
+    """Unpatch the manifest, reload, pip uninstall, and drop attribution.
+
+    Convergent and registry-free (see :meth:`Installer.uninstall`).
+    """
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store there
     # is nothing recorded to uninstall, so it refuses with a named reason.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -674,7 +699,7 @@ async def marketplace_uninstall(ref: str) -> dict[str, Any]:
         UpstreamError,
         NotSupportedError,
         UnavailableError,
-        OperationFailed,
+        OperationFailedError,
     ],
     request_model=MarketplaceUpdate,
     response_model=InstallResult,
@@ -687,13 +712,15 @@ async def marketplace_update(
     route_mounts: dict[str, str] | None = None,
     accept_public_routes: bool = False,
 ) -> dict[str, Any]:
-    """Resolve the target, pip upgrade (nothing for a descriptor-only plugin), re-patch
-    the manifest, reload, and upsert attribution — with the same pre-flights as install
-    (see :meth:`Installer.update`). ``env`` / ``secret_keys`` satisfy a new version's
-    required ``!ENV`` markers or connector-env. ``route_mounts`` remaps declared route
-    bases (surviving items keep their stored base); ``accept_public_routes`` acknowledges
-    public routes not already approved. The result's ``routes`` lists every route the
-    update mounted."""
+    """Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert attribution.
+
+    Nothing is pip-upgraded for a descriptor-only plugin; the same pre-flights apply
+    as install (see :meth:`Installer.update`). ``env`` / ``secret_keys`` satisfy a new
+    version's required ``!ENV`` markers or connector-env. ``route_mounts`` remaps
+    declared route bases (surviving items keep their stored base);
+    ``accept_public_routes`` acknowledges public routes not already approved. The
+    result's ``routes`` lists every route the update mounted.
+    """
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # update cannot upsert, so it refuses with a named reason.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -722,8 +749,9 @@ async def marketplace_update(
     response_model=UpgradeAllResult,
 )
 async def marketplace_upgrade_all() -> dict[str, Any]:
-    """Move every installed plugin onto its latest COMPATIBLE version in one
-    lock-held batch, answering ``{"results": [{ref, outcome, detail}, ...]}``.
+    """Move every installed plugin onto its latest COMPATIBLE version in one lock-held batch.
+
+    Answers ``{"results": [{ref, outcome, detail}, ...]}``.
 
     Per-ref failures (including a ref with NO compatible version) are report
     entries, never a batch abort — the ONE operation-level failure is the

@@ -55,8 +55,10 @@ _CONNECT_FRAME = ": connected\n\n"
 
 
 def _now() -> float:
-    """The monotonic loop clock the keepalive deadline reads. A module-level seam so
-    a test can drive the deadline without real wall-clock waits."""
+    """The monotonic loop clock the keepalive deadline reads.
+
+    A module-level seam so a test can drive the deadline without real wall-clock waits.
+    """
     return asyncio.get_running_loop().time()
 
 
@@ -118,8 +120,7 @@ async def _frame_for_event(
     restricted: bool,
     restricted_id: str | None,
 ) -> str | None:
-    """Map ONE stream entry to a rendered SSE frame string, or ``None`` when it is
-    filtered or skipped, applying the audience filter.
+    """Map ONE stream entry to a rendered SSE frame string, or ``None`` when it is filtered or skipped.
 
     A RESTRICTED caller (owner claim present) sees ONLY interactions addressed to it:
     an ``add`` frame is filtered on the record's ``audience == <own id>``, and an
@@ -127,7 +128,8 @@ async def _frame_for_event(
     payload. A malformed entry (missing required field) or an entry whose state pruned
     between the event and this read yields ``None`` — one bad or gone event never tears
     down the tail. A ``reason`` tag rides a removed frame when the store set one
-    (``"cancelled"`` for an operator per-interaction cancel), absent otherwise."""
+    (``"cancelled"`` for an operator per-interaction cancel), absent otherwise.
+    """
     event_type = fields.get("type")
     interaction_id = fields.get("interaction_id")
     group_id = fields.get("group_id")
@@ -157,8 +159,9 @@ async def _frame_for_event(
 
 
 async def _stream_events(request: Request, store: InteractionStore, settings: InteractionsSettings, cursor: str):
-    """Resolve the caller's isolation identity once, then run the NEVER-completing live
-    tail. This is a TAIL-ONLY stream: the pending set is served by the paged
+    """Resolve the caller's isolation identity once, then run the NEVER-completing live tail.
+
+    This is a TAIL-ONLY stream: the pending set is served by the paged
     ``GET /api/interactions`` door, so the stream carries no historical backlog and no
     end-of-backlog marker — only the live add/answered/removed tail. ``cursor`` is the
     events-stream tail the route handler captured BEFORE returning the response, so any
@@ -254,6 +257,11 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
     action="read",
 )
 async def stream(request: Request) -> Response:
+    """Serve the interactions inbox live tail as an SSE ``StreamingResponse``.
+
+    Refuses with a plain 501 when the store is unconfigured; otherwise resumes from the
+    caller's ``Last-Event-ID`` (or the current tail end) and streams the live tail.
+    """
     # OFF gate — BEFORE the StreamingResponse is constructed: an unconfigured store
     # answers a plain 501+code up front rather than sending 200 + SSE headers and
     # then dying mid-body when the generator reaches for an absent Redis.

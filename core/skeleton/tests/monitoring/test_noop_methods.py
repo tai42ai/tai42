@@ -36,7 +36,7 @@ def test_noop_span_id_and_updates_are_inert() -> None:
 
 def test_noop_writer_start_span_yields_a_span() -> None:
     writer = NoOpWriter()
-    with writer.start_span(name="s", kind=SpanKind.TOOL, trace_context=_ctx(), input={"a": 1}) as span:
+    with writer.start_span(name="s", kind=SpanKind.TOOL, trace_context=_ctx(), input_={"a": 1}) as span:
         assert isinstance(span, NoOpSpan)
 
 
@@ -44,7 +44,7 @@ def test_noop_writer_record_and_event_are_inert() -> None:
     writer = NoOpWriter()
     now = datetime.now()
     assert writer.record_span(name="s", kind=SpanKind.LLM, start=now, end=now, trace_context=_ctx()) is None
-    assert writer.create_event(name="e", trace_context=_ctx(), input="i", output="o") is None
+    assert writer.create_event(name="e", trace_context=_ctx(), input_="i", output="o") is None
     assert writer.update_current_span(status_message="m", metadata={}, output="o") is None
 
 

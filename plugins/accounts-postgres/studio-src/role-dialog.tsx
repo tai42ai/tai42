@@ -1,15 +1,16 @@
 /** Change a user's role from the seeded role templates. */
-import type { ReactElement } from 'react';
-import { useCallback, useMemo, useState } from 'react';
 import {
   Button,
   Dialog,
+  errorMessage,
   ErrorState,
   Field,
   Select,
   Spinner,
-  errorMessage,
 } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+
 import type { AdminUser, RoleTemplate, UsersAdminApi } from '@/api';
 
 export function RoleDialog({

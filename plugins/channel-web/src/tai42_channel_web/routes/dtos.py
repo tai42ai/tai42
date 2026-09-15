@@ -1,5 +1,7 @@
-"""Request/response wire shapes for the web-chat doors, and the pure validators that
-bound a visitor-sent value before any door forwards it."""
+"""Request/response wire shapes for the web-chat doors, and the pure visitor-value validators.
+
+The validators bound a visitor-sent value before any door forwards it.
+"""
 
 from __future__ import annotations
 
@@ -47,10 +49,13 @@ _MAX_LABEL_CHARS = 256
 
 
 def _clean_identity(value: str) -> str | None:
-    """The bridge's canonical identity — trimmed, because the bridge trims and an
-    untrimmed one here would key a transcript nothing ever writes to. ``None`` when
-    it is blank, over-long, or carries the ``:`` that separates a composite recipient
-    and qualifies the transcript key — an absent one is the caller's to tell apart."""
+    """The bridge's canonical identity — trimmed to match the bridge.
+
+    An untrimmed one here would key a transcript nothing ever writes to. ``None``
+    when it is blank, over-long, or carries the ``:`` that separates a composite
+    recipient and qualifies the transcript key — an absent one is the caller's to
+    tell apart.
+    """
     identity = value.strip()
     if not identity or len(identity) > _MAX_IDENTITY_CHARS or ":" in identity:
         return None
@@ -58,9 +63,12 @@ def _clean_identity(value: str) -> str | None:
 
 
 class IdentityBody(BaseModel):
-    """The web route a request names. Every door that takes one canonicalises it the
-    same way, so the value compared against the caller's session registration is the
-    bridge's own form and not the caller's spacing."""
+    """The web route a request names.
+
+    Every door that takes one canonicalises it the same way, so the value compared
+    against the caller's session registration is the bridge's own form and not the
+    caller's spacing.
+    """
 
     identity: str
 
@@ -78,7 +86,8 @@ class RotateBody(IdentityBody):
 
     ``entry_code`` carries the URL's ``tai_entry`` value: a gated identity refuses a
     rotation with a missing/dead code exactly as the page door refuses an entry; an
-    ungated identity ignores the field."""
+    ungated identity ignores the field.
+    """
 
     entry_code: str | None = None
 
@@ -91,8 +100,10 @@ class GateToggleBody(BaseModel):
 
 class MintCodeBody(BaseModel):
     """The management mint body: an optional operator label and an optional expiry.
+
     ``expires_at`` must be timezone-aware and in the future (the code's Redis TTL is
-    derived from it)."""
+    derived from it).
+    """
 
     label: str | None = Field(default=None, max_length=_MAX_LABEL_CHARS)
     expires_at: datetime | None = None
@@ -117,6 +128,8 @@ def _validated_retry_key(value: str | None) -> str | None:
 
 
 class MessageBody(IdentityBody):
+    """A visitor-sent chat message: the text plus an optional retry key and tapped-option id."""
+
     text: str = Field(max_length=_MAX_TEXT_CHARS)
     # Optional retry key. A POST whose reply never reached the browser is re-sent
     # with the SAME key, and the door then derives the bridge's dedup id from it, so
@@ -157,7 +170,8 @@ class FormSubmissionBody(BaseModel):
 
     ``values`` must be a NON-EMPTY JSON object — a transport-shape rule ({} carries
     nothing to bridge and would render a blank message), never schema validation:
-    nothing in this door checks the values against the form's stored schema."""
+    nothing in this door checks the values against the form's stored schema.
+    """
 
     values: dict[str, Any]
     client_message_id: str | None = None
@@ -180,7 +194,9 @@ class FormSubmissionBody(BaseModel):
 
 class MessageAcceptedResponse(BaseModel):
     """Ack of a bridged inbound turn — the id the transcript keys the message on.
-    Shared by the messages door and the form-submission door (same wire shape)."""
+
+    Shared by the messages door and the form-submission door (same wire shape).
+    """
 
     message_id: str
 
@@ -192,16 +208,20 @@ class AnswerResultResponse(BaseModel):
 
 
 class SessionRotatedResponse(BaseModel):
-    """Ack of a session rotation. The fresh session token rides a Set-Cookie header,
-    not this body."""
+    """Ack of a session rotation.
+
+    The fresh session token rides a Set-Cookie header, not this body.
+    """
 
     status: Literal["rotated"]
 
 
 class CodeView(BaseModel):
-    """One minted entry code as the management door lists it — its id and metadata,
-    never the raw code. ``created_at``/``expires_at`` are ISO-8601 strings as stored
-    (mirrors the ``EntryCode`` record)."""
+    """One minted entry code as the management door lists it — its id and metadata, never the raw code.
+
+    ``created_at``/``expires_at`` are ISO-8601 strings as stored (mirrors the
+    ``EntryCode`` record).
+    """
 
     code_id: str
     label: str | None
@@ -223,9 +243,12 @@ class GateToggledResponse(BaseModel):
 
 
 class MintedCodeResponse(BaseModel):
-    """A freshly minted entry code. ``code`` is the raw code, returned this once only
-    (a one-time secret — only its hash is stored). ``expires_at`` is an ISO-8601
-    string, or ``None`` for a code with no expiry."""
+    """A freshly minted entry code.
+
+    ``code`` is the raw code, returned this once only (a one-time secret — only its
+    hash is stored). ``expires_at`` is an ISO-8601 string, or ``None`` for a code
+    with no expiry.
+    """
 
     code: str
     code_id: str
@@ -239,9 +262,11 @@ class CodeRevokedResponse(BaseModel):
 
 
 def _object_refusal(value: dict[str, Any], what: str) -> str | None:
-    """The ONE transport bound on a visitor-sent JSON object — the answer door's form
-    answer and the form door's values ride it alike; ``what`` names the field in the
-    refusal. ``None`` when the object is forwardable.
+    """The ONE transport bound on a visitor-sent JSON object.
+
+    The answer door's form answer and the form door's values ride it alike;
+    ``what`` names the field in the refusal. ``None`` when the object is
+    forwardable.
 
     ``allow_nan=False`` rejects a non-finite float nested in the object:
     ``json.loads`` accepts ``Infinity``/``NaN``, and forwarding one emits invalid
@@ -249,7 +274,8 @@ def _object_refusal(value: dict[str, Any], what: str) -> str | None:
     the page's own JSON parse on every reconnect for the whole transcript TTL. The
     dump also measures the exact forwarded bytes. ``RecursionError`` is caught with
     the same refusal: the encoder's depth limit is its own, so an object the parse
-    admitted can still overrun it here."""
+    admitted can still overrun it here.
+    """
     try:
         serialized = json.dumps(value, allow_nan=False)
     except (ValueError, RecursionError):
@@ -264,7 +290,8 @@ def _answer_refusal(answer: Any) -> str | None:
 
     A scalar answer (text/confirm/select) is one string, number, or boolean; a form
     answer is a JSON object bounded by its serialized size. The callback door stays
-    authoritative on format and schema match — this only bounds what is forwarded."""
+    authoritative on format and schema match — this only bounds what is forwarded.
+    """
     if isinstance(answer, dict):
         return _object_refusal(answer, "answer object")
     if not isinstance(answer, _ANSWER_TYPES):

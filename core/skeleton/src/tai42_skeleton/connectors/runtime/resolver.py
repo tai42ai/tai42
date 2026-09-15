@@ -73,7 +73,8 @@ class ManagedAuth:
     ``Authorization: Bearer`` header or the stdio ``_meta`` token field).
     No-auth with config: ``access_token`` is None and ``headers`` (http) or
     ``env`` (stdio) carry the client-supplied static values the adapter merges
-    into the request at call time."""
+    into the request at call time.
+    """
 
     access_token: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
@@ -81,9 +82,11 @@ class ManagedAuth:
 
 
 class ConnectorAuthExpiredError(ConnectorError):
-    """Raised by the mcp adapter when ``token_expired`` persists after a
-    force-refresh + retry. Carries the connection identity the user needs to
-    reconnect so callers can branch without parsing the message."""
+    """Raised by the mcp adapter when ``token_expired`` persists after a force-refresh + retry.
+
+    Carries the connection identity the user needs to reconnect so callers can branch
+    without parsing the message.
+    """
 
     def __init__(
         self,
@@ -92,6 +95,7 @@ class ConnectorAuthExpiredError(ConnectorError):
         provider_id: str,
         sub_service: str,
     ) -> None:
+        """Store the connection identity the user must reconnect and format the message."""
         super().__init__(
             f"token_expired persisted after force-refresh for "
             f"connection_id={connection_id} "
@@ -103,7 +107,10 @@ class ConnectorAuthExpiredError(ConnectorError):
 
 
 class ConnectorConnectionError(ConnectorError):
+    """A managed connection is missing or unusable — base class for the typed connector errors."""
+
     def __init__(self, message: str, *, connection_id: str):
+        """Store the failing ``connection_id`` so callers can branch without parsing the message."""
         super().__init__(message)
         self.connection_id = connection_id
 
@@ -152,10 +159,12 @@ def _managed_auth(record: ConnectionRecord) -> ManagedAuth:
 
 
 async def _persist(record: ConnectionRecord, *, expected_blob: bytes) -> bool:
-    """Encrypt and compare-and-set the record against the ciphertext the refresh
-    began with. Returns ``True`` if the durable write committed, ``False`` on a
-    CAS miss — a peer rotated the stored record while our refresh was in flight,
-    so our result is stale and must not overwrite theirs."""
+    """Encrypt and compare-and-set the record against the ciphertext the refresh began with.
+
+    Returns ``True`` if the durable write committed, ``False`` on a CAS miss — a peer
+    rotated the stored record while our refresh was in flight, so our result is stale
+    and must not overwrite theirs.
+    """
     blob = crypto.encrypt(
         record.to_storage_json().encode("utf-8"),
         connection_id=record.connection_id,
@@ -169,8 +178,10 @@ async def _persist(record: ConnectionRecord, *, expected_blob: bytes) -> bool:
 
 
 async def _load(connection_id: str) -> tuple[ConnectionRecord, bytes]:
-    """Load the record together with the ciphertext it decrypted from (the CAS
-    handle for a later write-back)."""
+    """Load the record together with the ciphertext it decrypted from.
+
+    The ciphertext is the CAS handle for a later write-back.
+    """
     try:
         return await load_record_with_blob(connection_id)
     except ConnectionNotFoundError as exc:
@@ -184,11 +195,13 @@ async def _load(connection_id: str) -> tuple[ConnectionRecord, bytes]:
 
 
 async def _serve_rotated_peer(connection_id: str) -> ManagedAuth:
-    """Resolve the credential to serve after our write-back lost the
-    compare-and-set: a peer rotated the stored record while our refresh was in
-    flight (the connection lock's TTL can elapse before a slow refresh finishes
-    its retry budget). Re-read the peer's current record once and serve it
-    instead of clobbering it with our stale result."""
+    """Resolve the credential to serve after our write-back lost the compare-and-set.
+
+    A peer rotated the stored record while our refresh was in flight (the connection
+    lock's TTL can elapse before a slow refresh finishes its retry budget). Re-read the
+    peer's current record once and serve it instead of clobbering it with our stale
+    result.
+    """
     logger.warning(
         "connectors: refresh write-back lost the compare-and-set for %s — a "
         "concurrent refresh rotated the record; serving the peer's record",
@@ -215,8 +228,9 @@ def _serve_peer(peer: ConnectionRecord) -> ManagedAuth:
 
 
 async def _refresh(record: ConnectionRecord, started_blob: bytes) -> ManagedAuth:
-    """Drive the upstream OAuth refresh and persist the result. Must run under
-    :func:`connection_lock`.
+    """Drive the upstream OAuth refresh and persist the result.
+
+    Must run under :func:`connection_lock`.
 
     Always refreshes — both callers have already decided a refresh is needed
     (the freshness gate lives in :func:`resolve_managed_auth` under the lock;
@@ -294,9 +308,11 @@ async def _refresh(record: ConnectionRecord, started_blob: bytes) -> ManagedAuth
 
 
 def _refresh_prerequisites(record: ConnectionRecord) -> tuple[ProviderDescriptor, str]:
-    """Assert the record can be refreshed — a refresh token is present and the provider
-    descriptor still resolves — returning the descriptor and the refresh token, or raising
-    the typed :class:`ConnectorConnectionError`."""
+    """Assert the record can be refreshed, returning the descriptor and refresh token.
+
+    A refresh token must be present and the provider descriptor must still resolve;
+    otherwise the typed :class:`ConnectorConnectionError` is raised.
+    """
     connection_id = record.connection_id
     if record.refresh_token is None:
         # An oauth record without a refresh token cannot be refreshed — corrupt
@@ -319,8 +335,11 @@ def _refresh_prerequisites(record: ConnectionRecord) -> tuple[ProviderDescriptor
 
 
 def _apply_refreshed_tokens(record: ConnectionRecord, token_resp: oauth_client.TokenResponse) -> None:
-    """Write the refreshed access token, any rotated refresh token (rotation-style
-    providers), HEALTHY state, and any newly granted scopes onto the record."""
+    """Write the refresh result onto the record.
+
+    The refreshed access token, any rotated refresh token (rotation-style providers),
+    HEALTHY state, and any newly granted scopes are written onto the record.
+    """
     record.access_token = SecretStr(token_resp.access_token)
     record.access_token_expires_at = token_resp.expires_at
     if token_resp.refresh_token:
@@ -394,10 +413,12 @@ async def resolve_managed_auth(
 
 
 def _resolve_no_auth(record: ConnectionRecord, connection_id: str, sub_service: str) -> ManagedAuth | None:
-    """The ``kind == "none"`` resolution: no lock, no freshness gate, no refresh. Returns
-    None when the connection carries no client config (inject nothing), else a credential
-    carrying the config_values on the sub-service's transport channel (env for stdio,
-    headers for http)."""
+    """The ``kind == "none"`` resolution: no lock, no freshness gate, no refresh.
+
+    Returns None when the connection carries no client config (inject nothing), else a
+    credential carrying the config_values on the sub-service's transport channel (env
+    for stdio, headers for http).
+    """
     if not record.config_values:
         return None
     try:
@@ -416,10 +437,13 @@ def _resolve_no_auth(record: ConnectionRecord, connection_id: str, sub_service: 
 
 
 async def _resolve_oauth_refresh(connection_id: str) -> ManagedAuth:
-    """The OAuth slow path: fast-fail on a live refresh-cooldown breaker before even
-    queueing on the lock (so a failing connection cannot re-burn the full retry budget on
-    every call and stampede the lock-timeout waiters behind it), then under the lock re-load
-    and re-check freshness/cooldown/reconnect before driving :func:`_refresh`."""
+    """The OAuth slow path: refresh under the connection lock, guarded by the cooldown breaker.
+
+    Fast-fail on a live refresh-cooldown breaker before even queueing on the lock (so a
+    failing connection cannot re-burn the full retry budget on every call and stampede
+    the lock-timeout waiters behind it), then under the lock re-load and re-check
+    freshness/cooldown/reconnect before driving :func:`_refresh`.
+    """
     if await refresh_cooldown_active(connection_id):
         raise ConnectorRefreshFailingError(
             f"connection {connection_id} is in refresh cooldown after a failing refresh",

@@ -1,5 +1,4 @@
-"""Build the ``ClaudeAgentOptions`` PAYLOAD — a plain JSON-able dict the in-session runner
-turns into the real SDK object.
+"""Build the ``ClaudeAgentOptions`` PAYLOAD — a plain JSON-able dict the in-session runner turns into an SDK object.
 
 The adapter never imports the SDK, so it ships the runner a description of the options and the
 runner constructs ``ClaudeAgentOptions`` from it. Two security invariants are baked in here:
@@ -34,8 +33,10 @@ _TELEMETRY_ENV = {
 
 
 def build_home_env(ws: str) -> dict[str, str]:
-    """The HOME / ``CLAUDE_CONFIG_DIR`` / XDG targets, all pinned at ``{ws}/.claude-home`` so no
-    host-user directory is ever read or written."""
+    """The HOME / ``CLAUDE_CONFIG_DIR`` / XDG targets, all pinned at ``{ws}/.claude-home``.
+
+    Pinning them keeps any host-user directory from being read or written.
+    """
     home = f"{ws}/.claude-home"
     return {
         "HOME": home,
@@ -48,9 +49,11 @@ def build_home_env(ws: str) -> dict[str, str]:
 
 
 def build_env_allowlist(ws: str) -> dict[str, str]:
-    """The FIXED non-secret env the spawned claude runs under: telemetry-off + the pinned
-    HOME/XDG targets. The host env is never spread; secret values ride ``spec.env`` and are
-    named in ``env_passthrough`` (see :func:`build_options_payload`)."""
+    """The FIXED non-secret env the spawned claude runs under: telemetry-off + the pinned HOME/XDG targets.
+
+    The host env is never spread; secret values ride ``spec.env`` and are named in ``env_passthrough``
+    (see :func:`build_options_payload`).
+    """
     return {**_TELEMETRY_ENV, **build_home_env(ws)}
 
 
@@ -129,8 +132,11 @@ def build_options_payload(
 
 
 def credential_env_names(model_env_name: str, static_env_cred_names: list[str]) -> list[str]:
-    """The secret env-var names to pass through: the one model credential plus any STATIC
-    ``delivery="env"`` service creds. Sanity-checks the model env name is one of the two auth
-    vars, so a typo never silently omits the credential."""
-    assert model_env_name in {ANTHROPIC_API_KEY_ENV, CLAUDE_CODE_OAUTH_TOKEN_ENV}
+    """The secret env-var names to pass through: the one model credential plus any static service creds.
+
+    The static creds are ``delivery="env"``. Sanity-checks the model env name is one of the two auth vars,
+    so a typo never silently omits the credential.
+    """
+    if model_env_name not in {ANTHROPIC_API_KEY_ENV, CLAUDE_CODE_OAUTH_TOKEN_ENV}:
+        raise AssertionError
     return [model_env_name, *static_env_cred_names]

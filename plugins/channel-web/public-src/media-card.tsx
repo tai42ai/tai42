@@ -23,8 +23,8 @@
  * the reply controls go inert, since no message can land. A link action stays
  * openable even then: it sends nothing, so an ended session does not disable it.
  */
-import type { ReactElement } from 'react';
 import { Button, ExternalLinkIcon, Markdown } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
 
 import type {
   CardOption,
@@ -108,6 +108,7 @@ function MediaElement({ element }: { readonly element: MediaItem }): ReactElemen
       <figure className="tcw-media-figure">
         {/* An agent-sent clip carries no <track>; its optional text caption renders
             as the figcaption label below. */}
+        {/* eslint-disable-next-line jsx-a11y/media-has-caption -- agent video has no caption track; a text figcaption is rendered below */}
         <video className="tcw-media-video" src={element.url} controls preload="metadata" />
         {element.caption !== null ? (
           <figcaption className="tcw-media-caption">{element.caption}</figcaption>
@@ -118,6 +119,7 @@ function MediaElement({ element }: { readonly element: MediaItem }): ReactElemen
   if (element.kind === 'audio') {
     return (
       <figure className="tcw-media-figure">
+        {/* eslint-disable-next-line jsx-a11y/media-has-caption -- agent audio has no caption track; a text figcaption is rendered below */}
         <audio className="tcw-media-audio" src={element.url} controls preload="metadata" />
         {element.caption !== null ? (
           <figcaption className="tcw-media-caption">{element.caption}</figcaption>

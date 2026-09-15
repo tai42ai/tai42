@@ -29,8 +29,11 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class UrlGuardError(Exception):
-    """Raised when a target host cannot be resolved or is rejected as non-public, or when a
-    response exceeds the guard's size cap or its redirect chain exceeds ``max_redirects``."""
+    """Raised when a target host is unresolvable, non-public, over the size cap, or over-redirected.
+
+    Covers a host that cannot be resolved or is rejected as non-public, a response that
+    exceeds the guard's size cap, and a redirect chain that exceeds ``max_redirects``.
+    """
 
 
 class UrlGuardSettings(TaiBaseSettings):
@@ -90,8 +93,9 @@ def _is_blocked_address(ip_text: str, allow_nets: list[IPv4Network | IPv6Network
 
 
 async def resolve_and_validate(host: str) -> str:
-    """Resolve ``host``, reject it if any resolved address is non-public, and
-    return the first validated address to connect to (the "pin").
+    """Resolve ``host``, reject non-public addresses, and return the first validated address.
+
+    The returned address is the one to connect to (the "pin").
 
     Resolving once and connecting to the returned address closes DNS-rebinding:
     the same lookup that is validated is the one the connection uses, so an
@@ -124,8 +128,10 @@ async def resolve_and_validate(host: str) -> str:
 
 def enforce_size(nbytes: int) -> None:
     """Raise :class:`UrlGuardError` when ``nbytes`` exceeds the configured cap.
+
     A no-op when the guard is disabled. Never truncates — an over-cap response is
-    refused loudly."""
+    refused loudly.
+    """
     settings = url_guard_settings()
     if not settings.enabled:
         return

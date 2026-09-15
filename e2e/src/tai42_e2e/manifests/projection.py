@@ -61,7 +61,7 @@ def build_projection_authz_stack(res: StackResources, variants: Variants) -> Sta
 
     The same projected surface as ``build_projection_stack`` but with the identity
     provider + Postgres policy store wired ON, so a non-privileged key dispatching a
-    projected op over MCP is denied at the tool edge (a ``PermissionDenied``-backed
+    projected op over MCP is denied at the tool edge (a ``PermissionDeniedError``-backed
     ``ToolError``). The route table is seeded by ``seed_projection_authz`` before
     boot."""
     manifest = _projection_manifest(variants, dict(_PROJECTED_API_TOOLS))

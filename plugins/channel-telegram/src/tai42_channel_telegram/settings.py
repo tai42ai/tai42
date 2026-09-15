@@ -21,6 +21,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class TelegramSettings(TaiBaseSettings):
+    """``CHANNEL_TELEGRAM_*`` settings: bot credential, recipient allowlist, webhook secret, and HTTP budget."""
+
     model_config = SettingsConfigDict(env_prefix="CHANNEL_TELEGRAM_")
 
     # The bot credential (from BotFather). SecretStr keeps it out of any repr/log;
@@ -49,19 +51,21 @@ class TelegramSettings(TaiBaseSettings):
     @field_validator("allowed_recipients", mode="before")
     @classmethod
     def _parse_allowed_recipients(cls, value: object) -> object:
-        """Parse the allowlist from a JSON list (bracketed string), a
-        comma-separated string, or a list; entries must be strings, stripped,
-        empties dropped. Any other shape raises loudly."""
+        """Parse the allowlist from a JSON list (bracketed string), a comma-separated string, or a list.
+
+        Entries must be strings, stripped, empties dropped. Any other shape raises
+        loudly.
+        """
         if isinstance(value, str):
             stripped = value.strip()
             # JSON text opening with "[" parses to a list or raises loudly.
             value = json.loads(stripped) if stripped.startswith("[") else stripped.split(",")
         if not isinstance(value, list):
-            raise ValueError("allowed_recipients must be a comma-separated string or a list of chat addresses")
+            raise ValueError("allowed_recipients must be a comma-separated string or a list of chat addresses")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         entries: list[str] = []
         for item in value:
             if not isinstance(item, str):
-                raise ValueError("allowed_recipients entries must be strings")
+                raise ValueError("allowed_recipients entries must be strings")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
             entry = item.strip()
             if entry:
                 entries.append(entry)
@@ -81,17 +85,21 @@ class TelegramCorrelationSettings(RedisConnectionSettings):
 
 @settings_cache
 def telegram_settings() -> TelegramSettings:
+    """Return the process-cached :class:`TelegramSettings`."""
     return TelegramSettings()
 
 
 @settings_cache
 def telegram_correlation_settings() -> TelegramCorrelationSettings:
+    """Return the process-cached :class:`TelegramCorrelationSettings`."""
     return TelegramCorrelationSettings()
 
 
 def bot_numeric_id(token: str) -> str:
-    """The bot's numeric id — the token's ``<digits>:<secret>`` prefix. A token
-    with no ``:`` or a non-numeric prefix is malformed and raises loudly."""
+    """The bot's numeric id — the token's ``<digits>:<secret>`` prefix.
+
+    A token with no ``:`` or a non-numeric prefix is malformed and raises loudly.
+    """
     prefix, sep, _ = token.partition(":")
     if not sep or not prefix.isdigit():
         raise ValueError("CHANNEL_TELEGRAM_BOT_TOKEN is malformed; expected '<numeric bot id>:<secret>'")

@@ -1,5 +1,7 @@
-"""The manifest-relevant surface a plugin descriptor declares, and the reader
-that parses a ``tai-plugin.yml`` ``provides`` block into it."""
+"""The manifest-relevant surface a plugin descriptor declares, and its ``tai-plugin.yml`` reader.
+
+The reader parses a ``tai-plugin.yml`` ``provides`` block into the descriptor.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +21,8 @@ class Provides:
     its own Redis binding can be supplied (a channel refuses to register its doors
     without one). ``install_only`` lists the provide kinds whose provider cannot be
     exercised by a boot (its lifecycle needs a live external service CI has no
-    stand-in for) — reported, never booted."""
+    stand-in for) — reported, never booted.
+    """
 
     routers: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
@@ -56,9 +59,11 @@ class Provides:
     network: bool = False
 
     def has_boot_surface(self) -> bool:
-        """True when the descriptor declares a surface the gate can MOUNT into a
-        boot. False means nothing loads the plugin's module — a core-only boot that
-        proves nothing (the hollow pass this gate exists to prevent)."""
+        """True when the descriptor declares a surface the gate can MOUNT into a boot.
+
+        False means nothing loads the plugin's module — a core-only boot that
+        proves nothing (the hollow pass this gate exists to prevent).
+        """
         return bool(
             self.routers
             or self.tools
@@ -144,8 +149,11 @@ _ADDITIVE_HANDLERS = {
 
 
 def _read_top_level(provides: Provides, plugin_yaml: dict) -> None:
-    """Fold the descriptor's top-level (non-``provides``) surface into ``provides``:
-    the extra ``lifecycle_modules``, the migration component, and the network permission."""
+    """Fold the descriptor's top-level (non-``provides``) surface into ``provides``.
+
+    Covers the extra ``lifecycle_modules``, the migration component, and the
+    network permission.
+    """
     for module in plugin_yaml.get("lifecycle_modules") or []:
         provides.lifecycle.append(module)
     if plugin_yaml.get("migrations"):
@@ -166,7 +174,8 @@ def read_provides(plugin_yaml: dict) -> Provides:
     appended too. A kind whose provider cannot be exercised by a boot
     (``config`` — see :data:`_INSTALL_ONLY_KINDS`) is recorded on ``install_only`` so
     it is reported, never mounted. One plugin is booted ALONE, so the exclusive slots
-    it selects never contend with another consumer's."""
+    it selects never contend with another consumer's.
+    """
     provides = Provides()
     for entry in plugin_yaml.get("provides") or []:
         kind = entry.get("kind")

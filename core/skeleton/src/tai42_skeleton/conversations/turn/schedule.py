@@ -43,12 +43,14 @@ def _schedule_turn(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> asyncio.Task[ConversationRecord]:
-    """Schedule ``intake``'s turn as a background task consuming the caller's reservation;
-    returns the task whose result is the completed :class:`ConversationRecord`.
+    """Schedule ``intake``'s turn as a background task consuming the caller's reservation.
+
+    Returns the task whose result is the completed :class:`ConversationRecord`.
 
     The intake lease is refreshed OUTSIDE the caps, so a turn queued behind the FIFO reads
     as live too. ``caps`` MUST be the instance the caller reserved on, or the reservation is
-    released on a different instance and the slot leaks."""
+    released on a different instance and the slot leaks.
+    """
 
     async def _run() -> ConversationRecord:
         async with _intake_lease_held(intake.message_id, intake_token), caps.run_reserved(intake.thread_id):
@@ -74,9 +76,11 @@ def _schedule_turn(
 
 @contextlib.asynccontextmanager
 async def _intake_lease_held(message_id: str, token: str) -> AsyncIterator[None]:
-    """Refresh ``message_id``'s intake lease for the body's duration, so the intake re-drive
-    reads the turn as LIVE and leaves the record to this worker — whether it is running or
-    still queued behind the caps."""
+    """Refresh ``message_id``'s intake lease for the body's duration.
+
+    So the intake re-drive reads the turn as LIVE and leaves the record to this worker — whether it
+    is running or still queued behind the caps.
+    """
     refresher = asyncio.create_task(_refresh_intake_lease(message_id, token))
     try:
         yield
@@ -87,9 +91,11 @@ async def _intake_lease_held(message_id: str, token: str) -> AsyncIterator[None]
 
 
 async def _refresh_intake_lease(message_id: str, token: str) -> None:
-    """Re-take the intake lease every ``intake_claim_refresh_seconds`` until the record
-    leaves intake or the lease is lost. A refresh that fails is logged and retried — a
-    heartbeat that died quietly would let a live turn be reaped as stranded."""
+    """Re-take the intake lease every ``intake_claim_refresh_seconds`` until it is released or lost.
+
+    Runs until the record leaves intake or the lease is lost. A refresh that fails is logged and
+    retried — a heartbeat that died quietly would let a live turn be reaped as stranded.
+    """
     store = accessors._store()
     settings = store.settings
     while True:
@@ -136,8 +142,11 @@ def _spawn_delivery_on_success(task: asyncio.Task[ConversationRecord], message_i
 
 
 def _spawn_intake_resolution(message_id: str) -> None:
-    """Resolve a record this worker left at intake, in this worker, now — this worker owns
-    it, and waiting out its intake lease would hold the message unanswered for that long."""
+    """Resolve a record this worker left at intake, in this worker, now.
+
+    This worker owns it, and waiting out its intake lease would hold the message unanswered for that
+    long.
+    """
     task = asyncio.create_task(redrive._resolve_stranded_intake(message_id))
     _TURN_TASKS.add(task)
     task.add_done_callback(_on_intake_resolution_done)

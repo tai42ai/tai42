@@ -24,7 +24,7 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.route_registry import route_registry
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations._submitted_tool_authz import authorize_submitted_tool
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.operations.registry import operation_registry
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -113,7 +113,10 @@ def test_a_fenced_tool_is_denied_for_a_non_admin_submitter(ac) -> None:
     # the per-tag LEVEL pass fencing the operation to an admin.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            with _as_caller("k-scoped"), pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH} is not permitted"):
+            with (
+                _as_caller("k-scoped"),
+                pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"),
+            ):
                 await authorize_submitted_tool(_FENCED_OP, _FENCED_ARGS)
 
     asyncio.run(run())

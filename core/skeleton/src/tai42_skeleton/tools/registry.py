@@ -1,3 +1,5 @@
+"""The manifest-driven tool registry: selected tools, their extension combos, and base/branch links."""
+
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 
@@ -9,7 +11,10 @@ from tai42_skeleton.extensions.registry import extension_name
 
 
 class ToolRegistry(BaseRegistry):
+    """Tracks the selected tools, their extension combos, and every branch tool's origin base."""
+
     def __init__(self, requested_tools: set[str], tool_extensions: dict[str, list[list[ExtensionElement]]]):
+        """Seed the registry from the requested tools and their manifest extension combos."""
         # Copy, never alias: the caller passes ``manifest.tools_list`` (the same
         # set object), and register_tool/unregister_tool mutate this — aliasing
         # would silently rewrite the manifest's tool list.
@@ -19,9 +24,11 @@ class ToolRegistry(BaseRegistry):
         self._register_tools(tool_extensions)
 
     def register_extend_tool(self, tool_name, extend_tool_name):
+        """Record that ``extend_tool_name`` was produced from base ``tool_name``."""
         self._extend_tools[extend_tool_name] = tool_name
 
     def register_tool(self, name: str, combos: Sequence[Sequence[ExtensionElement]] | None = None) -> None:
+        """Register ``name`` and its extension ``combos`` (idempotent for the same combos; different combos raise)."""
         # Bare ``[]`` present-check PLUS the combos — symmetric with the manifest
         # seeding in ``_register_tools``. Each combo is copied to a list so the
         # stored shape is always ``list[list[ExtensionElement]]`` regardless of the
@@ -44,6 +51,7 @@ class ToolRegistry(BaseRegistry):
         self._tools[name] = tracked
 
     def unregister_tool(self, name: str) -> None:
+        """Remove ``name`` and its combos from the registry (a no-op when absent)."""
         if name not in self._requested_tools:
             return
 
@@ -51,9 +59,9 @@ class ToolRegistry(BaseRegistry):
         self._tools.pop(name, None)
 
     def unregister_tool_base(self, tool_name: str) -> list[str]:
-        """Tear a base tool down: drop its combos, its extension BRANCH tools,
-        and its selection entry, returning the removed branch names.
+        """Tear a base tool down, returning the removed branch names.
 
+        Drops its combos, its extension BRANCH tools, and its selection entry.
         ``_extend_tools`` always holds a base SELF-ENTRY ``tool_name ->
         tool_name`` (every bound tool records itself, including the base where
         ``curr_name == orig_name``) which is load-bearing for ``missing_tools``.
@@ -70,17 +78,21 @@ class ToolRegistry(BaseRegistry):
         return branches
 
     def base_of(self, name: str) -> str:
-        """The base tool ``name`` was produced from — ``name`` itself for a base
-        (every bound tool records a self-entry), the origin base for a branch
-        (composed) tool. An unbound name reports itself."""
+        """The base tool ``name`` was produced from (``name`` itself for a base or unbound name).
+
+        Every bound tool records a self-entry; a branch (composed) tool reports its origin base.
+        """
         return self._extend_tools.get(name, name)
 
     def is_branch(self, name: str) -> bool:
-        """Whether ``name`` is an extension BRANCH tool (produced by a combo) rather
-        than a base tool — ``base_of(name) != name``."""
+        """Whether ``name`` is an extension BRANCH tool (produced by a combo) rather than a base tool.
+
+        ``base_of(name) != name``.
+        """
         return self.base_of(name) != name
 
     def tool_extensions_iterator(self, tool_name: str) -> Iterator[list[ExtensionElement]]:
+        """Iterate the extension combos registered for ``tool_name`` (empty for an unknown name)."""
         # ``.get`` — reading an unknown name must not plant an empty defaultdict
         # entry that later shows up in ``missing_tools``.
         yield from self._tools.get(tool_name, [])
@@ -97,6 +109,7 @@ class ToolRegistry(BaseRegistry):
 
     @property
     def used_extensions(self) -> frozenset[str]:
+        """The set of extension names used across every registered tool's combos."""
         # Extract the NAME of each combo element (a bare name or a
         # ``{"name", "config"}`` mapping) — the used-extension set keys on names,
         # and a mapping element is unhashable.
@@ -108,9 +121,11 @@ class ToolRegistry(BaseRegistry):
 
     @property
     def missing_tools(self) -> frozenset[str]:
+        """The tracked tools no bound base ever produced — the set ``validation`` refuses on."""
         return frozenset(self._tools.keys()) - frozenset(self._extend_tools.values())
 
     def validation(self, ignore: frozenset[str] = frozenset()):
+        """Raise :class:`TaiValidationError` if any tool is missing, except names in ``ignore`` (failed MCP servers)."""
         # ``ignore`` holds tool names owned by MCP servers that failed their
         # viability check. They are legitimately absent (the server is down),
         # so they must not abort startup — they are tracked in

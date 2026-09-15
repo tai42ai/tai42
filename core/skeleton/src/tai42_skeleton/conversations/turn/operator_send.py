@@ -34,8 +34,9 @@ async def operator_send(
     footer: str | None = None,
     schema: dict[str, Any] | None = None,
 ) -> str:
-    """Send an operator's message ``text`` into ``thread_id`` on ``route``, returning its
-    record's ``message_id`` (a uuid4). No turn runs: the record is minted already
+    """Send an operator's message ``text`` into ``thread_id`` on ``route``, returning its ``message_id``.
+
+    The returned ``message_id`` is a uuid4. No turn runs: the record is minted already
     ``answered`` carrying the operator's text and handed to the delivery machine, which sends
     it from the route identity exactly as it sends a produced answer (same chunking, ledger
     and receipts). Allowed in either mode; it never flips the mode.
@@ -77,7 +78,8 @@ async def operator_send(
     ``sync_door_wait_seconds``: a wait past it — behind a turn possibly HITL-paused on another
     worker — raises the loud, retriable :class:`ThreadBusyError` (503) rather than blocking the
     caller past the proxy timeout. A full FIFO raises the loud, retriable
-    :class:`ThreadQueueOverflowError` (503) before anything is written."""
+    :class:`ThreadQueueOverflowError` (503) before anything is written.
+    """
     # A rich operator send (media/template/options/schema present) stores one
     # :class:`AnswerPart`
     # carrying the text plus its rich fields — the shape the delivery machine sends as a rich

@@ -25,7 +25,7 @@ def _check_object_shape_and_depth(value: object, what: str) -> None:
     # nesting stays within ``INBOUND_FORM_MAX_DEPTH`` container levels — checked ITERATIVELY, so an
     # arbitrarily deep (or self-referential) payload is a clean refusal, never a ``RecursionError``.
     if not isinstance(value, dict):
-        raise ValueError(f"{what} must be a JSON object")
+        raise ValueError(f"{what} must be a JSON object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     stack: list[tuple[object, int]] = [(value, 1)]
     while stack:
         node, depth = stack.pop()
@@ -35,7 +35,7 @@ def _check_object_shape_and_depth(value: object, what: str) -> None:
             children = cast("Mapping[object, object]", node)
             for key in children:
                 if not isinstance(key, str):
-                    raise ValueError(f"{what} object keys must be strings")
+                    raise ValueError(f"{what} object keys must be strings")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
             stack.extend((child, depth + 1) for child in children.values())
         elif isinstance(node, (list, tuple)):
             stack.extend((child, depth + 1) for child in cast("Sequence[object]", node))
@@ -76,7 +76,10 @@ def validate_bounded_object(value: object, *, what: str) -> dict[str, Any]:
 
 
 def validate_inbound_form(form: object) -> dict[str, Any]:
-    """Refuse (``ValueError``) or return the participant submission dict unchanged — the ask-less
-    form's answers bounded as pure transport by :func:`validate_bounded_object` (``what="form"``);
-    the contents stay opaque, untrusted participant data, never schema-conformant."""
+    """Refuse (``ValueError``) or return the participant submission dict unchanged.
+
+    The ask-less form's answers are bounded as pure transport by
+    :func:`validate_bounded_object` (``what="form"``); the contents stay opaque,
+    untrusted participant data, never schema-conformant.
+    """
     return validate_bounded_object(form, what="form")

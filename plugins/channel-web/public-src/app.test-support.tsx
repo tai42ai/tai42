@@ -1,6 +1,6 @@
-import type { ReactElement } from 'react';
 import { screen } from '@testing-library/react';
 import type userEvent from '@testing-library/user-event';
+import type { ReactElement } from 'react';
 
 import { ChatApp } from '@/app';
 import type { ChatItem } from '@/transcript-model';

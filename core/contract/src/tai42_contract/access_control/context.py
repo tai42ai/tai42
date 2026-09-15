@@ -31,8 +31,10 @@ _current_secret_capability: ContextVar[bool] = ContextVar("tai42_current_secret_
 
 
 def get_current_user_id() -> str | None:
-    """Return the calling user's id for the current request, or ``None`` when no
-    caller is bound — an anonymous request, or code running outside a request."""
+    """Return the calling user's id for the current request, or ``None`` when no caller is bound.
+
+    No caller is bound for an anonymous request, or for code running outside a request.
+    """
     return _current_user_id.get()
 
 
@@ -46,19 +48,18 @@ def set_request_user_id(user_id: str | None) -> Token[str | None]:
 
 
 def reset_request_user_id(token: Token[str | None]) -> None:
-    """Restore the caller id to the value captured in ``token`` by the matching
-    :func:`set_request_user_id` call."""
+    """Restore the caller id to the value captured in ``token`` by the matching :func:`set_request_user_id` call."""
     _current_user_id.reset(token)
 
 
 def caller_may_read_secrets() -> bool:
-    """Whether the current caller is authorized to read the platform's secrets — the
-    ``action=secret`` admin fence.
+    """Whether the current caller is authorized to read the platform's secrets — the ``action=secret`` admin fence.
 
     Defaults to ``False`` (fail-closed): no caller bound, an anonymous request, or
     code running outside a bound request is never secret-capable. The host binds the
     authoritative value once per request, computed from the same admin discriminator
-    the secret fence enforces."""
+    the secret fence enforces.
+    """
     return _current_secret_capability.get()
 
 
@@ -73,6 +74,8 @@ def set_request_secret_capability(capable: bool) -> Token[bool]:
 
 
 def reset_request_secret_capability(token: Token[bool]) -> None:
-    """Restore the secret-read capability to the value captured in ``token`` by the
-    matching :func:`set_request_secret_capability` call."""
+    """Restore the secret-read capability to the value captured in ``token``.
+
+    Pairs with the matching :func:`set_request_secret_capability` call.
+    """
     _current_secret_capability.reset(token)

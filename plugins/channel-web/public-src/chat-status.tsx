@@ -4,8 +4,8 @@
  * conversation could not be read (the stream carries on, so something was lost
  * without taking the page away — the hook never drops a bad frame in silence).
  */
-import type { ReactElement } from 'react';
 import { Spinner } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
 
 export function ConnectionStatus({
   reconnecting,

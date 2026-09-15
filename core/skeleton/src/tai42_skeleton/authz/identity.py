@@ -67,8 +67,10 @@ INTERNAL_PRINCIPAL = CallerIdentity(is_internal=True)
 
 
 def resolve_caller_identity() -> CallerIdentity:
-    """The external caller's identity at the current dispatch, from the request-user
-    context and the effective-scopes context the access control middleware bound.
+    """The external caller's identity at the current dispatch.
+
+    Drawn from the request-user context and the effective-scopes context the access control
+    middleware bound.
 
     ``user_id`` is ``None`` when no caller is bound — an unauthenticated external
     dispatch, which the authorization check denies while access control is enabled.

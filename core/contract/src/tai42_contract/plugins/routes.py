@@ -118,19 +118,23 @@ class RoutesDecl(BaseModel):
 
 
 def route_shape(base: str, path: str) -> tuple[str | None, ...]:
-    """Resolved segment shape of one declared route for overlap comparison: the
-    ``base`` segments followed by the ``path`` segments, each a literal text or
+    """Resolved segment shape of one declared route for overlap comparison.
+
+    The ``base`` segments followed by the ``path`` segments, each a literal text or
     ``None`` for a ``{name}`` template position. The fixed ``/api/`` root is a
-    constant prefix on every route and omitted."""
+    constant prefix on every route and omitted.
+    """
     segments: list[str | None] = list(base.split("/"))
     segments.extend(None if seg.startswith("{") else seg for seg in path.split("/")[1:])
     return tuple(segments)
 
 
 def shapes_overlap(a: tuple[str | None, ...], b: tuple[str | None, ...]) -> bool:
-    """True when two resolved shapes can match one concrete request path: equal
-    segment count and, at every position, either side is a template or the two
-    literals are equal (a concrete path instantiating a template IS an overlap)."""
+    """True when two resolved shapes can match one concrete request path.
+
+    Requires equal segment count and, at every position, either side is a template or the
+    two literals are equal (a concrete path instantiating a template IS an overlap).
+    """
     if len(a) != len(b):
         return False
     return all(sa is None or sb is None or sa == sb for sa, sb in zip(a, b, strict=True))

@@ -20,14 +20,15 @@ from opentelemetry import trace as otel_trace
 
 
 def current_scoped_public_key() -> str | None:
-    """The public key bound by the innermost active ``bind_public_key`` block,
-    or ``None`` outside any scope."""
+    """The public key bound by the innermost active ``bind_public_key`` block, or ``None`` outside any scope."""
     return _current_public_key.get(None)
 
 
 def bind_public_key(public_key: str) -> AbstractContextManager[None]:
-    """Bind the SDK's ambient project to ``public_key`` for the block, so both
-    this plugin's client resolution and the SDK's own ``get_client()`` see it."""
+    """Bind the SDK's ambient project to ``public_key`` for the block.
+
+    So both this plugin's client resolution and the SDK's own ``get_client()`` see it.
+    """
     return _set_current_public_key(public_key)
 
 
@@ -59,7 +60,7 @@ def emit_closed_span(
     end: datetime,
     trace_id: str,
     parent_span_id: str | None,
-    input: Any = None,
+    input_: Any = None,
     output: Any = None,
     level: str | None = None,
     status_message: str | None = None,
@@ -67,8 +68,10 @@ def emit_closed_span(
     usage_details: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Emit one already-closed observation with explicit start/end times into
-    the trace ``trace_id`` (nested under ``parent_span_id`` when given)."""
+    """Emit one already-closed observation with explicit start/end times into the trace ``trace_id``.
+
+    Nested under ``parent_span_id`` when given.
+    """
     remote_parent = client._create_remote_parent_span(trace_id=trace_id, parent_span_id=parent_span_id)
     with otel_trace.use_span(remote_parent):
         otel_span = client._otel_tracer.start_span(name=name, start_time=_to_ns(start))
@@ -76,7 +79,7 @@ def emit_closed_span(
         obs = client._create_observation_from_otel_span(
             otel_span=otel_span,
             as_type=as_type,  # type: ignore[arg-type]  # narrowed by the writer's SpanKind map
-            input=input,
+            input=input_,
             output=output,
             metadata=metadata,
             level=level,  # type: ignore[arg-type]  # MonitoringLevel values match the SDK literal
@@ -88,8 +91,10 @@ def emit_closed_span(
 
 
 def set_trace_attributes(obs: Any, *, name: str | None = None, tags: list[str] | None = None) -> None:
-    """Set the enclosing trace's name/tags via OTel attributes on ``obs``'s
-    underlying span (``obs`` is the SDK observation behind a ``Span`` handle)."""
+    """Set the enclosing trace's name/tags via OTel attributes on ``obs``'s underlying span.
+
+    ``obs`` is the SDK observation behind a ``Span`` handle.
+    """
     if name is not None:
         obs._otel_span.set_attribute(LangfuseOtelSpanAttributes.TRACE_NAME, name)
     if tags is not None:

@@ -22,9 +22,11 @@ class HttpFacet(_Facet):
     """``app.http`` — middleware + custom-route registration (``AppHttp``)."""
 
     def middleware(self, cls: type | None = None, **options: Any) -> Callable[..., Any]:
+        """Register an ASGI middleware class (usable bare or with options)."""
         return self._app._http_surface.middleware(cls, **options)
 
     def mount_base(self) -> str:
+        """Return the URL prefix custom routes and mounts are served under."""
         return self._app._http_surface.mount_base()
 
     def custom_route(
@@ -46,6 +48,7 @@ class HttpFacet(_Facet):
         no_body_reason: str | None = None,
         enveloped: bool = True,
     ) -> Callable[[Callable[[Request], Awaitable[Response]]], Callable[[Request], Awaitable[Response]]]:
+        """Register a custom HTTP route with its schema, auth, and OpenAPI metadata."""
         return self._app._http_surface.custom_route(
             path,
             methods,
@@ -65,4 +68,5 @@ class HttpFacet(_Facet):
         )
 
     def use_raw_path_key(self, path_prefix: str) -> None:
+        """Serve routes under ``path_prefix`` from the raw, undecoded request path."""
         return self._app._http_surface.use_raw_path_key(path_prefix)

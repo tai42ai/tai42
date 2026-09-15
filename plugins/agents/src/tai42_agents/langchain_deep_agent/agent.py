@@ -99,6 +99,8 @@ register_chained_park_tool()
     meta={"tai42/crash_resume": langchain_deep_agent_crash_resume()},
 )
 class DeepAgent(Agent):
+    """A LangChain deep agent: planning, subagents, skills, and a filesystem."""
+
     tool_name: ClassVar[str] = "langchain_deep_agent"
     tool_description: ClassVar[str] = (
         "Create and run a deep agent (planning + subagents + skills + filesystem). "
@@ -222,7 +224,7 @@ class DeepAgent(Agent):
                     agent_input: Any = Command(resume=resume)
                 else:
                     # The resume/user guard above makes rendered_user a str on this branch.
-                    assert rendered_user is not None
+                    assert rendered_user is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
                     agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
 
                 # The run face returns the park RECEIPT to its caller and resumes out of band, so
@@ -380,8 +382,7 @@ class DeepAgent(Agent):
         langgraph_config: dict[str, Any] | None = None,
         **_: Any,
     ) -> AsyncIterator[StreamEvent]:
-        """Run one turn and yield the platform event stream, then one
-        :class:`InterruptFinal` per pending interrupt.
+        """Run one turn and yield the platform event stream, then one :class:`InterruptFinal` per interrupt.
 
         Provide exactly one of ``user_message`` (a fresh turn) or ``resume``
         (answering a prior interrupt). ``user_message`` / ``system_message`` are each a
@@ -465,7 +466,7 @@ class DeepAgent(Agent):
                     agent_input: Any = Command(resume=resume)
                 else:
                     # The exactly-one-of guard above makes user_message (and its render) non-None here.
-                    assert rendered_user is not None
+                    assert rendered_user is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
                     agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
 
                 # Assemble the park identity for this streaming turn: it parks only when a
@@ -541,8 +542,7 @@ class DeepAgent(Agent):
         structured_strategy: Any = None,
         park: ParkIdentity | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Project a built agent's run into contract events, then one terminal
-        park/interrupt event per pending pause.
+        """Project a built agent's run into contract events, then one terminal park/interrupt event per pause.
 
         The shared streaming core behind both faces, so a thread poisoned by an
         aborted turn is repaired here before the run. After the drive stops the
@@ -579,13 +579,15 @@ class DeepAgent(Agent):
         llm_kwargs: dict[str, Any] | None,
         session: SandboxSession | None = None,
     ) -> Any:
-        """Resolve the LLM / checkpointer / store from the registries and assemble
-        the compiled deep agent. The caller builds the run config separately.
+        """Resolve the LLM / checkpointer / store from the registries and assemble the compiled deep agent.
+
+        The caller builds the run config separately.
 
         ``session`` is the acquired durable sandbox session threaded through to the backend:
         set on a run/astream drive (scratch on the workspace VOLUME via
         ``SandboxSessionBackend``), ``None`` on the append path (the non-sandbox
-        ``StateBackend`` — a checkpoint-only write needs no session)."""
+        ``StateBackend`` — a checkpoint-only write needs no session).
+        """
         provider = llm_provider or llm_provider_settings().llm
         llm = await get_llm_async(provider=provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
 
@@ -640,7 +642,8 @@ class DeepAgent(Agent):
         9999, so the effective step budget is MULTIPLICATIVE across nesting depth.
 
         ``session`` is the acquired durable sandbox session the caller threads through to
-        the backend (``None`` leaves the non-sandbox ``StateBackend`` default)."""
+        the backend (``None`` leaves the non-sandbox ``StateBackend`` default).
+        """
         agent = await self._resolve_and_build(
             tools=tools,
             subagents=subagents,
@@ -665,9 +668,9 @@ class DeepAgent(Agent):
         thread_id: str,
         resume_map: dict[str, dict[str, Any]],
     ) -> Any:
-        """Rebuild the parked graph from its stored identity and resume its park interrupts BY
-        ID with all answers — the deep-agent resume face the ``agent_resume`` continuation
-        drives.
+        """Rebuild the parked graph from its stored identity and resume its park interrupts BY ID with all answers.
+
+        The deep-agent resume face the ``agent_resume`` continuation drives.
 
         ``resume_map`` is ``{interrupt_id: {interaction_id: answer}}`` over every park interrupt
         the super-step suspended on — one key for a single park, several for parallel subagent
@@ -684,7 +687,8 @@ class DeepAgent(Agent):
         REATTACHES THE SAME durable volume the park wrote, so a cross-worker resume drives
         the same scratch tree. Resume is a turn like any other: it reacquires the session, takes
         the shared workspace lease, and scrubs the bearer credential material on its own terminal
-        exit."""
+        exit.
+        """
         rebuild = dict(rebuild_kwargs)
         recursion_limit = rebuild.pop("recursion_limit", None)
         workspace_key = rebuild.pop("workspace_key", None)

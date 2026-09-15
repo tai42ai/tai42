@@ -15,10 +15,13 @@ _SCALAR_FORM_TYPES = ("string", "boolean", "integer", "number")
 
 
 class FormOption(BaseModel):
-    """One per-send choice for a form field: ``value`` is the string submitted as
-    the answer, ``label`` (when set) is shown to the human in its place. A per-send
-    option list REPLACES a property's schema ``enum`` for ONE send — the published
-    form is unchanged, so a variant needs no re-publish. Frozen."""
+    """One per-send choice for a form field. Frozen.
+
+    ``value`` is the string submitted as the answer, ``label`` (when set) is shown
+    to the human in its place. A per-send option list REPLACES a property's schema
+    ``enum`` for ONE send — the published form is unchanged, so a variant needs no
+    re-publish.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -50,7 +53,8 @@ class FormData(BaseModel):
     property's ``enum`` for this send only (labels shown, values submitted). The
     model holds only the shape; the cross-check against the schema (unknown
     property, a value that fails its schema, options on a non-string property, an
-    empty list) is done once by the interaction request. Frozen."""
+    empty list) is done once by the interaction request. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -59,10 +63,12 @@ class FormData(BaseModel):
 
 
 class FormPage(BaseModel):
-    """One step of a stepped form: ``title`` heads the step and ``fields`` names the
-    top-level properties shown on it. Across a form's ``pages`` every property
-    appears exactly once (the interaction request enforces the coverage); absent
-    ``pages`` means one page. Frozen."""
+    """One step of a stepped form. Frozen.
+
+    ``title`` heads the step and ``fields`` names the top-level properties shown on
+    it. Across a form's ``pages`` every property appears exactly once (the
+    interaction request enforces the coverage); absent ``pages`` means one page.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -153,7 +159,7 @@ def _check_array_form_value(name: str, prop: dict[str, Any], value: Any, options
     if items.get("type") != "string":
         raise ValueError(f"form data value for {name!r} must be a list of strings")
     if not isinstance(value, list):
-        raise ValueError(f"form data value for {name!r} must be a list of strings")
+        raise ValueError(f"form data value for {name!r} must be a list of strings")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     value_list = cast("list[Any]", value)
     if not all(isinstance(item, str) for item in value_list):
         raise ValueError(f"form data value for {name!r} must be a list of strings")
@@ -181,11 +187,13 @@ def _check_form_value(name: str, prop: dict[str, Any], value: Any, options: list
 
 
 def check_form_data(schema: dict[str, Any], data: FormData) -> None:
-    """Validate a form's per-send :class:`FormData` against its schema: every
-    ``values`` / ``options`` key is a declared top-level property, each prefilled
-    value fits its property's schema, and a per-send option list targets only a
-    string (or array-of-strings) property and is non-empty. Raises ``ValueError``
-    naming the offending field."""
+    """Validate a form's per-send :class:`FormData` against its schema.
+
+    Every ``values`` / ``options`` key must be a declared top-level property, each
+    prefilled value must fit its property's schema, and a per-send option list must
+    target only a string (or array-of-strings) property and be non-empty. Raises
+    ``ValueError`` naming the offending field.
+    """
     props = _schema_properties(schema)
     for name, option_list in data.options.items():
         prop = props.get(name)
@@ -203,10 +211,12 @@ def check_form_data(schema: dict[str, Any], data: FormData) -> None:
 
 
 def check_form_pages(schema: dict[str, Any], pages: list[FormPage]) -> None:
-    """Validate a form's ``pages`` against its schema: every top-level property
-    appears exactly once across the pages, and every named field is a declared
-    property. Raises ``ValueError`` naming the missing / duplicate / unknown
-    field."""
+    """Validate a form's ``pages`` against its schema.
+
+    Every top-level property must appear exactly once across the pages, and every
+    named field must be a declared property. Raises ``ValueError`` naming the
+    missing / duplicate / unknown field.
+    """
     declared = list(_schema_properties(schema))
     seen: list[str] = []
     for page in pages:

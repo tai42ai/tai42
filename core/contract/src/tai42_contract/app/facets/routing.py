@@ -44,7 +44,11 @@ class DeclaredRouteMetadata:
 
 @runtime_checkable
 class AppHttp(Protocol):
-    def middleware(self, cls: type[Any] | None = None, **options: Any) -> Callable[..., Any]: ...
+    """The HTTP application facet: middleware, route registration, and mount introspection."""
+
+    def middleware(self, cls: type[Any] | None = None, **options: Any) -> Callable[..., Any]:
+        """Register a middleware on the application."""
+        ...
 
     def custom_route(
         self,
@@ -117,28 +121,31 @@ class AppHttp(Protocol):
           is never emitted.
 
         The handler's narrative docstring becomes the operation description, and
-        the reload-gate ``503`` response is derived from the handler body."""
+        the reload-gate ``503`` response is derived from the handler body.
+        """
         ...
 
     def use_raw_path_key(self, path_prefix: str) -> None:
-        """Match every already-registered route whose template starts with ``path_prefix``
-        against the raw (undecoded) request path, so a path parameter whose values carry
-        ``/`` (a state record's ``{key}``, addressed as one percent-encoded segment) stays
-        ONE segment instead of splitting once the ASGI server has decoded ``%2F``; the
-        matched parameters are decoded once after the match. Called AFTER the routes are
-        registered, over their shared prefix, so it covers a family of doors at one seam. A
-        no-op where no route table is served (the offline spec harness)."""
+        """Match already-registered routes under ``path_prefix`` against the raw (undecoded) request path.
+
+        A path parameter whose values carry ``/`` (a state record's ``{key}``, addressed as one
+        percent-encoded segment) stays ONE segment instead of splitting once the ASGI server has
+        decoded ``%2F``; the matched parameters are decoded once after the match. Called AFTER the
+        routes are registered, over their shared prefix, so it covers a family of doors at one seam. A
+        no-op where no route table is served (the offline spec harness).
+        """
         ...
 
     def mount_base(self) -> str:
-        """The resolved absolute mount base of the declared plugin route module
-        importing now — ``/api/`` + the item's mount base, no trailing slash
-        (e.g. ``/api/channels/telegram``).
+        """The resolved absolute mount base of the declared plugin route module importing now.
+
+        ``/api/`` + the item's mount base, no trailing slash (e.g. ``/api/channels/telegram``).
 
         Callable ONLY while a declared plugin route module imports — the mount
         binding is present then. A module captures this value at import for later
         use (a startup hook building an external webhook URL, a login descriptor's
         self-referential path) so a remapped base is followed instead of a
         hardcoded default. Called with no binding present — a core or
-        operator-authored module — it raises: those modules own no declared mount."""
+        operator-authored module — it raises: those modules own no declared mount.
+        """
         ...

@@ -48,14 +48,14 @@ def _error(message: str, status_code: int) -> JSONResponse:
 
 
 def _door_caller_principal() -> str | None:
-    """The accountable principal for an api/event-door turn — the id the turn keys its
-    thread and rate bucket on.
+    """The accountable principal for an api/event-door turn — the id the turn keys its thread and bucket on.
 
     With access control ON the auth gate binds the caller's id before the door runs. With
     it OFF no id is bound, so the door acts AS the platform's synthetic no-auth identity
     (the same principal the gate-off projection names), keyed exactly as a real caller's id
     would be. ``None`` is returned only with the gate ON and no id bound — a state the auth
-    gate makes unreachable — which the turn seam refuses."""
+    gate makes unreachable — which the turn seam refuses.
+    """
     principal = _pkg.get_current_user_id()
     if principal is not None and principal.strip():
         return principal
@@ -68,9 +68,11 @@ def _door_caller_principal() -> str | None:
 
 
 def _turn_submission_error(exc: Exception, status_map: dict[type[Exception], int]) -> JSONResponse | None:
-    """Map a caught turn-submission failure to its plain-envelope error response by the
-    status table, or ``None`` when the failure is not a mapped turn-submission error (the
-    caller re-raises it — nothing is swallowed)."""
+    """Map a caught turn-submission failure to its plain-envelope error response by the status table.
+
+    Returns ``None`` when the failure is not a mapped turn-submission error (the caller re-raises it —
+    nothing is swallowed).
+    """
     for exc_type, status in status_map.items():
         if isinstance(exc, exc_type):
             return _error(str(exc), status)
@@ -78,10 +80,12 @@ def _turn_submission_error(exc: Exception, status_map: dict[type[Exception], int
 
 
 def _turn_ack_response(result: ApiSubmitResult) -> JSONResponse:
-    """Shape the submission ack: ``200`` with the answer present (``exclude_none`` drops the
-    answer's own null fields, never the outer ``answer`` key, so a silent turn answers 200
-    with its silent marker), or the default deferred ``202`` when the turn produced no
-    outcome yet."""
+    """Shape the submission ack from the turn's outcome.
+
+    ``200`` with the answer present (``exclude_none`` drops the answer's own null fields, never the outer
+    ``answer`` key, so a silent turn answers 200 with its silent marker), or the default deferred ``202``
+    when the turn produced no outcome yet.
+    """
     payload: dict[str, object] = {"message_id": result.message_id, "thread_id": result.thread_id}
     if result.answer is not None:
         payload["answer"] = result.answer.model_dump(mode="json", exclude_none=True)
@@ -90,11 +94,12 @@ def _turn_ack_response(result: ApiSubmitResult) -> JSONResponse:
 
 
 class ConversationTurnAck(BaseModel):
-    """The ack a message/event submission returns: the accepted turn's ``message_id``
-    and its ``thread_id``. ``answer`` is present on every inline-waited turn that finished
-    in time (a 200) — including a silent one, which carries the silent marker (status
-    ``silent``, no answer text, dumped ``exclude_none``); it is absent only on the default
-    deferred 202, whose turn produced no outcome yet."""
+    """The ack a message/event submission returns: the accepted turn's ``message_id`` and ``thread_id``.
+
+    ``answer`` is present on every inline-waited turn that finished in time (a 200) — including a silent one,
+    which carries the silent marker (status ``silent``, no answer text, dumped ``exclude_none``); it is
+    absent only on the default deferred 202, whose turn produced no outcome yet.
+    """
 
     message_id: str
     thread_id: str
@@ -120,8 +125,7 @@ class ConversationTurnAck(BaseModel):
     action="write",
 )
 async def send_conversation_message(request: Request) -> Response:
-    """Accept one authed message for ``route_name`` and run its turn AS the route's
-    execution key.
+    """Accept one authed message for ``route_name`` and run its turn AS the route's execution key.
 
     The auth gate authorizes who may SEND; the turn's own authority is the route's
     execution key, not the caller. Default answer is ``202 {message_id, thread_id}``; the

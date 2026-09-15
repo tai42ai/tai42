@@ -33,7 +33,7 @@ def to_thread_messages(messages: list[dict[str, str]]) -> list[BaseMessage]:
     converted: list[BaseMessage] = []
     for index, item in enumerate(messages):
         if not isinstance(item, dict):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
                 f"append message {index} must be a mapping with 'role' and 'content'; got {type(item).__name__}"
             )
         role = item.get("role")

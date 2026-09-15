@@ -69,12 +69,14 @@ class ArqWorkerRuntime(BackendRuntime):
 
     @classmethod
     def from_args(cls, args: Sequence[str]) -> Self:
+        """Build a runtime from raw CLI ``args``, parsed strictly through the worker's option surface."""
         # Parse strictly through the CLI's own option surface: an unknown or
         # malformed option aborts the launch loudly rather than starting a worker
         # configured differently than the operator asked for.
         return cls(main.make_context("arq-worker", list(args)).params)
 
     async def build(self) -> None:
+        """Construct the arq ``Worker`` from settings and the parsed options."""
         settings = arq_settings()
         options = self._options
         self._worker = Worker(
@@ -107,8 +109,10 @@ class ArqWorkerRuntime(BackendRuntime):
 
     @property
     def worker(self) -> Worker:
-        """The built engine. Reading it before :meth:`build` is a bug in the
-        driver, not a state to tolerate quietly."""
+        """The built engine.
+
+        Reading it before :meth:`build` is a bug in the driver, not a state to tolerate quietly.
+        """
         if self._worker is None:
             raise RuntimeError("arq worker: build() has not run, so there is no worker to drive")
         return self._worker
@@ -116,6 +120,7 @@ class ArqWorkerRuntime(BackendRuntime):
     # -- running -------------------------------------------------------------
 
     async def run_on_loop(self) -> None:
+        """Run the worker on the current loop until it drains or is cancelled."""
         try:
             await self.worker.async_run()
         except asyncio.CancelledError:
@@ -130,6 +135,7 @@ class ArqWorkerRuntime(BackendRuntime):
     # -- stopping ------------------------------------------------------------
 
     def request_drain(self) -> None:
+        """Request a warm drain: stop picking jobs and let in-flight ones finish (idempotent)."""
         if self._draining:
             return
         self._draining = True
@@ -139,12 +145,14 @@ class ArqWorkerRuntime(BackendRuntime):
         self.worker.handle_sig_wait_for_completion(signal.SIGTERM)
 
     def request_terminate(self) -> None:
+        """Request a cold stop: cancel every running job now and end the run."""
         # arq's cold handler: cancel every running job now and end the run.
         self.worker.handle_sig(signal.SIGTERM)
 
     # -- teardown ------------------------------------------------------------
 
     async def aclose(self) -> None:
+        """Close the worker and the shared Redis pool on every exit path."""
         # Runs on every exit path, including one where ``build`` itself failed —
         # the shared pool may exist even when the worker never did.
         await RedisPoolManager.close()
@@ -178,6 +186,7 @@ async def _run_standalone(options: Mapping[str, Any]) -> None:
 @click.option("--max-tries", type=int, default=5, help="Max tries")
 @click.option("--health-check-interval", type=int, default=60, help="Health check interval seconds")
 def main(**options: Any) -> None:
+    """Run one arq worker standalone from the command line."""
     try:
         asyncio.run(_run_standalone(options))
     except KeyboardInterrupt:

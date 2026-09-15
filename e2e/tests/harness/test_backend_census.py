@@ -14,7 +14,7 @@ import pytest
 
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import BusWorker
-from tai42_e2e.waiting import WaitTimeout
+from tai42_e2e.waiting import WaitTimeoutError
 
 
 def _worker(name: str, generation: int, *, state: str = "ready", kind: str = "backend", pid: int = 1) -> BusWorker:
@@ -34,7 +34,7 @@ def test_wait_backend_census_ignores_the_pre_restart_corpse_at_the_old_generatio
     # Only the killed worker's corpse row (its slot name at the OLD generation) is present —
     # no fresh life has joined, so the restart wait must NOT pass on the corpse.
     stack = _stack([_worker("backend-1", 1)])
-    with pytest.raises(WaitTimeout, match="fresh ready backend-kind life"):
+    with pytest.raises(WaitTimeoutError, match="fresh ready backend-kind life"):
         stack._wait_backend_census(0.2, baseline={"backend-1": 1})
 
 
@@ -49,7 +49,7 @@ def test_wait_backend_census_waits_out_a_resyncing_next_life() -> None:
     # The next life joined at generation+1 but has not finished its boot resync — not ready,
     # so the wait holds rather than returning on a still-resyncing worker.
     stack = _stack([_worker("backend-1", 2, state="resyncing")])
-    with pytest.raises(WaitTimeout, match="fresh ready backend-kind life"):
+    with pytest.raises(WaitTimeoutError, match="fresh ready backend-kind life"):
         stack._wait_backend_census(0.2, baseline={"backend-1": 1})
 
 
@@ -61,5 +61,5 @@ def test_wait_backend_census_without_baseline_accepts_any_ready_backend() -> Non
 
 def test_wait_backend_census_without_baseline_times_out_with_no_backend() -> None:
     stack = _stack([_worker("serve-1", 1, kind="serve")])
-    with pytest.raises(WaitTimeout, match="a ready backend-kind worker"):
+    with pytest.raises(WaitTimeoutError, match="a ready backend-kind worker"):
         stack._wait_backend_census(0.2)

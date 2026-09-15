@@ -1,5 +1,6 @@
-"""Pending-question correlation store (plugin-owned Redis) — the contract
-:class:`~tai42_contract.channels.CorrelationStore` port.
+"""Pending-question correlation store (plugin-owned Redis) — the ``CorrelationStore`` contract port.
+
+Implements the :class:`~tai42_contract.channels.CorrelationStore` port.
 
 SMS has no threading, so the only correlation key is the number pair
 (<Twilio number>, <human number>), collapsed to the opaque ``"{twilio}:{human}"``
@@ -66,14 +67,17 @@ def _remaining_seconds(timeout_at: datetime) -> int:
 
 
 class TwilioCorrelationStore:
-    """Satisfies :class:`~tai42_contract.channels.CorrelationStore` over the
-    plugin-owned ``channel:twilio:pending:{twilio}:{human}`` keys."""
+    """Satisfies :class:`~tai42_contract.channels.CorrelationStore` over the plugin-owned keys.
+
+    Backed by the ``channel:twilio:pending:{twilio}:{human}`` keys.
+    """
 
     async def set_correlation(self, key: str, entry: Correlation, *, ttl_seconds: int) -> bool:
         """Reserve ``key`` for ``entry`` NX with a ``ttl_seconds`` expiry.
 
         Returns True when the pair was free and is now held; False when a question is
-        already pending for the pair — the one-pending-per-pair guarantee."""
+        already pending for the pair — the one-pending-per-pair guarantee.
+        """
         async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
             stored = await redis.set(_pending_key(key), entry.model_dump_json(), nx=True, ex=ttl_seconds)
         return bool(stored)
@@ -82,7 +86,8 @@ class TwilioCorrelationStore:
         """The pending question's record under ``key``, or ``None``.
 
         A non-destructive ``GET`` peek: it neither claims nor refreshes the pair, so
-        the ladder can decide the outcome before releasing."""
+        the ladder can decide the outcome before releasing.
+        """
         async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
             raw = cast("str | bytes | None", await redis.get(_pending_key(key)))
         if raw is None:
@@ -108,7 +113,8 @@ async def reserve_pending(
     The deliver path's front door onto :meth:`TwilioCorrelationStore.set_correlation`:
     it computes the remaining-budget TTL (raising ``ChannelDeliveryError`` on an
     already-spent deadline), builds the :class:`Correlation` record, and turns the
-    NX-refused case into the typed one-pending error."""
+    NX-refused case into the typed one-pending error.
+    """
     ttl = _remaining_seconds(timeout_at)
     entry = Correlation(callback_url=callback_url, interaction_id=interaction_id, ttl_deadline=timeout_at)
     stored = await twilio_correlation_store.set_correlation(

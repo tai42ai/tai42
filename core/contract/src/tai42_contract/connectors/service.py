@@ -1,5 +1,4 @@
-"""Connection lifecycle contract — start_connect, start_reconnect,
-complete_connect, disconnect, patch_sub_services.
+"""Connection lifecycle contract: start_connect, start_reconnect, complete_connect, disconnect, patch_sub_services.
 
 The runtime implements :class:`ConnectionService`; callers depend only on this
 Protocol and the data-holder result types it returns.
@@ -29,6 +28,8 @@ class AliasInUseError(ValueError):
 
 
 class FlowOperation(StrEnum):
+    """The connection flow operation a result reports."""
+
     CONNECT = "connect"
     RECONNECT = "reconnect"
     TOGGLE_SUBSERVICE_ON = "toggle_subservice_on"
@@ -39,6 +40,8 @@ class FlowOperation(StrEnum):
 
 @dataclass(frozen=True)
 class StartConnectResult:
+    """Result of starting an OAuth Connect: the flow id and provider authorize URL."""
+
     flow_id: str
     authorize_url: str
 
@@ -57,6 +60,8 @@ class NoAuthConnectResult:
 
 @dataclass(frozen=True)
 class CompleteConnectResult:
+    """Result of completing a Connect: the connection and its manifest changes."""
+
     connection_id: str
     return_url: str
     operation: FlowOperation
@@ -70,6 +75,8 @@ class CompleteConnectResult:
 
 @dataclass(frozen=True)
 class DisconnectResult:
+    """Result of a disconnect: revoke outcome and removed manifest entries."""
+
     connection_id: str
     upstream_revoke_outcome: UpstreamRevokeOutcome
     upstream_revoke_status: int | None
@@ -82,6 +89,8 @@ class DisconnectResult:
 
 @dataclass(frozen=True)
 class PatchResult:
+    """Result of a sub-service patch: enabled services and any consent flow."""
+
     connection_id: str
     enabled_sub_services: list[str]
     consent_required: bool
@@ -130,8 +139,7 @@ class ConnectionService(Protocol):
         redirect_uri: str,
         origin: str,
     ) -> StartConnectResult:
-        """Re-run the OAuth flow for an existing connection (add scopes / recover
-        from RECONNECT_REQUIRED)."""
+        """Re-run the OAuth flow for an existing connection (add scopes / recover from RECONNECT_REQUIRED)."""
         ...
 
     async def complete_connect(
@@ -140,10 +148,12 @@ class ConnectionService(Protocol):
         flow_id: str,
         code: str,
     ) -> CompleteConnectResult:
-        """Exchange code for tokens, persist the encrypted ConnectionRecord, and
-        write managed manifest entries. The token-exchange ``redirect_uri`` is the
-        one stored in the flow state at authorize-start (byte-identical per RFC
-        6749), so completion needs no ``redirect_uri`` argument."""
+        """Exchange code for tokens, persist the encrypted ConnectionRecord, and write manifest entries.
+
+        The token-exchange ``redirect_uri`` is the one stored in the flow state at
+        authorize-start (byte-identical per RFC 6749), so completion needs no
+        ``redirect_uri`` argument.
+        """
         ...
 
     async def disconnect(
@@ -151,8 +161,11 @@ class ConnectionService(Protocol):
         *,
         connection_id: str,
     ) -> DisconnectResult:
-        """Disconnect a connection: best-effort upstream revoke, then purge the
-        encrypted blob and remove managed manifest entries."""
+        """Disconnect a connection.
+
+        Best-effort upstream revoke, then purge the encrypted blob and remove
+        managed manifest entries.
+        """
         ...
 
     async def patch_sub_services(
@@ -164,7 +177,9 @@ class ConnectionService(Protocol):
         redirect_uri: str,
         origin: str,
     ) -> PatchResult:
-        """Toggle which sub-services are enabled. Sub-services toggled ON whose
-        scopes are not yet granted fork to a consent flow and return its
-        authorize URL."""
+        """Toggle which sub-services are enabled.
+
+        Sub-services toggled ON whose scopes are not yet granted fork to a consent
+        flow and return its authorize URL.
+        """
         ...

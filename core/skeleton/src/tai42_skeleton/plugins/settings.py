@@ -11,6 +11,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class PluginsSettings(TaiBaseSettings):
+    """Settings for the Studio-plugin SPA host — where the built Studio app dist lives."""
+
     # Absolute (or CWD-relative) path to the built Studio SPA dist directory —
     # the ``index.html``, the hashed asset bundles, the stable ``vendor/`` ESM
     # assets, and the static OAuth pages. Unset (None) means this deployment does
@@ -22,4 +24,5 @@ class PluginsSettings(TaiBaseSettings):
 
 @settings_cache
 def plugins_settings() -> PluginsSettings:
+    """Return the process-wide :class:`PluginsSettings`, cached after first load."""
     return PluginsSettings()

@@ -1,3 +1,5 @@
+"""Fetch, render, schema-infer, and cache stored (and inline) templates."""
+
 import asyncio
 import base64
 import logging
@@ -50,8 +52,7 @@ _LOCALE_CONTEXT_KEY = "_tai_locale"
 
 
 class TemplateLocaleNotFoundError(Exception):
-    """A stored template has no variant for the resolved locale fallback chain and no
-    default (bare) variant either.
+    """A stored template has no variant for the resolved locale chain and no default variant.
 
     Raised by :meth:`ResourceManager.render_by_id` when a locale-scoped render walks the
     chain (``he-IL`` -> ``he`` -> the bare default id) and finds NONE of them stored, so
@@ -116,7 +117,13 @@ def _assert_image(mime: str | None, source: object) -> None:
 
 
 class ResourceManager:
+    """Fetch, render, schema-infer, and cache stored (and inline) templates, guarded and locale-aware."""
+
     def __init__(self, provider: Storage | None):
+        """Wire the sandboxed Jinja environment and the compiled-template caches from settings.
+
+        ``provider`` is the Storage backend, or ``None`` when none is registered.
+        """
         self._provider = provider
         # Sandboxed engine: template text is an authoring surface (hook
         # condition/expr, stored/inline renders), so rendering blocks dunder and
@@ -184,13 +191,14 @@ class ResourceManager:
 
     @contextmanager
     def _render_scope(self) -> Iterator[None]:
-        """Mark this render thread as inside a render so every dependency it
-        resolves shares one event loop — the storage client opened for the first
-        {% include %}/{% extends %} is reused and closed once when the scope exits,
-        instead of a fresh loop + connection per dependency.
+        """Mark this render thread as inside a render so every dependency shares one event loop.
 
-        The loop is created lazily by ``_sync_loader`` on the first dependency, so
-        an include-free render creates no loop at all.
+        The storage client opened for the first {% include %}/{% extends %} is reused and
+        closed once when the scope exits, instead of a fresh loop + connection per
+        dependency.
+
+        The loop is created lazily by ``_sync_loader`` on the first dependency, so an
+        include-free render creates no loop at all.
         """
         self._render_loop.active = True
         self._render_loop.loop = None
@@ -224,8 +232,9 @@ class ResourceManager:
         return await self.provider.load(template_id)
 
     def _sync_loader(self, template_id: str) -> str | None:
-        """Synchronous bridge for Jinja2's FunctionLoader, letting {% extends %}
-        and {% include %} fetch their dependency from async storage.
+        """Synchronous bridge for Jinja2's FunctionLoader, fetching a dependency from async storage.
+
+        Lets {% extends %} and {% include %} fetch their dependency from async storage.
 
         A genuinely missing dependency becomes ``None`` so Jinja raises
         ``TemplateNotFound`` (keeping ``{% include ... ignore missing %}``
@@ -380,7 +389,8 @@ class ResourceManager:
 
             mime = detect_mime(source)
             _assert_image(mime, "<bytes>")
-            assert mime is not None
+            if mime is None:
+                raise AssertionError
             return {"type": "image_url", "image_url": {"url": _data_uri(source, mime)}}
 
         parts = urlsplit(source)
@@ -401,7 +411,8 @@ class ResourceManager:
         # Storage id (empty scheme) or a bad scheme -> load() validates and raises.
         data, mime = await self.load(source)
         _assert_image(mime, source)
-        assert mime is not None
+        if mime is None:
+            raise AssertionError
         return {"type": "image_url", "image_url": {"url": _data_uri(data, mime)}}
 
     def clear_cache(self) -> None:
@@ -457,8 +468,7 @@ class ResourceManager:
                 self._cached_template_ids.discard(template_id)
 
     def get_cache_info(self) -> Any:
-        """Return the compiled-template cache statistics, or ``None`` when caching
-        is disabled."""
+        """Return the compiled-template cache statistics, or ``None`` when caching is disabled."""
         cache_info = getattr(self._get_compiled_template, "cache_info", None)
         if cache_info is not None:
             return cache_info()
@@ -466,11 +476,13 @@ class ResourceManager:
 
     @staticmethod
     def _locale_variant_ids(template_id: str, locale: str) -> list[str]:
-        """The ordered fallback chain of variant ids for ``template_id`` under ``locale``:
-        the most-specific subtag form first, each shorter form next, then the bare
+        """The ordered fallback chain of variant ids for ``template_id`` under ``locale``.
+
+        The most-specific subtag form first, each shorter form next, then the bare
         ``template_id`` (the declared default variant). A variant lives at
         ``"{template_id}@{subtags}"`` — e.g. ``he-IL`` yields ``id@he-IL``, ``id@he``,
-        ``id``. The locale is already canonical, so the chain is built from one spelling."""
+        ``id``. The locale is already canonical, so the chain is built from one spelling.
+        """
         subs = locale.split("-")
         ids = [f"{template_id}@{'-'.join(subs[:i])}" for i in range(len(subs), 0, -1)]
         ids.append(template_id)
@@ -483,7 +495,8 @@ class ResourceManager:
         authz, access-control — keep today's behavior). A present locale walks the fallback
         chain and returns the first stored variant; when NONE of the chain (variants AND the
         bare default) is stored, it refuses with :class:`TemplateLocaleNotFoundError` naming
-        the template and locale, never a silent wrong-language render."""
+        the template and locale, never a silent wrong-language render.
+        """
         if locale is None:
             return await self._get_compiled_template(template_id)
         for candidate in self._locale_variant_ids(template_id, locale):
@@ -496,9 +509,11 @@ class ResourceManager:
         )
 
     def _with_locale(self, context: dict[str, Any], locale: str | None) -> dict[str, Any]:
-        """The render context with the resolved ``locale`` stamped under the reserved key so
-        the ``list_format`` filter reads it — the render carries the language, the template
-        never names one. A user variable colliding with the reserved key raises loudly."""
+        """The render context with the resolved ``locale`` stamped under the reserved key.
+
+        The ``list_format`` filter reads it — the render carries the language, the template
+        never names one. A user variable colliding with the reserved key raises loudly.
+        """
         if _LOCALE_CONTEXT_KEY in context:
             raise ValueError(f"{_LOCALE_CONTEXT_KEY!r} is a reserved render variable and cannot be a template variable")
         return {**context, _LOCALE_CONTEXT_KEY: locale}
@@ -506,6 +521,7 @@ class ResourceManager:
     async def render_by_id(
         self, template_id: str, kwargs: dict[str, Any] | None = None, locale: str | None = None
     ) -> str:
+        """Render the stored template ``template_id`` for ``locale`` with ``kwargs`` as its context."""
         template = await self._compiled_for_locale(template_id, locale)
         context = self._with_locale(kwargs or {}, locale)
 
@@ -516,8 +532,9 @@ class ResourceManager:
         return await asyncio.to_thread(_render)
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
-        """Render ``text`` — the stored resource it names by ``id``, else its inline
-        ``content`` — with its own ``kwargs`` as the render context.
+        """Render ``text`` — its stored resource by ``id``, else its inline ``content``.
+
+        Rendered with its own ``kwargs`` as the render context.
 
         A stored id resolves through :meth:`render_by_id` (locale variants included), so a
         missing one raises ``TemplateNotFoundError``; a template the engine cannot render
@@ -530,7 +547,8 @@ class ResourceManager:
         content = text.content
         # A templated text carries exactly one source, so with no id the content is a real
         # string (present-but-empty included — an empty template renders to an empty string).
-        assert content is not None
+        if content is None:
+            raise AssertionError
         context = self._with_locale(text.kwargs, locale)
 
         def _parse_and_render() -> str:
@@ -593,7 +611,8 @@ class ResourceManager:
         def _infer_schema() -> dict[str, Any]:
             # ``Storage.load`` contractually returns ``str``, and the block above
             # raised on a missing template, so ``content`` is a real string here.
-            assert content is not None
+            if content is None:
+                raise AssertionError
             try:
                 return to_json_schema(infer(content), jsonschema_encoder=JSONSchemaDraft4Encoder)
             except Exception as exc:
@@ -612,6 +631,7 @@ class ResourceManager:
         return await asyncio.to_thread(_infer_schema)
 
     async def find_undeclared_variables(self, content: str | None = None, template_id: str | None = None) -> set[str]:
+        """The undeclared variables in a template, from inline ``content`` or a stored ``template_id``."""
         if content is not None and template_id is not None:
             raise ValueError("Provide either 'content' OR 'template_id', not both.")
 
@@ -629,7 +649,8 @@ class ResourceManager:
             # ``Storage.load`` contractually returns ``str`` (present-but-empty is
             # ""), and the block above raised on a missing template, so ``content``
             # is a real string here.
-            assert content is not None
+            if content is None:
+                raise AssertionError
             ast = self._env.parse(content)
             return meta.find_undeclared_variables(ast)
 
@@ -668,8 +689,10 @@ class ResourceManager:
         self.evict_compiled(path)
 
     async def delete_template_dir(self, path: str) -> None:
-        """Delete every stored template under ``path/`` and evict their compiled
-        entries (eviction runs even on a partial-delete failure)."""
+        """Delete every stored template under ``path/`` and evict their compiled entries.
+
+        Eviction runs even on a partial-delete failure.
+        """
         try:
             return await self.provider.delete_dir(path)
         finally:

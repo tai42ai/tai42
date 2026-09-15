@@ -25,16 +25,18 @@ from tai42_contract.states.binding import StateBinding
 
 
 class ToolInvocation(BaseModel):
-    """The tool execution currently in flight: ``tool_name`` is the invoked
-    tool's registered name. Frozen — a deposited invocation is a fact of the
-    active execution, never mutated in place.
+    """The tool execution currently in flight.
+
+    ``tool_name`` is the invoked tool's registered name. Frozen — a deposited invocation is a
+    fact of the active execution, never mutated in place.
 
     ``state_binding`` is the OPTIONAL door-layer binding a door deposits when it
     initiates a run (a channel route, a schedule fire, a hook, or none for a bare
     run-tool call): it rides the ambient context to the shared dispatch chokepoint,
     which carries it forward across its own re-deposit and merges it with the
     dispatched preset's own binding before applying it around the run. The contract
-    interprets nothing about it — a logic-free carrier."""
+    interprets nothing about it — a logic-free carrier.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -46,22 +48,25 @@ _current_tool_invocation: ContextVar[ToolInvocation | None] = ContextVar("tai42_
 
 
 def current_tool_invocation() -> ToolInvocation | None:
-    """The tool execution in flight for the current context, or ``None`` when no
-    tool is executing."""
+    """The tool execution in flight for the current context, or ``None`` when no tool is executing."""
     return _current_tool_invocation.get()
 
 
 def set_current_tool_invocation(invocation: ToolInvocation) -> Token[ToolInvocation | None]:
-    """Deposit ``invocation`` as the in-flight tool for the current context; pass
-    the returned token to :func:`reset_current_tool_invocation` to restore the
-    previous value. Nested deposits (a tool invoking another) re-set for the inner
-    call and restore the outer value on reset — ContextVar token discipline."""
+    """Deposit ``invocation`` as the in-flight tool for the current context.
+
+    Pass the returned token to :func:`reset_current_tool_invocation` to restore the previous
+    value. Nested deposits (a tool invoking another) re-set for the inner call and restore the
+    outer value on reset — ContextVar token discipline.
+    """
     return _current_tool_invocation.set(invocation)
 
 
 def reset_current_tool_invocation(token: Token[ToolInvocation | None]) -> None:
-    """Restore the in-flight tool to the value captured in ``token`` by the
-    matching :func:`set_current_tool_invocation` call."""
+    """Restore the in-flight tool to the value captured in ``token``.
+
+    ``token`` is the return value of the matching :func:`set_current_tool_invocation` call.
+    """
     _current_tool_invocation.reset(token)
 
 

@@ -19,7 +19,7 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import (
     BadRequestError,
-    ValidationRejected,
+    ValidationRejectedError,
     operation_metadata_of,
     register_operation_route,
 )
@@ -46,7 +46,7 @@ async def _extract_bootstrap(request: Request) -> dict:
     try:
         parsed = BootstrapKeyBody.model_validate(body)
     except ValidationError as exc:
-        raise ValidationRejected("invalid request body") from exc
+        raise ValidationRejectedError("invalid request body") from exc
     return {
         "user_id": parsed.user_id,
         "description": parsed.description,

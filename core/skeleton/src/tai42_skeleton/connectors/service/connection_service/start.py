@@ -1,5 +1,8 @@
-"""Begin or re-begin a connection: the OAuth authorize start, the no-auth immediate
-create, and the reconnect authorize start."""
+"""Begin or re-begin a connection.
+
+The OAuth authorize start, the no-auth immediate create, and the reconnect
+authorize start.
+"""
 
 from __future__ import annotations
 
@@ -43,7 +46,8 @@ async def start_connect(
 
     The Origin is validated only on the OAuth branch, inside ``_start_flow``
     before it signs the redirect state — the no-auth branch has no redirect flow,
-    so it is deliberately not gated on the redirect allow-list."""
+    so it is deliberately not gated on the redirect allow-list.
+    """
     config_values = config_values or {}
     try:
         descriptor = _svc.get_provider(provider_id)
@@ -91,8 +95,11 @@ async def _connect_no_auth(
     enabled_sub_services: list[str],
     config_values: dict[str, str],
 ) -> NoAuthConnectResult:
-    """Create a no-auth connection: no OAuth flow, no token. Validate the client
-    config, persist a minimal record, write the managed manifest entries."""
+    """Create a no-auth connection: no OAuth flow, no token.
+
+    Validate the client config, persist a minimal record, write the managed
+    manifest entries.
+    """
     _validate_config_values(descriptor, config_values)
 
     connection_id = str(uuid.uuid4())
@@ -143,13 +150,15 @@ async def start_reconnect(
     redirect_uri: str,
     origin: str,
 ) -> StartConnectResult:
-    """Re-run the OAuth flow for an existing connection (add scopes / recover
-    from RECONNECT_REQUIRED). On callback the new tokens replace the old in
+    """Re-run the OAuth flow for an existing connection (add scopes / recover from RECONNECT_REQUIRED).
+
+    On callback the new tokens replace the old in
     :func:`~tai42_skeleton.connectors.service.connection_service.complete.complete_connect`.
 
     Reconnect is always an OAuth redirect, so the Origin is validated inside
     ``_start_flow`` before it signs the redirect state; nothing is persisted or
-    mutated before that call."""
+    mutated before that call.
+    """
     record = await _svc.load_record(connection_id)
     if record.kind == "none":
         raise ValueError(f"no-auth connection {connection_id} cannot be reconnected")

@@ -1,5 +1,4 @@
-"""The shared op vocabulary for a state record document — the op/path grammar, its
-validation, and the pure query helpers every door and consumer speaks.
+"""The shared op vocabulary for a state record document: op/path grammar, validation, and query helpers.
 
 This is the dependency-free half of the state store: the op-name constants, the
 resource caps, ``validate_op``/``validate_path``/``validate_guard`` (the loud
@@ -167,10 +166,10 @@ def _validate_key_value(key: Any, *, where: str) -> None:
 
 
 def _validate_remove_key(key: Any, *, where: str) -> None:
-    """``remove_by_key``'s ``key`` — a single scalar (str/int) OR a list of scalars
-    (the ``$pull`` + ``$in`` "remove any of these keys" idiom), else raise loudly.
+    """``remove_by_key``'s ``key`` — a single scalar (str/int) OR a list of scalars, else raise loudly.
 
-    A list holds only scalars — a nested container or a duplicate key are refused
+    A list is the ``$pull`` + ``$in`` "remove any of these keys" idiom, and holds only scalars — a
+    nested container or a duplicate key are refused
     loudly (the explicit-refusal style of :func:`validate_path` and the ``wait_for``
     uniqueness check). Duplicates are compared with :func:`json_equal` for consistency
     with the match semantics, not a plain ``set`` (str/int keys never collide across
@@ -194,11 +193,12 @@ def _validate_remove_key(key: Any, *, where: str) -> None:
 
 
 def _validate_keyed_item_list(value: Any, key_field: str, *, where: str, kind: str) -> None:
-    """The LIST-form payload for ``set_by_key`` / ``merge_by_key``: each entry a JSON
-    object CARRYING ``key_field`` whose value is a ``str``/``int`` key, and the keys
-    UNIQUE across the list (``json_equal`` dedup, the ``_validate_remove_key`` pattern).
-    ``value`` is a list the caller already established (an ``isinstance`` narrows to an
-    untyped list, so it arrives as ``Any``).
+    """The LIST-form payload for ``set_by_key`` / ``merge_by_key``: each entry a keyed JSON object.
+
+    Each entry is a JSON object CARRYING ``key_field`` whose value is a ``str``/``int``
+    key, and the keys UNIQUE across the list (``json_equal`` dedup, the
+    ``_validate_remove_key`` pattern). ``value`` is a list the caller already
+    established (an ``isinstance`` narrows to an untyped list, so it arrives as ``Any``).
 
     An EMPTY list is ACCEPTED as a well-defined NO-OP. Refuses loudly, per entry, a
     non-object entry, a missing ``key_field``, a bad key type, and a duplicate key —
@@ -281,9 +281,9 @@ def _check_unset_entry_fields(obj: dict[str, Any], key_field: str, *, where: str
 
 
 def _validate_unset_entries(value: Any, key_field: str, *, where: str) -> None:
-    """``unset_by_key``'s payload: a LIST of removal ENTRIES, each EXACTLY the envelope
-    ``{key_field: <key>, "fields": [<name>, …]}``.
+    """``unset_by_key``'s payload: a LIST of removal ENTRIES, each the exact envelope shape.
 
+    Each entry is EXACTLY ``{key_field: <key>, "fields": [<name>, …]}``.
     Per entry: a JSON object carrying ``key_field`` (a ``str``/``int`` key, unique
     across entries — the ``_validate_keyed_item_list`` dedup) plus a ``fields`` LIST of
     non-empty string field names, themselves unique within the entry. ``key_field``
@@ -294,7 +294,8 @@ def _validate_unset_entries(value: Any, key_field: str, *, where: str) -> None:
     an entry's EMPTY ``fields`` list, are ACCEPTED as well-defined no-ops (a jq
     selection that cleared nothing must land as a traced no-op, never raise). The
     shared cap bounds both the entry list and each ``fields`` list. ``value`` is a list
-    the caller already established (an ``isinstance`` narrows to an untyped list)."""
+    the caller already established (an ``isinstance`` narrows to an untyped list).
+    """
     entries = cast("list[Any]", value)
     if len(entries) > MAX_REMOVE_KEYS:
         raise InvalidPathError(f"{where}: {len(entries)} entries in the unset list — the cap is {MAX_REMOVE_KEYS}")
@@ -313,7 +314,8 @@ def _validate_fanout_value(value: dict[Any, Any], key_field: str, *, where: str)
     (objects carrying ``key_field``, unique keys, the shared size cap); the SAME item
     key under two fan-out keys is two different items in two independent lists, never
     a duplicate. An empty list — and an empty object — is a well-defined NO-OP. The
-    fan-out key count shares the list-payload cap, bounding one op's total work."""
+    fan-out key count shares the list-payload cap, bounding one op's total work.
+    """
     if len(value) > MAX_REMOVE_KEYS:
         raise InvalidPathError(f"{where}: {len(value)} fan-out keys — the cap is {MAX_REMOVE_KEYS}")
     for name, items in value.items():
@@ -537,8 +539,11 @@ def validate_guard(guard: Any, *, where: str = "op") -> dict[str, Any]:
 
 
 def value_at_path(doc: Any, path: list[str | int]) -> Any:
-    """The value at ``path`` in ``doc``, or ``None`` when any segment is absent or
-    addresses through the wrong container type — a guard reads a missing path as null."""
+    """The value at ``path`` in ``doc``, or ``None`` when it is absent or wrongly typed.
+
+    Returns ``None`` when any segment is absent or addresses through the wrong
+    container type — a guard reads a missing path as null.
+    """
     node: Any = doc
     for seg in path:
         if isinstance(seg, str):
@@ -559,10 +564,12 @@ def value_at_path(doc: Any, path: list[str | int]) -> Any:
 
 
 def json_equal(a: Any, b: Any) -> bool:
-    """STRICT JSON-value equality: booleans match only booleans (never ``1``/``0``),
-    objects compare key-set + values, arrays compare length + order; strings, numbers,
-    and null compare by value. Distinct from Python ``==`` only where a ``bool`` would
-    otherwise coerce to an ``int``."""
+    """STRICT JSON-value equality, distinct from Python ``==`` only for ``bool`` coercion.
+
+    Booleans match only booleans (never ``1``/``0``), objects compare key-set + values,
+    arrays compare length + order; strings, numbers, and null compare by value. Distinct
+    from Python ``==`` only where a ``bool`` would otherwise coerce to an ``int``.
+    """
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     if isinstance(a, dict) and isinstance(b, dict):
@@ -577,9 +584,11 @@ def json_equal(a: Any, b: Any) -> bool:
 
 
 def _item_matches(item: Any, key_field: str, key: Any) -> bool:
-    """Whether a list ``item`` is a JSON object carrying ``key_field`` that JSON-equals
-    ``key``. A non-object item, or an object MISSING ``key_field``, never matches (never
-    an error) — the keyed ops skip past foreign items rather than refusing the list."""
+    """Whether a list ``item`` is a JSON object carrying ``key_field`` that JSON-equals ``key``.
+
+    A non-object item, or an object MISSING ``key_field``, never matches (never an
+    error) — the keyed ops skip past foreign items rather than refusing the list.
+    """
     if not isinstance(item, dict):
         return False
     obj = cast("dict[str, Any]", item)
@@ -587,9 +596,10 @@ def _item_matches(item: Any, key_field: str, key: Any) -> bool:
 
 
 def keyed_op_match_counts(result_doc: Any, op: dict[str, Any]) -> dict[str, int] | None:
-    """The observability shape for ONE keyed list op: ``{"supplied": S, "matched": M}``
-    read against ``result_doc`` (the document AFTER the op applied — the committed
-    result the state-write trace already carries). ``None`` for a non-keyed op.
+    """The observability shape for ONE keyed list op: ``{"supplied": S, "matched": M}``, or ``None``.
+
+    Read against ``result_doc`` (the document AFTER the op applied — the committed
+    result the state-write trace already carries); ``None`` for a non-keyed op.
 
     ``supplied`` is how many keys the op carried (a single-object ``set_by_key`` or a
     scalar ``remove_by_key`` is ``1``; the list forms are ``len``). ``matched`` is how
@@ -610,7 +620,8 @@ def keyed_op_match_counts(result_doc: Any, op: dict[str, Any]) -> dict[str, int]
     signature, so the store's and deltas-door's existing apply callers are untouched.
     Reads the COMMITTED result, so a later op in the SAME batch that re-touches this
     list+key can shift the count (pathological — a single writer rarely merges/sets then
-    removes the same key)."""
+    removes the same key).
+    """
     kind = op.get("op")
     if kind not in KEYED_OPS:
         return None

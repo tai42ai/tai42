@@ -24,6 +24,7 @@ class RoleAuditView:
     """Typed append-only audit view over the generic versioned store."""
 
     def __init__(self, store: VersionedStore) -> None:
+        """Wrap the generic versioned ``store`` as the typed audit view."""
         self._store = store
 
     async def record(
@@ -35,10 +36,13 @@ class RoleAuditView:
         after: dict[str, Any] | None,
         tx: VersionedStoreTransaction | None = None,
     ) -> None:
-        """Append one audit event. Create-or-append: the first event for a role name
-        inserts version 1, every later event appends. Raises loudly on any store fault.
-        Runs the append within ``tx`` when one is supplied, so the audit commits or rolls
-        back atomically with the role mutation it records."""
+        """Append one audit event, creating the role's first version or appending a later one.
+
+        The first event for a role name inserts version 1, every later event
+        appends. Raises loudly on any store fault. Runs the append within ``tx``
+        when one is supplied, so the audit commits or rolls back atomically with
+        the role mutation it records.
+        """
         event = {"action": action, "actor": actor, "before": before, "after": after}
         try:
             await self._store.get_active_body(_KIND, role_name, tx=tx)
@@ -48,8 +52,10 @@ class RoleAuditView:
         await self._store.save_version(_KIND, role_name, event, tx=tx)
 
     async def list_events(self, role_name: str) -> list[DocumentVersion]:
-        """Every audit event for ``role_name`` (each version carries the ``created_at``
-        timestamp). Empty when the role has never been mutated."""
+        """Return every audit event for ``role_name``, each version carrying its ``created_at`` timestamp.
+
+        Empty when the role has never been mutated.
+        """
         try:
             return await self._store.list_versions(_KIND, role_name)
         except DocumentNotFoundError:

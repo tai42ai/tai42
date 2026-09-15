@@ -47,9 +47,11 @@ CELERY_SCHEDULE_OPTS: dict[str, Any] = {
 
 @contextmanager
 def prevent_celery_stream_capture() -> Generator[None]:
-    """Temporarily restore ``sys.stdout``/``sys.stderr`` to the real OS file
-    descriptors, bypassing Celery's ``LoggingProxy``, so subprocesses spawned by
-    the tool (e.g. stdio MCP servers) inherit valid file descriptors."""
+    """Temporarily restore ``sys.stdout``/``sys.stderr`` to the real OS file descriptors.
+
+    Bypasses Celery's ``LoggingProxy`` so subprocesses spawned by the tool (e.g. stdio MCP
+    servers) inherit valid file descriptors.
+    """
     captured_stdout = sys.stdout
     captured_stderr = sys.stderr
     try:
@@ -75,12 +77,15 @@ class AsyncTask(Task):
         return self._loop
 
     def run_async(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
+        """Run ``coroutine`` to completion on the task's private loop and return its result."""
         return self.loop.run_until_complete(coroutine)
 
     def close_loop(self) -> None:
-        """Close the task loop, shutting down its per-loop pooled clients first
-        (client pools are keyed per loop, so they must be closed on it before it
-        goes away). Run at worker-child shutdown."""
+        """Close the task loop, shutting down its per-loop pooled clients first.
+
+        Client pools are keyed per loop, so they must be closed on it before it goes away. Run at
+        worker-child shutdown.
+        """
         loop = self._loop
         self._loop = None
         if loop is None or loop.is_closed():
@@ -119,9 +124,11 @@ async def run_tool(**kwargs: Any) -> Any:
     autoretry_for=(ConnectionError, TimeoutError, CeleryTimeoutError),
 )
 def callback_task(self: AsyncTask, result: Any, callback: CallbackSchema) -> Any:
-    """Run a :class:`CallbackSchema` over the parent task's result. Linked to
-    ``tool_execution`` via ``apply_async(link=...)``, so ``result`` is the
-    parent's return value, handed to the jq inputs as-is."""
+    """Run a :class:`CallbackSchema` over the parent task's result.
+
+    Linked to ``tool_execution`` via ``apply_async(link=...)``, so ``result`` is the parent's
+    return value, handed to the jq inputs as-is.
+    """
     return self.run_async(callback_execution(result, callback))
 
 

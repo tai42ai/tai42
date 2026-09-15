@@ -31,8 +31,10 @@ _EVENTS_ACK = {
 
 
 def _recipients(settings: SlackSettings) -> set[str]:
-    """The channels a threaded reply or option tap may answer an ask from: the
-    configured allowlist plus the default recipient when one is set."""
+    """The channels a threaded reply or option tap may answer an ask from.
+
+    The configured allowlist plus the default recipient when one is set.
+    """
     recipients = set(settings.allowed_recipients)
     if settings.default_recipient is not None:
         recipients.add(settings.default_recipient)
@@ -90,8 +92,7 @@ async def _resolve_answer(
     *,
     params: dict[str, str] | None = None,
 ) -> Response:
-    """Resolve a correlated threaded reply against its pending ask via the ONE shared
-    ladder, or bridge it on a correlation miss.
+    """Resolve a correlated threaded reply against its pending ask via the ONE shared ladder, or bridge on a miss.
 
     The ask is peeked first (channel-side) so a correlated reply that carries no text is
     the loud error it has always been (raise -> 500, Slack retries then logs) rather than

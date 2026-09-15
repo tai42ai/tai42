@@ -27,6 +27,7 @@ class RateLimitedError(Exception):
     """Login throttled. ``retry_after`` is whole seconds until the next attempt."""
 
     def __init__(self, retry_after: int) -> None:
+        """Store ``retry_after`` (whole seconds until the next attempt)."""
         super().__init__(f"login throttled; retry after {retry_after}s")
         self.retry_after = retry_after
 
@@ -35,6 +36,7 @@ class RateLimiter:
     """Failures-only login throttle over the injected Redis."""
 
     def __init__(self, redis_settings: Any, settings: AccountsSettings) -> None:
+        """Bind the throttle to ``redis_settings`` and the accounts ``settings``."""
         self._redis_settings = redis_settings
         self._settings = settings
 

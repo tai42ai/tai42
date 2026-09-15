@@ -8,13 +8,15 @@
  * the bundle's stylesheet is emitted as one scoped CSS asset the host injects
  * before this module runs.
  */
-import type { ReactElement } from 'react';
-import type { PluginContext } from '@tai42/studio-sdk';
-import { UsersPage } from '@/users-page';
 // The plugin's own scoped stylesheet. Importing it makes the build emit it into
 // the bundle's one CSS asset, which the host injects (SRI'd) before this module
 // runs.
 import '@/styles.css';
+
+import type { PluginContext } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
+
+import { UsersPage } from '@/users-page';
 
 /**
  * The sidebar icon: a square inline SVG drawing with `currentColor`, sized by the

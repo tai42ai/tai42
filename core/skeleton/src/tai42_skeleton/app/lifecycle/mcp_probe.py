@@ -18,12 +18,16 @@ logger = logging.getLogger(__name__)
 
 
 class McpProbeMixin(LifecycleState):
+    """Lifecycle mixin that probes manifest MCP servers and tracks their binding health."""
+
     async def _probe_mcp(self, config: TaiMCPConfig, timeout: float | None = None) -> list["mcp.types.Tool"]:
-        """Connect to one MCP server and list its tools, bounded by ``timeout``
-        (defaults to the cold-boot ``mcp_probe_timeout``). Raises on
+        """Connect to one MCP server and list its tools, bounded by ``timeout``.
+
+        ``timeout`` defaults to the cold-boot ``mcp_probe_timeout``. Raises on
         failure/timeout; callers decide whether to skip-and-record or surface the
         error. The probe runs through the pooled ``FastMCPClient`` (one-shot,
-        off-pool) so no raw fastmcp ``Client`` is opened by the app."""
+        off-pool) so no raw fastmcp ``Client`` is opened by the app.
+        """
 
         async def _do() -> list["mcp.types.Tool"]:
             async with self.clients.client_ctx(
@@ -57,9 +61,10 @@ class McpProbeMixin(LifecycleState):
         async def run_one(config: TaiMCPConfig):
             try:
                 tools = await self._probe_mcp(config, timeout=timeout)
-                return config, tools, None
             except Exception as e:
                 return config, None, type(e).__name__
+            else:
+                return config, tools, None
 
         results = await asyncio.gather(*(run_one(cfg) for cfg in manifest.mcp))
         successes, failures = [], []
@@ -85,9 +90,9 @@ class McpProbeMixin(LifecycleState):
         )
 
     def _missing_tools_ignore(self) -> frozenset[str]:
-        """Tool names the failed MCP servers were to provide — legitimately
-        absent (server down), so ``tools.validation`` must not raise for them.
+        """Return tool names the failed MCP servers were to provide, now legitimately absent.
 
+        The servers are down, so ``tools.validation`` must not raise for them.
         Matched by base name (``:``-extension stripped), so validation is
         slightly under-strict for a missing tool sharing a base name with a
         failed MCP's tool — collisions are unlikely and not crashing wins.
@@ -99,16 +104,17 @@ class McpProbeMixin(LifecycleState):
         return frozenset(ignore)
 
     def _list_failed_mcps(self) -> list[dict[str, str]]:
-        """MCP servers skipped due to a failed viability check: ``title`` +
-        coarse ``status`` only. No config, no exception text — this is
-        LLM-callable, logged and broadcast, and the config carries
-        credentials. Per-process: in a multi-worker backend this reflects only
-        the current process.
+        """List MCP servers skipped due to a failed viability check: ``title`` + coarse ``status`` only.
+
+        No config, no exception text — this is LLM-callable, logged and
+        broadcast, and the config carries credentials. Per-process: in a
+        multi-worker backend this reflects only the current process.
 
         Reads race a reload worker thread mutating ``_failed_mcps`` (this read is
         deliberately not reload-gated, so status keeps answering mid-reload), so
         the dict is snapshot-copied — a single C-level op, atomic under the GIL —
-        before iterating."""
+        before iterating.
+        """
         return [{"title": title, "status": status} for title, status in dict(self._failed_mcps).items()]
 
     def _live_mcp_status(self) -> dict[str, Any]:

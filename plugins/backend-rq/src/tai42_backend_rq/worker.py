@@ -1,5 +1,4 @@
-"""The RQ worker runtime: worker classes, fork safety, and the ``worker``
-launch entrypoint.
+"""The RQ worker runtime: worker classes, fork safety, and the ``worker`` launch entrypoint.
 
 ``launch(["worker", ...])`` drives :class:`RqWorkerRuntime`, which the shared
 ``ManagedBackend`` base runs on a dedicated daemon thread — readiness gating,
@@ -124,7 +123,8 @@ class _TaiWorkerMixin:
         every ``_DEQUEUE_POLL_SECONDS`` with no job, and re-check ``_stop_requested`` between
         polls: when set, raise ``StopRequested`` so the outer ``work`` loop breaks and the
         process exits cleanly (the recycle self-exit + any graceful backend shutdown). A
-        dequeued job returns immediately, exactly as before."""
+        dequeued job returns immediately, exactly as before.
+        """
         poll = self.dequeue_timeout
         while True:
             if self._stop_requested:
@@ -134,10 +134,12 @@ class _TaiWorkerMixin:
                 return result
 
     def run_maintenance_tasks(self) -> None:
-        """Run rq's periodic maintenance under the fork gate: it re-spawns the scheduler
-        process when that process has died, which is the same hazard as a work-horse
-        fork. The span covers the whole body, which spawns at most once and otherwise
-        does bounded Redis maintenance (registry cleaning)."""
+        """Run rq's periodic maintenance under the fork gate.
+
+        It re-spawns the scheduler process when that process has died, which is the same hazard
+        as a work-horse fork. The span covers the whole body, which spawns at most once and
+        otherwise does bounded Redis maintenance (registry cleaning).
+        """
         with fork_gate.job_span(timeout=_FORK_GATE_WAIT_SECONDS):
             super().run_maintenance_tasks()  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -159,8 +161,7 @@ class _TaiWorkerMixin:
 
 
 class CustomRQWorker(_TaiWorkerMixin, Worker):
-    """The prefork worker: RQ's native forking ``execute_job`` (a monitored
-    work-horse child per job, with timeout enforcement).
+    """The prefork worker: RQ's native forking ``execute_job``, a monitored work-horse child per job.
 
     Its fork gate spans the ``os.fork()`` INSTANT (see :meth:`fork_work_horse`), not the
     job: the horse is a separate process, and what it inherits is a SNAPSHOT of
@@ -171,6 +172,7 @@ class CustomRQWorker(_TaiWorkerMixin, Worker):
     """
 
     def __init__(self, queues: Any, *args: Any, **kwargs: Any) -> None:
+        """Build the prefork worker and clear the killed-horse pid tracker."""
         super().__init__(queues, *args, **kwargs)
         # The horse pid ``kill_horse`` last targeted; the post-kill reap must not
         # self-timeout (see ``wait_for_horse``).
@@ -190,12 +192,12 @@ class CustomRQWorker(_TaiWorkerMixin, Worker):
             super().fork_work_horse(job, queue)
 
     def kill_horse(self, sig: signal.Signals = signal.SIGKILL) -> None:
+        """Record the horse pid being killed, then signal it (default SIGKILL)."""
         self._killed_horse_pid = self.horse_pid
         super().kill_horse(sig)
 
     def wait_for_horse(self) -> tuple[int | None, int | None, Any | None]:
-        """Reap the work-horse by POLLING rather than blocking, so the parent's
-        monitor loop keeps ticking while a job runs.
+        """Reap the work-horse by POLLING rather than blocking, so the monitor loop keeps ticking while a job runs.
 
         RQ's monitor wraps this in a death penalty sized to
         ``job_monitoring_interval`` that refreshes heartbeats and enforces the
@@ -221,9 +223,11 @@ class CustomRQWorker(_TaiWorkerMixin, Worker):
             time.sleep(_HORSE_POLL_SECONDS)
 
     def main_work_horse(self, job: Any, queue: Any) -> None:
-        """Run the forked child's work loop under rq's SIGNAL death penalty. The
-        forking thread becomes the child's main thread, so ``signal.signal`` works
-        here (and only SIGALRM can interrupt C-blocked job code)."""
+        """Run the forked child's work loop under rq's SIGNAL death penalty.
+
+        The forking thread becomes the child's main thread, so ``signal.signal`` works here
+        (and only SIGALRM can interrupt C-blocked job code).
+        """
         self.death_penalty_class = UnixSignalDeathPenalty
         super().main_work_horse(job, queue)
 
@@ -232,7 +236,8 @@ class CustomRQWorker(_TaiWorkerMixin, Worker):
 
         The work-horse leaves via ``os._exit``, which skips atexit, so buffered
         spans must be flushed explicitly. A failed flush is logged at ERROR (not
-        raised, which would turn a finished job into a horse failure)."""
+        raised, which would turn a finished job into a horse failure).
+        """
         try:
             return super().perform_job(job, queue)
         finally:
@@ -245,8 +250,7 @@ class CustomRQWorker(_TaiWorkerMixin, Worker):
 
 
 class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
-    """The non-forking worker (``solo`` and ``gevent`` pools): jobs run in the
-    worker process itself.
+    """The non-forking worker (``solo`` and ``gevent`` pools): jobs run in the worker process itself.
 
     Its fork gate spans the WHOLE job (see :meth:`execute_job`), unlike the prefork
     pool's fork-instant span. There is no child and no inherited lock snapshot here: the
@@ -285,9 +289,11 @@ class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
         self.set_state(WorkerStatus.IDLE)
 
     def _maintain_heartbeats_until(self, job: Any, done: threading.Event) -> None:
-        """Refresh this worker's heartbeats every monitoring interval until the job
-        finishes. A failed refresh is logged at ERROR and retried, never swallowed —
-        a stopped heartbeat drops this worker from the census."""
+        """Refresh this worker's heartbeats every monitoring interval until the job finishes.
+
+        A failed refresh is logged at ERROR and retried, never swallowed — a stopped heartbeat
+        drops this worker from the census.
+        """
         while not done.wait(self.job_monitoring_interval):
             try:
                 self.maintain_heartbeats(job)
@@ -296,8 +302,7 @@ class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
 
 
 def setup_gevent() -> None:
-    """Monkey-patch blocking primitives so the gevent pool can overlap
-    I/O-bound jobs inside the single non-forking worker process.
+    """Monkey-patch blocking primitives so the gevent pool can overlap I/O-bound jobs in one worker process.
 
     ``patch_all`` runs before the fork gate's ``Condition`` is first used, so the waiter
     locks that ``Condition.wait`` allocates per wait are green ones: a gate wait yields
@@ -314,15 +319,15 @@ def setup_gevent() -> None:
     makes the design safe is that the gate's ``_cond`` critical sections contain no yield
     points — ``Condition.wait`` releases the outer lock before parking, and the report
     strings are deliberately logged outside the lock. Do not add an await, a log, or any
-    other yielding call under ``_cond`` on the strength of this note."""
+    other yielding call under ``_cond`` on the strength of this note.
+    """
     from gevent import monkey
 
     monkey.patch_all()
 
 
 def _after_fork_in_child() -> None:
-    """Fork-safety for EVERY child this process forks — a work-horse on the prefork
-    pool, and the ``rq-scheduler`` process on every pool.
+    """Run fork-safety for EVERY child this process forks — a work-horse or the ``rq-scheduler`` process.
 
     Two inherited things are unusable in the child: the monitoring writer (its
     parent-owned background threads do not survive ``fork()`` and would hang flushes
@@ -357,10 +362,11 @@ def install_fork_hooks() -> None:
 
 
 def prepare_forking_worker() -> None:
-    """Fork-safety setup specific to the PREFORK pool, before it starts forking a
-    work-horse per job: drop the parent's monitoring client (its exporter thread would
-    not survive ``fork()``) and on macOS disable system proxy detection (``urllib``'s
-    proxy lookup deadlocks in a forked child during SSL setup).
+    """Run fork-safety setup specific to the PREFORK pool, before it forks a work-horse per job.
+
+    Drops the parent's monitoring client (its exporter thread would not survive ``fork()``) and
+    on macOS disables system proxy detection (``urllib``'s proxy lookup deadlocks in a forked
+    child during SSL setup).
 
     The after-fork child hook is NOT installed here — every pool needs it, so it is
     registered in :func:`install_fork_hooks` from the shared build seam.
@@ -385,9 +391,9 @@ def _build_worker(
     results_ttl: int,
     pool: str,
 ) -> tuple[CustomRQWorker | CustomRQSimpleWorker, Redis]:
-    """Build the RQ worker for the selected pool; returns it with its dedicated
-    connection (closed by the caller after the worker exits).
+    """Build the RQ worker for the selected pool, returning it with its dedicated connection.
 
+    The caller closes the returned connection after the worker exits.
     ``prefork`` (default) forks a monitored work-horse per job; ``solo`` and
     ``gevent`` run jobs in-process. ``results_ttl`` is the default result TTL; a
     ``name`` of ``None`` lets RQ auto-generate a unique per-process name.
@@ -435,21 +441,22 @@ class RqWorkerRuntime(BackendRuntime):
     pool_turnover_required = False
 
     def __init__(self, params: Mapping[str, Any]) -> None:
+        """Store the launch ``params``; the worker and its connection are built in :meth:`build`."""
         self._params = dict(params)
         self._worker: CustomRQWorker | CustomRQSimpleWorker | None = None
         self._redis_conn: Redis | None = None
 
     @classmethod
     def from_args(cls, args: Sequence[str]) -> Self:
-        """Parse the worker CLI's own options, strictly: an unknown or malformed
-        option raises out of click rather than being silently dropped."""
+        """Parse the worker CLI's own options strictly; an unknown or malformed option raises out of click."""
         ctx = main.make_context("rq-worker", list(args))
         return cls(ctx.params)
 
     async def build(self) -> None:
-        """Construct the worker and its dedicated connection — the pool-specific
-        fork-safety setup included. Runs before the readiness gate: building an
-        engine object consumes nothing."""
+        """Construct the worker and its dedicated connection, pool-specific fork-safety setup included.
+
+        Runs before the readiness gate: building an engine object consumes nothing.
+        """
         self._worker, self._redis_conn = _build_worker(
             self._params["redis_url"],
             self._params["name"],

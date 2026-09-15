@@ -1,3 +1,5 @@
+"""Unix-domain-socket client transports for MCP over local sockets."""
+
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
@@ -21,6 +23,7 @@ class SafeAsyncClient(httpx.AsyncClient):
         exc_value: BaseException | None = None,
         traceback: TracebackType | None = None,
     ) -> None:
+        """Close the client, swallowing the benign ``InvalidStateError`` from a UDS shutdown race."""
         try:
             await super().__aexit__(exc_type, exc_value, traceback)
         except asyncio.exceptions.InvalidStateError:
@@ -29,7 +32,10 @@ class SafeAsyncClient(httpx.AsyncClient):
 
 
 class BaseUDSTransport(ClientTransport):
+    """MCP client transport that connects over a Unix domain socket at ``socket_path``."""
+
     def __init__(self, socket_path: str):
+        """Store the ``socket_path`` this transport connects to."""
         self.socket_path = socket_path
 
     def _socket_factory(

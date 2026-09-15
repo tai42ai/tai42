@@ -1,7 +1,7 @@
-"""Tool-dispatch glue: convert a vendor tool (langchain ``BaseTool``, MCP
-``mcp.Tool``) into a callable with a synthesized signature. The generic
-JSON-Schema → pydantic converter these adapters use lives in
-``tai42_kit.utils.data.json_schema_util``.
+"""Tool-dispatch glue: convert a vendor tool into a callable with a synthesized signature.
+
+Adapts a langchain ``BaseTool`` or an MCP ``mcp.Tool``. The generic JSON-Schema → pydantic
+converter these adapters use lives in ``tai42_kit.utils.data.json_schema_util``.
 """
 
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func

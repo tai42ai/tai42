@@ -150,7 +150,7 @@ async def test_writes_returns_a_keyset_page_with_next_cursor(svc: StatesService)
 
 async def test_writes_refuses_a_malformed_cursor_with_a_value_error(svc: StatesService) -> None:
     # A client-supplied opaque cursor that is not a row id is a 422 (ValueValidationError →
-    # ValidationRejected at the door), never a 500 from ``int()`` deep in the store.
+    # ValidationRejectedError at the door), never a 500 from ``int()`` deep in the store.
     with pytest.raises(ValueValidationError, match="cursor"):
         await svc.writes("alerts", _subject(), limit=2, cursor="not-a-row-id")
 

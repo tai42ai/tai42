@@ -1,5 +1,4 @@
-"""The narrow record door an attach reconciler works through, and the reconcile refusal
-shapes.
+"""The narrow record door an attach reconciler works through, and the reconcile refusal shapes.
 
 A reconciler reads and writes a state's records on the attach transaction through
 :class:`_AttachReconcileRecords`; the refusal helpers build the message and structured
@@ -34,14 +33,16 @@ _RECONCILE_ORIGIN = WriteOrigin(consumer="attach-reconcile", meta={"origin": "re
 
 
 class _AttachReconcileRecords:
-    """The narrow record door an attach reconciler reads and writes through — the
-    :class:`~tai42_contract.states.AttachReconcileRecords` handle bound to one state and the
-    attach's transaction ``conn``. Every call runs on that transaction: ``merge`` and the
-    keyed ``apply`` write on it (so a reconciler's resolution commits with the attach or
-    rolls back with a refusal),
-    and ``read``/``list_subjects`` read on it too, so a reconciler sees its own in-flight
-    merges. Writes are completed and audited through the service chokepoint exactly like any
-    facet write."""
+    """The narrow record door an attach reconciler reads and writes through.
+
+    The :class:`~tai42_contract.states.AttachReconcileRecords` handle bound to one
+    state and the attach's transaction ``conn``. Every call runs on that
+    transaction: ``merge`` and the keyed ``apply`` write on it (so a reconciler's
+    resolution commits with the attach or rolls back with a refusal), and
+    ``read``/``list_subjects`` read on it too, so a reconciler sees its own
+    in-flight merges. Writes are completed and audited through the service
+    chokepoint exactly like any facet write.
+    """
 
     def __init__(self, service: _StatesServiceBase, state: str, conn: AsyncConnection[Any]) -> None:
         self._service = service
@@ -67,15 +68,19 @@ class _AttachReconcileRecords:
         return StateRecord(state=self._state, subject=subject, data=data, seq=seq, canonical_subject=subject)
 
     async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult:
-        """Apply an op batch (the same keyed ops as an update-purpose program) to ``subject``
-        on the attach transaction — so a record under a ``composing`` write regime can be
-        closed with a keyed op that ``merge``'s whole-path set would refuse."""
+        """Apply an op batch (the same keyed ops as an update-purpose program) to ``subject`` on the attach transaction.
+
+        So a record under a ``composing`` write regime can be closed with a keyed
+        op that ``merge``'s whole-path set would refuse.
+        """
         return await self._service.apply(self._state, subject, ops, op_id=None, origin=origin, conn=self._conn)
 
 
 def _record_subtree(data: dict[str, Any], path: list[str]) -> dict[str, Any]:
-    """The record document at an attachment's ``path`` — the subtree a template's jq programs
-    operate over (``.`` at the seam). An absent or non-object node reads as ``{}``."""
+    """The record document at an attachment's ``path`` — the subtree a template's jq programs operate over.
+
+    ``.`` at the seam. An absent or non-object node reads as ``{}``.
+    """
     node: Any = data
     for seg in path:
         if not isinstance(node, dict):
@@ -85,9 +90,11 @@ def _record_subtree(data: dict[str, Any], path: list[str]) -> dict[str, Any]:
 
 
 def _rebase_op(op: Any, path: list[str]) -> dict[str, Any]:
-    """One template-relative op with its ``path`` rebased under the attachment ``path``, so an
-    update program (like a fill) authors its ops in its own coordinates. A malformed op is a
-    loud refusal."""
+    """One template-relative op with its ``path`` rebased under the attachment ``path``.
+
+    So an update program (like a fill) authors its ops in its own coordinates. A
+    malformed op is a loud refusal.
+    """
     if not isinstance(op, dict) or not isinstance(op.get("path"), list):
         raise ValueValidationError(f"an update-program op must be an object carrying a list path, got {op!r}")
     return {**op, "path": [*path, *op["path"]]}
@@ -110,9 +117,12 @@ def _reconcile_refusal(context: AttachReconcileContext, orphans: list[tuple[Stat
 
 
 def _reconcile_orphans_extra(orphans: list[tuple[StateSubject, dict[str, Any]]]) -> dict[str, Any]:
-    """The reconcile refusal's STRUCTURED payload: the orphaned records (subject key/kind +
-    the orphan item's id/label) so a UI keys its resolve step on the data, not the prose.
-    ``reconcile`` flags the one refusal that has the close-with-resolution follow-up."""
+    """The reconcile refusal's STRUCTURED payload of the orphaned records.
+
+    Carries each orphan's subject key/kind and the orphan item's id/label so a UI
+    keys its resolve step on the data, not the prose. ``reconcile`` flags the one
+    refusal that has the close-with-resolution follow-up.
+    """
     return {
         "reconcile": True,
         "orphans": [

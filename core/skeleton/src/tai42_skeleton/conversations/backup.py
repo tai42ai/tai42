@@ -1,5 +1,6 @@
-"""The ``conversations`` backup section — export/import over the routing-row store. Only
-the routing rows are backed up; the record/dedupe/reverse-index keyspaces are transient.
+"""The ``conversations`` backup section — export/import over the routing-row store.
+
+Only the routing rows are backed up; the record/dedupe/reverse-index keyspaces are transient.
 
 ``callback_secret`` is EXCLUDED from the export — a live secret never leaves the host.
 Under ``overwrite`` a row is replaced and its ``api`` secret re-minted (surfaced in
@@ -36,16 +37,20 @@ def _empty_report() -> _SectionReport:
 
 
 def _channel_identity(route: ConversationRoute) -> tuple[str, str] | None:
-    """The ``(channel, canonical identity)`` pair a ``channel`` row claims; ``None`` for an
-    ``api`` row, which claims none."""
+    """The ``(channel, canonical identity)`` pair a ``channel`` row claims.
+
+    ``None`` for an ``api`` row, which claims none.
+    """
     if route.door != "channel" or route.channel is None or route.our_identity is None:
         return None
     return (route.channel, canonical_address(route.our_identity))
 
 
 async def export_conversation_routes() -> dict[str, Any]:
-    """The stored routing rows, each ``callback_secret`` EXCLUDED. An in-memory deployment
-    provably holds no rows, so it exports empty rather than refusing."""
+    """The stored routing rows, each ``callback_secret`` EXCLUDED.
+
+    An in-memory deployment provably holds no rows, so it exports empty rather than refusing.
+    """
     manager = get_conversations_manager()
     if isinstance(manager, InMemoryConversationsManager):
         return {"routes": []}
@@ -62,9 +67,12 @@ async def export_conversation_routes() -> dict[str, Any]:
 def _validate_row(
     item: Any, existing: dict[str, ConversationRoute], mode: Literal["skip", "overwrite"], report: _SectionReport
 ) -> ConversationRoute | None:
-    """The :class:`ConversationRoute` a backup row parses to, or ``None`` when the row is
-    rejected (a validation failure recorded per row) or left fully untouched (an existing
-    route under ``skip`` — no re-mint, no re-assertion of its execution key)."""
+    """The :class:`ConversationRoute` a backup row parses to, or ``None`` when it is not written.
+
+    ``None`` when the row is rejected (a validation failure recorded per row) or left fully
+    untouched (an existing route under ``skip`` — no re-mint, no re-assertion of its execution
+    key).
+    """
     route_name = item.get("route_name") if isinstance(item, dict) else None
     try:
         route = ConversationRoute.model_validate(item)
@@ -82,9 +90,12 @@ def _validate_row(
 async def _authorize_row(
     route: ConversationRoute, scan: ExecutionKeyScan, claimed: dict[tuple[str, str], str], report: _SectionReport
 ) -> bool:
-    """Whether ``route`` may be written: its execution key must assert usable and
-    token-free-evaluable, and its ``(channel, our_identity)`` claim must be unheld by a
-    DIFFERENT route. Either failure is a per-row rejection recorded in the report."""
+    """Whether ``route`` may be written.
+
+    Its execution key must assert usable and token-free-evaluable, and its
+    ``(channel, our_identity)`` claim must be unheld by a DIFFERENT route. Either failure is a
+    per-row rejection recorded in the report.
+    """
     try:
         # The same assertion the create door makes; a key reminted since the backup no
         # longer carries the row's bound fingerprint.
@@ -113,10 +124,13 @@ async def _write_row(
     claimed: dict[tuple[str, str], str],
     report: _SectionReport,
 ) -> None:
-    """Persist ``route`` with a freshly minted callback secret (shown once), re-home its
-    ``(channel, identity)`` claim, and record it as created or updated. Export carried no
-    secret; a ``channel`` row and a poll-only api row (no callback declared) sign nothing and
-    carry none. created/updated follows the pre-restore snapshot, not the store's return."""
+    """Persist ``route`` with a freshly minted callback secret (shown once) and record it.
+
+    Re-homes its ``(channel, identity)`` claim, and records it as created or updated. Export
+    carried no secret; a ``channel`` row and a poll-only api row (no callback declared) sign
+    nothing and carry none. created/updated follows the pre-restore snapshot, not the store's
+    return.
+    """
     callback_secret = secrets.token_urlsafe(32) if route.door == "api" and route.callback_url is not None else None
     restored = route.model_copy(update={"callback_secret": callback_secret})
     await manager.put_route(restored)
@@ -143,13 +157,14 @@ async def import_conversation_routes(
     execution key asserted usable and token-free-evaluable against the LIVE policy store
     (pass-role skipped — the restore door is admin-fenced), and its
     ``(channel, our_identity)`` claim checked unclaimed. A row failing any of these is a
-    per-row rejection in the report, never an aborted restore of the rest."""
+    per-row rejection in the report, never an aborted restore of the rest.
+    """
     if not isinstance(payload, dict):
-        raise ValueError(f"conversations section payload must be an envelope dict, got {type(payload)}")
+        raise ValueError(f"conversations section payload must be an envelope dict, got {type(payload)}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     if "routes" not in payload:
         raise ValueError("conversations envelope is missing the required 'routes' key")
     if not isinstance(payload["routes"], list):
-        raise ValueError("conversations envelope 'routes' must be a list")
+        raise ValueError("conversations envelope 'routes' must be a list")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
     report = _empty_report()
     if not payload["routes"]:
@@ -160,7 +175,7 @@ async def import_conversation_routes(
     if isinstance(manager, InMemoryConversationsManager):
         # The store cannot hold a row on a backend-less deployment; refuse the whole
         # section loudly rather than silently drop every route.
-        raise RuntimeError("conversation routes require the redis conversations backend to restore")
+        raise RuntimeError("conversation routes require the redis conversations backend to restore")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
     existing = await manager.list_routes()
     # Live ``(channel, identity)`` claims, tracked across the restore: two channel rows on

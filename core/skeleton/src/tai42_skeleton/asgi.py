@@ -104,9 +104,11 @@ def _claim_app_token(manifest_path: str | None) -> str | None:
 
 
 def _release_app_token(manifest_path: str | None, saved_manifest_env: str | None) -> None:
-    """Release the one-app token and restore the manifest env under ``_guard_lock``, so
-    a failed boot never wedges the process and a later no-param app resolves the
-    config-dir default rather than this app's path."""
+    """Release the one-app token and restore the manifest env under ``_guard_lock``.
+
+    A failed boot never wedges the process, and a later no-param app resolves the
+    config-dir default rather than this app's path.
+    """
     global _app_active, _active_manifest_marker
     with _guard_lock:
         if manifest_path is not None:
@@ -159,8 +161,11 @@ async def _worker_lifespan(
     app_state: dict,
     _app: Starlette,
 ) -> AsyncIterator[None]:
-    """The worker lifespan: claim the one-app token, build the app singleton, enter
-    ``app_context`` and the inner FastMCP lifespan, and release the token on exit."""
+    """Run the worker lifespan.
+
+    Claim the one-app token, build the app singleton, enter ``app_context`` and the
+    inner FastMCP lifespan, and release the token on exit.
+    """
     saved_manifest_env = _claim_app_token(manifest_path)
     try:
         app = instance.build_app()
@@ -183,8 +188,10 @@ async def _worker_lifespan(
 
 
 class _DispatchApp:
-    """The mounted sub-app that forwards requests to the built inner app, answering 503
-    until the lifespan populates the shared ``app_state`` it holds."""
+    """Mounted sub-app that forwards requests to the built inner app.
+
+    Answers 503 until the lifespan populates the shared ``app_state`` it holds.
+    """
 
     def __init__(self, app_state: dict) -> None:
         self._app_state = app_state
@@ -277,8 +284,7 @@ def create_app(
 
 
 def lifespan(app: Starlette):
-    """Return a ``create_app`` app's lifespan context manager, for composing into a
-    host lifespan when the app is mounted.
+    """Return a ``create_app`` app's lifespan context manager for composing into a host lifespan.
 
     Mounting the factory app is not enough on its own: Starlette does not run a
     mounted sub-app's lifespan, so the host must run it. Enter the returned context

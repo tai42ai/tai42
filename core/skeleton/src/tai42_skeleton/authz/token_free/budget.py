@@ -1,5 +1,8 @@
-"""The single per-scan allowance a condition draws from: the token count and nesting
-depth bounds, and the mutable :class:`_Budget` threaded through lexer and parser."""
+"""The single per-scan allowance a condition draws from: token and nesting bounds plus the budget object.
+
+Defines the token count and nesting depth bounds, and the mutable :class:`_Budget`
+threaded through lexer and parser.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ _MAX_NESTING_DEPTH = 32
 
 @dataclass
 class _Budget:
-    """The SINGLE allowance one scan of one condition draws from.
+    r"""The SINGLE allowance one scan of one condition draws from.
 
     Threaded through the lexer, the parser and every ``\\(...)`` body they descend into,
     so an interpolation cannot mint a fresh allowance and the depth counter tracks the
@@ -36,8 +39,10 @@ class _Budget:
             )
 
     def descend(self, condition_text: str, position: int) -> None:
-        """Enter one level of nesting, refusing past :data:`_MAX_NESTING_DEPTH`. Always
-        paired with a ``finally`` that calls :meth:`ascend`."""
+        """Enter one level of nesting, refusing past :data:`_MAX_NESTING_DEPTH`.
+
+        Always paired with a ``finally`` that calls :meth:`ascend`.
+        """
         self.depth += 1
         if self.depth > _MAX_NESTING_DEPTH:
             raise _refusal(

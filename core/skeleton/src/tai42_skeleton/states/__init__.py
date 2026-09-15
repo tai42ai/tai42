@@ -1,5 +1,7 @@
-"""The platform subject-keyed state store — the record substrate a door-agnostic
-contract facet (``tai42_app.states``) reads and writes a subject's document through.
+"""The platform subject-keyed state store — the record substrate the states facet reads and writes through.
+
+A door-agnostic contract facet (``tai42_app.states``) reads and writes a subject's document
+through this store.
 
 This package owns the Postgres seam (:mod:`.store`), the validate + apply service
 (:mod:`.service`) with the write-provenance chokepoint, the platform template document

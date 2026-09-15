@@ -144,8 +144,10 @@ class ClientDisconnectedError(Exception):
 
 
 class ClientConnectError(ClientDisconnectedError):
-    """Raised when a pooled client could not be (re)built — connect/init failed; a
-    subclass so unavailable-client handling catches both."""
+    """Raised when a pooled client could not be (re)built — connect/init failed.
+
+    A subclass so unavailable-client handling catches both.
+    """
 
     # A failed (re)connect is likewise a transient dependency-unavailable failure.
     __tai_error_kind__ = ErrorKind.UNAVAILABLE

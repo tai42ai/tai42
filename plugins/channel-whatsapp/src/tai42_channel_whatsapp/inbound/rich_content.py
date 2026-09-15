@@ -45,9 +45,11 @@ _MEDIA_PLACEHOLDERS = {
 
 
 def _media_placeholder(message_type: str, media: dict[str, Any]) -> str:
-    """A faithful, non-blank turn text for a caption-less media message — the bracketed type
-    label, enriched for a document with a filename and a voice note. Never blank (``accept``
-    refuses blank text)."""
+    """A faithful, non-blank turn text for a caption-less media message.
+
+    The bracketed type label, enriched for a document with a filename and a voice note. Never blank
+    (``accept`` refuses blank text).
+    """
     if message_type == "document":
         filename = media.get("filename")
         if isinstance(filename, str) and filename.strip():

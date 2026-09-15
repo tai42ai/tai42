@@ -10,12 +10,19 @@
  * The bundle is self-contained: React, the design system, and its stylesheets all
  * ship inside it, so there is no import map and nothing to resolve at load time.
  */
+// This import block is not auto-sorted: `@/styles.css` must stay LAST so its
+// `@layer` registration follows the design system's in the one emitted CSS asset
+// (theme < base precedence). simple-import-sort would hoist the side-effect
+// import to the top and invert `@layer` order, a real visual regression, so the
+// sort rule is pinned off for this block (it reports on the first import line).
+// eslint-disable-next-line simple-import-sort/imports
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { ChatApp } from '@/app';
-// The page's own stylesheet, imported LAST so its rules land after the design
-// system's in the one emitted CSS asset.
+
+// The page's own stylesheet, imported LAST (see the pin above) so its `@layer`
+// registration follows the design system's in the one emitted CSS asset.
 import '@/styles.css';
 
 const root = document.getElementById('root');

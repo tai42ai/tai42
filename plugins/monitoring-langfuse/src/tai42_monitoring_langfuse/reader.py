@@ -37,12 +37,14 @@ class LangfuseReader:
     """Serves the contract read surface from the Langfuse query APIs."""
 
     def __init__(self, manager: LangfuseClientManager) -> None:
+        """Wire the reader's metrics, span-window and trace query helpers over ``manager``."""
         self._metrics = MetricsQuery(manager)
         self._spans = SpanWindowQuery(manager)
         self._traces = TraceQuery(manager)
 
-    async def query_metrics(self, filter: MetricsFilter) -> MetricsResult:
-        return await self._metrics.query_metrics(filter)
+    async def query_metrics(self, filter_: MetricsFilter) -> MetricsResult:
+        """Return aggregated metrics matching ``filter_``."""
+        return await self._metrics.query_metrics(filter_)
 
     async def list_spans_in_window(
         self,
@@ -51,12 +53,14 @@ class LangfuseReader:
         *,
         run: str | None = None,
         kind: SpanKind | None = None,
-        filter: MonitoringFilter | None = None,
+        filter_: MonitoringFilter | None = None,
         order_by: OrderBy | None = None,
     ) -> list[SpanWindowItem]:
-        return await self._spans.list_spans_in_window(t0, t1, run=run, kind=kind, filter=filter, order_by=order_by)
+        """List spans in the ``[t0, t1)`` window, optionally filtered and ordered."""
+        return await self._spans.list_spans_in_window(t0, t1, run=run, kind=kind, filter_=filter_, order_by=order_by)
 
     async def get_trace(self, trace_id: str) -> MonitoringTrace:
+        """Return the full :class:`MonitoringTrace` for ``trace_id``."""
         return await self._traces.get_trace(trace_id)
 
     async def list_traces(
@@ -66,14 +70,15 @@ class LangfuseReader:
         to_timestamp: datetime | None = None,
         limit: int | None = None,
         page: int | None = None,
-        filter: MonitoringFilter | None = None,
+        filter_: MonitoringFilter | None = None,
         order_by: OrderBy | None = None,
     ) -> list[MonitoringTraceSummary]:
+        """List trace summaries in a time window, one page at a time, optionally filtered and ordered."""
         return await self._traces.list_traces(
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
             limit=limit,
             page=page,
-            filter=filter,
+            filter_=filter_,
             order_by=order_by,
         )

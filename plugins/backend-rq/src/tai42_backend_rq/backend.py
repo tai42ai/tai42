@@ -53,19 +53,21 @@ class _VendorCliRuntime(BackendRuntime):
         return cls(args)
 
     def _publish_argv(self) -> None:
-        """Hand this runtime's options to the vendor CLI the only way it reads
-        them — the process argv."""
+        """Hand this runtime's options to the vendor CLI the only way it reads them — the process argv."""
         sys.argv = [self.argv0, *self._args]
 
 
 class RqBeatRuntime(_VendorCliRuntime):
-    """``rq-scheduler``: moves due scheduled jobs onto the queue. It enqueues
-    work rather than pulling it, so it is not a consuming runtime."""
+    """``rq-scheduler``: moves due scheduled jobs onto the queue.
+
+    It enqueues work rather than pulling it, so it is not a consuming runtime.
+    """
 
     name = "beat"
     argv0 = "rq-scheduler"
 
     def run_blocking(self) -> None:
+        """Run the ``rq-scheduler`` process in the foreground."""
         self._publish_argv()
         # Imported on the path that runs it: only this runtime needs the
         # scheduler script, and only this process ever becomes one.
@@ -81,6 +83,7 @@ class RqDashboardRuntime(_VendorCliRuntime):
     argv0 = "rq-dashboard"
 
     def run_blocking(self) -> None:
+        """Run the ``rq-dashboard`` web view in the foreground."""
         self._publish_argv()
         # Imported on the path that runs it: the dashboard drags in a whole web
         # stack that a worker or beat process must never pay for.
@@ -106,5 +109,6 @@ class RqBackend(ManagedBackend):
 
         Read live rather than frozen at import, so a settings epoch flip that
         widens ``RQ_TASK_TIMEOUT`` widens the drain with it instead of leaving a
-        warm shutdown abandoning a work-horse it should have waited for."""
+        warm shutdown abandoning a work-horse it should have waited for.
+        """
         return float(rq_settings().task_timeout) + _DRAIN_MARGIN_SECONDS

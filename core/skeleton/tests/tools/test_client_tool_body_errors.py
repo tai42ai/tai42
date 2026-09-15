@@ -108,7 +108,7 @@ def test_machinery_failure_on_live_fire_propagates_unchanged(monkeypatch):
 def test_identity_gate_denial_propagates_unchanged(monkeypatch):
     # An identity-gate denial is platform machinery: its own exception type propagates
     # raw, never wrapped as a tool error.
-    class GateDenied(Exception):
+    class GateDeniedError(Exception):
         pass
 
     async def run() -> None:
@@ -123,12 +123,12 @@ def test_identity_gate_denial_propagates_unchanged(monkeypatch):
             runnable = app._tool_binding._client_runnable(tool_obj)
 
             async def _deny(*args, **kwargs):
-                raise GateDenied("not allowed")
+                raise GateDeniedError("not allowed")
 
             monkeypatch.setattr(app._tool_binding, "_bound_execution_identity", lambda: object())
             monkeypatch.setattr(app._tool_binding, "_authorize_execution_dispatch", _deny)
 
-            with pytest.raises(GateDenied):
+            with pytest.raises(GateDeniedError):
                 await runnable(q="x")
 
     asyncio.run(run())

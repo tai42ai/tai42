@@ -1,3 +1,5 @@
+"""Per-loop registry of long-lived LLM store resources."""
+
 import json
 from typing import Any
 
@@ -34,6 +36,7 @@ class StoreRegistry(ResourceRegistry):
         return f"{provider}::{conn_string}::{config_str}"
 
     async def get_store(self, provider: str, conn_string: str | None, **kwargs) -> BaseStore:
+        """Return the store for ``provider``/``conn_string``, creating and caching its resource on first use."""
         key = self._generate_key(provider, conn_string, kwargs)
         resource = await self._get_or_init_resource(key, lambda: create_store_resource(provider, conn_string, **kwargs))
         return get_store_from_resource(provider, resource, **kwargs)

@@ -1,5 +1,6 @@
-"""The ``conversation_target_config`` backup section — export/import over the per-target
-config store (``multichannel`` opt-in + first-contact ``greeting_template``).
+"""The ``conversation_target_config`` backup section — export/import over the per-target config store.
+
+The store carries the ``multichannel`` opt-in + first-contact ``greeting_template``.
 
 Operator config, carrying no credentials, so the section is not secret-flagged — the same
 split the connectors subsystem draws between its non-secret ``connector_categories`` and its
@@ -29,8 +30,10 @@ def _empty_report() -> _SectionReport:
 
 
 async def export_target_configs() -> dict[str, Any]:
-    """The stored per-target configs. An in-memory deployment provably holds none, so it
-    exports empty rather than refusing."""
+    """The stored per-target configs.
+
+    An in-memory deployment provably holds none, so it exports empty rather than refusing.
+    """
     if ConversationsSettings().in_memory:
         return {"target_configs": []}
     configs = await ConversationTargetConfigStore(ConversationsSettings()).list()
@@ -42,13 +45,14 @@ async def import_target_configs(payload: dict[str, Any], mode: Literal["skip", "
 
     A malformed envelope raises BEFORE any write. Each row is model-validated; a row failing
     validation is a per-row rejection in the report. Under ``skip`` (the default) an existing
-    config is left untouched; under ``overwrite`` it is replaced."""
+    config is left untouched; under ``overwrite`` it is replaced.
+    """
     if not isinstance(payload, dict):
-        raise ValueError(f"conversation_target_config section payload must be an envelope dict, got {type(payload)}")
+        raise ValueError(f"conversation_target_config section payload must be an envelope dict, got {type(payload)}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     if "target_configs" not in payload:
         raise ValueError("conversation_target_config envelope is missing the required 'target_configs' key")
     if not isinstance(payload["target_configs"], list):
-        raise ValueError("conversation_target_config envelope 'target_configs' must be a list")
+        raise ValueError("conversation_target_config envelope 'target_configs' must be a list")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
     report = _empty_report()
     if not payload["target_configs"]:

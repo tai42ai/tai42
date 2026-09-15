@@ -1,5 +1,4 @@
-"""Session registrations + transcript streams + pending-question + form records
-(plugin-owned Redis).
+"""Session registrations + transcript streams + pending-question + form records (plugin-owned Redis).
 
 The store is split by the record family it owns, each submodule reaching Redis
 through the shared connection helpers in :mod:`connection`:

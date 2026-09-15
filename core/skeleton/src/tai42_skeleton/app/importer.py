@@ -82,19 +82,21 @@ def _import_module_under_binding(
     route_savepoint: Callable[[], int] | None,
     route_rollback: Callable[[MountBinding, int], None] | None,
 ) -> None:
-    """Execute module ``name`` under ITS OWN mount binding when the map declares one
-    and it is not already the active binding, else under whatever context the walk
-    already carries. A route submodule reached through a foreign role's package walk
-    thus resolves ``mount_base()`` and registers its declared rows against ITS item's
-    binding; a sibling with no binding keeps the leaf's, and a module whose own binding
-    is already active is not re-bound (its rows must land in the live context so its
+    """Import module ``name`` under its own mount binding, else under the walk's current context.
+
+    Bound to ITS OWN mount binding when the map declares one and it is not already the active
+    binding, else run under whatever context the walk already carries. A route submodule reached
+    through a foreign role's package walk thus resolves ``mount_base()`` and registers its declared
+    rows against ITS item's binding; a sibling with no binding keeps the leaf's, and a module whose
+    own binding is already active is not re-bound (its rows must land in the live context so its
     completeness check still sees them).
 
     A submodule the walk newly binds is savepoint-guarded when ``route_savepoint``/
     ``route_rollback`` are supplied: a mid-import ``custom_route`` fault or a bind-time
     completeness fault rolls the submodule's committed rows back before the fault
     propagates, so a failed foreign-walk import leaves no half-registered state — the
-    same guarantee the own-role import gives itself."""
+    same guarantee the own-role import gives itself.
+    """
     binding = mount_map.get(name)
     if binding is not None and binding != current_mount_binding():
         savepoint = route_savepoint() if route_savepoint is not None else None
@@ -117,6 +119,13 @@ def import_or_reload_package(
     route_savepoint: Callable[[], int] | None = None,
     route_rollback: Callable[[MountBinding, int], None] | None = None,
 ) -> list[str]:
+    """Import (or force-reload) the ``root_pkg_name`` package tree plus ``extra_modules``.
+
+    The managed package and its route-registering sibling modules are dropped from ``sys.modules``
+    and re-imported in a stable dependency order, each under its declared ``mount_map`` binding.
+    Returns the names re-imported. A manifest-named module that cannot be found or imported aborts
+    loudly; a stale ``extra_modules`` entry that no longer resolves is dropped with a log line.
+    """
     if not root_pkg_name:
         return []
     module_bindings: Mapping[str, MountBinding] = mount_map or {}

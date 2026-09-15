@@ -54,8 +54,9 @@ async def accept(
     location: LocationElement | None = None,
     locale: str | None = None,
 ) -> str:
-    """Accept one inbound channel message, persist-and-deliver its answer, and return its
-    ``message_id`` (a uuid4). See :meth:`AppConversations.accept`.
+    """Accept one inbound channel message, persist-and-deliver its answer, and return its ``message_id``.
+
+    The ``message_id`` is a uuid4. See :meth:`AppConversations.accept`.
 
     Idempotent on ``(channel, provider_message_id)``: a redelivery returns the existing
     ``message_id`` and starts no second turn. Every gate that can refuse runs before any
@@ -87,7 +88,8 @@ async def accept(
 
     A blank/whitespace-only ``text`` is refused with :class:`BlankInboundTextError` before
     any state is written — there is nothing to run a turn on — for the channel adapter to
-    drop like an unrouted message."""
+    drop like an unrouted message.
+    """
     checked_params = _checked_params(params)
     checked_form = _checked_form(form)
     checked_attachments = _checked_attachments(attachments)
@@ -185,11 +187,13 @@ async def _accept_for_turn(
     location: LocationElement | None = None,
     locale: str | None = None,
 ) -> str:
-    """Commit an admitted channel message to a turn in the one order that keeps the
-    release-less inbound claim sound: reserve the per-thread FIFO slot (the last gate that
-    can refuse, and it refuses with nothing written), persist the intake record, claim the
-    inbound pair, schedule the turn. Losing the claim means a concurrent attempt committed
-    first, so this one releases its slot, discards its record and returns the winner's id."""
+    """Commit an admitted channel message to a turn in the one order that keeps the inbound claim sound.
+
+    The release-less order is: reserve the per-thread FIFO slot (the last gate that can refuse,
+    and it refuses with nothing written), persist the intake record, claim the inbound pair,
+    schedule the turn. Losing the claim means a concurrent attempt committed first, so this one
+    releases its slot, discards its record and returns the winner's id.
+    """
     caps = get_turn_caps()
     caps.reserve_thread_slot(thread_id)
     intake_token = uuid4().hex
@@ -258,11 +262,13 @@ async def _shed_with_reply(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> str:
-    """Answer an over-limit address with its one paid slow-down reply, committed in the
-    turn path's order: the record is persisted at ``accepted`` under an intake lease, the
-    inbound pair is claimed, and only then does the guarded transition make it deliverable.
-    A record the delivery machine drives must never stand behind an unclaimed pair. No turn
-    runs, so no thread slot is reserved."""
+    """Answer an over-limit address with its one paid slow-down reply, in the turn path's order.
+
+    The record is persisted at ``accepted`` under an intake lease, the inbound pair is claimed,
+    and only then does the guarded transition make it deliverable. A record the delivery machine
+    drives must never stand behind an unclaimed pair. No turn runs, so no thread slot is
+    reserved.
+    """
     intake_token = uuid4().hex
     intake = _new_record(
         route=route,
@@ -316,9 +322,11 @@ async def _shed_silently(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> str:
-    """Drop a message from an address already given its slow-down reply this window,
-    leaving a terminal ``shed`` record. The claim behind that record is what makes a
-    provider redelivery resolve to it instead of buying the address another turn."""
+    """Drop a message from an address already given its slow-down reply this window.
+
+    Leaves a terminal ``shed`` record. The claim behind that record is what makes a provider
+    redelivery resolve to it instead of buying the address another turn.
+    """
     record = _new_record(
         route=route,
         message_id=message_id,

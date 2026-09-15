@@ -63,12 +63,15 @@ from typing import Any, Protocol, runtime_checkable
 
 @runtime_checkable
 class ExtensionFactory(Protocol):
-    """The registered form of every tool extension: a factory called with the
-    tool's callable, its current name, and its description, returning a
-    NEW-NAMED callable that the platform binds as a branch tool alongside the
-    original."""
+    """The registered form of every tool extension: a factory that produces a branch tool.
 
-    def __call__(self, func: Callable[..., Any], name: str, description: str) -> Callable[..., Any]: ...
+    Called with the tool's callable, its current name, and its description, returning a
+    NEW-NAMED callable that the platform binds as a branch tool alongside the original.
+    """
+
+    def __call__(self, func: Callable[..., Any], name: str, description: str) -> Callable[..., Any]:
+        """Build the NEW-NAMED branch callable from ``func`` and its current ``name``/``description``."""
+        ...
 
 
 __all__ = ["ExtensionFactory"]

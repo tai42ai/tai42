@@ -114,7 +114,8 @@ async def test_tail_stall_raises_runtime_error(stub_app, monkeypatch: pytest.Mon
         async def xrevrange(self, key, count=None):
             return []
 
-        async def xrange(self, key, min="-", max="+", count=None):
+        # ``min``/``max`` mirror the redis-py xrange(name, min, max, count) client signature.
+        async def xrange(self, key, min="-", max="+", count=None):  # noqa: A002
             return []
 
         async def xread(self, streams, block=None):

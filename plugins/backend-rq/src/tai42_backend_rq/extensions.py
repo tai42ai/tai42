@@ -1,5 +1,4 @@
-"""The three BACKEND tool extensions: ``sync_task`` / ``schedule_task`` /
-``async_task``.
+"""The three BACKEND tool extensions: ``sync_task`` / ``schedule_task`` / ``async_task``.
 
 Each factory is handed a tool's callable, name, and description and returns a
 new-named branch tool that routes the call through the RQ queue. The branch
@@ -76,8 +75,10 @@ def _wait_for_job_result(job: _PollableJob, timeout: float) -> Any:
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="sync_task")
 def sync_task(func: Any, name: str, description: str) -> Any:
-    """Branch ``func`` into ``<name>_sync_task``: queue the call and block
-    until the job finishes, returning the job's result."""
+    """Branch ``func`` into ``<name>_sync_task``: queue the call and block for the result.
+
+    Blocks until the job finishes, returning the job's result.
+    """
     raw_name = f"{name}_sync_task"
     safe_name = makefun_func_name(raw_name)
     sig = add_signature_params(func, RQ_TASK_OPTS, exclude_fastmcp_ctx=True)
@@ -104,8 +105,10 @@ def sync_task(func: Any, name: str, description: str) -> Any:
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="schedule_task")
 def schedule_task(func: Any, name: str, description: str) -> Any:
-    """Branch ``func`` into ``<name>_schedule_task``: register a recurring
-    schedule (interval or crontab) that runs the tool via the queue."""
+    """Branch ``func`` into ``<name>_schedule_task``: register a recurring schedule.
+
+    The schedule (interval or crontab) runs the tool via the queue.
+    """
     raw_name = f"{name}_schedule_task"
     safe_name = makefun_func_name(raw_name)
     new_description = f"Scheduled version of '{name}'. Schedules the task to run later via a background queue."
@@ -144,8 +147,10 @@ def schedule_task(func: Any, name: str, description: str) -> Any:
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="async_task")
 def async_task(func: Any, name: str, description: str) -> Any:
-    """Branch ``func`` into ``<name>_async_task``: queue the call and return
-    the job id immediately (poll with ``backend_task_result``)."""
+    """Branch ``func`` into ``<name>_async_task``: queue the call and return the job id at once.
+
+    Returns the job id immediately (poll with ``backend_task_result``).
+    """
     raw_name = f"{name}_async_task"
     safe_name = makefun_func_name(raw_name)
     new_description = f"Async version of '{name}'. Submits the task to a background queue."

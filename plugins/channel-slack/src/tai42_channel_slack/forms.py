@@ -63,8 +63,10 @@ _MAX_HEADER_LEN = 150
 
 
 class FormSchemaError(ChannelInputError):
-    """A form schema (or a submitted value) cannot be mapped to Block Kit — a
-    permanent refusal, never a retryable delivery failure."""
+    """A form schema (or a submitted value) cannot be mapped to Block Kit.
+
+    A permanent refusal, never a retryable delivery failure.
+    """
 
 
 def _properties(schema: dict[str, Any]) -> dict[str, Any]:
@@ -87,14 +89,18 @@ def _required_set(schema: dict[str, Any]) -> set[str]:
 
 
 def first_field_name(schema: dict[str, Any]) -> str:
-    """The first property name — the fallback block a door-side error is pinned under
-    when the door names no locatable field."""
+    """The first property name.
+
+    The fallback block a door-side error is pinned under when the door names no locatable field.
+    """
     return next(iter(_properties(schema)))
 
 
 def is_declared_field(schema: dict[str, Any], name: str) -> bool:
-    """Whether ``name`` is a declared property of the schema — i.e. a real input
-    block_id (block_id == field name) a door-side error can be pinned under."""
+    """Whether ``name`` is a declared property of the schema.
+
+    A real input block_id (block_id == field name) a door-side error can be pinned under.
+    """
     return name in _properties(schema)
 
 
@@ -118,9 +124,12 @@ def _static_select(name: str, enum: Any) -> dict[str, Any]:
 
 
 def _static_select_from_options(name: str, choices: list[dict[str, Any]]) -> dict[str, Any]:
-    """A ``static_select`` built from a per-send option list — each ``{"value", "label"?}``
-    becomes an option whose label (falling back to the value) is shown and whose value is
-    submitted. An empty list or one past the option cap is refused, naming the property."""
+    """A ``static_select`` built from a per-send option list.
+
+    Each ``{"value", "label"?}`` becomes an option whose label (falling back to the value) is
+    shown and whose value is submitted. An empty list or one past the option cap is refused,
+    naming the property.
+    """
     if not choices:
         raise FormSchemaError(f"form schema property {name!r} per-send options must be a non-empty list")
     if len(choices) > _MAX_STATIC_SELECT_OPTIONS:
@@ -139,10 +148,12 @@ def _find_option(options: list[dict[str, Any]], value: str) -> dict[str, Any] | 
 
 
 def _apply_initial(name: str, element: dict[str, Any], value: Any) -> None:
-    """Prefill one control from a per-send value: ``initial_value`` for a text/number
-    input, ``initial_option`` for a select or the Yes/No radio. A select value that is
-    not among the control's options — or a boolean value that is not a bool — is a
-    caller bug, refused naming the field rather than silently dropped."""
+    """Prefill one control from a per-send value.
+
+    ``initial_value`` for a text/number input, ``initial_option`` for a select or the Yes/No
+    radio. A select value that is not among the control's options — or a boolean value that is
+    not a bool — is a caller bug, refused naming the field rather than silently dropped.
+    """
     etype = element["type"]
     if etype in ("plain_text_input", "number_input"):
         element["initial_value"] = value if isinstance(value, str) else str(value)
@@ -228,8 +239,10 @@ def _question_section(question: str) -> dict[str, Any]:
 
 
 def _page_header(title: str) -> dict[str, Any]:
-    """One form page's title as a Block Kit ``header`` — a bold titled group, Slack's
-    stand-in for a step (a modal has no native multi-step)."""
+    """One form page's title as a Block Kit ``header``.
+
+    A bold titled group, Slack's stand-in for a step (a modal has no native multi-step).
+    """
     if len(title) > _MAX_HEADER_LEN:
         raise FormSchemaError(f"form page title {title!r} exceeds {_MAX_HEADER_LEN} characters")
     return {"type": "header", "text": {"type": "plain_text", "text": title}}
@@ -241,11 +254,13 @@ def build_modal_blocks(
     options: dict[str, list[dict[str, Any]]] | None = None,
     pages: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """One input block per property, each prefilled from ``values`` and — for a string
-    property named in ``options`` — built as a select from that per-send choice list.
-    With ``pages`` the blocks are grouped under a ``header`` per page (in page order);
-    without them the properties render in schema order. Raises :class:`FormSchemaError`
-    on any property this mapping cannot express or any per-send extra it cannot map."""
+    """One input block per property, each prefilled from ``values``.
+
+    For a string property named in ``options`` the block is built as a select from that per-send
+    choice list. With ``pages`` the blocks are grouped under a ``header`` per page (in page
+    order); without them the properties render in schema order. Raises :class:`FormSchemaError`
+    on any property this mapping cannot express or any per-send extra it cannot map.
+    """
     values = values or {}
     options = options or {}
     required = _required_set(schema)
@@ -275,9 +290,11 @@ def build_modal_view(
     options: dict[str, list[dict[str, Any]]] | None = None,
     pages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """The ``views.open`` modal: the question as a section, then the input blocks
-    (prefilled, per-send selects, and page headers as applicable).
-    ``private_metadata`` carries the interaction id back on ``view_submission``."""
+    """The ``views.open`` modal: the question as a section, then the input blocks.
+
+    The input blocks are prefilled, with per-send selects and page headers as applicable.
+    ``private_metadata`` carries the interaction id back on ``view_submission``.
+    """
     blocks = [_question_section(question), *build_modal_blocks(schema, values, options, pages)]
     if len(blocks) > _MAX_MODAL_BLOCKS:
         raise FormSchemaError(f"form modal exceeds {_MAX_MODAL_BLOCKS} blocks")
@@ -293,15 +310,17 @@ def build_modal_view(
 
 
 def validate_form_schema(schema: dict[str, Any], question: str) -> None:
-    """Enforce the ask-time-knowable Block Kit caps at ask-time; raise
-    :class:`FormSchemaError` naming the offending property/limit on any violation.
+    """Enforce the ask-time-knowable Block Kit caps at ask-time.
+
+    Raises :class:`FormSchemaError` naming the offending property/limit on any violation.
 
     Covers every limit knowable before delivery: the question-text section cap,
     the supported property subset, the per-label cap, the static-select option
     count and per-option text caps, and the modal's 100-block cap (one question
     section plus one input block per property). The button-value cap depends on
     the per-send interaction id, not the schema or question, so it stays at
-    delivery."""
+    delivery.
+    """
     if len(question) > _MAX_SECTION_TEXT_LEN:
         raise FormSchemaError(f"form question exceeds {_MAX_SECTION_TEXT_LEN} characters")
     blocks = build_modal_blocks(schema)
@@ -311,8 +330,10 @@ def validate_form_schema(schema: dict[str, Any], question: str) -> None:
 
 
 def build_message_blocks(question: str, interaction_id: str) -> list[dict[str, Any]]:
-    """The ``chat.postMessage`` blocks: the question section plus a single button
-    whose ``value`` is the interaction id (read back on ``block_actions``)."""
+    """The ``chat.postMessage`` blocks: the question section plus a single button.
+
+    The button's ``value`` is the interaction id (read back on ``block_actions``).
+    """
     if len(interaction_id) > _MAX_BUTTON_VALUE_LEN:
         raise FormSchemaError(f"interaction id exceeds the {_MAX_BUTTON_VALUE_LEN}-character button value cap")
     return [
@@ -349,8 +370,10 @@ def _raw_value(entry: Any) -> str | None:
 
 
 def _coerce(name: str, spec: dict[str, Any], raw: str) -> Any:
-    """Map a submitted string to the schema's JSON type. Slack's inputs constrain
-    the text already; a value that still fails to coerce raises loudly."""
+    """Map a submitted string to the schema's JSON type.
+
+    Slack's inputs constrain the text already; a value that still fails to coerce raises loudly.
+    """
     ptype = spec.get("type")
     if ptype == "boolean":
         if raw == "true":
@@ -379,8 +402,11 @@ def _coerce(name: str, spec: dict[str, Any], raw: str) -> Any:
 
 
 def extract_answer(schema: dict[str, Any], state_values: dict[str, Any]) -> dict[str, Any]:
-    """The answer dict from a ``view_submission`` state: each present, non-empty
-    field coerced to its schema type (an unfilled optional field is omitted)."""
+    """The answer dict from a ``view_submission`` state.
+
+    Each present, non-empty field coerced to its schema type (an unfilled optional field is
+    omitted).
+    """
     answer: dict[str, Any] = {}
     for name, spec in _properties(schema).items():
         field_name = str(name)

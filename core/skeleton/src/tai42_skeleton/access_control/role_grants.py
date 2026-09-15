@@ -58,10 +58,11 @@ _grants_cache = None
 
 
 def _get_grants_cache(settings: AccessControlSettings):
-    """The memoized version-keyed grant cache, mirroring ``PolicyEnforcer``'s policy
-    cache (same size/ttl bound). Version participates in the key, so a role edit's
-    version bump yields a fresh slot — a cross-worker miss that re-reads the CURRENT
-    grant map once and re-caches."""
+    """The memoized version-keyed grant cache, mirroring ``PolicyEnforcer``'s policy cache (same size/ttl bound).
+
+    Version participates in the key, so a role edit's version bump yields a fresh slot — a cross-worker miss
+    that re-reads the CURRENT grant map once and re-caches.
+    """
     global _grants_cache
     if _grants_cache is None:
         _grants_cache = alru_cache(maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds)(_raw_resolve_grants)
@@ -70,15 +71,19 @@ def _get_grants_cache(settings: AccessControlSettings):
 
 @register_settings_reset
 def reset_role_grants_cache() -> None:
-    """Drop the memoized grant cache so a fresh settings object (or a test) rebuilds it,
-    mirroring the sibling ``@register_settings_reset`` caches."""
+    """Drop the memoized grant cache so a fresh settings object (or a test) rebuilds it.
+
+    Mirrors the sibling ``@register_settings_reset`` caches.
+    """
     global _grants_cache
     _grants_cache = None
 
 
 async def resolve_role_grants(role_name: str, version: int) -> RoleGrants:
-    """The role's CURRENT grant map (version-keyed cache). Raises
-    ``DocumentNotFoundError`` when the role does not exist (fail-closed deny)."""
+    """The role's CURRENT grant map (version-keyed cache).
+
+    Raises ``DocumentNotFoundError`` when the role does not exist (fail-closed deny).
+    """
     settings = access_control_settings()
     return await _get_grants_cache(settings)(role_name, version)
 
@@ -90,9 +95,9 @@ async def role_level_decision_for_route(
     method: str,
     version: int,
 ) -> tuple[bool, DenialCause | None]:
-    """The shared per-tag LEVEL decision over an ALREADY-RESOLVED registered route — the
-    term intersected with the base-tier jq and the owner second-pass at the enforcement
-    site.
+    """The shared per-tag LEVEL decision over an ALREADY-RESOLVED registered route.
+
+    The term is intersected with the base-tier jq and the owner second-pass at the enforcement site.
 
     * A ``fenced``/``secret`` route is decided FIRST and against the CALLER's OWN policy:
       fence-exemption is a PRINCIPAL property and an owned key is never the admin
@@ -144,8 +149,7 @@ async def role_level_decision(
     method: str | None,
     version: int,
 ) -> tuple[bool, DenialCause | None]:
-    """:func:`role_level_decision_for_route` for a caller holding a REAL request target,
-    resolving the route here.
+    """:func:`role_level_decision_for_route` for a caller holding a REAL request target, resolving the route here.
 
     Two shapes reach the resolution with no gated route behind them and are not acted on
     (the scope layer + jq base govern them): a method-less scope (websocket/MCP — every

@@ -107,10 +107,10 @@ async def test_bootstrap_refused_once_a_key_exists(
 
 async def test_mint_lock_is_mutually_exclusive(bootstrap_redis: FakeRedis) -> None:
     # The mutex the check-and-mint runs under: while one holder is inside, a second
-    # acquisition is refused (BootstrapContended) — the serialization that makes the
+    # acquisition is refused (BootstrapContendedError) — the serialization that makes the
     # existence-check-and-mint atomic. It is released on exit, so a later mint can proceed.
     async with bootstrap_mod.bootstrap_mint_lock():
-        with pytest.raises(bootstrap_mod.BootstrapContended):
+        with pytest.raises(bootstrap_mod.BootstrapContendedError):
             async with bootstrap_mod.bootstrap_mint_lock():
                 pass  # pragma: no cover - the acquire raises before the body
     # Freed on exit.

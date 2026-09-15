@@ -83,7 +83,6 @@ def operation(
     top level (a raw non-enveloped body) and REQUIRES a ``response_model`` — the route
     seam raises at registration on ``enveloped=False`` with a bare ``None``.
     """
-
     target_registry = registry if registry is not None else operation_registry
 
     def decorator(func: _AsyncOpT) -> _AsyncOpT:

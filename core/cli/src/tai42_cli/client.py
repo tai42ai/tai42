@@ -39,6 +39,7 @@ class ApiError(Exception):
     """
 
     def __init__(self, message: str, *, status_code: int) -> None:
+        """Store the server ``message`` and HTTP ``status_code`` on the error."""
         super().__init__(message)
         self.message = message
         self.status_code = status_code
@@ -69,8 +70,10 @@ _STATUS_ERRORS: dict[int, type[ApiError]] = {
 
 
 def _server_message(response: httpx.Response) -> str | None:
-    """The ``{"error": ...}`` message from a response body, or ``None`` when the
-    body is not the JSON error envelope."""
+    """The server's error message from a response body.
+
+    Returns ``None`` when the body is not the JSON ``{"error": ...}`` envelope.
+    """
     try:
         body = response.json()
     except (json.JSONDecodeError, ValueError):
@@ -95,8 +98,10 @@ def _error_from_response(response: httpx.Response) -> ApiError:
 
 
 def _unwrap(response: httpx.Response) -> Any:
-    """Return the ``data`` payload of a success response, raising on any failure
-    status or a malformed success envelope."""
+    """Return the ``data`` payload of a success response.
+
+    Raises on any failure status or a malformed success envelope.
+    """
     if response.status_code >= 400:
         raise _error_from_response(response)
     if response.status_code == 204 or not response.content:
@@ -168,6 +173,11 @@ class ApiClient:
         transport: httpx.BaseTransport | None = None,
         read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS,
     ) -> None:
+        """Build a client for ``base_url`` authenticating with ``api_key`` (``None`` = anonymous).
+
+        Inject ``transport`` to serve responses from a fake in tests; ``read_timeout``
+        tunes the read window for slow fleet operations.
+        """
         # No key → no ``x-api-key`` header at all, so a public route is never handed a
         # stale/wrong credential (which its always-public middleware would ignore, but a
         # protected route would 401 on).
@@ -186,12 +196,15 @@ class ApiClient:
         )
 
     def __enter__(self) -> "ApiClient":
+        """Enter the context manager, returning this client."""
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        """Close the client on context-manager exit."""
         self.close()
 
     def close(self) -> None:
+        """Close the underlying HTTP connection pool."""
         self._client.close()
 
     def request(
@@ -202,6 +215,7 @@ class ApiClient:
         json: Any | None = None,
         params: Mapping[str, Any] | None = None,
     ) -> Any:
+        """Send an auth'd request and return the unwrapped ``data`` payload."""
         response = self._client.request(method, path, json=json, params=params)
         return _unwrap(response)
 
@@ -213,12 +227,12 @@ class ApiClient:
         json: Any | None = None,
         params: Mapping[str, Any] | None = None,
     ) -> httpx.Response:
-        """Perform the auth'd request and return the RAW response, unwrapping no
-        envelope, but still raising the typed error on a failure status.
+        """Perform the auth'd request and return the RAW response, no envelope unwrapped.
 
-        The download routes (a bare backup document, a CSV/JSON export) answer
-        outside the ``{"data": ...}`` envelope, so their callers read the body
-        directly while keeping this module's auth, base URL, and typed errors.
+        Still raises the typed error on a failure status. The download routes (a
+        bare backup document, a CSV/JSON export) answer outside the ``{"data": ...}``
+        envelope, so their callers read the body directly while keeping this
+        module's auth, base URL, and typed errors.
         """
         response = self._client.request(method, path, json=json, params=params)
         if response.status_code >= 400:
@@ -226,6 +240,7 @@ class ApiClient:
         return response
 
     def get(self, path: str, *, params: Mapping[str, Any] | None = None) -> Any:
+        """Send an auth'd GET and return the unwrapped ``data`` payload."""
         return self.request("GET", path, params=params)
 
     def post(
@@ -235,6 +250,7 @@ class ApiClient:
         json: Any | None = None,
         params: Mapping[str, Any] | None = None,
     ) -> Any:
+        """Send an auth'd POST and return the unwrapped ``data`` payload."""
         return self.request("POST", path, json=json, params=params)
 
     def patch(
@@ -244,6 +260,7 @@ class ApiClient:
         json: Any | None = None,
         params: Mapping[str, Any] | None = None,
     ) -> Any:
+        """Send an auth'd PATCH and return the unwrapped ``data`` payload."""
         return self.request("PATCH", path, json=json, params=params)
 
     def put(
@@ -253,9 +270,11 @@ class ApiClient:
         json: Any | None = None,
         params: Mapping[str, Any] | None = None,
     ) -> Any:
+        """Send an auth'd PUT and return the unwrapped ``data`` payload."""
         return self.request("PUT", path, json=json, params=params)
 
     def delete(self, path: str, *, params: Mapping[str, Any] | None = None) -> Any:
+        """Send an auth'd DELETE and return the unwrapped ``data`` payload."""
         return self.request("DELETE", path, params=params)
 
     def stream(

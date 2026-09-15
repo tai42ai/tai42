@@ -58,8 +58,10 @@ def _validate_b64_key(value: str | None, *, env_var: str, min_bytes: int, exact:
 
 
 def _split_key_list(value: str | None) -> list[str]:
-    """Split a comma-separated base64 key list into its entries, dropping blanks and
-    surrounding whitespace. An unset/empty value yields no keys."""
+    """Split a comma-separated base64 key list into its entries, dropping blanks and surrounding whitespace.
+
+    An unset/empty value yields no keys.
+    """
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -119,13 +121,14 @@ class ConnectorCryptoSecrets(TaiBaseSettings):
         return _require_key_bytes(kek, env_var="CONNECTORS_KEK", what="encryption KEK")
 
     def require_decrypt_ring_bytes(self) -> list[bytes]:
-        """Return the decrypt key ring: the current KEK first, then each distinct
-        previous KEK from ``CONNECTORS_KEK_PREVIOUS`` (a comma-separated base64 list).
+        """Return the decrypt key ring: the current KEK first, then each distinct previous KEK.
 
-        Raises (value-free) when the current KEK is unset/malformed or any previous
+        Previous keys come from ``CONNECTORS_KEK_PREVIOUS`` (a comma-separated
+        base64 list). Raises (value-free) when the current KEK is unset/malformed or any previous
         entry is not valid base64 of exactly 32 bytes. Duplicate keys (a previous entry
         equal to the current key or to another previous entry) are collapsed so a blob
-        is never tried against the same key twice."""
+        is never tried against the same key twice.
+        """
         ring: list[bytes] = [self.require_kek_bytes()]
         previous = self.kek_previous.get_secret_value() if self.kek_previous is not None else None
         for entry in _split_key_list(previous):
@@ -144,6 +147,7 @@ class ConnectorCryptoSecrets(TaiBaseSettings):
 
 @settings_cache
 def connector_crypto_secrets() -> ConnectorCryptoSecrets:
+    """Return the cached connector crypto secrets."""
     return ConnectorCryptoSecrets()
 
 
@@ -151,8 +155,7 @@ def connector_crypto_secrets() -> ConnectorCryptoSecrets:
 
 
 class ConnectorEngineConfig(TaiBaseSettings):
-    """Non-secret engine knobs: session-TTL cap, redirect-URI allow-list, and the
-    optional central OAuth-bridge origin."""
+    """Non-secret engine knobs: session-TTL cap, redirect-URI allow-list, and the optional OAuth-bridge origin."""
 
     model_config = SettingsConfigDict(env_prefix="CONNECTORS_")
 
@@ -197,11 +200,13 @@ class ConnectorEngineConfig(TaiBaseSettings):
 
     @property
     def redirect_uri_allowlist_origins(self) -> list[str]:
+        """The allow-listed redirect origins, trimmed and stripped of trailing slashes."""
         return [item.strip().rstrip("/") for item in self.redirect_uri_allowlist.split(",") if item.strip()]
 
 
 @settings_cache
 def connector_engine_config() -> ConnectorEngineConfig:
+    """Return the cached connector engine config."""
     return ConnectorEngineConfig()
 
 
@@ -229,9 +234,11 @@ class ConnectorStoreRedisSettings(RedisConnectionSettings):
 
 
 class ConnectorStoreSettings(TaiBaseSettings):
-    """Token-store backend: the composed kit Redis connection settings plus the
-    connector key prefix. The durable Postgres connection is the skeleton
-    component's bound database, resolved through the central registry."""
+    """Token-store backend: the composed kit Redis connection settings plus the connector key prefix.
+
+    The durable Postgres connection is the skeleton component's bound database,
+    resolved through the central registry.
+    """
 
     model_config = SettingsConfigDict(env_prefix="CONNECTOR_STORE_")
 
@@ -245,6 +252,7 @@ class ConnectorStoreSettings(TaiBaseSettings):
 
 @settings_cache
 def connector_store_settings() -> ConnectorStoreSettings:
+    """Return the cached connector store settings."""
     return ConnectorStoreSettings()
 
 
@@ -252,12 +260,11 @@ def connector_store_settings() -> ConnectorStoreSettings:
 
 
 class ConnectorAdapterSettings(TaiBaseSettings):
-    """Wire-format contract between the outbound MCP adapter and the
-    connector-launched MCP servers: the JSON-RPC ``_meta`` key the adapter writes
-    the per-call access token into, and the prefix those servers stamp on
-    structured ``ToolError`` payloads.
+    """Wire-format contract between the outbound MCP adapter and the connector-launched MCP servers.
 
-    Both are read lazily by ``token_injection``, so an env override
+    Carries the JSON-RPC ``_meta`` key the adapter writes the per-call access
+    token into, and the prefix those servers stamp on structured ``ToolError``
+    payloads. Both are read lazily by ``token_injection``, so an env override
     (``CONNECTORS_META_TOKEN_KEY`` / ``CONNECTORS_ERROR_PREFIX``) takes effect as
     long as it is set before first use. The adapter and the launched server must
     agree on both values, or a managed call fails to inject the token / parse the
@@ -267,7 +274,7 @@ class ConnectorAdapterSettings(TaiBaseSettings):
     model_config = SettingsConfigDict(env_prefix="CONNECTORS_")
 
     #: JSON-RPC ``_meta`` key the adapter writes the per-call access token into.
-    meta_token_key: str = "tai_hub.access_token"
+    meta_token_key: str = "tai_hub.access_token"  # noqa: S105 constant identifier, not a secret value
     #: Prefix the connector servers stamp on ``ToolError`` strings to carry a
     #: structured payload; the adapter strips it before JSON-decoding.
     error_prefix: str = "tai-hub-err:"
@@ -275,4 +282,5 @@ class ConnectorAdapterSettings(TaiBaseSettings):
 
 @settings_cache
 def connector_adapter_settings() -> ConnectorAdapterSettings:
+    """Return the cached connector adapter settings."""
     return ConnectorAdapterSettings()

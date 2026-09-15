@@ -12,11 +12,13 @@ def _subject_cols(subject: StateSubject) -> tuple[str, str, str, str]:
 
 
 def _split_cursor(cursor: str) -> tuple[str, str, str, str]:
-    """Unpack a ``(target_kind, target_name, subject_kind, subject_key)`` keyset cursor
-    packed as ``"<tk>\\x00<tn>\\x00<kind>\\x00<key>"`` — the FULL subject identity, so no
-    two rows sharing a ``(subject_kind, subject_key)`` across targets collide at a page
-    boundary. A client-supplied cursor that does not carry the four packed parts is a bad
-    input (422), never a 500 from unpacking deep in the query."""
+    r"""Unpack a ``(target_kind, target_name, subject_kind, subject_key)`` keyset cursor.
+
+    Packed as ``"<tk>\\x00<tn>\\x00<kind>\\x00<key>"`` — the FULL subject identity, so no two rows
+    sharing a ``(subject_kind, subject_key)`` across targets collide at a page boundary. A
+    client-supplied cursor that does not carry the four packed parts is a bad input (422), never a
+    500 from unpacking deep in the query.
+    """
     parts = cursor.split("\x00")
     if len(parts) != 4:
         raise ValueValidationError("cursor is malformed; use only a cursor returned by a prior page")

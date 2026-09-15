@@ -1,9 +1,9 @@
-"""The ``app.conversations`` namespace, forwarding to the conversation bridge in
-:mod:`tai42_skeleton.conversations`.
+"""The ``app.conversations`` namespace, forwarding to the conversation bridge.
 
-``accept`` turns a received message into an agent turn and returns the new message's id;
-``record_delivery_status`` is the out-of-band sink an adapter calls when a provider later
-reports an outbound message's terminal fate.
+Forwards to the bridge in :mod:`tai42_skeleton.conversations`. ``accept`` turns a received
+message into an agent turn and returns the new message's id; ``record_delivery_status`` is the
+out-of-band sink an adapter calls when a provider later reports an outbound message's terminal
+fate.
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ if TYPE_CHECKING:
 
 
 class ConversationsFacet:
-    """``app.conversations`` — the bridge's inbound + delivery-receipt entry surface
-    (``AppConversations``)."""
+    """``app.conversations`` — the bridge's inbound + delivery-receipt entry surface (``AppConversations``)."""
 
     __slots__ = ("_app",)
 
     def __init__(self, app: TaiMCP) -> None:
+        """Bind the owning ``app``."""
         self._app = app
 
     async def accept(
@@ -41,6 +41,7 @@ class ConversationsFacet:
         location: LocationElement | None = None,
         locale: str | None = None,
     ) -> str:
+        """Turn a received message into an agent turn and return the new message's id."""
         return await self._app._conversation_accept(
             channel,
             our_identity,
@@ -56,14 +57,18 @@ class ConversationsFacet:
         )
 
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:
+        """Record a provider's terminal delivery status for an outbound message."""
         await self._app._conversation_record_delivery_status(channel, provider_message_id, status)
 
     def register_target_validator(self, target_kind: ConversationTargetKind, validator: TargetBindValidator) -> None:
+        """Register a bind ``validator`` for ``target_kind``."""
         self._app._target_validator_registry.register(target_kind, validator)
 
     def target_validator(self, target_kind: str) -> TargetBindValidator | None:
-        """The registered bind validator for ``target_kind``, or ``None`` when none is
-        registered. Skeleton-only — ``create_conversation_route`` consults it, so it is not
-        on the ``AppConversations`` protocol (the register-only seam), the precedent
-        ``AppPresets.write_validator`` sets."""
+        """The registered bind validator for ``target_kind``, or ``None`` when none is registered.
+
+        Skeleton-only — ``create_conversation_route`` consults it, so it is not on the
+        ``AppConversations`` protocol (the register-only seam), the precedent
+        ``AppPresets.write_validator`` sets.
+        """
         return self._app._target_validator_registry.get(target_kind)

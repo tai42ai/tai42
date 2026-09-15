@@ -35,6 +35,7 @@ class SandboxSessionNotFoundError(SandboxError):
     __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, session_id: str):
+        """Build the error for the missing ``session_id``, recording it on the instance."""
         super().__init__(f"sandbox session {session_id!r} not found")
         self.session_id = session_id
 
@@ -51,6 +52,7 @@ class SandboxExecTimeoutError(SandboxError):
     __tai_error_kind__ = ErrorKind.TIMED_OUT
 
     def __init__(self, *, timeout_seconds: float, stdout_len: int, stderr_len: int):
+        """Build the timeout error from the budget and the partial-output byte lengths."""
         super().__init__(
             f"sandbox exec exceeded its {timeout_seconds}s timeout "
             f"(stdout {stdout_len} bytes, stderr {stderr_len} bytes)"

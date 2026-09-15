@@ -26,13 +26,15 @@ class _TemplateJqMixin(_StatesServiceBase):
     async def _resolve_template_jq(
         self, state: str, name: str
     ) -> tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any], str]:
-        """Resolve a ``template_jq`` program ``name`` across ``state``'s attachments to
-        ``(template, path, parameters, declarations, program_name)``. An UNQUALIFIED name
-        resolves to the one attachment whose template declares it — a name two attached
-        templates both declare is a loud :class:`ValueValidationError` (the caller qualifies
-        it). A QUALIFIED ``<template>.<name>`` resolves to that attachment's template — a
-        template not attached on the state is a loud :class:`StateNotFoundError`. An unknown
-        program is a :class:`StateNotFoundError`."""
+        """Resolve a ``template_jq`` program ``name`` to its attachment tuple across ``state``'s attachments.
+
+        Returns ``(template, path, parameters, declarations, program_name)``. An UNQUALIFIED name
+        resolves to the one attachment whose template declares it — a name two attached templates
+        both declare is a loud :class:`ValueValidationError` (the caller qualifies it). A
+        QUALIFIED ``<template>.<name>`` resolves to that attachment's template — a template not
+        attached on the state is a loud :class:`StateNotFoundError`. An unknown program is a
+        :class:`StateNotFoundError`.
+        """
         attachments = await self._load_state_attachments(state)
         if "." in name:
             template_name, program_name = name.split(".", 1)
@@ -62,9 +64,11 @@ class _TemplateJqMixin(_StatesServiceBase):
         return template, path, parameters, declarations, name
 
     async def _render_program_body(self, template: StateTemplate, program_name: str, text: TemplatedText) -> str:
-        """Render one ``template_jq`` program body to its jq text just before it is compiled or
-        evaluated — the render happens HERE, never in a validator. A by-id body whose stored
-        resource cannot be fetched is a LOUD refusal naming the program and the id."""
+        """Render one ``template_jq`` program body to its jq text just before it is compiled or evaluated.
+
+        The render happens HERE, never in a validator. A by-id body whose stored resource cannot
+        be fetched is a LOUD refusal naming the program and the id.
+        """
         try:
             return await tai42_app.storage.resource_manager.render_templated_text(text)
         except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
@@ -74,10 +78,12 @@ class _TemplateJqMixin(_StatesServiceBase):
             ) from exc
 
     async def _render_template_jq(self, template: StateTemplate, program_name: str) -> tuple[str, str]:
-        """Render ``program_name``'s body and the sibling input-program prelude to jq text just
-        before the program runs. Every INPUT-purpose sibling is rendered (the prelude needs each
-        body); the target program's own body is rendered too (reusing the input render when it is
-        itself an input program). A by-id body that cannot be fetched raises loudly here."""
+        """Render ``program_name``'s body and the sibling input-program prelude to jq text before it runs.
+
+        Every INPUT-purpose sibling is rendered (the prelude needs each body); the target
+        program's own body is rendered too (reusing the input render when it is itself an input
+        program). A by-id body that cannot be fetched raises loudly here.
+        """
         rendered_inputs: dict[str, str] = {}
         for other_name, other in template.template_jq.items():
             if other.purpose == "input":
@@ -97,13 +103,15 @@ class _TemplateJqMixin(_StatesServiceBase):
         *,
         conn: AsyncConnection[Any] | None = None,
     ) -> TemplateJqResult:
-        """Evaluate an ``input``-purpose ``template_jq`` program ``name`` over ``subject``'s
-        record and return its value. ``args`` supplies the program's declared ``params`` as
-        the single ``$params`` object (every declared key must be present — value may be
-        null — and an undeclared key is a loud refusal); the jq runs over the record's
-        attached subtree with the attachment's ``$parameters``/``$declarations`` bound and the
-        sibling ``tjq_<name>`` input-program prelude. Read-only. An ``update``-purpose name is
-        a :class:`ValueValidationError`."""
+        """Evaluate an ``input``-purpose ``template_jq`` program ``name`` over ``subject``'s record.
+
+        Returns its value. ``args`` supplies the program's declared ``params`` as the single
+        ``$params`` object (every declared key must be present — value may be null — and an
+        undeclared key is a loud refusal); the jq runs over the record's attached subtree with
+        the attachment's ``$parameters``/``$declarations`` bound and the sibling ``tjq_<name>``
+        input-program prelude. Read-only. An ``update``-purpose name is a
+        :class:`ValueValidationError`.
+        """
         self._ensure_available()
         decl = await self._require_declaration_decl(state)
         await self.validate_subject(decl, subject)
@@ -139,14 +147,15 @@ class _TemplateJqMixin(_StatesServiceBase):
         state: str,
         subject: StateSubject,
         name: str,
-        input: Any,
+        input_: Any,
         *,
         op_id: str | None,
         origin: WriteOrigin,
         conn: AsyncConnection[Any] | None = None,
     ) -> TemplateJqApplyResult:
-        """Apply an ``update``-purpose ``template_jq`` program ``name`` to ``subject``. Its jq
-        runs over ``{record, input}`` (the record's attached subtree and the adapter's
+        """Apply an ``update``-purpose ``template_jq`` program ``name`` to ``subject``.
+
+        Its jq runs over ``{record, input}`` (the record's attached subtree and the adapter's
         ``input``) with the attachment's ``$parameters``/``$declarations`` bound and the
         sibling ``tjq_<name>`` input-program prelude, returning a template-relative op batch
         rebased under the attachment path and applied through the SAME ``apply`` chokepoint as
@@ -156,7 +165,8 @@ class _TemplateJqMixin(_StatesServiceBase):
         exactly those keys (a value may be null) — a missing or undeclared key is a loud
         :class:`ValueValidationError`; a program that declares none accepts any ``input``. An
         ``input``-purpose name, or a jq that does not return an op batch, is a
-        :class:`ValueValidationError`."""
+        :class:`ValueValidationError`.
+        """
         self._ensure_available()
         decl = await self._require_declaration_decl(state)
         await self.validate_subject(decl, subject)
@@ -168,13 +178,13 @@ class _TemplateJqMixin(_StatesServiceBase):
                 f"apply needs an 'update'-purpose program (eval an 'input' one instead)"
             )
         if program.params:
-            if not isinstance(input, dict):
+            if not isinstance(input_, dict):
                 raise ValueValidationError(
                     f"template_jq {program_name!r} on template {template.name!r} declares params "
-                    f"{program.params}, so its input must be an object, got {type(input).__name__}"
+                    f"{program.params}, so its input must be an object, got {type(input_).__name__}"
                 )
-            missing = sorted(set(program.params) - set(input))
-            unknown = sorted(set(input) - set(program.params))
+            missing = sorted(set(program.params) - set(input_))
+            unknown = sorted(set(input_) - set(program.params))
             if missing or unknown:
                 raise ValueValidationError(
                     f"template_jq {program_name!r} on template {template.name!r} declares params {program.params}"
@@ -188,7 +198,7 @@ class _TemplateJqMixin(_StatesServiceBase):
         try:
             result = await run_jq_first(
                 body,
-                {"record": subtree, "input": input},
+                {"record": subtree, "input": input_},
                 prelude=prelude,
                 variables=variables,
             )

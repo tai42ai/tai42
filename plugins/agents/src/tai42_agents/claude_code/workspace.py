@@ -1,6 +1,8 @@
-"""Per-turn hermetic workspace authoring for ``claude_code``: reset the adapter-owned config
-and payload trees, write ``.claude/settings.json``, re-materialize the bearer files, sync the
-skills, ship the runner payload, and build the runner options payload."""
+"""Per-turn hermetic workspace authoring for ``claude_code``.
+
+Reset the adapter-owned config and payload trees, write ``.claude/settings.json``, re-materialize
+the bearer files, sync the skills, ship the runner payload, and build the runner options payload.
+"""
 
 from __future__ import annotations
 
@@ -49,8 +51,10 @@ async def materialize(
 
 
 def _settings_json(settings: ClaudeCodeSettings) -> dict[str, Any]:
-    """The adapter-authored ``.claude/settings.json``: the permission floor, telemetry off,
-    and the operator's ``hook_settings`` fragment (verbatim)."""
+    """The adapter-authored ``.claude/settings.json``.
+
+    The permission floor, telemetry off, and the operator's ``hook_settings`` fragment (verbatim).
+    """
     doc: dict[str, Any] = {
         "permissions": {"defaultMode": "acceptEdits"},
         "env": {"DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1", "DISABLE_AUTOUPDATER": "1"},
@@ -69,6 +73,7 @@ def build_payload(
     model_env_name: str,
     resume_id: str | None,
 ) -> dict[str, Any]:
+    """Build the runner options payload from ``settings`` and the per-turn options snapshot."""
     return build_options_payload(
         ws=ws,
         system_prompt=options_snapshot["system_message"],

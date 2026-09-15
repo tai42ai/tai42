@@ -45,9 +45,11 @@ def _celery_cli_main() -> None:
 
 
 class _CeleryRuntime(BackendRuntime):
-    """What every Celery runtime shares: it parses nothing of its own (the
-    options belong to the Celery CLI, which validates them) and starts by
-    handing that CLI its own subcommand plus the rest of the launch argv."""
+    """What every Celery runtime shares.
+
+    It parses nothing of its own (the options belong to the Celery CLI, which validates them) and starts by
+    handing that CLI its own subcommand plus the rest of the launch argv.
+    """
 
     def __init__(self, args: Sequence[str]) -> None:
         self._args = list(args)
@@ -57,14 +59,18 @@ class _CeleryRuntime(BackendRuntime):
         return cls(args)
 
     def _set_argv(self) -> None:
-        """Point ``sys.argv`` at this runtime's Celery command — the CLI reads the
-        process argv rather than taking arguments."""
+        """Point ``sys.argv`` at this runtime's Celery command.
+
+        The CLI reads the process argv rather than taking arguments.
+        """
         sys.argv = ["celery", "-A", _CELERY_APP_PATH, self.name, *self._args]
 
 
 class CeleryWorkerRuntime(_CeleryRuntime):
-    """The consuming runtime: a Celery worker whose prefork children persist
-    across jobs, so a registry mutation obliges a pool turnover."""
+    """The consuming runtime: a Celery worker whose prefork children persist across jobs.
+
+    So a registry mutation obliges a pool turnover.
+    """
 
     name = "worker"
     mode = ExecutionMode.worker_thread
@@ -72,22 +78,23 @@ class CeleryWorkerRuntime(_CeleryRuntime):
     pool_turnover_required = True
 
     async def build(self) -> None:
-        """Set the CLI's argv and prepare the pool turnover, both before the host
-        gates on boot-readiness: connecting Celery's setup/ready signals must
-        happen before the worker boots past them, and neither consumes work."""
+        """Set the CLI's argv and prepare the pool turnover, both before the host gates on boot-readiness.
+
+        Connecting Celery's setup/ready signals must happen before the worker boots past them, and neither
+        consumes work.
+        """
         self._set_argv()
         prefork.register()
 
     def run_blocking(self) -> None:
+        """Run the Celery worker, blocking this thread until it exits."""
         _celery_cli_main()
 
     def request_drain(self) -> None:
-        """Ask the in-process worker to stop warmly, by driving
-        ``celery.worker.state`` directly: the worker runs off the main thread,
-        where Celery skips its own signal handlers.
+        """Ask the in-process worker to stop warmly, by driving ``celery.worker.state`` directly.
 
-        Idempotent — a second request is the same request, and only a flag that
-        was never set is set.
+        The worker runs off the main thread, where Celery skips its own signal handlers.
+        Idempotent — a second request is the same request, and only a flag that was never set is set.
         """
         from celery.worker import state
 
@@ -101,16 +108,20 @@ class CeleryWorkerRuntime(_CeleryRuntime):
         state.should_terminate = 0
 
     async def turn_over_pool(self, *, reason: str, budget: float) -> None:
-        """Re-fork this worker's prefork pool and confirm it, off the serving loop
-        (the turnover's control I/O blocks). A raise fails the op named by
-        ``reason``, which is the point: an unconfirmed turnover means a child may
-        still serve the pre-mutation registry."""
+        """Re-fork this worker's prefork pool and confirm it, off the serving loop.
+
+        The turnover's control I/O blocks. A raise fails the op named by ``reason``, which is the point:
+        an unconfirmed turnover means a child may still serve the pre-mutation registry.
+        """
         await asyncio.to_thread(prefork.turnover_local_pool, reason, budget)
 
 
 class _CeleryInlineRuntime(_CeleryRuntime):
-    """A Celery command that owns its process: nothing else runs on this loop, so
-    it blocks the loop deliberately and keeps Celery's native signal handling."""
+    """A Celery command that owns its process.
+
+    Nothing else runs on this loop, so it blocks the loop deliberately and keeps Celery's native signal
+    handling.
+    """
 
     mode = ExecutionMode.inline
 
@@ -143,8 +154,10 @@ class CeleryBackend(ManagedBackend):
 
     @property
     def dispatch_settings(self) -> BackendDispatchSettings:
-        """The ``CELERY_`` env group; its ``manifest_key`` is the env var the
-        re-forked pool children read the live manifest from."""
+        """The ``CELERY_`` env group.
+
+        Its ``manifest_key`` is the env var the re-forked pool children read the live manifest from.
+        """
         return celery_settings()
 
     @property
@@ -153,7 +166,8 @@ class CeleryBackend(ManagedBackend):
 
         Read live rather than frozen at import, so a settings epoch flip that
         widens ``CELERY_TASK_TIMEOUT`` widens the drain with it instead of leaving
-        a warm shutdown abandoning tasks it should have waited for."""
+        a warm shutdown abandoning tasks it should have waited for.
+        """
         return float(celery_settings().task_timeout) + _DRAIN_MARGIN_SECONDS
 
 

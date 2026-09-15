@@ -16,8 +16,10 @@ TEMPLATE_PARAM_MAX_CHARS = 4096
 
 
 class QuickReplyButtonParam(BaseModel):
-    """The runtime argument for one QUICK-REPLY button of a template's buttons component:
-    ``payload`` is the string the medium returns when the human taps the button. Frozen."""
+    """The runtime argument for one QUICK-REPLY button of a template's buttons component.
+
+    ``payload`` is the string the medium returns when the human taps the button. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -37,9 +39,11 @@ class QuickReplyButtonParam(BaseModel):
 
 
 class UrlButtonParam(BaseModel):
-    """The runtime argument for one URL button of a template's buttons component:
+    """The runtime argument for one URL button of a template's buttons component.
+
     ``url_parameter`` is the dynamic suffix substituted into the button's pre-approved URL.
-    Frozen."""
+    Frozen.
+    """
 
     model_config = ConfigDict(frozen=True)
 

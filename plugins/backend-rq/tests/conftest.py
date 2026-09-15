@@ -422,7 +422,8 @@ def _make_stateful_scheduler(store: dict[str, _StatefulScheduledJob], zset: dict
                 return [(job, datetime(2030, 1, 1)) for job in store.values()]
             return list(store.values())
 
-        def schedule(self, *, scheduled_time, func, args, kwargs, interval, id, meta, **rest):
+        # ``id`` mirrors the rq-scheduler Scheduler.schedule(..., id=...) signature this fake stands in for.
+        def schedule(self, *, scheduled_time, func, args, kwargs, interval, id, meta, **rest):  # noqa: A002
             store[id] = _StatefulScheduledJob(
                 id,
                 getattr(func, "__name__", "tool_execution"),
@@ -432,7 +433,8 @@ def _make_stateful_scheduler(store: dict[str, _StatefulScheduledJob], zset: dict
             )
             times[id] = scheduled_time.timestamp()
 
-        def cron(self, cron_string, *, func, args, kwargs, id, meta, **rest):
+        # ``id`` mirrors the rq-scheduler Scheduler.cron(..., id=...) signature this fake stands in for.
+        def cron(self, cron_string, *, func, args, kwargs, id, meta, **rest):  # noqa: A002
             store[id] = _StatefulScheduledJob(
                 id,
                 getattr(func, "__name__", "tool_execution"),

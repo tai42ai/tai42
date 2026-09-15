@@ -71,10 +71,10 @@ _LIST_PAGE_CEILING = 50
 # Indirection points so tests can observe the backoff without waiting and make the jitter
 # deterministic; nothing else reads them.
 _sleep = asyncio.sleep
-_rng = random.Random()
+_rng = random.Random()  # noqa: S311 non-cryptographic randomness (jitter/backoff/id)
 
 
-class StripeLivemodeMismatch(Exception):
+class StripeLivemodeMismatchError(Exception):
     """A Stripe object's ``livemode`` disagrees with the configured key's mode.
 
     Its own type because a cross-mode object is not one object's bad luck -- it means the process
@@ -83,7 +83,7 @@ class StripeLivemodeMismatch(Exception):
     """
 
 
-class CallbackTargetRefused(Exception):
+class CallbackTargetRefusedError(Exception):
     """A callback URL failed the exact-origin SSRF pin.
 
     Its own type because a refusal means the callback URLs the platform mints disagree with this
@@ -107,8 +107,11 @@ class CallbackDoorError(Exception):
 
 
 class StripeSettings(TaiBaseSettings):
-    """Stripe payment-tool configuration, read from ``STRIPE_``-prefixed env plus two unprefixed
-    platform names that the tools share with the rest of the deployment."""
+    """Stripe payment-tool configuration.
+
+    Read from ``STRIPE_``-prefixed env plus two unprefixed platform names that the tools share with the rest of
+    the deployment.
+    """
 
     model_config = SettingsConfigDict(env_prefix="STRIPE_")
 
@@ -140,10 +143,11 @@ def _secret_key() -> str:
 
 
 def _expected_livemode() -> bool:
-    """The livemode the configured key implies: ``True`` for ``sk_live_``/``rk_live_``, ``False``
-    for ``sk_test_``/``rk_test_``. Restricted keys are recognised deliberately -- they are
-    Stripe's recommended integration credential. Any other prefix raises rather than guessing a
-    mode; the key value is never echoed, so no secret can reach a log.
+    """The livemode the configured key implies.
+
+    ``True`` for ``sk_live_``/``rk_live_``, ``False`` for ``sk_test_``/``rk_test_``. Restricted keys are recognised
+    deliberately -- they are Stripe's recommended integration credential. Any other prefix raises rather than
+    guessing a mode; the key value is never echoed, so no secret can reach a log.
     """
     key = _secret_key()
     if key.startswith(("sk_live_", "rk_live_")):
@@ -156,16 +160,16 @@ def _expected_livemode() -> bool:
 
 
 def _assert_livemode(obj: dict[str, Any]) -> None:
-    """Raise ``StripeLivemodeMismatch`` unless the Stripe object's ``livemode`` matches the key's mode.
+    """Raise ``StripeLivemodeMismatchError`` unless the Stripe object's ``livemode`` matches the key's mode.
 
     ``livemode`` is a required boolean: a missing or non-bool value raises loudly.
     """
     expected = _expected_livemode()
     actual = obj.get("livemode")
     if not isinstance(actual, bool):
-        raise ValueError(f"Stripe object 'livemode' is missing or not a boolean: {actual!r}")
+        raise ValueError(f"Stripe object 'livemode' is missing or not a boolean: {actual!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     if actual != expected:
-        raise StripeLivemodeMismatch(
+        raise StripeLivemodeMismatchError(
             f"Stripe object livemode is {actual} but the configured key expects livemode {expected}"
         )
 
@@ -178,8 +182,9 @@ async def _http_request(
     data: str | None = None,
     params: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], str]:
-    """Issue one request through a fresh curl session and return ``(status, lowercased headers,
-    body text)``. Redirects are OFF: the callback POST carries ``X-TAI-Bridge-Secret`` and both
+    """Issue one request through a fresh curl session and return ``(status, lowercased headers, body text)``.
+
+    Redirects are OFF: the callback POST carries ``X-TAI-Bridge-Secret`` and both
     Stripe calls carry ``Authorization: Bearer <key>``, and libcurl replays custom headers across a
     redirect hop -- a 302 off a validated origin would hand those headers to another host.
     """
@@ -208,8 +213,9 @@ async def create_checkout_session(
     metadata: dict[str, str],
     idempotency_basis: str,
 ) -> dict[str, Any]:
-    """POST ``/v1/checkout/sessions`` for a one-line ``mode=payment`` session and return the
-    response JSON whole. A non-2xx raises loudly with Stripe's status and message (never a silent
+    """POST ``/v1/checkout/sessions`` for a one-line ``mode=payment`` session and return the response JSON whole.
+
+    A non-2xx raises loudly with Stripe's status and message (never a silent
     default), and no request-header content is ever echoed into the raised text.
 
     The ``Idempotency-Key`` is deterministic -- ``"tai-" + sha256(idempotency_basis)`` -- so a
@@ -266,9 +272,9 @@ async def expire_checkout_session(session_id: str) -> dict[str, Any]:
 
 
 async def list_checkout_sessions(created_gte: int) -> list[dict[str, Any]]:
-    """GET all completed Checkout Sessions created at or after ``created_gte`` (unix seconds),
-    following Stripe's ``starting_after`` cursor.
+    """GET all completed Checkout Sessions created at or after ``created_gte`` (unix seconds).
 
+    Follows Stripe's ``starting_after`` cursor.
     ``status=complete`` narrows server-side (only a completed session can be paid); the caller
     still tests ``payment_status == "paid"`` because they are different fields. The loop terminates
     on ``has_more == false`` and on an empty page, and RAISES at a hard ceiling of
@@ -308,8 +314,9 @@ async def list_checkout_sessions(created_gte: int) -> list[dict[str, Any]]:
 
 
 async def create_webhook_endpoint(*, url: str, enabled_events: list[str]) -> dict[str, Any]:
-    """POST ``/v1/webhook_endpoints`` with the target ``url`` and ``enabled_events`` and return the
-    response JSON whole. A non-2xx raises loudly with Stripe's status and message (never a silent
+    """POST ``/v1/webhook_endpoints`` with the target ``url`` and ``enabled_events`` and return the response JSON whole.
+
+    A non-2xx raises loudly with Stripe's status and message (never a silent
     default), and no request-header content is ever echoed into the raised text.
 
     The response carries the endpoint's signing ``secret`` -- Stripe reveals it ONLY on this create
@@ -369,8 +376,9 @@ async def list_webhook_endpoints() -> list[dict[str, Any]]:
 
 
 async def delete_webhook_endpoint(endpoint_id: str) -> dict[str, Any]:
-    """DELETE ``/v1/webhook_endpoints/{endpoint_id}`` and return Stripe's deletion stub whole. A
-    non-2xx raises loudly with Stripe's status and message; no request-header content is echoed.
+    """DELETE ``/v1/webhook_endpoints/{endpoint_id}`` and return Stripe's deletion stub whole.
+
+    A non-2xx raises loudly with Stripe's status and message; no request-header content is echoed.
     """
     headers = {
         "Authorization": f"Bearer {_secret_key()}",
@@ -386,8 +394,9 @@ async def delete_webhook_endpoint(endpoint_id: str) -> dict[str, Any]:
 
 
 def build_answer_payload(session: dict[str, Any]) -> dict[str, Any]:
-    """The ONE place the whitelisted answer is built, so the bridge and the reconciler can never
-    answer with different shapes. ``metadata`` is deliberately absent -- it holds the ask's own
+    """The ONE place the whitelisted answer is built, so the bridge and the reconciler never differ in shape.
+
+    ``metadata`` is deliberately absent -- it holds the ask's own
     ticket. Required fields are read directly (a missing one raises); ``customer_email`` is the
     only known-optional field and falls back from the flattened key to ``customer_details.email``.
     """
@@ -417,7 +426,7 @@ def _assert_callback_target(callback_url: str) -> None:
     and port cannot spoof it) and effective port, plus a path prefix DERIVED from the base's own
     path so a deployment mounted under a subpath still validates. Any ``..`` segment is rejected
     outright -- curl normalizes it before dialing, so a prefix check alone is escapable. Anything
-    else raises ``CallbackTargetRefused``. The URL is used verbatim; the pin validates, it does
+    else raises ``CallbackTargetRefusedError``. The URL is used verbatim; the pin validates, it does
     not reconstruct.
     """
     base = stripe_settings().interactions_public_base_url
@@ -427,14 +436,14 @@ def _assert_callback_target(callback_url: str) -> None:
     origin = urlparse(base)
     required_prefix = origin.path.rstrip("/") + "/api/interactions/callback/"
     if ".." in target.path.split("/"):
-        raise CallbackTargetRefused(f"callback URL path contains a '..' segment: {callback_url!r}")
+        raise CallbackTargetRefusedError(f"callback URL path contains a '..' segment: {callback_url!r}")
     if not (
         target.scheme == origin.scheme
         and (target.hostname or "").lower() == (origin.hostname or "").lower()
         and _effective_port(target) == _effective_port(origin)
         and target.path.startswith(required_prefix)
     ):
-        raise CallbackTargetRefused(f"callback URL {callback_url!r} is not on the pinned origin {base!r}")
+        raise CallbackTargetRefusedError(f"callback URL {callback_url!r} is not on the pinned origin {base!r}")
 
 
 def _computed_backoff(attempt: int) -> float:
@@ -443,9 +452,10 @@ def _computed_backoff(attempt: int) -> float:
 
 
 def _parse_retry_after(value: str) -> float | None:
-    """Parse a ``Retry-After`` header as delta-seconds. Returns the value only when it is a
-    non-negative integer at or under ``RETRY_AFTER_MAX_SECONDS``; a larger, negative, non-integer,
-    or HTTP-date value returns ``None`` so the caller falls back to the computed backoff.
+    """Parse a ``Retry-After`` header as delta-seconds.
+
+    Returns the value only when it is a non-negative integer at or under ``RETRY_AFTER_MAX_SECONDS``; a larger,
+    negative, non-integer, or HTTP-date value returns ``None`` so the caller falls back to the computed backoff.
     """
     try:
         seconds = int(value)
@@ -457,10 +467,11 @@ def _parse_retry_after(value: str) -> float | None:
 
 
 def _transient_delay(status: int, resp_headers: dict[str, str], attempt: int) -> float:
-    """The wait before the next attempt for a transient response. A 429's ``Retry-After`` is
-    honoured IN FULL when usable (a fixed-window limiter only clears by being waited out);
-    otherwise the computed backoff applies, and an unusable header is logged, never silently
-    ignored and never a raise.
+    """The wait before the next attempt for a transient response.
+
+    A 429's ``Retry-After`` is honoured IN FULL when usable (a fixed-window limiter only clears by being waited
+    out); otherwise the computed backoff applies, and an unusable header is logged, never silently ignored and
+    never a raise.
     """
     if status == 429:
         raw = resp_headers.get("retry-after")
@@ -482,9 +493,9 @@ def _is_transient(status: int) -> bool:
 
 
 async def post_answer(callback_url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """POST the answer JSON to the callback door with the ``X-TAI-Bridge-Secret`` header, under
-    the exact-origin SSRF pin and a bounded transient retry.
+    """POST the answer JSON to the callback door under the exact-origin SSRF pin and a bounded transient retry.
 
+    Sends the ``X-TAI-Bridge-Secret`` header.
     Missing and EMPTY ``TAI_BRIDGE_CALLBACK_SECRET`` are the same failure and both raise naming it:
     an empty secret would authenticate against a door whose verifier accepts the empty string.
     Transient failures (connection errors, 5xx, 408, 429) retry with exponential backoff; a 4xx

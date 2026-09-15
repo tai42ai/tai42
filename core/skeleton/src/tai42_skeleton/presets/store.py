@@ -58,8 +58,11 @@ _KIND = "preset"
 
 
 def _validate_extensions(extensions: Sequence[Sequence[ExtensionElement]]) -> None:
-    """Reject an empty INNER combo. The empty OUTER list is valid (no extensions);
-    an empty member combo (``[[]]`` or any ``[]``) is never a legal value."""
+    """Reject an empty INNER combo.
+
+    The empty OUTER list is valid (no extensions); an empty member combo (``[[]]`` or any
+    ``[]``) is never a legal value.
+    """
     for combo in extensions:
         if not combo:
             raise ValueError("preset extensions must not contain an empty combo")
@@ -74,6 +77,7 @@ class PresetStoreView(PresetStore):
         *,
         name_conflicts: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
+        """Wrap the generic ``store`` and an optional ``name_conflicts`` predicate for collision checks."""
         self._store = store
         self._name_conflicts = name_conflicts
 
@@ -87,6 +91,7 @@ class PresetStoreView(PresetStore):
         state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
     ) -> DocumentRecord:
+        """Create a preset from ``spec`` and its extension combos; raises on a name collision."""
         _validate_extensions(extensions)
         if self._name_conflicts is not None and await self._name_conflicts(spec.name):
             raise PresetNameConflictError(spec.name)
@@ -119,6 +124,7 @@ class PresetStoreView(PresetStore):
         state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
         tags: list[str] | None = None,
     ) -> DocumentVersion:
+        """Save a new preset version, carrying unset fields forward from the active version."""
         active = await self._active_body(name)
         new_extensions = active.extensions if extensions is None else extensions
         _validate_extensions(new_extensions)
@@ -150,45 +156,54 @@ class PresetStoreView(PresetStore):
             raise PresetNotFoundError(name) from exc
 
     async def list_presets(self) -> list[DocumentRecord]:
+        """Every preset's active record."""
         return await self._store.list(_KIND)
 
     async def get_preset(self, name: str) -> DocumentRecord:
+        """The record for preset ``name``; raises :class:`PresetNotFoundError` when unknown."""
         try:
             return await self._store.get(_KIND, name)
         except DocumentNotFoundError as exc:
             raise PresetNotFoundError(name) from exc
 
     async def get_active_kwargs(self, name: str) -> dict[str, Any]:
+        """The active version's ``fixed_kwargs`` for preset ``name``."""
         return (await self._active_body(name)).fixed_kwargs
 
     async def list_versions(self, name: str) -> list[DocumentVersion]:
+        """The version history of preset ``name``; raises :class:`PresetNotFoundError` when unknown."""
         try:
             return await self._store.list_versions(_KIND, name)
         except DocumentNotFoundError as exc:
             raise PresetNotFoundError(name) from exc
 
     async def get_version(self, name: str, version: int) -> DocumentVersion:
+        """One version body of preset ``name``; raises :class:`PresetVersionNotFoundError` when absent."""
         try:
             return await self._store.get_version(_KIND, name, version)
         except DocumentVersionNotFoundError as exc:
             raise PresetVersionNotFoundError(name, version) from exc
 
     async def get_active_body(self, name: str) -> PresetBody:
+        """The active :class:`PresetBody` of preset ``name``."""
         return await self._active_body(name)
 
     async def rollback(self, name: str, version: int) -> DocumentRecord:
+        """Restore an earlier ``version`` of preset ``name`` as a new active version."""
         try:
             return await self._store.rollback(_KIND, name, version)
         except DocumentVersionNotFoundError as exc:
             raise PresetVersionNotFoundError(name, version) from exc
 
     async def soft_delete(self, name: str) -> None:
+        """Soft-delete preset ``name``; raises :class:`PresetNotFoundError` when unknown."""
         try:
             await self._store.soft_delete(_KIND, name)
         except DocumentNotFoundError as exc:
             raise PresetNotFoundError(name) from exc
 
     async def rename_preset(self, name: str, new_name: str) -> DocumentRecord:
+        """Re-key preset ``name`` to ``new_name``; raises on a name collision or a missing preset."""
         # A rename must never silently shadow a live tool — the same rule create
         # enforces before any store write — so the injected predicate gates the NEW
         # name first. The body is untouched (rename moves a key), so there is no body

@@ -95,7 +95,7 @@ class LlmStub:
 
     def _next_turn(self) -> dict[str, Any]:
         if not self._queue:
-            raise _Unscripted()
+            raise _UnscriptedError()
         return self._queue.popleft()
 
     async def _serve_completion(self, body: dict[str, Any]) -> Any:
@@ -107,7 +107,7 @@ class LlmStub:
             self._requests.append(body)
             try:
                 turn = self._next_turn()
-            except _Unscripted:
+            except _UnscriptedError:
                 return JSONResponse(
                     status_code=500,
                     content={"error": {"message": "llmstub: no scripted turn for this call"}},
@@ -192,7 +192,7 @@ class LlmStub:
             return JSONResponse(content={"count": len(self._requests), "requests": self.requests})
 
 
-class _Unscripted(Exception):
+class _UnscriptedError(Exception):
     """Raised when a completion arrives with an empty script queue."""
 
 

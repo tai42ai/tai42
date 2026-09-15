@@ -42,7 +42,7 @@ from tai42_skeleton.settings.mcp_settings import mcp_dispatch_settings
 logger = logging.getLogger(__name__)
 
 
-_TOKEN_EXPIRED_CODE = "token_expired"
+_TOKEN_EXPIRED_CODE = "token_expired"  # noqa: S105 constant identifier, not a secret value
 
 # Outbound structured-error codes — the client-facing half of the connector-error
 # wire contract. When a managed tool call cannot proceed until the user acts, the
@@ -128,16 +128,17 @@ async def _force_refresh(config: TaiMCPConfig, failed_access_token: str | None) 
 
 
 def _require_managed(config: TaiMCPConfig) -> ConnectorRef:
-    """The connector ref of a managed entry; the connector branches are gated on
-    ``is_managed``, so a missing ref here is a caller bug that fails loudly."""
+    """The connector ref of a managed entry.
+
+    The connector branches are gated on ``is_managed``, so a missing ref here is a caller bug that fails loudly.
+    """
     if config.managed is None:
         raise RuntimeError(f"config {config.title!r} is not connector-managed")
     return config.managed
 
 
 def _reject_empty_token(auth: ManagedAuth, m) -> None:
-    """Refuse a ManagedAuth with no access_token — never send an unauthenticated
-    request as if it were authenticated."""
+    """Refuse a ManagedAuth with no access_token — never send an unauthenticated request as if it were authenticated."""
     if not auth.access_token:
         raise RuntimeError(
             "resolved ManagedAuth has empty access_token for "
@@ -162,8 +163,10 @@ def _merge_http_auth(config: TaiMCPConfig, auth: ManagedAuth) -> TaiMCPConfig:
 
 
 def _merge_http_headers(config: TaiMCPConfig, headers: dict[str, str]) -> TaiMCPConfig:
-    """Return a copy of ``config`` with the client's no-auth ``headers`` merged in
-    (http transport). Keys lowercased to dedupe against manifest-supplied headers."""
+    """Return a copy of ``config`` with the client's no-auth ``headers`` merged in (http transport).
+
+    Keys are lowercased to dedupe against manifest-supplied headers.
+    """
     raw_headers = config.config.headers or {}
     merged = {k.lower(): v for k, v in raw_headers.items()}
     for key, value in headers.items():
@@ -173,8 +176,10 @@ def _merge_http_headers(config: TaiMCPConfig, headers: dict[str, str]) -> TaiMCP
 
 
 def _merge_stdio_env(config: TaiMCPConfig, env: dict[str, str]) -> TaiMCPConfig:
-    """Return a copy of ``config`` with the client's no-auth ``env`` merged into
-    the stdio launch env (client values override static descriptor env)."""
+    """Return a copy of ``config`` with the client's no-auth ``env`` merged into the stdio launch env.
+
+    Client values override static descriptor env.
+    """
     raw_env = config.config.env or {}
     merged = {**raw_env, **env}
     new_inner = config.config.model_copy(update={"env": merged})
@@ -211,9 +216,9 @@ def extract_connector_error_payload(response: mcp.types.CallToolResult) -> dict 
 def managed_auth_error_result(
     exc: ConnectorConnectionError | ConnectorAuthExpiredError,
 ) -> mcp.types.CallToolResult:
-    """Build an error ``CallToolResult`` for a managed tool call blocked on user
-    action — ``invalid_grant`` (reconnect), refresh budget exhausted, or auth
-    still expired after a forced refresh.
+    """Build an error ``CallToolResult`` for a managed tool call blocked on user action.
+
+    Covers ``invalid_grant`` (reconnect), refresh budget exhausted, or auth still expired after a forced refresh.
 
     The text carries the connector-error prefix + a ``{"code": ...}`` payload, so
     it surfaces through the same error channel as a sub-server connector error and
@@ -238,8 +243,9 @@ def managed_auth_error_result(
 
 
 def upstream_mcp_unavailable_result(config: TaiMCPConfig) -> mcp.types.CallToolResult:
-    """Build an error ``CallToolResult`` for an upstream MCP whose pooled session
-    died and did not come back on the one-shot reconnect.
+    """Build an error ``CallToolResult`` for an upstream MCP whose pooled session died.
+
+    It did not come back on the one-shot reconnect.
 
     Mirrors :func:`managed_auth_error_result`'s envelope — the connector-error
     prefix + a ``{"code": ...}`` payload recoverable via

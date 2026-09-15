@@ -23,6 +23,7 @@ class StorageRegistry:
     """Holds the active :class:`Storage` provider for one app instance."""
 
     def __init__(self) -> None:
+        """Start with no active storage provider."""
         self._provider: Storage | None = None
 
     @overload

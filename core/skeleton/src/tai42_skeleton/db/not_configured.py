@@ -15,7 +15,10 @@ from tai42_skeleton.db.discovery import SKELETON_COMPONENT
 
 
 def not_configured_message(noun: str) -> str:
-    """The 501 remediation for an unconfigured ``noun``: name the ``PG_PASSWORD`` env
-    var of the database the skeleton component is bound to, read live per call."""
+    """The 501 remediation for an unconfigured ``noun``.
+
+    Names the ``PG_PASSWORD`` env var of the database the skeleton component is bound to, read
+    live per call.
+    """
     env_var = database_password_env(component_binding(SKELETON_COMPONENT))
     return f"the {noun} is not configured: set {env_var}"

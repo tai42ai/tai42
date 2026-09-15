@@ -120,7 +120,8 @@ def overlap(a: Shape, b: Shape) -> bool:
     if a_rest is not None:
         rest_shape, rest_index, plain = a, a_rest, b
     else:
-        assert b_rest is not None
+        if b_rest is None:
+            raise AssertionError
         rest_shape, rest_index, plain = b, b_rest, a
     suffix = rest_shape[rest_index + 1 :]
     if len(plain) < rest_index + len(suffix):
@@ -131,8 +132,10 @@ def overlap(a: Shape, b: Shape) -> bool:
 
 
 def collision(a: Shape, a_methods: frozenset[str], b: Shape, b_methods: frozenset[str]) -> bool:
-    """Whether two routes collide: their shapes overlap AND their method sets
-    intersect. Same shape with disjoint methods is not a collision."""
+    """Whether two routes collide: their shapes overlap AND their method sets intersect.
+
+    Same shape with disjoint methods is not a collision.
+    """
     return bool(a_methods & b_methods) and overlap(a, b)
 
 
@@ -145,9 +148,10 @@ def _segments_overlap(a: Segment, b: Segment) -> bool:
 
 
 def _path_param_index(shape: Shape) -> int | None:
-    """The index of the shape's FIRST ``PathParam`` rest-converter (a ``:path``
-    need not be terminal — core routes carry literals after it), or ``None`` when
-    the shape has none."""
+    """The index of the shape's FIRST ``PathParam`` rest-converter, or ``None`` when the shape has none.
+
+    A ``:path`` need not be terminal — core routes carry literals after it.
+    """
     for index, segment in enumerate(shape):
         if isinstance(segment, PathParam):
             return index

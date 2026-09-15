@@ -39,7 +39,7 @@ from tai42_skeleton.authz.execution_identity import get_execution_identity
 from tai42_skeleton.authz.resolver import OperationSurfaceUnsettledError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import api_keys as api_keys_ops
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.operations.registry import operation_registry
 from tai42_skeleton.tools.binding import CLIENT_TOOL_NAME_MAX_LEN
 
@@ -166,7 +166,7 @@ def test_a_fenced_operation_is_denied_under_a_non_admin_key(ac) -> None:
     # The key HOLDS the route's scope, so the scope/jq pass allows: the deny is the LEVEL pass.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            with pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH} is not permitted"):
+            with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"):
                 await _run_as("k-scoped", _FENCED_OP, _FENCED_ARGS)
 
     asyncio.run(run())
@@ -186,7 +186,7 @@ def test_the_fenced_deny_keys_on_the_path_the_call_actually_synthesizes(ac) -> N
     # template: the refusal names the alternate path, which is mapped and in-scope.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            with pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH_ALT} is not permitted"):
+            with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH_ALT} is not permitted"):
                 await _run_as("k-scoped", _FENCED_OP, {"target": "rollback", "mark": "m"})
 
             # ALLOW parity: the deny above is the fence, not an unresolved resource.
@@ -204,7 +204,7 @@ def test_a_preset_is_decided_on_the_arguments_it_actually_fires(ac) -> None:
 
             assert await _run_as("k-admin", "probe_deploy", {"mark": "m"}) == "fenced:deploy:m"
 
-            with pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH} is not permitted"):
+            with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"):
                 await _run_as("k-scoped", "probe_deploy", {"mark": "m"})
 
     asyncio.run(run())
@@ -215,7 +215,7 @@ def test_a_grantable_operation_runs_when_the_key_holds_it_and_is_denied_when_it_
         async with app.app_context(_manifest()):
             assert await _run_as("k-scoped", _GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
-            with pytest.raises(PermissionDenied, match="insufficient scope"):
+            with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await _run_as("k-narrow", _GRANTABLE_OP, _GRANTABLE_ARGS)
 
     asyncio.run(run())
@@ -237,7 +237,7 @@ def test_a_key_that_no_longer_exists_never_reaches_a_capability_tool(ac) -> None
     # keeping it bounded.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            with pytest.raises(PermissionDenied, match="has no policy"):
+            with pytest.raises(PermissionDeniedError, match="has no policy"):
                 await _run_as("ghost", _CAPABILITY_TOOL, {"text": "hi"})
 
     asyncio.run(run())
@@ -272,7 +272,7 @@ def test_a_fenced_operation_is_refused_while_the_operation_surface_rebuilds(ac) 
                 assert execution_probe.calls == []
 
             # Non-vacuous: once settled, the same dispatches take the real decision again.
-            with pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH} is not permitted"):
+            with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"):
                 await _run_as("k-scoped", _FENCED_OP, _FENCED_ARGS)
             assert await _run_as("k-admin", _FENCED_OP, _FENCED_ARGS) == "fenced:deploy:m"
 
@@ -410,7 +410,7 @@ def test_the_client_tool_seam_applies_the_same_decision(ac) -> None:
     # A tool handed to an agent runs through ``_client_runnable``, not ``run_tool``.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            with pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH} is not permitted"):
+            with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"):
                 await _invoke_client_tool_as("k-scoped", _FENCED_OP, _FENCED_ARGS)
 
             assert await _invoke_client_tool_as("k-admin", _FENCED_OP, _FENCED_ARGS) == "fenced:deploy:m"
@@ -438,7 +438,7 @@ def test_the_client_tool_seam_authorizes_the_full_name_the_client_label_truncate
             async with bind_execution_identity("k-scoped", bound_fingerprint="fp-k-scoped"):
                 [client_tool] = await app.tools.get_client_tools([long_name])
                 assert client_tool.name == long_name[:CLIENT_TOOL_NAME_MAX_LEN]
-                with pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH} is not permitted"):
+                with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"):
                     await client_tool.ainvoke(_FENCED_ARGS)
 
             # Non-vacuous: the deny above is the LEVEL pass, not a broken registration.
@@ -454,9 +454,11 @@ def test_the_client_tool_seam_binds_positional_arguments_before_deciding(ac) -> 
         async with app.app_context(_manifest()):
             runnable = app._tool_binding._client_runnable(await app.tools.get_tool(_FENCED_OP))
             async with bind_execution_identity("k-scoped", bound_fingerprint="fp-k-scoped"):
-                with pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH_ALT} is not permitted") as positional:
+                with pytest.raises(
+                    PermissionDeniedError, match=f"POST {_FENCED_PATH_ALT} is not permitted"
+                ) as positional:
                     await runnable("rollback", "m")
-                with pytest.raises(PermissionDenied) as keyword:
+                with pytest.raises(PermissionDeniedError) as keyword:
                     await runnable(target="rollback", mark="m")
             assert str(positional.value) == str(keyword.value)
 
@@ -469,7 +471,7 @@ def test_a_tool_an_agent_resolves_mid_turn_is_governed_by_the_seam(ac) -> None:
     async def run() -> None:
         async with app.app_context(_manifest()):
             nested = {"tool_name": _FENCED_OP, "arguments": _FENCED_ARGS}
-            with pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH} is not permitted"):
+            with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"):
                 await _run_as("k-scoped", "nested_tools", nested)
 
             # Non-vacuous: the deny above is the decision, not a broken fixture.
@@ -550,7 +552,7 @@ def test_the_binding_is_released_so_later_dispatches_are_unguarded(ac) -> None:
     # A DENIED fire must not leave the identity bound for whatever runs next on this context.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            with pytest.raises(PermissionDenied, match=f"POST {_FENCED_PATH} is not permitted"):
+            with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"):
                 await _run_as("k-scoped", _FENCED_OP, _FENCED_ARGS)
             assert get_execution_identity() is None
             assert await app.tools.run_tool(_FENCED_OP, _FENCED_ARGS) == "fenced:deploy:m"
@@ -570,7 +572,7 @@ def test_de_scoping_the_owner_denies_the_next_fire(ac) -> None:
 
             ac.policy("owner")["scopes"] = [_KEPT_SCOPE]
 
-            with pytest.raises(PermissionDenied, match="insufficient scope"):
+            with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await _run_as("k-owned", _GRANTABLE_OP, _GRANTABLE_ARGS)
 
     asyncio.run(run())
@@ -605,7 +607,7 @@ def test_rolling_the_policy_back_denies_the_next_fire(monkeypatch: pytest.Monkey
             assert ac.policy("k-scoped")["scopes"] == [_KEPT_SCOPE]
             assert await _stored_policy_version() > version_before
 
-            with pytest.raises(PermissionDenied, match="insufficient scope"):
+            with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await _run_as("k-scoped", _GRANTABLE_OP, _GRANTABLE_ARGS)
 
     asyncio.run(run())
@@ -620,7 +622,7 @@ def test_de_scoping_the_key_denies_the_next_dispatch_of_a_fire_already_running(a
 
             ac.policy("k-scoped")["scopes"] = [_KEPT_SCOPE]
 
-            with pytest.raises(PermissionDenied, match="insufficient scope"):
+            with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
 
     asyncio.run(run())
@@ -634,7 +636,7 @@ def test_de_scoping_the_owner_denies_the_next_dispatch_of_a_fire_already_running
 
             ac.policy("owner")["scopes"] = [_KEPT_SCOPE]
 
-            with pytest.raises(PermissionDenied, match="insufficient scope"):
+            with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
 
     asyncio.run(run())
@@ -647,7 +649,7 @@ def test_disabling_the_key_denies_the_next_fire(ac) -> None:
 
             ac.policy("k-scoped")["policy_data"] = {"disabled": True}
 
-            with pytest.raises(PermissionDenied, match="is disabled"):
+            with pytest.raises(PermissionDeniedError, match="is disabled"):
                 await _run_as("k-scoped", _GRANTABLE_OP, _GRANTABLE_ARGS)
 
     asyncio.run(run())
@@ -662,7 +664,7 @@ def test_deleting_the_key_denies_the_next_dispatch_of_a_fire_already_running(ac)
 
             ac.policies.remove(ac.policy("k-scoped"))
 
-            with pytest.raises(PermissionDenied, match="principal has no policy"):
+            with pytest.raises(PermissionDeniedError, match="principal has no policy"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
 
     asyncio.run(run())
@@ -677,7 +679,7 @@ def test_deleting_the_key_denies_the_next_CAPABILITY_dispatch_too(ac) -> None:
 
             ac.policies.remove(ac.policy("k-scoped"))
 
-            with pytest.raises(PermissionDenied, match="execution key 'k-scoped' has no policy"):
+            with pytest.raises(PermissionDeniedError, match="execution key 'k-scoped' has no policy"):
                 await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"})
 
     asyncio.run(run())
@@ -691,7 +693,7 @@ def test_disabling_the_key_denies_the_next_CAPABILITY_dispatch_too(ac) -> None:
 
             ac.policy("k-scoped")["policy_data"] = {"disabled": True}
 
-            with pytest.raises(PermissionDenied, match="execution key 'k-scoped' is disabled"):
+            with pytest.raises(PermissionDeniedError, match="execution key 'k-scoped' is disabled"):
                 await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"})
 
     asyncio.run(run())
@@ -710,7 +712,7 @@ def test_reminting_the_key_denies_the_next_OPERATION_dispatch_of_a_running_fire(
             ac.policy("k-scoped")["scopes"] = ["*"]
             ac.policy("k-scoped")["policy_data"] = {KEY_FINGERPRINT_CLAIM: "fp-k-scoped-2"}
 
-            with pytest.raises(PermissionDenied, match="no longer matches the bound key identity"):
+            with pytest.raises(PermissionDeniedError, match="no longer matches the bound key identity"):
                 await app.tools.run_tool(_FENCED_OP, _FENCED_ARGS)
 
     asyncio.run(run())
@@ -734,7 +736,7 @@ def test_dropping_the_governing_roles_grant_denies_the_next_fire(monkeypatch: py
             await role_store().update("ops", _role_body(tags, "none"))
             await management.bump_policy_version()
 
-            with pytest.raises(PermissionDenied, match=f"GET {_GRANTABLE_PATH} is not permitted"):
+            with pytest.raises(PermissionDeniedError, match=f"GET {_GRANTABLE_PATH} is not permitted"):
                 await _run_as("k-owned", _GRANTABLE_OP, _GRANTABLE_ARGS)
 
     asyncio.run(run())

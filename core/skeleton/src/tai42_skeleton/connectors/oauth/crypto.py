@@ -38,8 +38,10 @@ def ensure_kek() -> bytes:
 
 
 def ensure_decrypt_ring() -> list[bytes]:
-    """Return the decrypt key ring — the current KEK first, then any previous KEKs —
-    or raise a config error when the current KEK is missing/malformed."""
+    """Return the decrypt key ring — the current KEK first, then any previous KEKs.
+
+    Raises a config error when the current KEK is missing/malformed.
+    """
     try:
         return connector_crypto_secrets().require_decrypt_ring_bytes()
     except (RuntimeError, ValueError) as exc:
@@ -51,6 +53,7 @@ def _aad(connection_id: str) -> bytes:
 
 
 def encrypt(plaintext: bytes, *, connection_id: str) -> bytes:
+    """Wrap ``plaintext`` under the current KEK, binding ``connection_id`` as AAD."""
     if not isinstance(plaintext, (bytes, bytearray)):
         raise TypeError("plaintext must be bytes")
     kek = ensure_kek()
@@ -60,13 +63,14 @@ def encrypt(plaintext: bytes, *, connection_id: str) -> bytes:
 
 
 def _decrypt_with_ring(blob: bytes, *, connection_id: str, ring: list[bytes]) -> tuple[bytes, int]:
-    """Trial-decrypt ``blob`` against ``ring`` (current key first, then each previous
-    key), returning ``(plaintext, ring_index)`` for the first key that opens it.
+    """Trial-decrypt ``blob`` against ``ring``, returning ``(plaintext, ring_index)`` for the first opener.
 
+    ``ring`` is ordered current key first, then each previous key.
     A blob no ring key can open is unreadable: the ``InvalidTag`` propagates loudly
     rather than returning a silently-undecrypted blob. The shape/version guards run
     before any key is tried, so a wrong format fails as a ``ValueError`` (not a tag
-    mismatch)."""
+    mismatch).
+    """
     if not isinstance(blob, (bytes, bytearray)):
         raise TypeError("blob must be bytes")
     blob = bytes(blob)
@@ -86,6 +90,7 @@ def _decrypt_with_ring(blob: bytes, *, connection_id: str, ring: list[bytes]) ->
 
 
 def decrypt(blob: bytes, *, connection_id: str) -> bytes:
+    """Unwrap ``blob`` via the decrypt key ring, with ``connection_id`` as AAD."""
     plaintext, _ = _decrypt_with_ring(blob, connection_id=connection_id, ring=ensure_decrypt_ring())
     return plaintext
 
@@ -95,6 +100,7 @@ def decrypt_reporting_key(blob: bytes, *, connection_id: str) -> tuple[bytes, bo
 
     Used by the re-encrypt sweep to skip a blob already under the current key: the
     current key is ring index 0, so ``under_current_key`` is ``True`` only when the
-    current key opened the blob."""
+    current key opened the blob.
+    """
     plaintext, index = _decrypt_with_ring(blob, connection_id=connection_id, ring=ensure_decrypt_ring())
     return plaintext, index == 0

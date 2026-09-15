@@ -49,15 +49,20 @@ class EnvMarkerRef:
 
     @property
     def required(self) -> bool:
-        """True iff the ref carries no ``:default`` — an absent var silently
-        resolves to ``"N/A"`` rather than erroring, so the var must be present."""
+        """True iff the ref carries no ``:default``.
+
+        An absent var silently resolves to ``"N/A"`` rather than erroring, so the var must be
+        present.
+        """
         return self.default is None
 
 
 def scalar_leaves(node: Any, pointer: str = "") -> Iterator[tuple[str, str]]:
-    """Yield ``(json-pointer, value)`` for every string scalar leaf of *node*,
-    descending mappings and sequences. RFC 6901 pointers (``~`` → ``~0``, ``/`` →
-    ``~1`` in map keys)."""
+    """Yield ``(json-pointer, value)`` for every string scalar leaf of *node*.
+
+    Descends mappings and sequences. Pointers are RFC 6901 (``~`` → ``~0``, ``/`` → ``~1`` in
+    map keys).
+    """
     if isinstance(node, Mapping):
         for key, value in node.items():
             yield from scalar_leaves(value, f"{pointer}/{_escape(str(key))}")
@@ -69,8 +74,9 @@ def scalar_leaves(node: Any, pointer: str = "") -> Iterator[tuple[str, str]]:
 
 
 def scan_env_marker_refs(config: Any) -> list[EnvMarkerRef]:
-    """Walk *config*'s scalar leaves and return every ``${VAR[:default]}`` ref
-    carried in an ``!ENV`` marker string, in document order.
+    """Walk *config*'s scalar leaves and return every ``${VAR[:default]}`` ref, in document order.
+
+    Each ref is carried in an ``!ENV`` marker string.
 
     A leaf is a marker iff it begins with the ``!ENV `` prefix; the text past the
     prefix is scanned with :data:`ENV_REF`. A non-marker leaf, or a marker whose

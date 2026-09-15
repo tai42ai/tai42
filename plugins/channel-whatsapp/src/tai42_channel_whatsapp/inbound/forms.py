@@ -57,7 +57,8 @@ _DOOR_REJECTION_MAX_CHARS = 500
 _FLOW_BODY_MAX_CHARS = 1024
 # The lead + bounded door line alone always fit the cap, so the overflow fallback
 # (drop the whole question) is guaranteed deliverable — verified, not assumed.
-assert len(_FORM_REJECTION_LEAD) + 1 + _DOOR_REJECTION_MAX_CHARS <= _FLOW_BODY_MAX_CHARS
+if len(_FORM_REJECTION_LEAD) + 1 + _DOOR_REJECTION_MAX_CHARS > _FLOW_BODY_MAX_CHARS:
+    raise AssertionError
 
 
 def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None:
@@ -82,10 +83,12 @@ def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _coerce_value(value: Any, prop: Any) -> Any:
-    """One form value coerced to its schema type. Flow number inputs arrive as
-    strings, so ``integer``/``number``/``boolean`` are coerced ONLY when the value
-    is a string (an OptIn may already deliver a bool). A value that fails coercion
-    is returned raw — the door's 400 path then restores the pending ask."""
+    """One form value coerced to its schema type.
+
+    Flow number inputs arrive as strings, so ``integer``/``number``/``boolean`` are coerced ONLY
+    when the value is a string (an OptIn may already deliver a bool). A value that fails coercion is
+    returned raw — the door's 400 path then restores the pending ask.
+    """
     if not isinstance(prop, dict) or not isinstance(value, str):
         return value
     prop_type = prop.get("type")
@@ -116,8 +119,7 @@ def _coerce_bool(value: str) -> bool:
 
 
 def _coerce_form_answer(response: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
-    """The form answer forwarded to the door: ``response`` minus ``flow_token``,
-    each value coerced to its schema property's type."""
+    """The form answer forwarded to the door: ``response`` minus ``flow_token``, each value coerced by schema type."""
     properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
     props = properties if isinstance(properties, dict) else {}
     return {key: _coerce_value(value, props.get(key)) for key, value in response.items() if key != "flow_token"}
@@ -126,8 +128,7 @@ def _coerce_form_answer(response: dict[str, Any], schema: dict[str, Any] | None)
 async def _handle_form_reply(
     interactive: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
 ) -> None:
-    """A completed Flow form (``nfm_reply``): forward the coerced answer dict to the
-    pending form question, else bridge.
+    """A completed Flow form (``nfm_reply``): forward the coerced answer dict to the pending form question, else bridge.
 
     The reply matches ONLY when its ``flow_token`` equals the pending ask's
     ``interaction_id``; a malformed ``response_json``, a missing/mismatched token,
@@ -168,9 +169,9 @@ async def _handle_form_reply(
 async def _handle_notify_form_reply(
     response: dict[str, Any], flow_token: str, phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
 ) -> None:
-    """A completed ASK-LESS form (a ``notify`` Flow, token in the ``tai42-nf:``
-    namespace): enter it into the conversation as a structured participant message.
+    """A completed ASK-LESS form (a ``notify`` Flow) entered into the conversation as a structured message.
 
+    The token sits in the ``tai42-nf:`` namespace.
     No reservation exists for it — the token itself carries the schema hash, which
     resolves the answer schema from the durable schema sidecar. On a hit the values
     are coerced to the schema's types; on a miss (or an unset WABA id, without which
@@ -197,17 +198,21 @@ async def _handle_notify_form_reply(
 
 
 def _door_error_line(retry_reason: str | None) -> str:
-    """The participant-facing error line for the re-sent Flow: the door's OWN reason (already
-    length-bounded by the ladder, re-capped here defensively at ``_DOOR_REJECTION_MAX_CHARS``
-    which names the failing field), or the fixed opaque line when the door gave none."""
+    """The participant-facing error line for the re-sent Flow.
+
+    The door's OWN reason (already length-bounded by the ladder, re-capped here defensively at
+    ``_DOOR_REJECTION_MAX_CHARS`` which names the failing field), or the fixed opaque line when the
+    door gave none.
+    """
     return retry_reason[:_DOOR_REJECTION_MAX_CHARS] if retry_reason else _CALLBACK_REJECTION_OPAQUE
 
 
 async def _recover_form_rejection(
     phone_number_id: str, wa_id: str, wamid: str, pending: PendingQuestion, retry_reason: str | None
 ) -> None:
-    """Recover a door-rejected form answer by re-sending a fresh Flow for the SAME
-    interaction, bounded by ``_MAX_FORM_REJECTIONS``.
+    """Recover a door-rejected form answer by re-sending a fresh Flow for the SAME interaction.
+
+    Bounded by ``_MAX_FORM_REJECTIONS``.
 
     The shared ladder returned RETRY_KEPT: it KEPT the reservation and — because this
     channel owns the retry notice — sent NO participant message, so the fresh Flow is the
@@ -246,28 +251,27 @@ async def _recover_form_rejection(
         return
 
     body_text = _rejection_body(pending.question, _door_error_line(retry_reason))
-    try:
-        flow_id = await _cached_form_flow_id(pending.schema)
-        await send_flow(
-            phone_number_id=phone_number_id,
-            to=wa_id,
-            body_text=body_text,
-            flow_id=flow_id,
-            flow_token=pending.interaction_id,
-        )
-    except Exception:
-        # A re-send that fails must NOT mark the wamid seen and must NOT count the
-        # rejection: the record is still held (the ladder kept it), so raising is
-        # enough — Meta's redelivery re-runs the ladder and re-enters this path.
-        raise
+    # A re-send that fails must NOT mark the wamid seen and must NOT count the rejection:
+    # the record is still held (the ladder kept it), so letting the error propagate is
+    # enough — Meta's redelivery re-runs the ladder and re-enters this path.
+    flow_id = await _cached_form_flow_id(pending.schema)
+    await send_flow(
+        phone_number_id=phone_number_id,
+        to=wa_id,
+        body_text=body_text,
+        flow_id=flow_id,
+        flow_token=pending.interaction_id,
+    )
     await bump_rejections(phone_number_id, wa_id, pending)
     await mark_seen(wamid)
 
 
 async def _cached_form_flow_id(schema: dict[str, Any]) -> str:
-    """The published flow id for a form ask's schema, from the cache the original send
-    populated. The cache has no TTL, so a miss means the store was lost — a loud
-    failure that re-sends nothing, never a silent skip of the recovery."""
+    """The published flow id for a form ask's schema, from the cache the original send populated.
+
+    The cache has no TTL, so a miss means the store was lost — a loud failure that re-sends nothing,
+    never a silent skip of the recovery.
+    """
     _, schema_hash = build_flow(schema)
     waba_id = require_delivery_setting(whatsapp_settings().waba_id, "CHANNEL_WHATSAPP_WABA_ID")
     flow_id = await get_cached_flow_id(waba_id, schema_hash)
@@ -286,7 +290,8 @@ def _rejection_body(question: str, error_line: str) -> str:
     (forbidden by the no-silent-truncation posture) is never needed. ``error_line`` is
     the door's OWN reason (which names the failing field), bounded by
     :func:`_door_error_line` to ``_DOOR_REJECTION_MAX_CHARS`` — or the fixed opaque line
-    when the door gave none — so the lead + tail always fits the cap."""
+    when the door gave none — so the lead + tail always fits the cap.
+    """
     tail = f"{_FORM_REJECTION_LEAD} {error_line}"
     full = f"{question}\n\n{tail}"
     return full if len(full) <= _FLOW_BODY_MAX_CHARS else tail

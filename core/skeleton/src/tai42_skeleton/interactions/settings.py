@@ -16,11 +16,12 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class InteractionsRedisSettings(RedisConnectionSettings):
-    """Per-deploy Redis holding the group streams, state hashes, pending index,
-    reply channels, and the events tail. Connection values come from the
-    ``INTERACTIONS_REDIS_*`` env (``INTERACTIONS_REDIS_URL`` ...), or the shared
-    ``TAI_DEFAULT_REDIS_URL``; absent = the interactions store is unconfigured and
-    the feature answers OFF."""
+    """Per-deploy Redis holding the group streams, state hashes, pending index, reply channels, events tail.
+
+    Connection values come from the ``INTERACTIONS_REDIS_*`` env (``INTERACTIONS_REDIS_URL`` ...), or the
+    shared ``TAI_DEFAULT_REDIS_URL``; absent = the interactions store is unconfigured and the feature
+    answers OFF.
+    """
 
     model_config = SettingsConfigDict(env_prefix="INTERACTIONS_")
 
@@ -38,6 +39,8 @@ class InteractionsRedisSettings(RedisConnectionSettings):
 
 
 class InteractionsSettings(TaiBaseSettings):
+    """Interactions feature settings: the Redis connection plus the ask/answer budgets and limits."""
+
     model_config = SettingsConfigDict(env_prefix="INTERACTIONS_")
 
     # Infra: the redis connection is composed from the kit (a field, not a base),
@@ -126,9 +129,11 @@ class InteractionsSettings(TaiBaseSettings):
     @field_validator("public_base_url")
     @classmethod
     def _require_tls(cls, value: str | None) -> str | None:
-        """Reject a non-TLS public base URL unless it points at a loopback host
-        (``LOCAL_HTTP_HOSTS``, local dev) — loud at settings load, before any
-        callback URL is ever minted from it."""
+        """Reject a non-TLS public base URL unless it points at a loopback host.
+
+        (``LOCAL_HTTP_HOSTS``, local dev) — loud at settings load, before any callback URL is ever minted
+        from it.
+        """
         if value is None:
             return None
         parsed = urlparse(value)
@@ -143,6 +148,7 @@ class InteractionsSettings(TaiBaseSettings):
 
 @settings_cache
 def interactions_settings() -> InteractionsSettings:
+    """The cached :class:`InteractionsSettings` for this process."""
     return InteractionsSettings()
 
 
@@ -163,5 +169,6 @@ def interactions_store_configured() -> bool:
     fresh — not the cached singleton — so a config reload re-evaluates. A set
     ``redis_url`` signals the store is wired up; without one, the interactions and
     internal-notifications surfaces answer OFF rather than reaching for an absent
-    Redis."""
+    Redis.
+    """
     return bool(InteractionsRedisSettings().redis_url)

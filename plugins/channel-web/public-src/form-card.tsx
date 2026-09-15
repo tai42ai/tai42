@@ -23,9 +23,9 @@
  * no raw HTML), and every media URL was proven absolute and scheme-appropriate by
  * the stream reducer — the same guarantees the media card rides on.
  */
+import { Badge, Markdown } from '@tai42/studio-sdk';
 import type { ReactElement } from 'react';
 import { useState } from 'react';
-import { Badge, Markdown } from '@tai42/studio-sdk';
 
 import { isFormGone } from '@/api';
 import { LocationPin, MediaItems } from '@/media-card';

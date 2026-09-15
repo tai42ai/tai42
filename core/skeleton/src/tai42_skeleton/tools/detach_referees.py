@@ -1,5 +1,4 @@
-"""The process-wide state-template detach referee registry — the body behind
-``app.tools.register_detach_referee``.
+"""The process-wide state-template detach referee registry — the body behind ``app.tools.register_detach_referee``.
 
 A holder of door bindings that name templates (a plugin's per-node state bindings, or the
 platform's own preset/route/hook/schedule bindings) registers an async referee that, given
@@ -20,16 +19,22 @@ from tai42_contract.tools import StateTemplateDetachReferee
 
 
 class StateTemplateDetachRefereeRegistry:
+    """Process-wide registry of state-template detach referees."""
+
     def __init__(self) -> None:
+        """Start with no registered referees."""
         self._referees: list[StateTemplateDetachReferee] = []
 
     def register(self, provider: StateTemplateDetachReferee) -> None:
+        """Register a detach referee; raise if the same provider is already registered."""
         if provider in self._referees:
             raise ValueError("this detach referee is already registered")
         self._referees.append(provider)
 
     def all(self) -> list[StateTemplateDetachReferee]:
+        """Every registered detach referee."""
         return list(self._referees)
 
     def reset(self) -> None:
+        """Drop every registered referee."""
         self._referees.clear()

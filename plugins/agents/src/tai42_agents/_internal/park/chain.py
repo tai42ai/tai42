@@ -57,8 +57,9 @@ CHAINED_PARK_DELIVERY_TOOL_NAME: Final[str] = "deliver_chained_park"
 
 
 def _terminal_succeeded(chain_token: str, completion_id: str | None, status: str | None) -> bool:
-    """Whether a terminal fire's ``status`` names the clean-success terminal — and the one place
-    a non-success fire is ANNOUNCED.
+    """Whether a terminal fire's ``status`` names the clean-success terminal.
+
+    The one place a non-success fire is ANNOUNCED.
 
     The shared contract vocabulary carries exactly one success value. Every other shape is
     non-success — an UNSTAMPED fire (``None``: a driver that predates the status field, or one
@@ -68,7 +69,8 @@ def _terminal_succeeded(chain_token: str, completion_id: str | None, status: str
     Those two shapes are a driver/delivery version skew, and the skew is otherwise INVISIBLE:
     the fire still resumes the run, so a whole fleet can silently degrade every successful
     outcome into an error. This warning is the only detection, so EVERY non-success fire — the
-    explicit failure included — names the chained call and WHICH shape arrived."""
+    explicit failure included — names the chained call and WHICH shape arrived.
+    """
     if status == PARK_COMPLETION_SUCCEEDED:
         return True
     if status is None:
@@ -101,7 +103,8 @@ async def _extend_horizon(chain_token: str, expiry_at: str | None) -> dict[str, 
     fault: the first park of a chained call always notifies before the waiting run has finished
     recording its own park (the nested run parks first, by construction); a park the caller
     ADOPTED as its own — an ``ask_user`` raised directly by a chained dispatch — notifies a chain
-    nothing ever parks on; and a resolved or detached chain has nothing left to extend."""
+    nothing ever parks on; and a resolved or detached chain has nothing left to extend.
+    """
     entry = await read_park_entry(chain_token)
     if entry is None or is_resolved_tombstone(entry):
         logger.debug("agents: re-park notice for chained call %s has no live park to extend", chain_token)
@@ -163,7 +166,8 @@ async def deliver_chained_park(
     because the whole context rides every fire: the embedded caller binding (which this tool
     never needs — the waiting run's own park entry carries its delivery address) and the
     reserved thread field the platform's park-by-thread index reads off the context. Neither is
-    read here; they are declared so a complete fire is never a signature error."""
+    read here; they are declared so a complete fire is never a signature error.
+    """
     if not chain_token:
         logger.error(
             "agents: a chained park completion (%s) fired with no chain_token; it names no waiting run, so the "
@@ -193,7 +197,8 @@ def register_chained_park_tool() -> None:
     binding. Any OTHER error propagates loudly.
 
     Registered ``force=True`` (a mandatory mechanism, never an operator-excludable catalog tool)
-    and ``tai42/hidden`` (never offered to a model as a callable tool)."""
+    and ``tai42/hidden`` (never offered to a model as a callable tool).
+    """
     try:
         tai42_app.tools.tool(
             name=CHAINED_PARK_DELIVERY_TOOL_NAME,

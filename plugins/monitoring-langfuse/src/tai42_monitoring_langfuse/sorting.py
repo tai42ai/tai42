@@ -1,5 +1,7 @@
-"""Sort resolution for the trace and span-window read surfaces: mapping a neutral
-``OrderBy`` to a native / metric trace sort, and the client-side span sort."""
+"""Sort resolution for the trace and span-window read surfaces.
+
+Maps a neutral ``OrderBy`` to a native / metric trace sort, and the client-side span sort.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ _SPAN_SORT_FIELDS = {"start", "end", "duration", "name", "id"}
 
 
 def _trace_sort(order_by: OrderBy | None) -> tuple[str, Any]:
-    """Resolve a trace sort into a ``(kind, payload)`` pair the caller branches on:
+    """Resolve a trace sort into a ``(kind, payload)`` pair the caller branches on.
 
     - ``("native", "<field>.<direction>")`` for ``timestamp`` / ``name`` / ``id``
       — handed to ``trace.list`` for a server-side sort.
@@ -62,8 +64,7 @@ def _sort_window_items(items: list[SpanWindowItem], order_by: OrderBy | None) ->
 
 
 def _none_last_sorted(items: list[Any], key: Callable[[Any], Any], reverse: bool) -> list[Any]:
-    """Sort by ``key`` with ``None``-keyed items always last, so a ``None`` never
-    participates in the comparison."""
+    """Sort by ``key`` with ``None``-keyed items always last, so a ``None`` never participates in comparison."""
     present = [it for it in items if key(it) is not None]
     missing = [it for it in items if key(it) is None]
     present.sort(key=key, reverse=reverse)

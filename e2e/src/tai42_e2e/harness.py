@@ -19,7 +19,7 @@ import psycopg
 from tai42_e2e.pg import PostgresAdmin
 from tai42_e2e.redisx import RedisAdmin
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.topology import Infra, InfraUnavailable, StackResources
+from tai42_e2e.topology import Infra, InfraUnavailableError, StackResources
 from tai42_e2e.variants import resolve_variants
 
 
@@ -35,11 +35,11 @@ def connect_infra(settings: HarnessSettings) -> Infra:
     try:
         redis_admin.check_reachable()
     except Exception as exc:
-        raise InfraUnavailable(f"Redis not usable ({exc}). Start it with `docker compose up -d`.") from exc
+        raise InfraUnavailableError(f"Redis not usable ({exc}). Start it with `docker compose up -d`.") from exc
     try:
         pg_admin.check_reachable()
     except Exception as exc:
-        raise InfraUnavailable(f"Postgres not reachable ({exc}). Start it with `docker compose up -d`.") from exc
+        raise InfraUnavailableError(f"Postgres not reachable ({exc}). Start it with `docker compose up -d`.") from exc
     # Extra reachability the backend needs beyond the shared Redis + Postgres
     # (celery's broker); a no-op for the Redis-only backends.
     variants.backend.infra_check(settings)
@@ -56,7 +56,7 @@ def connect_infra(settings: HarnessSettings) -> Infra:
         try:
             checkpoint_redis.check_reachable()
         except Exception as exc:
-            raise InfraUnavailable(
+            raise InfraUnavailableError(
                 f"Checkpoint Redis not reachable ({exc}). Start it with `docker compose --profile agents-redis up -d`."
             ) from exc
         try:
@@ -64,7 +64,7 @@ def connect_infra(settings: HarnessSettings) -> Infra:
             # here is a misconfiguration, caught loudly at session start.
             checkpoint_redis.check_search_json_modules()
         except Exception as exc:
-            raise InfraUnavailable(
+            raise InfraUnavailableError(
                 f"Checkpoint Redis lacks the RediSearch/RedisJSON modules the langgraph redis provider needs "
                 f"({exc}). Use a module-capable image (redis:8); `docker compose --profile agents-redis up -d`."
             ) from exc
@@ -428,7 +428,7 @@ def seed_projection_authz(infra: Infra, resources: StackResources) -> tuple[str,
     reaches the MCP tool edge) while every projected operation's own synthesized
     route (e.g. ``/api/config/reload``) maps to ``e2e-all`` — which the limited key
     LACKS. So the limited key authenticates and dispatches, then the tool-edge authz
-    check denies the specific projected op with a ``PermissionDenied``-backed
+    check denies the specific projected op with a ``PermissionDeniedError``-backed
     ``ToolError``; the root key's ``*`` satisfies both and is allowed. The readiness
     probes stay public so boot's readiness wait is not itself denied."""
     root = seed_root_identity(infra, resources, user_id="proj-root", scopes=["*"])

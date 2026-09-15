@@ -76,16 +76,19 @@ class Epoch:
     _periodic_cancels: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        """Start the generation idle, before any request has entered it."""
         # Born idle: no request has entered this generation yet.
         self._idle.set()
 
     # -- per-epoch in-flight accounting ----------------------------------------
 
     def admit(self) -> None:
+        """Count one admitted request against this generation."""
         self._in_flight += 1
         self._idle.clear()
 
     def release(self) -> None:
+        """Release one admitted request, marking the generation idle when none remain."""
         # Never drops below zero: a double release would falsely mark the epoch idle
         # while work is still in flight and let the retire force-close under it.
         self._in_flight = max(0, self._in_flight - 1)
@@ -94,26 +97,31 @@ class Epoch:
 
     @property
     def in_flight(self) -> int:
+        """The count of requests currently admitted on this generation."""
         return self._in_flight
 
     def register_periodic_loop(self, cancel: Callable[[], Awaitable[None]]) -> None:
-        """Register a cancel-and-await callback for a periodic loop this generation
-        owns (the failed-MCP reprobe, the marketplace advisories poll, the
-        conversations delivery sweep). Every registered loop is cancelled when the
+        """Register a cancel-and-await callback for a periodic loop this generation owns.
+
+        Covers the failed-MCP reprobe, the marketplace advisories poll, and the
+        conversations delivery sweep. Every registered loop is cancelled when the
         epoch retires, so a retired generation leaves no timer running against the
-        fresh one."""
+        fresh one.
+        """
         self._periodic_cancels.append(cancel)
 
     async def _drain_in_flight(self, deadline: float) -> None:
-        """Wait, bounded by ``deadline``, for this generation's admitted requests to
-        finish. A request still in flight past the budget is logged loudly and the
-        retire proceeds (the fresh epoch already serves new traffic)."""
+        """Wait, bounded by ``deadline``, for this generation's admitted requests to finish.
+
+        A request still in flight past the budget is logged loudly and the
+        retire proceeds (the fresh epoch already serves new traffic).
+        """
         if self._idle.is_set():
             return
         try:
             await asyncio.wait_for(self._idle.wait(), timeout=deadline)
         except TimeoutError:
-            logger.error(
+            logger.exception(
                 "epoch %d retire: %d request(s) still in flight after the drain budget",
                 self.number,
                 self._in_flight,
@@ -128,12 +136,13 @@ class Epoch:
         door-driven reload's own request (an install/apply POST hanging to the client
         timeout). Bound each cancel: a loop that overruns is logged and abandoned (its task
         was already ``.cancel()``ed and dies in the background), so the retire always makes
-        progress."""
+        progress.
+        """
         for cancel in self._periodic_cancels:
             try:
                 await asyncio.wait_for(cancel(), timeout=deadline)
             except TimeoutError:
-                logger.error(
+                logger.exception(
                     "epoch %d retire: a periodic-loop cancel exceeded the %.1fs budget; abandoning it",
                     self.number,
                     deadline,
@@ -144,10 +153,13 @@ class Epoch:
 
 @dataclass
 class _AdmissionState:
-    """The per-request admission record the serving epoch counts. A MUTABLE object shared
-    between the admission wrapper and the request's own coroutine tree: a long-lived stream
-    handler flips ``drain_exempt`` (mutation is visible even when the stream body runs in a
-    child task, unlike a ``ContextVar`` set that would not propagate back to the wrapper)."""
+    """The per-request admission record the serving epoch counts.
+
+    A MUTABLE object shared between the admission wrapper and the request's own
+    coroutine tree: a long-lived stream handler flips ``drain_exempt`` (mutation
+    is visible even when the stream body runs in a child task, unlike a
+    ``ContextVar`` set that would not propagate back to the wrapper).
+    """
 
     epoch: Epoch
     drain_exempt: bool = False
@@ -168,10 +180,12 @@ class EpochAdmissionApp:
     """
 
     def __init__(self, app: ASGIApp, epoch: Epoch) -> None:
+        """Bind this wrapper to ``app`` and the ``epoch`` it counts requests against."""
         self._app = app
         self._epoch = epoch
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Count the HTTP request against its epoch for the life of the call; pass non-HTTP scopes through."""
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
@@ -215,7 +229,8 @@ def mark_current_request_drain_exempt() -> None:
     long-lived stream calls this; every real / short request stays counted, so a retire STILL
     drains in-flight work (an MCP tool call, a sync REST tool run) BEFORE the ``aclose``. The
     exempted stream's own generation is held (uncounted) until the client disconnects — a
-    bounded per-open-connection retention, not a leak of the in-flight counter."""
+    bounded per-open-connection retention, not a leak of the in-flight counter.
+    """
     state = _admission.get()
     if state is None or state.drain_exempt:
         return
@@ -265,51 +280,66 @@ _deferred_retire_tasks: set[asyncio.Task[None]] = set()
 
 
 def current_epoch() -> Epoch:
-    """The live serving generation, or a loud error before the worker lifespan
-    installs the boot epoch. Epoch-scoped caches key on ``current_epoch().number``."""
+    """The live serving generation, or a loud error before the worker lifespan installs the boot epoch.
+
+    Epoch-scoped caches key on ``current_epoch().number``.
+    """
     if _current is None:
         raise RuntimeError("no serving epoch is installed — enter the worker lifespan first")
     return _current
 
 
 def current_epoch_or_none() -> Epoch | None:
-    """The live serving generation or ``None`` — the non-raising accessor for a
-    caller that runs outside a worker lifespan (an embedded read, a probe)."""
+    """The live serving generation, or ``None`` — the non-raising accessor.
+
+    For a caller that runs outside a worker lifespan (an embedded read, a probe).
+    """
     return _current
 
 
 def epoch_under_construction() -> Epoch:
-    """The epoch a build is populating, else the live epoch — the accessor a per-epoch
-    startup handler uses to register a periodic loop's cancel with the generation that
-    owns it. During ``build_and_swap_epoch`` this is the new epoch (not yet ``_current``);
-    at boot it falls back to the just-installed boot epoch."""
+    """The epoch a build is populating, else the live epoch.
+
+    The accessor a per-epoch startup handler uses to register a periodic loop's
+    cancel with the generation that owns it. During ``build_and_swap_epoch``
+    this is the new epoch (not yet ``_current``); at boot it falls back to the
+    just-installed boot epoch.
+    """
     return _building_epoch if _building_epoch is not None else current_epoch()
 
 
 def epoch_under_construction_or_none() -> Epoch | None:
-    """:func:`epoch_under_construction`, but ``None`` (never raising) when no epoch is
-    installed — for a periodic-loop spawn that may run in a loop-less / pre-epoch context
-    (a bare unit test), where there is no generation to register the loop with."""
+    """Like :func:`epoch_under_construction`, but ``None`` (never raising) when no epoch is installed.
+
+    For a periodic-loop spawn that may run in a loop-less / pre-epoch context (a
+    bare unit test), where there is no generation to register the loop with.
+    """
     return _building_epoch if _building_epoch is not None else _current
 
 
 def is_epoch_rebuild_in_progress() -> bool:
-    """True only while ``build_and_swap_epoch`` is populating a NEW generation — i.e. during
-    a RELOAD, and never at cold boot or steady serving. (``_building_epoch`` is set only for
-    the span of the build; cold boot installs its core through ``install_boot_core`` without
-    it.) Lets a build-time step (the MCP viability probe) pick a short reload budget over the
-    generous cold-boot one, so an unreachable server can't stall a live reload. Read safely
-    from the off-loop build worker: it is a GIL-atomic reference read of a process global."""
+    """True only while ``build_and_swap_epoch`` is populating a new generation.
+
+    True during a RELOAD, and never at cold boot or steady serving.
+    (``_building_epoch`` is set only for the span of the build; cold boot
+    installs its core through ``install_boot_core`` without it.) Lets a
+    build-time step (the MCP viability probe) pick a short reload budget over the
+    generous cold-boot one, so an unreachable server can't stall a live reload.
+    Read safely from the off-loop build worker: it is a GIL-atomic reference read
+    of a process global.
+    """
     return _building_epoch is not None
 
 
 def install_boot_core(core: ServingCore) -> Epoch:
-    """Establish the boot serving generation's core, called once by ``app_context``
-    before ``start()`` runs — so ``start()`` and the epoch handlers register into this
-    generation's FastMCP, and every process-spine read resolves to it. The dispatch
-    slot + serving app are attached later by the worker lifespan
-    (:func:`attach_boot_serving_app`); an embedded / pure-``app_context`` caller needs
-    no serving app. The boot epoch's number is the current client epoch."""
+    """Establish the boot serving generation's core, called once by ``app_context`` before ``start()`` runs.
+
+    So ``start()`` and the epoch handlers register into this generation's
+    FastMCP, and every process-spine read resolves to it. The dispatch slot +
+    serving app are attached later by the worker lifespan
+    (:func:`attach_boot_serving_app`); an embedded / pure-``app_context`` caller
+    needs no serving app. The boot epoch's number is the current client epoch.
+    """
     # ``_loaded_env_keys`` is owned by the cold-boot env bridge, which ran BEFORE this
     # and populated it with the stored-env keys it applied; a later reload's removed-key
     # reconciliation depends on those keys, so this must NOT reset it. Between contexts
@@ -320,9 +350,11 @@ def install_boot_core(core: ServingCore) -> Epoch:
 
 
 def attach_boot_serving_app(serving_app: ASGIApp, app_state: dict[str, Any]) -> None:
-    """Point the ASGI dispatch slot at the boot serving app, called by the worker
-    lifespan after it builds the ``http_app`` and enters its FastMCP lifespan. Records
-    the slot the build+swap primitive re-points."""
+    """Point the ASGI dispatch slot at the boot serving app.
+
+    Called by the worker lifespan after it builds the ``http_app`` and enters its
+    FastMCP lifespan. Records the slot the build+swap primitive re-points.
+    """
     global _serving_slot
     _serving_slot = app_state
     current_epoch().serving_app = serving_app
@@ -330,9 +362,11 @@ def attach_boot_serving_app(serving_app: ASGIApp, app_state: dict[str, Any]) -> 
 
 
 async def clear_epoch() -> None:
-    """Drop the process serving generation, closing the live generation's FastMCP
-    lifespan supervisor (terminating its transports) so a later lifespan in the same
-    process starts from a clean slate."""
+    """Drop the process serving generation, closing its FastMCP lifespan supervisor.
+
+    Terminating its transports so a later lifespan in the same process starts
+    from a clean slate.
+    """
     global _current, _serving_slot, _loaded_env_keys
     current = _current
     if current is not None and current.supervisor is not None:
@@ -344,10 +378,13 @@ async def clear_epoch() -> None:
 
 @register_settings_reset
 def _sweep_retiring_epoch() -> None:
-    """Settings-reset hook: when a retire triggers the reset, sweep the retired
-    generation for stale-config leaks. A no-op for every other reset (the retire flag
-    is unset), so the global reset stays cheap. Never drops anything — a retired-epoch
-    settings instance still reachable is reported loudly by ``sweep_stale_settings``."""
+    """Settings-reset hook that sweeps the retiring generation for stale-config leaks.
+
+    Runs only when a retire triggers the reset. A no-op for every other reset
+    (the retire flag is unset), so the global reset stays cheap. Never drops
+    anything — a retired-epoch settings instance still reachable is reported
+    loudly by ``sweep_stale_settings``.
+    """
     retiring = _retiring_epoch
     if retiring is None:
         return
@@ -355,10 +392,11 @@ def _sweep_retiring_epoch() -> None:
 
 
 def _apply_env(proposed: Mapping[str, str]) -> None:
-    """Apply the proposed env to ``os.environ``, dropping any previously loaded key
-    the proposed env removed (removed-key reconciliation). Only keys a prior build
-    loaded are dropped — unrelated process env (PATH, the launcher's boot identity)
-    is untouched."""
+    """Apply the proposed env to ``os.environ``, dropping any previously loaded key it removed.
+
+    Removed-key reconciliation. Only keys a prior build loaded are dropped —
+    unrelated process env (PATH, the launcher's boot identity) is untouched.
+    """
     global _loaded_env_keys
     for key in _loaded_env_keys - set(proposed):
         os.environ.pop(key, None)
@@ -367,20 +405,24 @@ def _apply_env(proposed: Mapping[str, str]) -> None:
 
 
 def apply_env_and_reset_settings(proposed: Mapping[str, str]) -> None:
-    """Apply ``proposed`` to ``os.environ`` (removed-key reconciled) and clear the
-    settings accessor caches, so the next settings read resolves under it. The
-    apply-then-reset pair the epoch build and the cold-boot env bridge both cross —
-    one authority, so boot and reload resolve settings under the stored env
-    identically (stored env OVERRIDES container env on both, via ``_apply_env``'s
-    ``os.environ.update``)."""
+    """Apply ``proposed`` to ``os.environ`` (removed-key reconciled) and clear the settings accessor caches.
+
+    So the next settings read resolves under it. The apply-then-reset pair the
+    epoch build and the cold-boot env bridge both cross — one authority, so boot
+    and reload resolve settings under the stored env identically (stored env
+    OVERRIDES container env on both, via ``_apply_env``'s ``os.environ.update``).
+    """
     _apply_env(proposed)
     reset_all_settings()
 
 
 def _restore_env(snapshot: Mapping[str, str], loaded: set[str]) -> None:
-    """Restore ``os.environ`` exactly to ``snapshot`` on the failure branch — the
-    restore-on-failure ONLY counterpart of ``_apply_env`` (never a with-block, which
-    would restore on success too and defeat the stays-live contract)."""
+    """Restore ``os.environ`` exactly to ``snapshot`` on the failure branch.
+
+    The restore-on-failure ONLY counterpart of ``_apply_env`` (never a
+    with-block, which would restore on success too and defeat the stays-live
+    contract).
+    """
     global _loaded_env_keys
     os.environ.clear()
     os.environ.update(snapshot)
@@ -388,8 +430,11 @@ def _restore_env(snapshot: Mapping[str, str], loaded: set[str]) -> None:
 
 
 def _swap(new_epoch: Epoch) -> Epoch:
-    """Publish the new generation atomically: the current-epoch pointer and the ASGI
-    dispatch slot flip together, so no request ever sees a half-swapped surface."""
+    """Publish the new generation atomically.
+
+    The current-epoch pointer and the ASGI dispatch slot flip together, so no
+    request ever sees a half-swapped surface.
+    """
     global _current
     old = _current
     if old is None:
@@ -496,11 +541,14 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
 
 
 async def _deferred_drain_and_close(old: Epoch, budget: float) -> None:
-    """Background tail of a door-driven reload's retire: wait (bounded by the drain budget)
-    for the old generation's in-flight requests — including the driver, whose response then
-    flushes on the still-live session manager — to finish, then ``aclose`` its FastMCP
-    lifespan (for every remaining/streaming session). Runs on the serving loop (the
-    supervisor's owner loop), so the lifespan close stays loop-correct."""
+    """Background tail of a door-driven reload's retire.
+
+    Waits (bounded by the drain budget) for the old generation's in-flight
+    requests — including the driver, whose response then flushes on the
+    still-live session manager — to finish, then ``aclose`` its FastMCP lifespan
+    (for every remaining/streaming session). Runs on the serving loop (the
+    supervisor's owner loop), so the lifespan close stays loop-correct.
+    """
     try:
         await old._drain_in_flight(budget)
     finally:
@@ -512,17 +560,17 @@ async def _deferred_drain_and_close(old: Epoch, budget: float) -> None:
 
 
 def _default_rebuild() -> None:
-    """Build the fresh serving core OFF TO THE SIDE and re-initialise the process
-    registries into it, under the ALREADY applied proposed env (the primitive applied
-    it before calling this).
+    """Build the fresh serving core off to the side and re-initialise the process registries into it.
 
-    A fresh ``ServingCore`` (fresh FastMCP under a freshly-read AuthAdapter) is set
+    Runs under the ALREADY applied proposed env (the primitive applied it before
+    calling this). A fresh ``ServingCore`` (fresh FastMCP under a freshly-read AuthAdapter) is set
     on the app's ``_building`` slot, so ``start()`` and the epoch handlers register
     into it — the live core is NEVER touched. The env is NOT re-read from the store: the
     proposed env is live in ``os.environ`` and the settings caches were cleared, so this
     resolves every settings read under the env about to be persisted. On ANY
     failure the half-built core is discarded (``_building`` dropped) and re-raised, so
-    the live epoch keeps serving untouched."""
+    the live epoch keeps serving untouched.
+    """
     from tai42_skeleton.app import instance
     from tai42_skeleton.manifest import Manifest
 
@@ -538,15 +586,15 @@ def _default_rebuild() -> None:
 
 
 async def _default_build_serving_app(epoch: Epoch) -> ASGIApp:
-    """Build this generation's FRESH dispatch handle off the just-built core and enter
-    its FastMCP lifespan.
+    """Build this generation's fresh dispatch handle off the just-built core and enter its FastMCP lifespan.
 
     A fresh ``http_app`` is built off the ``_building`` core's fresh FastMCP, so its
     route table — including a reload-added router — is snapshotted anew and actually
     serves. Its FastMCP lifespan (a fresh streamable-http session manager) is entered
     through a dedicated-task supervisor so the swap task can later close it in the same
     context; the built core is recorded on the epoch (retire drops it), and
-    ``_building`` is cleared so post-swap reads resolve through ``current_epoch()``."""
+    ``_building`` is cleared so post-swap reads resolve through ``current_epoch()``.
+    """
     from tai42_skeleton.app import instance
     from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
 
@@ -569,12 +617,14 @@ async def _default_build_serving_app(epoch: Epoch) -> ASGIApp:
 
 
 async def _default_establish_background_loops() -> None:
-    """Re-establish the swapped-in generation's loop-affine background loops (the
-    advisories poll, the conversations delivery sweep) ON the serving loop this primitive
-    runs on, registering each with the now-current epoch so it retires with the
-    generation. The per-epoch handlers ran on a throwaway build-thread loop and could not
-    spawn a loop that survives the build, so these are (re)started here instead. Loud but
-    non-fatal on a single establisher's failure — the fresh epoch already serves."""
+    """Re-establish the swapped-in generation's loop-affine background loops on the serving loop.
+
+    Covers the advisories poll and the conversations delivery sweep, registering
+    each with the now-current epoch so it retires with the generation. The
+    per-epoch handlers ran on a throwaway build-thread loop and could not spawn a
+    loop that survives the build, so these are (re)started here instead. Loud but
+    non-fatal on a single establisher's failure — the fresh epoch already serves.
+    """
     from tai42_skeleton.app import instance
 
     await instance.app._run_post_swap_handlers(raise_on_error=False)

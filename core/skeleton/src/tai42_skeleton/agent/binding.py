@@ -84,7 +84,8 @@ def _suspended_interaction_from_receipt(receipt: dict[str, Any]) -> SuspendedInt
     It carries NO ``resume_owner``: the parked run recorded its OWN resume state against that
     interaction and is the only thing the platform ever resumes for it. A caller must not adopt
     the park as its own suspended state (it would wait on a resume fired at the nested run),
-    and ``assert_park_adoptable`` refuses it on the caller's behalf."""
+    and ``assert_park_adoptable`` refuses it on the caller's behalf.
+    """
     ids = receipt["interaction_ids"]
     if len(ids) != 1:
         raise RuntimeError(
@@ -106,7 +107,8 @@ def _run_tool_signature(tool_input: type[BaseModel]) -> inspect.Signature:
     cannot clash with the parameter default. A required field gets no parameter
     default; an optional field defaults to :data:`_UNSET`, the runtime marker the
     body strips before validation. Extensions derive their branch schema from this
-    signature, so it carries the agent's real input contract."""
+    signature, so it carries the agent's real input contract.
+    """
     params: list[inspect.Parameter] = []
     for field_name, field_info in tool_input.model_fields.items():
         stripped = copy.deepcopy(field_info)
@@ -126,6 +128,7 @@ class AgentBinding:
     """Registers agents, keeps their live instances, and binds their run tools."""
 
     def __init__(self, app: "TaiMCP") -> None:
+        """Bind to ``app`` and start with an empty agent registry."""
         self._app = app
         self._agents: dict[str, Agent] = {}
 
@@ -136,8 +139,7 @@ class AgentBinding:
     def agent(
         self, name: str, tags: set[str] | None = None, meta: dict[str, Any] | None = None
     ) -> Callable[[type[_AgentT]], type[_AgentT]]:
-        """Register an :class:`Agent` subclass under ``name`` and synthesize its
-        JSON ``run`` tool.
+        """Register an :class:`Agent` subclass under ``name`` and synthesize its JSON ``run`` tool.
 
         Fires when an ``agents:``-listed module imports. Gates the agent via the
         manifest ``agents:`` section (NOT the tools namespace), instantiates and
@@ -192,6 +194,7 @@ class AgentBinding:
         return decorator
 
     def get_agent(self, name: str) -> Agent:
+        """Return the live agent registered under ``name``; raises ``RuntimeError`` when there is none."""
         agent = self._agents.get(name)
         if agent is None:
             raise RuntimeError(f"No such agent: {name}.")

@@ -66,7 +66,8 @@ _READ_NOT_SUPPORTED_CODE = "monitoring-read-not-supported"
 class MetricsQuery(BaseModel):
     """The metrics door's optional time window and granularity.
 
-    Spec metadata only — the door parses its query at the HTTP edge."""
+    Spec metadata only — the door parses its query at the HTTP edge.
+    """
 
     from_: str | None = Field(
         default=None,
@@ -82,12 +83,14 @@ class MetricsQuery(BaseModel):
 
 
 class RunFilterQuery(BaseModel):
-    """The run time window, advanced filters, and sort shared by the run-list and export doors
-    (exactly what ``parse_time_range`` + ``parse_run_filter`` read at the HTTP edge).
+    """The run time window, advanced filters, and sort shared by the run-list and export doors.
+
+    Exactly what ``parse_time_range`` + ``parse_run_filter`` read at the HTTP edge.
 
     Spec metadata only — the doors parse their query at the HTTP edge. Beyond the declared
     fields, any ``meta.<key>=<value>`` query param adds one metadata string-equality clause
-    (dynamic keys, so not a fixed field); an empty key or value is a 400."""
+    (dynamic keys, so not a fixed field); an empty key or value is a 400.
+    """
 
     from_: str | None = Field(
         default=None,
@@ -209,12 +212,14 @@ async def list_observability_runs(
     page: int,
     page_size: int,
 ) -> dict:
-    """Filterable run list via the contract's ``list_traces``, paged with the
-    reader's ``limit`` / ``page``. Time range plus the neutral advanced filters
-    (tags / status / cost / token / latency ranges) and sort.
+    """Filterable run list via the contract's ``list_traces``, paged with the reader's ``limit`` / ``page``.
+
+    Time range plus the neutral advanced filters (tags / status / cost / token / latency
+    ranges) and sort.
 
     List- or dict-typed query params are JSON-encoded in the query string
-    (``tags`` may be a JSON list ``["a","b"]`` or a comma-separated string)."""
+    (``tags`` may be a JSON list ``["a","b"]`` or a comma-separated string).
+    """
     reader = get_monitoring().reader
     try:
         summaries = await reader.list_traces(
@@ -222,7 +227,7 @@ async def list_observability_runs(
             to_timestamp=t1,
             limit=page_size,
             page=page,
-            filter=run_filter,
+            filter_=run_filter,
             order_by=order_by,
         )
     except MonitoringReadNotSupportedError as exc:

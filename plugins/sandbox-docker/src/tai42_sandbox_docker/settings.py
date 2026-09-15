@@ -81,4 +81,5 @@ class DockerSandboxSettings(SandboxDispatchSettings):
 
 @settings_cache
 def docker_sandbox_settings() -> DockerSandboxSettings:
+    """The process-cached :class:`DockerSandboxSettings`."""
     return DockerSandboxSettings()  # pyright: ignore[reportCallIssue]

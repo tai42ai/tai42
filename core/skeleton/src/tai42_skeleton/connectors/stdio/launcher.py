@@ -12,5 +12,9 @@ from __future__ import annotations
 
 
 def reject_leading_dash(value: str, *, field: str) -> None:
+    """Raise ``ValueError`` if ``value`` starts with ``-``, which a launcher would parse as a flag.
+
+    ``field`` names the offending value in the error message.
+    """
     if value.startswith("-"):
         raise ValueError(f"{field} must not start with '-' (would be parsed as a launcher flag)")

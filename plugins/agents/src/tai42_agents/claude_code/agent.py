@@ -1,6 +1,6 @@
-"""``claude_code`` as an :class:`Agent`: drive the real ``claude`` binary through the Claude
-Agent SDK INSIDE a sandbox session over the versioned JSONL exec protocol.
+"""``claude_code`` as an :class:`Agent`: drive the real ``claude`` binary through the Claude Agent SDK.
 
+Runs INSIDE a sandbox session over the versioned JSONL exec protocol.
 The plugin server NEVER imports the SDK — the SDK lives in the session image and only the
 runner payload (shipped as DATA, executed in-session) imports it. This module is the ADAPTER:
 it acquires a sandbox session (:func:`require_sandbox`, the one raising chokepoint), authors a
@@ -133,7 +133,8 @@ def _resume_continuation(threaded: bool) -> Iterator[None]:
     can never resume, so binding ``None`` SHADOWS any ambient resume continuation a park-capable
     caller left bound, so a non-threaded run nested under one cannot inherit it and mint a park
     it can never resume: its async ask refuses pre-persist. Mirrors the LangGraph driver's
-    ``park_continuation``."""
+    ``park_continuation``.
+    """
     name = AGENT_RESUME_TOOL_NAME if threaded else None
     token = set_resume_continuation_tool(name)
     try:
@@ -160,6 +161,8 @@ _LIVE_SESSIONS: dict[str, SandboxSession] = {}
     meta={"tai42/crash_resume": claude_code_crash_resume()},
 )
 class ClaudeCodeAgent(Agent):
+    """The ``claude_code`` agent: drives the real ``claude`` binary in a sandbox over the exec protocol."""
+
     tool_name: ClassVar[str] = AGENT_NAME
     tool_description: ClassVar[str] = (
         "Run Claude Code as a platform agent: it drives the real claude binary inside a "
@@ -466,14 +469,16 @@ class ClaudeCodeAgent(Agent):
         options_snapshot: dict[str, Any],
         terminal_key: str | None = None,
     ) -> AsyncIterator[tuple[StreamEvent, bool]]:
-        """Consume the runner's up-frames, mapping each to a contract event (paired with a
-        park flag) via a thin per-frame dispatch. Handles the hello version/session gate, sync
+        """Consume the runner's up-frames, mapping each to a contract event (paired with a park flag).
+
+        A thin per-frame dispatch. Handles the hello version/session gate, sync
         asks, async parks, and proxied tool calls inline; a ``fatal`` or an error terminal
         raises loudly.
 
         On a clean terminal in a resume drive (``terminal_key`` set), the idempotence
         record is written BEFORE the terminal event is yielded, so a crash between here and the
-        index finalize leaves a durable record a redelivery re-produces from."""
+        index finalize leaves a durable record a redelivery re-produces from.
+        """
         allowlist = set(tool_names)
         text_parts: list[str] = []
         seen_hello = False
@@ -516,9 +521,11 @@ class ClaudeCodeAgent(Agent):
         text_parts: list[str],
         terminal_key: str | None,
     ) -> AsyncIterator[tuple[StreamEvent, bool]]:
-        """Map one non-hello up-frame to its ``(event, is_park)`` pairs: an event frame's stream
-        event, a sync/async ask, a proxied tool call (with its park tail), or the terminal. A
-        ``fatal`` raises loudly."""
+        """Map one non-hello up-frame to its ``(event, is_park)`` pairs.
+
+        An event frame's stream event, a sync/async ask, a proxied tool call (with its park tail),
+        or the terminal. A ``fatal`` raises loudly.
+        """
         if isinstance(frame, EventFrame):
             event = map_event(frame.event, text_parts)
             if event is not None:
@@ -556,17 +563,20 @@ class ClaudeCodeAgent(Agent):
         settings: ClaudeCodeSettings,
         options_snapshot: dict[str, Any],
     ) -> AsyncIterator[tuple[StreamEvent, bool]]:
-        """Run one proxied tool call and, when it async-parked, take the park tail: build the
-        park identity, gate capability, and record it into the durable index — the same tail the
-        agent's own async ask takes. Yields ``(event, True)`` for each surfaced park event; a
-        tool that ran (or errored) to a plain result yields nothing."""
+        """Run one proxied tool call and, when it async-parked, take the park tail.
+
+        Builds the park identity, gates capability, and records it into the durable index — the same
+        tail the agent's own async ask takes. Yields ``(event, True)`` for each surfaced park event;
+        a tool that ran (or errored) to a plain result yields nothing.
+        """
         parked = await run_proxied_tool_call(frame, handle=handle, allowlist=allowlist, thread_id=thread_id)
         if parked is None:
             return
         # The tool async-parked: record it into the durable index, stop the runner, and surface
         # the suspended terminal — the same park tail the agent's own async ask takes. thread_id
         # is not None here (a thread-less park was refused to the model inside run_proxied_tool_call).
-        assert thread_id is not None
+        if thread_id is None:
+            raise AssertionError
         horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
         completion_tool, completion_context = get_park_completion()
         execution_identity, execution_fingerprint = current_execution_identity()
@@ -596,9 +606,11 @@ class ClaudeCodeAgent(Agent):
         text_parts: list[str],
         terminal_key: str | None,
     ) -> StreamEvent:
-        """Emit the SDK usage, build the terminal event, and — in a resume drive
-        (``terminal_key`` set) — persist the durable terminal record BEFORE the caller reports
-        it, so a crash after this point lets a redelivery re-produce the SAME output."""
+        """Emit the SDK usage and build the terminal event.
+
+        In a resume drive (``terminal_key`` set) the durable terminal record is persisted BEFORE the
+        caller reports it, so a crash after this point lets a redelivery re-produce the SAME output.
+        """
         self._emit_usage(frame, settings=settings)
         event = terminal_event(frame, text_parts)
         if terminal_key is not None:
@@ -684,7 +696,8 @@ class ClaudeCodeAgent(Agent):
             mode="async",
             expiry_at=horizon,
         )
-        assert isinstance(suspended, SuspendedInteraction)
+        if not (isinstance(suspended, SuspendedInteraction)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         async for event in self._park_on_interaction(
             suspended, identity=identity, handle=handle, thread_id=thread_id, horizon=horizon
         ):
@@ -699,14 +712,16 @@ class ClaudeCodeAgent(Agent):
         thread_id: str,
         horizon: datetime,
     ) -> AsyncIterator[StreamEvent]:
-        """Record an already-created parked interaction into the durable index, stop the
-        runner, and surface the suspended terminal. The shared park tail BOTH the agent's OWN
+        """Record an already-created parked interaction into the durable index, stop the runner, and suspend.
+
+        The shared park tail BOTH the agent's OWN
         async ask and a tool the agent drives that async-parks cross into the index through —
         each supplies its interaction, this persists + stops + suspends uniformly.
 
         ``horizon`` is this session's retention bound; the interaction's own deadline (bounded
         by the retention gate) is what the entry is keyed to, falling back to the horizon when
-        the sentinel carried none."""
+        the sentinel carried none.
+        """
         interaction_id = suspended.interaction_id
         deadline = (suspended.expiry_at or horizon).isoformat()
         # interrupt_id == interaction_id (a one-ask park); persist BEFORE the stop/drain so an
@@ -716,8 +731,10 @@ class ClaudeCodeAgent(Agent):
         yield SuspendedFinal(interaction_ids=[interaction_id], thread_id=thread_id, expiry_at=deadline)
 
     def _emit_usage(self, frame: ResultFrame, *, settings: ClaudeCodeSettings) -> None:
-        """Emit the SDK-reported usage/cost into the ACTIVE trace (its model calls bypass the
-        platform LLM seam). Guarded by ``current_trace_id`` and fail-safe by construction."""
+        """Emit the SDK-reported usage/cost into the ACTIVE trace (its model calls bypass the platform LLM seam).
+
+        Guarded by ``current_trace_id`` and fail-safe by construction.
+        """
         if frame.usage is None:
             return
         writer = tai42_app.monitoring.active.writer

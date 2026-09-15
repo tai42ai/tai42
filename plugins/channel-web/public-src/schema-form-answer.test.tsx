@@ -2,8 +2,8 @@ import { cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { FormPage, JsonSchema } from '@/transcript-model';
 import { FORM_SCHEMA, formQuestion, question, renderCard } from '@/question-card.test-support';
+import type { FormPage, JsonSchema } from '@/transcript-model';
 
 afterEach(() => {
   cleanup();

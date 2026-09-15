@@ -40,6 +40,7 @@ _MEDIA_ID_RE = re.compile(r"[A-Za-z0-9_-]{43}")
     ),
 )
 async def media(request: Request) -> Response:
+    """Serve stored interaction media by its capability id; a malformed id is a 400, a miss a 404."""
     # UNAUTHENTICATED: the media id IS the capability secret — a vendor fetches the
     # url from its own servers, a browser ``<img>`` from the inbox origin. A malformed
     # id is a 400; an unconfigured store answers the SAME uniform 404 as a miss (never

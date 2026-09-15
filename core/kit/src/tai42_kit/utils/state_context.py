@@ -1,6 +1,9 @@
-"""The ambient state-context carrier — the one contextvar every door deposits a
-:class:`~tai42_contract.states.StateContext` on so downstream state writes resolve
-their subject and complete their write provenance without a per-door argument.
+"""The ambient state-context carrier for downstream state writes.
+
+The one contextvar every door deposits a
+:class:`~tai42_contract.states.StateContext` on so downstream state writes
+resolve their subject and complete their write provenance without a per-door
+argument.
 
 Homed in kit so both the skeleton that reads it and the execution backends below the
 skeleton (which never import tai42-skeleton) can deposit it, the same layering reason
@@ -22,9 +25,12 @@ _current_state_context: ContextVar[StateContext | None] = ContextVar("tai42_stat
 
 @contextmanager
 def state_context(ctx: StateContext) -> Iterator[None]:
-    """Deposit ``ctx`` as the ambient state context for the duration of the block — a
-    door wraps the work it drives so every downstream write completes its provenance
-    from it, and the token is reset in the ``finally`` so it never leaks past the door."""
+    """Deposit ``ctx`` as the ambient state context for the duration of the block.
+
+    A door wraps the work it drives so every downstream write completes its
+    provenance from it, and the token is reset in the ``finally`` so it never
+    leaks past the door.
+    """
     token = _current_state_context.set(ctx)
     try:
         yield
@@ -33,6 +39,5 @@ def state_context(ctx: StateContext) -> Iterator[None]:
 
 
 def current_state_context() -> StateContext | None:
-    """The ambient :class:`StateContext` the current door deposited, or ``None`` outside
-    a door."""
+    """Return the ambient :class:`StateContext` the current door deposited, or ``None`` outside a door."""
     return _current_state_context.get()

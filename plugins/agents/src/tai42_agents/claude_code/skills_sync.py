@@ -30,10 +30,14 @@ _SKILL_FILENAME = "SKILL.md"
 
 
 class SkillNameError(ValueError):
-    """A caller-supplied skill/subagent name is outside the safe path charset. Raised loudly at
-    the door so an unauthenticated name can never widen a materialization path."""
+    """A caller-supplied skill/subagent name is outside the safe path charset.
+
+    Raised loudly at the door so an unauthenticated name can never widen a
+    materialization path.
+    """
 
     def __init__(self, kind: str, name: str) -> None:
+        """Build the error naming the offending ``kind`` and ``name``."""
         self.kind = kind
         self.name = name
         super().__init__(f"{kind} name {name!r} is not a valid identifier ({_NAME_RE.pattern})")

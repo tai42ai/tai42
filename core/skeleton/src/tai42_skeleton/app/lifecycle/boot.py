@@ -26,7 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 class BootMixin(LifecycleState):
+    """Lifecycle mixin that boots the app: claims the global handle and brings up the manifest's components."""
+
     def start(self, manifest: Manifest):
+        """Boot the app from ``manifest``: claim the global ``tai42_app`` handle and bring up its components."""
         # Booting is the composition root: this is where the running impl claims
         # the global ``tai42_app`` handle. Constructing a ``TaiMCP`` must not — only
         # start()/app_context binds, so building a throwaway app can't hijack it.
@@ -191,14 +194,15 @@ class BootMixin(LifecycleState):
         warn_if_rate_limiting_off(logger)
 
     def _reload_registries(self, manifest: Manifest) -> dict[str, Any]:
-        """Re-initialise the process registries from ``manifest`` and run the per-epoch
-        handler list ONCE — the rebuild step the epoch build+swap primitive calls.
+        """Re-initialise the process registries from ``manifest`` and run the per-epoch handler list ONCE.
 
+        The rebuild step the epoch build+swap primitive calls.
         The proposed env is already live in ``os.environ`` and the settings caches
         were cleared by the primitive, so this resolves every settings read under the
         env about to be persisted. It raises loudly on ANY failure so the
         primitive discards the half-built epoch and restores the env — there is no
-        restore-on-failure dance here (the primitive owns the discard)."""
+        restore-on-failure dance here (the primitive owns the discard).
+        """
         # Reload-time re-check of the backend-needs-bus invariant, BEFORE the
         # registries rebuild: a reload whose new manifest registers a backend while
         # the bus is unconfigured is refused here (an env-materialized backend or an
@@ -214,12 +218,14 @@ class BootMixin(LifecycleState):
         return {"status": "ok"}
 
     def _audit_plugin_routes_preserved(self) -> None:
-        """Assert the epoch rebuild kept the routes of every still-declared plugin — the
-        loud guard against a silent route unmount. ``expected_owners`` is the plugin owner
+        """Assert the epoch rebuild kept the routes of every still-declared plugin.
+
+        The loud guard against a silent route unmount. ``expected_owners`` is the plugin owner
         identity of each route-declaring mount binding this build resolved (a plugin
         dropped from the manifest, or bound route-less, is absent, so its legitimately-gone
         routes never trip the guard). Uses the ONE owner-identity source ``custom_route``
-        stamps rows under, so the two never drift."""
+        stamps rows under, so the two never drift.
+        """
         from tai42_skeleton.app.http import plugin_owner
 
         expected_owners = {
@@ -237,8 +243,7 @@ class BootMixin(LifecycleState):
         self._extension_registry = ExtensionRegistry(self._tool_registry.used_extensions)
 
     def _reset_component_surface(self) -> None:
-        """Clear every tool / prompt / resource / resource template off the live
-        ``local_provider``.
+        """Clear every tool / prompt / resource / resource template off the live ``local_provider``.
 
         Called at the top of ``start()`` (before ``_initialize_components``
         re-imports the manifest modules) so a module-level ``@tai42_app.tools.tool``
@@ -258,7 +263,8 @@ class BootMixin(LifecycleState):
         cannot double-remove one name (``remove_*`` clears all versions by name in
         one call). Synchronous — a plain dict read and sync ``remove_*`` calls,
         needing no event loop, so it runs inline wherever ``start()`` runs (the
-        serving loop at cold boot, a worker thread on reload)."""
+        serving loop at cold boot, a worker thread on reload).
+        """
         provider = self._fast_mcp.local_provider
         components = list(provider._components.values())
         for name in {c.name for c in components if isinstance(c, Tool)}:
@@ -274,10 +280,12 @@ class BootMixin(LifecycleState):
             provider.remove_resource(uri)
 
     def _registry_names_sync(self) -> dict[str, set[str]]:
-        """Snapshot the live server's tool / prompt / resource names off-loop —
-        used by ``start()``'s tool log. Keyed by the SINGULAR kind. Runs through the
+        """Snapshot the live server's tool / prompt / resource names off-loop.
+
+        Used by ``start()``'s tool log. Keyed by the SINGULAR kind. Runs through the
         one off-loop ``run_blocking`` runner, safe from a loop-less caller and from
-        inside the server loop."""
+        inside the server loop.
+        """
 
         async def snapshot() -> dict[str, set[str]]:
             return {

@@ -57,7 +57,8 @@ def _tier1_reason(op: OperationMetadata) -> str | None:
 
     Named so the block log states WHY: a meta-executor is a universal authz bypass; a
     caller-context op takes the caller's OWN edge-derived identity as params, which an
-    MCP caller would supply itself to spoof another principal."""
+    MCP caller would supply itself to spoof another principal.
+    """
     if op.meta_executor or op.name in TIER1_META_EXECUTORS:
         return "meta-executor"
     if op.caller_context:

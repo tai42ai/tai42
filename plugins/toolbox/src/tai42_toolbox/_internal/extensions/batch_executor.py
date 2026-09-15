@@ -15,7 +15,7 @@ from tai42_contract.interactions import SuspendedInteraction
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
-class BatchMultiParkUnsupported(Exception):
+class BatchMultiParkUnsupportedError(Exception):
     """Raised when more than one body in a single ``batch`` call async-parked.
 
     Multi-park reassembly is unsupported at the batch layer BY DESIGN: a batch is ONE tool
@@ -28,7 +28,8 @@ class BatchMultiParkUnsupported(Exception):
     This is a LOUD guard, NOT a rollback: by the time a body's ``run_tool`` returned a
     sentinel its park was ALREADY durably persisted, and raising here does NOT unwind those —
     so N parks may be left orphaned. ``batch`` is single-park only; work that must fan out
-    multiple concurrent parks needs a purpose-built multi-park coordinator, not ``batch``."""
+    multiple concurrent parks needs a purpose-built multi-park coordinator, not ``batch``.
+    """
 
     def __init__(self, tool_name: str, interaction_ids: list[str]) -> None:
         self.tool_name = tool_name
@@ -42,8 +43,7 @@ class BatchMultiParkUnsupported(Exception):
 
 
 class BatchSettings(TaiBaseSettings):
-    """Concurrency and size bounds for the ``batch`` tool extension (env prefix
-    ``BATCH_``)."""
+    """Concurrency and size bounds for the ``batch`` tool extension (env prefix ``BATCH_``)."""
 
     model_config = SettingsConfigDict(env_prefix="BATCH_")
 
@@ -64,8 +64,11 @@ async def _run_one_body(
     fail_fast: bool,
     sem: asyncio.Semaphore | None = None,
 ) -> Any:
-    """Run one body of the batch. Under ``fail_fast`` a failure re-raises; otherwise
-    the exception's string takes the result slot so order and length are preserved."""
+    """Run one body of the batch.
+
+    Under ``fail_fast`` a failure re-raises; otherwise the exception's string takes the
+    result slot so order and length are preserved.
+    """
     try:
         if sem:
             async with sem:
@@ -83,8 +86,11 @@ async def _run_parallel(
     max_concurrent: int | None,
     fail_fast: bool,
 ) -> list[Any]:
-    """Run all bodies concurrently under a semaphore, results in input order. First
-    failure propagates; in-flight siblings are cancelled and drained before re-raising."""
+    """Run all bodies concurrently under a semaphore, results in input order.
+
+    First failure propagates; in-flight siblings are cancelled and drained before
+    re-raising.
+    """
     if max_concurrent is not None and max_concurrent < 1:
         raise ValueError("max_concurrent must be a positive integer")
     # Unset cap defaults to the setting, floored to input size (min 1 so an empty batch is valid).
@@ -112,16 +118,19 @@ async def _run_sequential(
 
 
 def _resolve_park(tool_name: str, results: list[Any]) -> list[Any] | SuspendedInteraction:
-    """Resolve the batch's park outcome. If a body parked, PROPAGATE the park: the batch
-    parks as a whole, re-surfacing the one sentinel so the caller's park recognition fires
-    rather than the batch reporting a partial result list over a hidden pause. TWO-plus
+    """Resolve the batch's park outcome.
+
+    If a body parked, PROPAGATE the park: the batch parks as a whole, re-surfacing the one
+    sentinel so the caller's park recognition fires rather than the batch reporting a partial
+    result list over a hidden pause. TWO-plus
     parks are unsupported at the batch layer (one tool call surfaces one signal) and are
     GUARDED loudly — the guard keys on the SENTINEL count only, so errored bodies (error
     strings, not sentinels, under fail_fast=False) never trip it. The guard does not unwind
-    the already-persisted parks."""
+    the already-persisted parks.
+    """
     suspended = [result for result in results if isinstance(result, SuspendedInteraction)]
     if len(suspended) > 1:
-        raise BatchMultiParkUnsupported(tool_name, [s.interaction_id for s in suspended])
+        raise BatchMultiParkUnsupportedError(tool_name, [s.interaction_id for s in suspended])
     if suspended:
         # Propagated WHOLE — the park's resume owner rides with the sentinel, so whoever
         # claims it downstream still checks it owns it. Re-minting one here would drop that.
@@ -147,7 +156,7 @@ async def execute_batch(
     tool call and surfaces ONE park: exactly one parked body PROPAGATES its sentinel (the
     batch parks as a whole, so the caller's park recognition fires rather than the batch
     reporting a partial result list over a hidden pause). TWO-plus parks are unsupported at
-    the batch layer and raise :class:`BatchMultiParkUnsupported` loudly, naming the parked
+    the batch layer and raise :class:`BatchMultiParkUnsupportedError` loudly, naming the parked
     interactions — the guard keys on the SENTINEL count only, so errored bodies (error
     strings under ``fail_fast=False``) never trip it. The guard does not unwind the
     already-persisted parks.

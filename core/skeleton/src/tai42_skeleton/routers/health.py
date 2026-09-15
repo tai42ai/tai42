@@ -49,7 +49,8 @@ class ReadinessStatus(BaseModel):
 
     ``checks`` maps each wired subsystem to ``"ok"`` or, on failure, the raised
     exception's TYPE name only — never its message, which would leak internal
-    hosts/ports. ``plugin_quarantine`` is diagnostic and never flips ``status`` red."""
+    hosts/ports. ``plugin_quarantine`` is diagnostic and never flips ``status`` red.
+    """
 
     status: str
     checks: dict[str, str]
@@ -66,16 +67,19 @@ class ReadinessStatus(BaseModel):
     authed=False,
 )
 async def health_check(request):
+    """Answer a liveness probe with ``OK`` (no auth, text/plain)."""
     return PlainTextResponse("OK")
 
 
 def _auth_connections() -> list[tuple[str, type, ClientSettings]]:
-    """The readiness targets every configured identity provider declares through the
-    IdentityProvider ABC — core enumerates them generically instead of naming a
-    concrete provider or its store. A provider with no pingable backing store declares
-    none. Resolved through the module-level registry, the same deferred path the auth
-    adapter and boot probe use; identical connections across providers are deduped
-    downstream. Empty when access control is off."""
+    """The readiness targets every configured identity provider declares through the IdentityProvider ABC.
+
+    Core enumerates them generically instead of naming a concrete provider or its
+    store. A provider with no pingable backing store declares none. Resolved through the
+    module-level registry, the same deferred path the auth adapter and boot probe use;
+    identical connections across providers are deduped downstream. Empty when access
+    control is off.
+    """
     ac = access_control_settings()
     if not ac.enable:
         return []
@@ -128,11 +132,13 @@ def _sub_mcp_connections() -> list[tuple[str, type, ClientSettings]]:
 
 
 def _component_store_connections() -> list[tuple[str, type, ClientSettings]]:
-    """Every durable skeleton store lives in the skeleton component's bound database;
-    the readiness probe pings that database once per feature label when it is
+    """Every durable skeleton store lives in the skeleton component's bound database.
+
+    The readiness probe pings that database once per feature label when it is
     configured. The connector Redis cache is an additional ping, ridden only when a
     connector-store Redis URL resolves, so a Postgres-only deploy readies on the PG row
-    alone rather than 503ing on a Redis it never wired."""
+    alone rather than 503ing on a Redis it never wired.
+    """
     conns: list[tuple[str, type, ClientSettings]] = []
     if component_store_configured(SKELETON_COMPONENT):
         conns.append(("connectors", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
@@ -148,9 +154,9 @@ def _component_store_connections() -> list[tuple[str, type, ClientSettings]]:
 
 
 def _wired_connections() -> list[tuple[str, type, ClientSettings]]:
-    """Return ``(subsystem, client class, connection settings)`` for every backing
-    store THIS deployment has wired, concatenating each subsystem's own contributor.
+    """Return ``(subsystem, client class, connection settings)`` for every backing store this deployment wired.
 
+    Concatenates each subsystem's own contributor.
     A subsystem may contribute more than one connection (``connectors`` uses both
     Redis and Postgres); its check is ``ok`` only when all of them ping clean.
     """

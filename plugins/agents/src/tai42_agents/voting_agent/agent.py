@@ -46,8 +46,7 @@ async def _run_voters(
     checkpoint_provider: str | None,
     voter_config: dict[str, Any] | None,
 ) -> tuple[list[str], list[VoteInfo], str, dict[str, Any]]:
-    """Render the messages, run every voter in parallel, and assemble the judge's
-    input.
+    """Render the messages, run every voter in parallel, and assemble the judge's input.
 
     Returns ``(user_messages, voters_info, judge_llm_provider, judge_llm_kwargs)``.
     ``judge_llm_provider`` / ``judge_llm_kwargs`` come back already defaulted (never
@@ -153,12 +152,12 @@ _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset(
 
 
 def _reject_unhonored(face: str, response_format: Any, extra_kwargs: dict[str, Any]) -> None:
-    """Reject, in ONE raise, every ABC ``Agent.run`` parameter the voting runtime
-    cannot honor.
+    """Reject, in ONE raise, every ABC ``Agent.run`` parameter the voting runtime cannot honor.
 
     ``response_format`` folds into the same guard: ``VotingOutput`` (or an unset
     ``None``) is dropped before the guard runs, any other type is an offender named
-    alongside the rest. ``face`` is the ``voting_agent.run`` / ``.astream`` label."""
+    alongside the rest. ``face`` is the ``voting_agent.run`` / ``.astream`` label.
+    """
     checked = dict(extra_kwargs)
     checked["response_format"] = response_format
     if response_format is VotingOutput:
@@ -167,9 +166,10 @@ def _reject_unhonored(face: str, response_format: Any, extra_kwargs: dict[str, A
 
 
 class VotingAgentInput(BaseModel):
-    """JSON tool-face params. ``judge_tools`` / ``voter_tools`` are client-tool
-    names resolved to live tools at run time (live tools are API-only via
-    ``astream`` and are not part of this JSON shape).
+    """JSON tool-face params.
+
+    ``judge_tools`` / ``voter_tools`` are client-tool names resolved to live tools at run time
+    (live tools are API-only via ``astream`` and are not part of this JSON shape).
 
     ``base_url``/``api_key`` in ``judge_llm_kwargs`` legitimately route to a
     caller-chosen model endpoint; expose any agent or tool carrying these kwargs
@@ -185,7 +185,8 @@ class VotingAgentInput(BaseModel):
     has no seat and is rejected.
 
     ``extra="forbid"`` rejects any unknown key loudly at validation rather than
-    letting a typo at the run door vanish silently."""
+    letting a typo at the run door vanish silently.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -204,16 +205,20 @@ class VotingAgentInput(BaseModel):
     @field_validator("user_content_kwargs")
     @classmethod
     def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """An empty dict carries no content-block keys — normalize {} to None so it
-        reads as unset, matching the builders that treat {} as no mark."""
+        """An empty dict carries no content-block keys — normalize {} to None so it reads as unset.
+
+        Matches the builders that treat {} as no mark.
+        """
         return value or None
 
 
 @tai42_app.agents.agent("voting_agent", tags={"agents"})
 class VotingAgent(Agent):
-    """Run a voting workflow: voter LLMs answer in parallel, then a judge LLM
-    decides. ``run`` returns the ``VotingOutput``; ``astream`` streams the judge's
-    steps and ends with a ``StructuredFinal`` of the same ``VotingOutput``."""
+    """Run a voting workflow: voter LLMs answer in parallel, then a judge LLM decides.
+
+    ``run`` returns the ``VotingOutput``; ``astream`` streams the judge's steps and ends with a
+    ``StructuredFinal`` of the same ``VotingOutput``.
+    """
 
     tool_name: ClassVar[str] = "voting_agent"
     tool_description: ClassVar[str] = (
@@ -223,10 +228,12 @@ class VotingAgent(Agent):
     ToolInput: ClassVar[type[BaseModel]] = VotingAgentInput
 
     async def run(self, **kwargs: Any) -> VotingOutput:
-        """Drain ``astream`` to its terminal ``VotingOutput``. A ``response_format``
-        other than ``VotingOutput``, or any unhonored ABC parameter, is rejected
-        before draining. The drain forces the ``VotingOutput`` structured terminal —
-        a missing one raises rather than falling back to message text."""
+        """Drain ``astream`` to its terminal ``VotingOutput``.
+
+        A ``response_format`` other than ``VotingOutput``, or any unhonored ABC parameter, is
+        rejected before draining. The drain forces the ``VotingOutput`` structured terminal —
+        a missing one raises rather than falling back to message text.
+        """
         _reject_unhonored("voting_agent.run", kwargs.get("response_format"), kwargs)
         return await self._drain(self.astream(**kwargs), response_format=VotingOutput)
 
@@ -247,16 +254,17 @@ class VotingAgent(Agent):
         response_format: Any = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
-        """Resolve the judge/voter tool names, run the voters silently, stream the
-        judge's events, then yield a terminal ``StructuredFinal`` carrying the full
-        ``VotingOutput``.
+        """Resolve the judge/voter tool names, run the voters, stream the judge, and yield the terminal.
+
+        The terminal is a ``StructuredFinal`` carrying the full ``VotingOutput``.
 
         ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control``)
         onto the judge's last user message (the final voter verdict when voters are
         present); a provider-unknown key surfaces as a loud provider error. A ``response_format``
         other than ``VotingOutput``, or any unhonored ABC parameter (including
         ``system_content_kwargs`` — the system prompts are internal fixed), is
-        rejected loudly here in parity with :meth:`run`."""
+        rejected loudly here in parity with :meth:`run`.
+        """
         _reject_unhonored("voting_agent.astream", response_format, kwargs)
         # Delivery-scoped: a tool a judge or voter dispatches must not capture the completion
         # binding addressing the agent's OWN deferred answer (see ``_internal.nested_dispatch``).

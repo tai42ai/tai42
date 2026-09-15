@@ -28,7 +28,7 @@ from tai42_skeleton.operations import (
 )
 from tai42_skeleton.operations import tool_runs as ops
 from tai42_skeleton.operations.decorator import operation_metadata_of
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.operations.tool_runs import ToolRunStore
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 
@@ -232,10 +232,10 @@ async def test_submit_denied_tool_is_refused_before_any_record(wired):
     wired.install(registered={"write_env"})
 
     async def _deny(tool_name, arguments):
-        raise PermissionDenied("access denied: POST /api/config/env is not permitted")
+        raise PermissionDeniedError("access denied: POST /api/config/env is not permitted")
 
     wired.monkeypatch.setattr(ops, "authorize_submitted_tool", _deny)
-    with pytest.raises(PermissionDenied, match="not permitted"):
+    with pytest.raises(PermissionDeniedError, match="not permitted"):
         await ops.submit_run("write_env", {"k": "v"})
     assert list(ops._SUPERVISORS) == []
     assert ops._ACTIVE_RUNS == 0

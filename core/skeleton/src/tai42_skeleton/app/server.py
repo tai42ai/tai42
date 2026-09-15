@@ -1,3 +1,5 @@
+"""The concrete ``tai42_contract.app.TaiApp`` server (``TaiMCP``) and its uniform-500 handler."""
+
 import contextlib
 import logging
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -97,8 +99,9 @@ async def _internal_error_handler(request: Request, exc: Exception) -> Response:
 
 
 class TaiMCP(TaiMCPLifecycleMixin):
-    """The concrete ``tai42_contract.app.TaiApp`` impl — owns the FastMCP server and
-    exposes the contract facet namespaces as its SOLE feature/contract surface;
+    """The concrete ``tai42_contract.app.TaiApp`` impl — owns the FastMCP server.
+
+    Exposes the contract facet namespaces as its SOLE feature/contract surface;
     the concrete server additionally exposes a launch surface (``sse_app`` /
     ``http_app`` / ``run`` and friends) that is not part of the facade.
 
@@ -108,9 +111,15 @@ class TaiMCP(TaiMCPLifecycleMixin):
     registries, ``app.http.HttpSurface``) and each facet forwards straight to its
     collaborator. Callers reach the app's features only through the facets
     (``app.tools.run_tool``, ``app.backends.backend``, ...) or the ``tai42_app``
-    handle, never a flat member."""
+    handle, never a flat member.
+    """
 
     def __init__(self, *args, **kwargs):
+        """Capture the FastMCP construction ``args``/``kwargs`` (``auth`` pulled aside) and build the facets.
+
+        The facet namespaces and an eager boot-scaffold serving core are created so a freshly
+        constructed, un-booted app already has a serving surface.
+        """
         super().__init__()
         # FastMCP construction params captured for the per-epoch ``ServingCore``
         # build. ``auth`` is pulled aside: production reads it FRESH per epoch from
@@ -164,10 +173,12 @@ class TaiMCP(TaiMCPLifecycleMixin):
     # -- Per-epoch serving core (fresh FastMCP + collaborators) ----------------
 
     def _build_serving_core(self) -> ServingCore:
-        """Build a fresh ``ServingCore`` under the CURRENT env — a fresh FastMCP and
-        the feature collaborators registered onto it, with the access-control adapter
-        read fresh unless a construction-time ``auth`` pins it. Imported locally to
-        avoid an import cycle (access_control -> ... -> app.server)."""
+        """Build a fresh ``ServingCore`` under the CURRENT env.
+
+        A fresh FastMCP and the feature collaborators registered onto it, with the access-control
+        adapter read fresh unless a construction-time ``auth`` pins it. Imported locally to
+        avoid an import cycle (access_control -> ... -> app.server).
+        """
         from tai42_skeleton.access_control.adapter import AuthAdapter
         from tai42_skeleton.access_control.settings import access_control_settings
 
@@ -182,110 +193,132 @@ class TaiMCP(TaiMCPLifecycleMixin):
 
     @property
     def tools(self) -> ToolsFacet:
+        """The tool/toolkit registration, lookup, and execution facet (``app.tools``)."""
         return self._tools_facet
 
     @property
     def agents(self) -> AgentsFacet:
+        """The agent registration and run-binding facet (``app.agents``)."""
         return self._agents_facet
 
     @property
     def backends(self) -> BackendsFacet:
+        """The background-execution backend facet (``app.backends``)."""
         return self._backends_facet
 
     @property
     def sandboxes(self) -> SandboxesFacet:
+        """The sandbox-provider facet (``app.sandboxes``)."""
         return self._sandboxes_facet
 
     @property
     def storage(self) -> StorageFacet:
+        """The resource-storage facet (``app.storage``)."""
         return self._storage_facet
 
     @property
     def connectors(self) -> ConnectorsFacet:
+        """The connector registration and credential-resolution facet (``app.connectors``)."""
         return self._connectors_facet
 
     @property
     def interactions(self) -> InteractionsFacet:
+        """The interactions facet (``app.interactions``) — the ``ask_user`` facade."""
         return self._interactions_facet
 
     @property
     def accounts(self) -> AccountsFacet:
+        """The identity/accounts provider facet (``app.accounts``)."""
         return self._accounts_facet
 
     @property
     def webhook_verifiers(self) -> WebhookVerifiersFacet:
+        """The webhook-verifier registration facet (``app.webhook_verifiers``)."""
         return self._webhook_verifiers_facet
 
     @property
     def channels(self) -> ChannelsFacet:
+        """The channel registration facet (``app.channels``)."""
         return self._channels_facet
 
     @property
     def conversations(self) -> ConversationsFacet:
+        """The conversation-bridge facet (``app.conversations``)."""
         return self._conversations_facet
 
     @property
     def monitoring(self) -> MonitoringFacet:
+        """The monitoring-backend facet (``app.monitoring``)."""
         return self._monitoring_facet
 
     @property
     def extensions(self) -> ExtensionsFacet:
+        """The extension registration facet (``app.extensions``)."""
         return self._extensions_facet
 
     @property
     def http(self) -> HttpFacet:
+        """The custom HTTP route facet (``app.http``)."""
         return self._http_facet
 
     @property
     def clients(self) -> ClientsFacet:
+        """The pooled-client lifecycle facet (``app.clients``)."""
         return self._clients
 
     @property
     def lifecycle(self) -> LifecycleFacet:
+        """The startup/shutdown/reload lifecycle facet (``app.lifecycle``)."""
         return self._lifecycle_facet
 
     @property
     def admin(self) -> AdminFacet:
+        """The in-process admin-operations facet (``app.admin``)."""
         return self._admin_facet
 
     @property
     def config(self) -> ConfigFacet:
+        """The process config-manager facet (``app.config``)."""
         return self._config_facet
 
     @property
     def sub_app(self) -> SubAppFacet:
+        """The sub-app MCP router facet (``app.sub_app``)."""
         return self._sub_app_facet
 
     @property
     def backup(self) -> BackupFacet:
+        """The backup-section facet (``app.backup``)."""
         return self._backup_facet
 
     @property
     def versioning(self) -> VersioningFacet:
+        """The versioned-document store facet (``app.versioning``)."""
         return self._versioning_facet
 
     @property
     def presets(self) -> PresetsFacet:
+        """The presets facet (``app.presets``)."""
         return self._presets_facet
 
     @property
     def states(self) -> StatesFacet:
-        """The subject-keyed state store facet — the ``tai42_contract.app.AppStates``
-        namespace."""
+        """The subject-keyed state store facet — the ``tai42_contract.app.AppStates`` namespace."""
         return self._states_facet
 
     @property
     def tool_meta(self) -> ToolMetaFacet:
-        """The tool-metadata overlay facet (folders + per-tool rows) — the
-        ``tai42_contract.app.AppToolMeta`` namespace."""
+        """The tool-metadata overlay facet — the ``tai42_contract.app.AppToolMeta`` namespace.
+
+        The organizational overlay (folders + per-tool rows) over any live tool.
+        """
         return self._tool_meta_facet
 
     # -- Raw FastMCP escape hatch (skeleton-only, ungoverned) ----------------
 
     @property
     def fastmcp(self) -> FastMCP:
-        """The raw, ungoverned FastMCP server — the escape hatch beneath the
-        facets.
+        """The raw, ungoverned FastMCP server — the escape hatch beneath the facets.
 
         Prefer the facets; reach here only for what the facets don't wrap
         (prompts, resources, ``add_middleware``, sampling, elicit-handlers,
@@ -298,16 +331,18 @@ class TaiMCP(TaiMCPLifecycleMixin):
         this accessor is skeleton-specific.
 
         Named ``fastmcp`` (not ``mcp``) because ``app.sub_app`` already owns the
-        sub-MCP namespace; ``mcp`` here would read as the sub-MCP."""
+        sub-MCP namespace; ``mcp`` here would read as the sub-MCP.
+        """
         return self._fast_mcp
 
     async def emit_list_changed(self, kind: str) -> None:
-        """Broadcast a ``list_changed`` notification to every active MCP session
-        for the given SINGULAR registry ``kind`` (``tool`` / ``prompt`` /
-        ``resource``). The generic in-process registration-mutation path (e.g. a
-        dev's runtime ``add_prompt`` via ``app.fastmcp``) awaits this after its
-        own registry mutation; the reload path drives the same registry from its
-        sync scheduler."""
+        """Broadcast a ``list_changed`` notification to every active MCP session for the given registry ``kind``.
+
+        ``kind`` is SINGULAR (``tool`` / ``prompt`` / ``resource``). The generic in-process
+        registration-mutation path (e.g. a dev's runtime ``add_prompt`` via ``app.fastmcp``) awaits
+        this after its own registry mutation; the reload path drives the same registry from its
+        sync scheduler.
+        """
         await self._session_registry.emit_list_changed(kind)
 
     # -- Live server-surface members (concrete launch surface, not facets) ----
@@ -319,8 +354,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         return self._manifest.live_manifest.model_dump(mode="json", exclude_none=True)
 
     def _base_middleware(self, middleware: list[Middleware] | None) -> list[Middleware]:
-        """The app's own base-app middleware, outermost first, ahead of whatever the
-        launch surface's caller passes.
+        """The app's own base-app middleware, outermost first, ahead of whatever the launch surface's caller passes.
 
         FastMCP builds the base app's stack as ``[*auth middleware, *middleware]``, so
         everything returned here runs AFTER the access-control gate has resolved the
@@ -334,7 +368,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         read their bodies unbounded otherwise); always on, tune via
         TAI_BODY_LIMIT_MAX_BODY_BYTES. It MUST sit inside the base app's own
         Starlette stack (its own ``ServerErrorMiddleware``), not as an outer
-        finalize wrapper: an over-cap escape (``_BodyTooLarge``) has to reach
+        finalize wrapper: an over-cap escape (``_BodyTooLargeError``) has to reach
         BodyLimitMiddleware and become a 413 before any error handler commits a 500.
         RateLimitMiddleware, by contrast, rejects before the app is entered, so it
         stays an outer finalize wrapper.
@@ -362,6 +396,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         message_path: str | None = None,
         middleware: list[Middleware] | None = None,
     ) -> StarletteWithLifespan:
+        """Build the SSE ASGI app for this server, recording the served SSE surface."""
         actual_path = path if path is not None else "/sse"
         actual_message_path = message_path if message_path is not None else "/messages"
 
@@ -389,7 +424,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         stateless_http: bool | None = None,
         transport: Literal["http", "streamable-http", "sse"] = "http",
     ) -> StarletteWithLifespan:
-
+        """Build the streamable-HTTP (or SSE) ASGI app for this server, recording the served surface."""
         base_app = self._fast_mcp.http_app(
             path=path,
             middleware=self._base_middleware(middleware),
@@ -419,12 +454,15 @@ class TaiMCP(TaiMCPLifecycleMixin):
     async def run_async(
         self, transport: Transport | None = None, show_banner: bool = True, **transport_kwargs: Any
     ) -> None:
+        """Run the FastMCP server asynchronously over ``transport``."""
         await self._fast_mcp.run_async(transport, show_banner, **transport_kwargs)
 
     def run(self, transport: Transport | None = None, show_banner: bool = True, **transport_kwargs: Any) -> None:
+        """Run the FastMCP server (blocking) over ``transport``."""
         self._fast_mcp.run(transport, show_banner, **transport_kwargs)
 
     async def run_backend(self, args) -> None:
+        """Launch the background-execution backend with ``args``."""
         await self._backend_holder.launch(args)
 
     # -- Storage / resources -------------------------------------------------
@@ -446,7 +484,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
         Forwarded by the ``tai42_app.connectors`` handle for every manifest
         ``connectors`` entry during boot/reload registration. A connector is pure
         data, so this is a plain call, not a decorator — it stores the descriptor
-        in the engine registry."""
+        in the engine registry.
+        """
         from tai42_skeleton.connectors.providers.registry import register_connector
 
         register_connector(descriptor)
@@ -470,7 +509,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
         BEFORE any resolution when none is bound, so an identity-less door never gets
         the operator's service token injected. The mapping wraps every credential value
         in ``SecretStr``, conveying the OAuth ``access_token`` plus static ``env`` /
-        ``headers`` channels; ``None`` maps to ``None``."""
+        ``headers`` channels; ``None`` maps to ``None``.
+        """
         from pydantic import SecretStr
         from tai42_contract.connectors.models import ResolvedConnectionAuth
 
@@ -550,11 +590,12 @@ class TaiMCP(TaiMCPLifecycleMixin):
 
     @property
     def preset_manager(self) -> PresetManager:
-        """The preset register/reload engine (spec map + quarantine set + register/
-        reload/remove/rehydrate). Skeleton-only surface — like ``emit_list_changed``
-        and ``fastmcp``, it is deliberately not on the ``tai42_contract.app.TaiApp``
-        protocol; the preset routes and the startup/reload rehydration hook reach
-        it through this concrete instance."""
+        """The preset register/reload engine (spec map + quarantine set + register/reload/remove/rehydrate).
+
+        Skeleton-only surface — like ``emit_list_changed`` and ``fastmcp``, it is deliberately not on
+        the ``tai42_contract.app.TaiApp`` protocol; the preset routes and the startup/reload
+        rehydration hook reach it through this concrete instance.
+        """
         return self._preset_manager
 
     @property

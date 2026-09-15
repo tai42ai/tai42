@@ -1,5 +1,7 @@
-"""Parsing a failed boot's log into the failing lifecycle handlers, their error
-text, and the routes named — plus the external-service-only classification."""
+"""Parse a failed boot's log into its failing handlers, error text, and routes.
+
+Plus the external-service-only classification.
+"""
 
 from __future__ import annotations
 
@@ -39,9 +41,11 @@ def _is_connection_error(text: str) -> bool:
 
 @dataclass(frozen=True)
 class BootFailure:
-    """What a failed boot surfaced: the lifecycle handlers that raised, the per-handler
-    error text, and the routes named in their errors, so the report says exactly what
-    broke and the classification can read each handler's failure class."""
+    """What a failed boot surfaced: the handlers that raised, their error text, and the routes named.
+
+    So the report says exactly what broke and the classification can read each handler's
+    failure class.
+    """
 
     handlers: tuple[str, ...]
     routes: tuple[str, ...]
@@ -64,7 +68,8 @@ def parse_boot_failure(log_text: str) -> BootFailure:
     startup handler raises; each handler name, the exception text that follows it (sliced
     up to the next handler), and any ``METHOD /path`` tokens are extracted. When no
     structured line is present the last error line is kept as the detail, so a
-    non-lifecycle boot failure still reports."""
+    non-lifecycle boot failure still reports.
+    """
     marker = "lifecycle handlers failed:"
     handlers: list[str] = []
     routes: list[str] = []
@@ -89,15 +94,19 @@ def parse_boot_failure(log_text: str) -> BootFailure:
 
 
 def external_service_handlers(failure: BootFailure) -> tuple[str, ...]:
-    """The failing startup handlers whose error is a connection-class failure reaching an
-    external endpoint (de-duplicated, in first-seen order)."""
+    """The failing startup handlers whose error is a connection-class failure to an external endpoint.
+
+    De-duplicated, in first-seen order.
+    """
     return tuple(dict.fromkeys(name for name, text in failure.handler_errors if _is_connection_error(text)))
 
 
 def is_external_service_only(failure: BootFailure) -> bool:
-    """True when EVERY startup handler that failed did so with a connection-class error
-    (and at least one did) — the boot got all the way to an external boundary and only the
-    external round-trip, which the gate cannot complete, was unreachable. A single
-    non-connection failure (a missing symbol, a refused route, a guard) makes this False,
-    so a real candidate-core break is never reclassified."""
+    """True when EVERY failed startup handler failed with a connection-class error (and at least one did).
+
+    The boot got all the way to an external boundary and only the external round-trip,
+    which the gate cannot complete, was unreachable. A single non-connection failure (a
+    missing symbol, a refused route, a guard) makes this False, so a real candidate-core
+    break is never reclassified.
+    """
     return bool(failure.handler_errors) and all(_is_connection_error(text) for _name, text in failure.handler_errors)

@@ -1,8 +1,7 @@
-"""The preset body model — the typed JSONB ``body`` a preset stores under
-``kind="preset"`` in the generic versioned-document store.
+"""The preset body model — the typed JSONB ``body`` a preset stores under ``kind="preset"``.
 
-This is the SHAPE only. The concrete view that validates and reshapes it (and
-enforces the sentinel/empty-combo rules documented on
+The store is the generic versioned-document store. This is the SHAPE only. The concrete view that validates
+and reshapes it (and enforces the sentinel/empty-combo rules documented on
 :meth:`~tai42_contract.presets.PresetStore.save_version`) lives in the skeleton,
 mirroring the AC-policy view — a contract holds models, never logic.
 """
@@ -79,9 +78,10 @@ class PresetInputSchemaSupport(BaseModel):
 
 
 class PresetSeedToolMeta(BaseModel):
-    """The optional display metadata a :class:`PresetSeed` seeds onto its preset's
-    tool_meta. Each field is applied only where the preset's tool_meta leaves it
-    absent — a seed never overwrites an operator-set display value.
+    """The optional display metadata a :class:`PresetSeed` seeds onto its preset's tool_meta.
+
+    Each field is applied only where the preset's tool_meta leaves it absent — a seed never overwrites
+    an operator-set display value.
 
     ``display_name`` is the human tool title; ``tags`` label it in listings;
     ``folder_path`` is a ``/``-style path the applier resolves into the tool_meta
@@ -116,18 +116,19 @@ class PresetSeed(BaseModel):
 
 
 class CarryForward:
-    """Sentinel for a :meth:`~tai42_contract.presets.PresetStore.save_version`
-    editable field the caller did not provide — carry the ACTIVE value forward.
+    """Sentinel for a :meth:`~tai42_contract.presets.PresetStore.save_version` field the caller did not provide.
 
-    ``fixed_kwargs`` / ``extensions`` clear with an empty container, so
+    Carry the ACTIVE value forward. ``fixed_kwargs`` / ``extensions`` clear with an empty container, so
     ``None`` is their carry-forward sentinel; ``output_schema`` / ``input_schema``
     have no empty container (their cleared state IS ``None``), so each needs a
     distinct sentinel to tell "not provided" (carry forward) apart from an explicit
-    ``None`` (clear)."""
+    ``None`` (clear).
+    """
 
     __slots__ = ()
 
     def __repr__(self) -> str:
+        """Render the stable sentinel name for logs and diffs."""
         return "CARRY_FORWARD"
 
 

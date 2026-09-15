@@ -84,8 +84,10 @@ def _token() -> str:
 
 
 def _headers(*, json_body: bool) -> dict[str, str]:
-    """The request headers for a GitHub REST call. The token rides ``Authorization`` and is never
-    echoed into any raised text or return value.
+    """The request headers for a GitHub REST call.
+
+    The token rides ``Authorization`` and is never echoed into any raised text or return
+    value.
     """
     headers = {
         "Authorization": f"Bearer {_token()}",
@@ -110,8 +112,10 @@ def _split_repo(repo: str) -> tuple[str, str]:
 
 
 def _hooks_url(owner: str, name: str) -> str:
-    """The ``/repos/{owner}/{name}/hooks`` collection URL with each path segment percent-encoded
-    on its own (``safe=""`` encodes ``/ ? #``) so neither part can escape into a different path.
+    """The ``/repos/{owner}/{name}/hooks`` collection URL with each path segment percent-encoded.
+
+    Each segment is encoded on its own (``safe=""`` encodes ``/ ? #``) so neither part can
+    escape into a different path.
     """
     return f"{github_tools_settings().api_base}/repos/{quote(owner, safe='')}/{quote(name, safe='')}/hooks"
 
@@ -123,11 +127,12 @@ async def _http_request(
     headers: dict[str, str],
     data: str | None = None,
 ) -> tuple[int, dict[str, str], str]:
-    """Issue one request through a fresh curl session and return ``(status, lowercased headers, body
-    text)``. Redirects are OFF: every request carries ``Authorization: Bearer <token>`` and libcurl
-    replays custom headers across a redirect hop -- a 3xx off the pinned host would hand the token to
-    another host. A non-2xx is returned as its status and body (never raised here) -- the caller
-    decides what a status means.
+    """Issue one request through a fresh curl session and return ``(status, lowercased headers, body)``.
+
+    Redirects are OFF: every request carries ``Authorization: Bearer <token>`` and libcurl
+    replays custom headers across a redirect hop -- a 3xx off the pinned host would hand the
+    token to another host. A non-2xx is returned as its status and body (never raised here)
+    -- the caller decides what a status means.
     """
     session_ctx = tai42_app.clients.client_ctx(CurlClient, session_params={}, fresh=True)
     async with session_ctx as session:
@@ -144,8 +149,10 @@ async def _http_request(
 
 
 def _next_page_url(link_header: str | None) -> str | None:
-    """The ``rel="next"`` URL from a ``Link`` response header, or ``None`` when the header is
-    absent or names no next page (the last page)."""
+    """The ``rel="next"`` URL from a ``Link`` response header, or ``None`` when there is none.
+
+    ``None`` when the header is absent or names no next page (the last page).
+    """
     if not link_header:
         return None
     match = _LINK_NEXT_RE.search(link_header)
@@ -172,12 +179,12 @@ async def create_webhook(repo: str, url: str, events: list[str], secret: str) ->
 
 
 async def list_webhooks(repo: str) -> list[dict[str, Any]]:
-    """GET every webhook on ``repo`` as ``{id, url, events, active}``, following the ``Link`` header
-    to exhaustion under ``_LIST_PAGE_CEILING``.
+    """GET every webhook on ``repo`` as ``{id, url, events, active}``.
 
-    The loop terminates when GitHub names no ``rel="next"`` page, and RAISES at the page ceiling
-    rather than following a self-referential ``Link`` header forever. A non-2xx on any page raises
-    loudly with GitHub's status and body. GitHub never returns a hook's secret.
+    Follows the ``Link`` header to exhaustion under ``_LIST_PAGE_CEILING``. The loop
+    terminates when GitHub names no ``rel="next"`` page, and RAISES at the page ceiling
+    rather than following a self-referential ``Link`` header forever. A non-2xx on any page
+    raises loudly with GitHub's status and body. GitHub never returns a hook's secret.
     """
     owner, name = _split_repo(repo)
     next_url: str | None = _hooks_url(owner, name)

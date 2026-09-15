@@ -76,10 +76,12 @@ _UNDECLARED_PROXY_WARNED = False
 
 
 def _bare_address(raw: str) -> str:
-    """One chain entry reduced to bare address text: ``[v6]``/``[v6]:port`` brackets
-    and a ``v4:port`` suffix removed, a ``%zone`` identifier dropped. A bare IPv6
-    address always carries at least two colons, so the single-colon test can never
-    cut one in half."""
+    """One chain entry reduced to bare address text.
+
+    ``[v6]``/``[v6]:port`` brackets and a ``v4:port`` suffix are removed, a ``%zone``
+    identifier dropped. A bare IPv6 address always carries at least two colons, so the
+    single-colon test can never cut one in half.
+    """
     text = raw.strip()
     if text.startswith("["):
         end = text.find("]")
@@ -98,7 +100,8 @@ def parse_address(raw: str) -> IPAddress | None:
 
     An IPv4-mapped IPv6 address unwraps to the IPv4 it carries, so a dual-stack
     listener buckets a mapped client as itself and a mapped peer matches an IPv4
-    CIDR in the trusted roster."""
+    CIDR in the trusted roster.
+    """
     try:
         ip = ipaddress.ip_address(_bare_address(raw))
     except ValueError:
@@ -109,10 +112,13 @@ def parse_address(raw: str) -> IPAddress | None:
 
 
 def parse_trusted_networks(entries: Sequence[str]) -> list[IPNetwork]:
-    """The declared trusted-proxy roster as networks — a single address and a CIDR
-    block share one containment code path (``198.51.100.7`` parses as
-    ``198.51.100.7/32``). Raises on an entry that is neither, so a typo'd roster is
-    refused where it is configured instead of silently trusting nothing."""
+    """The declared trusted-proxy roster as networks.
+
+    A single address and a CIDR block share one containment code path
+    (``198.51.100.7`` parses as ``198.51.100.7/32``). Raises on an entry that is
+    neither, so a typo'd roster is refused where it is configured instead of silently
+    trusting nothing.
+    """
     networks: list[IPNetwork] = []
     for entry in entries:
         text = entry.strip()
@@ -125,21 +131,28 @@ def parse_trusted_networks(entries: Sequence[str]) -> list[IPNetwork]:
 
 @lru_cache(maxsize=32)
 def _networks(entries: tuple[str, ...]) -> tuple[IPNetwork, ...]:
-    """:func:`parse_trusted_networks` memoized on the declared roster, so the
-    per-request trust test parses nothing."""
+    """:func:`parse_trusted_networks` memoized on the declared roster.
+
+    The per-request trust test then parses nothing.
+    """
     return tuple(parse_trusted_networks(entries))
 
 
 def _is_trusted(ip: IPAddress, networks: Sequence[IPNetwork]) -> bool:
-    """Containment against the roster. A network of the other IP version answers
-    ``False`` rather than raising, so a mixed v4/v6 roster needs no branching."""
+    """Containment against the roster.
+
+    A network of the other IP version answers ``False`` rather than raising, so a mixed
+    v4/v6 roster needs no branching.
+    """
     return any(ip in network for network in networks)
 
 
 def _warn_rejected_chain(reason: str, entry: str) -> None:
-    """Report a chain the resolver refused to believe (the caller then buckets by the
-    socket address). Throttled to one line per interval, carrying the count
-    suppressed since the last one — never silent, never floodable."""
+    """Report a chain the resolver refused to believe.
+
+    The caller then buckets by the socket address. Throttled to one line per interval,
+    carrying the count suppressed since the last one — never silent, never floodable.
+    """
     global _last_reject_warning, _suppressed_rejects
     now = time.monotonic()
     if now - _last_reject_warning < _REJECT_WARNING_INTERVAL_SECONDS:
@@ -158,10 +171,12 @@ def _warn_rejected_chain(reason: str, entry: str) -> None:
 
 
 def _warn_undeclared_proxy_once() -> None:
-    """Report the first ``X-Forwarded-For`` that arrives while no proxy trust is
-    declared — the live evidence that either a proxy sits in front undeclared (every
-    client then shares the proxy's bucket) or a client is spoofing the header. Once
-    per process: the posture, not the request, is the news."""
+    """Report the first ``X-Forwarded-For`` that arrives while no proxy trust is declared.
+
+    The live evidence that either a proxy sits in front undeclared (every client then
+    shares the proxy's bucket) or a client is spoofing the header. Once per process:
+    the posture, not the request, is the news.
+    """
     global _UNDECLARED_PROXY_WARNED
     if _UNDECLARED_PROXY_WARNED:
         return
@@ -176,11 +191,13 @@ def _warn_undeclared_proxy_once() -> None:
 
 
 def warn_if_proxy_trust_undeclared(log: logging.Logger, trusted_proxies: Sequence[str], trusted_hops: int) -> None:
-    """Emit the boot-time posture line when a deployment declares NO proxy trust:
-    every ``X-Forwarded-For`` is then ignored, which is correct for a directly
-    exposed deployment and collapses the whole world into one bucket behind a proxy.
-    Stated at boot so the posture is visible before the first flood makes it look
-    like the limiter works."""
+    """Emit the boot-time posture line when a deployment declares NO proxy trust.
+
+    Every ``X-Forwarded-For`` is then ignored, which is correct for a directly exposed
+    deployment and collapses the whole world into one bucket behind a proxy. Stated at
+    boot so the posture is visible before the first flood makes it look like the
+    limiter works.
+    """
     if trusted_proxies or trusted_hops:
         return
     log.warning(
@@ -191,10 +208,13 @@ def warn_if_proxy_trust_undeclared(log: logging.Logger, trusted_proxies: Sequenc
 
 
 def _hop_mode_address(chain: list[str], trusted_hops: int, socket_address: str) -> str:
-    """The client named by a fixed hop count: drop the ``trusted_hops`` right-most
-    entries and take the next. A chain too short to hold that many proxies, or a
-    selected entry that names no address, is a broken statement — report it and fall
-    back to the socket address rather than believe a hop the count did not cover."""
+    """The client named by a fixed hop count.
+
+    Drop the ``trusted_hops`` right-most entries and take the next. A chain too short
+    to hold that many proxies, or a selected entry that names no address, is a broken
+    statement — report it and fall back to the socket address rather than believe a hop
+    the count did not cover.
+    """
     if len(chain) <= trusted_hops:
         _warn_rejected_chain(
             f"the forwarded chain holds {len(chain)} entries but trusted_hops={trusted_hops} needs at least "
@@ -213,12 +233,14 @@ def _hop_mode_address(chain: list[str], trusted_hops: int, socket_address: str) 
 def _address_mode_address(
     entries: list[str], networks: Sequence[IPNetwork], peer: IPAddress | None, socket_address: str
 ) -> str:
-    """The client named by the trusted-address roster. The socket peer must itself be
-    trusted before the header is read at all; then the right-most entry that is not
-    itself a trusted proxy is the client. An unparseable entry the walk REACHES stops
-    it (believing the next one left would let a broken proxy hand the whole chain to
-    a caller): report and fall back. A chain whose every entry is trusted names no
-    client beyond the peer, which is the socket address."""
+    """The client named by the trusted-address roster.
+
+    The socket peer must itself be trusted before the header is read at all; then the
+    right-most entry that is not itself a trusted proxy is the client. An unparseable
+    entry the walk REACHES stops it (believing the next one left would let a broken
+    proxy hand the whole chain to a caller): report and fall back. A chain whose every
+    entry is trusted names no client beyond the peer, which is the socket address.
+    """
     if peer is None or not _is_trusted(peer, networks):
         if entries and not networks:
             _warn_undeclared_proxy_once()
@@ -239,10 +261,13 @@ def resolve_client_address(
     trusted_proxies: Sequence[str],
     trusted_hops: int,
 ) -> str:
-    """The client address for one request (module docstring holds the trust rules and
-    their precedence). ``peer`` is the socket address the ASGI server reports;
-    ``forwarded_for`` is the raw ``X-Forwarded-For`` header value, believed only
-    under a declared trust statement and never otherwise read."""
+    """The client address for one request.
+
+    The module docstring holds the trust rules and their precedence. ``peer`` is the
+    socket address the ASGI server reports; ``forwarded_for`` is the raw
+    ``X-Forwarded-For`` header value, believed only under a declared trust statement
+    and never otherwise read.
+    """
     peer_ip = parse_address(peer) if peer else None
     socket_address = str(peer_ip) if peer_ip is not None else (peer or UNKNOWN_CLIENT)
     entries = [hop.strip() for hop in forwarded_for.split(",") if hop.strip()]
@@ -254,9 +279,11 @@ def resolve_client_address(
 
 
 def bucket_of(address: str) -> str:
-    """The rate-limit bucket key for a resolved client address: an IPv6 address
-    collapses to its /64 prefix (a single host routinely holds a whole /64); an IPv4
-    address and the unknown-peer marker are the key as they stand."""
+    """The rate-limit bucket key for a resolved client address.
+
+    An IPv6 address collapses to its /64 prefix (a single host routinely holds a whole
+    /64); an IPv4 address and the unknown-peer marker are the key as they stand.
+    """
     ip = parse_address(address)
     if ip is None:
         return address
@@ -271,7 +298,8 @@ class ClientTrustSettings(TaiBaseSettings):
     The env prefix is ``TAI_RATE_LIMIT_`` because the statement is one deployment
     fact read by both the app rate limiter and the channel doors' turn caps — one
     posture, one place, so the accountable client is resolved the same way for every
-    consumer."""
+    consumer.
+    """
 
     model_config = SettingsConfigDict(env_prefix="TAI_RATE_LIMIT_")
 
@@ -289,23 +317,29 @@ class ClientTrustSettings(TaiBaseSettings):
     @field_validator("trusted_proxies")
     @classmethod
     def _validate_trusted_proxies(cls, value: list[str]) -> list[str]:
-        """Refuse a roster entry that is neither an address nor a CIDR block here,
-        where the operator can see it — an unparseable entry would otherwise silently
-        trust nothing and bucket every client behind the proxy together."""
+        """Refuse a roster entry that is neither an address nor a CIDR block.
+
+        Validated here, where the operator can see it — an unparseable entry would
+        otherwise silently trust nothing and bucket every client behind the proxy
+        together.
+        """
         parse_trusted_networks(value)
         return value
 
 
 @settings_cache
 def client_trust_settings() -> ClientTrustSettings:
+    """The cached :class:`ClientTrustSettings` for this process."""
     return ClientTrustSettings()
 
 
 def client_address(peer: str | None, forwarded_for: str) -> str:
-    """The client address behind a request, resolved against the deployment's declared
-    proxy trust. The single entry point: every consumer that needs to know who a
-    request is from calls THIS with the socket peer and the raw ``X-Forwarded-For``,
-    so one deployment's trust statement is read one way."""
+    """The client address behind a request, resolved against the deployment's declared proxy trust.
+
+    The single entry point: every consumer that needs to know who a request is from
+    calls THIS with the socket peer and the raw ``X-Forwarded-For``, so one
+    deployment's trust statement is read one way.
+    """
     settings = client_trust_settings()
     return resolve_client_address(peer, forwarded_for, settings.trusted_proxies, settings.trusted_hops)
 

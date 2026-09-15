@@ -2,7 +2,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MAX_MESSAGE_CHARS } from '@/api';
-import { Composer, charactersLeftAnnouncement } from '@/composer';
+import { charactersLeftAnnouncement, Composer } from '@/composer';
 
 afterEach(cleanup);
 

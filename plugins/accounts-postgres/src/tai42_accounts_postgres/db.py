@@ -78,8 +78,7 @@ def accounts_migration_entry() -> MigrationEntry:
 
 
 async def assert_accounts_schema_applied() -> None:
-    """Startup gate: assert the accounts chain is applied when the store is
-    configured.
+    """Startup gate: assert the accounts chain is applied when the store is configured.
 
     A deployment that does not configure the accounts store (no resolved password)
     owns no accounts tables, so the gate is a no-op. Otherwise the chain is

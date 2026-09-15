@@ -1,5 +1,7 @@
-"""The apply/fold engine for a state record document — the ONE ``apply`` used by
-BOTH the persisted store and the in-run engine view, so the two can never drift.
+"""The apply/fold engine for a state record document.
+
+The ONE ``apply`` used by BOTH the persisted store and the in-run engine view, so
+the two can never drift.
 
 The op/path *vocabulary* it applies — the op-name constants, the resource caps, the
 loud validators (:func:`validate_op`/:func:`validate_path`/:func:`validate_guard`)
@@ -60,8 +62,11 @@ __all__ = [
 
 
 def guard_passes(doc: dict[str, Any], guard: dict[str, Any]) -> bool:
-    """Whether ``doc`` satisfies a validated compare-and-set ``guard`` — the value at
-    ``guard['path']`` (missing ⇒ null) JSON-equals ``guard['expected']``."""
+    """Whether ``doc`` satisfies a validated compare-and-set ``guard``.
+
+    The value at ``guard['path']`` (missing ⇒ null) JSON-equals
+    ``guard['expected']``.
+    """
     return json_equal(value_at_path(doc, guard["path"]), guard["expected"])
 
 
@@ -73,8 +78,10 @@ _ABSENT = _Absent()
 
 
 def path_str(path: list[str | int]) -> str:
-    """The human-readable ``/a/0/b`` form of a path — error messages and the
-    path-overlap refusal both name paths this way."""
+    """The human-readable ``/a/0/b`` form of a path.
+
+    Error messages and the path-overlap refusal both name paths this way.
+    """
     return "/" + "/".join(str(s) for s in path)
 
 
@@ -83,8 +90,10 @@ _path_str = path_str
 
 
 def _fresh_for(next_seg: str | int | None) -> dict[str, Any] | list[Any]:
-    """The container a missing intermediate must be, decided by the NEXT segment:
-    an index or ``"-"`` needs a list; a key (or no next segment) needs an object."""
+    """The container a missing intermediate must be, decided by the NEXT segment.
+
+    An index or ``"-"`` needs a list; a key (or no next segment) needs an object.
+    """
     return [] if isinstance(next_seg, int) or next_seg == APPEND else {}
 
 
@@ -98,10 +107,12 @@ def _copy_level(node: Any) -> Any:
 
 
 def _step(node: Any, seg: str | int, nxt: str | int | None, *, create: bool, p: str) -> tuple[Any, str | int]:
-    """Resolve one INTERMEDIATE segment against ``node`` (already copied at this
-    level). ``nxt`` is the following segment (decides what a created intermediate
-    must be). Returns ``(child, resolved_seg)``; ``child`` is ``_ABSENT`` when the
-    location does not exist and ``create`` is off."""
+    """Resolve one INTERMEDIATE segment against ``node`` (already copied at this level).
+
+    ``nxt`` is the following segment (decides what a created intermediate must be).
+    Returns ``(child, resolved_seg)``; ``child`` is ``_ABSENT`` when the location
+    does not exist and ``create`` is off.
+    """
     if isinstance(seg, str) and seg == APPEND:
         if not isinstance(node, list):
             raise InvalidPathError(f"path {p}: '-' (append) requires a list, found {type(node).__name__}")
@@ -127,32 +138,39 @@ def _step(node: Any, seg: str | int, nxt: str | int | None, *, create: bool, p: 
 
 
 def _item_matches_any(item: Any, key_field: str, keys: list[Any]) -> bool:
-    """The list-key form of :func:`_item_matches`: whether ``item`` is a JSON object
-    carrying ``key_field`` that JSON-equals ANY key in ``keys`` (``remove_by_key``'s
-    ``$pull`` + ``$in`` set-membership). Membership is a per-key :func:`json_equal`
-    scan, not a hash lookup — ``json_equal`` is not hashable-safe across the int/float
-    boundary, so the strict-ish match semantics carry over unchanged."""
+    """The list-key form of :func:`_item_matches`.
+
+    Whether ``item`` is a JSON object carrying ``key_field`` that JSON-equals ANY
+    key in ``keys`` (``remove_by_key``'s ``$pull`` + ``$in`` set-membership).
+    Membership is a per-key :func:`json_equal` scan, not a hash lookup —
+    ``json_equal`` is not hashable-safe across the int/float boundary, so the
+    strict-ish match semantics carry over unchanged.
+    """
     return isinstance(item, dict) and key_field in item and any(json_equal(item[key_field], k) for k in keys)
 
 
 def _shallow_merge(existing: dict[str, Any], partial: dict[str, Any]) -> dict[str, Any]:
-    """``merge_by_key``'s per-item merge: ``{**existing, **partial}`` with NULL-valued
-    partial fields DROPPED first. TOP-LEVEL only — a partial's nested object/list
-    REPLACES the existing value wholesale, it never deep-merges. ``null`` NEVER
-    deletes (a dropped null leaves the existing field as-is) — a merge only ever
-    WRITES fields; deleting fields by key is ``unset_by_key``'s job. ``existing``
-    is always a dict (it matched via :func:`_item_matches`); ``partial`` was validated
-    to carry a scalar ``key_field``, so the key survives the merge unchanged."""
+    """``merge_by_key``'s per-item merge: ``{**existing, **partial}`` with NULL-valued partial fields dropped.
+
+    TOP-LEVEL only — a partial's nested object/list REPLACES the existing value
+    wholesale, it never deep-merges. ``null`` NEVER deletes (a dropped null leaves
+    the existing field as-is) — a merge only ever WRITES fields; deleting fields by
+    key is ``unset_by_key``'s job. ``existing`` is always a dict (it matched via
+    :func:`_item_matches`); ``partial`` was validated to carry a scalar
+    ``key_field``, so the key survives the merge unchanged.
+    """
     return {**existing, **{k: v for k, v in partial.items() if v is not None}}
 
 
 def _is_empty_keyed_payload(op: dict[str, Any]) -> bool:
-    """Whether a validated keyed op carries an EMPTY payload — an empty item/entry list
-    (``set_by_key`` / ``merge_by_key`` / ``unset_by_key``), an empty key list
-    (``remove_by_key``), or a
-    fan-out object that is ``{}`` / all-empty-lists (``set_by_key_each``). Such an op
-    is a well-defined NO-OP: :func:`apply_op` short-circuits it BEFORE the path walk,
-    so it never creates intermediates, an empty ``[]``, or an empty container."""
+    """Whether a validated keyed op carries an EMPTY payload.
+
+    An empty item/entry list (``set_by_key`` / ``merge_by_key`` / ``unset_by_key``),
+    an empty key list (``remove_by_key``), or a fan-out object that is ``{}`` /
+    all-empty-lists (``set_by_key_each``). Such an op is a well-defined NO-OP:
+    :func:`apply_op` short-circuits it BEFORE the path walk, so it never creates
+    intermediates, an empty ``[]``, or an empty container.
+    """
     if op["op"] == "remove_by_key":
         key = op["key"]
         return isinstance(key, list) and not key
@@ -163,11 +181,13 @@ def _is_empty_keyed_payload(op: dict[str, Any]) -> bool:
 
 
 def _slot_at_last(node: Any, last: str | int, *, creating: bool, p: str) -> Any:
-    """Resolve the value a keyed op addresses at its final segment ``last`` against the
-    already-copied parent ``node`` — the current value, or ``_ABSENT`` when missing.
-    The wrong PARENT container type (a key into a list, an index into an object) is a
-    loud :class:`InvalidPathError`; whether the resolved VALUE has the right type is
-    the caller's per-op check."""
+    """Resolve the value a keyed op addresses at its final segment ``last`` against the copied parent.
+
+    Returns the current value, or ``_ABSENT`` when missing. The wrong PARENT
+    container type (a key into a list, an index into an object) is a loud
+    :class:`InvalidPathError`; whether the resolved VALUE has the right type is the
+    caller's per-op check.
+    """
     if isinstance(last, str):
         if not isinstance(node, dict):
             raise InvalidPathError(f"path {p}: key {last!r} requires an object, found {type(node).__name__}")
@@ -184,11 +204,12 @@ def _slot_at_last(node: Any, last: str | int, *, creating: bool, p: str) -> Any:
 
 
 def _list_at_last(node: Any, last: str | int, *, creating: bool, p: str, kind: str) -> Any:
-    """Resolve the LIST a keyed op addresses at its final segment ``last`` against the
-    already-copied parent ``node``. Returns the current list, or ``_ABSENT`` when it is
-    missing (``set_by_key`` creates ``[]``; ``remove_by_key`` / ``merge_by_key`` /
-    ``unset_by_key`` no-op).
-    A present value that is not a list is a loud :class:`InvalidPathError`."""
+    """Resolve the LIST a keyed op addresses at its final segment ``last`` against the copied parent.
+
+    Returns the current list, or ``_ABSENT`` when it is missing (``set_by_key``
+    creates ``[]``; ``remove_by_key`` / ``merge_by_key`` / ``unset_by_key`` no-op).
+    A present value that is not a list is a loud :class:`InvalidPathError`.
+    """
     current = _slot_at_last(node, last, creating=creating, p=p)
     if current is not _ABSENT and not isinstance(current, list):
         raise InvalidPathError(f"path {p}: {kind} requires a list at the path, found {type(current).__name__}")
@@ -196,11 +217,14 @@ def _list_at_last(node: Any, last: str | int, *, creating: bool, p: str, kind: s
 
 
 def _upsert_by_key(current: Any, items: list[dict[str, Any]], key_field: str) -> list[Any]:
-    """The ``set_by_key`` upsert over one list: a NEW list from ``current`` (``_ABSENT``
-    starts ``[]``) with each item applied in payload order — the FIRST item whose
-    ``key_field`` JSON-equals the entry's key is REPLACED (whole item, in list order),
-    else the entry is APPENDED. Shared verbatim by ``set_by_key`` (single and list
-    forms) and each fanned list of ``set_by_key_each``."""
+    """The ``set_by_key`` upsert over one list.
+
+    A NEW list from ``current`` (``_ABSENT`` starts ``[]``) with each item applied
+    in payload order — the FIRST item whose ``key_field`` JSON-equals the entry's
+    key is REPLACED (whole item, in list order), else the entry is APPENDED. Shared
+    verbatim by ``set_by_key`` (single and list forms) and each fanned list of
+    ``set_by_key_each``.
+    """
     new_list = list(current) if current is not _ABSENT else []
     for entry in items:
         match_key = entry[key_field]
@@ -214,11 +238,13 @@ def _upsert_by_key(current: Any, items: list[dict[str, Any]], key_field: str) ->
 
 
 def _apply_set_by_key_each(node: Any, last: str | int, op: dict[str, Any], p: str) -> None:
-    """``set_by_key_each``: the fan-out addresses the OBJECT holding the fanned lists — an
-    absent container is created (the op is an upsert), a present non-object is loud. Each
-    ``(fan-out key, items)`` entry does the exact ``set_by_key`` upsert into the list at
-    ``path + [key]``; a key with NO items contributes nothing (its list is not created — the
-    empty-payload no-op, per key)."""
+    """``set_by_key_each``: the fan-out addresses the OBJECT holding the fanned lists.
+
+    An absent container is created (the op is an upsert), a present non-object is
+    loud. Each ``(fan-out key, items)`` entry does the exact ``set_by_key`` upsert
+    into the list at ``path + [key]``; a key with NO items contributes nothing (its
+    list is not created — the empty-payload no-op, per key).
+    """
     key_field: str = op["key_field"]
     container = _slot_at_last(node, last, creating=True, p=p)
     if container is not _ABSENT and not isinstance(container, dict):
@@ -240,18 +266,22 @@ def _apply_set_by_key_each(node: Any, last: str | int, op: dict[str, Any], p: st
 
 
 def _apply_set_by_key(node: Any, last: str | int, current: Any, op: dict[str, Any], key_field: str) -> None:
-    """``set_by_key``: ``value`` is a single item OR a LIST of items; each does the same
-    first-match-replace-else-append, in payload order (an empty list was already
-    short-circuited as a no-op)."""
+    """``set_by_key``: ``value`` is a single item OR a LIST of items.
+
+    Each does the same first-match-replace-else-append, in payload order (an empty
+    list was already short-circuited as a no-op).
+    """
     value = op["value"]
     node[last] = _upsert_by_key(current, value if isinstance(value, list) else [value], key_field)
 
 
 def _apply_merge_by_key(node: Any, last: str | int, current: Any, op: dict[str, Any], key_field: str) -> None:
-    """``merge_by_key``: partial-field UPDATE of matched items ONLY — merge NEVER inserts, so
-    an absent list is a quiet no-op (nothing to patch). Each partial (payload order)
-    shallow-merges into its FIRST key-match; a no-match partial is skipped (never an upsert).
-    Null partial fields are dropped by the merge."""
+    """``merge_by_key``: partial-field UPDATE of matched items ONLY — merge NEVER inserts.
+
+    An absent list is a quiet no-op (nothing to patch). Each partial (payload
+    order) shallow-merges into its FIRST key-match; a no-match partial is skipped
+    (never an upsert). Null partial fields are dropped by the merge.
+    """
     if current is _ABSENT:
         return
     new_list = list(current)
@@ -266,11 +296,13 @@ def _apply_merge_by_key(node: Any, last: str | int, current: Any, op: dict[str, 
 
 
 def _apply_unset_by_key(node: Any, last: str | int, current: Any, op: dict[str, Any], key_field: str) -> None:
-    """``unset_by_key``: field REMOVAL on matched items ONLY — unset NEVER inserts, so an
-    absent list is a quiet no-op (nothing to clear). Each entry (payload order) deletes its
-    named fields from its FIRST key-match; a field already absent on the item is an
-    idempotent per-field no-op. ``key_field`` can never be among the names (validated), so
-    the item keeps its identity."""
+    """``unset_by_key``: field REMOVAL on matched items ONLY — unset NEVER inserts.
+
+    An absent list is a quiet no-op (nothing to clear). Each entry (payload order)
+    deletes its named fields from its FIRST key-match; a field already absent on the
+    item is an idempotent per-field no-op. ``key_field`` can never be among the names
+    (validated), so the item keeps its identity.
+    """
     if current is _ABSENT:
         return
     new_list = list(current)
@@ -285,9 +317,11 @@ def _apply_unset_by_key(node: Any, last: str | int, current: Any, op: dict[str, 
 
 
 def _apply_remove_by_key(node: Any, last: str | int, current: Any, op: dict[str, Any], key_field: str) -> None:
-    """``remove_by_key``: drop EVERY match; an absent list is a quiet no-op. A scalar key
-    keeps the byte-identical fast path; a list drops any item matching ANY listed key in the
-    SAME single pass (set-semantics, no per-key re-scan)."""
+    """``remove_by_key``: drop EVERY match; an absent list is a quiet no-op.
+
+    A scalar key keeps the byte-identical fast path; a list drops any item matching
+    ANY listed key in the SAME single pass (set-semantics, no per-key re-scan).
+    """
     if current is _ABSENT:
         return
     key = op["key"]
@@ -298,9 +332,12 @@ def _apply_remove_by_key(node: Any, last: str | int, current: Any, op: dict[str,
 
 
 def _apply_keyed_op(node: Any, last: str | int, op: dict[str, Any], p: str) -> None:
-    """Dispatch a keyed op to its handler, resolving the addressed list (or, for the fan-out,
-    the container) at ``last`` first. ``set_by_key`` may create the list; the update-only
-    kinds (``merge_by_key``/``unset_by_key``/``remove_by_key``) no-op through an absent one."""
+    """Dispatch a keyed op to its handler, resolving the addressed list or container at ``last`` first.
+
+    ``set_by_key`` may create the list; the update-only kinds
+    (``merge_by_key``/``unset_by_key``/``remove_by_key``) no-op through an absent
+    one.
+    """
     kind = op["op"]
     if kind == "set_by_key_each":
         _apply_set_by_key_each(node, last, op, p)
@@ -318,8 +355,11 @@ def _apply_keyed_op(node: Any, last: str | int, op: dict[str, Any], p: str) -> N
 
 
 def _apply_scalar_set(node: Any, last: str | int, op: dict[str, Any], p: str) -> None:
-    """``set``: append (``"-"`` into a list), a dict key, or an in-range list index. The
-    wrong container type, or an index past the end, is a loud :class:`InvalidPathError`."""
+    """``set``: append (``"-"`` into a list), a dict key, or an in-range list index.
+
+    The wrong container type, or an index past the end, is a loud
+    :class:`InvalidPathError`.
+    """
     if isinstance(last, str) and last == APPEND:
         if not isinstance(node, list):
             raise InvalidPathError(f"path {p}: '-' (append) requires a list, found {type(node).__name__}")
@@ -340,8 +380,7 @@ def _apply_scalar_set(node: Any, last: str | int, op: dict[str, Any], p: str) ->
 
 
 def _apply_scalar_remove(node: Any, last: str | int, p: str) -> None:
-    """``remove``: an absent TARGET is a quiet no-op (idempotent erase); the wrong container
-    type stays loud."""
+    """``remove``: an absent TARGET is a quiet no-op (idempotent erase); the wrong container type stays loud."""
     if isinstance(last, str):
         if not isinstance(node, dict):
             raise InvalidPathError(f"path {p}: key {last!r} requires an object, found {type(node).__name__}")
@@ -357,7 +396,8 @@ def apply_op(doc: dict[str, Any], op: dict[str, Any]) -> dict[str, Any]:
     """Apply ONE validated op to ``doc``, returning a NEW document (input untouched).
 
     Walks to the PARENT of the final segment (copy-on-write along the touched path) and
-    dispatches on ``kind`` to a per-kind handler that mutates that parent in place."""
+    dispatches on ``kind`` to a per-kind handler that mutates that parent in place.
+    """
     kind = op["op"]
     path: list[str | int] = op["path"]
     p = _path_str(path)
@@ -394,8 +434,11 @@ def apply_op(doc: dict[str, Any], op: dict[str, Any]) -> dict[str, Any]:
 
 
 def apply_ops(doc: dict[str, Any], ops: list[dict[str, Any]]) -> dict[str, Any]:
-    """Apply every op in order to ``doc``, returning the NEW document. Pure; each op
-    is validated before ANY is applied, so a malformed batch changes nothing."""
+    """Apply every op in order to ``doc``, returning the NEW document.
+
+    Pure; each op is validated before ANY is applied, so a malformed batch changes
+    nothing.
+    """
     if len(ops) > MAX_OPS_PER_BATCH:
         raise InvalidPathError(f"ops batch has {len(ops)} operations — the cap is {MAX_OPS_PER_BATCH}")
     for i, op in enumerate(ops):

@@ -24,7 +24,7 @@ from tai42_e2e.manifests import (
 )
 from tai42_e2e.marketplace import _marketplace_source_env
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.topology import InfraUnavailable
+from tai42_e2e.topology import InfraUnavailableError
 from tai42_e2e.variants import STORAGES, resolve_variants
 
 
@@ -159,7 +159,7 @@ def test_s3_real_variant_loud_fails_naming_missing_vars(monkeypatch: pytest.Monk
     for var in ("STORAGE_S3_ENDPOINT", "STORAGE_S3_BUCKET", "STORAGE_S3_REGION", "STORAGE_S3_ACCESS_KEY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("STORAGE_S3_SECRET_KEY", "SECRET")  # one present, the rest absent
-    with pytest.raises(InfraUnavailable) as exc:
+    with pytest.raises(InfraUnavailableError) as exc:
         STORAGES["s3-real"].feature_env(_res())
     msg = str(exc.value)
     assert "STORAGE_S3_ENDPOINT" in msg

@@ -1,5 +1,4 @@
-"""The preset bind kernel — the single point every preset builds its live tool
-through.
+"""The preset bind kernel — the single point every preset builds its live tool through.
 
 ``preset_bind`` transforms a base tool into a new named tool via ONE FastMCP
 ``Tool.from_tool`` call: each ``fixed_kwargs`` key is baked as a HIDDEN, FIXED
@@ -108,8 +107,10 @@ async def preset_bind(
 
 
 def _bind_plain(base: Tool, name: str, description: str, transform_args: dict[str, ArgTransform]) -> Tool:
-    """Transform ``base`` baking the hidden constants, with NO output schema — the
-    plain no-output-schema path (one ``Tool.from_tool``)."""
+    """Transform ``base`` baking the hidden constants, with NO output schema.
+
+    The plain no-output-schema path (one ``Tool.from_tool``).
+    """
     return Tool.from_tool(
         base,
         name=name,
@@ -125,13 +126,13 @@ def _bind_agent_forced(
     transform_args: dict[str, ArgTransform],
     output_schema: dict[str, Any],
 ) -> Tool:
-    """Force structured output by baking ``response_format`` from the authored
-    schema.
+    """Force structured output by baking ``response_format`` from the authored schema.
 
     The agent run seam requires a top-level ``title``; when the author left it off,
     inject the preset name. The advertised output schema stays the authored
     (title-free) value; the agent's own drain validates the forced result, so no
-    second validation wrapper is attached."""
+    second validation wrapper is attached.
+    """
     baked_response_format = dict(output_schema)
     baked_response_format.setdefault("title", name)
     transform_args["response_format"] = ArgTransform(hide=True, default=baked_response_format)
@@ -151,12 +152,12 @@ def _bind_validated(
     transform_args: dict[str, ArgTransform],
     output_schema: dict[str, Any],
 ) -> Tool:
-    """Advertise the authored schema and validate every non-park result against it,
-    redacting a secret-bearing failure.
+    """Advertise the authored schema and validate every non-park result against it.
 
-    The plain-tool declare-and-validate path: a non-LLM tool cannot be forced, so
-    every result is validated against ``output_schema`` at run time, raising loudly
-    on any mismatch."""
+    A secret-bearing failure is redacted. The plain-tool declare-and-validate path: a non-LLM
+    tool cannot be forced, so every result is validated against ``output_schema`` at run time,
+    raising loudly on any mismatch.
+    """
 
     def _raise_redacted(caught: JsonSchemaValidationError) -> None:
         # The placeholder-only failure: json_path kept, instance text replaced by the
@@ -226,8 +227,9 @@ def _bind_validated(
 
 
 def deep_merge(baked: dict[str, Any], caller: dict[str, Any]) -> dict[str, Any]:
-    """Deep-merge ``caller`` over ``baked`` with CALLER-WINS-PER-KEY semantics,
-    recursing ONLY where both sides hold a dict.
+    """Deep-merge ``caller`` over ``baked`` with CALLER-WINS-PER-KEY semantics.
+
+    Recurses ONLY where both sides hold a dict.
 
     Applied per key:
 
@@ -269,9 +271,10 @@ def _bind_with_input_schema(
     input_schema: dict[str, Any],
     output_schema: dict[str, Any] | None,
 ) -> Tool:
-    """Build the exposed tool whose OWN advertised input schema is the authored
-    ``input_schema``, validating the caller's object against it and routing the
-    validated object into the base tool's ``payload_arg``.
+    """Build the exposed tool whose OWN advertised input schema is the authored ``input_schema``.
+
+    Validates the caller's object against it and routes the validated object into the base tool's
+    ``payload_arg``.
 
     Mechanism only — no base-tool knowledge in the kernel. The base tool must have
     registered :class:`~tai42_contract.presets.PresetInputSchemaSupport`; a preset giving

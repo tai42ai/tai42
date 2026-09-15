@@ -18,20 +18,20 @@
 import type { ReactElement } from 'react';
 import { useCallback, useMemo, useRef, useState } from 'react';
 
+import { EndedBanner } from '@/chat-banner';
+import { BrokenBody } from '@/chat-broken-body';
+import { ConnectionStatus } from '@/chat-status';
 import { Composer } from '@/composer';
 import { Header } from '@/header';
-import { Transcript } from '@/transcript';
-import { useChatStream } from '@/use-chat-stream';
-import { useViewportFit } from '@/use-viewport-fit';
-import { useConversationReset } from '@/use-conversation-reset';
-import { useTypingIndicator } from '@/use-typing-indicator';
-import { useOutbox } from '@/use-outbox';
-import { useAnswerSubmit } from '@/use-answer-submit';
-import { buildTranscriptEntries } from '@/transcript-entries';
-import { EndedBanner } from '@/chat-banner';
-import { ConnectionStatus } from '@/chat-status';
-import { BrokenBody } from '@/chat-broken-body';
 import { ResetConfirmDialog } from '@/reset-confirm-dialog';
+import { Transcript } from '@/transcript';
+import { buildTranscriptEntries } from '@/transcript-entries';
+import { useAnswerSubmit } from '@/use-answer-submit';
+import { useChatStream } from '@/use-chat-stream';
+import { useConversationReset } from '@/use-conversation-reset';
+import { useOutbox } from '@/use-outbox';
+import { useTypingIndicator } from '@/use-typing-indicator';
+import { useViewportFit } from '@/use-viewport-fit';
 
 export interface ChatAppProps {
   /** The web route this page talks to, read from the shell's `data-identity`. */

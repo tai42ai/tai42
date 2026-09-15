@@ -1,6 +1,6 @@
-"""The token-free-evaluable rule for a jq policy condition: which conditions a TOKENLESS
-background execution can be authorized against.
+"""The token-free-evaluable rule for a jq policy condition.
 
+Which conditions a TOKENLESS background execution can be authorized against.
 A fire's jq context carries the token claims REDUCED to the key's owner, making ``identity``
 the SOLE field a condition may not depend on — depending on it is a fail-OPEN, since
 ``.identity.X != v`` evaluates TRUE under an absent claim. The scan is structural, not by

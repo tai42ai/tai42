@@ -27,12 +27,12 @@ from tai42_skeleton.operations.errors import (
     NotFoundError,
     NotSupportedError,
     OperationError,
-    OperationFailed,
+    OperationFailedError,
     PayloadTooLargeError,
-    PermissionDenied,
+    PermissionDeniedError,
     UnavailableError,
     UpstreamError,
-    ValidationRejected,
+    ValidationRejectedError,
 )
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.tools.binding import UnknownToolError
@@ -40,17 +40,17 @@ from tai42_skeleton.tools.binding import UnknownToolError
 _STAMPED_SKELETON_ERRORS: list[tuple[BaseException, ErrorKind]] = [
     # operations/errors.py — beside each declared HTTP status
     (OperationError("x"), ErrorKind.UPSTREAM_ERROR),
-    (ValidationRejected("x"), ErrorKind.BAD_INPUT),
+    (ValidationRejectedError("x"), ErrorKind.BAD_INPUT),
     (BadRequestError("x"), ErrorKind.BAD_INPUT),
     (PayloadTooLargeError("x"), ErrorKind.BAD_INPUT),
     (NotFoundError("x"), ErrorKind.NOT_FOUND),
-    (PermissionDenied("x"), ErrorKind.UNAUTHORIZED),
+    (PermissionDeniedError("x"), ErrorKind.UNAUTHORIZED),
     (ForbiddenError("x"), ErrorKind.UNAUTHORIZED),
     (ConflictError("x"), ErrorKind.CONFLICT),
     (NotSupportedError("x"), ErrorKind.UNAVAILABLE),
     (UpstreamError("x"), ErrorKind.UPSTREAM_ERROR),
     (UnavailableError("x"), ErrorKind.UNAVAILABLE),
-    (OperationFailed("x"), ErrorKind.UPSTREAM_ERROR),
+    (OperationFailedError("x"), ErrorKind.UPSTREAM_ERROR),
     # exceptions/exceptions.py
     (TaiValidationError("x"), ErrorKind.BAD_INPUT),
     (TurnTimeoutError("x"), ErrorKind.TIMED_OUT),

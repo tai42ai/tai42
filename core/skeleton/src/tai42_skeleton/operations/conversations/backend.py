@@ -1,5 +1,7 @@
-"""The redis-backend guard shared by every routing operation, plus the lazy store accessors
-and the read guards (route existence, person route set, uniform thread-not-found)."""
+"""The redis-backend guard shared by every routing operation, plus the lazy store accessors.
+
+Also holds the read guards (route existence, person route set, uniform thread-not-found).
+"""
 
 from __future__ import annotations
 
@@ -39,8 +41,10 @@ def _require_backend() -> BaseConversationsManager:
 
 
 def _person_store() -> ConversationPersonStore:
-    """The person store over the live conversations settings. Called only after
-    :func:`_require_backend`, so its own backend guard never fires here."""
+    """The person store over the live conversations settings.
+
+    Called only after :func:`_require_backend`, so its own backend guard never fires here.
+    """
     from tai42_skeleton.conversations.persons import ConversationPersonStore
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
@@ -48,8 +52,10 @@ def _person_store() -> ConversationPersonStore:
 
 
 def _record_store() -> ConversationRecordStore:
-    """The answer/record store over the live conversations settings. Called only after
-    :func:`_require_backend`, so its own backend guard never fires here."""
+    """The answer/record store over the live conversations settings.
+
+    Called only after :func:`_require_backend`, so its own backend guard never fires here.
+    """
     from tai42_skeleton.conversations.records import ConversationRecordStore
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
@@ -57,8 +63,10 @@ def _record_store() -> ConversationRecordStore:
 
 
 def _mode_store() -> ConversationModeStore:
-    """The per-thread mode-override store over the live conversations settings. Called only
-    after :func:`_require_backend`, so its own backend guard never fires here."""
+    """The per-thread mode-override store over the live conversations settings.
+
+    Called only after :func:`_require_backend`, so its own backend guard never fires here.
+    """
     from tai42_skeleton.conversations.mode import ConversationModeStore
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
@@ -66,15 +74,20 @@ def _mode_store() -> ConversationModeStore:
 
 
 def _person_routes(person: Person) -> set[str]:
-    """Every route name the person has written under, straight off its address rows — the
-    routes whose indexes the aggregated transcript spans and the authz check reads."""
+    """Every route name the person has written under, straight off its address rows.
+
+    The routes whose indexes the aggregated transcript spans and the authz check reads.
+    """
     return {route for address in person.addresses for route in address.routes}
 
 
 async def _require_route(manager: BaseConversationsManager, route_name: str) -> ConversationRoute:
-    """The route a thread read is against. Refuses a read on a route that does not exist, so
-    an unknown route is a loud 404 and not an empty listing. Called only once the reader is
-    authorized: existence is a fact the answer discloses."""
+    """The route a thread read is against.
+
+    Refuses a read on a route that does not exist, so an unknown route is a loud 404 and not an
+    empty listing. Called only once the reader is authorized: existence is a fact the answer
+    discloses.
+    """
     route = await manager.get_route(route_name)
     if route is None:
         raise NotFoundError(f"conversation route not found: {route_name!r}")
@@ -82,6 +95,8 @@ async def _require_route(manager: BaseConversationsManager, route_name: str) -> 
 
 
 def _thread_not_found(thread_id: str) -> NotFoundError:
-    """The uniform not-found the thread reads give for a thread that is absent, expired under
-    the retention TTL, or keyed to another route."""
+    """The uniform not-found the thread reads give for a thread that is absent, expired, or misrouted.
+
+    Covers a thread that is absent, expired under the retention TTL, or keyed to another route.
+    """
     return NotFoundError(f"conversation thread not found: {thread_id!r}")

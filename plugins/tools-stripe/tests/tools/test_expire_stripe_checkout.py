@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tai42_tools_stripe._internal.tools.stripe_client import STRIPE_API_VERSION, StripeLivemodeMismatch
+from tai42_tools_stripe._internal.tools.stripe_client import STRIPE_API_VERSION, StripeLivemodeMismatchError
 from tai42_tools_stripe.tools.expire_stripe_checkout import expire_stripe_checkout
 
 
@@ -70,7 +70,7 @@ def test_non_open_session_400_propagates(stripe_env: Callable[..., None], stub_s
 def test_livemode_mismatch_on_returned_session_raises(stripe_env: Callable[..., None], stub_server: Any) -> None:
     stripe_env(secret_key="sk_test_abc", api_base=stub_server.base_url)
     stub_server.set_responder(_responder(livemode=True))  # test key, live session -> mismatch
-    with pytest.raises(StripeLivemodeMismatch):
+    with pytest.raises(StripeLivemodeMismatchError):
         _call()
 
 

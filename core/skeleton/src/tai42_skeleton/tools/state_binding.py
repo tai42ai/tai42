@@ -1,5 +1,4 @@
-"""The door-layer state-binding runtime: merge, apply-before / apply-after, and the
-save-time validate-and-attach seam.
+"""The door-layer state-binding runtime: merge, apply-before/apply-after, and validate-and-attach at save.
 
 ONE binding shape rides every door (:class:`~tai42_contract.states.StateBinding`). It reaches
 the shared dispatch chokepoint through the ambient :class:`~tai42_contract.tools.ToolInvocation`
@@ -38,11 +37,12 @@ if TYPE_CHECKING:
 
 
 async def _render_slot(app: TaiMCP, slot: str, text: TemplatedText) -> str:
-    """Render one binding jq slot's templated text to its jq program before it is compiled or
-    evaluated — the render happens HERE at the door, never inside a contract model validator.
+    """Render one binding jq slot's templated text to its jq program before it is compiled or evaluated.
 
+    The render happens HERE at the door, never inside a contract model validator.
     A slot given by ``id`` is fetched and rendered; a stored id that cannot be fetched is a
-    LOUD refusal naming the slot and the id, never a silent pass or a deferred surprise."""
+    LOUD refusal naming the slot and the id, never a silent pass or a deferred surprise.
+    """
     try:
         return await app.storage.resource_manager.render_templated_text(text)
     except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
@@ -52,14 +52,16 @@ async def _render_slot(app: TaiMCP, slot: str, text: TemplatedText) -> str:
 
 
 def merge_bindings(door: StateBinding | None, preset: StateBinding | None) -> StateBinding | None:
-    """Merge the door's binding with the dispatched preset's own into ONE binding, applied
-    once around the run. ``None`` on either side yields the other unchanged.
+    """Merge the door's binding with the dispatched preset's own into ONE binding applied once around the run.
+
+    ``None`` on either side yields the other unchanged.
 
     DOOR-FIRST: door :class:`StateAttach` entries come first, then the preset's. For a state
     named by BOTH, ``subject_expr`` is always the DOOR's; ``scope_expr`` is the door's when
     present, else the preset's; ``templates`` are UNIONED (door order first, deduplicated);
     and ``input_injections``/``updates`` are CONCATENATED door-first then preset. No cross-check
-    between the two definitions — each validated on its own save."""
+    between the two definitions — each validated on its own save.
+    """
     if door is None:
         return preset
     if preset is None:
@@ -87,10 +89,12 @@ def merge_bindings(door: StateBinding | None, preset: StateBinding | None) -> St
 
 
 async def _scope_engaged(app: TaiMCP, attach: StateAttach, run_input: dict[str, Any]) -> bool:
-    """Whether ``attach`` engages for this run — its ``scope_expr`` renders to an optional
-    BOOLEAN predicate over the run input: absent engages, ``true`` engages, ``false`` SKIPS the
-    state for this run (no injections/updates), and any non-boolean result is a loud refusal
-    (never a silent skip)."""
+    """Return whether ``attach`` engages for this run, from its optional ``scope_expr`` boolean predicate.
+
+    ``scope_expr`` renders to a boolean over the run input: absent engages, ``true`` engages,
+    ``false`` SKIPS the state for this run (no injections/updates), and any non-boolean result
+    is a loud refusal (never a silent skip).
+    """
     if attach.scope_expr is None:
         return True
     expr = await _render_slot(app, f"scope_expr for state {attach.state!r}", attach.scope_expr)
@@ -109,7 +113,8 @@ async def _resolve_subject(app: TaiMCP, attach: StateAttach, run_input: dict[str
     key}``) or a bare KEY string. A key string takes its scope ``(target_kind, target_name)``
     from the ambient :class:`~tai42_contract.states.StateContext` the door deposited and its
     ``kind`` from the state's ``default_subject_kind``. Any other shape, or a key with no
-    ambient scope, is a loud refusal — never a silent skip."""
+    ambient scope, is a loud refusal — never a silent skip.
+    """
     expr = await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr)
     resolved = await run_jq_first(expr, run_input)
     if isinstance(resolved, dict):
@@ -137,11 +142,13 @@ async def _resolve_subject(app: TaiMCP, attach: StateAttach, run_input: dict[str
 
 
 async def apply_binding_injections(app: TaiMCP, binding: StateBinding, arguments: dict[str, Any]) -> None:
-    """Inject each engaged attach's ``input_injections`` into ``arguments`` (in place) BEFORE
-    the dispatch. A named ``template_jq`` (input purpose) is evaluated over the subject's
-    record with NO params (a named injection carries no param values — a params-declaring
-    input jq is a loud refusal); a custom ``jq`` runs over ``{record, input}``. The value
-    lands at ``into``. An attach whose ``scope_expr`` predicate is ``false`` is skipped."""
+    """Inject each engaged attach's ``input_injections`` into ``arguments`` in place BEFORE the dispatch.
+
+    A named ``template_jq`` (input purpose) is evaluated over the subject's record with NO
+    params (a named injection carries no param values — a params-declaring input jq is a loud
+    refusal); a custom ``jq`` runs over ``{record, input}``. The value lands at ``into``. An
+    attach whose ``scope_expr`` predicate is ``false`` is skipped.
+    """
     for attach in binding.states:
         if not await _scope_engaged(app, attach, arguments):
             continue
@@ -151,7 +158,8 @@ async def apply_binding_injections(app: TaiMCP, binding: StateBinding, arguments
                 result = await app.states.eval_template_jq(attach.state, subject, injection.template_jq, {})
                 value = result.value
             else:
-                assert injection.jq is not None  # the model sets exactly one of template_jq/jq
+                if injection.jq is None:
+                    raise AssertionError
                 record = await app.states.read(attach.state, subject)
                 data = record.data if record is not None else {}
                 jq = await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq)
@@ -162,9 +170,10 @@ async def apply_binding_injections(app: TaiMCP, binding: StateBinding, arguments
 async def _resolve_op_id(
     app: TaiMCP, state: str, op_id_expr: TemplatedText | None, run_input: dict[str, Any], output: Any
 ) -> str | None:
-    """An update's optional ``op_id`` idempotency key from its rendered expression over
-    ``{output, input}``; ``null`` means no key. A non-string, non-null result is a loud
-    refusal."""
+    """Resolve an update's optional ``op_id`` idempotency key from its rendered expression over ``{output, input}``.
+
+    ``null`` means no key. A non-string, non-null result is a loud refusal.
+    """
     if op_id_expr is None:
         return None
     expr = await _render_slot(app, f"op_id expression for state {state!r}", op_id_expr)
@@ -177,8 +186,9 @@ async def _resolve_op_id(
 async def apply_binding_updates(
     app: TaiMCP, binding: StateBinding, arguments: dict[str, Any], output: Any, door_id: str
 ) -> None:
-    """Apply each attach's ``updates`` through the store AFTER the dispatch. A named
-    ``template_jq`` (update purpose) shapes its ``.input`` from the ``adapter`` over
+    """Apply each attach's ``updates`` through the store AFTER the dispatch.
+
+    A named ``template_jq`` (update purpose) shapes its ``.input`` from the ``adapter`` over
     ``{output, input}`` (or the run input directly when it declares none) and is applied via
     :meth:`app.states.apply_template_jq`; a custom ``jq`` authors the whole op batch over
     ``{record, output, input}`` and is applied via :meth:`app.states.apply`.
@@ -186,7 +196,8 @@ async def apply_binding_updates(
     Single-writer identity: a TEMPLATE update writes as one door-independent writer keyed on
     its resolved program name (the SAME update from any door on one state is one writer); a
     CUSTOM update writes as the door's own writer (``door_id`` = the dispatched definition).
-    An attach whose ``scope_expr`` predicate is ``false`` is skipped."""
+    An attach whose ``scope_expr`` predicate is ``false`` is skipped.
+    """
     for attach in binding.states:
         if not await _scope_engaged(app, attach, arguments):
             continue
@@ -208,7 +219,8 @@ async def apply_binding_updates(
                     origin=WriteOrigin(consumer="template_jq", meta={"template_jq": update.template_jq}),
                 )
             else:
-                assert update.jq is not None  # the model sets exactly one of template_jq/jq
+                if update.jq is None:
+                    raise AssertionError
                 record = await app.states.read(attach.state, subject)
                 data = record.data if record is not None else {}
                 jq = await _render_slot(app, f"update jq for state {attach.state!r}", update.jq)
@@ -224,8 +236,7 @@ async def apply_binding_updates(
 
 
 async def validate_and_attach_binding(app: TaiMCP, binding: StateBinding) -> None:
-    """Validate a binding and ATTACH its named templates at SAVE (the write of the runnable
-    definition carrying it).
+    """Validate a binding and ATTACH its named templates at SAVE (the write of the runnable definition carrying it).
 
     Attach-on-use: each named template is attached at its own path ``[<template>]`` — shared by
     every door/node that binds the state — IDEMPOTENTLY (an already-attached template is left
@@ -236,26 +247,29 @@ async def validate_and_attach_binding(app: TaiMCP, binding: StateBinding) -> Non
     the rendered program is compiled; every named ``template_jq`` referenced by an
     injection/update is resolved against the state's attachments with the right purpose — an
     unknown/ambiguous name, or a named update that names params but carries no adapter to fill
-    them, is a loud refusal at save."""
+    them, is a loud refusal at save.
+    """
     await _validate_binding(app, binding, do_attach=True)
 
 
 async def validate_binding(app: TaiMCP, binding: StateBinding) -> None:
-    """The SAME validation :func:`validate_and_attach_binding` runs, but WITHOUT attaching —
-    the dry-run (preset validate) door performs NO attach. Each declared template is verified
+    """Run the SAME validation as :func:`validate_and_attach_binding`, but WITHOUT attaching.
+
+    The dry-run (preset validate) door performs NO attach. Each declared template is verified
     to EXIST (proving it could be attached) rather than actually being attached, and named
     ``template_jq`` references resolve against the state's current attachments UNION the
     binding's own declared templates. A bad shape/state/template/jq/adapter is the same loud
-    refusal, so the validate verdict matches what a create/save would accept."""
+    refusal, so the validate verdict matches what a create/save would accept.
+    """
     await _validate_binding(app, binding, do_attach=False)
 
 
 async def _validate_templates(app: TaiMCP, attach: StateAttach, *, do_attach: bool) -> None:
-    """Per declared template of ``attach``: attach it idempotently (the SAVE seam,
-    ``do_attach``) or assert it exists and is attachable (the dry-run seam).
+    """Per declared template of ``attach``: attach it idempotently (SAVE) or assert it exists (dry-run).
 
     Attach-on-use, idempotent: skip an already-attached template (``attach`` would 409).
-    A dry run performs no attach — it only asserts the template exists (is attachable)."""
+    A dry run performs no attach — it only asserts the template exists (is attachable).
+    """
     for template in attach.templates:
         already = await app.states.list_attachments(attach.state, template=template)
         if already:
@@ -267,26 +281,26 @@ async def _validate_templates(app: TaiMCP, attach: StateAttach, *, do_attach: bo
 
 
 async def _validate_injections(app: TaiMCP, attach: StateAttach) -> None:
-    """Compile each injection's custom jq, or resolve each named ``template_jq`` to a
-    program of purpose ``"input"``."""
+    """Compile each injection's custom jq, or resolve each named ``template_jq`` to an ``"input"`` program."""
     for injection in attach.input_injections:
         if injection.jq is not None:
             compile_check(await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq))
         else:
-            assert injection.template_jq is not None  # the model sets exactly one source
+            if injection.template_jq is None:
+                raise AssertionError
             await _require_program(app, attach.state, injection.template_jq, "input", declared=attach.templates)
 
 
 async def _validate_updates(app: TaiMCP, attach: StateAttach) -> None:
-    """Compile op_id/custom-jq, resolve each named update ``template_jq`` to a program of
-    purpose ``"update"``, and enforce the adapter-vs-declared-params rule."""
+    """Compile op_id/custom-jq, resolve each named update ``template_jq``, and enforce the adapter-params rule."""
     for update in attach.updates:
         if update.op_id is not None:
             compile_check(await _render_slot(app, f"op_id expression for state {attach.state!r}", update.op_id))
         if update.jq is not None:
             compile_check(await _render_slot(app, f"update jq for state {attach.state!r}", update.jq))
         else:
-            assert update.template_jq is not None  # the model sets exactly one source
+            if update.template_jq is None:
+                raise AssertionError
             program = await _require_program(app, attach.state, update.template_jq, "update", declared=attach.templates)
             if update.adapter is not None:
                 compile_check(await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter))
@@ -298,10 +312,12 @@ async def _validate_updates(app: TaiMCP, attach: StateAttach) -> None:
 
 
 async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bool) -> None:
-    """Shared binding validation. With ``do_attach`` the named templates are attached
-    idempotently (the SAVE seam); without it they are only verified to exist (the dry-run
-    seam) — the one difference between the two doors, so neither drifts from the other's
-    verdict."""
+    """Run the shared binding validation for both the save and dry-run seams.
+
+    With ``do_attach`` the named templates are attached idempotently (the SAVE seam); without
+    it they are only verified to exist (the dry-run seam) — the one difference between the two
+    doors, so neither drifts from the other's verdict.
+    """
     for attach in binding.states:
         await _validate_templates(app, attach, do_attach=do_attach)
         compile_check(await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr))
@@ -314,12 +330,13 @@ async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bo
 async def _require_program(
     app: TaiMCP, state: str, name: str, purpose: str, *, declared: Iterable[str] = ()
 ) -> StateTemplateJq:
-    """Resolve a named ``template_jq`` across ``state``'s attachments and assert its purpose;
-    return its document entry (so the caller can read declared ``params``). An unknown or
-    ambiguous name, or a wrong purpose, is a loud refusal. ``declared`` names the binding's own
-    would-be-attached templates: on the SAVE seam they are already attached and appear here
-    anyway, so this only matters to the dry-run seam, where a self-declared template resolves
-    without being attached."""
+    """Resolve a named ``template_jq`` across ``state``'s attachments, assert its purpose, and return its entry.
+
+    The caller can read declared ``params`` off the entry. An unknown or ambiguous name, or a
+    wrong purpose, is a loud refusal. ``declared`` names the binding's own would-be-attached
+    templates: on the SAVE seam they are already attached and appear here anyway, so this only
+    matters to the dry-run seam, where a self-declared template resolves without being attached.
+    """
     attachments = await app.states.list_attachments(state)
     templates = {row["template"] for row in attachments} | set(declared)
     target, program_name = name.split(".", 1) if "." in name else (None, name)

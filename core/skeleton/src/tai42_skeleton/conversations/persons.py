@@ -1,5 +1,7 @@
-"""The per-target person registry — the runtime state that folds several channel addresses
-into ONE identity for a single ``(target_kind, target_name)`` target.
+"""The per-target person registry.
+
+The runtime state that folds several channel addresses into ONE identity for a single
+``(target_kind, target_name)`` target.
 
 Two Redis keyspaces, both built ONLY by the :class:`ConversationsSettings` helpers:
 
@@ -66,10 +68,11 @@ class PairingTarget:
 
 
 def _door_address_key(*, door: ConversationDoor, channel: str | None, our_identity: str | None, address: str) -> str:
-    """The single canonical encoding of one address for the person index and the open-code
-    pointer: ``[channel, our_identity, address]`` for a channel address, ``["api", address]``
-    for an api address. Deterministic JSON (no delimiter joining), so charset-unconstrained
-    parts never collide."""
+    """The single canonical encoding of one address for the person index and the open-code pointer.
+
+    ``[channel, our_identity, address]`` for a channel address, ``["api", address]`` for an api
+    address. Deterministic JSON (no delimiter joining), so charset-unconstrained parts never collide.
+    """
     if door == "channel":
         if channel is None or our_identity is None:
             raise ValueError("a channel address must carry channel and our_identity")
@@ -86,8 +89,7 @@ def _address_key_of(address: PersonAddress) -> str:
 
 
 def _as_str(value: Any) -> str:
-    """Redis may hand back ``bytes`` or ``str`` depending on decode settings; the row JSON is
-    utf-8, so normalize to ``str``."""
+    """Normalize Redis's ``bytes``-or-``str`` return to ``str`` (the row JSON is utf-8)."""
     return value.decode() if isinstance(value, bytes) else value
 
 
@@ -326,11 +328,14 @@ return {'ok', encoded}
 
 
 class ConversationPersonStore:
-    """The Redis-backed per-target person registry. Construction refuses with a loud 501
-    without the redis conversations backend — a person folded across channels must not live in
-    per-worker state that vanishes with the process."""
+    """The Redis-backed per-target person registry.
+
+    Construction refuses with a loud 501 without the redis conversations backend — a person folded
+    across channels must not live in per-worker state that vanishes with the process.
+    """
 
     def __init__(self, settings: ConversationsSettings) -> None:
+        """Store ``settings``, refusing construction (501) without the redis conversations backend."""
         if settings.in_memory:
             raise NotSupportedError(_NO_BACKEND)
         self.settings = settings
@@ -344,9 +349,11 @@ class ConversationPersonStore:
         our_identity: str | None,
         address: str,
     ) -> Person | None:
-        """The person owning ``address`` on ``target``, or ``None`` when the address has never
-        been seen there. The index field and its row are read in one atomic step; an index
-        field naming a missing row is corruption and raises."""
+        """The person owning ``address`` on ``target``, or ``None`` when the address has never been seen there.
+
+        The index field and its row are read in one atomic step; an index field naming a missing
+        row is corruption and raises.
+        """
         dak = _door_address_key(door=door, channel=channel, our_identity=our_identity, address=address)
         index_key = self.settings.person_index_key(target.target_kind, target.target_name)
         async with client_ctx(RedisClient, self.settings.redis) as r:
@@ -359,9 +366,11 @@ class ConversationPersonStore:
         raise RuntimeError(f"conversations: person index names a missing row: {_as_str(result[1])!r}")
 
     async def get_by_id(self, person_id: str) -> Person | None:
-        """The person row named by ``person_id``, or ``None`` when no such row exists. The
-        aggregated person-thread read door resolves the ``bridge:@person:{person_id}`` key
-        this way — against the store, never by parsing addresses out of the thread id."""
+        """The person row named by ``person_id``, or ``None`` when no such row exists.
+
+        The aggregated person-thread read door resolves the ``bridge:@person:{person_id}`` key
+        this way — against the store, never by parsing addresses out of the thread id.
+        """
         async with client_ctx(RedisClient, self.settings.redis) as r:
             raw = await awaited(r.get(self.settings.person_key(person_id)))
         if raw is None:
@@ -371,13 +380,15 @@ class ConversationPersonStore:
     async def ensure_provisional(
         self, target: PairingTarget, address_row: PersonAddress, *, locale: str | None = None
     ) -> tuple[Person, bool]:
-        """Get-or-create the single-address person for ``address_row`` on ``target``, atomic
-        against a concurrent first contact. On an EXISTING person, unions ``address_row``'s
+        """Get-or-create the single-address person for ``address_row`` on ``target``.
+
+        Atomic against a concurrent first contact. On an EXISTING person, unions ``address_row``'s
         routes into its matching address and leaves its stored ``locale`` untouched (a later
         turn never clobbers an operator override). Returns ``(person, created)`` — ``created``
         is True ONLY when this call wrote the row, the first-contact signal a greeting keys
         off. ``locale`` seeds a NEWLY created person's stored locale (the channel's
-        first-contact hint); it is ignored when the person already exists."""
+        first-contact hint); it is ignored when the person already exists.
+        """
         new_id = str(uuid4())
         person = Person(
             person_id=new_id,
@@ -413,12 +424,14 @@ class ConversationPersonStore:
         raise RuntimeError(f"conversations: person index names a missing row: {_as_str(result[1])!r}")
 
     async def erase(self, person: Person) -> tuple[bool, int]:
-        """Erase ``person`` from the registry ENTIRELY: its person row and every
-        ``door_address_key → person_id`` field of its per-target index (removed by value, so
-        exactly this person's addresses go, whatever the row currently lists). One atomic unit,
-        so a concurrent lookup never sees the row gone with an index still naming it. Idempotent:
-        a re-run on an already-erased person removes nothing. Returns ``(row_removed,
-        index_fields_removed)``."""
+        """Erase ``person`` from the registry ENTIRELY.
+
+        Removes its person row and every ``door_address_key → person_id`` field of its per-target index
+        (removed by value, so exactly this person's addresses go, whatever the row currently lists). One
+        atomic unit, so a concurrent lookup never sees the row gone with an index still naming it.
+        Idempotent: a re-run on an already-erased person removes nothing. Returns ``(row_removed,
+        index_fields_removed)``.
+        """
         row_key = self.settings.person_key(person.person_id)
         index_key = self.settings.person_index_key(person.target_kind, person.target_name)
         async with client_ctx(RedisClient, self.settings.redis) as r:
@@ -426,10 +439,12 @@ class ConversationPersonStore:
         return bool(int(result[0])), int(result[1])
 
     async def set_locale(self, person_id: str, locale: str | None) -> Person | None:
-        """Set ``person_id``'s stored locale to ``locale`` (canonical BCP 47) or clear it with
-        ``None``, in place on the person row, and return the updated person — or ``None`` when
-        no such person exists. The one WRITE door an operator drives to override the
-        channel-seeded locale; a later turn's ``ensure_provisional`` never clobbers it."""
+        """Set ``person_id``'s stored locale to ``locale`` (canonical BCP 47) or clear it with ``None``.
+
+        Updated in place on the person row; returns the updated person, or ``None`` when no such
+        person exists. The one WRITE door an operator drives to override the channel-seeded locale;
+        a later turn's ``ensure_provisional`` never clobbers it.
+        """
         row_key = self.settings.person_key(person_id)
         mode = "clear" if locale is None else "set"
         async with client_ctx(RedisClient, self.settings.redis) as r:
@@ -442,12 +457,14 @@ class ConversationPersonStore:
         raise RuntimeError(f"conversations: set_locale returned an unexpected status {status!r}")
 
     async def merge(self, person_id_a: str, person_id_b: str) -> Person:
-        """Merge two persons of the SAME target into one and return the survivor. The store
-        picks the survivor (earlier ``created_at``; ties by lexically smaller ``person_id``),
+        """Merge two persons of the SAME target into one and return the survivor.
+
+        The store picks the survivor (earlier ``created_at``; ties by lexically smaller ``person_id``),
         unions the absorbed addresses, repoints the absorbed index entries, and deletes the
         absorbed row — one atomic unit, so callers never decide the survivor. ``merge(P, P)``
         (both ids the same live person) is a no-op returning P. A cross-target merge raises
-        :class:`CrossTargetMergeError`."""
+        :class:`CrossTargetMergeError`.
+        """
         key_a = self.settings.person_key(person_id_a)
         key_b = self.settings.person_key(person_id_b)
         async with client_ctx(RedisClient, self.settings.redis) as r:
@@ -473,12 +490,13 @@ class ConversationPersonStore:
         our_identity: str | None,
         address: str,
     ) -> Person:
-        """Detach one address from a multi-address person and return it as its own fresh
-        provisional person (the rest of the original stays linked). Refuses with
-        :class:`NotLinkedError` when the address is the person's only one — it is already
-        provisional, so there is nothing to unlink. The detached address's fresh row carries
-        its accumulated routes, and being a fresh row means its next inbound is not a
-        first-contact creation, so no greeting re-fires."""
+        """Detach one address from a multi-address person and return it as its own fresh provisional person.
+
+        The rest of the original stays linked. Refuses with :class:`NotLinkedError` when the address
+        is the person's only one — it is already provisional, so there is nothing to unlink. The
+        detached address's fresh row carries its accumulated routes, and being a fresh row means its
+        next inbound is not a first-contact creation, so no greeting re-fires.
+        """
         new_id = str(uuid4())
         dak = _door_address_key(door=door, channel=channel, our_identity=our_identity, address=address)
         async with client_ctx(RedisClient, self.settings.redis) as r:

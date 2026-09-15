@@ -1,5 +1,4 @@
-"""Conversation-route management operations — the routing-table surface behind the
-``/api/conversations*`` doors, the ``tai conversations`` CLI and the MCP tools.
+"""Conversation-route management operations behind the ``/api/conversations*`` doors, the CLI and the MCP tools.
 
 A route binds an inbound door (``api`` or ``channel``) to a target — an ``agent`` run or a
 ``tool`` dispatch — and the ``execution_key`` that turn runs AS. A row's ``callback_secret``

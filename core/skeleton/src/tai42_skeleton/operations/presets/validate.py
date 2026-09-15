@@ -1,5 +1,7 @@
-"""The dry-run verdict door: report whether a preset draft would be accepted,
-running the SAME pre-store checks the corresponding write route would."""
+"""The dry-run verdict door: report whether a preset draft would be accepted.
+
+Runs the SAME pre-store checks the corresponding write route would.
+"""
 
 from __future__ import annotations
 
@@ -54,14 +56,16 @@ async def _validate_create(
     input_schema: TemplatedText | dict[str, Any] | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
-    """The create route's full pre-store verdict for a brand-new preset — the exact
-    ordered checks create runs before its store write (name safety → description
-    non-empty → quarantine → tool collision → agent-name collision → duplicate →
+    """The create route's full pre-store verdict for a brand-new preset, as a verdict rather than a write.
+
+    Runs the exact ordered checks create runs before its store write (name safety →
+    description non-empty → quarantine → tool collision → agent-name collision → duplicate →
     base rules → agent authoring), then combo → schema → dry-run bake — as a
     ``valid``/``error`` verdict rather than a write. A draft may omit ``description``
     (``None``): the emptiness gate applies only to an explicitly provided value, so an
     unfilled draft validates its structure and defers the required-description rule to
-    the real create's edge."""
+    the real create's edge.
+    """
     if not is_valid_preset_name(name):
         return _verdict(f"invalid preset name {name!r}: must match ^[A-Za-z0-9_-]{{1,64}}$")
     if description is not None and not description.strip():
@@ -105,12 +109,13 @@ async def _verdict_bind_chain(
     extensions: list[list[ExtensionElement]] | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
-    """The shared tail both modes run: combo registry → output schema → dry-run
-    bake → input-schema support → write validator → state binding, as a verdict — the
-    SAME chain the real create/save doors run, so the dry run never reports valid on a
-    draft the write door would 400. ``extensions`` defaults to no combos for the bind
-    chain's combo/schema checks; ``state_binding`` is validated (WITHOUT attaching) exactly
-    as create/save validate-and-attach it."""
+    """The shared tail both modes run: combo → schema → bake → input support → validator → state binding.
+
+    Returns a verdict — the SAME chain the real create/save doors run, so the dry run never
+    reports valid on a draft the write door would 400. ``extensions`` defaults to no combos
+    for the bind chain's combo/schema checks; ``state_binding`` is validated (WITHOUT
+    attaching) exactly as create/save validate-and-attach it.
+    """
     combos: list[list[ExtensionElement]] = extensions or []
     combo_error = _combo_registry_error(combos)
     if combo_error is not None:
@@ -172,10 +177,12 @@ async def validate_preset(
     state_binding_present: bool = False,
     state_binding_value: Any = None,
 ) -> dict[str, Any]:
-    """Report whether a preset draft would be accepted, running the SAME pre-store
-    verdict the corresponding write route would — CREATE mode when no preset named
-    ``name`` exists, VERSION mode when one does (mode-resolved by a store lookup).
-    Both verdicts return 200; only a malformed body is a 400."""
+    """Report whether a preset draft would be accepted, running the SAME pre-store verdict the write route would.
+
+    CREATE mode when no preset named ``name`` exists, VERSION mode when one does
+    (mode-resolved by a store lookup). Both verdicts return 200; only a malformed body is a
+    400.
+    """
     # Mode resolution needs the store; refuse cleanly on a store-less deploy exactly
     # as the create route does before anything else.
     if not component_store_configured(SKELETON_COMPONENT):

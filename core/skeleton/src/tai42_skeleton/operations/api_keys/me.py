@@ -18,9 +18,10 @@ from tai42_skeleton.operations import operation
 async def get_me(
     user_id: str | None, effective_scopes: list[str] | None, claims: dict[str, Any] | None
 ) -> ProjectionResult:
-    """The authenticated caller's derived capability projection — the concrete routes,
-    dynamic patterns, sub-MCP mounts, tools, and agents it can reach right now (derived,
-    never stored).
+    """The authenticated caller's derived capability projection.
+
+    The concrete routes, dynamic patterns, sub-MCP mounts, tools, and agents it can reach right
+    now (derived, never stored).
 
     ``user_id``/``effective_scopes``/``claims`` are the caller's OWN identity, derived at
     the HTTP edge from the authenticated request — never caller-supplied. This is
@@ -31,7 +32,8 @@ async def get_me(
     ``user_id=None``), so a synthetic TOTAL projection is returned; otherwise the
     projection is built through the REAL enforcer so it can never advertise a door the
     gate would deny. Any infrastructure error propagates per the projection's failure
-    doctrine."""
+    doctrine.
+    """
     if user_id is None:
         return synthetic_full_projection()
     return await _pkg.build_projection(user_id, effective_scopes or [], claims or {})

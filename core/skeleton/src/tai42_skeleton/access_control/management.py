@@ -50,10 +50,12 @@ _RESERVED_USER_IDS = frozenset({"__root__"})
 
 
 class _Unset(Enum):
-    """Sentinel marking an ``edit_user_payload`` argument the caller did not
-    supply. A partial edit leaves such a field at its stored value; only fields
-    given an explicit value (including ``None``/``{}``/``""``) are overwritten, so
-    editing one field never silently clears another."""
+    """Sentinel marking an ``edit_user_payload`` argument the caller did not supply.
+
+    A partial edit leaves such a field at its stored value; only fields given an explicit value
+    (including ``None``/``{}``/``""``) are overwritten, so editing one field never silently
+    clears another.
+    """
 
     UNSET = "unset"
 
@@ -66,9 +68,11 @@ def _settings() -> AccessControlSettings:
 
 
 def _resolve_provider(name: str) -> IdentityProvider:
-    """Build the provider named ``name`` through the module-level registry — the SAME
-    path the runtime auth adapter uses (never a direct import of the plugin). An
-    unregistered name raises LOUDLY (``KeyError`` out of the registry)."""
+    """Build the provider named ``name`` through the module-level registry.
+
+    The SAME path the runtime auth adapter uses (never a direct import of the plugin). An
+    unregistered name raises LOUDLY (``KeyError`` out of the registry).
+    """
     return get_identity_provider_factory(name)(_settings())
 
 
@@ -83,7 +87,8 @@ def _identity_provider() -> ApiKeyIdentityProvider:
     management op must never run when access control resolves no identity provider.
     When NO configured provider is mint-capable (a validator-only deployment), raise
     ``TypeError`` naming the chain — the loud behavior the capabilities route surfaces
-    ahead of a mint attempt rather than a raw 500 at mint time."""
+    ahead of a mint attempt rather than a raw 500 at mint time.
+    """
     s = _settings()
     for name in s.auth_providers:
         provider = _resolve_provider(name)
@@ -96,9 +101,11 @@ def _identity_provider() -> ApiKeyIdentityProvider:
 
 
 def provider_capabilities() -> list[tuple[str, bool]]:
-    """Each configured provider as ``(name, mintable)`` — ``mintable`` iff it
-    implements ``ApiKeyIdentityProvider``. The capabilities route surfaces this so a
-    validator-only deployment disables its mint UI instead of erroring at mint time."""
+    """Each configured provider as ``(name, mintable)``, ``mintable`` iff it implements ``ApiKeyIdentityProvider``.
+
+    The capabilities route surfaces this so a validator-only deployment disables its mint UI
+    instead of erroring at mint time.
+    """
     return [(name, isinstance(_resolve_provider(name), ApiKeyIdentityProvider)) for name in _settings().auth_providers]
 
 
@@ -115,10 +122,12 @@ async def get_all_existing_scopes() -> dict[str, str]:
 
 
 async def get_all_route_mappings() -> dict[str, str]:
-    """Every route mapping as ``{url: value}``, INCLUDING public routes whose value
-    is the public marker (which ``get_all_existing_scopes`` filters out). The full,
-    faithful set a backup needs so an explicit public mapping round-trips instead of
-    silently reverting to protected on restore."""
+    """Every route mapping as ``{url: value}``, INCLUDING public routes whose value is the public marker.
+
+    ``get_all_existing_scopes`` filters that marker out. This is the full, faithful set a backup
+    needs so an explicit public mapping round-trips instead of silently reverting to protected on
+    restore.
+    """
     return await access_control_store().get_all_route_mappings()
 
 
@@ -128,8 +137,7 @@ async def get_all_existing_patterns() -> dict[str, str]:
 
 
 async def get_all_existing_tokens_payload() -> list[dict[str, Any]]:
-    """Every provisioned key's identity merged with its policy — an ORCHESTRATION,
-    not a single store read.
+    """Every provisioned key's identity merged with its policy — an ORCHESTRATION, not a single store read.
 
     The identities (``user_id``/``description``) come from the active provider's
     ``list_identities`` enumeration (it owns the identity records); each is merged
@@ -174,15 +182,19 @@ async def add_url_to_scope(scope_id: str, url: str, pattern: str | None = None) 
 
 
 async def remove_url_from_scope(url: str) -> tuple[bool, list[tuple[str, dict[str, Any]]]]:
-    """Unmap ``url``, cascading its scope out of every token policy when the scope
-    loses its last url. Returns ``(existed, [(user_id, committed_body), …])``."""
+    """Unmap ``url``, cascading its scope out of every token policy when the scope loses its last url.
+
+    Returns ``(existed, [(user_id, committed_body), …])``.
+    """
     return await access_control_store().remove_url_from_scope(url)
 
 
 async def remove_scope(scope_id: str) -> tuple[int, list[tuple[str, dict[str, Any]]]]:
     """Delete a scope, stripping it from every token policy and deleting its routes.
-    Returns ``(deleted_count, [(user_id, committed_body), …])``. Removing the public
-    marker raises ``ValueError``."""
+
+    Returns ``(deleted_count, [(user_id, committed_body), …])``. Removing the public marker raises
+    ``ValueError``.
+    """
     return await access_control_store().remove_scope(scope_id)
 
 
@@ -192,9 +204,10 @@ async def get_public_route_pins() -> list[str]:
 
 
 async def pin_route_public(url: str, pattern: str | None = None) -> None:
-    """Pin ``url`` public (optionally with a dynamic ``pattern``), re-pointing it off
-    any prior scope. The dedicated public-pin writer — the marker never routes through
-    ``add_url_to_scope``."""
+    """Pin ``url`` public (optionally with a dynamic ``pattern``), re-pointing it off any prior scope.
+
+    The dedicated public-pin writer — the marker never routes through ``add_url_to_scope``.
+    """
     await access_control_store().pin_route_public(url, pattern)
 
 
@@ -209,9 +222,11 @@ async def get_policy_body(user_id: str) -> dict[str, Any] | None:
 
 
 async def restore_policy_body(user_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
-    """Write a prior policy ``body`` back as the enforced policy — the store side of
-    a version rollback. Returns the restored body, or ``None`` if ``user_id`` is not
-    provisioned (a falsy sentinel the route's 404 guard tests)."""
+    """Write a prior policy ``body`` back as the enforced policy — the store side of a version rollback.
+
+    Returns the restored body, or ``None`` if ``user_id`` is not provisioned (a falsy sentinel the
+    route's 404 guard tests).
+    """
     return await access_control_store().restore_policy_body(user_id, body)
 
 
@@ -226,11 +241,12 @@ async def add_user_api_key(
     condition: TemplatedText | None = None,
     owner_user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], str]:
-    """Provision a new key for ``user_id`` and return
-    ``(raw_sk_key, committed_body, key_fingerprint)`` — the raw ``sk-…`` (surfaced to
-    the caller exactly once), the exact policy body committed to Postgres (so the caller
-    records it as durable version history without re-reading the store), and the fresh
-    per-mint ``key_fingerprint`` (so the caller can surface it for a subsequent bind).
+    """Provision a new key for ``user_id`` and return ``(raw_sk_key, committed_body, key_fingerprint)``.
+
+    The tuple is the raw ``sk-…`` (surfaced to the caller exactly once), the exact policy body
+    committed to Postgres (so the caller records it as durable version history without re-reading
+    the store), and the fresh per-mint ``key_fingerprint`` (so the caller can surface it for a
+    subsequent bind).
 
     Every mint stamps a fresh ``key_fingerprint`` (``uuid4`` hex) into the committed
     ``policy_data`` under :data:`KEY_FINGERPRINT_CLAIM` — the key's immutable, per-mint,
@@ -313,11 +329,11 @@ async def edit_user_payload(
     policy_data: dict[str, Any] | _Unset | None = _UNSET,
     condition: TemplatedText | _Unset | None = _UNSET,
 ) -> dict[str, Any] | None:
-    """Partially update an existing key's description and policy in place (never
-    rotates the key). Only the arguments the caller actually supplies are written;
-    an argument left at its ``_UNSET`` default preserves the stored value, so editing
-    one field never clears another. A field supplied as ``None``/``{}``/``""`` is
-    written verbatim (an explicit clear).
+    """Partially update an existing key's description and policy in place (never rotates the key).
+
+    Only the arguments the caller actually supplies are written; an argument left at its ``_UNSET``
+    default preserves the stored value, so editing one field never clears another. A field supplied
+    as ``None``/``{}``/``""`` is written verbatim (an explicit clear).
 
     The edit SPLITS by field across the backends: ``description`` — whose single home
     is the identity record — goes to the provider's ``update_description``; the policy
@@ -362,13 +378,15 @@ async def _has_identity_record(provider: ApiKeyIdentityProvider, user_id: str) -
 
     The enumeration is the provider API's only NON-destructive existence read (``revoke``
     answers by destroying the record). A provider fault propagates: a revoke must never
-    proceed on a guessed existence."""
+    proceed on a guessed existence.
+    """
     return any(uid == user_id for uid, _description in await provider.list_identities())
 
 
 async def revoke_api_key(user_id: str) -> bool:
-    """Delete a provisioned key and all of its records. Returns ``False`` if
-    ``user_id`` has no identity record.
+    """Delete a provisioned key and all of its records.
+
+    Returns ``False`` if ``user_id`` has no identity record.
 
     That record is the single existence signal of a MINTED key; a policy row alone is NOT
     one — role assignment provisions policy rows for account users this surface must never
@@ -391,7 +409,8 @@ async def revoke_api_key(user_id: str) -> bool:
 
     A failure in steps 2-5 RAISES loudly rather than leaving a silent orphan. The residue
     is a key that verifies while holding no policy, which the authentication backend
-    refuses outright; repeating the call clears it."""
+    refuses outright; repeating the call clears it.
+    """
     s = _settings()
     provider = _identity_provider()
     store = access_control_store()
@@ -411,9 +430,10 @@ async def revoke_api_key(user_id: str) -> bool:
 
 
 async def bump_policy_version() -> int:
-    """Increment the policy-version counter (plain Redis), forcing a cross-worker
-    policy cache miss on the next read. Called after any scope/policy mutation. A
-    failed bump RAISES loudly — it is never swallowed."""
+    """Increment the policy-version counter (plain Redis), forcing a cross-worker cache miss on the next read.
+
+    Called after any scope/policy mutation. A failed bump RAISES loudly — it is never swallowed.
+    """
     s = _settings()
     async with client_ctx(RedisClient, s.redis) as r:
         return await awaited(r.incr(s.policy_version_key))

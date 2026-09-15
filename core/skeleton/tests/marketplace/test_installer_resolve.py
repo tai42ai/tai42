@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+
 import pytest
 
-from tai42_skeleton.marketplace import installer as installer_module
 from tai42_skeleton.marketplace.errors import (
     MalformedRefError,
     RegistryResponseError,
@@ -57,7 +58,7 @@ async def test_install_null_contract_range_is_contract_less_and_proceeds(monkeyp
     # That is NOT garbled data: there is no constraint to gate, so the install proceeds —
     # matching ``compat.update_targets``, which also counts a null range compatible. The
     # installed contract version is irrelevant here (nothing checks it).
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "2.0.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "2.0.0")
     h = Harness()
     spec = make_spec()
     h.registry.resolved = make_resolved(spec, contract_range=None)

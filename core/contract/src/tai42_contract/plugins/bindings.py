@@ -123,7 +123,9 @@ DATA_BLOCK_BY_KIND: Mapping[PluginItemKind, str] = MappingProxyType(
 
 
 def data_kinds() -> frozenset[PluginItemKind]:
-    """The item kinds whose binding carries ``payload == "data"`` — the kinds a
-    declarative (no-``module``) item is built for. Derived from
-    ``KIND_MANIFEST_BINDINGS`` so the payload table stays the one source."""
+    """The item kinds whose binding carries ``payload == "data"``.
+
+    These are the kinds a declarative (no-``module``) item is built for. Derived
+    from ``KIND_MANIFEST_BINDINGS`` so the payload table stays the one source.
+    """
     return frozenset(kind for kind, binding in KIND_MANIFEST_BINDINGS.items() if binding.payload == "data")

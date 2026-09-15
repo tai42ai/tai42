@@ -29,8 +29,10 @@ from tai42_skeleton.plugins import registry as studio_registry
 
 
 def begin_staging_all() -> None:
-    """Open a fresh staged generation for every per-generation global, leaving each
-    committed generation serving the live epoch untouched."""
+    """Open a fresh staged generation for every per-generation global.
+
+    Each committed generation serving the live epoch is left untouched.
+    """
     connector_registry.begin_staging()
     identity_registry.begin_staging()
     accounts_registry.begin_staging()
@@ -42,9 +44,11 @@ def begin_staging_all() -> None:
 
 
 def commit_staging_all() -> None:
-    """Promote every staged generation to committed — one atomic reference assignment
-    each. Runs in the primitive's no-await swap stretch, so the whole set flips before
-    any request can observe a mix of generations."""
+    """Promote every staged generation to committed — one atomic reference assignment each.
+
+    Runs in the primitive's no-await swap stretch, so the whole set flips before any request
+    can observe a mix of generations.
+    """
     connector_registry.commit_staging()
     identity_registry.commit_staging()
     accounts_registry.commit_staging()
@@ -56,8 +60,11 @@ def commit_staging_all() -> None:
 
 
 def abort_staging_all() -> None:
-    """Drop every staged generation on a failed build — no committed global is
-    touched, so the live epoch keeps serving exactly what it served before."""
+    """Drop every staged generation on a failed build.
+
+    No committed global is touched, so the live epoch keeps serving exactly what it served
+    before.
+    """
     connector_registry.abort_staging()
     identity_registry.abort_staging()
     accounts_registry.abort_staging()

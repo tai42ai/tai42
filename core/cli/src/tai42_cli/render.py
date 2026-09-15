@@ -39,7 +39,8 @@ def render_json(data: Any) -> str:
     ``json.dumps`` escapes the C0 control characters (``0x00``-``0x1F``, including
     the ESC that arms an ANSI sequence) inside string values, but NOT the C1 range
     (``0x80``-``0x9F``); the payload is left byte-faithful for downstream tools
-    rather than stripped, so this output is for a pipe, not a raw terminal."""
+    rather than stripped, so this output is for a pipe, not a raw terminal.
+    """
     return json.dumps(data, indent=2, default=str, ensure_ascii=False)
 
 
@@ -62,6 +63,7 @@ def render_table(records: Sequence[Mapping[str, Any]], columns: Sequence[str]) -
 
 
 def print_json(data: Any, *, file: IO[str] | None = None) -> None:
+    """Print ``data`` as pretty JSON to ``file`` (stdout by default)."""
     print(render_json(data), file=file if file is not None else sys.stdout)
 
 
@@ -81,9 +83,11 @@ def print_records(
 
 
 def print_result(data: Any, *, json_output: bool, file: IO[str] | None = None) -> None:
-    """Render a single result. Under ``--json`` the raw value is emitted; the
-    human form is a two-column key/value table for a mapping, else the stripped
-    string form."""
+    """Render a single result.
+
+    Under ``--json`` the raw value is emitted; the human form is a two-column
+    key/value table for a mapping, else the stripped string form.
+    """
     stream = file if file is not None else sys.stdout
     if json_output:
         print_json(data, file=stream)

@@ -42,18 +42,20 @@ async def _export_webhooks() -> dict[str, Any]:
 
 
 def _validate_webhooks_envelope(payload: dict[str, Any]) -> tuple[list, dict, list, list]:
-    """Reject a malformed webhooks envelope loudly BEFORE any write, returning the
-    ``(hooks, topic_verifiers, trigger_links, tombstones)`` the restore replays. A
-    missing key or wrong-typed value raises rather than defaulting an empty section."""
+    """Reject a malformed webhooks envelope loudly BEFORE any write.
+
+    Returns the ``(hooks, topic_verifiers, trigger_links, tombstones)`` the restore replays. A
+    missing key or wrong-typed value raises rather than defaulting an empty section.
+    """
     for key in ("hooks", "trigger_links", "tombstones"):
         if key not in payload:
             raise ValueError(f"webhooks envelope is missing the required {key!r} key")
         if not isinstance(payload[key], list):
-            raise ValueError(f"webhooks envelope {key!r} must be a list")
+            raise ValueError(f"webhooks envelope {key!r} must be a list")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     if "topic_verifiers" not in payload:
         raise ValueError("webhooks envelope is missing the required 'topic_verifiers' key")
     if not isinstance(payload["topic_verifiers"], dict):
-        raise ValueError("webhooks envelope 'topic_verifiers' must be a mapping of topic to binding")
+        raise ValueError("webhooks envelope 'topic_verifiers' must be a mapping of topic to binding")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     return payload["hooks"], payload["topic_verifiers"], payload["trigger_links"], payload["tombstones"]
 
 
@@ -65,9 +67,11 @@ async def _restore_hooks(
     hooks: list[dict[str, Any]],
     unlocked_topics: frozenset[str] = frozenset(),
 ) -> None:
-    """Restore hook records: per-hook validate / skip-existing / unlocked-topic refuse /
-    execution-key assert / register. Each rejection is a per-hook error, never a hook
-    without a bounded identity nor an aborted restore."""
+    """Restore hook records, each rejection a per-hook error.
+
+    Per hook: validate / skip-existing / unlocked-topic refuse / execution-key assert / register. Never a hook
+    without a bounded identity nor an aborted restore.
+    """
     existing = await manager.list_hooks()
     for item in hooks:
         name = item.get("name") if isinstance(item, dict) else None
@@ -120,9 +124,11 @@ async def _restore_topic_verifiers(
     topic_verifiers: dict[str, Any],
     existing_verifiers: dict[str, Any],
 ) -> set[str]:
-    """Replay the ingress locks, reporting which failed. Returns the unlocked-topic
-    set — every record ON such a topic is refused by the callers, so no window exists
-    in which a restored hook is reachable through a door the backup had verified."""
+    """Replay the ingress locks, reporting which failed.
+
+    Returns the unlocked-topic set — every record ON such a topic is refused by the callers, so no window exists
+    in which a restored hook is reachable through a door the backup had verified.
+    """
     unlocked_topics: set[str] = set()
     for topic, binding in topic_verifiers.items():
         if not isinstance(topic, str) or not topic:
@@ -150,8 +156,10 @@ async def _restore_topic_verifiers(
 
 
 async def _restore_tombstones(report: dict[str, Any], tombstones: list[Any]) -> None:
-    """Restore tombstones first, so a tombstoned hash then refuses its own record
-    below (tombstone wins). An idempotent set-union keyed by ``token_hash``."""
+    """Restore tombstones first, so a tombstoned hash then refuses its own record below (tombstone wins).
+
+    An idempotent set-union keyed by ``token_hash``.
+    """
     for token_hash in tombstones:
         try:
             await restore_tombstone(token_hash)
@@ -168,13 +176,15 @@ async def _restore_trigger_links(
     unlocked_topics: set[str],
     scan: ExecutionKeyScan,
 ) -> None:
-    """Restore each trigger link, refusing a link on an unlocked topic (it would go
-    back on an unverified public door) and reporting per-item outcomes."""
+    """Restore each trigger link, reporting per-item outcomes.
+
+    A link on an unlocked topic is refused (it would go back on an unverified public door).
+    """
     for item in trigger_links:
         name = item.get("name") if isinstance(item, dict) else None
         try:
             if not isinstance(item, dict):
-                raise TriggerLinkError(400, "trigger link entry must be a JSON object")
+                raise TriggerLinkError(400, "trigger link entry must be a JSON object")  # noqa: TRY301 raised to the shared per-item handler below that records it as a per-link error and continues
             if item["name"] in live_link_names and mode == "skip":
                 # Existing trigger link (keyed by name) left untouched — its live record
                 # and token hash stand, so a re-import does not re-key it.
@@ -184,7 +194,7 @@ async def _restore_trigger_links(
             topic = record.get("topic") if isinstance(record, dict) else None
             if topic in unlocked_topics:
                 # Lock absent: restoring the link would put it back on a verified door.
-                raise TriggerLinkError(
+                raise TriggerLinkError(  # noqa: TRY301 raised to the shared per-item handler below that records it as a per-link error and continues
                     400,
                     f"topic {topic!r} is not restored — its verifier binding failed, which would take this "
                     "link back into service on an unverified public door",
@@ -206,9 +216,11 @@ async def _restore_trigger_links(
 
 
 async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> dict[str, Any]:
-    """Order the webhooks restore: a bare LIST is the hooks-only shape; else validate
-    the envelope, run the duplicate-hash pre-scan, replay topic verifiers, restore
-    hooks, tombstones, and trigger links."""
+    """Order the webhooks restore.
+
+    A bare LIST is the hooks-only shape; else validate the envelope, run the duplicate-hash pre-scan,
+    replay topic verifiers, restore hooks, tombstones, and trigger links.
+    """
     manager = hooks_cache.get_hooks_manager()
     mode = current_import_mode()
     report = _empty_report()
@@ -221,7 +233,7 @@ async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> di
         return report
 
     if not isinstance(payload, dict):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
             f"webhooks section payload must be a list (old shape) or an envelope dict, got {type(payload)}"
         )
     hooks, topic_verifiers, trigger_links, tombstones = _validate_webhooks_envelope(payload)
@@ -244,11 +256,13 @@ async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> di
 
 
 def _reject_duplicate_hash_binding(trigger_links: Any, live_by_name: dict[str, str]) -> None:
-    """Raise if any single token hash is bound under two DIFFERENT names, within the
-    payload or against the live store index — zero keys written. ``live_by_name`` maps
+    """Raise if a token hash is bound under two DIFFERENT names, in the payload or against the live store index.
+
+    Zero keys written. ``live_by_name`` maps
     every ``name:*`` store binding (orphans included) to its hash, so binding a new name
     to an already-orphaned hash is refused too (a later revoke would destroy the new
-    name's live record)."""
+    name's live record).
+    """
     # Malformed entries are left to the per-item restore to reject loudly.
     hash_to_name: dict[str, str] = {}
     for item in trigger_links:

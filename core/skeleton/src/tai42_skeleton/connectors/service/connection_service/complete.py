@@ -1,6 +1,8 @@
-"""Finish a connection from the OAuth callback: exchange the code, persist the record
-(fresh connect), or replace tokens on an existing record (reconnect / toggle-on), and
-reconcile the managed manifest."""
+"""Finish a connection from the OAuth callback.
+
+Exchange the code, persist the record (fresh connect), or replace tokens on an existing record
+(reconnect / toggle-on), and reconcile the managed manifest.
+"""
 
 from __future__ import annotations
 
@@ -31,10 +33,11 @@ async def complete_connect(
     flow_id: str,
     code: str,
 ) -> CompleteConnectResult:
-    """Exchange code for tokens, persist the encrypted ConnectionRecord, and
-    write managed manifest entries. The token-exchange ``redirect_uri`` is the
-    one stored in the flow state at authorize-start (byte-identical per RFC
-    6749), never recomputed from the completion request."""
+    """Exchange code for tokens, persist the encrypted ConnectionRecord, and write managed manifest entries.
+
+    The token-exchange ``redirect_uri`` is the one stored in the flow state at authorize-start (byte-identical
+    per RFC 6749), never recomputed from the completion request.
+    """
     flow_state = await state.get_and_delete(flow_id)
     if flow_state is None:
         raise oauth_client.OAuthError("state mismatch: no flow record found for the given flow_id")
@@ -134,13 +137,13 @@ async def complete_connect(
 
 
 async def _revoke_fresh_grant(descriptor: ProviderDescriptor, token_resp: oauth_client.TokenResponse) -> None:
-    """Best-effort upstream revoke of a brand-new, unshared grant whose fresh
-    Connect failed after the code exchange.
+    """Best-effort upstream revoke of a brand-new, unshared grant whose fresh Connect failed after the code exchange.
 
     Only ever called on the fresh-CONNECT path: that ``refresh_token`` is unshared
     (a reconnect/toggle would inherit an existing record's token, so revoking it
     could kill a live connection — those paths deliberately do NOT revoke). Logged,
-    never raises, never masks the caller's original error."""
+    never raises, never masks the caller's original error.
+    """
     if token_resp.refresh_token is None:
         return
     try:
@@ -164,8 +167,10 @@ async def _complete_reconnect_or_toggle(
     descriptor: ProviderDescriptor,
     token_resp: oauth_client.TokenResponse,
 ) -> CompleteConnectResult:
-    """Replace tokens + scopes + enabled_sub_services on an existing record and
-    reconcile its managed manifest entries, under the connection lock."""
+    """Replace tokens + scopes + enabled_sub_services on an existing record, under the connection lock.
+
+    Reconciles its managed manifest entries.
+    """
     cid = flow_state.reconnect_connection_id
     if not cid:
         raise oauth_client.OAuthError(f"flow operation {flow_state.operation} requires reconnect_connection_id")

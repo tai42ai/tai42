@@ -21,6 +21,7 @@ class LangfuseMonitoring:
         projects: list[ProjectConfig],
         default_public_key: str,
     ) -> None:
+        """Wire the client manager, writer, and reader over ``projects`` and ``default_public_key``."""
         self._manager = LangfuseClientManager(projects, default_public_key)
         self._writer = LangfuseWriter(self._manager)
         self._reader = LangfuseReader(self._manager)
@@ -31,8 +32,10 @@ class LangfuseMonitoring:
 
     @property
     def writer(self) -> LangfuseWriter:
+        """The write surface (trace/span/event emission)."""
         return self._writer
 
     @property
     def reader(self) -> LangfuseReader:
+        """The read surface (trace/observation queries)."""
         return self._reader

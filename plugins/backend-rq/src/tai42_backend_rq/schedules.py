@@ -1,5 +1,4 @@
-"""Schedule shapes: the portable :class:`ScheduleRecord` and the one code path
-that writes a canonical schedule into the RQ scheduler.
+"""Schedule shapes: the portable ``ScheduleRecord`` and the writer of a canonical schedule into RQ.
 
 ``ScheduleRecord`` is the backend-neutral, JSON-serializable backup form.
 ``apply_normalized_schedule`` is shared by the create, update, and import paths
@@ -17,10 +16,12 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class ScheduleRecord(BaseModel):
-    """One schedule in a backend-neutral, JSON-serializable form: ``name``, the
-    scheduled call's ``args``/``kwargs``, the canonical interval-or-crontab
-    ``schedule`` dict, and the ``enabled`` flag. Round-trips through a backup
-    document via ``model_dump`` / ``model_validate``."""
+    """One schedule in a backend-neutral, JSON-serializable form.
+
+    Carries ``name``, the scheduled call's ``args``/``kwargs``, the canonical interval-or-crontab
+    ``schedule`` dict, and the ``enabled`` flag. Round-trips through a backup document via
+    ``model_dump`` / ``model_validate``.
+    """
 
     name: str
     args: list[Any] = Field(default_factory=list)
@@ -58,9 +59,11 @@ def crontab_string(norm: dict[str, Any]) -> str:
 
 
 def interval_seconds(norm: dict[str, Any]) -> int:
-    """The whole-second interval of a canonical interval dict. The RQ scheduler
-    re-arms an interval as ``int(interval)`` seconds, so a fractional or
-    sub-second value is rejected loudly rather than silently truncated."""
+    """The whole-second interval of a canonical interval dict.
+
+    The RQ scheduler re-arms an interval as ``int(interval)`` seconds, so a fractional or
+    sub-second value is rejected loudly rather than silently truncated.
+    """
     every = float(norm["every"])
     seconds = int(every)
     if seconds != every or seconds < 1:

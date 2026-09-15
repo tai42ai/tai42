@@ -1,3 +1,5 @@
+"""MCP token-verifier adapter wiring the access-control middleware stack and identity providers."""
+
 import logging
 from datetime import UTC, datetime
 
@@ -31,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 
 def handle_auth_error(conn: HTTPConnection, exc: Exception) -> JSONResponse:
+    """Render an auth-middleware exception as a generic 401/403 (or the retriable reload envelope).
+
+    Emits a refusal audit line at the door and never leaks the exception's
+    internal detail to the caller.
+    """
     # A reload holds the gate and cleared the identity registry (its reset->reimport
     # window): answer the SAME retriable ``reloading`` envelope the dispatch surface
     # uses, so the client retries rather than seeing a spurious 401. A transient infra
@@ -77,7 +84,10 @@ def handle_auth_error(conn: HTTPConnection, exc: Exception) -> JSONResponse:
 
 
 class AuthAdapter(TokenVerifier):
+    """Token verifier that installs the access-control middleware stack and resolves identity providers."""
+
     def __init__(self, settings: AccessControlSettings):
+        """Wire the verifier and middleware stack from ``settings``, deferring provider resolution to first use."""
         super().__init__()
         self.settings = settings
 
@@ -139,7 +149,9 @@ class AuthAdapter(TokenVerifier):
         ]
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        """Verify ``token`` through the internal verifier, returning the access token or ``None``."""
         return await self._internal_verifier.verify_token(token)
 
     def get_middleware(self) -> list[Middleware]:
+        """Return the access-control middleware stack this adapter installs."""
         return self._middleware_stack

@@ -173,8 +173,8 @@ def test_finalize_drive_raises_on_a_park_with_no_identity_bound(fake_park_redis:
     from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY
 
     class _Interrupt:
-        def __init__(self, id: str, value: Any) -> None:
-            self.id = id
+        def __init__(self, id_: str, value: Any) -> None:
+            self.id = id_
             self.value = value
 
     class _Task:

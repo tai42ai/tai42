@@ -23,9 +23,11 @@ logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
 
 async def _resolve_stranded_intake(message_id: str) -> None:
-    """Resolve a record this worker left at intake — an interrupted commit or a turn task
-    that died. A record that has already left intake keeps the outcome it carries; one still
-    at intake is arbitrated against its inbound pair."""
+    """Resolve a record this worker left at intake — an interrupted commit or a turn task that died.
+
+    A record that has already left intake keeps the outcome it carries; one still at intake is arbitrated
+    against its inbound pair.
+    """
     store = accessors._store()
     record = await store.get_record(message_id)
     if record is None:
@@ -44,9 +46,11 @@ async def _resolve_stranded_intake(message_id: str) -> None:
 
 
 async def _arbitrate_stranded_intake(store: ConversationRecordStore, record: ConversationRecord) -> None:
-    """Resolve one record left at intake against its inbound claim (channel pair or event
-    id): the record the claim is committed to takes the error outcome and delivers it; one
-    that lost the claim to another attempt owns nothing and is discarded."""
+    """Resolve one record left at intake against its inbound claim (channel pair or event id).
+
+    The record the claim is committed to takes the error outcome and delivers it; one that lost the claim
+    to another attempt owns nothing and is discarded.
+    """
     if await _owns_inbound_claim(store, record):
         await _fail_stranded_turn(store, record)
         return
@@ -78,7 +82,8 @@ async def redrive_accepted() -> None:
     sweep never reaps an in-flight turn. Only a record whose lease has LAPSED is adopted,
     then arbitrated against the inbound claim (a get-or-set): one the claim names someone
     else for is discarded. An adopted record takes the ``error`` outcome and its turn is
-    never re-run — a turn dispatches authorized tools, so it is not idempotent."""
+    never re-run — a turn dispatches authorized tools, so it is not idempotent.
+    """
     store = accessors._store()
     token = uuid4().hex
     for record in await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED})):
@@ -108,10 +113,11 @@ async def redrive_accepted() -> None:
 
 async def _owns_inbound_claim(store: ConversationRecordStore, record: ConversationRecord) -> bool:
     """Whether ``record`` is the one its inbound claim is committed to — claim-family-aware.
+
     An event record arbitrates against the event dedupe family
-    (``get_event_owner``/``claim_event`` on ``(route, event_id)``); a channel message record
-    against the channel pair; an api-door message record has no provider id to dedupe on and
-    is its own authority."""
+    (``get_event_owner``/``claim_event`` on ``(route, event_id)``); a channel message record against the
+    channel pair; an api-door message record has no provider id to dedupe on and is its own authority.
+    """
     if record.inbound_kind == "event":
         event = record.inbound_event or {}
         owner = await store.claim_event(record.route_name, event["event_id"], record.message_id)
@@ -123,9 +129,10 @@ async def _owns_inbound_claim(store: ConversationRecordStore, record: Conversati
 
 
 async def _fail_stranded_turn(store: ConversationRecordStore, record: ConversationRecord) -> None:
-    """Give an intake record the error outcome its interrupted turn never produced and
-    spawn its delivery — the one resolution both the in-process watcher and the periodic
-    re-drive apply. Losing the guarded transition leaves the existing outcome standing.
+    """Give an intake record the error outcome its interrupted turn never produced and spawn its delivery.
+
+    The one resolution both the in-process watcher and the periodic re-drive apply. Losing the guarded
+    transition leaves the existing outcome standing.
 
     The intake record carries its ``route_name``, so the participant-facing text resolves the
     route's ``error_reply_text`` best-effort: the route is looked up through the conversations
@@ -133,7 +140,8 @@ async def _fail_stranded_turn(store: ConversationRecordStore, record: Conversati
     built-in default. This is an interrupted-turn/lease-lapse repair path, so it must never be
     less robust than a bare default — the lookup only ever upgrades the text, never blocks the
     outcome. Only the participant-facing ``answer`` resolves through the route; the record's ``error``
-    detail and the logs keep the built-in wording."""
+    detail and the logs keep the built-in wording.
+    """
     try:
         route = await cache.get_conversations_manager().get_route(record.route_name)
     except Exception:

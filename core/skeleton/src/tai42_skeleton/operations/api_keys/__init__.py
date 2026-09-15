@@ -1,5 +1,7 @@
-"""Operations for the access-control keys/scopes surface — the authed doors the
-Studio's API-keys settings tab consumes, projected from one declaration.
+"""Operations for the access-control keys/scopes surface.
+
+The authed doors the Studio's API-keys settings tab consumes, projected from one
+declaration.
 
 Nineteen operations for the access-control keys/scopes surface: the scope
 catalog + CRUD, the route catalog, the public-route pins, the key CRUD (create /

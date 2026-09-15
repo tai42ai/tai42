@@ -54,7 +54,8 @@ def reserve_active_slot(limit: int) -> bool:
     package object so the single mutable binding is shared with the submit door's
     reset patch. Check-and-increment is done with no ``await`` between the read and
     the ``+= 1``, so two concurrent submits cannot both pass the check on the single
-    event loop. Returns ``False`` (no slot taken) when ``limit <= _ACTIVE_RUNS``."""
+    event loop. Returns ``False`` (no slot taken) when ``limit <= _ACTIVE_RUNS``.
+    """
     if limit <= _pkg._ACTIVE_RUNS:
         return False
     _pkg._ACTIVE_RUNS += 1
@@ -62,17 +63,21 @@ def reserve_active_slot(limit: int) -> bool:
 
 
 def release_active_slot() -> None:
-    """Return one concurrency slot to the pool — the ``-= 1`` the submit door's
-    ``except`` and each supervisor's done-callback perform on the package-homed
-    ``_ACTIVE_RUNS`` counter."""
+    """Return one concurrency slot to the pool.
+
+    The ``-= 1`` the submit door's ``except`` and each supervisor's done-callback perform on the package-homed
+    ``_ACTIVE_RUNS`` counter.
+    """
     _pkg._ACTIVE_RUNS -= 1
 
 
 def _enroll_supervisor(task: asyncio.Task[None]) -> None:
-    """Register ``task`` in the drain registry and tag it with the epoch that ADMITTED
-    its run, so a whole-server drain cancels-and-awaits it and an epoch retire drains
+    """Register ``task`` in the drain registry and tag it with the epoch that ADMITTED its run.
+
+    A whole-server drain cancels-and-awaits it and an epoch retire drains
     exactly this generation's runs — sequencing its terminal write ahead of the pooled
-    clients' close. A ``None`` epoch (a loop-less unit context) tags nothing."""
+    clients' close. A ``None`` epoch (a loop-less unit context) tags nothing.
+    """
     from tai42_skeleton.app.epoch import current_epoch_or_none
 
     _SUPERVISORS.add(task)
@@ -82,9 +87,11 @@ def _enroll_supervisor(task: asyncio.Task[None]) -> None:
 
 
 def _discard_supervisor(task: asyncio.Task[None]) -> None:
-    """Drop the drain registry's strong reference and epoch tag for a finished
-    supervisor. Reserves no ``_ACTIVE_RUNS`` slot to release — the caller that reserved
-    one (the submit door) releases it in its own done-callback."""
+    """Drop the drain registry's strong reference and epoch tag for a finished supervisor.
+
+    Reserves no ``_ACTIVE_RUNS`` slot to release — the caller that reserved one (the submit door) releases it in
+    its own done-callback.
+    """
     _SUPERVISORS.discard(task)
     _SUPERVISOR_EPOCH.pop(task, None)
 
@@ -94,22 +101,23 @@ def _spawn_supervisor(run_id: str, tool_name: str, arguments: dict[str, Any]) ->
 
     The task must be spawned HERE so it copies the submitting context: that carries a
     bound execution identity into the run, which is what authorizes the dispatch
-    :func:`_supervise` makes long after the submitting fire released its binding."""
+    :func:`_supervise` makes long after the submitting fire released its binding.
+    """
     task = asyncio.create_task(_supervise(run_id, tool_name, arguments))
     _enroll_supervisor(task)
     task.add_done_callback(lambda t: _on_supervisor_done(t, run_id, tool_name))
 
 
 def _on_supervisor_done(task: asyncio.Task[None], run_id: str, tool_name: str) -> None:
-    """Done-callback for a supervisor task: drop the strong reference AND surface a
-    failure at completion time.
+    """Done-callback for a supervisor task: drop the strong reference AND surface a failure at completion time.
 
     The supervisor's inner ``try`` persists a tool that raises as a ``failed``
     record, but a failure BEFORE it (e.g. the ``client_ctx`` enter raising because
     Redis died after submit) escapes that guard — asyncio would then report it only
     via the nondeterministic 'never retrieved' message at GC. Logging it here with
     the ``run_id``/``tool_name`` makes it a timely, attributable signal. A
-    cancellation (test teardown / shutdown) is the normal stop and stays silent."""
+    cancellation (test teardown / shutdown) is the normal stop and stays silent.
+    """
     _discard_supervisor(task)
     # Release the concurrency slot the submit door reserved for this run. Every
     # spawned supervisor reaches this callback exactly once, so the count returns
@@ -123,13 +131,15 @@ def _on_supervisor_done(task: asyncio.Task[None], run_id: str, tool_name: str) -
 
 
 async def _refresh_liveness_loop(r: Any, store: ToolRunStore, run_id: str, settings: ToolRunsSettings) -> None:
-    """Re-set the run's liveness key every ``liveness_ttl_seconds / 3`` — a
-    constant cadence — so a live run (including a slow sync tool offloaded to a
-    thread, which leaves the loop free to run this task) never looks ``lost``.
+    """Re-set the run's liveness key every ``liveness_ttl_seconds / 3`` — a constant cadence.
+
+    So a live run (including a slow sync tool offloaded to a thread, which leaves the loop free to run this task)
+    never looks ``lost``.
 
     A transient failure of a single refresh is logged and the loop CONTINUES: one
     failed ``SET`` must never stop the refresher, or a still-``running`` run would
-    lose liveness while alive and be wrongly reconciled to ``lost``."""
+    lose liveness while alive and be wrongly reconciled to ``lost``.
+    """
     cadence = settings.liveness_ttl_seconds / 3
     while True:
         try:
@@ -151,7 +161,8 @@ async def _supervise(
     caller's own failure surfacing (the hooks fan-out's per-hook error log) still fires.
     The detached submit supervisor leaves it off — it is the top of its task, with no caller
     to propagate to, so a recorded failure is the whole outcome (a re-raise would only reach
-    the done-callback's generic task-failure log)."""
+    the done-callback's generic task-failure log).
+    """
     settings = _pkg.tool_runs_settings()
     store = ToolRunStore(settings.key_prefix)
     async with _pkg.client_ctx(RedisClient, settings.redis) as r:
@@ -251,8 +262,9 @@ async def _supervise(
 
 
 async def run_recorded(tool_name: str, arguments: dict[str, Any]) -> None:
-    """Execute ``tool_name`` under the CURRENTLY bound execution identity, writing the
-    SAME full run-record lifecycle (running -> succeeded/failed) a background submit
+    """Execute ``tool_name`` under the CURRENTLY bound execution identity, writing the full run-record lifecycle.
+
+    Writes the SAME running -> succeeded/failed lifecycle a background submit
     writes — so a hook- or trigger-dispatched fire is listable via ``GET /api/tool-runs``
     and gettable by run id exactly as a submitted run, attributed to and indexed under the
     fire's execution key.
@@ -263,7 +275,8 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any]) -> None:
     Reserves NO ``max_concurrent_runs`` slot and detaches no supervisor task: the run is
     awaited inline and its capacity is the CALLER's to bound (the hooks manager's
     ``max_workers`` semaphore), never the submit door's per-worker slot pool. A failure
-    creating the record propagates loudly to the caller."""
+    creating the record propagates loudly to the caller.
+    """
     from . import reconcile
 
     if not tool_runs_store_configured():
@@ -336,10 +349,10 @@ async def drain_supervisors(
     epoch: int | None = None,
     reason: str = _DEFAULT_CANCEL_REASON,
 ) -> None:
-    """Cancel in-flight supervisors and wait, bounded, for each to write its terminal
-    ``failed`` record naming ``reason``.
+    """Cancel in-flight supervisors and wait, bounded, for each to write its terminal ``failed`` record.
 
-    Reused by two retire paths: process shutdown (:func:`_drain_supervisors`, all runs)
+    Each terminal record names ``reason``. Reused by two retire paths: process shutdown
+    (:func:`_drain_supervisors`, all runs)
     and an epoch retire (a settings-profile apply swaps in a fresh serving surface and
     retires the old one). With ``epoch`` given, cancels ONLY the runs that generation
     admitted — a run admitted on the fresh epoch during the retire is left running;
@@ -349,7 +362,8 @@ async def drain_supervisors(
     ``reason`` is passed as the cancel message so each cancelled run records the actual
     cause. ``deadline`` is a drain budget in SECONDS — a relative duration, not an
     absolute time (mirrors the kit's ``drain_epoch`` vocabulary); defaults to
-    ``shutdown_drain_seconds``."""
+    ``shutdown_drain_seconds``.
+    """
     tasks = [t for t in _SUPERVISORS if not t.done() and (epoch is None or _SUPERVISOR_EPOCH.get(t) == epoch)]
     if not tasks:
         return
@@ -367,9 +381,9 @@ async def drain_supervisors(
 
 @tai42_app.lifecycle.on_shutdown
 async def _drain_supervisors() -> None:
-    """Cancel every in-flight supervisor at shutdown and drain them bounded by
-    ``shutdown_drain_seconds``.
+    """Cancel every in-flight supervisor at shutdown and drain them bounded by ``shutdown_drain_seconds``.
 
     Shutdown handlers run BEFORE ``_teardown_resources`` closes the pooled clients,
-    so a cancelled supervisor still has a live Redis to write through."""
+    so a cancelled supervisor still has a live Redis to write through.
+    """
     await drain_supervisors(reason="the server is shutting down before the tool-run completed")

@@ -1,7 +1,7 @@
-"""The builtin subject-state tools: ``state_read`` / ``state_replace`` /
-``state_merge`` / ``state_apply`` — LLM-facing shims over the door-agnostic
-``tai42_app.states`` facet that let an agent read and write the calling subject's
-document.
+"""The builtin subject-state tools: ``state_read`` / ``state_replace`` / ``state_merge`` / ``state_apply``.
+
+LLM-facing shims over the door-agnostic ``tai42_app.states`` facet that let an agent read and write
+the calling subject's document.
 
 A *state* is a declared JSON document, one per *subject*
 (``{target_kind, target_name, kind, key}``). These tools take an OPTIONAL
@@ -57,10 +57,12 @@ _RESULT_SCHEMA: dict[str, Any] = {
 
 
 def _origin(op_id: str | None = None) -> WriteOrigin:
-    """The consumer-only :class:`WriteOrigin` a state tool supplies: the invoked
-    tool's name as ``consumer``, the ambient run's ``session_id`` as ``run_id`` when a
-    run is attributed, and the caller's ``op_id``. ``door``/``actor``/``turn_id`` are
-    absent — the facet stamps them from the ambient context, never the tool."""
+    """The consumer-only :class:`WriteOrigin` a state tool supplies.
+
+    Carries the invoked tool's name as ``consumer``, the ambient run's ``session_id`` as ``run_id``
+    when a run is attributed, and the caller's ``op_id``. ``door``/``actor``/``turn_id`` are absent
+    — the facet stamps them from the ambient context, never the tool.
+    """
     invocation = current_tool_invocation()
     attribution = get_run_attribution()
     return WriteOrigin(
@@ -78,7 +80,8 @@ async def _resolve_subject(state: str, subject: dict[str, Any] | None) -> StateS
     ``{kind, key}`` takes its target from the ambient context; an omitted subject
     resolves the candidate the door knows for the state's ``default_subject_kind``.
     Every unresolvable case raises :class:`SubjectRefusedError` naming what is missing —
-    never a silent unaddressed write."""
+    never a silent unaddressed write.
+    """
     ctx = tai42_app.states.context()
     if subject is not None:
         has_target_kind = "target_kind" in subject

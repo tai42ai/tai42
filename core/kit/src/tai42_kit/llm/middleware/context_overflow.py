@@ -1,3 +1,5 @@
+"""Context-overflow middlewares that keep an agent's message history within the model's token budget."""
+
 from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any, cast

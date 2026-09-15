@@ -1,9 +1,9 @@
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useChatStream } from '@/use-chat-stream';
+import { BACKLOG_DONE, closing, HELLO } from '@/stream-driver.test-support';
 import { reconnectDelayMs } from '@/transcript-subscription';
-import { BACKLOG_DONE, HELLO, closing } from '@/stream-driver.test-support';
+import { useChatStream } from '@/use-chat-stream';
 
 const api = vi.hoisted(() => ({ openChatStream: vi.fn() }));
 

@@ -60,6 +60,7 @@ def _write_target() -> dict[str, ProviderDescriptor]:
 
 
 def register_connector(descriptor: ProviderDescriptor) -> None:
+    """Register ``descriptor`` in the write-target generation, rejecting a duplicate id or unseeded category."""
     target = _write_target()
     if descriptor.id in target:
         raise ValueError(f"Provider {descriptor.id!r} already registered")
@@ -75,10 +76,12 @@ def register_connector(descriptor: ProviderDescriptor) -> None:
 
 
 def reset_registry() -> None:
-    """Clear the write-target provider registry — the STAGED generation while a build is
-    staging (``start()`` clears the fresh staged map before re-registering the
-    manifest's ``connectors`` entries, never the committed one), else the committed
-    map (boot, test isolation)."""
+    """Clear the write-target provider registry.
+
+    The target is the STAGED generation while a build is staging (``start()`` clears the fresh
+    staged map before re-registering the manifest's ``connectors`` entries, never the committed
+    one), else the committed map (boot, test isolation).
+    """
     _write_target().clear()
 
 
@@ -96,8 +99,10 @@ def list_providers() -> list[ProviderDescriptor]:
 
 
 def list_providers_staged() -> list[ProviderDescriptor]:
-    """Every descriptor in the STAGED generation if a build is staging, else the
-    committed one — the build's own view (kind status)."""
+    """Every descriptor in the STAGED generation if a build is staging, else the committed one.
+
+    The build's own view (kind status).
+    """
     return list(_write_target().values())
 
 

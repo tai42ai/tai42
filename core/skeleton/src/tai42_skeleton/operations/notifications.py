@@ -71,10 +71,12 @@ with warnings.catch_warnings():
     warnings.filterwarnings("ignore", message='Field name "schema"', category=UserWarning)
 
     class NotifyUser(BaseModel):
-        """A notification to send: the ``message`` text, an optional named ``channel``
-        that carries it (omit to record to the internal sink), an optional per-call
-        ``recipient`` delivery address, and an optional ``audience`` identity whose in-app
-        inbox shows it (honored even with a channel set; distinct from ``recipient``)."""
+        """A notification to send.
+
+        The ``message`` text, an optional named ``channel`` that carries it (omit to record to the internal sink),
+        an optional per-call ``recipient`` delivery address, and an optional ``audience`` identity whose in-app
+        inbox shows it (honored even with a channel set; distinct from ``recipient``).
+        """
 
         message: str
         channel: str | None = None
@@ -213,7 +215,8 @@ async def list_notifications() -> dict:
 
     A RESTRICTED caller reads its OWN per-identity feed (complete within its own
     bound — never truncated by other identities' volume, never a broadcast); an
-    UNRESTRICTED caller reads the shared feed unchanged (today's operator view)."""
+    UNRESTRICTED caller reads the shared feed unchanged (today's operator view).
+    """
     # OFF gate: the internal feed lives on the interactions Redis; with none
     # configured the honest answer is the empty collection — no store touched.
     if not interactions_store_configured():
@@ -307,7 +310,7 @@ async def notify_user(
         if sender_identity is not None:
             # Rejected BEFORE any send: a caller must not choose which operator identity a
             # message leaves from.
-            raise SenderIdentityNotAllowedError(
+            raise SenderIdentityNotAllowedError(  # noqa: TRY301 raised to funnel through this function's own translate path (→ BadRequestError), unifying with _notify_user's identical rejection
                 "sender_identity is set internally by the conversation bridge and cannot be supplied by a caller"
             )
         await _notify_user(

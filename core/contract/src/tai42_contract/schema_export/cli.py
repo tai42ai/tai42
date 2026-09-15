@@ -21,6 +21,7 @@ from tai42_contract.schema_export.registry import (
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the schema-export CLI, returning the process exit code (non-zero on ``--check`` drift)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", metavar="PATH", help="Write the bundle to PATH instead of stdout.")
     parser.add_argument(

@@ -33,7 +33,7 @@ import yaml
 
 from tai42_e2e import StackConfig, Topology, wait_for_async
 from tai42_e2e.manifests import build_bare_stack, build_connectors_stack
-from tai42_e2e.waiting import WaitTimeout
+from tai42_e2e.waiting import WaitTimeoutError
 
 if TYPE_CHECKING:
     from tai42_e2e import StackResources
@@ -209,7 +209,7 @@ async def converged_digest(stack: TaiStack, *, deadline: float = 60.0, differ_fr
     async def attempt() -> str | None:
         try:
             seen = await stack.wait_workers(FLEET_WORKERS, deadline=10.0)
-        except WaitTimeout:
+        except WaitTimeoutError:
             return None
         last_seen.clear()
         last_seen.update(seen)
@@ -225,8 +225,8 @@ async def converged_digest(stack: TaiStack, *, deadline: float = 60.0, differ_fr
 
     try:
         return await wait_for_async(attempt, deadline=deadline, message="")
-    except WaitTimeout as exc:
-        raise WaitTimeout(
+    except WaitTimeoutError as exc:
+        raise WaitTimeoutError(
             f"the {FLEET_WORKERS}-worker fleet never reached: {goal} "
             f"(after {deadline:.1f}s; last per-pid digests: "
             f"{ {pid: d[:12] for pid, d in last_seen.items()} }; "

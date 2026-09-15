@@ -1,3 +1,5 @@
+"""Access-policy fetch, caching, and condition enforcement for the access-control gate."""
+
 import json
 from typing import Any
 
@@ -13,16 +15,18 @@ from tai42_skeleton.access_control.store import access_control_store
 
 
 class PolicyEvaluationError(Exception):
-    """An INFRASTRUCTURE fault while evaluating a policy condition — a jq timeout, a
-    render/template fault, an eval error — as distinct from a genuine policy DENY
-    (which stays an ``AuthenticationError``).
+    """An INFRASTRUCTURE fault while evaluating a policy condition, distinct from a policy DENY.
+
+    A jq timeout, a render/template fault, or an eval error — as distinct from a genuine policy
+    DENY (which stays an ``AuthenticationError``).
 
     Deliberately NOT an ``AuthenticationError`` subclass: a caller that narrowly
     catches the deny type to fail closed (the projection build) then lets an
     infrastructure fault PROPAGATE loudly instead of silently swallowing it as a
     deny — a vanished route in an otherwise-200 projection. The runtime gate
     (``backend``/``authz``) catches broad ``Exception`` and so still fails closed on
-    it."""
+    it.
+    """
 
 
 def policy_is_empty(policy: AccessPolicy) -> bool:
@@ -32,12 +36,16 @@ def policy_is_empty(policy: AccessPolicy) -> bool:
     back as exactly this, so every layer that must refuse such a principal (the tokenless
     identity build, the tool edge's live re-read, the execution-key bind door, the HTTP
     backend's owner check) asks the same question and can never disagree about which
-    keys exist."""
+    keys exist.
+    """
     return not policy.scopes and policy.condition is None
 
 
 class PolicyEnforcer:
+    """Fetches, caches, and enforces a principal's access policy."""
+
     def __init__(self, settings: AccessControlSettings):
+        """Bind ``settings`` and build the version-keyed policy cache."""
         self.settings = settings
 
         # Cache for Policy (Static Rules). The cache is keyed on (user_id,
@@ -59,8 +67,9 @@ class PolicyEnforcer:
         return await self.get_policy_at(user_id, await self._current_policy_version())
 
     async def get_policy_at(self, user_id: str, version: int) -> AccessPolicy:
-        """Fetch policy for a specific user at an ALREADY-READ ``version`` — the form
-        :meth:`get_policy` is built on, for a decision that reads several policies (a
+        """Fetch policy for a specific user at an ALREADY-READ ``version``.
+
+        The form :meth:`get_policy` is built on, for a decision that reads several policies (a
         key's and its owner's) and then keys a further pass on the same version.
 
         ``version`` is a CACHE key, not a store coordinate: the fetch always reads the
@@ -74,9 +83,11 @@ class PolicyEnforcer:
         return await self._fetch_policy(user_id, version)
 
     async def current_policy_version(self) -> int:
-        """The current policy version (a cheap single-key GET) — the cache key the LIVE
-        per-tag grant resolution mixes in, so a role edit's version bump busts it. A
-        backend error fails closed by RAISING (surfaces as a clean deny)."""
+        """The current policy version (a cheap single-key GET).
+
+        The cache key the LIVE per-tag grant resolution mixes in, so a role edit's version bump
+        busts it. A backend error fails closed by RAISING (surfaces as a clean deny).
+        """
         return await self._current_policy_version()
 
     async def _current_policy_version(self) -> int:
@@ -105,8 +116,8 @@ class PolicyEnforcer:
         return AccessPolicy(**data)
 
     async def get_live_context(self, user_id: str) -> dict[str, Any]:
-        """
-        Fetches dynamic context (usage, counters) - ALWAYS fresh from Redis.
+        """Fetches dynamic context (usage, counters) - ALWAYS fresh from Redis.
+
         No caching here to ensure security enforcement is based on live data.
 
         The context is stored as a Redis HASH at ``ac:context:{user_id}``: each
@@ -136,11 +147,13 @@ class PolicyEnforcer:
         return {field: json.loads(value) for field, value in raw.items()}
 
     async def get_auth_data(self, user_id: str) -> tuple[AccessPolicy, dict[str, Any]]:
+        """Fetch a user's policy and live context together."""
         policy = await self.get_policy(user_id)
         context = await self.get_live_context(user_id)
         return policy, context
 
     async def enforce(self, context: dict[str, Any], expression: str | None, *, condition_configured: bool = False):
+        """Evaluate the policy condition against ``context``, raising ``AuthenticationError`` on deny."""
         if not expression:
             # Distinguish "no condition configured" from "a condition was
             # configured but rendered to empty". When a condition WAS configured
@@ -159,7 +172,7 @@ class PolicyEnforcer:
             result = await run_jq_first(expression, context)
 
             if result is not True:
-                raise AuthenticationError("Policy violation")
+                raise AuthenticationError("Policy violation")  # noqa: TRY301 deny raised in-try so the AuthenticationError branch re-raises it distinctly from an infra fault
 
         except AuthenticationError:
             # A genuine policy DENY — re-raise as-is so callers can distinguish it from

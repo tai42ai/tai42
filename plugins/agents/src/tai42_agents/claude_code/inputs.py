@@ -1,5 +1,4 @@
-"""The tool-face parameter models for ``claude_code``: the run input and its inline
-subagent/skill shapes."""
+"""The tool-face parameter models for ``claude_code``: the run input and its inline subagent/skill shapes."""
 
 from __future__ import annotations
 

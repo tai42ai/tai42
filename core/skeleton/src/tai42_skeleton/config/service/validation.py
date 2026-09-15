@@ -1,6 +1,8 @@
-"""Validation on the resolved projection of a manifest / env / profile-replace change —
-the pydantic ``Manifest`` schema, the boundary refusals (X-band, key material, dangling
-``!ENV``, incomplete admin pair), and the backend-needs-bus invariant in both directions."""
+"""Validation on the resolved projection of a manifest / env / profile-replace change.
+
+Covers the pydantic ``Manifest`` schema, the boundary refusals (X-band, key material, dangling
+``!ENV``, incomplete admin pair), and the backend-needs-bus invariant in both directions.
+"""
 
 from __future__ import annotations
 
@@ -24,26 +26,32 @@ if TYPE_CHECKING:
 
 
 class _ValidationMixin(_ConfigServiceBase):
-    """The validate-before-persist gate every pipeline entrypoint runs the resolved
-    projection of its change through."""
+    """The validate-before-persist gate every pipeline entrypoint runs its change through.
+
+    The resolved projection of a change is validated here before it is persisted.
+    """
 
     def _validate_manifest(self, document: Mapping[str, Any]) -> None:
-        """Validate the resolved projection of a manifest change: the pydantic
-        ``Manifest`` schema plus the backend-needs-bus invariant, and refuse any
-        ``!ENV`` marker left dangling against the current env. The env is unchanged
-        by a manifest mutation, so markers resolve against the current process env and
-        the bus configuration is the current one."""
+        """Validate the resolved projection of a manifest change.
+
+        Checks the pydantic ``Manifest`` schema plus the backend-needs-bus invariant, and refuses
+        any ``!ENV`` marker left dangling against the current env. The env is unchanged by a
+        manifest mutation, so markers resolve against the current process env and the bus
+        configuration is the current one.
+        """
         manifest = self._validated_projection(document)
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_settings().enabled)
         refuse_unresolved_env(document, dict(os.environ))
 
     def _validate_env(self, changes: dict[str, str]) -> None:
-        """Validate the effective config an env change produces: refuse an X-band key
-        in the change PAYLOAD, resolve the persisted manifest's ``!ENV`` markers
-        against the post-change env (so a marker that materializes a backend
-        participates, and a dropped reference is caught as dangling), and evaluate the
-        backend-needs-bus invariant against the post-change bus configuration (so
-        removing the bus while a backend remains is rejected too)."""
+        """Validate the effective config an env change produces.
+
+        Refuses an X-band key in the change PAYLOAD, resolves the persisted manifest's ``!ENV``
+        markers against the post-change env (so a marker that materializes a backend participates,
+        and a dropped reference is caught as dangling), and evaluates the backend-needs-bus
+        invariant against the post-change bus configuration (so removing the bus while a backend
+        remains is rejected too).
+        """
         refuse_x_band(changes.keys())
         # Change-aware: refuse a key-material key only when the payload SETS it to a value
         # different from the current stored value (rotation-via-editor), never an unchanged
@@ -70,7 +78,8 @@ class _ValidationMixin(_ConfigServiceBase):
         ``!ENV`` markers against the post-change effective env (so the marker the mutator
         just wrote resolves against the value the env write supplies, and a dropped
         reference is caught as dangling), validates the resolved projection, and
-        evaluates backend-needs-bus against the post-change bus configuration."""
+        evaluates backend-needs-bus against the post-change bus configuration.
+        """
         refuse_x_band(changes.keys())
         # Change-aware key-material refusal (see :meth:`_validate_env`): a CHANGE to a KEK /
         # signing key is refused, an unchanged carry is allowed.
@@ -84,14 +93,16 @@ class _ValidationMixin(_ConfigServiceBase):
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
 
     def _validate_replace(self, profile_env: dict[str, str]) -> None:
-        """Validate a whole-env REPLACE (a settings-profile apply) before it persists —
-        the apply's validate-before-persist entry, mirroring :meth:`ConfigService.apply_replace`.
+        """Validate a whole-env REPLACE (a settings-profile apply) before it persists.
+
+        The apply's validate-before-persist entry, mirroring :meth:`ConfigService.apply_replace`.
 
         Refuses any X-band key in the profile's DECLARED payload (NEVER the post-carry
         effective env — the applier legitimately CARRIES the whole X band across
         ``replace_env``), refuses a change that leaves a manifest ``!ENV`` marker
         dangling against the replace-effective env, and evaluates the backend-needs-bus
-        invariant against that same env."""
+        invariant against that same env.
+        """
         refuse_x_band(profile_env.keys())
         # Change-aware key-material refusal: a profile snapshotted from the stored env carries
         # the KEK unchanged (allowed); only a profile that would SET key material to a new
@@ -114,7 +125,9 @@ class _ValidationMixin(_ConfigServiceBase):
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
 
     def _validated_projection(self, document: Mapping[str, Any]) -> Manifest:
-        """Build the RESOLVED in-memory projection of a PRESERVED document (``!ENV``
-        markers materialized for validation only) and validate it against the
-        ``Manifest`` schema. Raises on an invalid document."""
+        """Build and validate the RESOLVED in-memory projection of a PRESERVED document.
+
+        The ``!ENV`` markers are materialized for validation only, then the projection is validated
+        against the ``Manifest`` schema. Raises on an invalid document.
+        """
         return Manifest.model_validate(self._resolve(document))

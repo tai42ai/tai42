@@ -1,5 +1,4 @@
-"""The route-metadata registry — the single source of truth for the app's
-self-describing HTTP surface.
+"""The route-metadata registry — the single source of truth for the app's self-describing HTTP surface.
 
 Every ``@tai42_app.http.custom_route(...)`` registration records a
 :class:`RouteMetadata` entry here (see :mod:`tai42_skeleton.app.http`). Two
@@ -44,7 +43,7 @@ from __future__ import annotations
 
 from tai42_skeleton.app.route_registry.metadata import (
     CORE_OWNER,
-    CrossOwnerRouteCollision,
+    CrossOwnerRouteCollisionError,
     DeclaredRouteMetadata,
     EpochRouteAuditError,
     RouteMetadata,
@@ -71,7 +70,7 @@ from tai42_skeleton.app.route_shapes import Shape
 __all__ = [
     "CORE_OWNER",
     "MOUNT_METHODS",
-    "CrossOwnerRouteCollision",
+    "CrossOwnerRouteCollisionError",
     "DeclaredRouteMetadata",
     "EpochRouteAuditError",
     "Handler",

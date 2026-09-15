@@ -32,16 +32,21 @@ CLAUDE_AGENT_SDK_VERSION = "0.2.144"
 
 
 class ProtocolError(RuntimeError):
-    """A malformed, unknown-version, or unknown-type frame, or a runner ``fatal`` — every
-    protocol fault raises this rather than degrading to a partial outcome."""
+    """A malformed, unknown-version, or unknown-type frame, or a runner ``fatal``.
+
+    Every protocol fault raises this rather than degrading to a partial outcome.
+    """
 
 
 # --- Down frames (adapter -> runner) -------------------------------------------------------
 
 
 class StartFrame(BaseModel):
-    """Kick off one turn: the options payload, the prompt, the requested-tool allowlist, the
-    skills list, and the adapter's pinned SDK version (echoed back for the ``hello`` gate)."""
+    """Kick off one turn.
+
+    The options payload, the prompt, the requested-tool allowlist, the skills list, and the
+    adapter's pinned SDK version (echoed back for the ``hello`` gate).
+    """
 
     v: int = PROTOCOL_VERSION
     type: Literal["start"] = "start"
@@ -84,8 +89,10 @@ class StopFrame(BaseModel):
 
 
 class HelloFrame(BaseModel):
-    """The init frame at stream start: the runner's ACTUAL SDK version and the effective SDK
-    session id (captured here, before any turn work, so a first-turn park still records it)."""
+    """The init frame at stream start: the runner's ACTUAL SDK version and the effective SDK session id.
+
+    Captured here, before any turn work, so a first-turn park still records it.
+    """
 
     v: int = PROTOCOL_VERSION
     type: Literal["hello"] = "hello"
@@ -102,8 +109,10 @@ class EventFrame(BaseModel):
 
 
 class AskFrame(BaseModel):
-    """The runner's in-process ``ask_user`` tool blocked on a question; ``mode`` selects the
-    sync/async wait discipline (the model chose it, default sync)."""
+    """The runner's in-process ``ask_user`` tool blocked on a question.
+
+    ``mode`` selects the sync/async wait discipline (the model chose it, default sync).
+    """
 
     v: int = PROTOCOL_VERSION
     type: Literal["ask"] = "ask"

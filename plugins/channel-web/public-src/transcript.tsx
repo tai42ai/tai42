@@ -13,9 +13,9 @@
  * day, with a time stamp on the first entry of each group. A group breaks on a new
  * day, on a gap of {@link GROUP_GAP_MS}, or when the speaker changes.
  */
+import { ArrowDownIcon, Button, EmptyState, Spinner } from '@tai42/studio-sdk';
 import type { ReactElement } from 'react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownIcon, Button, EmptyState, Spinner } from '@tai42/studio-sdk';
 
 import { Bubble, type SendStatus } from '@/bubble';
 import { FormCard, type FormCardItem } from '@/form-card';
@@ -264,6 +264,7 @@ export function Transcript({
         aria-live={announce ? 'polite' : 'off'}
         aria-relevant="additions"
         aria-label="Conversation"
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- role="log" focusable scroll region for keyboard scroll
         tabIndex={0}
       >
         {loading ? (

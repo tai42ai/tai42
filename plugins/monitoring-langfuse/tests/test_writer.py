@@ -24,7 +24,7 @@ def test_start_span_emits_observation_and_exits_cm(manager, mock_client):
     obs = _enter_obs(mock_client)
     writer = LangfuseWriter(manager)
 
-    with writer.start_span(name="node", kind=SpanKind.TOOL, input={"a": 1}) as span:
+    with writer.start_span(name="node", kind=SpanKind.TOOL, input_={"a": 1}) as span:
         span.update(output="result", usage_details={"input": 5})
 
     kwargs = mock_client.start_as_current_observation.call_args.kwargs
@@ -130,7 +130,7 @@ def test_record_span_maps_to_explicit_time_emission(manager, mock_client, monkey
         start=t0,
         end=t1,
         trace_context=TraceContext(trace_id="t1", parent_span_id="p1"),
-        input={"a": 1},
+        input_={"a": 1},
         output="r",
         level=MonitoringLevel.WARNING,
         usage_details={"input": 3},
@@ -143,7 +143,7 @@ def test_record_span_maps_to_explicit_time_emission(manager, mock_client, monkey
     assert captured["end"] == t1
     assert captured["trace_id"] == "t1"
     assert captured["parent_span_id"] == "p1"
-    assert captured["input"] == {"a": 1}
+    assert captured["input_"] == {"a": 1}
     assert captured["output"] == "r"
     assert captured["level"] == "WARNING"
     assert captured["usage_details"] == {"input": 3}
@@ -177,7 +177,7 @@ def test_record_span_is_fail_safe(manager, monkeypatch):
 
 def test_create_event_and_update_current_span(manager, mock_client):
     writer = LangfuseWriter(manager)
-    writer.create_event(name="evt", input={"i": 1}, output={"o": 2})
+    writer.create_event(name="evt", input_={"i": 1}, output={"o": 2})
     writer.update_current_span(level=MonitoringLevel.ERROR, status_message="bad")
 
     assert mock_client.create_event.call_args.kwargs["level"] == "DEFAULT"
@@ -218,7 +218,7 @@ def test_start_span_input_masks_secrets(manager, mock_client):
     _enter_obs(mock_client)
     writer = LangfuseWriter(manager)
 
-    with writer.start_span(name="x", kind=SpanKind.TOOL, input={"api_key": SecretValue("sk-live-REAL")}):
+    with writer.start_span(name="x", kind=SpanKind.TOOL, input_={"api_key": SecretValue("sk-live-REAL")}):
         pass
 
     kwargs = mock_client.start_as_current_observation.call_args.kwargs
@@ -251,18 +251,18 @@ def test_record_span_masks_secret_input_and_output(manager, mock_client, monkeyp
         start=datetime.now(UTC),
         end=datetime.now(UTC),
         trace_context=TraceContext(trace_id="t1"),
-        input={"token": SecretValue("tok-REAL")},
+        input_={"token": SecretValue("tok-REAL")},
         output=[SecretValue("out-REAL")],
     )
 
-    assert captured["input"] == {"token": SECRET_PLACEHOLDER}
+    assert captured["input_"] == {"token": SECRET_PLACEHOLDER}
     assert captured["output"] == [SECRET_PLACEHOLDER]
-    assert "REAL" not in repr((captured["input"], captured["output"]))
+    assert "REAL" not in repr((captured["input_"], captured["output"]))
 
 
 def test_create_event_masks_secret_input_and_output(manager, mock_client):
     writer = LangfuseWriter(manager)
-    writer.create_event(name="evt", input={"secret": SecretValue("s-REAL")}, output={"secret": SecretValue("o-REAL")})
+    writer.create_event(name="evt", input_={"secret": SecretValue("s-REAL")}, output={"secret": SecretValue("o-REAL")})
 
     kwargs = mock_client.create_event.call_args.kwargs
     assert kwargs["input"] == {"secret": SECRET_PLACEHOLDER}

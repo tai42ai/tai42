@@ -12,6 +12,7 @@ each case is deterministic.
 
 from __future__ import annotations
 
+import importlib.metadata
 from typing import Any
 
 import pytest
@@ -26,7 +27,7 @@ from tai42_skeleton.marketplace.errors import (
 from tai42_skeleton.marketplace.routes import OwnedRoute
 
 from ._specs import make_resolved, make_spec, router_item
-from .test_installer import Harness, installer_module
+from .test_installer import Harness
 
 
 def _owned(path: str, methods: list[str], *, label: str = "core", ref: str | None = None) -> OwnedRoute:
@@ -43,7 +44,7 @@ def _reserved() -> list[str]:
 def _stamp_versions(monkeypatch: pytest.MonkeyPatch) -> None:
     # The attribution write stamps the running core versions; pin them so a full
     # install through the harness needs no live distribution metadata.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
 
 
 def _router_spec(*, base: str = "relay", paths: list[dict[str, Any]] | None = None):

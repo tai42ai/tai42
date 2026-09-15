@@ -1,5 +1,6 @@
-"""Select and run the route's target (tool / agent / manual / pairing) and build the
-completed record the transition persists.
+"""Select and run the route's target (tool / agent / manual / pairing).
+
+Builds the completed record the transition persists.
 """
 
 from __future__ import annotations
@@ -35,8 +36,9 @@ async def _target_outcome(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> _ToolOutcome:
-    """The route's TARGET turn as an outcome: a tool dispatch (which may be silent) or an
-    agent run (always answered/error). The single dispatch both the plain and the
+    """The route's TARGET turn as an outcome: a tool dispatch (which may be silent) or an agent run.
+
+    An agent run is always answered/error. The single dispatch both the plain and the
     multichannel paths route ordinary text to. ``person``, ``params``, ``form`` (the structured
     inbound submission), ``attachments`` (the participant's media) and ``location`` reach only the tool
     payload; the agent branch ignores them all — an agent target reads the rendered TEXT
@@ -51,7 +53,8 @@ async def _target_outcome(
     tool ``run_tool`` seam or the agent ``drive_live_caller_astream`` seam) stamps its
     trace with this conversation's identity. tai42 stays flow-agnostic: it deposits only
     generic dimensions (a person-or-address user, the resolved thread as session, the
-    route as a tag, the channel/our_identity as metadata) and interprets none of them."""
+    route as a tag, the channel/our_identity as metadata) and interprets none of them.
+    """
     if await effective_mode(route, intake.thread_id) == "manual":
         return await _manual_target_outcome(route, intake, text)
     attribution = _conversation_attribution(route, intake, person)
@@ -75,6 +78,7 @@ async def _target_outcome(
 
 async def _manual_target_outcome(route: ConversationRoute, intake: ConversationRecord, text: str) -> _ToolOutcome:
     """The target turn SUPPRESSED for a manual-mode thread — no agent run, no tool dispatch.
+
     An agent target that HOLDS thread memory (implements ``append_thread_messages``) has the
     inbound appended to its checkpoint as a ``user`` message, so a later agent turn (once the
     thread returns to ``agent`` mode) reads it as prior context; a memoryless agent target
@@ -86,7 +90,8 @@ async def _manual_target_outcome(route: ConversationRoute, intake: ConversationR
     append takes an error outcome without re-running, so the redrive adds no duplicate; an
     api-door caller retrying the same inbound submits a fresh turn (new ``message_id``, no
     inbound dedup there) that appends the line again — accepted over losing the inbound from
-    memory."""
+    memory.
+    """
     if route.target_kind == "agent":
         agent = accessors._agent_registry().get(route.target_name)
         if agent is not None and supports_thread_append(agent):
@@ -95,7 +100,7 @@ async def _manual_target_outcome(route: ConversationRoute, intake: ConversationR
                     thread_id=intake.thread_id, messages=[{"role": "user", "content": text}]
                 )
             except Exception as exc:
-                logger.error(
+                logger.exception(
                     "conversations: manual-mode inbound append for route %r failed", route.route_name, exc_info=exc
                 )
                 return _tool_error(f"manual-mode append error: {exc}", route)
@@ -105,10 +110,12 @@ async def _manual_target_outcome(route: ConversationRoute, intake: ConversationR
 async def _resolve_event_person(
     route: ConversationRoute, intake: ConversationRecord, multichannel: _Multichannel | None
 ) -> Person | None:
-    """The EXISTING person an event turn carries in its tool payload, resolved READ-ONLY:
-    a linked-person thread (``bridge:@person:{id}``) names it by id, otherwise a multichannel
+    """The EXISTING person an event turn carries in its tool payload, resolved READ-ONLY.
+
+    A linked-person thread (``bridge:@person:{id}``) names it by id, otherwise a multichannel
     route reads it by the sending address. An event NEVER mints identity, so a thread with no
-    such person carries no person fields — exactly like a plain, non-multichannel thread."""
+    such person carries no person fields — exactly like a plain, non-multichannel thread.
+    """
     if intake.thread_id.startswith(PERSON_THREAD_PREFIX):
         return await accessors._person_store().get_by_id(intake.thread_id[len(PERSON_THREAD_PREFIX) :])
     if multichannel is None:
@@ -133,8 +140,9 @@ async def _resolve_turn_record(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> ConversationRecord:
-    """Run the route's target (or a pairing turn) and build the completed record the
-    transition persists. With ``multichannel`` off this is byte-identical to the target turn.
+    """Run the route's target (or a pairing turn) and build the completed record the transition persists.
+
+    With ``multichannel`` off this is byte-identical to the target turn.
     With it on, the canonical per-accept order runs at the HEAD of this scheduled
     execution — AFTER the door's terminal admission write: ``ensure_provisional`` (the sole
     person WRITE, keying the first-contact greeting and the redeem's own side) → classify
@@ -147,7 +155,8 @@ async def _resolve_turn_record(
     An EVENT turn takes its own branch first: it resolves any existing person READ-ONLY
     (:func:`_resolve_event_person`) and carries the person fields into the tool payload exactly
     as a message turn would, but runs NONE of the person-WRITE path — no provisional mint, no
-    greeting, no classify — because a structured event has no human sender to admit."""
+    greeting, no classify — because a structured event has no human sender to admit.
+    """
     if intake.inbound_kind == "event":
         person = await _resolve_event_person(route, intake, multichannel)
         return _outcome_record(intake, await _target_outcome(route, intake, text, person, params, form))
@@ -186,12 +195,14 @@ async def _complete_turn(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> ConversationRecord:
-    """Run the turn and move its intake record to its outcome (persist before send);
-    delivery is the caller's to spawn. A produced answer goes to ``pending_delivery``; a
+    """Run the turn and move its intake record to its outcome (persist before send).
+
+    Delivery is the caller's to spawn. A produced answer goes to ``pending_delivery``; a
     silent tool turn goes straight to terminal ``silent`` with nothing to deliver. The
     transition is guarded on the record still being at intake, so a turn finishing after a
     re-drive resolved its record raises rather than overwriting the outcome the client was
-    given."""
+    given.
+    """
     completed = await _resolve_turn_record(
         route=route,
         intake=intake,

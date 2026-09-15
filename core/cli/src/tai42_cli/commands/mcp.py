@@ -21,9 +21,12 @@ app = typer.Typer(
 
 
 def _load_add_entries(file: Path) -> list[Any]:
-    """Read an ``add``-file's entries: ONE entry object, a bare JSON array, or an
-    object with an ``"entries"`` list. An object is a single entry unless it has an
-    ``"entries"`` key, whose value must then be a list."""
+    """Read an ``add``-file's entries into a list.
+
+    Accepts ONE entry object, a bare JSON array, or an object with an
+    ``"entries"`` list. An object is a single entry unless it has an
+    ``"entries"`` key, whose value must then be a list.
+    """
     try:
         parsed = json.loads(file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:

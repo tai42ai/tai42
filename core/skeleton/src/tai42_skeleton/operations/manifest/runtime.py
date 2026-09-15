@@ -28,11 +28,12 @@ from .models import ManifestReplace, McpTargets
     response_model=FleetResult,
 )
 async def reload_mcp(title: str, targets: list[str] | None = None) -> Any:
-    # Re-probe a single MCP server by title (unknown title → loud 404), applied on
-    # this worker through the gate and broadcast to the fleet (all workers, or only
-    # ``targets``); the response embeds the per-worker fleet report. A pure runtime
-    # op: if the local re-probe raises, nothing is broadcast. (No docstring here, so
-    # the route description in projection falls back to the operation summary.)
+    """Re-probe a single MCP server by ``title`` (unknown title → loud 404) and reattach it.
+
+    Applied on this worker through the gate and broadcast to the fleet (all workers, or only
+    ``targets``); the response embeds the per-worker fleet report. If the local re-probe raises,
+    nothing is broadcast.
+    """
     live = tai42_app.admin.live_manifest
     titles = {entry.get("title") for entry in live.get("mcp", [])}
     if title not in titles:
@@ -94,9 +95,10 @@ async def update_manifest(manifest_text: str) -> Any:
     response_model=FleetResult,
 )
 async def reload_failed_mcps(targets: list[str] | None = None) -> Any:
-    """Re-probe every MCP server currently in the failed list and attach the ones now
-    viable. Applied on this worker through the gate and broadcast to the fleet (all
-    workers, or only ``targets``); the response embeds the per-worker fleet report.
+    """Re-probe every MCP server currently in the failed list and attach the ones now viable.
+
+    Applied on this worker through the gate and broadcast to the fleet (all workers, or only
+    ``targets``); the response embeds the per-worker fleet report.
     """
     # Run the heavy sync re-probe pass on a worker thread through the gate.
     return await broadcast(
@@ -115,10 +117,11 @@ async def reload_failed_mcps(targets: list[str] | None = None) -> Any:
     response_model=FleetResult,
 )
 async def deregister_mcp(title: str, targets: list[str] | None = None) -> Any:
-    """Detach a single MCP server's tools (by manifest title) without touching the
-    other servers — the removal counterpart of ``reload_mcp``. Applied on this worker
-    through the gate and broadcast to the fleet (all workers, or only ``targets``);
-    the response embeds the per-worker fleet report.
+    """Detach a single MCP server's tools (by manifest title) without touching the other servers.
+
+    The removal counterpart of ``reload_mcp``. Applied on this worker through the gate and
+    broadcast to the fleet (all workers, or only ``targets``); the response embeds the per-worker
+    fleet report.
     """
     # Run the heavy sync detach on a worker thread through the gate.
     return await broadcast(

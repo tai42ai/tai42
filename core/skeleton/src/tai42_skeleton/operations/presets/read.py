@@ -23,8 +23,10 @@ from tai42_skeleton.operations.response_models_group_a import (
 
 @operation(summary="List presets", tags=["presets"], response_model=PresetRecordList)
 async def list_presets() -> list[dict[str, Any]]:
-    """One row per store-backed record (the presets plus the ``conflicted``
-    quarantined ones) — the population the presets management table shows."""
+    """One row per store-backed record (the presets plus the ``conflicted`` quarantined ones).
+
+    The population the presets management table shows.
+    """
     rows: list[dict[str, Any]] = []
     # A store-less deploy (no versioned store configured) has no presets — skip the
     # Postgres read and serve an empty list.
@@ -53,8 +55,10 @@ async def list_presets() -> list[dict[str, Any]]:
 
 @operation(summary="Get a preset", tags=["presets"], errors=[NotFoundError], response_model=PresetDetailView)
 async def get_preset(name: str) -> dict[str, Any]:
-    """The store record + the active ``fixed_kwargs`` + the ``uses`` / ``used_by``
-    cross-references; 404 for an absent name."""
+    """The store record + the active ``fixed_kwargs`` + the ``uses`` / ``used_by`` cross-references.
+
+    404 for an absent name.
+    """
     try:
         record = await instance.app.presets.store.get_preset(name)
     except PresetNotFoundError as exc:
@@ -94,8 +98,10 @@ async def list_versions(name: str) -> list[dict[str, Any]]:
     response_model=DocumentVersion,
 )
 async def get_version(name: str, version: str) -> dict[str, Any]:
-    """One version of a preset by its integer version number; a non-integer segment
-    is a 400 and an unknown version a 404."""
+    """One version of a preset by its integer version number.
+
+    A non-integer segment is a 400 and an unknown version a 404.
+    """
     try:
         version_num = int(version)
     except ValueError as exc:
@@ -114,12 +120,14 @@ async def get_version(name: str, version: str) -> dict[str, Any]:
     response_model=PresetRefereesResult,
 )
 async def preset_referees(name: str) -> dict[str, Any]:
-    """Every live reference a rename of this preset would strand — the SAME full union
-    the rename door blocks on: the OTHER presets whose active body composes it, plus every
-    registered referee (platform wiring — schedules/hooks/routes/extensions/parks — and
-    plugin holders). Exposed so the UI can preflight a rename. 404 for an unknown preset,
-    the same existence check the rename door runs first; a referee raising propagates
-    loudly, exactly as at the rename gate."""
+    """Every live reference a rename of this preset would strand — the SAME union the rename door blocks on.
+
+    The OTHER presets whose active body composes it, plus every registered referee
+    (platform wiring — schedules/hooks/routes/extensions/parks — and plugin holders).
+    Exposed so the UI can preflight a rename. 404 for an unknown preset, the same
+    existence check the rename door runs first; a referee raising propagates loudly,
+    exactly as at the rename gate.
+    """
     # A store-less deploy holds no preset, so an unknown name is a genuine 404
     # without a Postgres open (the rename/delete doors' reasoning).
     if not component_store_configured(SKELETON_COMPONENT):

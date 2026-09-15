@@ -1,3 +1,5 @@
+"""Per-worker routing and lifespan management for the mounted sub-MCP apps under ``/app/{slug}``."""
+
 import asyncio
 import logging
 import re
@@ -56,10 +58,9 @@ def validate_registration(slug: str, transport: str) -> None:
 
 
 class InvocationSeamMiddleware(McpMiddleware):
-    """A retained, standalone FastMCP middleware that deposits the ambient invoked-tool
-    seam around a ``tools/call``. NOT registered by the platform.
+    """A retained, standalone FastMCP middleware that deposits the invoked-tool seam around a ``tools/call``.
 
-    The live MCP ``tools/call`` edge deposits the invoked-tool seam — and arms the rest
+    NOT registered by the platform. The live MCP ``tools/call`` edge deposits the invoked-tool seam — and arms the rest
     of the run lifecycle — through ``DispatchScopeMiddleware``
     (:mod:`tai42_skeleton.tools.dispatch_scope`). This class remains a public component
     that performs the deposit on its own, but nothing in the platform wires it into a
@@ -67,9 +68,11 @@ class InvocationSeamMiddleware(McpMiddleware):
 
     ``on_call_tool`` deposits the called tool's name and resets it in ``finally`` under
     token discipline, so a nested in-process re-dispatch restores the outer name and the
-    deposit never leaks across calls."""
+    deposit never leaks across calls.
+    """
 
     def __init__(self) -> None:
+        """Warn that this middleware is not wired by the platform."""
         warnings.warn(
             "InvocationSeamMiddleware is not registered by the platform; the MCP "
             "tools/call edge lifecycle is handled by DispatchScopeMiddleware "
@@ -84,6 +87,7 @@ class InvocationSeamMiddleware(McpMiddleware):
         context: MiddlewareContext[Any],
         call_next: Callable[[MiddlewareContext[Any]], Awaitable[Any]],
     ) -> Any:
+        """Deposit the called tool's name for the span of the call, resetting it afterwards."""
         token = set_current_tool_invocation(ToolInvocation(tool_name=context.message.name))
         try:
             return await call_next(context)
@@ -116,6 +120,7 @@ class SubAppLifespan:
     """
 
     def __init__(self, sub_app: ASGIApp) -> None:
+        """Hold ``sub_app`` and the events/state its dedicated lifespan task coordinates on."""
         self._sub_app = sub_app
         self._started = asyncio.Event()
         self._stop = asyncio.Event()
@@ -133,7 +138,8 @@ class SubAppLifespan:
         request driving a lazy build is cancelled) cancels and reaps the dedicated
         task before re-raising, so its half-opened lifespan is unwound and the task
         is never orphaned — the caller holds no reference to reap it once ``start()``
-        raises."""
+        raises.
+        """
         self._task = asyncio.create_task(self._run())
         try:
             await self._started.wait()
@@ -166,8 +172,10 @@ class SubAppLifespan:
             raise
 
     async def aclose(self) -> None:
-        """Signal the lifespan task to exit and await it, re-raising any teardown
-        failure. Idempotent — a second call just re-observes the finished task."""
+        """Signal the lifespan task to exit and await it, re-raising any teardown failure.
+
+        Idempotent — a second call just re-observes the finished task.
+        """
         if self._task is None:
             return
         self._stop.set()
@@ -193,6 +201,7 @@ class SubMcpAppRouter:
     """
 
     def __init__(self, app):
+        """Bind the router to its owning ``app`` and initialize the per-worker route cache and locks."""
         self._app = app
         self._routes: dict[str, RouteConfig] = {}
         # stdio sub-apps have no ASGI surface, so a slug can cache as None and the
@@ -234,13 +243,20 @@ class SubMcpAppRouter:
 
     @property
     def root_prefix(self):
+        """The path prefix every sub-MCP app mounts under."""
         return ROOT_PREFIX
 
     @property
     def routes(self) -> dict[str, RouteConfig]:
+        """The in-process ``slug -> RouteConfig`` cache."""
         return self._routes
 
     async def register_sub_mcp_app(self, slug: str, tools: list[str], transport: str = "http"):
+        """Register or replace the sub-MCP app for ``slug``, tearing down any stale live instance.
+
+        The slug and transport are validated loudly; a reload stamps a fresh generation token so an
+        in-flight build of the prior config detects it was superseded and does not cache a stale app.
+        """
         # Validate the slug shape + transport at the core so every caller is guarded
         # (the HTTP router maps this to a 400; the backup-restore path records it as
         # a per-section error). A malformed slug is rejected loudly here rather than
@@ -262,20 +278,21 @@ class SubMcpAppRouter:
             await self._aclose_slug_stack(slug, stale)
 
     async def unregister_sub_mcp_app(self, slug: str):
+        """Drop ``slug`` from the cache and tear down its live instance, if any."""
         with self._state_lock:
             stale = self._pop_slug_locked(slug)
         if stale is not None:
             await self._aclose_slug_stack(slug, stale)
 
     def _pop_slug_locked(self, slug: str) -> SubAppLifespan | None:
-        """Remove a slug's route + cached app + generation token and return its
-        lifespan runner (or None) for the caller to close off-lock. Caller holds
-        ``_state_lock``.
+        """Remove a slug's route, cached app, and generation token; return its lifespan runner.
 
-        Dropping the generation token here means an in-flight build whose captured
+        Returns the runner (or ``None``) for the caller to close off-lock. Caller holds
+        ``_state_lock``. Dropping the generation token here means an in-flight build whose captured
         token no longer matches (the token is gone) treats the slug as vanished and
         discards its build. The stack is popped here, so a close failure below can
-        never leave a re-closable/leaked entry behind — the entry is already gone."""
+        never leave a re-closable/leaked entry behind — the entry is already gone.
+        """
         self._routes.pop(slug, None)
         self._server_cache.pop(slug, None)
         self._route_generations.pop(slug, None)
@@ -284,12 +301,12 @@ class SubMcpAppRouter:
     async def _aclose_slug_stack(self, slug: str, stack: SubAppLifespan) -> None:
         try:
             await self._aclose_on_owner(slug, stack)
-        except Exception as e:
+        except Exception:
             # Log for the shutdown trail, then re-raise: a sub-app whose teardown
             # failed on the inline (owner-loop) branch must never be reported as
             # cleanly removed. The cross-loop branch never raises here — it schedules
             # the close and surfaces any failure through its done-callback instead.
-            logger.error(f"Error shutting down MCP app {slug}: {e}")
+            logger.exception(f"Error shutting down MCP app {slug}")
             raise
 
     async def _aclose_on_owner(self, slug: str, stack: SubAppLifespan) -> None:
@@ -370,7 +387,7 @@ class SubMcpAppRouter:
                     future = asyncio.run_coroutine_threadsafe(stack.aclose(), close_loop)
                     future.add_done_callback(lambda f, s=slug: self._log_teardown_result(s, f))
             except Exception as e:
-                logger.error("Error tearing down sub-MCP app %s on reset: %s", slug, e)
+                logger.exception("Error tearing down sub-MCP app %s on reset", slug)
                 errors.append(e)
         if errors:
             raise ExceptionGroup("sub-MCP reset teardown failures", errors)
@@ -393,10 +410,9 @@ class SubMcpAppRouter:
             logger.error("Error tearing down sub-MCP app %s: %s", slug, exc)
 
     async def _build_sub_app(self, slug: str, config: RouteConfig) -> tuple[ASGIApp | None, SubAppLifespan | None]:
-        """Build the ASGI sub-app for ``slug`` from the CAPTURED ``config`` and enter
-        its lifespan, returning ``(sub_app, lifespan)``.
+        """Build the ASGI sub-app for ``slug`` from the CAPTURED ``config`` and enter its lifespan.
 
-        Pure build — it reads NO router state (the caller captured ``config`` with
+        Returns ``(sub_app, lifespan)``. Pure build — it reads NO router state (the caller captured ``config`` with
         the generation token and decides, after the build, whether to record or
         discard it). ``stdio`` has no ASGI surface, so it returns ``(None, None)``;
         the caller caches that ``None`` for the slug. The lifespan is entered inside a
@@ -476,27 +492,30 @@ class SubMcpAppRouter:
         return sub_app, app_lifespan
 
     def _cached_or_known(self, slug: str) -> tuple[bool, Any, bool]:
-        """Fast-path read under the loop-agnostic state lock — no await, no cross-loop
-        hazard. A present cache KEY means "built" even when its value is ``None`` (stdio
-        has no ASGI surface), so membership distinguishes cached-None from not-yet-built
-        without a sentinel. Returns ``(cache_hit, cached_value, known)``."""
+        """Fast-path read under the loop-agnostic state lock — no await, no cross-loop hazard.
+
+        A present cache KEY means "built" even when its value is ``None`` (stdio has no ASGI
+        surface), so membership distinguishes cached-None from not-yet-built without a sentinel.
+        Returns ``(cache_hit, cached_value, known)``.
+        """
         with self._state_lock:
             if slug in self._server_cache:
                 return True, self._server_cache[slug], True
             return False, None, slug in self._routes
 
     async def _rehydrate_from_store(self, slug: str) -> bool:
-        """Cross-worker read path: this worker never registered the slug, but a sibling
-        may have persisted it durably. Consult the store — we are on the owner loop, so
-        awaiting is fine. This costs one Redis ``HGET`` per unknown-slug request (same
-        class as serving the 404) and NOTHING on the known-slug fast path, which never
-        reaches here. Register a found config directly, NOT through the write service —
-        the store is already the source of this config, so re-writing it is wrong.
+        """Consult the durable store for a slug this worker never registered but a sibling persisted.
+
+        We are on the owner loop, so awaiting is fine. This costs one Redis ``HGET`` per
+        unknown-slug request (same class as serving the 404) and NOTHING on the known-slug fast
+        path, which never reaches here. Register a found config directly, NOT through the write
+        service — the store is already the source of this config, so re-writing it is wrong.
 
         Residual: a slug DELETED on a sibling stays served by workers that already built
         it until their next reload (stale-positive); the store-backed ``GET`` list is
         already correct. ``reset()`` clears the cache — this rehydrate repopulates it.
-        Returns whether the slug now exists in this worker's router."""
+        Returns whether the slug now exists in this worker's router.
+        """
         config = await get_sub_mcp_store().get_route(slug)
         if config is None:
             return False
@@ -504,10 +523,11 @@ class SubMcpAppRouter:
         return True
 
     async def _build_with_generation(self, slug: str):
-        """Build the slug's sub-app against the newest live registration, serializing
-        concurrent builds of the same slug on the owner loop. ``_build_lock`` is only
-        ever taken here (single loop), so it stays a safe ``asyncio.Lock``; route/cache
-        mutation stays under ``_state_lock``.
+        """Build the slug's sub-app against the newest live registration.
+
+        Serializes concurrent builds of the same slug on the owner loop. ``_build_lock`` is only
+        ever taken here (single loop), so it stays a safe ``asyncio.Lock``; route/cache mutation
+        stays under ``_state_lock``.
 
         Retry loop: capture the slug's generation token with its config, build against
         that captured config, then cache the result ONLY if the token still matches. A
@@ -520,7 +540,8 @@ class SubMcpAppRouter:
         hammering REPLACE on a slug delays first-time builds — its own and any other
         not-yet-cached slug, since ``_build_lock`` serializes builds router-wide. Cached
         slugs and the register/unregister/dispatch/reset paths never take this lock, so
-        they are unaffected; the delay is self-limited to the REPLACE rate."""
+        they are unaffected; the delay is self-limited to the REPLACE rate.
+        """
         async with self._build_lock:
             while True:
                 with self._state_lock:
@@ -562,6 +583,7 @@ class SubMcpAppRouter:
 
     @asynccontextmanager
     async def lifespan(self, app: Starlette) -> AsyncIterator[None]:
+        """Own the loop for lazily-built sub-app lifespans and close every one at shutdown."""
         # Record the loop that owns every lazily-built sub-app lifespan so a
         # reload driven from a throwaway loop closes them here instead.
         self._owner_loop = asyncio.get_running_loop()
@@ -585,6 +607,7 @@ class SubMcpAppRouter:
                 raise ExceptionGroup("sub-MCP app shutdown failures", errors)
 
     async def __call__(self, scope, receive, send):
+        """Dispatch an ASGI request to the sub-app for its ``/app/{slug}`` path."""
         if scope["type"] != "http":
             # A websocket routed under the mount is closed explicitly (policy code
             # 1008) with a log line rather than returned with no ASGI message —

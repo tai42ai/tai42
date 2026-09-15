@@ -16,8 +16,8 @@ import pytest
 import tai42_tools_stripe._internal.tools.stripe_client as stripe_client
 from tai42_tools_stripe._internal.tools.stripe_client import (
     STRIPE_API_VERSION,
-    CallbackTargetRefused,
-    StripeLivemodeMismatch,
+    CallbackTargetRefusedError,
+    StripeLivemodeMismatchError,
     _assert_callback_target,
     _assert_livemode,
     _expected_livemode,
@@ -71,7 +71,7 @@ def test_unrecognised_prefix_message_does_not_leak_the_key(
 
 def test_assert_livemode_mismatch_raises(stripe_env: Callable[..., None]) -> None:
     stripe_env(secret_key="sk_test_abc")
-    with pytest.raises(StripeLivemodeMismatch, match="livemode"):
+    with pytest.raises(StripeLivemodeMismatchError, match="livemode"):
         _assert_livemode({"livemode": True})
 
 
@@ -107,7 +107,7 @@ _OK = "https://pay.acme.com/api/interactions/callback/tkt"
 )
 def test_ssrf_pin_refuses(stripe_env: Callable[..., None], callback_url: str) -> None:
     stripe_env(public_base=_BASE)
-    with pytest.raises(CallbackTargetRefused):
+    with pytest.raises(CallbackTargetRefusedError):
         _assert_callback_target(callback_url)
 
 
@@ -124,7 +124,7 @@ def test_ssrf_pin_accepts_explicit_default_port(stripe_env: Callable[..., None])
 def test_ssrf_pin_derives_prefix_from_path_bearing_base(stripe_env: Callable[..., None]) -> None:
     stripe_env(public_base="https://pay.acme.com/tai")
     _assert_callback_target("https://pay.acme.com/tai/api/interactions/callback/tkt")
-    with pytest.raises(CallbackTargetRefused):
+    with pytest.raises(CallbackTargetRefusedError):
         _assert_callback_target("https://pay.acme.com/api/interactions/callback/tkt")
 
 

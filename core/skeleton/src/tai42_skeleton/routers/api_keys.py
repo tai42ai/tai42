@@ -1,5 +1,6 @@
-"""HTTP surface for provisioning access-control keys and scopes — the authed
-doors the Studio's API-keys settings tab consumes.
+"""HTTP surface for provisioning access-control keys and scopes.
+
+The authed doors the Studio's API-keys settings tab consumes.
 
 Routes (all AUTHED), prefixed ``/api/auth`` — each a thin adapter over an operation
 in :mod:`tai42_skeleton.operations.api_keys`; no key/scope logic lives here:

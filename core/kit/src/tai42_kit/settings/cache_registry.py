@@ -1,11 +1,13 @@
-"""Central registry of cached settings accessors so ``reset_all_settings``
-can drop every cached settings singleton in one call (the live-reload soft
-restart re-reads env then resets here).
+"""Central registry of cached settings accessors so every cached singleton can be dropped in one call.
+
+``reset_all_settings`` drops every cached settings singleton at once (the
+live-reload soft restart re-reads env then resets here).
 
 Each constructed ``BaseSettings`` instance is stamped with the epoch it was born
 under and recorded in a weakref roster, so ``sweep_stale_settings`` can find any
 instance of a retired epoch that a holder is still keeping alive past a reset — a
-stale-config leak, reported loudly and never dropped."""
+stale-config leak, reported loudly and never dropped.
+"""
 
 import contextlib
 import gc
@@ -115,7 +117,8 @@ class StaleHolder:
     """A still-live cached settings instance stamped with a retired epoch.
 
     ``settings_type`` and ``holders`` are ``module.qualname`` strings (the settings
-    class, and the type of each object still referencing the instance)."""
+    class, and the type of each object still referencing the instance).
+    """
 
     settings_type: str
     epoch: int

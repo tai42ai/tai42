@@ -1,3 +1,5 @@
+"""Pooled Postgres client built on ``psycopg_pool.AsyncConnectionPool``."""
+
 from psycopg import AsyncConnection
 from psycopg.rows import TupleRow
 from psycopg.types.json import Json
@@ -21,8 +23,10 @@ _ALLOWED_KWARGS = frozenset({"dsn", "min_size", "max_size"})
 
 
 class PostgresClient(PooledClient[_Pool]):
-    """Pooled ``psycopg_pool.AsyncConnectionPool``, one pool per (DSN, size) per
-    loop. Compose ``PostgresConnectionSettings`` for the connection kwargs."""
+    """Pooled ``psycopg_pool.AsyncConnectionPool``, one pool per (DSN, size) per loop.
+
+    Compose ``PostgresConnectionSettings`` for the connection kwargs.
+    """
 
     async def _create(self, **kwargs) -> _Pool:
         if "dsn" not in kwargs:

@@ -34,7 +34,7 @@ from tai42_contract.states.models import (
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.route_registry import load_api_routes
-from tai42_skeleton.operations import NotFoundError, NotSupportedError, ValidationRejected
+from tai42_skeleton.operations import NotFoundError, NotSupportedError, ValidationRejectedError
 from tai42_skeleton.operations import states as ops
 from tai42_skeleton.routers import states as router
 
@@ -224,7 +224,7 @@ def test_malformed_record_path_segment_is_422(monkeypatch: pytest.MonkeyPatch) -
     # A bad target_kind (not a ConversationTargetKind) fails the subject parse at the edge,
     # before the facet is reached — a 422 rejected input, never a 500.
     _install_fake_states(monkeypatch)
-    with pytest.raises(ValidationRejected) as excinfo:
+    with pytest.raises(ValidationRejectedError) as excinfo:
         asyncio.run(ops.read_state_record("alerts", "not-a-target-kind", "acme", "person", "p-1"))
     assert excinfo.value.status == 422
 
@@ -317,7 +317,7 @@ def test_attach_validator_refusal_is_422_on_every_door(monkeypatch: pytest.Monke
     # put_template) funnels through ``_states_door``; a consumer validator's contract
     # ``TemplateValidationError`` maps to a 422 with the validator's message verbatim, never a 500.
     _install_fake_states(monkeypatch)
-    with pytest.raises(ValidationRejected) as excinfo:
+    with pytest.raises(ValidationRejectedError) as excinfo:
         asyncio.run(door())
     assert excinfo.value.status == 422
     assert str(excinfo.value) == _VALIDATOR_REFUSAL
@@ -515,7 +515,7 @@ def test_put_state_template_with_template_jq_section_succeeds(monkeypatch: pytes
 
 def test_put_state_template_by_id_body_that_cannot_be_fetched_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     app = _real_states_door(monkeypatch)
-    with tai42_app.bound(app), pytest.raises(ValidationRejected) as excinfo:
+    with tai42_app.bound(app), pytest.raises(ValidationRejectedError) as excinfo:
         asyncio.run(
             ops.put_state_template(
                 "summary-missing",

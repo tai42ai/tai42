@@ -1,5 +1,4 @@
-"""The chat-page navigation doors: serve the page (minting/refreshing the session) and
-serve one built bundle asset."""
+"""The chat-page navigation doors: serve the page (minting/refreshing the session) and serve a bundle asset."""
 
 from __future__ import annotations
 
@@ -94,12 +93,13 @@ _ENTRY_REFUSED_PAGE = render_refusal("This chat is private", _ENTRY_REFUSED_MESS
 
 
 def _read_link_params(request: Request, identity: str) -> tuple[dict[str, str], Response | None]:
-    """Parse the navigation's query into the validated link params, or a byte-constant
-    400 refusal page. A DUPLICATE key — checked on the RAW query, reserved names
-    included, so ``?tai_pair=a&tai_pair=b`` is a 400 too — is a bound violation; the reserved
-    names are then stripped before validation. Param VALUES never reach the log: the
-    duplicate warning names no value, and ``validate_entry_params`` names only the
-    violated bound (and at most a key)."""
+    """Parse the navigation's query into the validated link params, or a byte-constant 400 refusal page.
+
+    A DUPLICATE key — checked on the RAW query, reserved names included, so ``?tai_pair=a&tai_pair=b`` is a
+    400 too — is a bound violation; the reserved names are then stripped before validation. Param VALUES
+    never reach the log: the duplicate warning names no value, and ``validate_entry_params`` names only the
+    violated bound (and at most a key).
+    """
     pairs = request.query_params.multi_items()
     keys = [key for key, _ in pairs]
     if len(keys) != len(set(keys)):
@@ -114,10 +114,12 @@ def _read_link_params(request: Request, identity: str) -> tuple[dict[str, str], 
 
 
 async def _entry_gate_refusal(request: Request, identity: str, entry_code: str | None) -> Response | None:
-    """The page door's entry-gate refusal for a mint-needing caller on ``identity``, or
-    ``None`` when the route is ungated or the code is live. Runs AFTER the navigation
-    guard (README door order), so a non-navigation never reaches it and no response
-    differs by code validity; a refused entry is the one byte-constant page."""
+    """The page door's entry-gate refusal for a mint-needing caller on ``identity``, or ``None`` when open.
+
+    ``None`` when the route is ungated or the code is live. Runs AFTER the navigation guard (README door
+    order), so a non-navigation never reaches it and no response differs by code validity; a refused entry
+    is the one byte-constant page.
+    """
     if await _entry_gate_outcome(request, identity, entry_code) is not None:
         return _refusal_page(_ENTRY_REFUSED_PAGE, 403)
     return None
@@ -192,7 +194,8 @@ async def web_chat_page(request: Request) -> Response:
     try:
         build = load_build()
     except PublicBuildError as exc:
-        logger.error("web chat page cannot be served: %s", exc)
+        # Surface the actionable build error (path + build step) in the message line for operators.
+        logger.exception("web chat page cannot be served: %s", exc)  # noqa: TRY401
         return _refusal_page(_PAGE_UNAVAILABLE_PAGE, 500)
     mount_base = _mount_base(request, "/chat/{identity}")
     response = Response(
@@ -205,7 +208,7 @@ async def web_chat_page(request: Request) -> Response:
         # same visitor id); a cross-site subresource must not, and empty params leave
         # the stored ones untouched.
         if params and navigation:
-            assert registration is not None  # _serves guarantees it when existing is set
+            assert registration is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
             await update_session_params(existing, registration, params)
         set_session_cookie(response, existing, settings, mount_base)
     else:
@@ -239,7 +242,8 @@ async def web_asset(request: Request) -> Response:
     try:
         build = load_build()
     except PublicBuildError as exc:
-        logger.error("web chat asset cannot be served: %s", exc)
+        # Surface the actionable build error (path + build step) in the message line for operators.
+        logger.exception("web chat asset cannot be served: %s", exc)  # noqa: TRY401
         return _error(_PAGE_UNAVAILABLE, 500)
     if name not in build.integrity:
         return _error("not found", 404)

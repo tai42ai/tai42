@@ -1,5 +1,4 @@
-"""Byte-constant HTML pages and response-header sets for the unauthenticated
-interactions callback surface."""
+"""Byte-constant HTML pages and response-header sets for the unauthenticated interactions callback surface."""
 
 from __future__ import annotations
 

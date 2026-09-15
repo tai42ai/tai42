@@ -1,6 +1,8 @@
-"""The Traces API query surface: ``get_trace`` (one complete trace) and
-``list_traces`` (a page of summaries, native or metric-ranked, with token and
-error-status enrichment)."""
+"""The Traces API query surface: ``get_trace`` (one complete trace) and ``list_traces`` (a page of summaries).
+
+``list_traces`` pages summaries native or metric-ranked, with token and
+error-status enrichment.
+"""
 
 from __future__ import annotations
 
@@ -77,7 +79,7 @@ class TraceQuery(_LangfuseQuery):
         to_timestamp: datetime | None = None,
         limit: int | None = None,
         page: int | None = None,
-        filter: MonitoringFilter | None = None,
+        filter_: MonitoringFilter | None = None,
         order_by: OrderBy | None = None,
     ) -> list[MonitoringTraceSummary]:
         """Run SUMMARIES for one page — never per-trace bodies.
@@ -100,7 +102,7 @@ class TraceQuery(_LangfuseQuery):
                 to_timestamp=to_timestamp,
                 limit=limit,
                 page=page,
-                filter=filter,
+                filter_=filter_,
             )
         else:
             rows = await self._native_rows(
@@ -111,11 +113,11 @@ class TraceQuery(_LangfuseQuery):
                 to_timestamp=to_timestamp,
                 limit=limit,
                 page=page,
-                filter=filter,
+                filter_=filter_,
             )
         if not rows:
             return []
-        return await self._summarize(client, source, rows, filter)
+        return await self._summarize(client, source, rows, filter_)
 
     async def _native_rows(
         self,
@@ -127,7 +129,7 @@ class TraceQuery(_LangfuseQuery):
         to_timestamp: datetime | None,
         limit: int | None,
         page: int | None,
-        filter: MonitoringFilter | None,
+        filter_: MonitoringFilter | None,
     ) -> list[Any]:
         """The page's summary rows via one server-side trace.list (native sort)."""
         return await self._list_page(
@@ -138,7 +140,7 @@ class TraceQuery(_LangfuseQuery):
             to_timestamp=to_timestamp,
             limit=limit,
             page=page,
-            filter=filter,
+            filter_=filter_,
         )
 
     async def _list_page(
@@ -151,11 +153,13 @@ class TraceQuery(_LangfuseQuery):
         to_timestamp: datetime | None,
         limit: int | None,
         page: int | None,
-        filter: MonitoringFilter | None,
+        filter_: MonitoringFilter | None,
     ) -> list[Any]:
-        """One trace.list call, returning its ``TraceWithDetails`` summary rows
-        with the core/io/metrics field groups (no observation bodies)."""
-        advanced = _trace_advanced_filter(filter)
+        """One trace.list call, returning its ``TraceWithDetails`` summary rows.
+
+        Rows carry the core/io/metrics field groups (no observation bodies).
+        """
+        advanced = _trace_advanced_filter(filter_)
         # Langfuse's advanced ``filter`` JSON overrides the native
         # fromTimestamp/toTimestamp params, so time bounds must ride in the JSON too.
         if advanced:
@@ -171,11 +175,11 @@ class TraceQuery(_LangfuseQuery):
                 order_by=order_by,
                 environment=source,
                 fields=_LIST_FIELDS,
-                name=filter.name if filter else None,
-                user_id=filter.user_id if filter else None,
-                session_id=filter.session_id if filter else None,
-                version=filter.version if filter else None,
-                tags=(filter.tags or None) if filter else None,
+                name=filter_.name if filter_ else None,
+                user_id=filter_.user_id if filter_ else None,
+                session_id=filter_.session_id if filter_ else None,
+                version=filter_.version if filter_ else None,
+                tags=(filter_.tags or None) if filter_ else None,
                 filter=filter_json,
                 request_options=self._request_options(),
             )
@@ -192,13 +196,13 @@ class TraceQuery(_LangfuseQuery):
         to_timestamp: datetime | None,
         limit: int | None,
         page: int | None,
-        filter: MonitoringFilter | None,
+        filter_: MonitoringFilter | None,
     ) -> list[Any]:
-        """The page's rows for a metric sort: globally rank the ids via the
-        metrics API, then walk trace.list (newest-first) over the same window to
-        collect their summary rows, in rank order. Never a per-id trace.get.
+        """The page's rows for a metric sort, in rank order.
 
-        The ranked ids can sit anywhere in the window, so the walk is bounded by
+        Globally ranks the ids via the metrics API, then walks trace.list
+        (newest-first) over the same window to collect their summary rows. Never a
+        per-id trace.get. The ranked ids can sit anywhere in the window, so the walk is bounded by
         ``_METRIC_LIST_PAGE_BUDGET`` pages; a page whose ranked ids are not all
         found within that budget raises loudly rather than returning a short row
         set that reads as a complete page.
@@ -211,7 +215,7 @@ class TraceQuery(_LangfuseQuery):
             to_timestamp=to_timestamp,
             limit=limit,
             page=page,
-            filter=filter,
+            filter_=filter_,
         )
         if not ranked_ids:
             return []
@@ -232,7 +236,7 @@ class TraceQuery(_LangfuseQuery):
                 to_timestamp=to_timestamp,
                 limit=_PAGE_SIZE,
                 page=list_page,
-                filter=filter,
+                filter_=filter_,
             )
             for row in batch:
                 if row.id in wanted:
@@ -259,13 +263,13 @@ class TraceQuery(_LangfuseQuery):
         to_timestamp: datetime | None,
         limit: int | None,
         page: int | None,
-        filter: MonitoringFilter | None,
+        filter_: MonitoringFilter | None,
     ) -> list[str]:
-        """Globally rank trace-ids by an aggregated measure (cost / latency /
-        tokens) via the metrics API, which can order by it where ``trace.list``
-        cannot. Returns the page slice of the top-N in rank order.
+        """Globally rank trace-ids by an aggregated measure (cost / latency / tokens) via the metrics API.
 
-        Bad inputs (no time bound, non-positive limit/page, paging past the row
+        The metrics API can order by the measure where ``trace.list`` cannot.
+        Returns the page slice of the top-N in rank order. Bad inputs (no time
+        bound, non-positive limit/page, paging past the row
         cap) raise before any request.
         """
         measure, direction = measure_dir
@@ -288,7 +292,7 @@ class TraceQuery(_LangfuseQuery):
             "view": "traces",
             "metrics": [{"measure": measure, "aggregation": "sum"}],
             "dimensions": [{"field": "id"}],
-            "filters": [_environment_clause(source), *_trace_metric_filter(filter)],
+            "filters": [_environment_clause(source), *_trace_metric_filter(filter_)],
             # The orderBy key the server emits for a summed measure is sum_<measure>.
             "orderBy": [{"field": f"sum_{measure}", "direction": direction}],
             "fromTimestamp": from_timestamp.isoformat(),
@@ -311,11 +315,13 @@ class TraceQuery(_LangfuseQuery):
         return [row["id"] for row in rows][start : start + limit]
 
     async def _summarize(
-        self, client: Any, source: str, rows: list[Any], filter: MonitoringFilter | None
+        self, client: Any, source: str, rows: list[Any], filter_: MonitoringFilter | None
     ) -> list[MonitoringTraceSummary]:
-        """Build the page's summaries from the list rows plus two batched, window-
-        scoped enrichments: token totals (one metrics query) and error status (one
-        paged observations query). Order is preserved."""
+        """Build the page's summaries from the list rows plus two batched, window-scoped enrichments.
+
+        The enrichments are token totals (one metrics query) and error status (one
+        paged observations query). Order is preserved.
+        """
         timestamps = [row.timestamp for row in rows if row.timestamp is not None]
         if not timestamps:
             return [self._to_summary(row, {}, set()) for row in rows]
@@ -339,30 +345,38 @@ class TraceQuery(_LangfuseQuery):
         obs_end = (max(estimated_ends) if estimated_ends else t_max) + _WINDOW_EPSILON
 
         tokens_by_id, error_ids = await asyncio.gather(
-            self._tokens_for_window(client, source, t_min, t_max + _WINDOW_EPSILON, page_ids, filter),
+            self._tokens_for_window(client, source, t_min, t_max + _WINDOW_EPSILON, page_ids, filter_),
             self._error_trace_ids(client, source, t_min, obs_end),
         )
         return [self._to_summary(row, tokens_by_id, error_ids) for row in rows]
 
     async def _tokens_for_window(
-        self, client: Any, source: str, t0: datetime, t1: datetime, page_ids: list[str], filter: MonitoringFilter | None
+        self,
+        client: Any,
+        source: str,
+        t0: datetime,
+        t1: datetime,
+        page_ids: list[str],
+        filter_: MonitoringFilter | None,
     ) -> dict[str, float]:
-        """Per-trace summed token totals over the page window via ONE metrics
-        traces-view query (dimension id, measure totalTokens). The page filter's
-        view-supported clauses narrow the metrics population; correctness comes
-        from the per-id join, so the unsupported clauses are dropped, not raised.
-        A trace absent from the result carries no usage.
+        """Per-trace summed token totals over the page window via ONE metrics traces-view query.
+
+        Uses dimension id, measure totalTokens. The page filter's view-supported
+        clauses narrow the metrics population; correctness comes from the per-id
+        join, so the unsupported clauses are dropped, not raised. A trace absent
+        from the result carries no usage.
 
         The metrics view caps at ``_METRIC_ROW_LIMIT_MAX`` rows: if the cap is hit
         AND a page id is uncovered, the token join cannot tell "no usage" from
         "truncated" — it raises loudly rather than reporting a silent None. If rows
         come back yet none carry a recognised token measure, the query shape is
-        wrong — it raises rather than reporting every trace as usage-less."""
+        wrong — it raises rather than reporting every trace as usage-less.
+        """
         query: dict[str, Any] = {
             "view": "traces",
             "metrics": [{"measure": "totalTokens", "aggregation": "sum"}],
             "dimensions": [{"field": "id"}],
-            "filters": [_environment_clause(source), *_metric_population_filter(filter)],
+            "filters": [_environment_clause(source), *_metric_population_filter(filter_)],
             "fromTimestamp": t0.isoformat(),
             "toTimestamp": t1.isoformat(),
             "config": {"row_limit": _METRIC_ROW_LIMIT_MAX},
@@ -402,12 +416,13 @@ class TraceQuery(_LangfuseQuery):
         return tokens_by_id
 
     async def _error_trace_ids(self, client: Any, source: str, t0: datetime, t1: datetime) -> set[str]:
-        """The (source-scoped) trace ids with an ERROR-level observation whose
-        start falls in the window, drained across pages up to ``_ERROR_PAGE_BUDGET``.
+        """The (source-scoped) trace ids with an ERROR-level observation whose start falls in the window.
 
-        Errors are rare, so the window normally resolves in one call. Exceeding the
+        Drained across pages up to ``_ERROR_PAGE_BUDGET``. Errors are rare, so the
+        window normally resolves in one call. Exceeding the
         budget, or a full page returned without a page count to bound the walk,
-        raises loudly — it never stops quietly on a partial result."""
+        raises loudly — it never stops quietly on a partial result.
+        """
         ids: set[str] = set()
         page = 1
         while True:

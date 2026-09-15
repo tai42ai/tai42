@@ -1,9 +1,9 @@
-"""Tools contract: the ``ToolInfo`` model + the ``AppTools`` tool/toolkit
-registration sub-protocol. Vendor return types (fastmcp ``Tool``, langchain
-``StructuredTool``) are ``TYPE_CHECKING``-only.
+"""Tools contract: the ``ToolInfo`` model + the ``AppTools`` tool/toolkit registration sub-protocol.
 
-``AppTools`` is the ``app.tools`` namespace of the assembled facade
-(:mod:`tai42_contract.app`)."""
+Vendor return types (fastmcp ``Tool``, langchain ``StructuredTool``) are ``TYPE_CHECKING``-only.
+
+``AppTools`` is the ``app.tools`` namespace of the assembled facade (:mod:`tai42_contract.app`).
+"""
 
 from __future__ import annotations
 
@@ -117,31 +117,54 @@ class AppTools(Protocol):
     @overload
     def toolkit(self, *args: Any, **kwargs: Any) -> Callable[[F], F]: ...
 
-    def tool_title(self, func: Callable[..., object]) -> str: ...
+    def tool_title(self, func: Callable[..., object]) -> str:
+        """Return the human-facing title of the tool implemented by ``func``."""
+        ...
 
-    async def get_tool(self, key: str) -> Tool: ...
+    async def get_tool(self, key: str) -> Tool:
+        """Return the assembled tool registered under ``key``."""
+        ...
 
-    async def get_tools(self) -> dict[str, Tool]: ...
+    async def get_tools(self) -> dict[str, Tool]:
+        """Return every assembled tool keyed by name."""
+        ...
 
-    async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]: ...
+    async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
+        """Return the client-facing tool objects, restricted to ``names`` when given."""
+        ...
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any: ...
+    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
+        """Execute the tool registered under ``key`` with ``arguments`` and return its result.
 
-    def remove_tool(self, name: str) -> None: ...
+        ``offload_sync`` runs a synchronous tool body off the event loop in a worker thread.
+        """
+        ...
+
+    def remove_tool(self, name: str) -> None:
+        """Remove the tool registered under ``name``."""
+        ...
 
     # ``combos`` is the tool's list of extension combos (each combo a stack of
     # extension elements — a bare name or a ``{"name", "config"}`` mapping);
     # ``register`` attaches them to the base ``name``.
-    def register_tool_info(self, name: str, combos: Sequence[Sequence[ExtensionElement]] | None = None) -> None: ...
+    def register_tool_info(self, name: str, combos: Sequence[Sequence[ExtensionElement]] | None = None) -> None:
+        """Register base tool ``name``'s extension combos, attaching each combo stack to the base."""
+        ...
 
-    def unregister_tool_info(self, name: str) -> None: ...
+    def unregister_tool_info(self, name: str) -> None:
+        """Drop the registered tool-info for ``name``."""
+        ...
 
-    def unregister_tool_base(self, tool_name: str) -> list[str]: ...
+    def unregister_tool_base(self, tool_name: str) -> list[str]:
+        """Unregister base tool ``tool_name`` and return the names removed."""
+        ...
 
     # The declared tool-references extractor a base tool registered under ``name``,
     # or ``None`` when it declared none — the preset reference collector consults it
     # for a body's ``base_tool``.
-    def tool_refs_extractor(self, name: str) -> ToolRefsExtractor | None: ...
+    def tool_refs_extractor(self, name: str) -> ToolRefsExtractor | None:
+        """Return the tool-references extractor base tool ``name`` registered, or ``None`` when it declared none."""
+        ...
 
     def register_rename_referee(self, provider: ToolRenameReferee) -> None:
         """Register a :data:`ToolRenameReferee` consulted before a tool rename.
@@ -151,7 +174,8 @@ class AppTools(Protocol):
         old name on a rename; any non-empty answer blocks the rename and its
         descriptions name the holders. Registering the same provider object twice
         raises loudly — a double registration is a plugin bug, never a silent
-        duplicate consult."""
+        duplicate consult.
+        """
         ...
 
     def register_delete_referee(self, provider: ToolDeleteReferee) -> None:
@@ -163,12 +187,12 @@ class AppTools(Protocol):
         referee cascades its own cleanup and returns empty to allow, or returns non-empty
         descriptions to VETO — any non-empty answer blocks the delete and names the
         holders. Registering the same provider object twice raises loudly — a double
-        registration is a plugin bug, never a silent duplicate consult."""
+        registration is a plugin bug, never a silent duplicate consult.
+        """
         ...
 
     def register_detach_referee(self, provider: StateTemplateDetachReferee) -> None:
-        """Register a :data:`StateTemplateDetachReferee` consulted before a state-template
-        detach.
+        """Register a :data:`StateTemplateDetachReferee` consulted before a state-template detach.
 
         A holder of door bindings that name templates (e.g. per-node state bindings, or the
         platform's own preset/route/hook/schedule bindings) calls this through the
@@ -176,12 +200,14 @@ class AppTools(Protocol):
         ``(state, template)`` on a detach; any non-empty answer blocks the detach and its
         descriptions name the referencing bindings. Registering the same provider object
         twice raises loudly — a double registration is a bug, never a silent duplicate
-        consult."""
+        consult.
+        """
         ...
 
     def register_tier(self, base_tool: str, tier: RouteAction) -> None:
-        """Declare ``base_tool``'s registration tier — the authorization character
-        (a :data:`RouteAction`) enforced everywhere the tier is consulted.
+        """Declare ``base_tool``'s registration tier (a :data:`RouteAction`).
+
+        The authorization character enforced everywhere the tier is consulted.
 
         A ``fenced`` or ``secret`` tier gates BOTH authoring a preset over the base tool
         (admin-only) AND running the tool: a ``fenced``/``secret`` tool runs only for an
@@ -189,12 +215,15 @@ class AppTools(Protocol):
         that fence at run time. ``read``/``write`` carry no execution gate. This is the
         programmatic form of ``@app.tools.tool(tier=...)``; both write the one shared
         registry (also read on the authoring side as ``app.presets.registration_tier``).
-        One declaration per base tool; a duplicate raises loudly."""
+        One declaration per base tool; a duplicate raises loudly.
+        """
         ...
 
     def tier(self, base_tool: str) -> RouteAction | None:
-        """The registration tier ``base_tool`` declared, or ``None`` when it declared
-        none (no execution fence; authoring keeps the presets' default ``write`` action)."""
+        """The registration tier ``base_tool`` declared, or ``None`` when it declared none.
+
+        None means no execution fence; authoring keeps the presets' default ``write`` action.
+        """
         ...
 
 

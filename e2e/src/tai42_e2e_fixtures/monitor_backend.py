@@ -103,7 +103,7 @@ class _RecordingWriter(NoOpWriter):
         name: str,
         kind: SpanKind,
         trace_context: TraceContext | None = None,
-        input: Any = None,
+        input_: Any = None,
         model: str | None = None,
         model_parameters: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -111,7 +111,7 @@ class _RecordingWriter(NoOpWriter):
         record = {
             "name": name,
             "kind": kind.value,
-            "input": repr(input),
+            "input": repr(input_),
             # The active run attribution when this span opened, or ``None`` — so a spec proves
             # the span fell INSIDE the attribution scope, not merely that the scope was entered.
             "attribution": _active_attribution.get(),

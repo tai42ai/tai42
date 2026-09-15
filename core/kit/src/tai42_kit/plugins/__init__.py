@@ -74,8 +74,7 @@ class PluginSpecLoadError(Exception):
 
 
 class PluginDocsError(Exception):
-    """Raised when a plugin's in-wheel ``docs/`` tree cannot be read or fails
-    the canonical validation contract.
+    """Raised when a plugin's in-wheel ``docs/`` tree cannot be read or fails the canonical validation contract.
 
     Covers both the extraction family (missing tree, a traversing/absolute
     member, an over-ceiling or bomb member, an unreadable archive) and every
@@ -148,7 +147,7 @@ def parse_plugin_spec(data: bytes | str, *, source: str = PLUGIN_SPEC_FILENAME) 
                 f"{source} is {encoded_size} bytes, exceeding the {MAX_PLUGIN_SPEC_BYTES}-byte limit"
             )
     try:
-        raw = yaml.load(text, Loader=_StrictSpecLoader)
+        raw = yaml.load(text, Loader=_StrictSpecLoader)  # noqa: S506 loader subclasses yaml.SafeLoader; no arbitrary object construction
     except _SpecRejection as exc:
         raise PluginSpecLoadError(f"{source}: {exc}") from exc
     except yaml.YAMLError as exc:
@@ -348,9 +347,12 @@ def _resolve_docs_root(plugin_dir: Path) -> Path:
 
 
 def _read_capped_docs_member(path: Path, docs_root_real: Path) -> bytes:
-    """One docs member's bytes: recheck it resolves inside ``docs_root_real``, refuse
-    an over-cap file by ``stat`` before reading, then bounded-read at the per-file
-    ceiling. Any escape, unreadable file, or over-cap file raises :class:`PluginDocsError`."""
+    """Return one docs member's bytes, enforcing containment and the per-file size cap.
+
+    Recheck the path resolves inside ``docs_root_real``, refuse an over-cap file by ``stat`` before
+    reading, then bounded-read at the per-file ceiling. Any escape, unreadable file, or over-cap file
+    raises :class:`PluginDocsError`.
+    """
     if not path.resolve().is_relative_to(docs_root_real):
         raise PluginDocsError(f"{path} resolves outside the {PLUGIN_DOCS_DIRNAME}/ tree at {docs_root_real}")
     # ``stat`` first refuses an over-cap file before any bytes are read; the
@@ -419,9 +421,10 @@ class EnvRequirement:
 
 
 def _marker_refs(item: PluginItem) -> list[EnvMarkerRef]:
-    """Every ``!ENV`` marker ref carried in an item's ``mcp`` block, in document
-    order. Only an ``mcp-server`` item carries markers; any other item has no
-    ``mcp`` block and contributes none."""
+    """Every ``!ENV`` marker ref carried in an item's ``mcp`` block, in document order.
+
+    Only an ``mcp-server`` item carries markers; any other item has no ``mcp`` block and contributes none.
+    """
     if item.mcp is None:
         return []
     return scan_env_marker_refs(item.mcp.model_dump(exclude_none=True))
@@ -557,9 +560,9 @@ _MDX_EXPR_RE = re.compile(r"(?<!\\)(?:\\\\)*\{")
 
 
 def validate_docs(files: dict[str, bytes], *, first_party: bool) -> None:
-    """Validate a docs tree (``{docs-relative-path: bytes}``) against the
-    canonical contract, raising :class:`PluginDocsError` on the first violation.
+    """Validate a docs tree (``{docs-relative-path: bytes}``) against the canonical contract.
 
+    Raise :class:`PluginDocsError` on the first violation.
     The one implementation every enforcement point shares (marketplace ingest,
     the monorepo CI gate, the docs-site generator); each caller owns the
     ``first_party`` policy. Enforced for EVERY namespace: the set shape (only
@@ -613,7 +616,7 @@ def _validate_front_matter(page: str, text: str) -> None:
     if match is None:
         raise PluginDocsError(f"{page}: missing a leading `---` front-matter block with title and description")
     try:
-        meta = yaml.load(match.group(1), Loader=_StrictSpecLoader)
+        meta = yaml.load(match.group(1), Loader=_StrictSpecLoader)  # noqa: S506 loader subclasses yaml.SafeLoader; no arbitrary object construction
     except _SpecRejection:
         raise PluginDocsError(f"{page}: front matter must not use YAML anchors, aliases, or duplicate keys") from None
     except yaml.YAMLError as exc:
@@ -641,13 +644,14 @@ def _check_front_matter_value(page: str, key: str, value: object) -> None:
 
 
 def _mask_front_matter_and_code(text: str) -> str:
-    """Blank the front matter, fenced code blocks (```` ``` ````/``~~~``), and inline
-    ``code`` spans, preserving line count and within-line offsets, so the reference
-    and mdx scans see only real body text (a link or ``<tag>`` shown inside a code
-    sample is documentation, not live). It masks only these, and only over-scans,
-    never hiding live content: a 4-space-indented code block is NOT masked, so an
+    """Blank front matter, fenced code blocks (```` ``` ````/``~~~``), and inline ``code`` spans.
+
+    Line count and within-line offsets are preserved, so the reference and mdx scans see only real
+    body text (a link or ``<tag>`` shown inside a code sample is documentation, not live). It masks only
+    these, and only over-scans, never hiding live content: a 4-space-indented code block is NOT masked, so an
     indented sample carrying braces/tags/link-like text is conservatively rejected
-    for third-party docs — the fail-closed choice (authors use fenced blocks)."""
+    for third-party docs — the fail-closed choice (authors use fenced blocks).
+    """
     out: list[str] = []
     in_front_matter = False
     fence: str | None = None
@@ -722,8 +726,10 @@ def _check_reference(page: str, raw: str, line: int, files: dict[str, bytes], *,
 
 
 def _resolve_reference(page: str, target: str) -> str | None:
-    """The in-set key a scheme-less reference resolves to, or None for a pure
-    in-page anchor/query (which resolves to the page itself)."""
+    """The in-set key a scheme-less reference resolves to, or None for a pure in-page anchor/query.
+
+    A pure anchor/query resolves to the page itself.
+    """
     path_part = target.split("#", 1)[0].split("?", 1)[0]
     if path_part == "":
         return None

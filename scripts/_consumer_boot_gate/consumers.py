@@ -1,5 +1,7 @@
-"""Consumer distributions to boot: the supplied wheels/reqs and the first-party
-plugin enumeration (each at its latest published PyPI version)."""
+"""Consumer distributions to boot.
+
+The supplied wheels/reqs and the first-party plugin enumeration (each at its latest published PyPI version).
+"""
 
 from __future__ import annotations
 
@@ -16,9 +18,11 @@ _WHEEL_NAME_RE = re.compile(r"^(?P<name>.+?)-(?P<version>\d[^-]*)-")
 
 @dataclass(frozen=True)
 class Consumer:
-    """A consumer distribution to install and boot: its distribution name (used to
-    read the installed descriptor), a display label, and the install argument uv
-    receives (a wheel path or a requirement spec)."""
+    """A consumer distribution to install and boot.
+
+    Its distribution name (used to read the installed descriptor), a display label, and the install argument uv
+    receives (a wheel path or a requirement spec).
+    """
 
     dist_name: str
     label: str
@@ -34,15 +38,16 @@ def wheel_name_version(wheel: Path) -> tuple[str, str]:
 
 
 def _req_dist_name(req: str) -> str:
-    """The distribution name at the head of a requirement spec (``pkg==1.2`` ->
-    ``pkg``), used to read the installed descriptor."""
+    """The distribution name at the head of a requirement spec (``pkg==1.2`` -> ``pkg``), for the descriptor read."""
     return re.split(r"[<>=!~\[; ]", req, maxsplit=1)[0]
 
 
 def collect_consumers(wheels: list[str], reqs: list[str]) -> list[Consumer]:
-    """Resolve the supplied wheels and requirement specs into consumers. A wheel
-    path that does not exist raises loudly — an upstream download that failed is a
-    hard error, never a skipped consumer."""
+    """Resolve the supplied wheels and requirement specs into consumers.
+
+    A wheel path that does not exist raises loudly — an upstream download that failed is a hard error, never a
+    skipped consumer.
+    """
     consumers: list[Consumer] = []
     for raw in wheels:
         wheel = Path(raw)
@@ -58,9 +63,10 @@ _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 def first_party_plugin_names(repo_root: Path) -> dict[str, str]:
-    """Every packaged first-party plugin, mapping its distribution name to its member
-    dir. A descriptor-only plugin dir (no ``pyproject.toml``) ships no distribution and
-    is skipped."""
+    """Every packaged first-party plugin, mapping its distribution name to its member dir.
+
+    A descriptor-only plugin dir (no ``pyproject.toml``) ships no distribution and is skipped.
+    """
     import tomllib
 
     names: dict[str, str] = {}
@@ -71,11 +77,13 @@ def first_party_plugin_names(repo_root: Path) -> dict[str, str]:
 
 
 def release_bump_set(repo_root: Path) -> set[str]:
-    """The distribution names being RELEASED in this train — a package whose
-    release-please manifest version has no matching tag yet (a pending bump). Read the
+    """The distribution names being RELEASED in this train.
+
+    A package whose release-please manifest version has no matching tag yet (a pending bump). Read the
     way the API gate reads versions: the manifest version against the package's tags.
     Booting such a package's stale published version is pointless (its new code is the
-    candidate, its new version unpublished), so the caller excludes it."""
+    candidate, its new version unpublished), so the caller excludes it.
+    """
     import json
 
     manifest = json.loads((repo_root / ".release-please-manifest.json").read_text())
@@ -86,8 +94,8 @@ def release_bump_set(repo_root: Path) -> set[str]:
         version = manifest.get(path)
         if not package or not version:
             continue
-        tags = subprocess.run(
-            ["git", "tag", "--list", f"{package}-v{version}"],
+        tags = subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
+            ["git", "tag", "--list", f"{package}-v{version}"],  # noqa: S607 fixed, trusted executable resolved from PATH
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -99,8 +107,10 @@ def release_bump_set(repo_root: Path) -> set[str]:
 
 
 def latest_pypi_version(name: str) -> str | None:
-    """The highest final ``major.minor.patch`` release of ``name`` on PyPI, or ``None``
-    when the distribution has no release yet (never published, or a 404)."""
+    """The highest final ``major.minor.patch`` release of ``name`` on PyPI, or ``None`` when it has none.
+
+    ``None`` covers a distribution never published, or a 404.
+    """
     import urllib.error
     import urllib.request
 
@@ -119,9 +129,11 @@ def latest_pypi_version(name: str) -> str | None:
 
 
 def enumerate_first_party(repo_root: Path) -> tuple[list[Consumer], list[str]]:
-    """The first-party plugin consumers to boot — each NOT in this train's bump set, at
-    its latest published PyPI version — plus a notice per plugin with no PyPI release yet
-    (skipped, never a failure). One consumer per distribution."""
+    """The first-party plugin consumers to boot — each at its latest published PyPI version.
+
+    Each is NOT in this train's bump set. Plus a notice per plugin with no PyPI release yet (skipped, never a
+    failure). One consumer per distribution.
+    """
     bumped = release_bump_set(repo_root)
     consumers: list[Consumer] = []
     notices: list[str] = []

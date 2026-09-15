@@ -34,16 +34,20 @@ from tai42_skeleton.operations.response_models_group_b import ToolExtensionsView
 
 
 class ToolExtensionsUpdate(BaseModel):
-    """Set a tool's applied extension combos — the full list of combos, authored
-    losslessly. Each combo element is an extension name or a ``{"name", "config"}``
-    mapping binding author config. An empty list clears them."""
+    """Set a tool's applied extension combos — the full list of combos, authored losslessly.
+
+    Each combo element is an extension name or a ``{"name", "config"}`` mapping
+    binding author config. An empty list clears them.
+    """
 
     combos: list[list[ExtensionElement]]
 
 
 class ToolExtensionCombosModify(BaseModel):
-    """Add and/or remove single extension combos on a tool, granular over the full
-    ``set`` write. Each combo is authored losslessly, exactly as ``combos`` above."""
+    """Add and/or remove single extension combos on a tool, granular over the full ``set`` write.
+
+    Each combo is authored losslessly, exactly as ``combos`` above.
+    """
 
     add: list[list[ExtensionElement]] = Field(default_factory=list)
     remove: list[list[ExtensionElement]] = Field(default_factory=list)
@@ -54,11 +58,12 @@ def _live_manifest() -> Manifest:
 
 
 def _owning_configs(manifest: Manifest, name: str) -> list[tuple[str, str]]:
-    """Every config that PROVIDES ``name``, as ``(kind, key)`` pairs (``key`` is
-    the module for a ``tools`` config, the title for an ``mcp`` config). A local
-    tool is owned when its resolved selection recorded it under the config's
-    module; an mcp tool when resolved selection OR the live mcp-bound-tool map
-    recorded it under the config's title.
+    """Every config that PROVIDES ``name``, as ``(kind, key)`` pairs.
+
+    ``key`` is the module for a ``tools`` config, the title for an ``mcp`` config.
+    A local tool is owned when its resolved selection recorded it under the
+    config's module; an mcp tool when resolved selection OR the live
+    mcp-bound-tool map recorded it under the config's title.
 
     A branch/composed tool (the tool an extension combo PRODUCES, e.g.
     ``weather_chain``) is never itself an extension TARGET — only its base tool is —
@@ -66,7 +71,8 @@ def _owning_configs(manifest: Manifest, name: str) -> list[tuple[str, str]]:
     bases, so without this guard an mcp branch tool would resolve a bogus owner and
     corrupt the manifest on write; excluding it makes a branch tool report no owner
     exactly as the base-only ``resolved_includes`` path already does for local
-    tools."""
+    tools.
+    """
     if instance.app.tools.is_branch(name):
         return []
     owners: list[tuple[str, str]] = []
@@ -83,9 +89,11 @@ def _owning_configs(manifest: Manifest, name: str) -> list[tuple[str, str]]:
 
 
 def _other_mappers(manifest: Manifest, name: str, owner: tuple[str, str]) -> list[str]:
-    """The configs OTHER than the providing one whose ``extensions`` map also
-    carries ``name`` — a write would leave their combos behind and the union GET
-    would disagree with what was authored, so any such config is a 409."""
+    """The configs OTHER than the providing one whose ``extensions`` map also carries ``name``.
+
+    A write would leave their combos behind and the union GET would disagree with
+    what was authored, so any such config is a 409.
+    """
     kind, key = owner
     others: list[str] = []
     others.extend(
@@ -102,10 +110,12 @@ def _other_mappers(manifest: Manifest, name: str, owner: tuple[str, str]) -> lis
 
 
 def _resolve_single_owner(manifest: Manifest, name: str) -> tuple[str, str]:
-    """The ONE config that provides ``name`` as ``(kind, key)``, or a loud reject:
-    no owner → 400, multiple owners → 400, a mapping split across configs → the 409
-    consolidation error. Shared by every door that writes a tool's ``extensions``
-    entry so the resolution stays byte-identical."""
+    """The ONE config that provides ``name`` as ``(kind, key)``, or a loud reject.
+
+    No owner → 400, multiple owners → 400, a mapping split across configs → the
+    409 consolidation error. Shared by every door that writes a tool's
+    ``extensions`` entry so the resolution stays byte-identical.
+    """
     owners = _owning_configs(manifest, name)
     if not owners:
         raise BadRequestError(f"tool {name!r} is not currently provided by any config")
@@ -125,10 +135,13 @@ def _resolve_single_owner(manifest: Manifest, name: str) -> tuple[str, str]:
 
 
 def _owner_combos(manifest: Manifest, owner: tuple[str, str], name: str) -> list[list[ExtensionElement]]:
-    """The write target's OWN combos for ``name`` — after ``_resolve_single_owner``'s
-    gates this is the union view, and it is what the granular merge edits. The owner
-    came from these same configs, so a missing match is an invariant breach and
-    raises (``next`` with no default) rather than fabricating an empty list."""
+    """The write target's OWN combos for ``name``.
+
+    After ``_resolve_single_owner``'s gates this is the union view, and it is what
+    the granular merge edits. The owner came from these same configs, so a missing
+    match is an invariant breach and raises (``next`` with no default) rather than
+    fabricating an empty list.
+    """
     kind, key = owner
     configs = manifest.tools if kind == "tools" else manifest.mcp
     key_field = "module" if kind == "tools" else "title"
@@ -137,19 +150,23 @@ def _owner_combos(manifest: Manifest, owner: tuple[str, str], name: str) -> list
 
 
 def _normalized_combos(name: str, combos: list[list[ExtensionElement]]) -> list[list[ExtensionElement]]:
-    """Combos in the exact stored form ``ExtensionsConfigMixin`` produces, so
-    add/remove membership compares against the PERSISTED shape (the contract
-    normalization) rather than the router edge's element reader."""
+    """Combos in the exact stored form ``ExtensionsConfigMixin`` produces.
+
+    So add/remove membership compares against the PERSISTED shape (the contract
+    normalization) rather than the router edge's element reader.
+    """
     if not combos:
         return []
     return ExtensionsConfigMixin.model_validate({"extensions": {name: combos}}).extensions[name]
 
 
 def _validate_combos_against_registry(combos: list[list[ExtensionElement]]) -> None:
-    """Reject an unknown extension name and a double-non-stackable-kind combo
-    against the LIVE registry, before any persist — one bad combo fails the whole
-    write. Delegates to the ``app.extensions.validate_combo`` accessor (the shared
-    combo-validation seam) so the manifest can never carry an illegal combo."""
+    """Reject an unknown extension name and a double-non-stackable-kind combo against the LIVE registry.
+
+    Runs before any persist — one bad combo fails the whole write. Delegates to
+    the ``app.extensions.validate_combo`` accessor (the shared combo-validation
+    seam) so the manifest can never carry an illegal combo.
+    """
     for combo in combos:
         try:
             instance.app.extensions.validate_combo(combo)
@@ -160,11 +177,12 @@ def _validate_combos_against_registry(combos: list[list[ExtensionElement]]) -> N
 def _apply_combos(
     manifest_dict: dict[str, Any], owner: tuple[str, str], name: str, combos: list[list[ExtensionElement]]
 ) -> bool:
-    """Upsert the providing config's ``extensions[name]`` entry in the persisted
-    manifest dict — ``include``/``exclude`` are untouched. An empty ``combos``
-    drops the tool's key (and the whole ``extensions`` map if it empties), never
-    writing a present-but-empty value. Returns whether the providing config entry
-    was found."""
+    """Upsert the providing config's ``extensions[name]`` entry in the persisted manifest dict.
+
+    ``include``/``exclude`` are untouched. An empty ``combos`` drops the tool's
+    key (and the whole ``extensions`` map if it empties), never writing a
+    present-but-empty value. Returns whether the providing config entry was found.
+    """
     kind, key = owner
     section, key_field = ("tools", "module") if kind == "tools" else ("mcp", "title")
     for entry in manifest_dict.get(section, []):
@@ -189,6 +207,7 @@ def _apply_combos(
     response_model=ToolExtensionsView,
 )
 async def get_tool_extensions(name: str) -> dict:
+    """Return the tool's applied extension combos and the available extensions; 404 for an unknown tool."""
     tools = await instance.app.tools.get_tools()
     if name not in tools:
         raise NotFoundError(f"tool {name!r} is not a registered tool")
@@ -207,8 +226,7 @@ async def get_tool_extensions(name: str) -> dict:
     response_model=ApplyResponse,
 )
 async def set_tool_extensions(name: str, combos: list[list[ExtensionElement]]) -> object:
-    """Author all of a tool's extension combos through the pipeline: persist, reload,
-    and broadcast.
+    """Author all of a tool's extension combos through the pipeline (persist, reload, broadcast).
 
     Owner resolution, the consolidation-conflict check, and the registry combo
     validation all run BEFORE the pipeline (nothing persisted on a reject). The
@@ -246,10 +264,12 @@ async def set_tool_extensions(name: str, combos: list[list[ExtensionElement]]) -
 
 
 def _merge_combo_edits(current: list[Any], add_combos: list[Any], remove_combos: list[Any], name: str) -> list[Any]:
-    """The merged combo list — ``current`` plus ``add_combos`` minus ``remove_combos`` —
-    with the two membership guards: an add already attached is a loud 400, a remove not
-    attached a loud 404 (each naming the combo). Returns kept combos (removals dropped)
-    then the additions, in order."""
+    """The merged combo list — ``current`` plus ``add_combos`` minus ``remove_combos``.
+
+    With the two membership guards: an add already attached is a loud 400, a
+    remove not attached a loud 404 (each naming the combo). Returns kept combos
+    (removals dropped) then the additions, in order.
+    """
     for combo in add_combos:
         if combo in current:
             raise BadRequestError(f"combo {json.dumps(combo)} is already attached to tool {name!r}")
@@ -273,11 +293,11 @@ async def modify_tool_extension_combos(
     add: list[list[ExtensionElement]] | None = None,
     remove: list[list[ExtensionElement]] | None = None,
 ) -> dict:
-    """Granularly edit a tool's extension combos: append ``add`` and drop ``remove``
-    over the merge of its current combos, then persist through the same pipeline
-    ``set_tool_extensions`` rides.
+    """Granularly edit a tool's extension combos: append ``add`` and drop ``remove``.
 
-    Pinned order (each check loud, nothing persisted on a reject): the tool must be
+    Applied over the merge of its current combos, then persisted through the same
+    pipeline ``set_tool_extensions`` rides. Pinned order (each check loud, nothing
+    persisted on a reject): the tool must be
     REGISTERED (404, as ``get_tool_extensions``); its owning config resolves
     (400/400/409, as ``set_tool_extensions``); membership over the OWNING config's
     combos in their stored form — adding a present combo → 400, removing an absent

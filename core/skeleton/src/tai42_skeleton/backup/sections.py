@@ -1,5 +1,4 @@
-"""The host's own backup sections — the skeleton as first consumer of its
-``app.backup`` facet.
+"""The host's own backup sections — the skeleton as first consumer of its ``app.backup`` facet.
 
 Each section is a thin exporter/importer pair over the owning subsystem's existing
 read/write seam; no backup logic lives in the subsystems. Exporters/importers reach
@@ -53,7 +52,7 @@ async def _import_manifest(payload: dict[str, Any]) -> _SectionReport:
     # with nothing persisted; the router records it as this section's error. When the
     # replacement DROPS an oauth connector the replace crosses the combined env+manifest
     # seam (to keep the leaving secret masked), so a manifest-persist partial failure is
-    # mapped to a loud, typed OperationFailed exactly as the marketplace / manifest doors.
+    # mapped to a loud, typed OperationFailedError exactly as the marketplace / manifest doors.
     with translate_orphan_env_write():
         result = await ConfigService.from_app().apply_replace(payload)
     report = _empty_report()

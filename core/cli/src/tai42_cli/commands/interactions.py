@@ -59,8 +59,9 @@ def list_pending_interactions(
         int | None, typer.Option("--limit", help="Max parked asks to return, 1..1000 (default 500).")
     ] = None,
 ) -> None:
-    """Print the parked (async) interactions awaiting an answer — the operator-only
-    audit a watchdog reads to spot asks nearing or past their expiry.
+    """Print the parked (async) interactions awaiting an answer.
+
+    The operator-only audit a watchdog reads to spot asks nearing or past their expiry.
 
     Example: ``tai interactions pending --limit 100``
     """

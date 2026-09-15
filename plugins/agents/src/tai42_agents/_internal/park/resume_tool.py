@@ -68,7 +68,8 @@ def register_agent_resume_tool() -> None:
     (``ValueError('Component already exists: ...')``), debug-logging the no-op — NOT a
     process-lifetime flag (that would starve every post-boot reload epoch of its binding,
     since the module is import-cached and not re-imported on reload). Any OTHER error
-    propagates loudly so a genuine registration bug is never swallowed."""
+    propagates loudly so a genuine registration bug is never swallowed.
+    """
     # The abandonment counterpart of the resume continuation: when the platform PERMANENTLY gives
     # up redelivering a park's resume, this handler fires the FAILED terminal so the bound caller is
     # not left waiting. Registered here alongside the resume tool (idempotent by handler identity,

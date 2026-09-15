@@ -1,3 +1,5 @@
+"""The ``tai serve`` CLI: build and run the MCP app across the http/sse/stdio transports."""
+
 import asyncio
 import logging
 import os
@@ -33,6 +35,7 @@ _STATEFUL_TRANSPORTS = frozenset({"http", "streamable-http", "sse"})
 
 
 def create_app():
+    """The uvicorn worker factory: configure the worker process and build the ASGI app from the stamped env."""
     # Configure the root logger in every uvicorn worker process: multi-worker
     # ``uvicorn.run(..., factory=True)`` imports this factory string and never runs
     # ``main()``, so without this the workers (which do all the real logging) stay
@@ -69,12 +72,14 @@ def create_app():
 
 
 def _refuse_stdio_profile_apply() -> None:
-    """Reload handler wired only by the stdio launcher: the stdio transport serves
-    through ``app.run_async`` (no swappable ASGI slot) and joins no fleet, so a fresh
-    epoch could never take over serving. A profile apply / config reload here would
-    otherwise rebuild registries the live stdio session never serves — a silent
-    partial apply — so refuse loudly instead (the epoch rebuild runs reload handlers,
-    so the build is discarded and this server keeps serving)."""
+    """Reload handler wired only by the stdio launcher.
+
+    The stdio transport serves through ``app.run_async`` (no swappable ASGI slot) and joins no
+    fleet, so a fresh epoch could never take over serving. A profile apply / config reload here
+    would otherwise rebuild registries the live stdio session never serves — a silent partial
+    apply — so refuse loudly instead (the epoch rebuild runs reload handlers, so the build is
+    discarded and this server keeps serving).
+    """
     raise RuntimeError(
         "profile apply / config reload is not supported on the 'stdio' transport: it serves "
         "through a single in-process session with no swappable serving surface and no fleet, so "
@@ -83,6 +88,7 @@ def _refuse_stdio_profile_apply() -> None:
 
 
 async def run_stdio():
+    """Serve the app over the stdio transport in this process and return the exit code."""
     # The stdio server writes tool counters in this process, so the multiproc mmap
     # backend must have frozen (``run_mcp_app`` set the env before calling this).
     from tai42_skeleton.routers.prometheus import assert_multiproc_value_class
@@ -108,13 +114,14 @@ async def run_stdio():
 
 
 async def run_debug(config_kwargs: dict[str, Any]) -> int:
-    """Serve a single in-process worker through the SAME factory + epoch machinery as
-    the multi-worker path: :func:`create_app` builds the shim app (boot-epoch install
-    + swap slot), so a debug run gets the fresh-FastMCP-per-epoch serving surface and
-    a profile apply swaps a fresh epoch in place exactly as a served worker does. Only
-    the process shape differs — one uvicorn ``Server`` here versus ``uvicorn.run``'s
-    worker pool. The transport / stateless-http selection travels to ``create_app``
-    through the env ``run_mcp_app`` stamped before dispatching here."""
+    """Serve a single in-process worker through the SAME factory + epoch machinery as the multi-worker path.
+
+    :func:`create_app` builds the shim app (boot-epoch install + swap slot), so a debug run gets
+    the fresh-FastMCP-per-epoch serving surface and a profile apply swaps a fresh epoch in place
+    exactly as a served worker does. Only the process shape differs — one uvicorn ``Server`` here
+    versus ``uvicorn.run``'s worker pool. The transport / stateless-http selection travels to
+    ``create_app`` through the env ``run_mcp_app`` stamped before dispatching here.
+    """
     config_kwargs["app"] = create_app()
     await uvicorn.Server(uvicorn.Config(**config_kwargs)).serve()
     return 0
@@ -172,8 +179,7 @@ def _validate_serve_args(
     stateless_http: bool,
     defaults: Any,
 ) -> None:
-    """Refuse an unserveable argument set with a :class:`click.BadParameter`, and run
-    the worker-bus boot rules.
+    """Refuse an unserveable argument set with a :class:`click.BadParameter`, and run the worker-bus boot rules.
 
     Guards: workers ≥ 1; uds not on Windows; uds not with stdio; host/port not set
     with stdio or uds; ``--stateless-http`` only on an http transport; more than one
@@ -181,7 +187,8 @@ def _validate_serve_args(
     Then the bus boot rules (fail loud, naming TAI_BUS_REDIS_URL) run BEFORE any
     config-manager construction, so a busless shared-config boot refuses on the bus var
     rather than on the provider connection. The workers rule lives only in this CLI —
-    an external process manager driving the ASGI factory bypasses it."""
+    an external process manager driving the ASGI factory bypasses it.
+    """
     if workers < 1:
         raise click.BadParameter("Number of workers must be at least 1.", param_hint="'-w'/'--workers'")
 
@@ -230,10 +237,12 @@ def _validate_serve_args(
 
 
 def _stamp_serve_env(manifest_path: str, transport: str, stateless_http: bool) -> None:
-    """Publish the flags the uvicorn factory worker reads (a factory import string
-    carries no arguments): the manifest path, the transport, the stateless-http flag
-    (cleared when off so a prior run cannot leak in), and a per-run metrics id inherited
-    by every forked worker so the Prometheus multiproc-dir wipe fires once per run."""
+    """Publish the flags the uvicorn factory worker reads (a factory import string carries no arguments).
+
+    Stamps the manifest path, the transport, the stateless-http flag (cleared when off so a prior
+    run cannot leak in), and a per-run metrics id inherited by every forked worker so the
+    Prometheus multiproc-dir wipe fires once per run.
+    """
     os.environ["TAI_MANIFEST_PATH"] = manifest_path
     os.environ["TAI_TRANSPORT"] = transport
     if stateless_http:
@@ -244,10 +253,12 @@ def _stamp_serve_env(manifest_path: str, transport: str, stateless_http: bool) -
 
 
 def _build_serve_config(uds: str | None, host: str, port: int, uvicorn_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """The uvicorn ``config_kwargs``: the transport defaults plus a settings-backed
-    graceful-shutdown timeout (inserted BEFORE the extra-arg update so a shipped
-    ``--timeout-graceful-shutdown`` still wins), then the uds-vs-tcp binding branch.
-    Feeds both the served (``uvicorn.run``) and debug (``uvicorn.Config``) paths."""
+    """The uvicorn ``config_kwargs`` for both the served (``uvicorn.run``) and debug (``uvicorn.Config``) paths.
+
+    Carries the transport defaults plus a settings-backed graceful-shutdown timeout (inserted
+    BEFORE the extra-arg update so a shipped ``--timeout-graceful-shutdown`` still wins), then the
+    uds-vs-tcp binding branch.
+    """
     config_kwargs: dict[str, Any] = {
         "ws": "wsproto",
         "loop": "auto",
@@ -276,6 +287,7 @@ def run_mcp_app(
     stateless_http: bool = False,
     uvicorn_kwargs: dict[str, Any] | None = None,
 ) -> int:
+    """Dispatch a serve run to the multi-worker, stdio, or debug path for ``transport`` and return the exit code."""
     # Configure logging for this served process: the multi-worker master and the
     # in-process stdio/debug servers this dispatches to all run through here (the
     # shipped ``tai serve`` reaches this via ``cli``, not ``main``). Uvicorn workers
@@ -394,7 +406,7 @@ def cli(
     stateless_http: bool,
     extra_args: tuple[str, ...],
 ) -> None:
-    """Run the tai MCP server (FastMCP + Starlette), serving the Studio SPA too.
+    r"""Run the tai MCP server (FastMCP + Starlette), serving the Studio SPA too.
 
     \b
     Worker / transport combinations:
@@ -445,11 +457,12 @@ def cli(
         logger.info("KeyboardInterrupt")
         sys.exit(130)
     except (TaiValidationError, FileNotFoundError, RuntimeError, TimeoutError, OSError, ImportError) as e:
-        logger.error(str(e))
+        logger.exception("MCP app command failed")
         raise click.ClickException(str(e)) from e
 
 
 def main() -> None:
+    """The process entry point: bootstrap env and logging, then run the ``tai serve`` CLI."""
     if config_mode() == ConfigMode.file:
         load_dotenv()
 

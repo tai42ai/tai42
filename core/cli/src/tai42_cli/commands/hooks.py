@@ -39,8 +39,9 @@ def list_hooks(
     ctx: typer.Context,
     topic: Annotated[str | None, typer.Option("--topic", help="Filter to one topic.")] = None,
 ) -> None:
-    """List registered hooks (the per-topic verifier bindings and each topic's
-    derived ``trigger_auth`` ride the ``--json`` body).
+    """List registered hooks.
+
+    The per-topic verifier bindings and each topic's derived ``trigger_auth`` ride the ``--json`` body.
 
     Example: ``tai hooks list --topic github``
     """
@@ -73,8 +74,9 @@ def register_hook(
     ] = None,
     params_file: Annotated[str | None, typer.Option("--params-file", help=_PARAMS_FILE_HELP)] = None,
 ) -> None:
-    """Register a hook from a ``HookRegister`` JSON body. Exactly one of ``--params`` or
-    ``--params-file`` is required.
+    """Register a hook from a ``HookRegister`` JSON body.
+
+    Exactly one of ``--params`` or ``--params-file`` is required.
 
     The body REQUIRES an ``execution_key`` — the api-key user id the hook fires as. Bind
     your own identity or a key you own (an admin may bind any); its policy condition must
@@ -110,8 +112,9 @@ def delete_hook(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Ho
 @app.command("trigger-links")
 @covers(("GET", "/api/hooks/trigger-links"))
 def list_trigger_links(ctx: typer.Context) -> None:
-    """List trigger links (name, topic, execution key, door auth, expiry, hash
-    prefix; never a raw token).
+    """List trigger links.
+
+    Each record carries name, topic, execution key, door auth, expiry, and hash prefix; never a raw token.
 
     Example: ``tai hooks trigger-links``
     """
@@ -214,8 +217,9 @@ def create_trigger_link(
 @app.command("delete-trigger-link")
 @covers(("DELETE", "/api/hooks/trigger-links/{name}"))
 def delete_trigger_link(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Trigger link name.")]) -> None:
-    """Revoke a trigger link by name (immediate and durable — a restored backup
-    cannot re-arm it).
+    """Revoke a trigger link by name.
+
+    The revocation is immediate and durable: a restored backup cannot re-arm it.
 
     Example: ``tai hooks delete-trigger-link my-wall-qr``
     """
@@ -234,6 +238,7 @@ def set_topic_verifier(
     config_json: Annotated[str | None, typer.Option("--config", help="Verifier config as a JSON object.")] = None,
 ) -> None:
     """Bind a webhook verifier to a topic so its deliveries are signature-verified.
+
     ADMIN-ONLY: a ``hooks``-write role is fenced out of this door and reads a bare 403.
 
     Binding also takes every trigger link on the topic OUT OF SERVICE until it is
@@ -253,8 +258,9 @@ def set_topic_verifier(
 @app.command("delete-verifier")
 @covers(("DELETE", "/api/hooks/topics/{topic}/verifier"))
 def delete_topic_verifier(ctx: typer.Context, topic: Annotated[str, typer.Argument(help="Hook topic.")]) -> None:
-    """Remove a topic's verifier binding. ADMIN-ONLY: a ``hooks``-write role is fenced
-    out of this door and reads a bare 403.
+    """Remove a topic's verifier binding.
+
+    ADMIN-ONLY: a ``hooks``-write role is fenced out of this door and reads a bare 403.
 
     Unbinding REOPENS the topic's public ``/universal_webhook/{topic}`` ingress door to
     anyone who knows the topic name, at which point every hook on it fires under its bound

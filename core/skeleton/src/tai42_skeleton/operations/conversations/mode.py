@@ -1,5 +1,7 @@
-"""Per-thread control-mode doors: read the mode in force for a thread and where it comes from,
-and set a per-thread override."""
+"""Per-thread control-mode doors: read the mode in force for a thread and set a per-thread override.
+
+The read also reports where the mode comes from.
+"""
 
 from __future__ import annotations
 
@@ -24,15 +26,17 @@ from .threads_delete import _thread_delete_routes
     response_model=ThreadModeView,
 )
 async def get_conversation_thread_mode(route_name: str, thread_id: str) -> dict[str, Any]:
-    """The mode in force for ``thread_id`` on ``route_name`` and where it comes from:
-    ``{"mode", "source"}``, ``source`` being ``thread`` for a per-thread override and
+    """The mode in force for ``thread_id`` on ``route_name`` and where it comes from.
+
+    Returns ``{"mode", "source"}``, ``source`` being ``thread`` for a per-thread override and
     ``route`` for the no-override default. A route-keyed thread's default is the route's
     ``initial_mode``; a LINKED person's aggregated thread defaults to ``manual`` when ANY
     route the person spans defaults to ``manual``, else ``agent``.
 
     The thread-belongs-to-route guard is the thread delete's: a route-keyed id off the route
     is a 400, a person thread off the named route a 404. An unknown route is a loud 404; a
-    blank ``thread_id`` a 400."""
+    blank ``thread_id`` a 400.
+    """
     _validate_route_name(route_name)
     if not thread_id.strip():
         raise BadRequestError("thread_id must be a non-blank thread identifier")
@@ -56,9 +60,10 @@ async def get_conversation_thread_mode(route_name: str, thread_id: str) -> dict[
     response_model=ThreadModeSetResult,
 )
 async def set_conversation_thread_mode(route_name: str, thread_id: str, mode: str) -> dict[str, Any]:
-    """Set the per-thread mode override for ``thread_id`` on ``route_name`` to ``mode`` (one
-    of ``agent``/``manual``), returning ``{"route_name", "thread_id", "mode", "source"}`` with
-    ``source`` always ``thread`` — a set writes an override.
+    """Set the per-thread mode override for ``thread_id`` on ``route_name`` to ``mode``.
+
+    ``mode`` is one of ``agent``/``manual``. Returns ``{"route_name", "thread_id", "mode",
+    "source"}`` with ``source`` always ``thread`` — a set writes an override.
 
     This is the door an EXTERNAL/programmatic caller names a thread through; an agent flipping
     its OWN live conversation uses the ``set_conversation_mode`` builtin instead, which reads
@@ -67,7 +72,8 @@ async def set_conversation_thread_mode(route_name: str, thread_id: str, mode: st
     Caller authority is the door's grantable ``write`` action. The thread-belongs-to-route
     guard is the thread delete's: a route-keyed id off the route is a 400, a person thread off
     the named route a 404. An unknown route is a loud 404; a blank ``thread_id`` or a ``mode``
-    outside the vocabulary is a 400."""
+    outside the vocabulary is a 400.
+    """
     _validate_route_name(route_name)
     if not thread_id.strip():
         raise BadRequestError("thread_id must be a non-blank thread identifier")

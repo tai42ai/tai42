@@ -1,5 +1,4 @@
-"""The app's channels facet — the ``app.channels`` namespace, in its own module
-like ``app.clients`` (``app/clients.py``).
+"""The app's channels facet — the ``app.channels`` namespace, in its own module like ``app.clients``.
 
 Forwards to the app's :class:`~tai42_skeleton.channels.registry.ChannelRegistry`.
 A channel plugin registers a named deliverer here via an import-only
@@ -19,21 +18,24 @@ if TYPE_CHECKING:
 
 
 class ChannelsFacet:
-    """``app.channels`` — channel registration + lookup + the inbound-answer ladder
-    (``AppChannels``)."""
+    """``app.channels`` — channel registration + lookup + the inbound-answer ladder (``AppChannels``)."""
 
     __slots__ = ("_app",)
 
     def __init__(self, app: TaiMCP) -> None:
+        """Bind the facet to ``app``."""
         self._app = app
 
     def register(self, name: str, channel: Channel) -> None:
+        """Register ``channel`` under ``name``."""
         return self._app._channel_registry.register(name, channel)
 
     def get(self, name: str) -> Channel:
+        """Return the channel registered under ``name``."""
         return self._app._channel_registry.get(name)
 
     def names(self) -> list[str]:
+        """Return the registered channel names."""
         return self._app._channel_registry.names()
 
     async def handle_inbound_answer(
@@ -65,9 +67,9 @@ class ChannelsFacet:
     async def record_flow_send_receipt(
         self, channel: str, provider_message_id: str, status: DeliveryReceipt, *, errors: Any = None
     ) -> bool:
-        """Post a flow send's out-of-band delivery receipt back onto its trace (see
-        :meth:`AppChannels.record_flow_send_receipt`).
+        """Post a flow send's out-of-band delivery receipt back onto its trace.
 
+        See :meth:`AppChannels.record_flow_send_receipt`.
         The tier-2 send-outcome path lives in :mod:`tai42_skeleton.channels.send_receipts`;
         this facet is the contract-level seam the channel delivery-status webhooks reach it
         through (a channel never imports the skeleton). Imported locally so the facet's

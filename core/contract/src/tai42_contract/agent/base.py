@@ -46,15 +46,18 @@ if TYPE_CHECKING:
 
 
 class AgentInterruptedError(Exception):
-    """Raised by ``run``/``_drain`` when a non-streaming caller drains a run that
-    paused on an interrupt. A non-streaming caller cannot act on an interrupt, so
-    it surfaces loudly rather than returning a partial. ``interrupts`` is the list
-    of :class:`InterruptFinal` events the run emitted."""
+    """Raised by ``run``/``_drain`` when a non-streaming caller drains a run that paused on an interrupt.
+
+    A non-streaming caller cannot act on an interrupt, so it surfaces loudly rather than
+    returning a partial. ``interrupts`` is the list of :class:`InterruptFinal` events the run
+    emitted.
+    """
 
     # A drained run that paused on an interrupt did not complete — cancelled.
     __tai_error_kind__ = ErrorKind.CANCELLED
 
     def __init__(self, interrupts: list[InterruptFinal]):
+        """Carry the :class:`InterruptFinal` events the drained run paused on into the error."""
         self.interrupts = interrupts
         ids = ", ".join(i.interrupt_id for i in interrupts)
         super().__init__(f"agent run interrupted (pending: {ids or 'unknown'})")
@@ -68,10 +71,12 @@ def _resolve_drain_terminal(
     message: MessageFinal | None,
     response_format: Any,
 ) -> Any:
-    """The terminal rule of a drained event stream — the final value from the collected
-    terminals. A park wins first (a clean, non-error receipt), then an interrupt raises, then
-    the requested-but-absent ``response_format`` raises, else the last structured/message
-    payload, else ``""`` for an empty run. Never returns a partial."""
+    """The terminal rule of a drained event stream — the final value from the collected terminals.
+
+    A park wins first (a clean, non-error receipt), then an interrupt raises, then the
+    requested-but-absent ``response_format`` raises, else the last structured/message payload,
+    else ``""`` for an empty run. Never returns a partial.
+    """
     if suspended is not None:
         return {
             "status": "suspended",
@@ -93,9 +98,10 @@ def _resolve_drain_terminal(
 
 
 class PresetSpec(BaseModel):
-    """A base tool bound to fixed kwargs, resolved into a ``StructuredTool`` at
-    run time (see ``resolve_tools``). A base tool that interprets its fixed kwargs
-    as a nested document carries that document opaquely here.
+    """A base tool bound to fixed kwargs, resolved into a ``StructuredTool`` at run time.
+
+    See ``resolve_tools``. A base tool that interprets its fixed kwargs as a nested document
+    carries that document opaquely here.
     """
 
     name: str
@@ -136,8 +142,10 @@ class SubAgentSpec(BaseModel):
 
 
 class Agent(ABC):
-    """The uniform agent contract. Implement :meth:`run`; override
-    :meth:`astream` only when the agent produces real per-step events.
+    """The uniform agent contract.
+
+    Implement :meth:`run`; override :meth:`astream` only when the agent produces real per-step
+    events.
 
     Subclasses declare three class attributes that drive auto-tool generation:
 
@@ -257,8 +265,9 @@ class Agent(ABC):
         raise NotImplementedError
 
     async def _drain(self, agen: AsyncIterator[StreamEvent], *, response_format: Any = None) -> Any:
-        """Consume a whole event stream and return the final value (the terminal
-        rule). Streaming agents' ``run`` uses this over their own ``astream``.
+        """Consume a whole event stream and return the final value (the terminal rule).
+
+        Streaming agents' ``run`` uses this over their own ``astream``.
 
         Semantics:
 

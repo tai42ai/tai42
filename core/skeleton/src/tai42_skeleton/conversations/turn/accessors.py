@@ -51,7 +51,9 @@ def _tools():
 
 
 async def _refresh_thread_mode_ttl(thread_id: str) -> None:
-    """Extend a live mode override's retention window on new thread activity, so an override
-    lives exactly as long as the conversation stays within its retention window. A no-op when
-    none is set — the override is never resurrected."""
+    """Extend a live mode override's retention window on new thread activity.
+
+    An override lives exactly as long as the conversation stays within its retention
+    window. A no-op when none is set — the override is never resurrected.
+    """
     await ConversationModeStore(ConversationsSettings()).refresh_ttl(thread_id)

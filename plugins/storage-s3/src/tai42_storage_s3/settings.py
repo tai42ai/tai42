@@ -13,6 +13,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class S3Settings(TaiBaseSettings):
+    """S3 backend settings, read from the ``STORAGE_S3_`` env prefix."""
+
     model_config = SettingsConfigDict(env_prefix="STORAGE_S3_")
 
     bucket: str | None = None
@@ -31,4 +33,5 @@ class S3Settings(TaiBaseSettings):
 
 @settings_cache
 def s3_settings() -> S3Settings:
+    """Return the cached S3 backend settings."""
     return S3Settings()

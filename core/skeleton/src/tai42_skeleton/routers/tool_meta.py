@@ -80,8 +80,7 @@ def _require_str(body: dict[str, Any], field: str) -> str:
 
 
 def _opt_str_or_null(body: dict[str, Any], field: str) -> str | None:
-    """A field that must be a string or ``null`` when present; ``null`` (or absent)
-    reads as ``None``."""
+    """A field that must be a string or ``null`` when present; ``null`` (or absent) reads as ``None``."""
     value = body.get(field)
     if value is not None and not isinstance(value, str):
         raise BadRequestError(f"{field!r} must be a string or null")

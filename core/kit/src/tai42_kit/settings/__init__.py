@@ -1,6 +1,8 @@
-"""Settings machinery: the base class + the cache-reset registry. Leaf settings
-live next to the impl they configure (``tai42_kit.llm``, ``tai42_kit.clients``,
-``tai42_kit.logging``)."""
+"""Settings machinery: the base class + the cache-reset registry.
+
+Leaf settings live next to the impl they configure (``tai42_kit.llm``, ``tai42_kit.clients``,
+``tai42_kit.logging``).
+"""
 
 from tai42_kit.settings.base import KeyMaterial, ReloadClass, TaiBaseSettings
 from tai42_kit.settings.cache_registry import (

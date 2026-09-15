@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 class McpReloadMixin(LifecycleState):
+    """Targeted single-MCP reload/deregister and the dependent-preset reconcile methods."""
+
     async def _reload_mcp_async(self, title: str) -> dict[str, Any]:
         self._refresh_manifest_mcp()
         manifest = self._manifest
@@ -38,10 +40,10 @@ class McpReloadMixin(LifecycleState):
         return await self._apply_reloaded_mcp(title, config, tools)
 
     async def _apply_reloaded_mcp(self, title: str, config: TaiMCPConfig, tools: list[Any]) -> dict[str, Any]:
-        """Bind a freshly-probed MCP server's tools and reconcile dependent presets —
-        the registry-mutating half of a reload, split from the probe.
+        """Bind a freshly-probed MCP server's tools and reconcile dependent presets.
 
-        This half synchronously rewrites the process-wide tool registry and then
+        The registry-mutating half of a reload, split from the probe. This half
+        synchronously rewrites the process-wide tool registry and then
         marshals the preset reconcile onto the serving loop, so two servers applying
         at once would race each other's registry mutation across the probe and serving
         threads. ``_reload_failed_mcps_async`` therefore probes servers concurrently
@@ -88,22 +90,21 @@ class McpReloadMixin(LifecycleState):
         return result
 
     async def _reconcile_after_mcp_reload(self, title: str, old_bound: set[str], new_bound: set[str]) -> None:
-        """Reconcile dependent presets after a targeted MCP reload rebinds
-        ``title``'s tools and the vanished-tool unregistration has settled the base
-        registry.
+        """Reconcile dependent presets after a targeted MCP reload rebinds ``title``'s tools.
 
-        A preset over a base this MCP rebound is a ``TransformedTool`` whose closure
+        Runs after the vanished-tool unregistration has settled the base
+        registry. A preset over a base this MCP rebound is a ``TransformedTool`` whose closure
         still holds the OLD wrapper/config, so it is re-registered from its in-memory
         spec to track the freshly-bound base; a preset whose base vanished across the
         reload is quarantined (its store row surfaces as ``conflicted``).
         ``old_bound`` / ``new_bound`` are the tool names this MCP bound before and
         after the rebind,
-        so their union is exactly the set of bases whose bindings changed."""
+        so their union is exactly the set of bases whose bindings changed.
+        """
         await self._reconcile_bases_on_serving_loop(old_bound | new_bound)
 
     async def _reconcile_bases_on_serving_loop(self, affected_bases: set[str]) -> None:
-        """Reconcile base-dependent presets with the ``PresetManager`` per-name locks
-        taken on the serving loop.
+        """Reconcile base-dependent presets with the ``PresetManager`` per-name locks taken on the serving loop.
 
         Those locks are ``asyncio.Lock``s, valid on a single loop only. The preset
         mutation routes take them on the serving loop, so every reconcile takes them
@@ -150,8 +151,7 @@ class McpReloadMixin(LifecycleState):
         await asyncio.wrap_future(future)
 
     async def _reload_failed_mcps_async(self) -> list[dict[str, Any]]:
-        """Re-probe every currently-failed MCP concurrently, then apply the binds
-        ONE server at a time.
+        """Re-probe every currently-failed MCP concurrently, then apply the binds one server at a time.
 
         Probing is network-bound and mutates no shared state, so all servers are
         probed at once — N down servers cost ~one probe timeout, not N. Applying a
@@ -194,8 +194,7 @@ class McpReloadMixin(LifecycleState):
         return out
 
     def _raise_if_on_serving_loop(self, op: str) -> None:
-        """Refuse a reconcile-driving admin call issued from a coroutine already on
-        the serving loop.
+        """Refuse a reconcile-driving admin call issued from a coroutine already on the serving loop.
 
         ``reload_mcp`` / ``reload_failed_mcps`` / ``deregister_mcp`` run their async
         body through ``run_blocking`` and marshal the preset reconcile back onto the
@@ -217,9 +216,9 @@ class McpReloadMixin(LifecycleState):
 
     def _reload_mcp(self, title: str) -> dict[str, Any]:
         """Re-probe one MCP server by title and, if viable, (re)attach its tools.
-        Synchronous and context-agnostic, mirroring ``update``.
 
-        On failure the server is re-recorded in ``list_failed_mcps`` and its
+        Synchronous and context-agnostic, mirroring ``update``. On failure the
+        server is re-recorded in ``list_failed_mcps`` and its
         existing tools are left intact (transient blips self-heal). Only a
         successful reload replaces tools; a mid-rebind failure can leave the set
         partially updated — rerun after fixing the config.
@@ -228,15 +227,18 @@ class McpReloadMixin(LifecycleState):
         return run_blocking(lambda: self._reload_mcp_async(title))
 
     def _reload_failed_mcps(self) -> list[dict[str, Any]]:
-        """Re-probe every MCP currently in the failed list; attach the ones
-        that are now viable. Synchronous and context-agnostic."""
+        """Re-probe every MCP currently in the failed list and attach the ones now viable.
+
+        Synchronous and context-agnostic.
+        """
         self._raise_if_on_serving_loop("reload_failed_mcps")
         return run_blocking(self._reload_failed_mcps_async)
 
     def _deregister_mcp(self, title: str) -> dict[str, Any]:
-        """Detach one MCP server's tools — the removal counterpart of
-        ``reload_mcp``. Idempotent: a process that never bound the title
-        reports ``absent``, not an error."""
+        """Detach one MCP server's tools — the removal counterpart of ``reload_mcp``.
+
+        Idempotent: a process that never bound the title reports ``absent``, not an error.
+        """
         self._raise_if_on_serving_loop("deregister_mcp")
         self._refresh_manifest_mcp()
         bound = sorted(self._mcp_bound_tools.pop(title, set()))

@@ -8,8 +8,8 @@
  * survive and nothing in it is ever read as markup. No server string reaches the
  * DOM by any other route.
  */
-import type { ReactElement } from 'react';
 import { AlertTriangleIcon, Button, CheckIcon, Markdown, PendingIcon } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
 
 /** The delivery state of a message the visitor sent from this page. `null` on
  * anything that came off the transcript stream — that is already durable. */

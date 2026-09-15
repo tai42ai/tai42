@@ -1,5 +1,4 @@
-"""HTTP surface for the channels feature — the authed catalog door the Studio
-admin surface consumes.
+"""HTTP surface for the channels feature — the authed catalog door the Studio admin surface consumes.
 
 - ``GET /api/channels`` (AUTHED) — list the registered channel names, i.e. the
   delivery media ``ask_user(channel=...)`` can currently resolve. Registration

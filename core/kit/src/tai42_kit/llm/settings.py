@@ -96,7 +96,8 @@ class ContextEditingSettings(TaiBaseSettings):
     Mirrors LangChain's ``ClearToolUsesEdit`` (Anthropic-style context editing):
     once the history crosses ``trigger_tokens`` the oldest tool results are
     replaced with a placeholder, preserving the ``keep_tool_results`` most
-    recent ones."""
+    recent ones.
+    """
 
     model_config = SettingsConfigDict(env_prefix="CONTEXT_EDITING_")
 
@@ -108,6 +109,8 @@ class ContextEditingSettings(TaiBaseSettings):
 
 
 class EmbeddingSettings(TaiBaseSettings):
+    """Provider-agnostic embedding-model configuration read from the ``EMBEDDING_`` env namespace."""
+
     model_config = SettingsConfigDict(env_prefix="EMBEDDING_")
 
     model: str = "text-embedding-3-small"  # Required by all providers
@@ -121,6 +124,8 @@ class EmbeddingSettings(TaiBaseSettings):
 
 
 class LLMSettings(TaiBaseSettings):
+    """Provider-agnostic chat-model configuration read from the ``LLM_`` env namespace."""
+
     model_config = SettingsConfigDict(env_prefix="LLM_")
     model: str = "gpt-4o"  # Common to all
     temperature: float | None = None  # Sent to the provider only when configured
@@ -135,6 +140,8 @@ class LLMSettings(TaiBaseSettings):
 
 
 class LLMProviderSettings(TaiBaseSettings):
+    """Selects the LLM, embedding, checkpoint, and store provider implementations and their connection strings."""
+
     model_config = SettingsConfigDict(env_prefix="LLM_PROVIDER_")
 
     llm: str = "openai"
@@ -165,34 +172,41 @@ class LLMProviderSettings(TaiBaseSettings):
 
 @settings_cache
 def trimming_middleware_settings() -> TrimmingMiddlewareSettings:
+    """Return the process-wide :class:`TrimmingMiddlewareSettings`, cached after first load."""
     return TrimmingMiddlewareSettings()
 
 
 @settings_cache
 def context_overflow_settings() -> ContextOverflowSettings:
+    """Return the process-wide :class:`ContextOverflowSettings`, cached after first load."""
     return ContextOverflowSettings()
 
 
 @settings_cache
 def summarization_middleware_settings() -> SummarizationMiddlewareSettings:
+    """Return the process-wide :class:`SummarizationMiddlewareSettings`, cached after first load."""
     return SummarizationMiddlewareSettings()
 
 
 @settings_cache
 def context_editing_settings() -> ContextEditingSettings:
+    """Return the process-wide :class:`ContextEditingSettings`, cached after first load."""
     return ContextEditingSettings()
 
 
 @settings_cache
 def llm_provider_settings() -> LLMProviderSettings:
+    """Return the process-wide :class:`LLMProviderSettings`, cached after first load."""
     return LLMProviderSettings()
 
 
 @settings_cache
 def llm_settings() -> LLMSettings:
+    """Return the process-wide :class:`LLMSettings`, cached after first load."""
     return LLMSettings()
 
 
 @settings_cache
 def embedding_settings() -> EmbeddingSettings:
+    """Return the process-wide :class:`EmbeddingSettings`, cached after first load."""
     return EmbeddingSettings()

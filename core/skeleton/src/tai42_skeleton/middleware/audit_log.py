@@ -1,5 +1,4 @@
-"""One structured audit line per HTTP request that reaches it — who, what, when,
-outcome.
+"""One structured audit line per HTTP request that reaches it — who, what, when, outcome.
 
 Registered INSIDE the access-control stack (``TaiMCP._base_middleware``), after
 the gate has resolved the caller, so THIS middleware writes the line for every
@@ -98,11 +97,13 @@ _UNRESOLVED_ROUTE = "<unresolved>"
 
 
 class _MatchMarks(NamedTuple):
-    """Routing marks captured on a scope at one moment: the matched route
-    (FastAPI), the matched endpoint (Starlette), and the two marks only a
+    """Routing marks captured on a scope at one moment.
+
+    The matched route (FastAPI), the matched endpoint (Starlette), and the two marks only a
     ``Mount`` writes — ``root_path`` (grown by the consumed prefix) and
     ``app_root_path`` (stamped on first mount match; the only trace of a mount
-    consuming an EMPTY prefix)."""
+    consuming an EMPTY prefix).
+    """
 
     route: object
     endpoint: object
@@ -168,14 +169,16 @@ def emit_audit_line(
     ts: str,
     reason: str | None = None,
 ) -> None:
-    """Write ONE ``audit:`` trail line — the single place the line format lives, so
-    the accept middleware and the refusal sites (401/403/429) all render the same
+    """Write ONE ``audit:`` trail line — the single place the line format lives.
+
+    So the accept middleware and the refusal sites (401/403/429) all render the same
     shape. ``reason`` is the refusal cause (a ``DenialCause`` value); it is rendered
     only when set, so an accept line omits it.
 
     On ANY failure the line is dropped and a loud ``audit_log:`` ERROR line is
     written instead (distinct prefix, so a failure can never read as a trail entry);
-    the caller's request is never broken."""
+    the caller's request is never broken.
+    """
     try:
         if reason is None:
             logger.info(
@@ -203,14 +206,17 @@ def emit_audit_line(
 
 
 class AuditLogMiddleware:
-    """Writes the ``audit:`` line for every http request that reaches it;
-    non-http scopes (lifespan, websocket) pass straight through untouched —
-    neither carries a response status."""
+    """Writes the ``audit:`` line for every http request that reaches it.
+
+    Non-http scopes (lifespan, websocket) pass straight through untouched — neither carries a response status.
+    """
 
     def __init__(self, app: ASGIApp) -> None:
+        """Wrap the inner ASGI ``app``."""
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Run the inner app and emit the audit line for an http request (other scopes pass through)."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -237,9 +243,9 @@ class AuditLogMiddleware:
 
     @staticmethod
     def _route(scope: Scope, entered: _MatchMarks) -> str:
-        """The MATCHED route's path TEMPLATE, or ``<unmatched>`` (module docstring
-        has the three outcomes and what each may state).
+        """The MATCHED route's path TEMPLATE, or ``<unmatched>``.
 
+        The module docstring has the three outcomes and what each may state.
         Read AFTER the inner app runs: a mark is read as a CHANGE against
         ``entered``, never mere presence — a host mounting this app may
         pre-populate ``endpoint`` before entry.
@@ -273,13 +279,13 @@ class AuditLogMiddleware:
         return UNMATCHED_ROUTE
 
     def _emit(self, scope: Scope, entered: _MatchMarks, status: int | None, duration_ms: int, ts: str) -> None:
-        """Write the accept line without breaking the request on failure (module
-        docstring has the failure contract).
+        """Write the accept line without breaking the request on failure (module docstring has the failure contract).
 
         Route derivation is its OWN guarded step: a derivation failure has no safe
         route text, so it names the placeholder in a loud ERROR line and writes NO
         trail line — never the concrete path, which would leak the credential into
-        the very line templating exists to keep it out of."""
+        the very line templating exists to keep it out of.
+        """
         route = _UNRESOLVED_ROUTE
         try:
             route = self._route(scope, entered)

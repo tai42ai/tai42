@@ -17,10 +17,11 @@ from tai42_channel_whatsapp.inbound.params import _merged_params, _put_param
 async def _handle_text(
     message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
 ) -> None:
-    """A typed reply: resolve it against a pending question via the shared ladder, else
-    route to the bridge. ``params`` are the message-level referral/reply-context entries,
-    carried onto the bridged turn — including the expired-ask fallback bridge (the
-    correlated forward itself takes none)."""
+    """A typed reply: resolve it against a pending question via the shared ladder, else route to the bridge.
+
+    ``params`` are the message-level referral/reply-context entries, carried onto the bridged
+    turn — including the expired-ask fallback bridge (the correlated forward itself takes none).
+    """
     if await already_seen(wamid):
         return
     text_field = message.get("text")
@@ -37,8 +38,7 @@ async def _handle_text(
 
 
 def _extract_interactive_reply(interactive: Any) -> tuple[str | None, str, str | None]:
-    """The tapped ``(id, title, description)`` from an interactive reply, or
-    ``(None, "", None)``.
+    """The tapped ``(id, title, description)`` from an interactive reply, or ``(None, "", None)``.
 
     ``id`` is None when the button/list reply is missing or malformed; ``title`` is the
     human-readable label bridged when the tap is not an answer; ``description`` is a
@@ -89,8 +89,7 @@ def _map_tap_to_answer(reply_id: str | None, pending: PendingQuestion) -> str | 
 async def _handle_interactive(
     message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
 ) -> None:
-    """A button tap or list pick: map it to a pending ask's option, else bridge
-    the tap's title.
+    """A button tap or list pick: map it to a pending ask's option, else bridge the tap's title.
 
     A tap whose id matches the pending ask answers it (``options[index]``). A tap
     with no pending question, or one whose id is stale/malformed/out-of-range, is
@@ -139,8 +138,9 @@ async def _handle_interactive(
 async def _handle_button(
     message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
 ) -> None:
-    """A template quick-reply tap (a ``button`` message): resolve its visible ``text``
-    against a pending question via the shared ladder, else route to the bridge — the same
+    """A template quick-reply tap (a ``button`` message): resolve its visible text, else route to the bridge.
+
+    Resolves ``button.text`` against a pending question via the shared ladder, with the same
     routing and known-contact semantics a text message takes.
 
     ``button.text`` is the human-visible label (the turn text every consumer sees);

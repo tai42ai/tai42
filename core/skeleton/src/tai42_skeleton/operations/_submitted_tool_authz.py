@@ -1,5 +1,4 @@
-"""Authorize the LIVE caller to dispatch a caller-SUBMITTED tool name at an async
-run-any-tool door.
+"""Authorize the LIVE caller to dispatch a caller-SUBMITTED tool name at an async run-any-tool door.
 
 ``submit_run`` and ``create_schedule`` run a caller-supplied ``tool_name`` DETACHED from
 the request, so the inner tool reaches no other edge: the execution-identity seam is a
@@ -28,7 +27,7 @@ async def authorize_submitted_tool(tool_name: str, arguments: dict[str, Any]) ->
     branches, folding in what each preset bakes), then :func:`check`s the caller against
     it. A non-operation (capability) target carries no per-call decision and passes.
 
-    Raises ``PermissionDenied`` (403) on a deny and the retriable
+    Raises ``PermissionDeniedError`` (403) on a deny and the retriable
     ``OperationSurfaceUnsettledError`` (503) mid-rebuild — the MCP edge's own refusals.
     """
     # ``_tool_registry`` / ``preset_manager`` forward to the epoch's serving core; at

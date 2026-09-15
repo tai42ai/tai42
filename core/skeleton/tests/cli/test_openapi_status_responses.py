@@ -489,31 +489,31 @@ def test_scope_url_delete_doors_document_the_400(
 
 # The five run-any-tool doors and the exact status set each declares, hand-maintained as
 # ground truth. All five dispatch a named tool and share one error story: a typed
-# ``PermissionDenied`` from under the dispatch passes through (403 on every one) and any
-# other raise is enveloped as an ``OperationFailed`` (500 on every one). The sets are the
+# ``PermissionDeniedError`` from under the dispatch passes through (403 on every one) and any
+# other raise is enveloped as an ``OperationFailedError`` (500 on every one). The sets are the
 # statuses each door answers with the plain ``{"error": ...}`` envelope — its ``errors=``
 # list plus the 401 the authed flag adds. The reload gate's 503 is NOT one of them (it
 # answers a different body); the gated doors among these carry it via ``reload_gated``,
 # and the test adds it to the expected SPEC responses from that flag.
 #
 # Declared is not the same as reachable, and nothing here says a door cannot answer a
-# status it leaves undeclared. ``PermissionDenied`` is only the sharpest case of the
+# status it leaves undeclared. ``PermissionDeniedError`` is only the sharpest case of the
 # passthrough: the dispatch re-raises EVERY ``OperationError`` the inner tool raises, so
 # a tool whose body raises its own ``NotFoundError`` answers 404 through a door whose set
 # below holds none. That status belongs to the inner tool, not to the door's contract —
 # the equality is over what each door DECLARES, which is what a client reads off the spec.
 _EXPECTED_TOOL_DISPATCH_DOOR_STATUSES: dict[tuple[str, str], set[int]] = {
-    # BadRequestError, 401 authed, PermissionDenied, NotFoundError, OperationFailed. Its
+    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, OperationFailedError. Its
     # only 503 is the reload gate's, so none is declared here.
     ("POST", "/api/run-tool"): {400, 401, 403, 404, 500},
-    # 401 authed, PermissionDenied, OperationFailed, NotSupportedError, UnavailableError
+    # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
     # (503 — these two doors are not reload-gated, so the dispatch seam is its only source).
     ("GET", "/api/schedules"): {401, 403, 500, 501, 503},
     ("GET", "/api/schedules/server-datetime"): {401, 403, 500, 501, 503},
-    # BadRequestError, 401 authed, PermissionDenied, NotFoundError, OperationFailed,
+    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, OperationFailedError,
     # NotSupportedError, UnavailableError (503) — and the reload gate's own 503 beside it.
     ("POST", "/api/schedules"): {400, 401, 403, 404, 500, 501, 503},
-    # 401 authed, PermissionDenied, OperationFailed, NotSupportedError, UnavailableError
+    # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
     # (503) — and the reload gate's own 503 beside it.
     ("DELETE", "/api/schedules/{schedule_name}"): {401, 403, 500, 501, 503},
 }

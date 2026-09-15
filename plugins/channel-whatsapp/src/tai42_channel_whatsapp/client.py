@@ -78,11 +78,11 @@ async def _send(url: str, payload: dict[str, object] | None = None, *, method: s
 
 
 async def _post(phone_number_id: str, payload: dict[str, object]) -> str:
-    """Send one already-built message payload FROM ``phone_number_id``; return its
-    ``wamid`` (``messages[0].id``).
+    """Send one already-built message payload FROM ``phone_number_id``; return its ``wamid``.
 
-    The send seam for every message shape. Raises ``ChannelDeliveryError`` on the
-    ``_send`` failure modes or a 2xx that carries no message id.
+    ``wamid`` is ``messages[0].id``. The send seam for every message shape. Raises
+    ``ChannelDeliveryError`` on the ``_send`` failure modes or a 2xx that carries no
+    message id.
     """
     url = f"{whatsapp_settings().api_base_url}/{phone_number_id}/messages"
     response = await _send(url, payload)
@@ -125,7 +125,8 @@ def _header_object(header: MediaItem) -> dict[str, Any]:
     add a ``filename``). WhatsApp interactive headers support text/image/video/document
     ONLY — an ``audio`` header has no representation here, so the caller sends the audio as
     its own message ahead of the interactive instead of reaching this builder (a ``link``
-    is never a header by contract)."""
+    is never a header by contract).
+    """
     if header.kind is MediaKind.IMAGE:
         return {"type": "image", "image": {"link": header.url}}
     if header.kind is MediaKind.VIDEO:
@@ -141,9 +142,12 @@ def _header_object(header: MediaItem) -> dict[str, Any]:
 def _with_header_footer(
     interactive: dict[str, Any], header: dict[str, Any] | None, footer: str | None
 ) -> dict[str, Any]:
-    """``interactive`` with an optional media ``header`` and text ``footer`` added — the two
-    pure enhancements every interactive shape (buttons/list/cta_url) shares. Keys are added
-    only when set, so a send without them is byte-identical to the plain interactive."""
+    """``interactive`` with an optional media ``header`` and text ``footer`` added.
+
+    The two pure enhancements every interactive shape (buttons/list/cta_url)
+    shares. Keys are added only when set, so a send without them is byte-identical
+    to the plain interactive.
+    """
     if header is not None:
         interactive["header"] = header
     if footer:
@@ -300,9 +304,12 @@ async def send_location(
 
 
 def _template_header_component(header: MediaItem) -> dict[str, Any]:
-    """The template ``header`` component for a media header argument, per the template-message
-    API: a single ``image``/``video``/``document`` parameter (a ``document`` may add a
-    ``filename``). An ``audio`` header has no template representation and is refused loudly."""
+    """The template ``header`` component for a media header argument, per the template-message API.
+
+    A single ``image``/``video``/``document`` parameter (a ``document`` may add a
+    ``filename``). An ``audio`` header has no template representation and is refused
+    loudly.
+    """
     if header.kind is MediaKind.IMAGE:
         parameter: dict[str, Any] = {"type": "image", "image": {"link": header.url}}
     elif header.kind is MediaKind.VIDEO:
@@ -318,9 +325,11 @@ def _template_header_component(header: MediaItem) -> dict[str, Any]:
 
 
 def _template_button_component(index: int, button: TemplateButtonParam) -> dict[str, Any]:
-    """One template ``button`` component for the i-th button's runtime argument, per the
-    template-message API: a ``quick_reply`` carries a ``payload`` parameter, a ``url`` carries
-    a ``text`` parameter (the dynamic suffix substituted into the button's pre-approved URL)."""
+    """One template ``button`` component for the i-th button's runtime argument, per the template-message API.
+
+    A ``quick_reply`` carries a ``payload`` parameter, a ``url`` carries a ``text``
+    parameter (the dynamic suffix substituted into the button's pre-approved URL).
+    """
     if isinstance(button, QuickReplyButtonParam):
         return {
             "type": "button",
@@ -388,7 +397,8 @@ async def delete_flow(flow_id: str) -> None:
 
     Cleans up a draft stranded when a publish or cache write fails after create;
     Meta deletes only unpublished flows. Raises ``ChannelDeliveryError`` on
-    failure like every builder — the caller decides whether to swallow it."""
+    failure like every builder — the caller decides whether to swallow it.
+    """
     url = f"{whatsapp_settings().api_base_url}/{flow_id}"
     await _send(url, method="delete")
 
@@ -402,8 +412,7 @@ async def send_flow(
     screen: str = "FORM",
     data: dict[str, Any] | None = None,
 ) -> str:
-    """Send an interactive Flow message opening the published ``flow_id``; return
-    its ``wamid``.
+    """Send an interactive Flow message opening the published ``flow_id``; return its ``wamid``.
 
     ``flow_token`` correlates the completed form back to its origin: a form ask
     passes the delivery's ``interaction_id`` verbatim, an ask-less form
@@ -451,8 +460,10 @@ def _parse_json(response: httpx.Response) -> Any:
 
 
 def _error_detail(response: httpx.Response, payload: Any) -> str:
-    """Meta's ``error.code``/``error.message`` from the parsed body, else raw
-    text; bounded to 500 chars so an HTML error page cannot flood the exception."""
+    """Meta's ``error.code``/``error.message`` from the parsed body, else raw text.
+
+    Bounded to 500 chars so an HTML error page cannot flood the exception.
+    """
     if not isinstance(payload, dict):
         return response.text[:500]
     error = payload.get("error")
@@ -462,8 +473,10 @@ def _error_detail(response: httpx.Response, payload: Any) -> str:
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:
-    """The ``Retry-After`` header as seconds, or ``None`` when absent or sent in
-    the HTTP-date form (the backoff stands in for it)."""
+    """The ``Retry-After`` header as seconds, or ``None`` when absent or in HTTP-date form.
+
+    For the HTTP-date form the backoff stands in for it.
+    """
     raw = response.headers.get("Retry-After")
     if raw is None:
         return None
@@ -474,9 +487,10 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
 
 
 def _retry_policy(response: httpx.Response, payload: Any) -> tuple[bool, float | None]:
-    """Whether a rejected send may be re-attempted, and the seconds Meta asked the
-    caller to wait for. A ``Retry-After`` header is honored on every transient
-    rejection, not only the 429.
+    """Whether a rejected send may be re-attempted, and the seconds Meta asked the caller to wait.
+
+    A ``Retry-After`` header is honored on every transient rejection, not only the
+    429.
 
     Transient: any 5xx, an HTTP 429, or a Meta rate-limit ``error.code`` whatever
     the status. Everything else — a recipient outside the allowed list (131030),

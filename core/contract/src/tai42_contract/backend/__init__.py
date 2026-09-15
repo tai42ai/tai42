@@ -1,5 +1,8 @@
-"""Execution-backend contract: the ``Backend`` ABC, the ``BackendRuntime`` ABC
-one launch subcommand implements, and the ``CallbackSchema``."""
+"""Execution-backend contract.
+
+Exposes the ``Backend`` ABC, the ``BackendRuntime`` ABC one launch subcommand implements, and
+the ``CallbackSchema``.
+"""
 
 from __future__ import annotations
 

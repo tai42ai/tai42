@@ -34,10 +34,11 @@ logger = logging.getLogger(__name__)
 async def _reconcile_lost_with_liveness(
     r: Any, store: ToolRunStore, run_id: str, record: dict[str, str], liveness_present: bool, ttl: int
 ) -> dict[str, str]:
-    """Persist ``lost`` one way when a still-``running`` ``record`` has lost its
-    liveness key (``liveness_present`` is ``False``) — a dead supervisor's
-    ``finally`` never wrote a terminal record. The write is a compare-and-set
-    gated on ``running`` (``mark_terminal_if_running``): should the supervisor's
+    """Persist ``lost`` one way when a still-``running`` record has lost its liveness key.
+
+    ``liveness_present`` is ``False`` when a dead supervisor's ``finally`` never
+    wrote a terminal record. The write is a compare-and-set gated on ``running``
+    (``mark_terminal_if_running``): should the supervisor's
     own terminal write land between this reader's GET and the CAS, the CAS is
     rejected and the real terminal record is re-read rather than reporting a stale
     ``lost``. A live run keeps its liveness key, so it is never reconciled.
@@ -46,7 +47,8 @@ async def _reconcile_lost_with_liveness(
     SAME reconcile point, marked ``lost`` (the one-way CAS, so exactly one reader wins
     and only one dispatches) AND re-dispatched as a DETACHED background task replaying
     ``run_recorded`` from scratch under the principal's reconstructed CURRENT-grant
-    identity. An un-flagged record keeps today's quiet ``lost`` EXACTLY."""
+    identity. An un-flagged record keeps today's quiet ``lost`` EXACTLY.
+    """
     if record.get("status") != _RUNNING or liveness_present:
         return record
     finished_at = _pkg._now().isoformat()
@@ -62,10 +64,12 @@ async def _reconcile_lost_with_liveness(
 
 
 async def _tool_declares_crash_resume(tool_name: str) -> bool:
-    """Whether ``tool_name``'s registration meta opts it into crash-resume (absent →
-    ``False``). Reads the generic ``tai42/crash_resume`` meta off the registered tool by
-    name; an unregistered name is treated as un-flagged (the run itself fails loudly in
-    ``run_tool``)."""
+    """Whether ``tool_name``'s registration meta opts it into crash-resume (absent → ``False``).
+
+    Reads the generic ``tai42/crash_resume`` meta off the registered tool by name;
+    an unregistered name is treated as un-flagged (the run itself fails loudly in
+    ``run_tool``).
+    """
     try:
         tool = await tai42_app.tools.get_tool(tool_name)
     except Exception:
@@ -79,7 +83,8 @@ def _spawn_crash_resume(run_id: str, record: dict[str, str]) -> None:
     Never awaited inline: the reconciler runs on READ paths (get-by-id, list) and an
     inline re-drive would block the reader for the run's whole wall-clock. The re-invoke
     is logged loudly by run id; a re-invoke that itself raises is surfaced loudly by the
-    task's done-callback, never silently swallowed."""
+    task's done-callback, never silently swallowed.
+    """
     task = asyncio.create_task(
         _crash_resume(run_id, record),
         name=f"tai-crash-resume-{run_id}",
@@ -89,8 +94,10 @@ def _spawn_crash_resume(run_id: str, record: dict[str, str]) -> None:
 
 
 def _on_crash_resume_done(task: asyncio.Task[None], run_id: str, tool_name: str) -> None:
-    """Drop the drain registry reference and surface a crash-resume failure LOUDLY — a
-    re-invoke that itself raises is logged at ERROR, never silently swallowed."""
+    """Drop the drain registry reference and surface a crash-resume failure loudly.
+
+    A re-invoke that itself raises is logged at ERROR, never silently swallowed.
+    """
     supervisor._discard_supervisor(task)
     if task.cancelled():
         return
@@ -107,14 +114,17 @@ async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
     ``run_recorded(tool_name, persisted arguments)``. When the principal's live grants no
     longer carry authority the reconstruction binds ``None`` (identity-less) — the
     re-drive then fail-closes loudly on any credential seam, never a silent principal
-    substitution under a revoked key."""
+    substitution under a revoked key.
+    """
     from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 
     tool_name = record["tool_name"]
     try:
         arguments = json.loads(record.get("arguments") or "{}")
     except json.JSONDecodeError:
-        logger.error("crash-resume: run %s (%s) has an unreadable arguments blob; skipping re-drive", run_id, tool_name)
+        logger.exception(
+            "crash-resume: run %s (%s) has an unreadable arguments blob; skipping re-drive", run_id, tool_name
+        )
         return
     user_id = record.get("user_id")
     identity = await _rebuild_crash_resume_identity(user_id) if user_id is not None else None
@@ -127,26 +137,28 @@ async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
 
 
 async def _rebuild_crash_resume_identity(execution_key: str) -> CallerIdentity | None:
-    """Rebuild the synthetic execution identity for a crash-resume re-drive from
-    ``execution_key``'s CURRENT live grants, or ``None`` when they no longer carry
-    authority.
+    """Rebuild the synthetic execution identity for a crash-resume re-drive from ``execution_key``'s live grants.
 
-    The record persists only the ``user_id`` string (never the mint fingerprint), so the
+    Returns ``None`` when they no longer carry authority. The record persists
+    only the ``user_id`` string (never the mint fingerprint), so the
     reconstruction reads the key's live fingerprint and builds the identity from the
     current grants — a mid-life de-scope/revocation therefore lands on the re-drive. A key
     with no live policy / disabled / grantless yields ``None`` so the re-drive fail-closes
     loudly rather than substituting a different principal. Delegates to the shared
     :func:`~tai42_skeleton.authz.execution.rebuild_execution_identity` (function-local
     import keeps the operations→authz edge lazy, matching the guarded authz-edge
-    idiom)."""
+    idiom).
+    """
     from tai42_skeleton.authz.execution import rebuild_execution_identity
 
     return await rebuild_execution_identity(execution_key)
 
 
 async def _reconcile_lost(r: Any, store: ToolRunStore, run_id: str, record: dict[str, str], ttl: int) -> dict[str, str]:
-    """Single-record ``lost`` reconciliation for the GET-by-id door: read the run's
-    liveness only while it is still ``running`` (a terminal record is never
-    reconciled), then apply ``_reconcile_lost_with_liveness``."""
+    """Single-record ``lost`` reconciliation for the GET-by-id door.
+
+    Reads the run's liveness only while it is still ``running`` (a terminal record
+    is never reconciled), then applies ``_reconcile_lost_with_liveness``.
+    """
     liveness_present = record.get("status") == _RUNNING and await store.liveness_present(r, run_id)
     return await _reconcile_lost_with_liveness(r, store, run_id, record, liveness_present, ttl)

@@ -1,5 +1,4 @@
-"""The author-facing ``notify_user`` surface — one fire-and-forget message to a
-human, no reply expected.
+"""The author-facing ``notify_user`` surface — one fire-and-forget message to a human, no reply expected.
 
 Unlike ``ask_user`` there is no interaction, no ticket, no callback and no
 blocking wait: the named channel sends the message and the call returns as soon
@@ -67,8 +66,10 @@ class SenderIdentityNotAllowedError(Exception):
 
 
 def _resolve_channel(channel: str) -> Channel:
-    """Resolve a named channel loudly — an unknown name raises ``ValueError``
-    (mirroring the ``ask_user`` helper's channel guard), never a soft ignore."""
+    """Resolve a named channel loudly — an unknown name raises ``ValueError``.
+
+    Mirrors the ``ask_user`` helper's channel guard, never a soft ignore.
+    """
     if not isinstance(channel, str) or not channel:
         raise ValueError("channel must be a non-empty string")
     try:
@@ -88,14 +89,16 @@ def _guard_channel_capabilities(
     sections: list[OptionSection] | None,
     schema: dict[str, Any] | None,
 ) -> None:
-    """Central capability gate — a channel that does not advertise the matching flag
-    receives neither field. The flags are OPTIONAL class attributes (absent = False),
-    read defensively so a text-only sibling channel is a valid target and never forced
-    to declare them. Raises ``NotImplementedError`` naming the field for any
-    advertised-capability miss. Runs BEFORE any feed write so a refused rich send leaves
-    no phantom feed entry. A sectioned list IS an interactive choice surface (the SAME
-    flag flat options ride); ``header``/``footer`` ride that already-gated choice
-    surface, so they carry NO gate of their own."""
+    """Central capability gate — a channel that does not advertise the matching flag is refused the field.
+
+    The flags are OPTIONAL class attributes (absent = False), read defensively so
+    a text-only sibling channel is a valid target and never forced to declare
+    them. Raises ``NotImplementedError`` naming the field for any
+    advertised-capability miss. Runs BEFORE any feed write so a refused rich send
+    leaves no phantom feed entry. A sectioned list IS an interactive choice
+    surface (the SAME flag flat options ride); ``header``/``footer`` ride that
+    already-gated choice surface, so they carry NO gate of their own.
+    """
     if media is not None and not getattr(channel_obj, "supports_media_notifications", False):
         raise NotImplementedError(f"channel {channel!r} does not support media notifications")
     if location is not None and not getattr(channel_obj, "supports_location_notifications", False):
@@ -111,12 +114,15 @@ def _guard_channel_capabilities(
 
 
 def _validate_channel_form(channel_obj: Channel, schema: dict[str, Any], message: str) -> None:
-    """Refuse a form schema the channel could never render, BEFORE any feed write or
-    send. The shared channel-deliverable subset walk (``validate_channel_form_schema`` —
-    the ONE definition the ask path's form delivery uses) refuses an unrenderable schema
-    loudly (``ValueError`` → 400); then the channel's OPTIONAL ``validate_form_schema``
-    hook enforces its own medium-specific limits (reserved names, per-medium caps) with
-    the notification's MESSAGE as the question, exactly as the ask path calls it."""
+    """Refuse a form schema the channel could never render, before any feed write or send.
+
+    The shared channel-deliverable subset walk (``validate_channel_form_schema``
+    — the ONE definition the ask path's form delivery uses) refuses an
+    unrenderable schema loudly (``ValueError`` → 400); then the channel's
+    OPTIONAL ``validate_form_schema`` hook enforces its own medium-specific
+    limits (reserved names, per-medium caps) with the notification's MESSAGE as
+    the question, exactly as the ask path calls it.
+    """
     validate_channel_form_schema(schema)
     validate_form_schema = getattr(channel_obj, "validate_form_schema", None)
     if validate_form_schema is not None:
@@ -124,8 +130,9 @@ def _validate_channel_form(channel_obj: Channel, schema: dict[str, Any], message
 
 
 async def _prepare_channel_media(media: list[Any], settings: Any) -> list[MediaItem]:
-    """Rewrite the send's media for a channel, mirroring the ask path
-    (``substitute_media``). The operation door hands plain dicts, so coerce each to
+    """Rewrite the send's media for a channel, mirroring the ask path (``substitute_media``).
+
+    The operation door hands plain dicts, so coerce each to
     ``MediaItem`` ONCE up front (the contract shape validation raising loudly on bad
     input, a ``ValueError`` the door maps to a 400). Then: a ``data:`` image is stored by
     reference and its url swapped for an ABSOLUTE served reference, and an ALREADY-STORED
@@ -134,7 +141,8 @@ async def _prepare_channel_media(media: list[Any], settings: Any) -> list[MediaI
     from its OWN servers, so a relative same-origin url is unfetchable off-origin. A
     ``data:`` image with no public base is a loud ``ChannelInputError`` naming the setting
     (the door maps it to a 400), never a silent drop. Redis is touched only when a rewrite
-    is actually needed, so a plain https-media send still needs no Redis."""
+    is actually needed, so a plain https-media send still needs no Redis.
+    """
     items = [item if isinstance(item, MediaItem) else MediaItem.model_validate(item) for item in media]
     has_data_image = any(item.kind is MediaKind.IMAGE and item.url.startswith("data:image/") for item in items)
     if has_data_image and settings.public_base_url is None:
@@ -154,10 +162,12 @@ async def _prepare_channel_media(media: list[Any], settings: Any) -> list[MediaI
 
 
 async def _record_feed(notification: ChannelNotification, audience: str | None) -> None:
-    """Write the in-app feed record (shared + per-identity feed) from a validated
-    ``ChannelNotification`` and ``audience``. The single home for the field mapping the
-    sink path and the addressed-channel path share — the record carries the same rich
-    fields the channel receives (feed parity)."""
+    """Write the in-app feed record (shared + per-identity feed) from a validated ``ChannelNotification``.
+
+    The single home for the field mapping the sink path and the addressed-channel
+    path share — the record carries the same rich fields the channel receives
+    (feed parity).
+    """
     await record_notification(
         notification.message,
         recipient=notification.recipient,
@@ -176,8 +186,7 @@ async def _record_feed(notification: ChannelNotification, audience: str | None) 
 async def _send_with_telemetry(
     channel_obj: Channel, channel: str, notification: ChannelNotification, recipient: str | None
 ) -> list[str]:
-    """Send on the channel inside the send-outcome monitoring span and return the accepted
-    per-message ids.
+    """Send on the channel inside the send-outcome monitoring span and return the accepted per-message ids.
 
     Tier 1: one structured ``send:<channel>`` span around the single send seam (a no-op
     outside a flow trace); on failure the span is marked ERROR with the typed detail and
@@ -186,7 +195,8 @@ async def _send_with_telemetry(
     back onto this run. The provider has already ACCEPTED the send, so this best-effort
     telemetry write is caught-and-logged, never raised — an interactions-Redis outage here
     must not raise a FALSE send failure (risking a double-send). ``None`` means accepted but
-    no correlatable per-message id — an empty id set, not an error and not a dropped id."""
+    no correlatable per-message id — an empty id set, not an error and not a dropped id.
+    """
     with send_span(channel, recipient=recipient) as span:
         outbound_ids = await channel_obj.notify(notification)
         if span is not None and outbound_ids:
@@ -317,7 +327,7 @@ async def notify_user(
     # or send attempt. Duplicating the rule here would refuse media-only sends the contract
     # admits.
     if not isinstance(message, str):
-        raise ValueError("message must be a string")
+        raise ValueError("message must be a string")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     if audience is not None and (not isinstance(audience, str) or not audience.strip()):
         raise ValueError("audience must be a non-empty identity")
     # ``audience`` becomes a per-identity Redis feed key and persists into the record,

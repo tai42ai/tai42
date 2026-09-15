@@ -102,19 +102,19 @@ class _FakeReader:
         self.get_trace_error: Exception | None = None
         self.list_calls: list[dict] = []
 
-    async def query_metrics(self, filter) -> MetricsResult:
+    async def query_metrics(self, filter_) -> MetricsResult:
         if self.query_error is not None:
             raise self.query_error
-        if filter.view == MetricsView.OBSERVATIONS:
+        if filter_.view == MetricsView.OBSERVATIONS:
             return MetricsResult(rows=self.model_rows)
-        if filter.granularity:
+        if filter_.granularity:
             return MetricsResult(rows=self.series_rows)
         return MetricsResult(rows=self.summary_rows)
 
     async def list_traces(
-        self, *, from_timestamp=None, to_timestamp=None, limit=None, page=None, filter=None, order_by=None
+        self, *, from_timestamp=None, to_timestamp=None, limit=None, page=None, filter_=None, order_by=None
     ) -> list[MonitoringTraceSummary]:
-        self.list_calls.append({"limit": limit, "page": page, "filter": filter, "order_by": order_by})
+        self.list_calls.append({"limit": limit, "page": page, "filter": filter_, "order_by": order_by})
         if self.list_error is not None:
             raise self.list_error
         return self.summaries
@@ -127,7 +127,7 @@ class _FakeReader:
             raise TraceNotFoundError(f"trace {trace_id!r} not found")
         return trace
 
-    async def list_spans_in_window(self, t0, t1, *, run=None, kind=None, filter=None, order_by=None):
+    async def list_spans_in_window(self, t0, t1, *, run=None, kind=None, filter_=None, order_by=None):
         return []
 
 
@@ -223,10 +223,10 @@ async def test_metrics_bymodel_omitted_when_subquery_rejected():
     reader.summary_rows = [MetricsRow(metrics={"count": 1})]
 
     # The by-model view is the only OBSERVATIONS query; reject just that one.
-    async def query(filter):
-        if filter.view == MetricsView.OBSERVATIONS:
+    async def query(filter_):
+        if filter_.view == MetricsView.OBSERVATIONS:
             raise MonitoringReadNotSupportedError("no observations metrics")
-        return MetricsResult(rows=reader.summary_rows if not filter.granularity else [])
+        return MetricsResult(rows=reader.summary_rows if not filter_.granularity else [])
 
     reader.query_metrics = query  # type: ignore[method-assign]
     resp = await router.get_metrics(_req(""))

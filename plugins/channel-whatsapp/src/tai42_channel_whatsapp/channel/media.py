@@ -1,5 +1,7 @@
-"""Media-item sends: each image/document/video/audio as its own native message,
-and any ``link`` items rendered as appended body lines."""
+"""Media-item sends: each image/document/video/audio as its own native message.
+
+Any ``link`` items are rendered as appended body lines.
+"""
 
 from __future__ import annotations
 
@@ -21,10 +23,12 @@ def _link_line(item: MediaItem) -> str:
 
 
 def _body_with_links(message: str, links: list[MediaItem]) -> str:
-    """The message body with each ``link`` media item appended as its own line. A blank
-    ``message`` (a media-only send) contributes no leading blank line — the body is then the
-    link lines alone, or ``""`` when there are no links (an images-only send whose body is
-    skipped entirely)."""
+    """The message body with each ``link`` media item appended as its own line.
+
+    A blank ``message`` (a media-only send) contributes no leading blank line — the body is
+    then the link lines alone, or ``""`` when there are no links (an images-only send whose
+    body is skipped entirely).
+    """
     link_lines = [_link_line(item) for item in links]
     if not message.strip():
         return "\n".join(link_lines)
@@ -34,8 +38,10 @@ def _body_with_links(message: str, links: list[MediaItem]) -> str:
 
 
 async def _send_one_file(phone_number_id: str, target: str, item: MediaItem) -> str:
-    """Send one file-media item (image/document/video/audio) as its own native message and
-    return its ``wamid``. A ``link`` never reaches here (it renders as a body line)."""
+    """Send one file-media item (image/document/video/audio) as its own native message and return its ``wamid``.
+
+    A ``link`` never reaches here (it renders as a body line).
+    """
     if item.kind is MediaKind.IMAGE:
         return await send_image(phone_number_id=phone_number_id, to=target, link=item.url, caption=item.caption)
     if item.kind is MediaKind.DOCUMENT:
@@ -49,8 +55,9 @@ async def _send_one_file(phone_number_id: str, target: str, item: MediaItem) -> 
 
 
 async def _send_file_media(phone_number_id: str, target: str, files: list[MediaItem], sent: list[str]) -> list[str]:
-    """Send each file-media item (image/document/video/audio) as its own native message,
-    extending ``sent`` with the minted ``wamid`` in order and returning it.
+    """Send each file-media item (image/document/video/audio) as its own native message.
+
+    Extends ``sent`` with the minted ``wamid`` in order and returns it.
 
     Each item is its own message, so there is no native per-send cap here — the platform
     guard bounds the item count. A part that fails mid-send raises naming the wamids already
@@ -65,8 +72,9 @@ async def _send_file_media(phone_number_id: str, target: str, files: list[MediaI
 
 
 async def _send_media_prelude(phone_number_id: str, target: str, media: list[MediaItem]) -> list[str]:
-    """Send a delivered question's accompanying display media as its own messages,
-    BEFORE the question — any ``link`` items as one text line-block, then each file item
+    """Send a delivered question's accompanying display media as its own messages, BEFORE the question.
+
+    Any ``link`` items go out as one text line-block, then each file item
     (image/document/video/audio) as its own native message (the same per-item send as
     ``notify``).
 

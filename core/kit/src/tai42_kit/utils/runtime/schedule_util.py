@@ -1,3 +1,5 @@
+"""Parse and normalize interval and crontab schedule specs into RedBeat-native JSON."""
+
 from typing import Any
 
 _PERIODS = {
@@ -23,8 +25,8 @@ _PERIODS = {
 
 
 def parse_crontab_expr(expr: str) -> dict[str, Any]:
-    """
-    Accepts standard 5-field cron: M H DOM MON DOW
+    """Accepts standard 5-field cron: M H DOM MON DOW.
+
     If a 6-field expression (with seconds) is passed, ignores the first field.
     """
     parts = expr.split()
@@ -51,8 +53,10 @@ def _interval_from_seconds(value: int | float) -> dict[str, Any]:
 
 
 def _canonical_schedule(spec: dict[str, Any]) -> dict[str, Any]:
-    """An already-``__type__`` dict, float-coercing ``every`` and defaulting
-    ``relative`` for an interval (raises on ``<= 0``)."""
+    """An already-``__type__`` dict, float-coercing ``every`` and defaulting ``relative`` for an interval.
+
+    Raises on ``<= 0``.
+    """
     out = dict(spec)
     if out["__type__"] == "interval":
         out["every"] = float(out["every"])
@@ -63,8 +67,10 @@ def _canonical_schedule(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _interval_from_friendly(spec: dict[str, Any]) -> dict[str, Any]:
-    """A friendly interval schema (``every``/``run_every`` times the ``period``
-    multiplier) as a RedBeat interval (raises on missing/unsupported/``<= 0``)."""
+    """A friendly interval schema as a RedBeat interval (``every``/``run_every`` times the ``period`` multiplier).
+
+    Raises on missing/unsupported/``<= 0``.
+    """
     every = spec.get("every") or spec.get("run_every")
     if every is None:
         raise ValueError("interval schedule requires 'every'")
@@ -79,8 +85,10 @@ def _interval_from_friendly(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _crontab_from_friendly(spec: dict[str, Any]) -> dict[str, Any]:
-    """A friendly crontab schema as RedBeat crontab: an ``expression`` parsed with
-    per-field overrides, else the per-field values defaulting to ``*``."""
+    """A friendly crontab schema as RedBeat crontab.
+
+    An ``expression`` is parsed with per-field overrides, else the per-field values default to ``*``.
+    """
     if "expression" in spec:
         base = parse_crontab_expr(spec["expression"])
         base["__type__"] = base.pop("type", "crontab")
@@ -102,11 +110,11 @@ def _crontab_from_friendly(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_schedule(s: int | float | str | dict[str, Any]) -> dict[str, Any]:
-    """
-    Normalize to RedBeat-native JSON:
-      - interval: {"__type__":"interval","every":<seconds: float>,"relative":False|True}
-      - crontab : {"__type__":"crontab","minute":...,"hour":...,"day_of_month":...,
-                   "month_of_year":...,"day_of_week":...}
+    """Normalize to RedBeat-native JSON.
+
+    - interval: {"__type__":"interval","every":<seconds: float>,"relative":False|True}
+    - crontab : {"__type__":"crontab","minute":...,"hour":...,"day_of_month":...,
+                 "month_of_year":...,"day_of_week":...}.
     """
     # numeric => interval seconds
     if isinstance(s, (int, float)):

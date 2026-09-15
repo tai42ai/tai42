@@ -1,3 +1,5 @@
+"""String helpers for deriving safe Python identifiers from arbitrary names."""
+
 import hashlib
 import keyword
 import string
@@ -31,7 +33,7 @@ def text_to_md5(string: str) -> str:
     A non-cryptographic content fingerprint (cache keys, dedup ids), not for
     security use.
     """
-    return hashlib.md5(string.encode("utf-8")).hexdigest()
+    return hashlib.md5(string.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def hash_api_key(key: str) -> str:

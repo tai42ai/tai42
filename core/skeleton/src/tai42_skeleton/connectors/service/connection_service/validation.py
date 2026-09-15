@@ -1,5 +1,7 @@
-"""Client-input validators for the connection lifecycle: return-URL shape, sub-service
-membership and transport support, config-value presence, and scope derivation."""
+"""Client-input validators for the connection lifecycle.
+
+Return-URL shape, sub-service membership and transport support, config-value presence, and scope derivation.
+"""
 
 from __future__ import annotations
 

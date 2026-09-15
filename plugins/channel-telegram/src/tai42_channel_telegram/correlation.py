@@ -39,9 +39,9 @@ from tai42_channel_telegram.settings import TelegramCorrelationSettings, telegra
 
 
 class StoredOption(BaseModel):
-    """One tappable option kept in a message's side record so an inbound
-    ``callback_query`` maps its ``callback_data`` back to the option it stands for.
+    """One tappable option kept in a message's side record.
 
+    So an inbound ``callback_query`` maps its ``callback_data`` back to the option it stands for.
     ``callback_data`` is the token that rides the wire on the button — an author-set id
     echoed verbatim when it fits Telegram's 64-byte cap, else a channel-minted token — and
     is what the inbound tap reports; the reader matches it against this field. ``text`` is
@@ -50,7 +50,8 @@ class StoredOption(BaseModel):
     id — kept independently of ``callback_data`` (the wire token may be minted even when an
     id was set) and surfaced as ``params.reply_id`` on a bridged tap; ``None`` when the
     author set none. ``description`` is a sectioned-row's optional secondary line, surfaced
-    as ``params.reply_description`` on a bridged tap. Frozen."""
+    as ``params.reply_description`` on a bridged tap. Frozen.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -93,9 +94,9 @@ def _options_key(chat_id: str, message_id: str) -> str:
 
 
 async def set_options(chat_id: str, message_id: str, options: list[StoredOption], *, ttl_seconds: int) -> None:
-    """Store the tappable ``options`` for an inline-keyboard anchor under its
-    chat-scoped ``{chat_id}:{message_id}`` with a ``ttl_seconds`` expiry.
+    """Store the tappable ``options`` for an inline-keyboard anchor with a ``ttl_seconds`` expiry.
 
+    Keyed under its chat-scoped ``{chat_id}:{message_id}``.
     A button tap reports only its ``callback_data`` (the wire token) and the anchor
     ``message_id`` within its chat; this record resolves that token back to the exact
     :class:`StoredOption` — its text (submitted as the turn) and its author-set id /
@@ -113,9 +114,9 @@ async def set_options(chat_id: str, message_id: str, options: list[StoredOption]
 
 
 async def get_options(chat_id: str, message_id: str) -> list[StoredOption] | None:
-    """The tappable option records stored for ``{chat_id}:{message_id}``, or ``None``
-    (no record — unknown, expired, or a message that carried no callback options).
+    """The tappable option records stored for ``{chat_id}:{message_id}``, or ``None``.
 
+    No record — unknown, expired, or a message that carried no callback options.
     A non-destructive peek: a resolved tap leaves the record to expire (its anchor is
     single-use and the correlation record is the source of truth the ladder releases),
     so a redelivered callback still resolves the same option rather than erroring.
@@ -141,12 +142,14 @@ def _redis_ctx():
 
 
 class TelegramCorrelationStore:
-    """Satisfies :class:`~tai42_contract.channels.CorrelationStore` over the
-    plugin-owned ``channel:telegram:corr:{chat_id}:{message_id}`` string keys (the
-    ``key`` argument is the chat-scoped :func:`scoped_correlation_key`).
+    """Satisfies :class:`~tai42_contract.channels.CorrelationStore` over plugin-owned Redis string keys.
+
+    The keys are ``channel:telegram:corr:{chat_id}:{message_id}`` (the ``key`` argument is the
+    chat-scoped :func:`scoped_correlation_key`).
 
     Stateless — the Redis connection is read at each call so a live-reload picks up a
-    rotated URL with no stale per-instance snapshot."""
+    rotated URL with no stale per-instance snapshot.
+    """
 
     async def set_correlation(self, key: str, entry: Correlation, *, ttl_seconds: int) -> bool:
         """Reserve ``key`` for ``entry`` NX with a ``ttl_seconds`` expiry.
@@ -165,7 +168,8 @@ class TelegramCorrelationStore:
     async def get_correlation(self, key: str) -> Correlation | None:
         """The pending question's record under ``key``, or ``None`` (unknown/expired).
 
-        A non-destructive peek — it neither drops nor refreshes the reservation."""
+        A non-destructive peek — it neither drops nor refreshes the reservation.
+        """
         async with _redis_ctx() as r:
             # decode_responses=True on this connection, so a hit is always ``str``.
             raw = cast("str | None", await r.get(_key(key)))

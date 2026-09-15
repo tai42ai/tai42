@@ -1,5 +1,4 @@
-"""The venv/pip/prefix side of a flow: pip install a pinned version, remove a
-package, and the environment-shadow refusal.
+"""The venv/pip/prefix side of a flow: pip install a pinned version, remove a package, and env-shadow refusal.
 
 The pip transaction boundary: an unwind fully reverts skeleton state, but the venv
 is only as transactional as pip itself — ``pip uninstall`` removes just the named
@@ -81,7 +80,8 @@ async def remove_package(
     no files and return ``False`` — never a loud failure for a state the install
     rule made legitimate. Absent from BOTH the prefix and the environment is a
     loud :class:`PluginPrefixError`. Only the named distribution goes on every
-    path; dependencies stay."""
+    path; dependencies stay.
+    """
     if prefix is None:
         await pip_runner(uninstall_args(package))
         return True
@@ -109,7 +109,8 @@ def guard_env_shadow(
     a harmless no-op (the manifest wiring is the whole value), so proceed. A
     DIFFERENT environment version would silently hide the prefix copy → refuse
     loudly before any package, manifest, or attribution state changes,
-    naming both versions."""
+    naming both versions.
+    """
     env_version = env_dist_version(package, prefix)
     if env_version is not None and env_version != pinned_version:
         raise EnvironmentShadowError(

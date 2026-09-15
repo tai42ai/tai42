@@ -283,7 +283,8 @@ class _Containers:
                 return container
         raise _not_found("container", ident)
 
-    async def list(self, *, all: Any = None, filters: Any = None) -> list[FakeContainer]:
+    # ``all`` mirrors the docker-py containers.list(all, filters) signature this fake stands in for.
+    async def list(self, *, all: Any = None, filters: Any = None) -> list[FakeContainer]:  # noqa: A002
         return [c for c in self._docker.store_containers if not c.deleted]
 
 

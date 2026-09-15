@@ -9,10 +9,10 @@ from tai42_skeleton.operations.errors import (
     ConflictError,
     NotFoundError,
     OperationError,
-    OperationFailed,
-    PermissionDenied,
+    OperationFailedError,
+    PermissionDeniedError,
     UnavailableError,
-    ValidationRejected,
+    ValidationRejectedError,
 )
 
 
@@ -20,12 +20,12 @@ from tai42_skeleton.operations.errors import (
     ("cls", "status"),
     [
         (BadRequestError, 400),
-        (PermissionDenied, 403),
+        (PermissionDeniedError, 403),
         (NotFoundError, 404),
         (ConflictError, 409),
-        (ValidationRejected, 422),
+        (ValidationRejectedError, 422),
         (UnavailableError, 503),
-        (OperationFailed, 500),
+        (OperationFailedError, 500),
         (OperationError, 500),
     ],
 )

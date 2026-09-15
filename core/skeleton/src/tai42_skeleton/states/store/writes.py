@@ -1,5 +1,8 @@
-"""The record write path — replace, path-op apply, RTBF erase and subject fold — each
-recording the ``state_writes`` provenance row and the ``state_applied_ops`` idempotency ledger."""
+"""The record write path — replace, path-op apply, RTBF erase and subject fold.
+
+Each records the ``state_writes`` provenance row and the ``state_applied_ops``
+idempotency ledger.
+"""
 
 from __future__ import annotations
 
@@ -21,8 +24,7 @@ from .trace import _abs_regime_paths, _iso_now, _refuse_composing_shape, _traced
 
 
 class _RecordWriteStore(_StoreBase):
-    """The record write path + the ``state_writes`` provenance row and ``state_applied_ops``
-    idempotency ledger."""
+    """The record write path plus the ``state_writes`` provenance row and ``state_applied_ops`` idempotency ledger."""
 
     @staticmethod
     async def _insert_write(
@@ -37,8 +39,10 @@ class _RecordWriteStore(_StoreBase):
         paths: list[list[Any]],
         op_id: str | None,
     ) -> None:
-        """Record one ``state_writes`` row — the completed origin plus the touched paths —
-        in the caller's transaction."""
+        """Record one ``state_writes`` row in the caller's transaction.
+
+        The row carries the completed origin plus the touched paths.
+        """
         await cur.execute(
             "INSERT INTO state_writes "
             "(state, target_kind, target_name, subject_kind, subject_key, seq, at, door, actor, consumer, meta, "
@@ -64,10 +68,12 @@ class _RecordWriteStore(_StoreBase):
     async def replace(
         self, state: str, subject: StateSubject, data: dict[str, Any], *, origin: CompletedOrigin, validate_doc: Any
     ) -> tuple[dict[str, Any], float]:
-        """Replace ``subject``'s whole document with ``data`` (validated whole against the
-        effective schema) and record the write (paths ``[[]]`` — the whole document). ONE
-        txn under the declaration ``FOR SHARE`` lock; the subject resolves through the
-        alias table first."""
+        """Replace ``subject``'s whole document with ``data`` and record the write.
+
+        ``data`` is validated whole against the effective schema; the write records
+        paths ``[[]]`` (the whole document). ONE txn under the declaration
+        ``FOR SHARE`` lock; the subject resolves through the alias table first.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -107,9 +113,10 @@ class _RecordWriteStore(_StoreBase):
         retention_days: int,
         conn: AsyncConnection[Any] | None = None,
     ) -> tuple[bool, dict[str, Any] | None, float | None, list[dict[str, Any]]]:
-        """Apply a batch of path-addressed ops to one record, in ONE txn. Returns
-        ``(applied, merged_document, seq, guarded_skipped)`` — ``(False, None, None, [])``
-        on an op-id replay.
+        """Apply a batch of path-addressed ops to one record, in ONE txn.
+
+        Returns ``(applied, merged_document, seq, guarded_skipped)`` —
+        ``(False, None, None, [])`` on an op-id replay.
 
         Order (pinned): declaration row ``FOR SHARE`` (the schema-change serialization pin
         AND the effective-schema read); compose the state's regime + traced paths from its
@@ -161,7 +168,8 @@ class _RecordWriteStore(_StoreBase):
                 (state, subject.target_kind, subject.target_name, kind, key),
             )
             record = await cur.fetchone()
-            assert record is not None  # the upsert-lock returns exactly one row, always
+            if record is None:
+                raise AssertionError
             current = record["data"]
 
             applied_ops: list[dict[str, Any]] = []
@@ -225,10 +233,13 @@ class _RecordWriteStore(_StoreBase):
             return (True, merged, seq, guarded_skipped)
 
     async def erase_subject(self, state: str, subject: StateSubject, *, origin: CompletedOrigin) -> None:
-        """The RTBF delete — idempotent, ALIAS-AWARE, and audited. The key resolves to its
-        canonical, the surviving record dies with every alias pointing at it, and the erase
-        is recorded (paths ``[[]]``). ONE txn under the declaration ``FOR SHARE`` lock; an
-        undeclared state falls through to a plain delete."""
+        """The RTBF delete — idempotent, ALIAS-AWARE, and audited.
+
+        The key resolves to its canonical, the surviving record dies with every
+        alias pointing at it, and the erase is recorded (paths ``[[]]``). ONE txn
+        under the declaration ``FOR SHARE`` lock; an undeclared state falls through
+        to a plain delete.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -271,11 +282,14 @@ class _RecordWriteStore(_StoreBase):
         origin: CompletedOrigin,
         validate_doc: Any,
     ) -> dict[str, Any]:
-        """Fold ``subject`` into ``into`` — ONE txn under the declaration row ``FOR
-        UPDATE`` (every ``apply_ops``'s ``FOR SHARE`` blocks, so no write lands mid-fold).
-        Both keys resolve first. ``switch`` drops the subject's record; ``merge`` folds it
-        into the survivor (survivor wins). Refusals raise :class:`SubjectFoldError`; a
-        retried fold is a quiet no-op. Records one write row for the survivor."""
+        """Fold ``subject`` into ``into`` in ONE txn under the declaration row ``FOR UPDATE``.
+
+        Every ``apply_ops``'s ``FOR SHARE`` blocks, so no write lands mid-fold.
+        Both keys resolve first. ``switch`` drops the subject's record; ``merge``
+        folds it into the survivor (survivor wins). Refusals raise
+        :class:`SubjectFoldError`; a retried fold is a quiet no-op. Records one
+        write row for the survivor.
+        """
         if subject.target_kind != into.target_kind or subject.target_name != into.target_name:
             raise SubjectFoldError(
                 f"cannot fold across targets: {subject.target_kind}/{subject.target_name} into "

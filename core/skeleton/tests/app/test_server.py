@@ -289,13 +289,13 @@ def test_internal_error_handler_survives_unstampable_exception():
 
     from starlette.requests import Request
 
-    class _Unstampable(Exception):
+    class _UnstampableError(Exception):
         @property
         def error_id(self) -> str:  # read-only: ``exc.error_id = ...`` raises AttributeError
             return "sealed"
 
     scope = {"type": "http", "method": "GET", "path": "/api/x", "query_string": b"", "headers": []}
-    exc = _Unstampable("boom")
+    exc = _UnstampableError("boom")
     resp = asyncio.run(server_module._internal_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))

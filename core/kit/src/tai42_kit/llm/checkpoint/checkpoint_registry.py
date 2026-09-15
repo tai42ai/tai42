@@ -1,3 +1,5 @@
+"""Per-loop registry of checkpoint savers, keyed by provider and connection string."""
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from tai42_kit.llm._resource_registry import LoopRegistryMap, ResourceRegistry
@@ -14,6 +16,7 @@ class CheckpointRegistry(ResourceRegistry):
     """
 
     async def get_checkpointer(self, provider: str, conn_string: str | None) -> BaseCheckpointSaver:
+        """Return the checkpoint saver for ``provider::conn_string``, creating it once and caching it."""
         key = f"{provider}::{conn_string}"
         resource = await self._get_or_init_resource(key, lambda: create_checkpoint_resource(provider, conn_string))
         return get_saver_from_resource(provider, resource)

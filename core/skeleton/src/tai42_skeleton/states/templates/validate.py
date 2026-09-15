@@ -71,9 +71,11 @@ def _require_type(value: Any, kind: type | tuple[type, ...], *, where: str) -> A
 
 
 def _reject_extra_keys(doc: dict[str, Any], *, where: str) -> None:
-    """Refuse any key outside the platform document. A consumer keeps its own documents
-    beside the template under its own kind, validated through its registered attach
-    validator; nothing consumer-owned is folded into the state-template document."""
+    """Refuse any key outside the platform document.
+
+    A consumer keeps its own documents beside the template under its own kind, validated through its
+    registered attach validator; nothing consumer-owned is folded into the state-template document.
+    """
     extra = sorted(set(doc) - _TEMPLATE_KEYS)
     if extra:
         raise TemplateValidationError(
@@ -83,9 +85,11 @@ def _reject_extra_keys(doc: dict[str, Any], *, where: str) -> None:
 
 
 def _compile_check_jq(expr: str, *, where: str) -> None:
-    """Compile-check the declarations ``check`` predicate, declaring the named variables
-    the attach seam binds at evaluation (``$parameters`` — the effective attach parameters)
-    so an author may reference them; a failure is a loud template error."""
+    """Compile-check the declarations ``check`` predicate.
+
+    Declares the named variables the attach seam binds at evaluation (``$parameters`` — the
+    effective attach parameters) so an author may reference them; a failure is a loud template error.
+    """
     try:
         compile_check(expr, variables=DECLARATIONS_CHECK_VARIABLES)
     except Exception as exc:
@@ -170,8 +174,10 @@ def _parse_identifier_list(raw: Any, *, where: str) -> list[str]:
 
 
 def _parse_path_list(raw: Any, *, where: str) -> list[list[str]]:
-    """A list of template-relative record paths (an update program's ``reads``/``writes``);
-    each path a list of non-empty string segments (object keys or the ``"*"`` wildcard)."""
+    """A list of template-relative record paths (an update program's ``reads``/``writes``).
+
+    Each path a list of non-empty string segments (object keys or the ``"*"`` wildcard).
+    """
     value = _require_type(raw, list, where=where)
     out: list[list[str]] = []
     for i, path in enumerate(value):
@@ -184,10 +190,12 @@ def _parse_path_list(raw: Any, *, where: str) -> list[list[str]]:
 
 
 def _parse_program_body(raw: Any, *, where: str) -> TemplatedText:
-    """Parse one authored jq program body as a :class:`~tai42_contract.template.TemplatedText`
-    (inline ``content`` or a stored ``id``). A stray key inside the value is refused by the
+    """Parse one authored jq program body as a :class:`~tai42_contract.template.TemplatedText`.
+
+    Inline ``content`` or a stored ``id``. A stray key inside the value is refused by the
     value type (``extra="forbid"``), and an empty inline body is a loud refusal — a bad shape or
-    an empty program is the same loud :class:`TemplateValidationError` a malformed section is."""
+    an empty program is the same loud :class:`TemplateValidationError` a malformed section is.
+    """
     _require_type(raw, dict, where=where)
     try:
         text = TemplatedText.model_validate(raw)
@@ -199,14 +207,17 @@ def _parse_program_body(raw: Any, *, where: str) -> TemplatedText:
 
 
 def _parse_template_jq(raw: Any) -> dict[str, StateTemplateJq]:
-    """Parse the ``template_jq`` section: each entry ``{description?, purpose, ...}`` with a
-    ``purpose`` of ``input`` or ``update``. Both purposes may declare ``params``; an
-    ``input`` entry carries no ``reads``/``writes``, an ``update`` entry carries them. Each
-    entry's ``jq`` is a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a
-    stored ``id``). An all-inline section compiles here over the sibling INPUT-purpose prelude
-    (so any program may call an input program as ``tjq_<name>({…})``); a by-id body defers the
-    section's compile to the save door, which can render the stored resources. ``reads``/``writes``
-    are template-relative paths (checked against the fragment in :func:`validate_template`)."""
+    """Parse the ``template_jq`` section.
+
+    Each entry ``{description?, purpose, ...}`` with a ``purpose`` of ``input`` or ``update``. Both
+    purposes may declare ``params``; an ``input`` entry carries no ``reads``/``writes``, an
+    ``update`` entry carries them. Each entry's ``jq`` is a
+    :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``). An
+    all-inline section compiles here over the sibling INPUT-purpose prelude (so any program may call
+    an input program as ``tjq_<name>({…})``); a by-id body defers the section's compile to the save
+    door, which can render the stored resources. ``reads``/``writes`` are template-relative paths
+    (checked against the fragment in :func:`validate_template`).
+    """
     _require_type(raw, dict, where="template_jq")
     programs: dict[str, StateTemplateJq] = {}
     for name, spec in raw.items():
@@ -237,12 +248,14 @@ def _parse_template_jq(raw: Any) -> dict[str, StateTemplateJq]:
 
 
 def _parse_reconcile(raw: Any) -> StateTemplateReconcile:
-    """Parse the ``reconcile`` section ``{orphans, close, resolutions}`` — three jq programs,
-    each a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``)
+    """Parse the ``reconcile`` section ``{orphans, close, resolutions}`` — three jq programs.
+
+    Each is a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``)
     over its own input payload (no ``$`` bindings). An inline body compiles here; a by-id body
     defers its compile to the save door
     (:meth:`~tai42_skeleton.states.service.StatesService._compile_by_id_reconcile`), the point
-    that can render the stored resource."""
+    that can render the stored resource.
+    """
     _require_type(raw, dict, where="reconcile")
     _reject_section_extra_keys(raw, frozenset({"orphans", "close", "resolutions"}), where="reconcile")
     programs: dict[str, TemplatedText] = {}
@@ -269,8 +282,10 @@ def _parse_trace(raw: Any) -> TemplateTrace:
 
 
 def _validate_fragment_schema(name: str, fragment: dict[str, Any]) -> None:
-    """The fragment, with defaults substituted, must pass the shared object-schema validator
-    (object-rooted, ≥1 property, a valid draft 2020-12 schema)."""
+    """The fragment, with defaults substituted, must pass the shared object-schema validator.
+
+    Object-rooted, ≥1 property, a valid draft 2020-12 schema.
+    """
     try:
         _validate_schema(fragment)
     except SchemaValidationError as exc:
@@ -278,8 +293,7 @@ def _validate_fragment_schema(name: str, fragment: dict[str, Any]) -> None:
 
 
 def validate_template(doc: Any) -> StateTemplate:
-    """Parse and validate a raw platform state-template document, returning the
-    :class:`~tai42_skeleton.states.templates.model.StateTemplate`.
+    """Parse and validate a raw platform state-template document into a :class:`StateTemplate`.
 
     Enforces every platform rule: ``kind == "state-template"``; the ``name`` form; the
     fragment is an object schema passing ``_validate_schema`` after defaults substitution
@@ -294,7 +308,8 @@ def validate_template(doc: Any) -> StateTemplate:
     and an inline ``reconcile`` program compiles, while a by-id body is rendered and compiled at
     the save door; every update program's ``reads``/``writes`` paths resolve in the fragment. Any
     key outside the platform set is refused. Raises
-    :class:`~tai42_contract.states.errors.TemplateValidationError` on the first violation."""
+    :class:`~tai42_contract.states.errors.TemplateValidationError` on the first violation.
+    """
     _require_type(doc, dict, where="template document")
     _reject_extra_keys(doc, where="template document")
 

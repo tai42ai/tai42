@@ -1,5 +1,7 @@
-"""The parsed-construct node types the parser builds and the taint analysis walks:
-one frozen dataclass per grammar construct, each carrying its source offset."""
+"""The parsed-construct node types the parser builds and the taint analysis walks.
+
+One frozen dataclass per grammar construct, each carrying its source offset.
+"""
 
 from __future__ import annotations
 
@@ -25,8 +27,11 @@ class _Constant(_Node):
 
 @dataclass(frozen=True)
 class _String(_Node):
-    """A string literal. ``value`` is the decoded text and is a usable static field name
-    only when ``interpolations`` is empty."""
+    """A string literal.
+
+    ``value`` is the decoded text and is a usable static field name only when ``interpolations``
+    is empty.
+    """
 
     value: str
     interpolations: tuple[_Node, ...] = ()
@@ -103,8 +108,10 @@ class _Try(_Node):
 
 @dataclass(frozen=True)
 class _ObjectConstruction(_Node):
-    """``{key: value, ...}``. The keys are static names, so only the VALUES can carry a
-    value derived from the auth context."""
+    """``{key: value, ...}``.
+
+    The keys are static names, so only the VALUES can carry a value derived from the auth context.
+    """
 
     values: tuple[_Node, ...] = ()
 

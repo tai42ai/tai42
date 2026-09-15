@@ -31,7 +31,7 @@ from tai42_skeleton.conversations import target_config as target_config_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations.managers.base_conversations_manager import (
     BaseConversationsManager,
-    DoorFlipRefused,
+    DoorFlipRefusedError,
 )
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
@@ -160,7 +160,7 @@ class _DictManager(BaseConversationsManager):
         if existing is not None and existing.door != route.door:
             held = await self._redis.zcard(self.settings.route_threads_key(route.route_name))
             if held:
-                raise DoorFlipRefused(route.route_name, existing.door, route.door, held)
+                raise DoorFlipRefusedError(route.route_name, existing.door, route.door, held)
         created = route.route_name not in self.rows
         self.rows[route.route_name] = route
         self._redis.seed_route(route.route_name)

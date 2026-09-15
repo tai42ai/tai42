@@ -1,3 +1,5 @@
+"""Pooled HTTP client backed by curl_cffi ``AsyncSession`` instances."""
+
 import anyio
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import SessionClosed

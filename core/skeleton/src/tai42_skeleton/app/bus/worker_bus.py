@@ -1,5 +1,4 @@
-"""The worker-bus object: identity/claim state and construction, composing the
-publish + subscribe surfaces."""
+"""The worker-bus object: identity/claim state and construction over the publish and subscribe surfaces."""
 
 from __future__ import annotations
 
@@ -42,7 +41,8 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
     re-mints a new one). :meth:`publish` reads the one identity to echo-skip the
     publisher's own broadcast and synthesize the self entry; the subscriber, presence
     writer, and echo-skip all read the SAME attribute, so the two-holder drift is
-    structurally impossible. Constructed once per process by the lifecycle."""
+    structurally impossible. Constructed once per process by the lifecycle.
+    """
 
     def __init__(
         self,
@@ -55,6 +55,11 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
         reconnect_backoff_max: float = 30.0,
         reconnect_backoff_factor: float = 2.0,
     ) -> None:
+        """Bind the bus to this process's ``kind`` and ``pid``, minting a claim token and reconnect backoff.
+
+        Registers an ``os.register_at_fork`` hook that re-derives the identity in
+        a forked child; the busless ``local`` variant self-mints a member identity.
+        """
         self._settings = settings
         self._kind = kind
         self._pid = pid if pid is not None else os.getpid()
@@ -93,10 +98,10 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
             os.register_at_fork(after_in_child=self._fork_child_nonmember)
 
     def _fork_child_nonmember(self) -> None:
-        """Re-derive this bus's identity to an explicit NON-MEMBER in a forked child
-        (an ``os.register_at_fork`` after-in-child hook registered at construction).
+        """Re-derive this bus's identity to an explicit NON-MEMBER in a forked child.
 
-        A child inherits the parent's ``WorkerBus`` — identity included — across
+        Registered as an ``os.register_at_fork`` after-in-child hook at
+        construction. A child inherits the parent's ``WorkerBus`` — identity included — across
         ``os.fork()``. Left shared, a fleet op the child publishes would carry the
         PARENT's identity and be echo-skipped by the parent's own subscription. A
         derived name ``{parent-name}/fork-{pid}`` at generation 0 makes the child's
@@ -107,7 +112,8 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
         The name is derived ONLY from a parent that HAS an identity (a member parent
         post-claim, or a local bus). A member parent that has not yet claimed has no
         name to derive from — and a raise here is unraisable — so the identity is
-        POISONED instead: any bus use in the child raises loudly at the use site."""
+        POISONED instead: any bus use in the child raises loudly at the use site.
+        """
         parent = self._identity
         if parent is None:
             self._poisoned = True
@@ -123,25 +129,31 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
 
     @classmethod
     def local(cls, kind: WorkerKind = WorkerKind.serve) -> WorkerBus:
-        """The no-op variant for a single-worker / file-mode / no-backend / no-bus
-        process: :meth:`publish` returns a local-only result, :meth:`subscribe`
-        parks, :meth:`census` returns just this process's one synthesized row. Legal
-        only under the boot rules that permit a busless deployment. The ``{kind}-1``
-        generation-1 identity is self-minted at construction."""
+        """The no-op variant for a single-worker / file-mode / no-backend / no-bus process.
+
+        :meth:`publish` returns a local-only result, :meth:`subscribe` parks,
+        :meth:`census` returns just this process's one synthesized row. Legal
+        only under the boot rules that permit a busless deployment. The
+        ``{kind}-1`` generation-1 identity is self-minted at construction.
+        """
         return cls(BusSettings(), kind=kind, local=True)
 
     @property
     def heartbeat_ttl(self) -> float:
-        """This bus's presence-key TTL, the freshness cadence :func:`presence_fresh`
-        gates against — the ONE bound a stale check reads, so no consumer hardcodes a
-        threshold of its own."""
+        """This bus's presence-key TTL, the freshness cadence :func:`presence_fresh` gates against.
+
+        The ONE bound a stale check reads, so no consumer hardcodes a threshold of its own.
+        """
         return self._settings.heartbeat_ttl
 
     @property
     def identity(self) -> WorkerIdentity:
-        """This process's bus identity. Raises before the slot is claimed (a real bus
-        pre-subscribe), or in a fork child of an unclaimed member parent (a poisoned
-        identity) — never a silent ``None``/placeholder name on the wire."""
+        """This process's bus identity.
+
+        Raises before the slot is claimed (a real bus pre-subscribe), or in a
+        fork child of an unclaimed member parent (a poisoned identity) — never a
+        silent ``None``/placeholder name on the wire.
+        """
         if self._poisoned:
             raise RuntimeError(
                 "worker bus: forked from a member parent that had not yet claimed a slot — "
@@ -153,20 +165,23 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
         return identity
 
     def arm_post_reply(self, action: Callable[[], None]) -> None:
-        """Arm the single-shot slot the subscription loop fires AFTER the current op's
-        terminal reply ships and only on a clean apply (recycle's post-reply self-exit).
-        Called from an op handler during its callback; the last arming wins."""
+        """Arm the single-shot slot the subscription loop fires after the current op's terminal reply ships.
+
+        Fires only on a clean apply (recycle's post-reply self-exit). Called
+        from an op handler during its callback; the last arming wins.
+        """
         self._post_reply_slot = action
 
     async def mark_recycling(self) -> None:
-        """Write ``state=recycling`` into presence before a graceful self-exit, so the
-        census shows WHY this worker is departing rather than reading as merely quiet.
+        """Write ``state=recycling`` into presence before a graceful self-exit.
 
-        Renew-gated like every presence write (the compare-token renew runs FIRST and
+        So the census shows WHY this worker is departing rather than reading as
+        merely quiet. Renew-gated like every presence write (the compare-token renew runs FIRST and
         the write is skipped on a miss) AND best-effort against transport errors: a
         cosmetic census write can never abort the recycle it precedes, so a blip on the
         connect/renew/set is logged and swallowed rather than propagated. A no-op when
-        this bus holds no presence (a busless or unsubscribed bus)."""
+        this bus holds no presence (a busless or unsubscribed bus).
+        """
         presence = self._presence
         if presence is None:
             return

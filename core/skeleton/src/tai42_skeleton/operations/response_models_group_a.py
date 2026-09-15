@@ -1,5 +1,4 @@
-"""Response models for group-A operations (api_keys · conversations · manifest ·
-marketplace · presets).
+"""Response models for group-A operations (api_keys · conversations · manifest · marketplace · presets).
 
 Each model DESCRIBES the inner payload its operation returns today; the route adapter
 wraps that payload in the ``{"data": ...}`` success envelope, so nothing here re-declares
@@ -29,13 +28,11 @@ from tai42_skeleton.conversations.models import ConversationRecord
 
 
 class ScopeUrlMap(RootModel[dict[str, str]]):
-    """The scope catalog as a ``{url: scope_id}`` mapping; empty when access control
-    is disabled."""
+    """The scope catalog as a ``{url: scope_id}`` mapping; empty when access control is disabled."""
 
 
 class StringList(RootModel[list[str]]):
-    """A bare list of strings — the public-route pins and the marketplace category /
-    item-kind vocabularies."""
+    """A bare list of strings — the public-route pins and the marketplace category / item-kind vocabularies."""
 
 
 class ScopeUrlAck(BaseModel):
@@ -60,9 +57,11 @@ class ScopeDeleteResult(BaseModel):
 
 class RouteMappingRow(BaseModel):
     """One HTTP route joined with its scope mapping and route-registry metadata.
+
     ``mapped`` is the route's scope id, the public marker, or ``null`` when unmapped;
     ``action`` is its authorization action class, ``null`` when the route carries no
-    registry metadata."""
+    registry metadata.
+    """
 
     path: str
     methods: list[str]
@@ -77,9 +76,11 @@ class RouteMappingList(RootModel[list[RouteMappingRow]]):
 
 
 class TokenPayloadRow(BaseModel):
-    """A provisioned key's identity merged with its enforced policy — NEVER key
-    material. The policy fields are present only when the key carries a stored policy
-    row; the owner claim, when set, rides inside ``policy_data``."""
+    """A provisioned key's identity merged with its enforced policy — NEVER key material.
+
+    The policy fields are present only when the key carries a stored policy row; the owner claim, when set,
+    rides inside ``policy_data``.
+    """
 
     user_id: str
     description: str
@@ -93,9 +94,11 @@ class TokenPayloadList(RootModel[list[TokenPayloadRow]]):
 
 
 class ApiKeyCreateResult(BaseModel):
-    """A freshly minted key. ``api_key`` is the raw ``sk-…`` secret surfaced ONCE — it
-    is never stored in plaintext and never returned again; ``key_fingerprint`` is the
-    key's immutable per-mint identity a binding pins against."""
+    """A freshly minted key.
+
+    ``api_key`` is the raw ``sk-…`` secret surfaced ONCE — it is never stored in plaintext and never
+    returned again; ``key_fingerprint`` is the key's immutable per-mint identity a binding pins against.
+    """
 
     api_key: str
     key_fingerprint: str
@@ -124,9 +127,11 @@ class RevokeAck(BaseModel):
 
 
 class ClaimLinkResult(BaseModel):
-    """A one-time claim link. ``token`` is the claim secret surfaced ONCE (it rides the
-    ``claim_path`` URL fragment and is never stored in plaintext); ``expires_at`` is its
-    ISO-8601 expiry."""
+    """A one-time claim link.
+
+    ``token`` is the claim secret surfaced ONCE (it rides the ``claim_path`` URL fragment and is never
+    stored in plaintext); ``expires_at`` is its ISO-8601 expiry.
+    """
 
     claim_path: str
     token: str
@@ -152,16 +157,17 @@ class RoleDefinitionList(RootModel[list[RoleDefinition]]):
 
 
 class ConditionCheckResult(BaseModel):
-    """A jq policy-condition validation verdict. ``result`` is the sampled allow/deny
-    boolean, or ``null`` when no sample context was evaluated."""
+    """A jq policy-condition validation verdict.
+
+    ``result`` is the sampled allow/deny boolean, or ``null`` when no sample context was evaluated.
+    """
 
     ok: bool
     result: bool | None
 
 
 class DocumentVersionList(RootModel[list[DocumentVersion]]):
-    """A document's append-only version history — the policy history and the preset
-    version history both serve this shape."""
+    """A document's append-only version history — the policy history and the preset history serve this shape."""
 
 
 class PolicyRollbackResult(BaseModel):
@@ -177,11 +183,12 @@ class PolicyRollbackResult(BaseModel):
 
 
 class ConversationRouteView(ConversationRouteCreate):
-    """A stored conversation route as every read serves it: the client-supplied fields
-    plus the server-derived ``execution_key_fingerprint``, with ``callback_secret``
-    OMITTED — reads always strip it, so the view never advertises a field the wire
-    withholds. The one-time ``callback_secret`` is returned separately by the create
-    door."""
+    """A stored conversation route as every read serves it.
+
+    The client-supplied fields plus the server-derived ``execution_key_fingerprint``, with
+    ``callback_secret`` OMITTED — reads always strip it, so the view never advertises a field the wire
+    withholds. The one-time ``callback_secret`` is returned separately by the create door.
+    """
 
     execution_key_fingerprint: str
 
@@ -194,9 +201,11 @@ class ConversationRouteListEnvelope(BaseModel):
 
 
 class ConversationRouteCreateResult(BaseModel):
-    """The created/replaced route. ``callback_secret`` is the api-door callback signing
-    secret surfaced ONCE (``null`` for a channel route); ``route`` is the stored view
-    with its secret stripped."""
+    """The created/replaced route.
+
+    ``callback_secret`` is the api-door callback signing secret surfaced ONCE (``null`` for a channel
+    route); ``route`` is the stored view with its secret stripped.
+    """
 
     created: bool
     route_name: str
@@ -205,11 +214,14 @@ class ConversationRouteCreateResult(BaseModel):
 
 
 class ConversationRecordView(ConversationRecord):
-    """A conversation answer record as a read door serves it. An admin read carries every
+    """A conversation answer record as a read door serves it.
+
+    An admin read carries every
     field; the caller-scoped read withholds the route-key's internal detail — ``channel``,
     ``our_identity``, ``provider_message_id``, ``callback_url``, ``error``,
     ``outbound_message_ids`` and ``attempts`` are present only for an admin caller and are
-    absent from the caller_view subset."""
+    absent from the caller_view subset.
+    """
 
     outbound_message_ids: list[str] | None = None
     attempts: int | None = None
@@ -217,8 +229,10 @@ class ConversationRecordView(ConversationRecord):
 
 class ThreadSummaryRow(BaseModel):
     """One thread's activity summary, drawn from its newest readable record.
+
     ``last_activity_at`` is the route index's own sort score; ``last_delivery_status`` is
-    that record's delivery-status wire string."""
+    that record's delivery-status wire string.
+    """
 
     thread_id: str
     client_address: str
@@ -228,9 +242,11 @@ class ThreadSummaryRow(BaseModel):
 
 
 class ThreadSummaryEnvelope(BaseModel):
-    """A page of thread summaries. ``next_page`` is ``null`` on the last page;
-    ``truncated`` is ``true`` when a filtered scan spent its budget before the page
-    filled."""
+    """A page of thread summaries.
+
+    ``next_page`` is ``null`` on the last page; ``truncated`` is ``true`` when a filtered scan spent its
+    budget before the page filled.
+    """
 
     items: list[ThreadSummaryRow]
     total: int
@@ -242,7 +258,9 @@ class ThreadSummaryEnvelope(BaseModel):
 
 class TranscriptEnvelope(BaseModel):
     """A page of a thread's records (admin full records or the caller_view subset).
-    ``order`` is the direction served; ``next_page`` is ``null`` on the last page."""
+
+    ``order`` is the direction served; ``next_page`` is ``null`` on the last page.
+    """
 
     items: list[ConversationRecordView]
     total: int
@@ -272,8 +290,11 @@ class FailedConversationsEnvelope(BaseModel):
 
 
 class RouteRemoveResult(BaseModel):
-    """A conversation route removal. ``removed`` says whether THIS call removed the
-    routing row (``false`` when only an owed index reclamation was completed)."""
+    """A conversation route removal.
+
+    ``removed`` says whether THIS call removed the routing row (``false`` when only an owed index
+    reclamation was completed).
+    """
 
     removed: bool
     route_name: str
@@ -288,8 +309,11 @@ class ThreadDeleteResult(BaseModel):
 
 
 class PersonDeleteResult(BaseModel):
-    """A person erase. ``removed`` counts the answer records deleted across the person's
-    routes; ``erased`` says whether THIS call removed the person row."""
+    """A person erase.
+
+    ``removed`` counts the answer records deleted across the person's routes; ``erased`` says whether THIS
+    call removed the person row.
+    """
 
     person_id: str
     removed: int
@@ -304,8 +328,10 @@ class ThreadMessageAck(BaseModel):
 
 
 class ThreadModeView(BaseModel):
-    """A thread's control mode and where it comes from — ``source`` is ``thread`` for a
-    per-thread override or ``route`` for the route default."""
+    """A thread's control mode and where it comes from.
+
+    ``source`` is ``thread`` for a per-thread override or ``route`` for the route default.
+    """
 
     mode: str
     source: str
@@ -350,18 +376,22 @@ class ConversationConfigDeleteResult(BaseModel):
 
 
 class PreservedManifestView(BaseModel):
-    """The PRESERVED persisted manifest's MCP section + user tools. The ``mcp`` entries
-    carry their raw ``!ENV ${KEY}`` markers intact (unresolved config entries, NOT a
-    resolved ``TaiMCPConfig``), so no secret value ever leaves on the wire."""
+    """The PRESERVED persisted manifest's MCP section + user tools.
+
+    The ``mcp`` entries carry their raw ``!ENV ${KEY}`` markers intact (unresolved config entries, NOT a
+    resolved ``TaiMCPConfig``), so no secret value ever leaves on the wire.
+    """
 
     mcp: list[dict[str, Any]]
     user_tools: list[str]
 
 
 class McpEnvRef(BaseModel):
-    """One ``!ENV ${VAR[:default]}`` marker ref carried by the manifest's MCP section —
-    NAMES and BOOLEANS only. ``pointer`` is the marker leaf's json-pointer; ``set`` is
-    whether the var is present in the effective environment."""
+    """One ``!ENV ${VAR[:default]}`` marker ref carried by the manifest's MCP section — NAMES and BOOLEANS only.
+
+    ``pointer`` is the marker leaf's json-pointer; ``set`` is whether the var is present in the effective
+    environment.
+    """
 
     var: str
     pointer: str
@@ -381,9 +411,11 @@ class FailedMcp(BaseModel):
 
 
 class McpHealth(BaseModel):
-    """One MCP server's passive dispatch health. ``last_error`` carries a
-    ``{type, message, at}`` block when a failure has been recorded, else ``null``;
-    ``last_success`` / ``failing_since`` are ISO-8601 timestamps or ``null``."""
+    """One MCP server's passive dispatch health.
+
+    ``last_error`` carries a ``{type, message, at}`` block when a failure has been recorded, else ``null``;
+    ``last_success`` / ``failing_since`` are ISO-8601 timestamps or ``null``.
+    """
 
     last_success: str | None
     last_error: dict[str, str] | None
@@ -392,9 +424,11 @@ class McpHealth(BaseModel):
 
 
 class McpStatusSnapshot(BaseModel):
-    """The live MCP-binding snapshot: ``bound`` maps each server title to its bound tool
-    names, ``failed`` lists the skipped servers, and ``health`` maps every bound and
-    failed title to its dispatch-health block."""
+    """The live MCP-binding snapshot.
+
+    ``bound`` maps each server title to its bound tool names, ``failed`` lists the skipped servers, and
+    ``health`` maps every bound and failed title to its dispatch-health block.
+    """
 
     bound: dict[str, list[str]]
     failed: list[FailedMcp]
@@ -421,10 +455,12 @@ class ItemRef(BaseModel):
 
 
 class InstalledRow(BaseModel):
-    """One installed plugin with its update picture computed against the running
-    contract. ``installed_at`` is ISO-8601; ``latest`` / ``incompatible_newer`` are
-    ``null`` when none applies; ``delivery`` is ``package`` or ``descriptor``;
-    ``route_mounts`` maps each route-carrying item name to its mounted base."""
+    """One installed plugin with its update picture computed against the running contract.
+
+    ``installed_at`` is ISO-8601; ``latest`` / ``incompatible_newer`` are ``null`` when none applies;
+    ``delivery`` is ``package`` or ``descriptor``; ``route_mounts`` maps each route-carrying item name to
+    its mounted base.
+    """
 
     ref: str
     version: str
@@ -455,9 +491,11 @@ class InstalledInventory(BaseModel):
 
 
 class AdvisorySnapshot(BaseModel):
-    """The advisory snapshot for the installed plugins. Each advisory row is an upstream
-    registry object forwarded verbatim (its shape is owned by the registry);
-    ``fetched_at`` is the ISO-8601 fetch time."""
+    """The advisory snapshot for the installed plugins.
+
+    Each advisory row is an upstream registry object forwarded verbatim (its shape is owned by the
+    registry); ``fetched_at`` is the ISO-8601 fetch time.
+    """
 
     advisories: list[dict[str, JsonValue]]
     fetched_at: str
@@ -507,8 +545,7 @@ class PreviewItemRoute(BaseModel):
 
 
 class PreviewItem(BaseModel):
-    """One route-carrying item in an install/update preview, with its resolved and
-    declared bases and its routes."""
+    """One route-carrying item in an install/update preview, with its resolved and declared bases and routes."""
 
     item: str
     kind: str
@@ -518,11 +555,13 @@ class PreviewItem(BaseModel):
 
 
 class InstallResult(BaseModel):
-    """The install (and update) receipt. ``package`` is ``null`` for a descriptor-only
-    plugin; ``advisories`` are the target's upstream advisory rows forwarded verbatim;
-    ``notes`` are activation notes; ``reload`` is the manifest apply's fleet result;
-    ``pip_output`` is ``null`` for a descriptor-only plugin; ``routes`` lists every route
-    the operation mounted."""
+    """The install (and update) receipt.
+
+    ``package`` is ``null`` for a descriptor-only plugin; ``advisories`` are the target's upstream advisory
+    rows forwarded verbatim; ``notes`` are activation notes; ``reload`` is the manifest apply's fleet
+    result; ``pip_output`` is ``null`` for a descriptor-only plugin; ``routes`` lists every route the
+    operation mounted.
+    """
 
     ref: str
     version: str
@@ -535,10 +574,12 @@ class InstallResult(BaseModel):
 
 
 class InstallPreview(BaseModel):
-    """A no-side-effect install/update preview: the resolved routes per item, the
-    collisions against the live registry, the public rows requiring acceptance, the
-    ``new_public_routes`` an update has not already approved, the required and missing
-    env vars, and the delivery form."""
+    """A no-side-effect install/update preview.
+
+    The resolved routes per item, the collisions against the live registry, the public rows requiring
+    acceptance, the ``new_public_routes`` an update has not already approved, the required and missing
+    env vars, and the delivery form.
+    """
 
     ref: str
     version: str
@@ -553,8 +594,11 @@ class InstallPreview(BaseModel):
 
 
 class UninstallResult(BaseModel):
-    """The uninstall receipt. ``reload`` is ``null`` when the plugin wrote no manifest
-    entry to remove; ``notes`` are removal notes (e.g. orphaned env vars left in place)."""
+    """The uninstall receipt.
+
+    ``reload`` is ``null`` when the plugin wrote no manifest entry to remove; ``notes`` are removal notes
+    (e.g. orphaned env vars left in place).
+    """
 
     ref: str
     uninstalled: bool
@@ -563,8 +607,11 @@ class UninstallResult(BaseModel):
 
 
 class UpgradeRow(BaseModel):
-    """One ref's upgrade-all outcome. ``outcome`` is one of ``upgraded`` / ``up-to-date``
-    / ``no-compatible-version`` / ``failed``; ``detail`` is its human-readable note."""
+    """One ref's upgrade-all outcome.
+
+    ``outcome`` is one of ``upgraded`` / ``up-to-date`` / ``no-compatible-version`` / ``failed``;
+    ``detail`` is its human-readable note.
+    """
 
     ref: str
     outcome: str
@@ -583,10 +630,12 @@ class UpgradeAllResult(BaseModel):
 
 
 class PresetRecordView(BaseModel):
-    """A preset's record row. ``extensions`` is the ordered extension combos;
-    ``conflicted`` marks a quarantined record with its ``conflicted_reason`` (``null``
-    when clean); ``uses`` / ``used_by`` are the sorted other presets this body composes
-    and that compose it."""
+    """A preset's record row.
+
+    ``extensions`` is the ordered extension combos; ``conflicted`` marks a quarantined record with its
+    ``conflicted_reason`` (``null`` when clean); ``uses`` / ``used_by`` are the sorted other presets this
+    body composes and that compose it.
+    """
 
     name: str
     base_tool: str
@@ -618,8 +667,7 @@ class PresetCreateResult(PresetRecordView):
 
 
 class PresetVersionSaveResult(DocumentVersion):
-    """A newly saved preset version row with the per-worker rebind fan-out report
-    (fields merged, not nested)."""
+    """A newly saved preset version row with the per-worker rebind fan-out report (fields merged, not nested)."""
 
     fanout: FanoutSummary
 
@@ -633,8 +681,11 @@ class PresetRollbackResult(BaseModel):
 
 
 class PresetRenameResult(BaseModel):
-    """A renamed preset. ``name`` is the new name and ``renamed_from`` the old one; the
-    fan-out report is the new binding's propagation."""
+    """A renamed preset.
+
+    ``name`` is the new name and ``renamed_from`` the old one; the fan-out report is the new binding's
+    propagation.
+    """
 
     name: str
     renamed_from: str
@@ -658,8 +709,7 @@ class PresetRefereesResult(BaseModel):
 
 
 class PresetValidateVerdict(BaseModel):
-    """A preset draft validation verdict — ``valid`` is the absence of an ``error``
-    (both outcomes answer 200)."""
+    """A preset draft validation verdict — ``valid`` is the absence of an ``error`` (both outcomes answer 200)."""
 
     valid: bool
     error: str | None

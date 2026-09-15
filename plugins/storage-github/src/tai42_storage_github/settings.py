@@ -12,6 +12,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class GithubStorageSettings(TaiBaseSettings):
+    """``STORAGE_GITHUB_*`` credentials, repo target, REST base URLs, and connection pool sizing."""
+
     model_config = SettingsConfigDict(env_prefix="STORAGE_GITHUB_")
 
     username: str | None = None
@@ -33,4 +35,5 @@ class GithubStorageSettings(TaiBaseSettings):
 
 @settings_cache
 def github_storage_settings() -> GithubStorageSettings:
+    """The cached :class:`GithubStorageSettings` for this process."""
     return GithubStorageSettings()

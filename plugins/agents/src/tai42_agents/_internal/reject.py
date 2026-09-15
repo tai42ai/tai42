@@ -123,8 +123,9 @@ def reject_untitled_response_format(agent_name: str, response_format: Any) -> No
 
 
 async def resolve_response_format(agent_name: str, response_format: Any) -> Any:
-    """Resolve an agent's ``response_format`` to the value the run forces structured output
-    with, then run the untitled guard on it.
+    """Resolve an agent's ``response_format`` to the value the run forces structured output with.
+
+    The resolved value is passed through the untitled guard.
 
     ``response_format`` is the ``TemplatedText | dict`` authored-schema union, a live pydantic
     class (in-process), or ``None``. A :class:`~tai42_contract.template.TemplatedText` (a stored

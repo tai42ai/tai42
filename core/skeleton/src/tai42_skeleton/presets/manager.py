@@ -56,8 +56,10 @@ _PRESET_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def is_valid_preset_name(name: str) -> bool:
-    """Whether ``name`` is a valid preset (tool) name — the create route's 400
-    guard and :meth:`PresetManager.register`'s backstop share this rule."""
+    """Return whether ``name`` is a valid preset (tool) name.
+
+    The create route's 400 guard and :meth:`PresetManager.register`'s backstop share this rule.
+    """
     return _PRESET_NAME_RE.fullmatch(name) is not None
 
 
@@ -65,6 +67,7 @@ class PresetManager:
     """Register/reload engine + authoritative spec map + quarantine map."""
 
     def __init__(self, app: TaiMCP) -> None:
+        """Bind the manager to ``app`` and start with empty spec, version and quarantine maps."""
         self._app = app
         # name -> the spec used to BUILD the live tool; written on register,
         # dropped on teardown, rebuilt wholesale on rehydration — so it always
@@ -96,17 +99,21 @@ class PresetManager:
     # -- authoritative spec map (feeds the run path) --------------------------
 
     def get_spec(self, name: str) -> PresetBody:
-        """The active spec of a REGISTERED preset. Raise
-        :class:`PresetNotFoundError` if no preset by that name is registered."""
+        """Return the active spec of a REGISTERED preset.
+
+        Raises :class:`PresetNotFoundError` if no preset by that name is registered.
+        """
         try:
             return self._specs[name]
         except KeyError:
             raise PresetNotFoundError(name) from None
 
     def baked_kwargs(self, name: str) -> dict[str, Any]:
-        """The active baked ``fixed_kwargs`` of a REGISTERED preset — the value
-        both the tool face and the ephemeral-agent run path serve, read from the
-        spec map (never the tool closure)."""
+        """Return the active baked ``fixed_kwargs`` of a REGISTERED preset.
+
+        The value both the tool face and the ephemeral-agent run path serve, read from the
+        spec map (never the tool closure).
+        """
         return self.get_spec(name).fixed_kwargs
 
     def is_registered(self, name: str) -> bool:
@@ -114,10 +121,12 @@ class PresetManager:
         return name in self._specs
 
     def active_version(self, name: str) -> int | None:
-        """The store active version currently bound for ``name``, or ``None`` when no
-        preset by that name is registered. The run chokepoint reads it to attribute a
-        dispatched preset's run with its ``preset-v:`` tag + root version; ``None`` for
-        a non-preset/draft key leaves the run unstamped."""
+        """Return the store active version currently bound for ``name``, or ``None`` if none is registered.
+
+        The run chokepoint reads it to attribute a dispatched preset's run with its
+        ``preset-v:`` tag + root version; ``None`` for a non-preset/draft key leaves the run
+        unstamped.
+        """
         return self._versions.get(name)
 
     def registered_names(self) -> frozenset[str]:
@@ -127,21 +136,26 @@ class PresetManager:
     # -- quarantine map (the ``conflicted`` mechanism) ------------------------
 
     def is_quarantined(self, name: str) -> bool:
+        """Return whether ``name`` is currently quarantined."""
         return name in self._quarantine
 
     def quarantined_names(self) -> frozenset[str]:
+        """Return every quarantined preset name."""
         return frozenset(self._quarantine)
 
     def quarantine_reason(self, name: str) -> str | None:
-        """The human-readable reason ``name`` is quarantined, or ``None`` when it is
-        not — the ``conflicted_reason`` a preset row carries alongside its
-        ``conflicted`` flag."""
+        """Return the human-readable reason ``name`` is quarantined, or ``None`` when it is not.
+
+        The ``conflicted_reason`` a preset row carries alongside its ``conflicted`` flag.
+        """
         return self._quarantine.get(name)
 
     def drop_quarantine(self, name: str) -> None:
-        """Remove ``name`` from the quarantine map with immediate effect — the
-        single between-rehydration mutation, driven by the DELETE route's
-        conflicted branch so a later create of that name starts clean."""
+        """Remove ``name`` from the quarantine map with immediate effect.
+
+        The single between-rehydration mutation, driven by the DELETE route's conflicted
+        branch so a later create of that name starts clean.
+        """
         self._quarantine.pop(name, None)
 
     # -- name-collision predicate (wired into the PresetStore view) -----------
@@ -155,7 +169,8 @@ class PresetManager:
         registered tool is. This checks LIVE (bound) tools; a name merely REQUESTED
         by a manifest tool that is not yet bound is handled at :meth:`register`,
         which clears the stale requested entry before seeding so the preset's own
-        combos still bind."""
+        combos still bind.
+        """
         if name in self._specs:
             return False
         return name in await self._app.tools.get_tools()
@@ -186,7 +201,8 @@ class PresetManager:
         ``version`` is the store active version this spec was read at, retained beside
         the body so the run chokepoint can attribute a dispatch with it; the create
         door passes the just-created record's ``active_version`` (defaults to ``1`` —
-        the version a fresh create always mints)."""
+        the version a fresh create always mints).
+        """
         if not is_valid_preset_name(name):
             raise ValueError(f"invalid preset name {name!r}: must match {_PRESET_NAME_RE.pattern}")
         async with self._locks[name]:
@@ -229,7 +245,8 @@ class PresetManager:
         :class:`PresetExistsError`, and a name held by a foreign LIVE tool raises
         :class:`PresetNameConflictError`, before any bind. Callers that
         deliberately re-bind an existing name (reload, reconcile) tear the old
-        registration down first, so the guard sees a free name."""
+        registration down first, so the guard sees a free name.
+        """
         if name in self._specs:
             raise PresetExistsError(name)
         if name in await self._app.tools.get_tools():
@@ -269,14 +286,15 @@ class PresetManager:
         state_binding: StateBinding | None = None,
         version: int,
     ) -> None:
-        """Seed the combos and force-register the prebuilt ``tool_obj``, then capture
-        the spec + version — the SYNCHRONOUS tail of a register/reload.
+        """Seed the combos and force-register the prebuilt ``tool_obj``, then capture the spec and version.
 
+        The SYNCHRONOUS tail of a register/reload.
         Holds no ``await``: the whole registry mutation lands in one loop turn, so a
         run resolving ``name`` on this loop never observes it half-bound between the
         teardown and the re-register (:meth:`reload` tears the old registration down
         immediately before calling this). All-or-nothing: a mid-register failure tears
-        down the partial registration and re-raises loudly."""
+        down the partial registration and re-raises loudly.
+        """
         try:
             # Clear any stale registry entry for ``name`` first — the seed below is
             # a no-op when the name is already a requested tool, so honour that
@@ -312,8 +330,7 @@ class PresetManager:
     # -- reload one (edit path) -----------------------------------------------
 
     async def reload(self, name: str) -> None:
-        """Re-register ``name`` from its store ACTIVE version body after a
-        ``save_version`` / ``rollback`` has committed.
+        """Re-register ``name`` from its store ACTIVE version body after a ``save_version``/``rollback`` committed.
 
         The new body is READ and its tool BUILT while the live registration is still
         bound; only then is the old base + every branch torn down and the fresh tool
@@ -334,7 +351,8 @@ class PresetManager:
         Holds the per-name lock across the whole read+build+swap so two reloads of one
         name serialize; re-registers through the sync commit / internal
         :meth:`_register`, never the public :meth:`register`, so the held per-name lock
-        is never re-acquired (the lock is not reentrant)."""
+        is never re-acquired (the lock is not reentrant).
+        """
         async with self._locks[name]:
             captured = self._specs.get(name)
             captured_version = self._versions.get(name)
@@ -388,15 +406,15 @@ class PresetManager:
         The teardown counterpart of :meth:`register`, used by the DELETE route's
         non-conflicted branch (a conflicted record was never registered, so its
         delete is store-side only and must NOT reach here). Takes the per-name lock
-        so a delete never races a concurrent register/reload of the same name."""
+        so a delete never races a concurrent register/reload of the same name.
+        """
         async with self._locks[name]:
             self._remove_registration(name)
 
     # -- reconcile after a scoped MCP reload/deregister -----------------------
 
     async def reconcile_bases(self, affected_bases: set[str]) -> None:
-        """Reconcile presets whose base tool is in ``affected_bases`` after a scoped
-        MCP reload or deregister changed the live tool bindings.
+        """Reconcile presets whose base tool is in ``affected_bases`` after a scoped MCP reload/deregister.
 
         Reconciles from the in-memory spec map, never the store: a preset whose base
         tool is still bound is re-registered from its spec so its ``TransformedTool``
@@ -405,7 +423,8 @@ class PresetManager:
         QUARANTINED, so its store row surfaces as ``conflicted`` rather than staying
         bound to a base that no longer exists. Each name is reconciled under its own
         lock through the internal register/teardown, so a concurrent edit of the same
-        preset never interleaves."""
+        preset never interleaves.
+        """
         affected = [name for name, body in self._specs.items() if body.base_tool in affected_bases]
         if not affected:
             return
@@ -446,8 +465,7 @@ class PresetManager:
     # -- rehydrate all (startup/reload hook body) -----------------------------
 
     async def rehydrate(self) -> None:
-        """Re-register every VERSIONED preset from the store — the body a startup
-        and reload hook run.
+        """Re-register every VERSIONED preset from the store — the body a startup and reload hook run.
 
         ``reload_config`` wipes the whole runtime tool registry, so the spec map +
         quarantine map are cleared WHOLESALE first, then every preset is rebuilt from
@@ -456,7 +474,8 @@ class PresetManager:
         name is taken by a foreign tool, or its base tool is missing or itself a
         preset. A preset already bound as THIS SAME spec is re-adopted without a
         rebind (idempotent self-registration). One bad name never aborts the
-        boot."""
+        boot.
+        """
         prior = self._specs
         self._specs = {}
         self._versions = {}
@@ -545,8 +564,10 @@ class PresetManager:
     # -- internal teardown ----------------------------------------------------
 
     def _remove_registration(self, name: str) -> None:
-        """Drop ``name``'s base + branch tools, its structured-registry entry, and
-        its spec — the shared teardown for reload, remove, and register rollback."""
+        """Drop ``name``'s base and branch tools, its structured-registry entry, and its spec.
+
+        The shared teardown for reload, remove, and register rollback.
+        """
         branches = self._app.tools.unregister_tool_base(name)
         for branch in branches:
             self._safe_remove(branch)
@@ -559,6 +580,7 @@ class PresetManager:
 
         Only ``KeyError`` (the FastMCP provider's "no such tool" for an
         idempotent teardown / a partially-bound register rollback) is tolerated;
-        every other failure propagates."""
+        every other failure propagates.
+        """
         with contextlib.suppress(KeyError):
             self._app.tools.remove_tool(name)

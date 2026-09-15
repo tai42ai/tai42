@@ -179,28 +179,28 @@ def test_every_stamped_class_carries_the_well_known_attribute():
 
 
 def test_registry_resolves_subclass_via_registered_base():
-    class _VendorBase(Exception):
+    class _VendorBaseError(Exception):
         pass
 
-    class _VendorDerived(_VendorBase):
+    class _VendorDerivedError(_VendorBaseError):
         pass
 
-    register_error_kind(_VendorBase, ErrorKind.UNAVAILABLE)
+    register_error_kind(_VendorBaseError, ErrorKind.UNAVAILABLE)
     # A subclass with no stamp of its own inherits the base's registration.
-    assert error_kind(_VendorDerived()) is ErrorKind.UNAVAILABLE
+    assert error_kind(_VendorDerivedError()) is ErrorKind.UNAVAILABLE
 
 
 def test_registry_most_derived_registration_wins():
-    class _Base(Exception):
+    class _BaseError(Exception):
         pass
 
-    class _Derived(_Base):
+    class _DerivedError(_BaseError):
         pass
 
-    register_error_kind(_Base, ErrorKind.UNAVAILABLE)
-    register_error_kind(_Derived, ErrorKind.CONFLICT)
+    register_error_kind(_BaseError, ErrorKind.UNAVAILABLE)
+    register_error_kind(_DerivedError, ErrorKind.CONFLICT)
     # The MRO walk hits the most-derived registered ancestor first.
-    assert error_kind(_Derived()) is ErrorKind.CONFLICT
+    assert error_kind(_DerivedError()) is ErrorKind.CONFLICT
 
 
 def test_builtin_registry_seeds():
@@ -260,13 +260,13 @@ def test_rename_immunity_pin():
     # Subclass a stamped error under a TOTALLY different name and mutate ``__name__``
     # / ``__qualname__`` — the exact thing that breaks a ``type(e).__name__ == "..."``
     # or message-substring check. ``error_kind`` still resolves via the inherited stamp.
-    class _AliasedAway(SandboxSessionNotFoundError):
+    class _AliasedAwayError(SandboxSessionNotFoundError):
         pass
 
-    _AliasedAway.__name__ = "CompletelyUnrelatedError"
-    _AliasedAway.__qualname__ = "CompletelyUnrelatedError"
+    _AliasedAwayError.__name__ = "CompletelyUnrelatedError"
+    _AliasedAwayError.__qualname__ = "CompletelyUnrelatedError"
 
-    err = _AliasedAway("sid")
+    err = _AliasedAwayError("sid")
     assert type(err).__name__ == "CompletelyUnrelatedError"  # the name is gone
     assert type(err).__name__ != "SandboxSessionNotFoundError"
     assert error_kind(err) is ErrorKind.NOT_FOUND  # ...the kind is not

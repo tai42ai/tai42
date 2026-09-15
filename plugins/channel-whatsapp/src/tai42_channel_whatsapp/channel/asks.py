@@ -12,8 +12,10 @@ _TIER1_FORMATS = frozenset({"confirm", "external"})
 
 
 def _render_link(delivery: ChannelDelivery) -> str:
-    """The message body for a Tier-1 ask (``confirm`` or ``external``): the
-    question plus the tappable callback link."""
+    """The message body for a Tier-1 ask (``confirm`` or ``external``).
+
+    The question plus the tappable callback link.
+    """
     return f"{delivery.question}\n\nAnswer here: {delivery.callback_url}"
 
 

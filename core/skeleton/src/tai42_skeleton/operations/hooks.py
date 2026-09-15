@@ -1,5 +1,4 @@
-"""Hook-management operations — the authed hooks surface the Studio drives, over
-the shared ``get_hooks_manager()``.
+"""Hook-management operations — the authed hooks surface the Studio drives, over ``get_hooks_manager()``.
 
 * ``list_hooks`` lists registered hooks (filtered to ``topic`` when given) plus the
   per-topic verifier bindings and each covered topic's derived ``trigger_auth`` — one
@@ -70,7 +69,8 @@ from tai42_skeleton.operations.response_models_group_b import (
 class HookListQuery(BaseModel):
     """The hook listing's optional ``?topic=`` filter.
 
-    Spec metadata only — the door parses its query at the HTTP edge."""
+    Spec metadata only — the door parses its query at the HTTP edge.
+    """
 
     topic: str | None = Field(
         default=None, description="Restrict the listing to hooks registered for this topic; omit for all hooks."
@@ -78,8 +78,7 @@ class HookListQuery(BaseModel):
 
 
 class TopicVerifierBinding(BaseModel):
-    """Bind a registered webhook ``verifier`` (with optional ``config``) to a
-    hook topic so its deliveries are signature-verified."""
+    """Bind a registered webhook ``verifier`` (with optional ``config``) to a hook topic for verification."""
 
     verifier: str
     config: dict[str, Any] = {}
@@ -105,7 +104,8 @@ class TriggerLinkCreate(BaseModel):
     rule the stored record enforces, so the mint door never writes a link its own restore
     would refuse. ``tool_kwargs`` (optional) is stored on the link and merged into every
     fired hook's input BELOW that hook's own static ``tool_kwargs``, so it supplies only
-    the arguments the hook's author left unpinned — a colliding key stays the author's."""
+    the arguments the hook's author left unpinned — a colliding key stays the author's.
+    """
 
     topic: str = Field(min_length=1)
     execution_key: str = Field(min_length=1)
@@ -229,8 +229,7 @@ async def register_hook(
     subject: HookSubject | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
-    """Register a hook from its flat parameters — an UPSERT, so this is the create
-    path AND the edit path for a hook of that name.
+    """Register a hook from its flat parameters — an UPSERT (the create path and the edit path).
 
     Supports conditional execution (``condition``), payload transformation (``expr``) —
     each a templated text carrying its jq inline or by stored id — and dynamic tool arguments.
@@ -285,10 +284,12 @@ async def unregister_hook(name: str) -> dict[str, Any]:
 
 @operation(summary="List registered webhook verifiers", tags=["hooks"], response_model=StringListResponse)
 async def list_verifiers() -> list[str]:
-    """The sorted names of every registered webhook verifier — the catalog the
-    Studio bind form offers instead of free text. Names ONLY: a verifier object and
-    a bound config are secret-adjacent and never leave this door. An empty registry
-    (no verifier lifecycle module loaded) is a valid state, so it returns ``[]``."""
+    """The sorted names of every registered webhook verifier — the catalog the Studio bind form offers.
+
+    Offered instead of free text. Names ONLY: a verifier object and a bound config are
+    secret-adjacent and never leave this door. An empty registry (no verifier lifecycle
+    module loaded) is a valid state, so it returns ``[]``.
+    """
     # Reached through the concrete app singleton because ``names`` rides the skeleton
     # facet, not the tai42-contract ``AppWebhookVerifiers`` protocol.
     from tai42_skeleton.app import instance
@@ -333,8 +334,10 @@ async def set_topic_verifier(topic: str, verifier: str, config: dict[str, Any] |
     response_model=RemovedByTopic,
 )
 async def delete_topic_verifier(topic: str) -> dict[str, Any]:
-    """Remove a topic's verifier binding, reopening its public ingress door; a missing
-    binding is a loud 404."""
+    """Remove a topic's verifier binding, reopening its public ingress door.
+
+    A missing binding is a loud 404.
+    """
     removed = await get_hooks_manager().delete_topic_verifier(topic)
     if not removed:
         raise NotFoundError(f"no verifier bound to topic: {topic!r}")
@@ -382,7 +385,8 @@ async def create_trigger_link(
 
     ``created_by`` is stamped from the AMBIENT caller identity, never a request field
     (which would be caller-spoofable); with the gate off there is no principal and it
-    is stored ``null``."""
+    is stored ``null``.
+    """
     caller = await resolve_caller()
     execution_key_fingerprint = await assert_execution_key_bindable(caller, execution_key)
     try:
@@ -407,9 +411,11 @@ async def create_trigger_link(
     response_model=TriggerLinkListView,
 )
 async def list_trigger_links() -> dict[str, Any]:
-    """Every live trigger link's record plus its hash PREFIX and its derived
-    ``trigger_auth`` — never a raw token (none is stored; a listed link's QR is
-    unrecoverable by design). Returns ``{"items", "total"}``."""
+    """Every live trigger link's record plus its hash PREFIX and its derived ``trigger_auth``.
+
+    Never a raw token (none is stored; a listed link's QR is unrecoverable by design).
+    Returns ``{"items", "total"}``.
+    """
     try:
         return await trigger_links.list_trigger_links()
     except TriggerLinkError as exc:
@@ -425,9 +431,11 @@ async def list_trigger_links() -> dict[str, Any]:
     response_model=RemovedByName,
 )
 async def delete_trigger_link(name: str) -> dict[str, Any]:
-    """Revoke a trigger link by name — immediate and DURABLE (a permanent tombstone
-    keeps a restored backup from re-arming it). An unknown name is a loud 404.
-    Returns ``{"removed", "name"}``."""
+    """Revoke a trigger link by name — immediate and DURABLE.
+
+    A permanent tombstone keeps a restored backup from re-arming it. An unknown name is a
+    loud 404. Returns ``{"removed", "name"}``.
+    """
     try:
         await trigger_links.revoke_trigger_link(name)
     except TriggerLinkError as exc:

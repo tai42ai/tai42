@@ -24,12 +24,12 @@ from typing import Any
 
 
 class InprocessRevealGate:
-    """The armed in-process dispatch's carry-out slots: a secret reveal payload and
-    an async-park sentinel."""
+    """The armed in-process dispatch's carry-out slots: a secret reveal payload and an async-park sentinel."""
 
     __slots__ = ("has_park", "has_payload", "park", "payload")
 
     def __init__(self) -> None:
+        """Start with both carry-out slots empty (no payload, no park)."""
         self.payload: Any = None
         self.has_payload = False
         self.park: Any = None

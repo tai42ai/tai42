@@ -207,6 +207,7 @@ class DefaultNamespaceMixin:
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Append the ``TAI_DEFAULT_*`` fallback sources beneath the specific settings sources."""
         tai_default_fields = cls.tai_default_fields
         if not tai_default_fields:
             return (init_settings, env_settings, dotenv_settings, file_secret_settings)

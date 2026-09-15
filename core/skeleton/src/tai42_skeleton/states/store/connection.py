@@ -23,23 +23,29 @@ def _settings() -> Any:
 
 
 def _pool(settings: Any) -> Any:
-    """Open a pooled client through the live ``states.store`` package's ``client_ctx`` — read
-    from :data:`sys.modules` at CALL time so a test's package-alias monkeypatch (and a config
-    reload's rebound package) bites, never a stale module-top binding."""
+    """Open a pooled client through the live ``states.store`` package's ``client_ctx``.
+
+    Read from :data:`sys.modules` at CALL time so a test's package-alias monkeypatch
+    (and a config reload's rebound package) bites, never a stale module-top binding.
+    """
     return sys.modules["tai42_skeleton.states.store"].client_ctx(PostgresClient, settings)
 
 
 class _StoreConnection(_StoreBase):
-    """The pooled-connection and transaction-boundary methods every mixin's read/write runs
-    on. Each method opens its own pooled connection; a caller that must span several writes
-    atomically opens :meth:`begin` and threads the yielded connection into the write methods'
-    ``conn`` parameter — they join that transaction instead of opening their own."""
+    """The pooled-connection and transaction-boundary methods every mixin's read/write runs on.
+
+    Each method opens its own pooled connection; a caller that must span several writes
+    atomically opens :meth:`begin` and threads the yielded connection into the write
+    methods' ``conn`` parameter — they join that transaction instead of opening their own.
+    """
 
     @asynccontextmanager
     async def begin(self) -> AsyncIterator[AsyncConnection[Any]]:
-        """A pooled connection with an open transaction — the atomic boundary a caller
-        threads into the write methods' ``conn`` so several writes commit or roll back as
-        one."""
+        """A pooled connection with an open transaction — the atomic boundary for multi-write callers.
+
+        A caller threads it into the write methods' ``conn`` so several writes commit or
+        roll back as one.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -49,9 +55,11 @@ class _StoreConnection(_StoreBase):
 
     @asynccontextmanager
     async def _write_cursor(self, conn: AsyncConnection[Any] | None) -> AsyncIterator[Any]:
-        """Yield the cursor a write runs on: with an external ``conn`` join the caller's
-        transaction (no new one); otherwise open a pooled connection and a fresh
-        transaction."""
+        """Yield the cursor a write runs on.
+
+        With an external ``conn`` join the caller's transaction (no new one); otherwise
+        open a pooled connection and a fresh transaction.
+        """
         if conn is not None:
             async with conn.cursor(row_factory=dict_row) as cur:
                 yield cur
@@ -66,9 +74,12 @@ class _StoreConnection(_StoreBase):
 
     @asynccontextmanager
     async def _read_cursor(self, conn: AsyncConnection[Any] | None) -> AsyncIterator[Any]:
-        """Yield the cursor a read runs on: with an external ``conn`` join the caller's
-        transaction (so it sees that transaction's own uncommitted writes); otherwise open
-        a pooled connection (no transaction, matching a plain read)."""
+        """Yield the cursor a read runs on.
+
+        With an external ``conn`` join the caller's transaction (so it sees that
+        transaction's own uncommitted writes); otherwise open a pooled connection (no
+        transaction, matching a plain read).
+        """
         if conn is not None:
             async with conn.cursor(row_factory=dict_row) as cur:
                 yield cur

@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 
 # The operator's "treat these env keys as secret" marks var — the same
 # comma-separated key-name list ``set_mcp_secret_env`` and the installer append to.
-_SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"
+_SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"  # noqa: S105 constant identifier, not a secret value
 
 
 class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
@@ -104,18 +104,20 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
     _env_write_loop: ClassVar[asyncio.AbstractEventLoop | None] = None
 
     def __init__(self, config_manager: _ManifestStore, admin: _ReloadAdmin, bus: _FleetPublisher) -> None:
+        """Bind the config manager, the admin reload seam, and the worker bus the pipeline drives."""
         self._config_manager = config_manager
         self._admin = admin
         self._bus = bus
 
     @classmethod
     def _env_lock(cls) -> asyncio.Lock:
-        """The process-wide env-write lock bound to the running serving loop, created on
-        first use and rebound only if the running loop differs from the bound one (a loop
-        swap — there is never a second live loop in the same process). Mirrors
-        :meth:`ReloadGate._serving_lock`, keeping the singleton correct across loops rather
-        than raising the cross-loop ``RuntimeError`` a bare module-level ``asyncio.Lock``
-        would across test loops."""
+        """The process-wide env-write lock bound to the running serving loop.
+
+        Created on first use and rebound only if the running loop differs from the bound one (a loop swap —
+        there is never a second live loop in the same process). Mirrors :meth:`ReloadGate._serving_lock`,
+        keeping the singleton correct across loops rather than raising the cross-loop ``RuntimeError`` a bare
+        module-level ``asyncio.Lock`` would across test loops.
+        """
         loop = asyncio.get_running_loop()
         if cls._env_write_lock is None or cls._env_write_loop is not loop:
             cls._env_write_lock = asyncio.Lock()
@@ -124,8 +126,10 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
 
     @classmethod
     def from_app(cls) -> ConfigService:
-        """Wire the pipeline from the running app: the active config manager, the admin
-        reload seam, and this process's worker bus."""
+        """Wire the pipeline from the running app.
+
+        Pulls the active config manager, the admin reload seam, and this process's worker bus.
+        """
         from tai42_contract.app import tai42_app
 
         from tai42_skeleton.app import instance
@@ -133,9 +137,11 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         return cls(config_manager=tai42_app.config.config_manager, admin=tai42_app.admin, bus=instance.app.bus)
 
     async def apply_change(self, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
-        """Read-modify-write: run ``mutator`` on the PRESERVED manifest inside the
-        config-manager transaction, VALIDATE the resolved projection of the mutated
-        document, persist, locally reload, and broadcast to the whole fleet.
+        """Read-modify-write the manifest, then persist, reload, and broadcast to the fleet.
+
+        Runs ``mutator`` on the PRESERVED manifest inside the config-manager transaction, VALIDATEs the
+        resolved projection of the mutated document, persists, locally reloads, and broadcasts to the whole
+        fleet.
 
         ``mutator`` edits the passed document IN PLACE and must be pure / re-runnable
         (the transaction may re-run it on a concurrency conflict). An invalid mutation
@@ -148,7 +154,8 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         stay masked after removal (its value is not deleted), so this method DELEGATES to
         the combined :meth:`apply_env_and_change` seam — persisting the marks union and the
         manifest mutation atomically under the env-write lock — instead of the plain
-        transaction. When nothing leaves, the plain path runs unchanged."""
+        transaction. When nothing leaves, the plain path runs unchanged.
+        """
         preserved = self._read_preserved_manifest()
         candidate = copy.deepcopy(preserved)
         mutator(candidate)
@@ -168,9 +175,10 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         return await self._reload_and_broadcast(document=persisted)
 
     async def apply_replace(self, document: dict[str, Any]) -> ApplyResult:
-        """Replace the whole manifest: VALIDATE the resolved projection of ``document``
-        BEFORE it is persisted (a replace has no mutator to abort), then replace,
-        locally reload, and broadcast to the whole fleet.
+        """Replace the whole manifest, then reload locally and broadcast to the fleet.
+
+        VALIDATEs the resolved projection of ``document`` BEFORE it is persisted (a replace has no mutator to
+        abort), then replaces, locally reloads, and broadcasts to the whole fleet.
 
         The caller supplies the PRESERVED-view document (``!ENV`` markers, never
         resolved values) — the seam persists it verbatim. The document is SEALED
@@ -183,7 +191,8 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         :meth:`apply_env_and_change` seam with a replace-as-mutator (``clear()`` +
         ``update()``, so the whole-document replace still DELETES omitted sections — never
         a merge) — persisting the marks union and the replace atomically. When nothing
-        leaves, the plain replace runs unchanged."""
+        leaves, the plain replace runs unchanged.
+        """
         preserved = self._read_preserved_manifest()
         if _leaving_connector_secrets(preserved, document):
 
@@ -198,16 +207,18 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         return await self._reload_and_broadcast(document=persisted)
 
     async def _apply_change_with_leaving(self, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
-        """Persist a manifest mutation that drops an oauth connector through the combined
-        env+manifest seam, so the leaving ``client_secret_env`` names are folded into the
-        stored ``TAI_ENV_SECRET_KEYS`` marks and the manifest mutation land atomically.
+        """Persist a manifest mutation that drops an oauth connector through the combined env+manifest seam.
+
+        The leaving ``client_secret_env`` names are folded into the stored
+        ``TAI_ENV_SECRET_KEYS`` marks and the manifest mutation land atomically.
 
         ``prepare`` returns an EMPTY change set and the caller's own ``mutator``:
         :meth:`apply_env_and_change` itself computes the leaving names from the mutated
         candidate and folds the marks union into the env write (written only when it grows
         the stored set). Its validate/seal/persist/reload rules then apply exactly as for
         the combined seam's native callers, and a manifest-persist failure surfaces the same
-        :class:`OrphanEnvWriteError` (a marks write may have landed)."""
+        :class:`OrphanEnvWriteError` (a marks write may have landed).
+        """
 
         async def prepare(_stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
             return {}, mutator
@@ -215,11 +226,13 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         return await self.apply_env_and_change(prepare)
 
     async def apply_env_change(self, changes: dict[str, str]) -> ApplyResult:
-        """Apply env overrides: VALIDATE the effective/resolved config (the manifest's
-        ``!ENV`` markers materialized against the post-change env) through the SAME
-        backend-needs-bus gate, then merge the overrides, locally reload, and broadcast
-        to the whole fleet. An invalid effective config raises before anything is
-        written."""
+        """Apply env overrides, validating the effective config before anything is written.
+
+        VALIDATE the effective/resolved config (the manifest's ``!ENV`` markers
+        materialized against the post-change env) through the SAME backend-needs-bus gate,
+        then merge the overrides, locally reload, and broadcast to the whole fleet. An
+        invalid effective config raises before anything is written.
+        """
         self._validate_env(changes)
         self._config_manager.write_env(changes)
         return await self._reload_and_broadcast(document=None)
@@ -344,14 +357,16 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         preserved: Mapping[str, Any],
         candidate: Mapping[str, Any],
     ) -> None:
-        """Fold every oauth ``client_secret_env`` NAME this change DROPS from the manifest
-        into ``changes[TAI_ENV_SECRET_KEYS]``, so a leaving connector's secret value stays
-        masked after removal (its value is never deleted).
+        """Fold every dropped oauth ``client_secret_env`` NAME into ``changes[TAI_ENV_SECRET_KEYS]``.
+
+        Every NAME this change DROPS from the manifest is folded in so a leaving
+        connector's secret value stays masked after removal (its value is never deleted).
 
         The union is ``stored marks union caller marks (already in ``changes`` when the caller
         set them) union leaving names``, written back only when it GROWS the stored set — so a
         no-op change never rewrites the marks and a leaving name already marked adds nothing.
-        Names only; env VALUES are untouched."""
+        Names only; env VALUES are untouched.
+        """
         leaving = _leaving_connector_secrets(preserved, candidate)
         if not leaving:
             return

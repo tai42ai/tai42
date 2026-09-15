@@ -1,6 +1,8 @@
-"""The information-flow rule over a parsed condition: one rule deciding that a ROOT
-value (the whole auth context) may only be projected by a static field name, and the
-per-node-kind handlers that enforce it."""
+"""The information-flow rule over a parsed condition, and the handlers that enforce it.
+
+One rule decides that a ROOT value (the whole auth context) may only be projected by a static
+field name; the per-node-kind handlers enforce it.
+"""
 
 from __future__ import annotations
 
@@ -50,8 +52,10 @@ class _Taint(Enum):
 
 @dataclass(frozen=True)
 class _Scope:
-    """The taint environment an expression is analyzed in: what ``.`` carries, and what
-    each ``as``-bound variable carries."""
+    """The taint environment an expression is analyzed in.
+
+    What ``.`` carries, and what each ``as``-bound variable carries.
+    """
 
     subject: _Taint
     variables: Mapping[str, _Taint] = field(default_factory=dict)
@@ -113,44 +117,53 @@ class _TaintAnalysis:
         return _Taint.SAFE
 
     def _taint_string(self, node: _Node, scope: _Scope) -> _Taint:
-        assert isinstance(node, _String)
+        if not (isinstance(node, _String)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         for part in node.interpolations:
             self._require_safe(self._taint(part, scope), part.position, "a string interpolation")
         return _Taint.SAFE
 
     def _taint_variable(self, node: _Node, scope: _Scope) -> _Taint:
-        assert isinstance(node, _Variable)
+        if not (isinstance(node, _Variable)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         taint = scope.variables.get(node.name)
         if taint is None:
             raise _refusal(self._text, node.position, f"condition reads the unbound variable '${node.name}'")
         return taint
 
     def _taint_negate(self, node: _Node, scope: _Scope) -> _Taint:
-        assert isinstance(node, _Negate)
+        if not (isinstance(node, _Negate)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         self._require_safe(self._taint(node.operand, scope), node.position, "arithmetic negation")
         return _Taint.SAFE
 
     def _taint_bind(self, node: _Node, scope: _Scope) -> _Taint:
-        assert isinstance(node, _Bind)
+        if not (isinstance(node, _Bind)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         variables = {**scope.variables, node.variable: self._taint(node.source, scope)}
         return self._taint(node.body, _Scope(scope.subject, variables))
 
     def _taint_object(self, node: _Node, scope: _Scope) -> _Taint:
-        assert isinstance(node, _ObjectConstruction)
+        if not (isinstance(node, _ObjectConstruction)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         for value in node.values:
             self._require_safe(self._taint(value, scope), value.position, "an object being constructed")
         return _Taint.SAFE
 
     def _taint_array(self, node: _Node, scope: _Scope) -> _Taint:
-        assert isinstance(node, _ArrayConstruction)
+        if not (isinstance(node, _ArrayConstruction)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         if node.element is not None:
             self._require_safe(self._taint(node.element, scope), node.element.position, "an array being collected")
         return _Taint.SAFE
 
     def _projection(self, node: _Node, scope: _Scope) -> _Taint:
-        """The taint of a suffix chain — the ONE place a ``ROOT`` value is allowed to be
-        consumed, and only by a static field name."""
-        assert isinstance(node, _Projection)
+        """The taint of a suffix chain.
+
+        The ONE place a ``ROOT`` value is allowed to be consumed, and only by a static field name.
+        """
+        if not (isinstance(node, _Projection)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         taint = self._taint(node.source, scope)
         suffixes = node.suffixes
         position = 0
@@ -186,9 +199,12 @@ class _TaintAnalysis:
         return taint
 
     def _call(self, node: _Node, scope: _Scope) -> _Taint:
-        """A builtin reads its input and its arguments, so both must be safe — and its
-        result is then derived from safe values only."""
-        assert isinstance(node, _Call)
+        """A builtin reads its input and its arguments, so both must be safe.
+
+        Its result is then derived from safe values only.
+        """
+        if not (isinstance(node, _Call)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         self._require_safe(scope.subject, node.position, f"the builtin {node.name!r}")
         # jq evaluates every argument against the call's own input, and the filter
         # arguments of ``map``/``any``/``all`` against an element of it. That input is
@@ -201,7 +217,8 @@ class _TaintAnalysis:
         return _Taint.SAFE
 
     def _binary(self, node: _Node, scope: _Scope) -> _Taint:
-        assert isinstance(node, _Binary)
+        if not (isinstance(node, _Binary)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         if node.operator == "|":
             piped = _Scope(self._taint(node.left, scope), scope.variables)
             return self._taint(node.right, piped)
@@ -216,7 +233,8 @@ class _TaintAnalysis:
         return _Taint.SAFE
 
     def _try(self, node: _Node, scope: _Scope) -> _Taint:
-        assert isinstance(node, _Try)
+        if not (isinstance(node, _Try)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         body = self._taint(node.body, scope)
         if node.handler is None:
             return body
@@ -227,9 +245,11 @@ class _TaintAnalysis:
 
 
 def _static_name(suffix: _Field | _Index | _Optional) -> str | None:
-    """The field name a suffix statically projects, or ``None`` when it projects
-    something only evaluation could name (``[]``, a computed or interpolated index, an
-    error-suppressing ``?``)."""
+    """The field name a suffix statically projects, or ``None`` when only evaluation could name it.
+
+    ``None`` covers what only evaluation could name (``[]``, a computed or interpolated index, an
+    error-suppressing ``?``).
+    """
     if isinstance(suffix, _Field):
         return suffix.name
     if isinstance(suffix, _Index) and isinstance(suffix.key, _String) and not suffix.key.interpolations:

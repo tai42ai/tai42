@@ -85,7 +85,7 @@ async def test_list_traces_summarizes_without_bodies(
     errors_for(["b"])
 
     result = await LangfuseReader(manager).list_traces(
-        from_timestamp=now, limit=5, page=2, filter=MonitoringFilter(tags=["x"])
+        from_timestamp=now, limit=5, page=2, filter_=MonitoringFilter(tags=["x"])
     )
     assert [t.id for t in result] == ["a", "b"]
     a, b = result
@@ -125,7 +125,7 @@ async def test_list_traces_version_filter_rides_native_param(
     route_metrics(tokens={"a": 1})
     errors_for([])
 
-    await LangfuseReader(manager).list_traces(from_timestamp=now, filter=MonitoringFilter(version="5"))
+    await LangfuseReader(manager).list_traces(from_timestamp=now, filter_=MonitoringFilter(version="5"))
 
     # ``version`` is a native trace.list param (not an advanced-filter clause).
     assert mock_client.api.trace.list.call_args.kwargs["version"] == "5"
@@ -160,7 +160,7 @@ async def test_version_stamp_and_filter_round_trip(
     list_returns([trace_row(id="a")])
     route_metrics(tokens={"a": 1})
     errors_for([])
-    await LangfuseReader(manager).list_traces(filter=MonitoringFilter(version=stamped_version))
+    await LangfuseReader(manager).list_traces(filter_=MonitoringFilter(version=stamped_version))
     assert mock_client.api.trace.list.call_args.kwargs["version"] == stamped_version
 
 
@@ -181,7 +181,7 @@ async def test_list_traces_page_is_at_most_three_calls(
 async def test_trace_filter_level_and_metrics_to_advanced(manager, mock_client):
     mock_client.api.trace.list.return_value = SimpleNamespace(data=[])
     await LangfuseReader(manager).list_traces(
-        filter=MonitoringFilter(level=MonitoringLevel.ERROR, min_cost=1.0, metadata={"a": "b"})
+        filter_=MonitoringFilter(level=MonitoringLevel.ERROR, min_cost=1.0, metadata={"a": "b"})
     )
     kwargs = mock_client.api.trace.list.call_args.kwargs
     sent = json.loads(kwargs["filter"])
@@ -197,7 +197,9 @@ async def test_trace_advanced_filter_folds_time_bounds_into_json(manager, mock_c
     mock_client.api.trace.list.return_value = SimpleNamespace(data=[])
     t0 = datetime(2026, 1, 1, tzinfo=UTC)
     t1 = datetime(2026, 1, 2, tzinfo=UTC)
-    await LangfuseReader(manager).list_traces(from_timestamp=t0, to_timestamp=t1, filter=MonitoringFilter(min_cost=1.0))
+    await LangfuseReader(manager).list_traces(
+        from_timestamp=t0, to_timestamp=t1, filter_=MonitoringFilter(min_cost=1.0)
+    )
     sent = json.loads(mock_client.api.trace.list.call_args.kwargs["filter"])
     ts = [c for c in sent if c["column"] == "timestamp"]
     assert {"column": "timestamp", "operator": ">=", "value": t0.isoformat(), "type": "datetime"} in ts
@@ -207,7 +209,7 @@ async def test_trace_advanced_filter_folds_time_bounds_into_json(manager, mock_c
 
 async def test_trace_filter_model_raises(manager, mock_client):
     with pytest.raises(MonitoringReadNotSupportedError):
-        await LangfuseReader(manager).list_traces(filter=MonitoringFilter(model="gpt"))
+        await LangfuseReader(manager).list_traces(filter_=MonitoringFilter(model="gpt"))
 
 
 async def test_trace_native_sort_forwarded(manager, mock_client):

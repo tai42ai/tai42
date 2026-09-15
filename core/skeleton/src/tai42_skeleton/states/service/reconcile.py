@@ -31,12 +31,13 @@ from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError
 
 class _ReconcileMixin(_StatesServiceBase):
     async def _reconcile_template_records(self, context: AttachReconcileContext) -> None:
-        """The platform's own attach reconciler (always registered). On a declarations edit of
-        a template that declares ``reconcile``, it settles the state's open records against the
-        new declarations through the template's ``reconcile`` contract — a no-op on a first
+        """The platform's own attach reconciler (always registered).
+
+        On a declarations edit of a template that declares ``reconcile``, it settles the state's open records against
+        the new declarations through the template's ``reconcile`` contract — a no-op on a first
         attach (no previous declarations) or a template without ``reconcile``. No template concept
-        enters this body: the template's own jq decides what a declarations edit orphans and how
-        to close it."""
+        enters this body: the template's own jq decides what a declarations edit orphans and how to close it.
+        """
         if context.previous_declarations is None:
             return
         resolved_body, _by_id = await self._resolve_template_body(
@@ -49,9 +50,10 @@ class _ReconcileMixin(_StatesServiceBase):
         await self._run_reconcile(context, template.reconcile, path)
 
     async def _reconcile_attach_path(self, state: str, template_name: str) -> list[str]:
-        """The path at which ``template_name`` is attached on ``state`` — the subtree the
-        template's records live under. The attachment exists at reconcile time (a re-attach /
-        declarations edit)."""
+        """The path at which ``template_name`` is attached on ``state`` — the subtree its records live under.
+
+        The attachment exists at reconcile time (a re-attach / declarations edit).
+        """
         for template, attach_path, _params, _decls in await self._load_state_attachments(state):
             if template.name == template_name:
                 return list(attach_path)
@@ -68,8 +70,10 @@ class _ReconcileMixin(_StatesServiceBase):
     async def _collect_reconcile_orphans(
         self, context: AttachReconcileContext, reconcile: StateTemplateReconcile, path: list[str]
     ) -> list[tuple[StateSubject, dict[str, Any]]]:
-        """The keyset-paged scan reading each subject's subtree and gathering the items the new
-        declarations no longer cover, as ``(subject, item)`` pairs."""
+        """The keyset-paged scan gathering the items the new declarations no longer cover.
+
+        Reads each subject's subtree and returns ``(subject, item)`` pairs.
+        """
         previous = context.previous_declarations or {}
         new = context.new_declarations
         orphans: list[tuple[StateSubject, dict[str, Any]]] = []
@@ -103,8 +107,10 @@ class _ReconcileMixin(_StatesServiceBase):
         path: list[str],
         orphans: list[tuple[StateSubject, dict[str, Any]]],
     ) -> None:
-        """Read the ``orphans`` directive, guard the resolution, run the ``close`` jq per orphan,
-        and apply the rebased ops. A missing directive is the loud refusal listing the orphans."""
+        """Read the ``orphans`` directive, guard the resolution, run the ``close`` jq per orphan, and apply the ops.
+
+        A missing directive is the loud refusal listing the orphans.
+        """
         directive = context.options.get("orphans")
         if directive is None:
             raise TemplateValidationError(_reconcile_refusal(context, orphans), extra=_reconcile_orphans_extra(orphans))
@@ -169,10 +175,12 @@ class _ReconcileMixin(_StatesServiceBase):
             )
 
     async def _run_reconcile_jq(self, label: str, text: TemplatedText, payload: Any, *, template_name: str) -> Any:
-        """One reconcile jq program over its input payload. Its body is a templated text rendered
-        to jq text IMMEDIATELY before it runs — a by-id body whose stored resource cannot be
-        fetched is a LOUD refusal naming the program and the id. Loud, too, on an evaluation
-        failure, carrying the program's own ``error(...)`` message out."""
+        """One reconcile jq program over its input payload.
+
+        Its body is a templated text rendered to jq text IMMEDIATELY before it runs — a by-id body whose stored
+        resource cannot be fetched is a LOUD refusal naming the program and the id. Loud, too, on an evaluation
+        failure, carrying the program's own ``error(...)`` message out.
+        """
         try:
             expr = await tai42_app.storage.resource_manager.render_templated_text(text)
         except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:

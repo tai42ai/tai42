@@ -62,8 +62,10 @@ async def add_scope_url(scope_id: str, url: str, pattern: str | None) -> dict[st
     response_model=UrlAck,
 )
 async def remove_scope_url(url: str) -> dict[str, str]:
-    """Unmap ``url`` from every scope that references it; a url that was never mapped
-    is a loud 404 (a typo, not a silent success)."""
+    """Unmap ``url`` from every scope that references it.
+
+    A url that was never mapped is a loud 404 (a typo, not a silent success).
+    """
     # OFF: access control disabled → refuse the write with a named, machine-readable
     # reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:
@@ -88,8 +90,10 @@ async def remove_scope_url(url: str) -> dict[str, str]:
     response_model=ScopeDeleteResult,
 )
 async def delete_scope(scope_id: str) -> dict[str, Any]:
-    """Delete a scope, cascading it out of every referencing key; an unknown scope
-    (no urls) is a loud 404."""
+    """Delete a scope, cascading it out of every referencing key.
+
+    An unknown scope (no urls) is a loud 404.
+    """
     # OFF: access control disabled → refuse the delete with a named, machine-readable
     # reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:

@@ -1,6 +1,8 @@
-"""Api-door delivery: POST a produced answer to the row's ``callback_url`` under an HMAC
-``X-Tai-Signature``, retried with backoff under the delivery lease, or — for a poll-only row
-that declares no callback — drive the record terminal-readable for the poll door without a POST.
+"""Api-door delivery of a produced answer to the row's ``callback_url``.
+
+POST it under an HMAC ``X-Tai-Signature``, retried with backoff under the
+delivery lease, or — for a poll-only row that declares no callback — drive the
+record terminal-readable for the poll door without a POST.
 """
 
 from __future__ import annotations
@@ -100,8 +102,9 @@ async def _deliver_api(store: ConversationRecordStore, record: ConversationRecor
 
 
 async def _post_callback(url: str, body: bytes, signature: str, timeout_seconds: float) -> int | None:
-    """POST the signed answer body, returning the HTTP status, or ``None`` when the request
-    never completed — a transport error or a timeout is a retryable non-2xx, logged not raised.
+    """POST the signed answer body, returning the HTTP status, or ``None`` when it never completed.
+
+    A transport error or a timeout is a retryable non-2xx, logged not raised.
 
     ``timeout_seconds`` is a hard total-request deadline (validated below the delivery lease), not
     httpx's per-phase timeout, so a slow receiver cannot keep the POST in flight past the lease.

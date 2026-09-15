@@ -67,10 +67,12 @@ _NOT_CONFIGURED_NOUN = "tool-metadata store"
 
 
 class ToolMetaUpsert(BaseModel):
-    """A merge-patch overlay edit. Only the fields PRESENT in the request are
-    written; a present-null clears (``hidden: null`` writes the tri-state defer
-    state); a present ``tags`` array replaces the whole set. Absent fields are
-    unchanged — there is no full-row replace."""
+    """A merge-patch overlay edit.
+
+    Only the fields PRESENT in the request are written; a present-null clears (``hidden: null``
+    writes the tri-state defer state); a present ``tags`` array replaces the whole set. Absent
+    fields are unchanged — there is no full-row replace.
+    """
 
     display_name: str | None = None
     folder_id: str | None = None
@@ -80,8 +82,7 @@ class ToolMetaUpsert(BaseModel):
 
 
 class FolderCreate(BaseModel):
-    """A folder-creation request — a ``name`` and an optional ``parent_id``
-    (``null`` = a root folder)."""
+    """A folder-creation request — a ``name`` and an optional ``parent_id`` (``null`` = a root folder)."""
 
     name: str
     parent_id: str | None = None
@@ -103,9 +104,11 @@ class FolderMove(BaseModel):
 
 
 def _clean_label(value: str, field: str) -> str:
-    """A non-empty label, stored stripped. Any value empty after ``strip()`` is a
-    loud 400 — the ``display_name ?? name`` fallback must never render an empty
-    label, and a folder must never be nameless."""
+    """A non-empty label, stored stripped.
+
+    Any value empty after ``strip()`` is a loud 400 — the ``display_name ?? name`` fallback must
+    never render an empty label, and a folder must never be nameless.
+    """
     cleaned = value.strip()
     if not cleaned:
         raise BadRequestError(f"{field} must not be blank")
@@ -117,9 +120,10 @@ def _clean_label(value: str, field: str) -> str:
 
 @operation(summary="List the tool-metadata overlay", tags=["tool_meta"], response_model=ToolMetaListView)
 async def list_tool_meta() -> dict[str, Any]:
-    """The whole overlay in one read: every folder (the flat tree) plus every
-    per-tool row. The UI builds the tree and merges the rows against the live tool
-    list client-side."""
+    """The whole overlay in one read: every folder (the flat tree) plus every per-tool row.
+
+    The UI builds the tree and merges the rows against the live tool list client-side.
+    """
     # OFF gate: with no overlay store the honest answer is the empty overlay — the
     # UI degrades perfectly on empty. No store touched.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -142,11 +146,13 @@ async def list_tool_meta() -> dict[str, Any]:
     response_model=ToolMetaRecord,
 )
 async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, Any]:
-    """Merge-patch the overlay row for ``tool_name`` (create it if absent). ``patch``
-    holds ONLY the fields the caller sent; each is applied over the current row (or
+    """Merge-patch the overlay row for ``tool_name`` (create it if absent).
+
+    ``patch`` holds ONLY the fields the caller sent; each is applied over the current row (or
     the empty defaults when none exists), absent fields unchanged. A blank
     ``display_name`` is refused; a present-null clears; a present ``tags`` or
-    ``badges`` array replaces that set. An unknown ``folder_id`` is a loud 400."""
+    ``badges`` array replaces that set. An unknown ``folder_id`` is a loud 400.
+    """
     # OFF gate: a write needs the store — refuse with a named, machine-readable
     # reason rather than reaching for an absent Postgres.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -179,8 +185,10 @@ async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, A
 
 @operation(summary="Delete a tool's overlay row", tags=["tool_meta"], response_model=ToolMetaDeleted)
 async def delete_tool_meta(tool_name: str) -> dict[str, Any]:
-    """Drop the overlay row for ``tool_name``. Idempotent — deleting a tool with no
-    row is a no-op, not an error (most tools never own one)."""
+    """Drop the overlay row for ``tool_name``.
+
+    Idempotent — deleting a tool with no row is a no-op, not an error (most tools never own one).
+    """
     # OFF gate: with no store there is no row to drop — the same idempotent success
     # the documented no-op contract already answers, no store touched.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -201,9 +209,10 @@ async def delete_tool_meta(tool_name: str) -> dict[str, Any]:
     response_model=FolderRecord,
 )
 async def create_folder(name: str, parent_id: str | None = None) -> dict[str, Any]:
-    """Create a folder under ``parent_id`` (``null`` = a root folder). A blank name
-    is a 400, an unknown ``parent_id`` a 400, and a sibling already holding the name
-    a 409."""
+    """Create a folder under ``parent_id`` (``null`` = a root folder).
+
+    A blank name is a 400, an unknown ``parent_id`` a 400, and a sibling already holding the name a 409.
+    """
     # OFF gate: a write needs the store — refuse with a named, machine-readable
     # reason rather than reaching for an absent Postgres.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -219,8 +228,9 @@ async def create_folder(name: str, parent_id: str | None = None) -> dict[str, An
 
 
 async def resolve_folder_path(path: str) -> str | None:
-    """Resolve a ``/``-style folder ``path`` to its leaf ``folder_id`` in the id-keyed
-    tool_meta folder tree, creating every missing segment along the way. Each segment is a
+    """Resolve a ``/``-style folder ``path`` to its leaf ``folder_id``, creating missing segments along the way.
+
+    Resolution runs against the id-keyed tool_meta folder tree. Each segment is a
     folder ``name`` under the running parent — an existing sibling of that name is reused, a
     missing one created through ``create_folder(name, parent_id)``. Callers store the returned
     leaf id, never a raw path string. Every RAW segment is run through ``_clean_label``, so a
@@ -233,7 +243,8 @@ async def resolve_folder_path(path: str) -> str | None:
     losing create raises :class:`FolderNameConflictError`. That is not a failure here — it means
     the sibling already made the folder this path needs — so re-read the folders and reuse the
     winning sibling's id for that segment. Concurrent resolvers on the same fresh path converge
-    on ONE folder id, none raises."""
+    on ONE folder id, none raises.
+    """
     store = instance.app.tool_meta.store
     children: dict[tuple[str | None, str], str] = {
         (folder.parent_id, folder.name): folder.id for folder in await store.list_folders()
@@ -266,8 +277,10 @@ async def resolve_folder_path(path: str) -> str | None:
     response_model=FolderRecord,
 )
 async def rename_folder(folder_id: str, name: str) -> dict[str, Any]:
-    """Rename a folder in place. A blank name is a 400, an unknown folder a 404, and
-    a sibling collision a 409."""
+    """Rename a folder in place.
+
+    A blank name is a 400, an unknown folder a 404, and a sibling collision a 409.
+    """
     # OFF gate: with no store no folder can exist — a 404 byte-identical to the
     # genuine miss below, so the door is no oracle for the store's absence.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -291,9 +304,11 @@ async def rename_folder(folder_id: str, name: str) -> dict[str, Any]:
     response_model=FolderRecord,
 )
 async def move_folder(folder_id: str, parent_id: str | None = None) -> dict[str, Any]:
-    """Re-parent a folder (``null`` = move to root). An unknown folder or parent is a
-    404, a move that would form a cycle a 400, and a sibling collision at the
-    destination a 409."""
+    """Re-parent a folder (``null`` = move to root).
+
+    An unknown folder or parent is a 404, a move that would form a cycle a 400, and a sibling
+    collision at the destination a 409.
+    """
     # OFF gate: with no store no folder can exist — a 404 byte-identical to the
     # genuine folder-miss below (``FolderNotFoundError(folder_id)`` renders the same
     # text), so the door is no oracle.
@@ -317,8 +332,10 @@ async def move_folder(folder_id: str, parent_id: str | None = None) -> dict[str,
     response_model=FolderDeleted,
 )
 async def delete_folder(folder_id: str) -> dict[str, Any]:
-    """Delete an EMPTY folder. An unknown folder is a 404; a folder still holding
-    subfolders or overlay rows is a 409 (empty it first)."""
+    """Delete an EMPTY folder.
+
+    An unknown folder is a 404; a folder still holding subfolders or overlay rows is a 409 (empty it first).
+    """
     # OFF gate: with no store no folder can exist — a 404 byte-identical to the
     # genuine miss below, so the door is no oracle for the store's absence.
     if not component_store_configured(SKELETON_COMPONENT):

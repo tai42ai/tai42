@@ -20,11 +20,13 @@ class MarketplaceError(TaiMCPServerError):
 
 
 class RegistryUnreachableError(MarketplaceError):
-    """An upstream the registry directed us to could not be reached, errored, or
-    was named unusably — the message carries the failing URL and the transport
-    detail. The gateway case: this server reached out to the registry (by its base
-    URL) or to a registry-named artifact host (by the artifact URL) and got no
-    valid upstream response. Distinct from a this-server fault; maps to a 502."""
+    """An upstream the registry directed us to could not be reached, errored, or was named unusably.
+
+    The message carries the failing URL and the transport detail. The gateway
+    case: this server reached out to the registry (by its base URL) or to a
+    registry-named artifact host (by the artifact URL) and got no valid upstream
+    response. Distinct from a this-server fault; maps to a 502.
+    """
 
 
 class RegistryResponseError(MarketplaceError):
@@ -38,68 +40,83 @@ class RegistryResponseError(MarketplaceError):
     """
 
     def __init__(self, message: str, *, status: int | None = None) -> None:
+        """Build the error with the optional upstream ``status`` (``None`` for a data-shape fault)."""
         super().__init__(message)
         self.status: int | None = status
 
 
 class MalformedRefError(MarketplaceError):
-    """The caller's ``ref`` is not a well-formed lowercase ``namespace/name`` —
-    the caller's own author error, mapped at the boundary to a 400. Distinct from
+    """The caller's ``ref`` is not a well-formed lowercase ``namespace/name``.
+
+    The caller's own author error, mapped at the boundary to a 400. Distinct from
     every registry/environment fault so the operation layer maps ONLY this to a
-    bad-request response."""
+    bad-request response.
+    """
 
 
 class ListingNotFoundError(MarketplaceError):
-    """Unknown listing ref or version — the message names the ref (and the
-    version, when one was requested) exactly."""
+    """Unknown listing ref or version.
+
+    The message names the ref (and the version, when one was requested) exactly.
+    """
 
 
 class VersionRefusedError(MarketplaceError):
-    """The target version is refused: a registry refusal of a killed or
-    otherwise unpublished version, or a non-withdrawn critical advisory affects
-    it — the message carries the reason."""
+    """The target version is refused.
+
+    A registry refusal of a killed or otherwise unpublished version, or a
+    non-withdrawn critical advisory affects it — the message carries the reason.
+    """
 
 
 class ContractIncompatibleError(MarketplaceError):
-    """The plugin's ``contract_range`` excludes the ``tai42-contract`` version
-    installed in this environment — the message names both. Nothing was
-    installed."""
+    """The plugin's ``contract_range`` excludes the ``tai42-contract`` version installed in this environment.
+
+    The message names both. Nothing was installed.
+    """
 
 
 class ManifestCollisionError(MarketplaceError):
-    """A provides item collides with an existing manifest entry — the message
-    names every colliding field/module so the operator can resolve it."""
+    """A provides item collides with an existing manifest entry.
+
+    The message names every colliding field/module so the operator can resolve
+    it.
+    """
 
 
 class ManifestBindingError(MarketplaceError):
-    """A spec provides an item kind this repo's manifest bindings do not name —
-    contract drift past the bindings, a server-side invariant fault (500), never
-    the caller's request. Raised in place of a silently skipped item."""
+    """A spec provides an item kind this repo's manifest bindings do not name.
+
+    Contract drift past the bindings, a server-side invariant fault (500), never
+    the caller's request. Raised in place of a silently skipped item.
+    """
 
 
 class InstallStateError(MarketplaceError):
-    """A state conflict: the ref is already installed, the ref is not installed,
-    or the target version equals the installed one.
+    """A state conflict: the ref is already/not installed, or the target version equals the installed one.
 
     ``not_installed`` is ``True`` only for the not-installed case, so the
     boundary maps that one to a not-found response and the others to a conflict.
     """
 
     def __init__(self, message: str, *, not_installed: bool = False) -> None:
+        """Build the error, flagging ``not_installed`` for the not-installed case."""
         super().__init__(message)
         self.not_installed = not_installed
 
 
 class OperationInProgressError(MarketplaceError):
-    """Another marketplace operation holds the fleet-wide advisory lock (or the
-    per-worker fast-path lock) — retriable; surfaced as a temporary-unavailable
-    response the caller may retry."""
+    """Another marketplace operation holds the fleet-wide advisory lock (or the per-worker fast-path lock).
+
+    Retriable; surfaced as a temporary-unavailable response the caller may retry.
+    """
 
 
 class PipUnavailableError(MarketplaceError):
-    """The running environment cannot perform the install — the ``pip`` module is
-    missing (a uv-synced venv can ship without it). The message names the exact
-    fix."""
+    """The running environment cannot perform the install — the ``pip`` module is missing.
+
+    A uv-synced venv can ship without it. The message names the exact fix.
+    """
 
 
 class PipFailedError(MarketplaceError):
@@ -112,6 +129,7 @@ class PipFailedError(MarketplaceError):
     """
 
     def __init__(self, argv: list[str], returncode: int, output: str) -> None:
+        """Build the error from the credential-free ``argv``, the ``returncode``, and the captured ``output``."""
         super().__init__(f"pip {' '.join(argv)} exited with code {returncode}")
         self.argv = argv
         self.returncode = returncode
@@ -119,17 +137,21 @@ class PipFailedError(MarketplaceError):
 
 
 class ManifestComposeError(MarketplaceError):
-    """A composed manifest failed ``Manifest.model_validate`` — the registry
-    spec plus the local manifest produced an invalid document. A server-side
-    fault, never the caller's request."""
+    """A composed manifest failed ``Manifest.model_validate``.
+
+    The registry spec plus the local manifest produced an invalid document. A
+    server-side fault, never the caller's request.
+    """
 
 
 class InstallEnvError(MarketplaceError):
-    """An mcp-server install/update whose required ``!ENV`` markers were not
-    satisfied — a dangling-marker refusal (each missing var + json-pointer named),
-    or another env-boundary refusal (X-band / key-material) raised by the combined
+    """An mcp-server install/update whose required ``!ENV`` markers were not satisfied.
+
+    A dangling-marker refusal (each missing var + json-pointer named), or another
+    env-boundary refusal (X-band / key-material) raised by the combined
     env+manifest pipeline before anything persisted. The caller's own input error
-    (supply the values), mapped at the boundary to a 400. Names only, never values."""
+    (supply the values), mapped at the boundary to a 400. Names only, never values.
+    """
 
 
 class InstallUnwindError(MarketplaceError):
@@ -141,6 +163,7 @@ class InstallUnwindError(MarketplaceError):
     """
 
     def __init__(self, step_error: Exception, unwind_error: Exception) -> None:
+        """Build the error from the original ``step_error`` and the ``unwind_error`` raised while rolling back."""
         super().__init__(
             f"install step failed ({step_error}); the unwind then also failed "
             f"({unwind_error}) — the environment was left partially changed"
@@ -150,43 +173,54 @@ class InstallUnwindError(MarketplaceError):
 
 
 class LocalStateError(MarketplaceError):
-    """The local attribution-store data is corrupt (a row that cannot be
-    reconstructed into an install record). A server-side fault, never the
-    caller's request."""
+    """The local attribution-store data is corrupt.
+
+    A row that cannot be reconstructed into an install record. A server-side
+    fault, never the caller's request.
+    """
 
 
 class PluginPrefixError(MarketplaceError):
-    """The configured plugin prefix cannot serve the operation: it is set but not
-    writable when an install needs it, or a plugin the caller asked to remove is
-    not present in the prefix (so removing it would mean touching the environment,
-    which is refused). A deployment/local fault, never the caller's request."""
+    """The configured plugin prefix cannot serve the operation.
+
+    It is set but not writable when an install needs it, or a plugin the caller
+    asked to remove is not present in the prefix (so removing it would mean
+    touching the environment, which is refused). A deployment/local fault, never
+    the caller's request.
+    """
 
 
 class EnvironmentShadowError(MarketplaceError):
-    """The running environment already provides the target distribution at a
-    DIFFERENT version than the one requested, and the plugin prefix sits at the END
-    of ``sys.path`` — so a prefix install of the requested version would be shadowed
-    by the environment copy and never import. Refused before any state change; the
-    message names both versions. A deployment/state conflict the operator resolves
-    (re-pin to the environment version or rebuild the image), never the caller's
-    request."""
+    """The running environment already provides the target distribution at a DIFFERENT version than requested.
+
+    The plugin prefix sits at the END of ``sys.path`` — so a prefix install of
+    the requested version would be shadowed by the environment copy and never
+    import. Refused before any state change; the message names both versions. A
+    deployment/state conflict the operator resolves (re-pin to the environment
+    version or rebuild the image), never the caller's request.
+    """
 
 
 class RouteMountError(MarketplaceError):
-    """A ``route_mounts`` override names an item that is not route-carrying in the
-    resolved spec, or a base that is not the relative mount charset — the caller's
-    own input error, mapped at the boundary to a 400. Names the offending item or
-    base, never guesses."""
+    """A ``route_mounts`` override names a non-route-carrying item or a malformed base.
+
+    The item is not route-carrying in the resolved spec, or the base is not the
+    relative mount charset — the caller's own input error, mapped at the boundary
+    to a 400. Names the offending item or base, never guesses.
+    """
 
 
 class RouteCollisionError(MarketplaceError):
-    """One or more declared routes collide (path SHAPE + method) with a route the
-    live registry already owns — core or another installed plugin. Carries the
-    collision rows so the operator sees each clash and its owner; the remedy, stated
-    in the message, is to remap the item's mount base. Mapped at the boundary to a
-    409 with a machine-readable ``ROUTE_COLLISION`` code."""
+    """One or more declared routes collide (path SHAPE + method) with a route the live registry already owns.
+
+    The owner is core or another installed plugin. Carries the collision rows so
+    the operator sees each clash and its owner; the remedy, stated in the message,
+    is to remap the item's mount base. Mapped at the boundary to a 409 with a
+    machine-readable ``ROUTE_COLLISION`` code.
+    """
 
     def __init__(self, collisions: list[dict[str, Any]]) -> None:
+        """Build the error from the ``collisions`` rows (each clashing route and its owner)."""
         super().__init__(
             "declared route(s) collide with a route the server already owns; remap the "
             f"item's mount base to resolve: {collisions}"
@@ -195,13 +229,16 @@ class RouteCollisionError(MarketplaceError):
 
 
 class PublicRoutesNotAcceptedError(MarketplaceError):
-    """Declared PUBLIC route(s) require the operator's explicit acceptance — they
-    answer UNAUTHENTICATED once installed — and the accept flag was not set. Carries
-    the rows requiring acceptance (an install lists every public row; an update lists
-    only rows not already approved in the installed version). Mapped at the boundary
-    to a 400 with a machine-readable ``PUBLIC_ROUTES_NOT_ACCEPTED`` code."""
+    """Declared PUBLIC route(s) require the operator's explicit acceptance and the accept flag was not set.
+
+    They answer UNAUTHENTICATED once installed. Carries the rows requiring
+    acceptance (an install lists every public row; an update lists only rows not
+    already approved in the installed version). Mapped at the boundary to a 400
+    with a machine-readable ``PUBLIC_ROUTES_NOT_ACCEPTED`` code.
+    """
 
     def __init__(self, public_routes: list[dict[str, Any]]) -> None:
+        """Build the error from the ``public_routes`` rows requiring acceptance."""
         super().__init__(
             "installing would open route(s) that answer WITHOUT authentication; pass "
             f"accept_public_routes to proceed: {public_routes}"
@@ -210,13 +247,16 @@ class PublicRoutesNotAcceptedError(MarketplaceError):
 
 
 class ReservedRoutePrefixError(MarketplaceError):
-    """A declared PUBLIC route resolves under a reserved never-public prefix (the
-    operator remapped a base into it, or the declaration does) — refused before any
-    state change. Carries the offending resolved paths and the reserved prefixes.
-    Mapped at the boundary to a 409 with a machine-readable ``ROUTE_RESERVED_PREFIX``
-    code."""
+    """A declared PUBLIC route resolves under a reserved never-public prefix.
+
+    The operator remapped a base into it, or the declaration does — refused
+    before any state change. Carries the offending resolved paths and the
+    reserved prefixes. Mapped at the boundary to a 409 with a machine-readable
+    ``ROUTE_RESERVED_PREFIX`` code.
+    """
 
     def __init__(self, offenders: list[str], reserved_prefixes: list[str]) -> None:
+        """Build the error from the ``offenders`` (resolved paths) and the ``reserved_prefixes``."""
         super().__init__(
             f"declared public route(s) {offenders} resolve under a reserved never-public "
             f"prefix {reserved_prefixes}; a public route may not mount there — remap the base"
@@ -226,8 +266,9 @@ class ReservedRoutePrefixError(MarketplaceError):
 
 
 class ArtifactIntegrityError(MarketplaceError):
-    """A fetched github artifact's sha256 does not match the digest the registry
-    captured at release ingest — the download is refused, not installed.
+    """A fetched github artifact's sha256 does not match the digest the registry captured at release ingest.
+
+    The download is refused, not installed.
 
     This is its OWN type, distinct from :class:`RegistryResponseError`: the
     registry data was well-formed (a valid ``https://`` artifact_ref and a valid
@@ -238,6 +279,7 @@ class ArtifactIntegrityError(MarketplaceError):
     """
 
     def __init__(self, *, expected_sha256: str, actual_sha256: str, artifact_ref: str) -> None:
+        """Build the error from ``expected_sha256``, ``actual_sha256``, and the ``artifact_ref``."""
         super().__init__(
             f"artifact sha256 mismatch for {artifact_ref}: expected {expected_sha256}, got {actual_sha256} "
             "— the release tag may have been re-pointed since registry ingest; refusing to install"

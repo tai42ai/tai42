@@ -31,9 +31,9 @@ _INTERRUPTED_TOOL_RESULT = "the run was interrupted before this tool produced a 
 
 
 class ToolErrorToMessageMiddleware(AgentMiddleware):
-    """Turn a tool-logic failure into a model-visible error ``ToolMessage`` so the
-    agent loop continues instead of aborting with a checkpointed dangling tool_call.
+    """Turn a tool-logic failure into a model-visible error ``ToolMessage`` so the agent loop continues.
 
+    Continues instead of aborting with a checkpointed dangling tool_call.
     Only a ``ToolException`` or a pydantic ``ValidationError`` from the tool
     invocation is caught; every other exception propagates unchanged so an
     infrastructure failure stays a loud abort.

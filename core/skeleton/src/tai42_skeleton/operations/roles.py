@@ -1,5 +1,6 @@
-"""The admin-only role-management operations: create / edit / delete / version history
-/ rollback over the versioned role store.
+"""The admin-only role-management operations over the versioned role store.
+
+They cover create / edit / delete / version history / rollback.
 
 Every mutation validates the grant map BEFORE persisting (fail-closed), guards the
 reserved permanent ``admin`` role (block-downgrade + block-delete), rejects deleting a
@@ -47,8 +48,10 @@ _GRANT_LEVELS = frozenset(get_args(_GrantLevel))
 
 
 class RoleCreate(BaseModel):
-    """The create-role request body: the grant map + base tier the operator authors; the
-    base-tier jq is resolved server-side (no raw jq surface)."""
+    """The create-role request body: the grant map + base tier the operator authors.
+
+    The base-tier jq is resolved server-side (no raw jq surface).
+    """
 
     name: str
     description: str = ""
@@ -57,36 +60,43 @@ class RoleCreate(BaseModel):
 
 
 class RoleUpdate(BaseModel):
-    """The edit-role request body: only the per-tag grant map + description are editable;
-    the base-tier jq / base_tier are seed-fixed and rejected on any change attempt. Both
-    fields are omit-means-keep — an absent ``grants`` (``None``) preserves the stored grant
-    map (it is never silently wiped), and an absent ``description`` preserves the stored
-    description."""
+    """The edit-role request body: only the per-tag grant map + description are editable.
+
+    The base-tier jq / base_tier are seed-fixed and rejected on any change attempt. Both fields are
+    omit-means-keep — an absent ``grants`` (``None``) preserves the stored grant map (it is never
+    silently wiped), and an absent ``description`` preserves the stored description.
+    """
 
     grants: dict[str, _GrantLevel] | None = None
     description: str | None = None
 
 
 class RoleRollback(BaseModel):
+    """The rollback request body: the target ``version`` to re-point the role to."""
+
     version: int
 
 
 class RoleGrantsModify(BaseModel):
-    """The set/remove-grants request body: ``set`` upserts a tag → level (the one
-    sanctioned overwrite), ``remove`` drops tags. At least one must be non-empty; a tag may
-    not appear in both."""
+    """The upsert/remove-grants request body.
 
-    set: dict[str, _GrantLevel] = Field(default_factory=dict)
+    ``upsert`` writes a tag → level (the one sanctioned overwrite), ``remove`` drops tags. At least
+    one must be non-empty; a tag may not appear in both.
+    """
+
+    upsert: dict[str, _GrantLevel] = Field(default_factory=dict)
     remove: list[str] = Field(default_factory=list)
 
 
 def _validate_grants(grants: Mapping[str, str]) -> None:
-    """Reject a grant on a tag that is not a GRANTABLE feature group — a nonexistent tag
-    or one whose routes are ALL fenced/secret (admin-only, never opened by a level) — and
-    reject a LEVEL outside ``_GrantLevel``. A loud 400 so a typo'd or un-openable tag, or a
-    bad level, can never be persisted as dead access. The level check lives here because
-    model validation does NOT run on every path (a context_extractor route skips it, and the
-    api_tools/MCP projection calls the op function directly)."""
+    """Reject a grant on a non-grantable tag or a LEVEL outside ``_GrantLevel``.
+
+    A non-grantable tag is a nonexistent one or one whose routes are ALL fenced/secret (admin-only,
+    never opened by a level). A loud 400 so a typo'd or un-openable tag, or a bad level, can never
+    be persisted as dead access. The level check lives here because model validation does NOT run on
+    every path (a context_extractor route skips it, and the api_tools/MCP projection calls the op
+    function directly).
+    """
     grantable = grantable_feature_tags()
     unknown = sorted(tag for tag in grants if tag not in grantable)
     if unknown:
@@ -135,8 +145,11 @@ def _resolved_create(name: str, description: str, base_tier: str, grants: Mappin
     response_model=RoleDefinition,
 )
 async def create_role(name: str, description: str, base_tier: str, grants: dict[str, str]) -> dict[str, Any]:
-    """Create an operator-authored role. Admin-only; validates the grant map + base tier
-    before persist; 409 on a name collision. Bumps the policy version and audits."""
+    """Create an operator-authored role.
+
+    Admin-only; validates the grant map + base tier before persist; 409 on a name collision. Bumps
+    the policy version and audits.
+    """
     caller = await resolve_caller()
     require_admin(caller)
     role = _resolved_create(name, description, base_tier, grants)
@@ -163,12 +176,14 @@ async def create_role(name: str, description: str, base_tier: str, grants: dict[
     response_model=RoleDefinition,
 )
 async def update_role(name: str, grants: dict[str, str] | None, description: str | None) -> dict[str, Any]:
-    """Edit a role's per-tag grant map + description (the base-tier jq is seed-fixed, not
-    editable here). Admin-only; guards the reserved ``admin`` role and the block-downgrade
-    of any allow_all role. Both inputs are omit-means-keep — an absent ``grants``/
-    ``description`` preserves the stored value, so a description-only edit never wipes the
-    grant map. Validates a supplied grant map before persist; LIVE — the edit changes every
-    holder's reach on their next request via the policy-version bump. Audits."""
+    """Edit a role's per-tag grant map + description (the base-tier jq is seed-fixed, not editable here).
+
+    Admin-only; guards the reserved ``admin`` role and the block-downgrade of any allow_all role.
+    Both inputs are omit-means-keep — an absent ``grants``/``description`` preserves the stored
+    value, so a description-only edit never wipes the grant map. Validates a supplied grant map
+    before persist; LIVE — the edit changes every holder's reach on their next request via the
+    policy-version bump. Audits.
+    """
     caller = await resolve_caller()
     require_admin(caller)
     if name == RESERVED_ADMIN_ROLE:
@@ -210,22 +225,22 @@ async def update_role(name: str, grants: dict[str, str] | None, description: str
     response_model=RoleDefinition,
 )
 async def modify_role_grants(
-    name: str, set: dict[str, str] | None = None, remove: list[str] | None = None
+    name: str, upsert: dict[str, str] | None = None, remove: list[str] | None = None
 ) -> dict[str, Any]:
-    """Set (upsert) and/or remove single tag grants on a role WITHOUT replacing the whole
-    map. Admin-only; guards the reserved ``admin`` role and the block-downgrade of any
-    allow_all role. ``set`` overwrites a tag's level (the one sanctioned overwrite); a
-    ``remove`` tag absent from the stored map is a loud 404. Validates the merged map before
-    persist; LIVE via the policy-version bump. Audits as ``edit``."""
-    # The ``set`` parameter shadows the builtin deliberately — wire-key parity with the CLI
-    # ``--set`` flag and the request model; the body never calls the builtin.
-    set = set or {}
+    """Set (upsert) and/or remove single tag grants on a role WITHOUT replacing the whole map.
+
+    Admin-only; guards the reserved ``admin`` role and the block-downgrade of any allow_all role.
+    ``upsert`` overwrites a tag's level (the one sanctioned overwrite); a ``remove`` tag absent from
+    the stored map is a loud 404. Validates the merged map before persist; LIVE via the
+    policy-version bump. Audits as ``edit``.
+    """
+    upsert = upsert or {}
     remove = remove or []
-    if not set and not remove:
-        raise BadRequestError("nothing to change: provide 'set' and/or 'remove'")
-    overlap = sorted(tag for tag in remove if tag in set)
+    if not upsert and not remove:
+        raise BadRequestError("nothing to change: provide 'upsert' and/or 'remove'")
+    overlap = sorted(tag for tag in remove if tag in upsert)
     if overlap:
-        raise BadRequestError(f"tag(s) cannot be in both set and remove: {overlap}")
+        raise BadRequestError(f"tag(s) cannot be in both upsert and remove: {overlap}")
     caller = await resolve_caller()
     require_admin(caller)
     if name == RESERVED_ADMIN_ROLE:
@@ -247,7 +262,7 @@ async def modify_role_grants(
             raise NotFoundError(f"tag(s) not present on role {name!r}: {absent}")
         for tag in remove:
             del merged[tag]
-        merged.update(set)
+        merged.update(upsert)
         _validate_grants(merged)
         updated = existing.model_copy(update={"grants": merged})
         body = updated.model_dump()
@@ -266,9 +281,12 @@ async def modify_role_grants(
     response_model=RoleDeleted,
 )
 async def delete_role(name: str) -> dict[str, Any]:
-    """Delete a role. Admin-only; the reserved ``admin`` role is undeletable; a role still
-    assigned to any principal (its LIVE pointer held by any policy) is rejected loudly so
-    a holder can never be orphaned. Bumps the version and audits."""
+    """Delete a role.
+
+    Admin-only; the reserved ``admin`` role is undeletable; a role still assigned to any principal
+    (its LIVE pointer held by any policy) is rejected loudly so a holder can never be orphaned.
+    Bumps the version and audits.
+    """
     caller = await resolve_caller()
     require_admin(caller)
     if name == RESERVED_ADMIN_ROLE:
@@ -304,7 +322,9 @@ async def delete_role(name: str) -> dict[str, Any]:
 )
 async def list_role_versions(name: str) -> dict[str, Any]:
     """The role's append-only version history plus its who/when/before→after audit trail.
-    Admin-only. A store-less deployment keeps no history, so the read is an empty pair."""
+
+    Admin-only. A store-less deployment keeps no history, so the read is an empty pair.
+    """
     caller = await resolve_caller()
     require_admin(caller)
     from tai42_kit.db import component_store_configured
@@ -331,9 +351,10 @@ async def list_role_versions(name: str) -> dict[str, Any]:
     response_model=RoleDefinition,
 )
 async def rollback_role(name: str, version: int) -> dict[str, Any]:
-    """Re-point a role's active version to a prior one (LIVE — holders follow on their
-    next request). Admin-only; the reserved ``admin`` role has no editable history.
-    Bumps the version and audits."""
+    """Re-point a role's active version to a prior one (LIVE — holders follow on their next request).
+
+    Admin-only; the reserved ``admin`` role has no editable history. Bumps the version and audits.
+    """
     caller = await resolve_caller()
     require_admin(caller)
     if name == RESERVED_ADMIN_ROLE:
@@ -365,8 +386,11 @@ async def _bump() -> None:
 
 
 def _versioned_store():
-    """The active versioned store, resolved lazily so it follows the same construction
-    point ``role_store``/``role_audit`` build over (a single transaction spans both)."""
+    """The active versioned store, resolved lazily.
+
+    Follows the same construction point ``role_store``/``role_audit`` build over (a single
+    transaction spans both).
+    """
     from tai42_skeleton.versioning import versioned_store
 
     return versioned_store()

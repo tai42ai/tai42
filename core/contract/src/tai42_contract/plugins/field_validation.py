@@ -56,16 +56,20 @@ DISPLAY_NAME_MAX_LEN = 80
 
 
 def has_disallowed_control_char(value: str) -> bool:
-    """True if ``value`` holds any C0 or C1 control character, ``DEL``, a Unicode
-    line/paragraph separator, or a bidirectional / zero-width format control
-    (Trojan-Source spoofing) — the class that enables terminal-escape /
-    line-overwrite / visual-spoofing injection. A regular ASCII space
-    (``0x20``), U+200D ZWJ, and U+200C ZWNJ are allowed, so ordinary spaced
-    prose, emoji sequences, and legitimate Persian/Farsi text pass."""
+    """Report whether ``value`` contains any disallowed control character.
+
+    Covers C0/C1 control characters, ``DEL``, a Unicode line/paragraph
+    separator, or a bidirectional / zero-width format control (Trojan-Source
+    spoofing) — the class that enables terminal-escape / line-overwrite /
+    visual-spoofing injection. A regular ASCII space (``0x20``), U+200D ZWJ,
+    and U+200C ZWNJ are allowed, so ordinary spaced prose, emoji sequences, and
+    legitimate Persian/Farsi text pass.
+    """
     return any(is_control_char(ch) for ch in value)
 
 
 def check_one_line(value: str, *, field: str = "description") -> str:
+    """Return ``value`` if it is a non-empty single line, else raise ``ValueError`` naming ``field``."""
     if not value.strip():
         raise ValueError(f"{field} must be non-empty")
     if has_disallowed_control_char(value):
@@ -74,6 +78,7 @@ def check_one_line(value: str, *, field: str = "description") -> str:
 
 
 def check_tags(value: list[str]) -> list[str]:
+    """Return ``value`` if it is at most 10 unique, well-formed tags, else raise ``ValueError``."""
     if len(value) > 10:
         raise ValueError(f"at most 10 tags are allowed, got {len(value)}")
     if len(set(value)) != len(value):

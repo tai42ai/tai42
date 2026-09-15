@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Derive first-party ``tai42-*`` version ranges from the released member versions
-and rewrite them in place — runnable entrypoint + public facade.
+"""Derive first-party ``tai42-*`` version ranges from released member versions and rewrite them in place.
 
+Runnable entrypoint + public facade.
 The implementation lives in the private ``_range_sync`` package; this module
 re-exports its public surface (so ``import range_sync`` keeps resolving every
 symbol) and is the entrypoint the CI lanes invoke by path. See

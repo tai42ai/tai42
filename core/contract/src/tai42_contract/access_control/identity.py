@@ -8,6 +8,8 @@ from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 
 class AuthIdentity(NamedTuple):
+    """An authenticated caller: their ``user_id`` and the claims on their record."""
+
     user_id: str
     claims: dict[str, Any]
 
@@ -62,8 +64,7 @@ class IdentityProvider(ABC):
 
     @abstractmethod
     async def validate_token(self, token: str) -> AuthIdentity | None:
-        """Return the :class:`AuthIdentity` for a valid token, or ``None`` if the
-        token is not valid."""
+        """Return the :class:`AuthIdentity` for a valid token, or ``None`` if invalid."""
         ...
 
     async def healthcheck(self) -> None:
@@ -73,12 +74,14 @@ class IdentityProvider(ABC):
         The skeleton awaits this at startup when access control is enabled, for
         WHATEVER provider is active (an OIDC/SAML provider that implements only this
         base class is boot-probed too), so a provider whose own backend is unusable
-        fails the boot instead of the first authenticated request."""
+        fails the boot instead of the first authenticated request.
+        """
         return
 
     def readiness_targets(self) -> Sequence[ReadinessTarget]:
-        """Declare the backing store(s) core's ``/ready`` probe should ping for this
-        provider — the mechanism by which core health-checks the active identity
+        """Declare the backing store(s) core's ``/ready`` probe should ping for this provider.
+
+        This is the mechanism by which core health-checks the active identity
         provider WITHOUT naming a concrete provider.
 
         Each :class:`ReadinessTarget` carries a check label plus the kit client class
@@ -89,7 +92,8 @@ class IdentityProvider(ABC):
         Default: no targets — a provider with no pingable backing store (e.g. one
         that validates tokens against an external IdP over HTTP) inherits the empty
         tuple, exactly as it inherits the ``healthcheck`` no-op. A provider backed by
-        its own store overrides this to declare that store."""
+        its own store overrides this to declare that store.
+        """
         return ()
 
 
@@ -105,8 +109,9 @@ class ApiKeyIdentityProvider(IdentityProvider):
 
     @abstractmethod
     async def provision(self, user_id: str, description: str, *, owner_user_id: str | None = None) -> str:
-        """Write the key->identity record in the provider's OWN storage and return
-        the RAW key. The identity record — key hash -> ``{user_id, description}``
+        """Write the key->identity record in the provider's OWN storage and return the RAW key.
+
+        The identity record — key hash -> ``{user_id, description}``
         plus the reverse user -> hash lookup — is owned by the provider. Async
         because provider storage (e.g. Redis) is reached over an async client.
 
@@ -123,19 +128,24 @@ class ApiKeyIdentityProvider(IdentityProvider):
         identity record under :data:`OWNER_USER_ID_CLAIM` so it surfaces in
         ``AuthIdentity.claims`` on every subsequent ``validate_token``. ``None``
         mints an ownerless machine key; whether a caller is ALLOWED to mint
-        ownerless keys is application policy, not provider logic."""
+        ownerless keys is application policy, not provider logic.
+        """
         ...
 
     @abstractmethod
     async def revoke(self, user_id: str) -> bool:
         """Delete the identity record so the key stops authenticating immediately.
-        Return ``False`` if the user is unknown."""
+
+        Return ``False`` if the user is unknown.
+        """
         ...
 
     @abstractmethod
     async def update_description(self, user_id: str, description: str) -> bool:
-        """Rewrite the ``description`` field of the stored identity record — its
-        single home. Return ``False`` if the user is unknown."""
+        """Rewrite the ``description`` field of the stored identity record — its single home.
+
+        Return ``False`` if the user is unknown.
+        """
         ...
 
     @abstractmethod

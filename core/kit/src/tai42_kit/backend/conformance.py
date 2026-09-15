@@ -168,8 +168,7 @@ def check_backend_declarations(backend: object) -> list[str]:
 
 
 def _overrides(cls: type[BackendRuntime], member: str) -> bool:
-    """Whether ``cls`` binds ``member`` rather than inheriting the contract's
-    raising default."""
+    """Whether ``cls`` binds ``member`` rather than inheriting the contract's raising default."""
     return getattr(cls, member) is not getattr(BackendRuntime, member)
 
 

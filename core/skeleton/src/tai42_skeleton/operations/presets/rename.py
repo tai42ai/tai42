@@ -34,10 +34,12 @@ _pkg = sys.modules["tai42_skeleton.operations.presets"]
 
 
 async def _check_rename_target(mgr: Any, new_name: str) -> None:
-    """NEW-name pre-checks in create's exact order and codes: the quarantine 409 → the
-    live-tool collision 409 → the agent tool-name collision 400 → the duplicate-preset
-    409. Raises the mapped 400/409. Tool-name safety of ``new_name`` is validated at the
-    top of ``rename_preset``, before any existence check, so it is not repeated here."""
+    """NEW-name pre-checks in create's exact order and codes.
+
+    The quarantine 409 → the live-tool collision 409 → the agent tool-name collision 400 → the
+    duplicate-preset 409. Raises the mapped 400/409. Tool-name safety of ``new_name`` is validated at the
+    top of ``rename_preset``, before any existence check, so it is not repeated here.
+    """
     if mgr.is_quarantined(new_name):
         raise ConflictError(f"a quarantined preset {new_name!r} exists — delete the quarantined record first")
     if await mgr.name_conflicts(new_name):
@@ -50,10 +52,12 @@ async def _check_rename_target(mgr: Any, new_name: str) -> None:
 
 
 async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: str) -> Any:
-    """The local apply of a rename, NEW FIRST: move the store key, bind ``new_name`` from
-    the moved row's active body (compensating by re-pointing the store back on a
-    re-register failure so store + live never diverge), tear the OLD binding down, then
-    re-key the tool_meta overlay. Returns the moved store record; raises the mapped 409s."""
+    """The local apply of a rename, NEW FIRST.
+
+    Move the store key, bind ``new_name`` from the moved row's active body (compensating by re-pointing the
+    store back on a re-register failure so store + live never diverge), tear the OLD binding down, then
+    re-key the tool_meta overlay. Returns the moved store record; raises the mapped 409s.
+    """
     # Move the store key. The pre-checks make the typed conflicts race-window catches,
     # mapped exactly as create maps its post-write errors.
     try:
@@ -83,7 +87,7 @@ async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: s
             raise ConflictError(f"preset {new_name!r} already exists") from reload_exc
         if isinstance(reload_exc, PresetNameConflictError):
             raise ConflictError(f"preset name {new_name!r} collides with an existing tool") from reload_exc
-        raise reload_exc
+        raise
 
     # Then tear the OLD binding down. A failure here leaves BOTH names bound (old is
     # stale-but-functional: its baked spec is in-memory and its base tool is untouched);
@@ -115,16 +119,17 @@ async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: s
     response_model=PresetRenameResult,
 )
 async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
-    """Rename a preset, ATOMIC (a preset's name IS its live tool name). Runs create's
-    ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every referee
-    if any live reference composes the current name, binds the new tool BEFORE tearing
-    the old one down, fires one ``list_changed``, and fans the rebind out NEW-first
-    then the old removal. The response embeds the primary rebind (new-name) fan-out
-    report under ``fanout``; the old-name removal stays log-only.
+    """Rename a preset, ATOMIC (a preset's name IS its live tool name).
+
+    Runs create's ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every referee if any
+    live reference composes the current name, binds the new tool BEFORE tearing the old one down, fires one
+    ``list_changed``, and fans the rebind out NEW-first then the old removal. The response embeds the
+    primary rebind (new-name) fan-out report under ``fanout``; the old-name removal stays log-only.
 
     A preset's NAME is its identity everywhere — it IS the live tool binding, and every
     reference (preset bodies, platform wiring, plugin holders) keys on it deliberately;
-    rename integrity is enforced at THIS gate, and there are no surrogate ids."""
+    rename integrity is enforced at THIS gate, and there are no surrogate ids.
+    """
     # The new name is a live tool name + a ``{name}`` route segment, so it must be
     # tool-name-safe — the same rule create enforces. Validated FIRST, before any
     # quarantine/existence/tier check, so an invalid new name is a 400 no matter the
@@ -215,11 +220,13 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     response_model=PresetDeleteResult,
 )
 async def delete_preset(name: str) -> dict[str, Any]:
-    """Delete a preset. A non-conflicted record is soft-deleted and its base + branch
-    tools torn down (one ``list_changed``); a conflicted record is removed store-side
-    ONLY (HARD delete + drop the quarantine entry), touching no registration and
-    firing no emit. Both branches fan the removal out on the bus and embed the
-    per-worker fleet report under ``fanout``."""
+    """Delete a preset.
+
+    A non-conflicted record is soft-deleted and its base + branch tools torn down (one ``list_changed``);
+    a conflicted record is removed store-side ONLY (HARD delete + drop the quarantine entry), touching no
+    registration and firing no emit. Both branches fan the removal out on the bus and embed the per-worker
+    fleet report under ``fanout``.
+    """
     mgr = instance.app.preset_manager
 
     # Consult the delete referees FIRST (before any teardown): a referee cascades its own

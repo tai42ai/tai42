@@ -1,5 +1,4 @@
-"""Subscribe to the fleet channel, hold the slot claim + heartbeat, and apply
-delivered ops."""
+"""Subscribe to the fleet channel, hold the slot claim + heartbeat, and apply delivered ops."""
 
 from __future__ import annotations
 
@@ -64,8 +63,11 @@ return 0
 
 
 class WorkerBusSubscribeMixin:
-    """The subscriber surface of :class:`WorkerBus`: claim a slot, hold its presence
-    heartbeat, and apply delivered ops with a two-phase confirmation."""
+    """The subscriber surface of :class:`WorkerBus`: claim a slot and apply delivered ops.
+
+    Holds the slot's presence heartbeat and applies delivered ops with a two-phase
+    confirmation.
+    """
 
     if TYPE_CHECKING:
         # State and read surface supplied by the composed WorkerBus (declared here so
@@ -85,7 +87,9 @@ class WorkerBusSubscribeMixin:
         _backoff_factor: float
 
         @property
-        def identity(self) -> WorkerIdentity: ...
+        def identity(self) -> WorkerIdentity:
+            """This worker's identity, supplied by the composed :class:`WorkerBus`."""
+            ...
 
     async def subscribe(
         self,
@@ -114,7 +118,8 @@ class WorkerBusSubscribeMixin:
         only a deliberate stop deletes it, and only after the claim release succeeds.
         A lost slot is routed through a DEDICATED reconnect branch (never the
         transport-error path) that re-enters immediately with no backoff. Each
-        transport reconnect attempt is ERROR-logged."""
+        transport reconnect attempt is ERROR-logged.
+        """
         if self._local:
             await asyncio.Event().wait()
             return
@@ -129,7 +134,6 @@ class WorkerBusSubscribeMixin:
 
             try:
                 await self._run_subscription(callback, on_ready, _mark_established)
-                return
             except asyncio.CancelledError:
                 raise
             except SlotLostError as exc:
@@ -146,6 +150,8 @@ class WorkerBusSubscribeMixin:
                     backoff,
                     exc_info=True,
                 )
+            else:
+                return
             if established:
                 backoff = self._backoff_initial
             await asyncio.sleep(backoff)
@@ -244,7 +250,8 @@ class WorkerBusSubscribeMixin:
         A held claim that still renews keeps its name+generation+joined_at across the
         reconnect (scoped to a never-lost claim). A lost or absent claim
         (renew miss on the old name, or no prior identity on first boot) mints a NEW
-        life: the lowest free ``{kind}-{n}`` won by ``SET NX`` + a fresh ``INCR``."""
+        life: the lowest free ``{kind}-{n}`` won by ``SET NX`` + a fresh ``INCR``.
+        """
         if self._identity is not None and await self._renew_claim(r, self._identity.name):
             return
         self._identity = await self._claim_slot(r)
@@ -256,7 +263,8 @@ class WorkerBusSubscribeMixin:
         ``SET <token> NX PX`` on the claim key claims the name atomically; the first
         free ordinal wins. ``INCR`` on the per-name generation counter mints a
         monotonic life number — never re-INCRed by a worker that cannot prove the
-        claim (this runs ONLY on a fresh successful claim)."""
+        claim (this runs ONLY on a fresh successful claim).
+        """
         ttl_ms = int(self._settings.heartbeat_ttl * 1000)
         n = 1
         while True:
@@ -268,17 +276,20 @@ class WorkerBusSubscribeMixin:
             n += 1
 
     async def _renew_claim(self, r: Any, name: str) -> bool:
-        """Extend the claim TTL iff this process still holds the token (one atomic
-        compare-token Lua step). Returns False on a miss (token mismatch or absent
-        key) — a lost slot."""
+        """Extend the claim TTL iff this process still holds the token (one atomic compare-token Lua step).
+
+        Returns False on a miss (token mismatch or absent key) — a lost slot.
+        """
         px = int(self._settings.heartbeat_ttl * 1000)
         result = await eval_script(r, _RENEW_LUA, 1, self._settings.slot_key(name), self._claim_token, px)
         return bool(result)
 
     async def _release_claim(self, r: Any, name: str) -> bool:
-        """Delete the claim key iff this process still holds the token (one atomic
-        compare-token Lua step). Returns False on a miss — the slot already belongs to
-        a new holder, so nothing was released."""
+        """Delete the claim key iff this process still holds the token (one atomic compare-token Lua step).
+
+        Returns False on a miss — the slot already belongs to a new holder, so nothing was
+        released.
+        """
         result = await eval_script(r, _RELEASE_LUA, 1, self._settings.slot_key(name), self._claim_token)
         return bool(result)
 
@@ -293,7 +304,8 @@ class WorkerBusSubscribeMixin:
         that reloads for longer than the presence TTL would park the loop and let this
         worker's key EXPIRE while it is alive and applying — the census would drop the
         live worker. The callback's own awaits yield control, so this task renews and
-        refreshes throughout a long apply."""
+        refreshes throughout a long apply.
+        """
         interval = self._settings.heartbeat_ttl / 3
         while True:
             await asyncio.sleep(interval)
@@ -308,10 +320,12 @@ class WorkerBusSubscribeMixin:
                 await self._set_presence(r, presence_key, presence)
 
     async def _write_presence(self, r: Any, presence_key: str, presence: _PresenceValue) -> None:
-        """A renew-gated presence write: renew the claim FIRST, then serialize the
-        whole in-memory value. Skipped on a renew miss (the heartbeat's own miss
-        raises SlotLostError to re-mint), so no presence write is unguarded and an
-        ex-owner in the loss-lag never regresses the census under its stale name."""
+        """A renew-gated presence write: renew the claim FIRST, then serialize the whole in-memory value.
+
+        Skipped on a renew miss (the heartbeat's own miss raises SlotLostError to
+        re-mint), so no presence write is unguarded and an ex-owner in the loss-lag never
+        regresses the census under its stale name.
+        """
         if not await self._renew_claim(r, self.identity.name):
             return
         await self._set_presence(r, presence_key, presence)
@@ -320,13 +334,15 @@ class WorkerBusSubscribeMixin:
         await r.set(presence_key, presence.model_dump_json(), px=int(self._settings.heartbeat_ttl * 1000))
 
     def _heartbeat_failure(self, heartbeat: asyncio.Task[None], name: str) -> BaseException:
-        """Turn a self-terminated heartbeat task into the failure that ends this
-        subscription, logging it at ERROR immediately.
+        """Turn a self-terminated heartbeat task into the failure that ends this subscription.
+
+        Logged at ERROR immediately.
 
         A transport error (a lost pooled command connection) flows back into the
         reconnect-with-backoff loop; a :class:`SlotLostError` (a renew miss) flows into
         the dedicated re-mint branch. A heartbeat that returned without raising — it
-        never should, its loop is unbounded — becomes a loud ``RuntimeError``."""
+        never should, its loop is unbounded — becomes a loud ``RuntimeError``.
+        """
         exc = heartbeat.exception()
         if exc is None:
             exc = RuntimeError("worker bus: presence heartbeat returned without an error")
@@ -334,10 +350,12 @@ class WorkerBusSubscribeMixin:
         return exc
 
     async def _stop_heartbeat(self, heartbeat: asyncio.Task[None] | None) -> None:
-        """Cancel and await the presence-heartbeat task during teardown, so it never
-        leaks past the subscription. A heartbeat that already died of a transport error
-        (the dropped connection the subscription is reconnecting from) is logged loudly
-        and swallowed so teardown still completes."""
+        """Cancel and await the presence-heartbeat task during teardown, so it never leaks past the subscription.
+
+        A heartbeat that already died of a transport error (the dropped connection the
+        subscription is reconnecting from) is logged loudly and swallowed so teardown still
+        completes.
+        """
         if heartbeat is None:
             return
         heartbeat.cancel()
@@ -361,9 +379,11 @@ class WorkerBusSubscribeMixin:
         await self._apply_op_and_reply(r, callback, op_payload, responder, reply_to)
 
     def _admit_op_frame(self, msg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str | None, Any] | None:
-        """Admit an op frame: decode, echo-skip by ``(name, generation)``, filter by
-        targets, validate the object payload. Returns ``(op_payload, responder,
-        reply_to, op_id)`` for a frame to apply, or ``None`` when it is not ours."""
+        """Admit an op frame: decode, echo-skip by ``(name, generation)``, filter by targets, validate payload.
+
+        Returns ``(op_payload, responder, reply_to, op_id)`` for a frame to apply, or
+        ``None`` when it is not ours.
+        """
         frame = _decode(msg["data"])
         if frame is None:
             return None
@@ -400,9 +420,11 @@ class WorkerBusSubscribeMixin:
         responder: dict[str, Any],
         reply_to: str | None,
     ) -> None:
-        """Run the callback, build and send the terminal (applied/failed) frame after
-        the received ack, stamp last-op, and fire the armed post-reply slot on a clean
-        apply. The slot is disarmed on every exit."""
+        """Run the callback, send the terminal (applied/failed) frame after the received ack, and stamp last-op.
+
+        Fires the armed post-reply slot on a clean apply. The slot is disarmed on every
+        exit.
+        """
         identity = self.identity
         if reply_to:
             await self._reply(r, reply_to, {**responder, "phase": "received"})
@@ -455,7 +477,8 @@ class WorkerBusSubscribeMixin:
         A no-op when this bus holds no presence (not subscribed under a claimed slot).
         Renew-gated: the compare-token renew runs FIRST and the write is skipped on a
         miss — the re-mint itself rides the next heartbeat's ``SlotLostError``, never
-        this message-loop write."""
+        this message-loop write.
+        """
         presence = self._presence
         if presence is None:
             return
@@ -478,7 +501,8 @@ class WorkerBusSubscribeMixin:
         new holder, whose row must not be deleted. Transport-error and lost-slot exits
         leave BOTH keys to their TTL (the identity is carried across the reconnect /
         the name already belongs to the new holder). The channel close is always
-        attempted; best-effort, never silent."""
+        attempted; best-effort, never silent.
+        """
         if exit_kind == "deliberate" and self._identity is not None:
             # Release the claim whenever a held identity stops deliberately — even in
             # the claim window before the presence row is written (presence_key still

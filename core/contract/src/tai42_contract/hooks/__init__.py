@@ -1,5 +1,8 @@
-"""Hooks contract: the ``HookRegister`` request body, the stored ``HookParams`` /
-``TopicVerifierBinding`` models + the ``HooksManager`` protocol."""
+"""Hooks contract: request body, stored models, and manager protocol.
+
+The ``HookRegister`` request body, the stored ``HookParams`` /
+``TopicVerifierBinding`` models, and the ``HooksManager`` protocol.
+"""
 
 from __future__ import annotations
 

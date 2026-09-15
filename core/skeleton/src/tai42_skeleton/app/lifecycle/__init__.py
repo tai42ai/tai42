@@ -1,5 +1,7 @@
-"""The ``TaiMCP`` lifecycle mixin, composed from one construction/spine base and the
-per-concern mixins, plus the module-global seam the tests patch at this package path."""
+"""The ``TaiMCP`` lifecycle mixin, composed from a construction/spine base and per-concern mixins.
+
+Also holds the module-global seam the tests patch at this package path.
+"""
 
 from tai42_contract.access_control.registry import reset_registry as reset_identity_registry
 from tai42_kit.clients import shutdown_all_clients
@@ -62,8 +64,10 @@ class TaiMCPLifecycleMixin(
     ConfigReloadMixin,
     LifecycleState,
 ):
-    """The concrete app's lifecycle surface, composed from the per-concern mixins over
-    the shared construction/spine base. It carries no body of its own: construction is
-    ``LifecycleState.__init__`` and every method comes from one owning mixin. Consumed
-    by ``TaiMCP`` (``app/server.py``) and the test doubles; ``_mcp_tools`` stays abstract
-    for the concrete subclass to implement."""
+    """The concrete app's lifecycle surface, composed from the per-concern mixins over the spine base.
+
+    It carries no body of its own: construction is ``LifecycleState.__init__`` and
+    every method comes from one owning mixin. Consumed by ``TaiMCP``
+    (``app/server.py``) and the test doubles; ``_mcp_tools`` stays abstract for the
+    concrete subclass to implement.
+    """

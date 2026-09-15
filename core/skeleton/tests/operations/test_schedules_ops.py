@@ -4,7 +4,7 @@ The route oracles (``tests/routers/test_schedules.py``) pin the enveloped surfac
 these pin the ops directly, including the paths all four doors share. Every door
 dispatches a NAMED tool, so every door discriminates an ``UnknownToolError`` by name:
 one naming a DIFFERENT tool than the door asked for is the inner dispatch's own
-failure, so it becomes a structured ``OperationFailed`` (500) like any other raise
+failure, so it becomes a structured ``OperationFailedError`` (500) like any other raise
 during execution, never a verdict about the tool the door asked for — including when
 the name is the door's SIBLING marker tool, which is still not the tool that door
 asked for. One naming the door's OWN tool is that tool's absence, and each door answers
@@ -13,7 +13,7 @@ it honestly: ``NotSupportedError`` (501) for ``list_schedules`` / ``delete_sched
 for ``server_datetime`` (no pre-check at all — the dispatch is how it learns), and
 ``NotFoundError`` (404) for ``create_schedule``, whose named tool is the caller's and is
 never covered by the marker pre-check. A typed ``OperationError`` from the dispatch seam
-passes through untouched — a ``PermissionDenied`` 403, or the retriable
+passes through untouched — a ``PermissionDeniedError`` 403, or the retriable
 ``OperationSurfaceUnsettledError`` (503) the seam's execution authorization raises while
 the operation surface is being rebuilt.
 
@@ -42,11 +42,11 @@ from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
     NotSupportedError,
-    OperationFailed,
+    OperationFailedError,
     UnavailableError,
 )
 from tai42_skeleton.operations import schedules as schedules_ops
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.tools.binding import UnknownToolError
 
 
@@ -125,10 +125,13 @@ async def test_list_501_without_backend(install) -> None:
 
 async def test_list_raise_during_execution_is_500(install, caplog) -> None:
     # The backend is installed and its list tool ran; a raise from that body is a
-    # structured OperationFailed (500) naming the door and the exception class, never an
+    # structured OperationFailedError (500) naming the door and the exception class, never an
     # opaque 500 and never the caught exception's own text — which lands in the log.
     install(_FakeTools(_MARKERS, run_exc=RuntimeError("boom listing at 10.0.0.7:6379")))
-    with caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name), pytest.raises(OperationFailed) as caught:
+    with (
+        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
+        pytest.raises(OperationFailedError) as caught,
+    ):
         await schedules_ops.list_schedules()
     assert caught.value.message == "schedule listing failed (RuntimeError)"
     _assert_logged_server_side(caplog, "10.0.0.7:6379")
@@ -153,7 +156,10 @@ async def test_list_maps_unknown_tool_raised_for_another_name_to_structured_500(
     # body — that inner dispatch's failure, so a structured 500, never a 501. The caught
     # error itself stays server-side on an ERROR record.
     install(_FakeTools(_MARKERS, run_exc=UnknownToolError("some_inner_tool")))
-    with caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name), pytest.raises(OperationFailed) as caught:
+    with (
+        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
+        pytest.raises(OperationFailedError) as caught,
+    ):
         await schedules_ops.list_schedules()
     assert caught.value.message == "schedule listing failed (unknown tool some_inner_tool)"
     _assert_logged_server_side(caplog, "No such tool: some_inner_tool.")
@@ -164,19 +170,19 @@ async def test_list_sibling_marker_unknown_tool_is_structured_500(install) -> No
     # naming it is the inner dispatch's failure like any other foreign name — a structured
     # 500, never the 501 reserved for this door's own marker vanishing.
     install(_FakeTools(_MARKERS, run_exc=UnknownToolError(schedules_ops._DELETE_TOOL)))
-    with pytest.raises(OperationFailed) as caught:
+    with pytest.raises(OperationFailedError) as caught:
         await schedules_ops.list_schedules()
     assert caught.value.message == "schedule listing failed (unknown tool backend_delete_schedule)"
 
 
 async def test_list_permission_denied_passes_through(install, caplog) -> None:
-    # A ``PermissionDenied`` taken by the tool-dispatch seam is already the caller's
+    # A ``PermissionDeniedError`` taken by the tool-dispatch seam is already the caller's
     # answer (403); it passes through typed rather than being flattened into a 500, and
     # records nothing — it is the tool's own answer, not a failure of this door.
-    install(_FakeTools(_MARKERS, run_exc=PermissionDenied("access denied: listing refused")))
+    install(_FakeTools(_MARKERS, run_exc=PermissionDeniedError("access denied: listing refused")))
     with (
         caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
-        pytest.raises(PermissionDenied, match="listing refused"),
+        pytest.raises(PermissionDeniedError, match="listing refused"),
     ):
         await schedules_ops.list_schedules()
     _assert_nothing_logged_server_side(caplog)
@@ -218,7 +224,10 @@ async def test_server_datetime_maps_unknown_tool_raised_for_another_name_to_stru
     # naming that tool, never "the time tool is not available" (501). The caught error
     # itself stays server-side on an ERROR record.
     install(_FakeTools({schedules_ops._TIME_TOOL}, run_exc=UnknownToolError("not_current_time_info")))
-    with caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name), pytest.raises(OperationFailed) as caught:
+    with (
+        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
+        pytest.raises(OperationFailedError) as caught,
+    ):
         await schedules_ops.server_datetime()
     assert caught.value.message == "server-datetime lookup failed (unknown tool not_current_time_info)"
     _assert_logged_server_side(caplog, "No such tool: not_current_time_info.")
@@ -226,24 +235,27 @@ async def test_server_datetime_maps_unknown_tool_raised_for_another_name_to_stru
 
 async def test_server_datetime_raise_during_execution_is_500(install, caplog) -> None:
     # The time tool is registered and ran; a raise from its body is a structured
-    # OperationFailed (500) naming the door and the exception class, never "the time tool
+    # OperationFailedError (500) naming the door and the exception class, never "the time tool
     # is not available" (501) and never the caught exception's own text — which lands in
     # the log.
     install(_FakeTools({schedules_ops._TIME_TOOL}, run_exc=RuntimeError("boom clock at 10.0.0.7:6379")))
-    with caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name), pytest.raises(OperationFailed) as caught:
+    with (
+        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
+        pytest.raises(OperationFailedError) as caught,
+    ):
         await schedules_ops.server_datetime()
     assert caught.value.message == "server-datetime lookup failed (RuntimeError)"
     _assert_logged_server_side(caplog, "10.0.0.7:6379")
 
 
 async def test_server_datetime_permission_denied_passes_through(install, caplog) -> None:
-    # A ``PermissionDenied`` taken by the tool-dispatch seam is already the caller's
+    # A ``PermissionDeniedError`` taken by the tool-dispatch seam is already the caller's
     # answer (403); it passes through typed rather than being flattened into a 500, and
     # records nothing — it is the tool's own answer, not a failure of this door.
-    install(_FakeTools({schedules_ops._TIME_TOOL}, run_exc=PermissionDenied("access denied: clock refused")))
+    install(_FakeTools({schedules_ops._TIME_TOOL}, run_exc=PermissionDeniedError("access denied: clock refused")))
     with (
         caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
-        pytest.raises(PermissionDenied, match="clock refused"),
+        pytest.raises(PermissionDeniedError, match="clock refused"),
     ):
         await schedules_ops.server_datetime()
     _assert_nothing_logged_server_side(caplog)
@@ -270,7 +282,10 @@ async def test_create_maps_unknown_tool_raised_for_another_name_to_structured_50
     # becomes a structured 500 naming that inner tool, not a 404 for the caller-named
     # tool. The caught error itself stays server-side on an ERROR record.
     install(_FakeTools(_MARKERS | {"send"}, run_exc=UnknownToolError("some_inner_tool")))
-    with caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name), pytest.raises(OperationFailed) as caught:
+    with (
+        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
+        pytest.raises(OperationFailedError) as caught,
+    ):
         await schedules_ops.create_schedule("send", {}, {})
     assert caught.value.message == "schedule creation failed (unknown tool some_inner_tool)"
     _assert_logged_server_side(caplog, "No such tool: some_inner_tool.")
@@ -278,25 +293,28 @@ async def test_create_maps_unknown_tool_raised_for_another_name_to_structured_50
 
 async def test_create_raise_during_execution_is_500(install, caplog) -> None:
     # The caller-named tool resolved and was scheduled; a raise from that dispatch is a
-    # structured OperationFailed (500) naming the door and the exception class, never a
+    # structured OperationFailedError (500) naming the door and the exception class, never a
     # 404 for the caller-named tool and never the caught exception's own text — which
     # lands in the log.
     install(_FakeTools(_MARKERS | {"send"}, run_exc=RuntimeError("boom scheduling at 10.0.0.7:6379")))
-    with caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name), pytest.raises(OperationFailed) as caught:
+    with (
+        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
+        pytest.raises(OperationFailedError) as caught,
+    ):
         await schedules_ops.create_schedule("send", {}, {})
     assert caught.value.message == "schedule creation failed (RuntimeError)"
     _assert_logged_server_side(caplog, "10.0.0.7:6379")
 
 
 async def test_create_permission_denied_from_the_dispatch_passes_through(install, caplog) -> None:
-    # Distinct from the pre-dispatch authorization denial below: this ``PermissionDenied``
+    # Distinct from the pre-dispatch authorization denial below: this ``PermissionDeniedError``
     # comes from the tool-dispatch seam itself and is already the caller's answer (403),
     # so it passes through typed rather than being flattened into a 500, and records
     # nothing — it is the tool's own answer, not a failure of this door.
-    install(_FakeTools(_MARKERS | {"send"}, run_exc=PermissionDenied("access denied: dispatch refused")))
+    install(_FakeTools(_MARKERS | {"send"}, run_exc=PermissionDeniedError("access denied: dispatch refused")))
     with (
         caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
-        pytest.raises(PermissionDenied, match="dispatch refused"),
+        pytest.raises(PermissionDeniedError, match="dispatch refused"),
     ):
         await schedules_ops.create_schedule("send", {}, {})
     _assert_nothing_logged_server_side(caplog)
@@ -335,10 +353,10 @@ async def test_create_denied_tool_is_refused_before_scheduling(install, monkeypa
     )
 
     async def _deny(tool_name, arguments):
-        raise PermissionDenied("access denied: POST /api/config/env is not permitted")
+        raise PermissionDeniedError("access denied: POST /api/config/env is not permitted")
 
     monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _deny)
-    with pytest.raises(PermissionDenied, match="not permitted"):
+    with pytest.raises(PermissionDeniedError, match="not permitted"):
         await schedules_ops.create_schedule("write_env", {"k": "v"}, {"cron": "* * * * *"})
 
 
@@ -380,10 +398,13 @@ async def test_delete_501_without_backend(install) -> None:
 
 async def test_delete_raise_during_execution_is_500(install, caplog) -> None:
     # The backend is installed and its delete tool ran; a raise from that body is a
-    # structured OperationFailed (500) naming the door and the exception class, never an
+    # structured OperationFailedError (500) naming the door and the exception class, never an
     # opaque 500 and never the caught exception's own text — which lands in the log.
     install(_FakeTools(_MARKERS, run_exc=RuntimeError("boom deleting at 10.0.0.7:6379")))
-    with caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name), pytest.raises(OperationFailed) as caught:
+    with (
+        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
+        pytest.raises(OperationFailedError) as caught,
+    ):
         await schedules_ops.delete_schedule("nightly")
     assert caught.value.message == "schedule deletion failed (RuntimeError)"
     _assert_logged_server_side(caplog, "10.0.0.7:6379")
@@ -408,7 +429,10 @@ async def test_delete_maps_unknown_tool_raised_for_another_name_to_structured_50
     # body — that inner dispatch's failure, so a structured 500, never a 501. The caught
     # error itself stays server-side on an ERROR record.
     install(_FakeTools(_MARKERS, run_exc=UnknownToolError("some_inner_tool")))
-    with caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name), pytest.raises(OperationFailed) as caught:
+    with (
+        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
+        pytest.raises(OperationFailedError) as caught,
+    ):
         await schedules_ops.delete_schedule("nightly")
     assert caught.value.message == "schedule deletion failed (unknown tool some_inner_tool)"
     _assert_logged_server_side(caplog, "No such tool: some_inner_tool.")
@@ -419,19 +443,19 @@ async def test_delete_sibling_marker_unknown_tool_is_structured_500(install) -> 
     # naming it is the inner dispatch's failure like any other foreign name — a structured
     # 500, never the 501 reserved for this door's own marker vanishing.
     install(_FakeTools(_MARKERS, run_exc=UnknownToolError(schedules_ops._LIST_TOOL)))
-    with pytest.raises(OperationFailed) as caught:
+    with pytest.raises(OperationFailedError) as caught:
         await schedules_ops.delete_schedule("nightly")
     assert caught.value.message == "schedule deletion failed (unknown tool backend_list_schedules)"
 
 
 async def test_delete_permission_denied_passes_through(install, caplog) -> None:
-    # A ``PermissionDenied`` taken by the tool-dispatch seam is already the caller's
+    # A ``PermissionDeniedError`` taken by the tool-dispatch seam is already the caller's
     # answer (403); it passes through typed rather than being flattened into a 500, and
     # records nothing — it is the tool's own answer, not a failure of this door.
-    install(_FakeTools(_MARKERS, run_exc=PermissionDenied("access denied: deletion refused")))
+    install(_FakeTools(_MARKERS, run_exc=PermissionDeniedError("access denied: deletion refused")))
     with (
         caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
-        pytest.raises(PermissionDenied, match="deletion refused"),
+        pytest.raises(PermissionDeniedError, match="deletion refused"),
     ):
         await schedules_ops.delete_schedule("nightly")
     _assert_nothing_logged_server_side(caplog)

@@ -1,6 +1,8 @@
-"""Persisting a new question: build the durable ``InteractionRequest`` and, on a
-fresh connection, substitute media, reserve the concurrency slot and write the
-question to the store."""
+"""Persisting a new question: build the durable ``InteractionRequest`` and write it to the store.
+
+On a fresh connection, substitute media, reserve the concurrency slot and write the
+question to the store.
+"""
 
 from __future__ import annotations
 
@@ -39,10 +41,12 @@ def build_request(
     mode: Literal["sync", "async"],
     expiry_at: Any,
 ) -> InteractionRequest:
-    """Build the durable ``InteractionRequest`` for the question — its answer format +
-    payload, the digression policy/notice, the deadline window, the delivery
-    channel/recipient/audience, the stored media, and (for an async park) the resolved
-    continuation binding."""
+    """Build the durable ``InteractionRequest`` for the question.
+
+    Carries its answer format + payload, the digression policy/notice, the deadline window,
+    the delivery channel/recipient/audience, the stored media, and (for an async park) the
+    resolved continuation binding.
+    """
     return InteractionRequest(
         interaction_id=interaction_id,
         group_id=group,
@@ -98,10 +102,12 @@ async def persist_question(
     mode: Literal["sync", "async"],
     expiry_at: Any,
 ) -> list[MediaItem] | None:
-    """Open the persist connection, substitute media by reference, build the request,
-    reserve the concurrency slot under ``max_concurrent`` (raising
-    ``InteractionLimitError`` at the cap) and write it. Returns the stored media list
-    (the same items the durable record and any channel delivery carry)."""
+    """Open the persist connection, substitute media, build the request, reserve the slot, and write it.
+
+    Reserves the concurrency slot under ``max_concurrent`` (raising
+    ``InteractionLimitError`` at the cap). Returns the stored media list (the same items the
+    durable record and any channel delivery carry).
+    """
     from tai42_skeleton.interactions import helper
 
     async with helper.client_ctx(RedisClient, settings.redis) as r:

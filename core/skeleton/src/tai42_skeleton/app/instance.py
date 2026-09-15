@@ -1,3 +1,5 @@
+"""The process app singleton and its startup/reload handlers."""
+
 import logging
 from contextlib import asynccontextmanager
 
@@ -48,8 +50,9 @@ def versioned_store_in_use() -> bool:
 
 
 async def rehydrate_versioned_presets_if_store_in_use() -> None:
-    """Startup/reload handler: re-register every versioned preset from the store,
-    only when the versioned-document store is configured.
+    """Startup/reload handler: re-register every versioned preset from the store.
+
+    Runs only when the versioned-document store is configured.
 
     ``reload_config()`` (and a cold boot) wipes the runtime tool registry, so this
     reloads the persisted presets from their active bodies — clearing the
@@ -73,8 +76,9 @@ async def rehydrate_versioned_presets_if_store_in_use() -> None:
 
 
 async def rehydrate_sub_mcp_apps() -> None:
-    """Startup/reload handler: re-materialize every persisted sub-MCP app from the
-    shared store into THIS worker's in-process router.
+    """Startup/reload handler: re-materialize every persisted sub-MCP app into this worker's router.
+
+    Reads from the shared store into THIS worker's in-process router.
 
     ``reset()`` (run on every ``start()``/``reload_config()``) wipes the router's
     per-worker route cache, so this reloads the durable registrations — the store is
@@ -94,8 +98,7 @@ async def rehydrate_sub_mcp_apps() -> None:
 
 
 async def _apply_preset_tool_reload(action: str, name: str) -> None:
-    """Worker-bus dispatch target for the ``"preset"`` tool kind: rebind or tear
-    down one preset on THIS worker.
+    """Worker-bus dispatch target for the ``"preset"`` tool kind: rebind or tear down one preset on this worker.
 
     ``reload`` re-reads the preset's ACTIVE store body and rebinds it — a missing
     store row raises :class:`~tai42_contract.presets.errors.PresetNotFoundError`, so a
@@ -108,7 +111,8 @@ async def _apply_preset_tool_reload(action: str, name: str) -> None:
     is dropped — the foreign tool stays bound; any other name is a live preset whose
     registration is torn down (idempotent for an absent name). Registered in
     :func:`build_app` and invoked through ``TaiMCP._run_tool_reload``, which rejects
-    any other action."""
+    any other action.
+    """
     manager = build_app().preset_manager
     if action == "reload":
         await manager.reload(name)
@@ -148,6 +152,7 @@ def register_cli_logging_reload() -> None:
 
 @asynccontextmanager
 async def lifespan(app_):
+    """The ASGI lifespan: enter the sub-MCP router's lifespan for the duration of the served process."""
     # Process-wide resource teardown (pooled clients, store/checkpoint pools,
     # monitoring flush) runs on ``app_context`` — the seam both this served path
     # and the backend worker cross — so it is not duplicated here. See

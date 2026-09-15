@@ -1,3 +1,5 @@
+"""Contract schema for a backend task's follow-up callback."""
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -14,6 +16,8 @@ from tai42_contract.template import (
 
 
 class CallbackSchema(ConditionMixin, ExprMixin):
+    """A backend task's follow-up: an optional guard ``condition`` and a follow-up tool kwargs ``expr``."""
+
     # Optional: with no ``tool`` the backend runs the rendered ``expr`` directly.
     tool: str = ""
 

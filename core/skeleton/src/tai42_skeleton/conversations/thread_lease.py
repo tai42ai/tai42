@@ -32,8 +32,10 @@ logger = logging.getLogger(__name__)
 
 
 class ThreadLeaseLostError(UnavailableError):
-    """The thread turn lease was lost mid-turn (its TTL lapsed or another worker adopted it):
-    a loud, retriable 503 — the turn cannot trust its parent checkpoint any longer."""
+    """The thread turn lease was lost mid-turn (its TTL lapsed or another worker adopted it).
+
+    A loud, retriable 503 — the turn cannot trust its parent checkpoint any longer.
+    """
 
 
 # Refresh the lease under this worker's token: 1 still held, 0 lost (expired or taken).
@@ -59,8 +61,7 @@ return 0
 
 
 class _LeaseSignal:
-    """Carries the heartbeat's lost verdict back to the owner so a self-cancel is told apart
-    from an external one."""
+    """Carries the heartbeat's lost verdict back to the owner so a self-cancel is told apart from an external one."""
 
     __slots__ = ("lost",)
 
@@ -69,11 +70,14 @@ class _LeaseSignal:
 
 
 class ThreadTurnLease:
-    """The cross-worker per-thread turn mutex over the conversations Redis. Holds no live
-    state of its own — every :meth:`held` span reads the current timings, so a settings
-    reload is adopted in place by :meth:`reconfigure`."""
+    """The cross-worker per-thread turn mutex over the conversations Redis.
+
+    Holds no live state of its own — every :meth:`held` span reads the current timings, so a settings
+    reload is adopted in place by :meth:`reconfigure`.
+    """
 
     def __init__(self, settings: ConversationsSettings) -> None:
+        """Bind to ``settings``; timings are read fresh each span."""
         self.settings = settings
 
     def reconfigure(self, settings: ConversationsSettings) -> None:
@@ -82,9 +86,10 @@ class ThreadTurnLease:
 
     @asynccontextmanager
     async def held(self, thread_id: str) -> AsyncIterator[None]:
-        """Hold ``thread_id``'s cross-worker lease for the body's duration, heartbeat-refreshed
-        while it runs. A lease lost mid-body cancels the body and surfaces as
-        :class:`ThreadLeaseLostError`."""
+        """Hold ``thread_id``'s cross-worker lease for the body's duration, heartbeat-refreshed while it runs.
+
+        A lease lost mid-body cancels the body and surfaces as :class:`ThreadLeaseLostError`.
+        """
         if self.settings.in_memory:
             # No conversations Redis is no cross-process store, and a worker without one can
             # never run a turn — the mutex is an explicit local no-op, not a hidden skip.
@@ -135,9 +140,11 @@ class ThreadTurnLease:
                 raise asyncio.CancelledError
 
     async def _acquire(self, key: str, token: str) -> None:
-        """SET NX PX, polling every ``thread_lease_poll_seconds`` until the key is free. The
-        wait is unbounded — the same shape as a local waiter behind a HITL-paused turn; the
-        upstream FIFO depth bounds how many ever queue here."""
+        """SET NX PX, polling every ``thread_lease_poll_seconds`` until the key is free.
+
+        The wait is unbounded — the same shape as a local waiter behind a HITL-paused turn; the
+        upstream FIFO depth bounds how many ever queue here.
+        """
         lease_ms = self.settings.thread_lease_seconds * 1000
         while True:
             async with client_ctx(RedisClient, self.settings.redis) as r:
@@ -149,12 +156,14 @@ class ThreadTurnLease:
     async def _heartbeat(
         self, key: str, token: str, owner: asyncio.Task[object], signal: _LeaseSignal, last_success: float
     ) -> None:
-        """Re-expire the lease every ``thread_lease_refresh_seconds`` until it is lost. A
-        transient Redis error is logged and retried, but only while under ``last_success +
+        """Re-expire the lease every ``thread_lease_refresh_seconds`` until it is lost.
+
+        A transient Redis error is logged and retried, but only while under ``last_success +
         thread_lease_seconds``: once that monotonic deadline passes the lease may already have
         lapsed server-side and been adopted, so the hold can no longer be proven and the owner
         is cancelled exactly as a returned-0 does. A lost lease cancels the owner, whose
-        context turns the self-cancel into :class:`ThreadLeaseLostError`."""
+        context turns the self-cancel into :class:`ThreadLeaseLostError`.
+        """
         while True:
             await asyncio.sleep(self.settings.thread_lease_refresh_seconds)
             try:

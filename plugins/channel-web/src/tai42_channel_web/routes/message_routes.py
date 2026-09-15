@@ -1,5 +1,7 @@
 """The inbound-message doors: send one visitor message, and submit one ask-less form.
-Both bridge a participant message into the conversation through the shared bridge."""
+
+Both bridge a participant message into the conversation through the shared bridge.
+"""
 
 from __future__ import annotations
 
@@ -53,10 +55,12 @@ _FORM_NOT_FOUND = "form not found (unknown, expired, or already gone)"
 
 
 def _inbound_locale(request: Request) -> str | None:
-    """The visitor's BCP 47 locale from the request's ``Accept-Language`` header — the
-    browser's top-ranked language range, canonicalized. A wildcard (``*``), an absent
+    """The visitor's BCP 47 locale from the request's ``Accept-Language`` header.
+
+    The browser's top-ranked language range, canonicalized. A wildcard (``*``), an absent
     header or a malformed range is dropped to ``None`` (no locale hint), so the turn still
-    runs; the platform never guesses a language from nothing."""
+    runs; the platform never guesses a language from nothing.
+    """
     header = request.headers.get("accept-language", "")
     top = header.split(",", 1)[0].split(";", 1)[0].strip()
     if not top or top == "*":
@@ -81,20 +85,24 @@ def _provider_message_id(identity: str, address: str, client_message_id: str | N
     and the text would land on the first route's transcript). No visitor can reach
     into another's dedup space either: neither half is the caller's to choose — the
     address comes from their registration, and both halves are ``:``-free, so the
-    join is unambiguous."""
+    join is unambiguous.
+    """
     if client_message_id is None:
         return uuid4().hex
     return hashlib.sha256(f"{identity}:{address}:{client_message_id}".encode()).hexdigest()
 
 
 def _turn_params(registration: SessionRegistration, reply_id: str | None) -> dict[str, str] | None:
-    """The turn's opaque enrichment params: the session's captured link params, plus a
-    tapped reply option's ``id`` under ``reply_id`` when one rode this send. ``None`` when
-    neither is present, so a plain typed message's payload stays byte-identical to before.
+    """The turn's opaque enrichment params.
+
+    The session's captured link params, plus a tapped reply option's ``id`` under
+    ``reply_id`` when one rode this send. ``None`` when neither is present, so a plain
+    typed message's payload stays byte-identical to before.
 
     The merged dict is re-bounded by the shared entry-param validator here (rather than only
     inside ``accept``, which would surface an over-count/over-size merge as an opaque 500):
-    the caller maps a ``ValueError`` to a 422 the visitor's chip tap can be refused with."""
+    the caller maps a ``ValueError`` to a 422 the visitor's chip tap can be refused with.
+    """
     params = dict(registration.params)
     if reply_id is not None:
         params["reply_id"] = reply_id
@@ -114,9 +122,10 @@ async def _bridge_inbound_message(
     blank_message: str,
     form: dict[str, Any] | None = None,
 ) -> Response:
-    """Bridge one participant message into its web conversation and append the
-    visitor's own frame under the accept-returned id — both held under the
-    conversation's write-order gate.
+    """Bridge one participant message into its web conversation and append the visitor's own frame.
+
+    The visitor's frame is appended under the accept-returned id; both the accept and the
+    append are held under the conversation's write-order gate.
 
     Shared by the messages door and the form-submission door. The inbound transcript
     entry is appended only once ``accept`` has RETURNED a turn id (a refused message
@@ -124,7 +133,8 @@ async def _bridge_inbound_message(
     bridge recorded it), and it reuses that ``message_id`` so a retry re-appends under
     the SAME id and the page's id-keyed replay still shows one message. The gate spans
     ``accept`` and the append so a shed message's slow-down reply cannot land ahead of
-    the message that caused it."""
+    the message that caused it.
+    """
     async with transcript_order(identity, address):
         try:
             message_id = await tai42_app.conversations.accept(

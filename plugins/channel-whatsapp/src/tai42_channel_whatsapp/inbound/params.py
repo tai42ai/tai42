@@ -66,12 +66,15 @@ _REFERRAL_PARAM_KEYS: dict[str, str] = {
 
 
 def _message_context_params(message: dict[str, Any]) -> dict[str, str]:
-    """The opaque entry-params a bridged turn carries from a message's ``referral``
-    (click-to-WhatsApp / QR entry) and reply-to ``context`` — forwarded verbatim as
-    strings, no interpretation. A missing/non-string/empty field is skipped, and a value
-    over the contract's per-value cap is dropped (the transport bound is enforced
-    end-to-end by :func:`~tai42_contract.conversations.validate_entry_params`); the key
-    vocabulary is the module's ``_REFERRAL_PARAM_KEYS`` plus ``context_message_id``."""
+    """The opaque entry-params a bridged turn carries from a message's ``referral`` and reply-to ``context``.
+
+    ``referral`` is a click-to-WhatsApp / QR entry. Forwarded verbatim as strings,
+    no interpretation. A missing/non-string/empty field is skipped, and a value over
+    the contract's per-value cap is dropped (the transport bound is enforced
+    end-to-end by :func:`~tai42_contract.conversations.validate_entry_params`); the
+    key vocabulary is the module's ``_REFERRAL_PARAM_KEYS`` plus
+    ``context_message_id``.
+    """
     params: dict[str, str] = {}
     referral = message.get("referral")
     if isinstance(referral, dict):
@@ -85,8 +88,11 @@ def _message_context_params(message: dict[str, Any]) -> dict[str, str]:
 
 def _put_param(params: dict[str, str], key: str, value: Any) -> None:
     """Add ``key`` iff ``value`` is a non-empty string within the contract's per-value cap.
-    An over-cap opaque value is dropped (never truncated — truncation would silently corrupt
-    an opaque token); a debug line records the drop without ever logging the value."""
+
+    An over-cap opaque value is dropped (never truncated — truncation would
+    silently corrupt an opaque token); a debug line records the drop without ever
+    logging the value.
+    """
     if not isinstance(value, str) or not value:
         return
     if len(value) > ENTRY_PARAM_VALUE_MAX_CHARS:
@@ -96,9 +102,11 @@ def _put_param(params: dict[str, str], key: str, value: Any) -> None:
 
 
 def _merged_params(base: dict[str, str], extra: dict[str, str]) -> dict[str, str] | None:
-    """``base`` merged with ``extra`` (both already per-value bounded), or ``None`` when the
-    result is empty. ``base`` is never mutated. ``extra`` wins on a key collision, though the
-    channel's key spaces do not overlap by construction."""
+    """``base`` merged with ``extra`` (both already per-value bounded), or ``None`` when empty.
+
+    ``base`` is never mutated. ``extra`` wins on a key collision, though the
+    channel's key spaces do not overlap by construction.
+    """
     if not base and not extra:
         return None
     merged = {**base, **extra}

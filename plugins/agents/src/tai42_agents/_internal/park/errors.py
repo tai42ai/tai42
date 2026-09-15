@@ -12,8 +12,10 @@ from datetime import datetime
 
 
 class AgentResumeParkEntryNotFoundError(RuntimeError):
-    """No park entry exists for the interaction being resumed — never parked here,
-    already resumed, or its thread ended."""
+    """No park entry exists for the interaction being resumed.
+
+    Never parked here, already resumed, or its thread ended.
+    """
 
     def __init__(self, interaction_id: str) -> None:
         self.interaction_id = interaction_id
@@ -21,8 +23,10 @@ class AgentResumeParkEntryNotFoundError(RuntimeError):
 
 
 class AgentResumeBarrierNotFoundError(RuntimeError):
-    """The super-step barrier the answer converges on is gone (expired or cleared) while
-    a park entry still points at it."""
+    """The super-step barrier the answer converges on is gone (expired or cleared).
+
+    A park entry still points at it.
+    """
 
     def __init__(self, thread_id: str, superstep_id: str) -> None:
         self.thread_id = thread_id
@@ -31,8 +35,10 @@ class AgentResumeBarrierNotFoundError(RuntimeError):
 
 
 class AgentResumeInterruptNotPendingError(RuntimeError):
-    """The interrupt an answer targets is not (or no longer) pending on the parked graph
-    — a corrupted routing, or a graph that already advanced past it."""
+    """The interrupt an answer targets is not (or no longer) pending on the parked graph.
+
+    A corrupted routing, or a graph that already advanced past it.
+    """
 
     def __init__(self, interaction_id: str, interrupt_id: str) -> None:
         self.interaction_id = interaction_id
@@ -45,7 +51,8 @@ class AgentResumeDriveInProgressError(RuntimeError):
 
     Raised (never a benign return) so the platform keeps this continuation's durable
     retry ticket — the reaper redelivers until the live drive completes or its lease
-    expires."""
+    expires.
+    """
 
     def __init__(self, thread_id: str, superstep_id: str) -> None:
         self.thread_id = thread_id
@@ -54,14 +61,18 @@ class AgentResumeDriveInProgressError(RuntimeError):
 
 
 class AgentParkMarkerError(RuntimeError):
-    """A parked ToolMessage could not be reconciled with the resume answers — a marked
-    message missing on replay, or a marker whose interaction id has no answer. Raised so a
-    resume never silently substitutes a partial or wrong answer."""
+    """A parked ToolMessage could not be reconciled with the resume answers.
+
+    A marked message missing on replay, or a marker whose interaction id has no answer.
+    Raised so a resume never silently substitutes a partial or wrong answer.
+    """
 
 
 class AgentParkNotHostableError(RuntimeError):
-    """A drive stopped on an async-park interrupt the run cannot host: no park identity is
-    bound, so there is nowhere to record the durable index the resume would read.
+    """A drive stopped on an async-park interrupt the run cannot host.
+
+    No park identity is bound, so there is nowhere to record the durable index the resume
+    would read.
 
     Raised rather than returned as a terminal, because returning would silently corrupt the
     caller's result: the run face would hand back the park marker's JSON as if it were the
@@ -70,7 +81,8 @@ class AgentParkNotHostableError(RuntimeError):
     A non-hostable run binds ``None`` as its resume continuation, so its own async ask is
     refused at ask-time before any marker is minted, and the park hook refuses an unclaimable
     park to the model before it can interrupt — so reaching this backstop means a park interrupt
-    was raised by something other than this run's own hostable ask."""
+    was raised by something other than this run's own hostable ask.
+    """
 
 
 class WorkspaceLeaseHeldError(RuntimeError):
@@ -81,7 +93,8 @@ class WorkspaceLeaseHeldError(RuntimeError):
     is NOT idempotent under concurrent drives (two sessions writing one volume corrupt each
     other). Raised (constant message, never the workspace path) when ``SET NX`` finds the
     lease already held, so a second concurrent turn busy-errors loudly rather than starting a
-    corrupting second session."""
+    corrupting second session.
+    """
 
     def __init__(self, workspace_key: str) -> None:
         self.workspace_key = workspace_key
@@ -96,7 +109,8 @@ class ParkExpiryExceedsRetentionError(RuntimeError):
     bound is the nearest such horizon; under a bounded one, a deadline beyond it — or a park
     with NO deadline at all — would let a backing store be swept before the ask resolves,
     leaving an unresumable park. Raised at park-persist time so the whole super-step fails
-    with zero park-index state written, never a park that silently cannot be resumed."""
+    with zero park-index state written, never a park that silently cannot be resumed.
+    """
 
     def __init__(self, interaction_id: str, expiry_at: str | None, horizon: datetime) -> None:
         self.interaction_id = interaction_id

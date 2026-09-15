@@ -34,8 +34,10 @@ class VoterSpec(BaseModel):
     llm_kwargs: dict[str, Any] | None = None
 
     def effective_llm_kwargs(self) -> dict[str, Any]:
-        """The kwargs handed to the LLM: ``llm_kwargs`` with the explicit
-        ``model`` field folded in when it is set."""
+        """The kwargs handed to the LLM.
+
+        ``llm_kwargs`` with the explicit ``model`` field folded in when it is set.
+        """
         kwargs = dict(self.llm_kwargs or {})
         if self.model is not None:
             kwargs["model"] = self.model
@@ -43,17 +45,17 @@ class VoterSpec(BaseModel):
 
     @property
     def declared_model(self) -> str | None:
-        """The model this spec pins, if any — the explicit ``model`` field or a
-        ``model`` inside ``llm_kwargs``. ``None`` when the spec leaves the model
-        to settings resolution."""
+        """The model this spec pins, if any — the explicit ``model`` field or a ``model`` inside ``llm_kwargs``.
+
+        ``None`` when the spec leaves the model to settings resolution.
+        """
         if self.model is not None:
             return self.model
         return (self.llm_kwargs or {}).get("model")
 
 
 class VoteInfo(BaseModel):
-    """One LLM's verdict — the provider and model that produced it, and its
-    answer text.
+    """One LLM's verdict — the provider and model that produced it, and its answer text.
 
     ``model`` is the actual model that ran (as reported by the run's usage) when
     known, otherwise the model the spec pinned; it is ``None`` when neither the
@@ -66,8 +68,7 @@ class VoteInfo(BaseModel):
 
 
 class VotingOutput(BaseModel):
-    """The voting agent's result: the judge's deciding verdict and the list of
-    every voter's verdict."""
+    """The voting agent's result: the judge's deciding verdict and the list of every voter's verdict."""
 
     judge: VoteInfo
     voters: list[VoteInfo]

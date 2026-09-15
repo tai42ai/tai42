@@ -1,3 +1,5 @@
+"""Middleware ensuring an outgoing history opens with a user message for strict-ordering providers."""
+
 import uuid
 from typing import Any, cast
 
@@ -26,6 +28,7 @@ class LeadingUserMiddleware(AgentMiddleware):
     """
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        """Insert the marker turn when the first non-system message is an assistant message; else no-op."""
         messages = state["messages"]
         first = next((i for i, m in enumerate(messages) if not isinstance(m, SystemMessage)), None)
         if first is None or not isinstance(messages[first], AIMessage):
@@ -46,5 +49,6 @@ class LeadingUserMiddleware(AgentMiddleware):
         }
 
     async def abefore_model(self, state: AgentState, runtime: Runtime | None = None) -> dict[str, Any] | None:
+        """Async entry point; delegates to the synchronous list rewrite."""
         # Pure list rewrite (no I/O); reuse the sync implementation.
         return self.before_model(state, cast(Runtime, runtime))

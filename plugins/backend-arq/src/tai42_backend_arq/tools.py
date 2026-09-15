@@ -41,8 +41,10 @@ logger = logging.getLogger(__name__)
 
 
 def _failure_detail(result: Any) -> str:
-    """Human-readable detail of a stored failure result: the revived failure's
-    ``repr``, or the ``repr`` of whatever else was stored."""
+    """Human-readable detail of a stored failure result.
+
+    The revived failure's ``repr``, or the ``repr`` of whatever else was stored.
+    """
     if isinstance(result, TaskFailedError):
         return result.error_repr
     if isinstance(result, asyncio.CancelledError):
@@ -52,9 +54,7 @@ def _failure_detail(result: Any) -> str:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_task_status(task_id: str) -> str:
-    """
-    Return the current status of a given task ID.
-    """
+    """Return the current status of a given task ID."""
     arq_redis: Any = await RedisPoolManager.get()
     job = Job(task_id, arq_redis, _deserializer=job_deserializer)
     status = await job.status()
@@ -63,8 +63,7 @@ async def backend_task_status(task_id: str) -> str:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_task_result(task_id: str, timeout: float | None = None) -> Any:
-    """
-    Return the result of a completed task by ID.
+    """Return the result of a completed task by ID.
 
     - `timeout is None`: return the current state without waiting. If the task is
       not yet complete, a "not ready" snapshot value is returned.
@@ -98,8 +97,7 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_cancel_task(task_id: str) -> str:
-    """
-    Cancel (abort) a running or queued task.
+    """Cancel (abort) a running or queued task.
 
     Waits up to the configured task timeout for an outcome. No outcome within
     the wait is reported as requested-but-unconfirmed (the request stays
@@ -158,8 +156,7 @@ async def backend_cancel_task(task_id: str) -> str:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_active_tasks() -> dict[str, Any]:
-    """
-    Get all currently executing tasks (in-progress jobs).
+    """Get all currently executing tasks (in-progress jobs).
 
     Returns a flat mapping of job id to ``{"status": "in_progress"}`` — arq has
     no per-worker attribution for a running job, so the map is keyed by job id,
@@ -183,8 +180,7 @@ async def backend_active_tasks() -> dict[str, Any]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_reserved_tasks() -> list[str]:
-    """
-    Get all reserved/queued tasks (due to run, not yet picked up).
+    """Get all reserved/queued tasks (due to run, not yet picked up).
 
     Returns a flat list of job ids — arq has one queue and no per-worker
     reservation, so there is no worker or queue keying to report.
@@ -200,8 +196,7 @@ async def backend_reserved_tasks() -> list[str]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_scheduled_tasks() -> dict[str, float]:
-    """
-    Get all scheduled/deferred tasks (future-dated queue entries).
+    """Get all scheduled/deferred tasks (future-dated queue entries).
 
     Returns a flat mapping of job id to its due time in milliseconds since the
     epoch (the queue zset score).
@@ -217,12 +212,12 @@ async def backend_scheduled_tasks() -> dict[str, float]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_list_failed_tasks() -> list[dict[str, Any]]:
-    """
-    Get the failed (including aborted) tasks whose results are still retained,
-    as ``{"task_id", "error"}`` rows — ``error`` carries the stored failure
-    detail (the original exception's ``repr``; an aborted task's detail names
-    its ``CancelledError``). arq keeps job outcomes only for the configured
-    keep-result window, so this lists failures within that window.
+    """Get the failed (including aborted) tasks whose results are still retained.
+
+    Returns ``{"task_id", "error"}`` rows — ``error`` carries the stored failure detail (the
+    original exception's ``repr``; an aborted task's detail names its ``CancelledError``). arq
+    keeps job outcomes only for the configured keep-result window, so this lists failures within
+    that window.
     """
     arq_redis: Any = await RedisPoolManager.get()
     return [
@@ -234,8 +229,7 @@ async def backend_list_failed_tasks() -> list[dict[str, Any]]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_list_schedules() -> list[dict[str, Any]]:
-    """
-    List all custom schedules.
+    """List all custom schedules.
 
     Each row carries the canonical keys ``name``, ``enabled``,
     ``next_run_at_ts`` and ``next_run_at_iso`` (the pending job's due time,
@@ -273,8 +267,7 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_export_schedules() -> list[dict[str, Any]]:
-    """
-    Export every custom schedule as a list of portable, JSON-serializable records.
+    """Export every custom schedule as a list of portable, JSON-serializable records.
 
     Each record captures only the durable definition of a schedule -- its name,
     positional args, keyword args (which carry the tool name verbatim), the
@@ -312,8 +305,7 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Import schedules previously produced by ``backend_export_schedules``.
+    """Import schedules previously produced by ``backend_export_schedules``.
 
     Each entry is parsed as a ``ScheduleRecord`` and written through the same
     low-level schedule-hash mapping the create path uses: target is set to
@@ -380,9 +372,7 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_get_schedule(name: str) -> dict[str, Any]:
-    """
-    Get details of a custom schedule.
-    """
+    """Get details of a custom schedule."""
     arq_redis: Any = await RedisPoolManager.get()
     settings = arq_settings()
     key = settings.arq_schedule_key(name)
@@ -401,8 +391,7 @@ async def backend_get_schedule(name: str) -> dict[str, Any]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_delete_schedule(name: str) -> dict[str, Any]:
-    """
-    Delete a custom schedule.
+    """Delete a custom schedule.
 
     Runs under the per-schedule lock so the delete serializes with schedule
     transitions and flag writes — a transition mid-flight can never re-write
@@ -423,8 +412,7 @@ async def backend_delete_schedule(name: str) -> dict[str, Any]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_enable_schedule(name: str) -> dict[str, Any]:
-    """
-    Enable a custom schedule.
+    """Enable a custom schedule.
 
     The flag write runs under the per-schedule lock, after an existence check
     that stays true for the write — writing the flag into a hash a concurrent
@@ -442,8 +430,7 @@ async def backend_enable_schedule(name: str) -> dict[str, Any]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_disable_schedule(name: str) -> dict[str, Any]:
-    """
-    Disable a custom schedule.
+    """Disable a custom schedule.
 
     The flag write runs under the per-schedule lock, after an existence check
     that stays true for the write — writing the flag into a hash a concurrent
@@ -461,9 +448,7 @@ async def backend_disable_schedule(name: str) -> dict[str, Any]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_run_schedule_now(name: str) -> dict[str, Any]:
-    """
-    Force a schedule to run ASAP.
-    """
+    """Force a schedule to run ASAP."""
     arq_redis: Any = await RedisPoolManager.get()
     settings = arq_settings()
     key = settings.arq_schedule_key(name)
@@ -483,9 +468,7 @@ async def backend_run_schedule_now(name: str) -> dict[str, Any]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_schedule_exists(name: str) -> bool:
-    """
-    Return True if a custom schedule entry exists.
-    """
+    """Return True if a custom schedule entry exists."""
     arq_redis: Any = await RedisPoolManager.get()
     settings = arq_settings()
     key = settings.arq_schedule_key(name)
@@ -499,8 +482,7 @@ async def backend_update_schedule(
     next_run_in_ms: int | None = None,
     next_run_at_ts: float | None = None,
 ) -> dict[str, Any]:
-    """
-    Update an existing custom schedule entry.
+    """Update an existing custom schedule entry.
 
     - `new_schedule` (optional): int/float (seconds interval), str (5-field crontab), or dict.
       If omitted, the schedule is left unchanged.
@@ -591,39 +573,29 @@ async def backend_update_schedule(
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_registered_tasks() -> list[str]:
-    """
-    List the task functions registered with the worker.
-    """
+    """List the task functions registered with the worker."""
     raise NotImplementedError("backend 'arq' does not support backend_registered_tasks")
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_worker_stats() -> dict[str, Any]:
-    """
-    Return runtime statistics for the worker.
-    """
+    """Return runtime statistics for the worker."""
     raise NotImplementedError("backend 'arq' does not support backend_worker_stats")
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_worker_queues() -> list[str]:
-    """
-    List the queues the worker consumes from.
-    """
+    """List the queues the worker consumes from."""
     raise NotImplementedError("backend 'arq' does not support backend_worker_queues")
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_ping_worker() -> dict[str, Any]:
-    """
-    Ping the worker and return its liveness response.
-    """
+    """Ping the worker and return its liveness response."""
     raise NotImplementedError("backend 'arq' does not support backend_ping_worker")
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_list_active_workers() -> list[str]:
-    """
-    List the workers currently active.
-    """
+    """List the workers currently active."""
     raise NotImplementedError("backend 'arq' does not support backend_list_active_workers")

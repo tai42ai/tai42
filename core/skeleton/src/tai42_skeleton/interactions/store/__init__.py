@@ -31,9 +31,11 @@ from .writes import PruneResult, _StoreWrites
 
 
 class InteractionStore(_StoreWrites, _StoreReads):
-    """The interactions store: the durable question lifecycle (writes) and the
-    read/query/audit + reaper claims (reads), reassembled over the shared Redis key
-    contract into the one class every ``store.<method>`` call site uses."""
+    """The interactions store: the durable question lifecycle (writes) and read/query/audit + reaper claims (reads).
+
+    Reassembled over the shared Redis key contract into the one class every ``store.<method>`` call
+    site uses.
+    """
 
 
 __all__ = [

@@ -5,17 +5,17 @@
  * the caller's — a question ANSWERS/Submits, an ask-less card SENDS — so the one
  * implementation serves both without new copy of its own.
  */
-import type { ReactElement, RefObject } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import type { JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
 import {
   Badge,
   Button,
+  defaultValueForSchema,
   SchemaForm,
   Spinner,
-  defaultValueForSchema,
   validateAgainstSchema,
 } from '@tai42/studio-sdk';
-import type { JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
+import type { ReactElement, RefObject } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import type { FormOptionData, FormPage, FormPrefill } from '@/transcript-model';
 

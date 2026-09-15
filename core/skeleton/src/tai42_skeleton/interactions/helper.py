@@ -62,13 +62,15 @@ DELIVERY_FAILED_EVENT_TOPIC = "interactions_delivery_failed"
 
 
 async def cancel_parks_for_thread(thread_id: str) -> list[str]:
-    """Cancel every async ``ask_user`` park bound to ``thread_id`` — the entry point a
-    conversation thread/person/route delete calls so a parked question the deletion would
-    orphan is torn down (via the store's status-gated ``prune_pending``, firing NO
-    continuation) instead of lingering muted until its expiry deadline. Runs on its own
-    connection. A no-op when the interactions store is unconfigured (nothing could have
-    been parked) or the thread holds no parks. Idempotent — safe to re-run under a
-    delete's retry. Returns the cancelled interaction ids."""
+    """Cancel every async ``ask_user`` park bound to ``thread_id``.
+
+    The entry point a conversation thread/person/route delete calls so a parked question the
+    deletion would orphan is torn down (via the store's status-gated ``prune_pending``, firing NO
+    continuation) instead of lingering muted until its expiry deadline. Runs on its own connection.
+    A no-op when the interactions store is unconfigured (nothing could have been parked) or the
+    thread holds no parks. Idempotent — safe to re-run under a delete's retry. Returns the cancelled
+    interaction ids.
+    """
     settings = interactions_settings()
     if not settings.redis.redis_url:
         # Interactions off: no park could ever have been persisted, so there is nothing
@@ -101,9 +103,10 @@ async def ask_user(
     mode: Literal["sync", "async"] = "sync",
     expiry_at: datetime | None = None,
 ) -> Any:
-    """Ask a human ``question``: in ``mode="sync"`` block until the answer returns;
-    in ``mode="async"`` park the caller and return a ``SuspendedInteraction``
-    immediately.
+    """Ask a human ``question`` and return their answer.
+
+    In ``mode="sync"`` block until the answer returns; in ``mode="async"`` park the caller and
+    return a ``SuspendedInteraction`` immediately.
 
     Returns the typed answer per ``answer_format`` (text->str, confirm->bool,
     select->chosen value, form->validated dict, external->the callback payload).
@@ -286,7 +289,8 @@ async def ask_user(
     callback = timing.mint_callback_ticket(settings, window, mode, force=validation.is_external or channel is not None)
 
     if validation.is_external:
-        assert callback is not None  # is_external forces the mint above
+        if callback is None:
+            raise AssertionError
         if channel is not None:
             # Channel-delivered external ask: the channel presents the tappable URL and
             # that URL IS the callback door — no link builder runs.
@@ -325,8 +329,10 @@ async def ask_user(
     # Deliver through the channel AFTER the question is persisted (the callback ticket
     # must be claimable before any human can act on it) and BEFORE the blocking wait.
     if channel is not None:
-        assert validation.channel_obj is not None  # resolved with the up-front validation
-        assert callback is not None  # a set channel forces the mint above
+        if validation.channel_obj is None:
+            raise AssertionError
+        if callback is None:
+            raise AssertionError
         delivery_frame = delivery.build_delivery_frame(
             interaction_id=interaction_id,
             recipient=recipient,

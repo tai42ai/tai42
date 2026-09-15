@@ -30,15 +30,17 @@ async def execute_chain(
     jq_expression: TemplatedText,
     next_tool_name: str,
 ) -> Any:
-    """Call ``tool_name``, transform its output with ``jq_expression``, then call
-    ``next_tool_name`` with the transformed result.
+    """Call ``tool_name``, transform its output with ``jq_expression``, then call ``next_tool_name``.
+
+    The second call takes the transformed result.
 
     If the first stage async-parks it returns the ``SuspendedInteraction`` park SIGNAL; the
     chain PROPAGATES it verbatim instead of feeding the sentinel to jq (which would fail to
     read it as data) or handing it to the next stage. The chain parks as a whole and its own
     resumer drives the parked stage forward; the caller's park recognition fires on the
     surfaced signal. The second stage's result is returned as-is, so a park there propagates
-    naturally by being the return value."""
+    naturally by being the return value.
+    """
     first_result = await tai42_app.tools.run_tool(tool_name, tool_arguments)
     # A parked first stage surfaces the sentinel; propagate it rather than feeding a park
     # signal into jq or the next tool. The chain re-surfaces exactly one park.

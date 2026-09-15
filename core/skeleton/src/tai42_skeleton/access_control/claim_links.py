@@ -59,7 +59,7 @@ _OWNERSHIP_MESSAGE = "may only create claim links for keys you own or your own k
 # The single, deliberately-indistinguishable exchange miss: used / unknown / expired all
 # answer this so the public surface leaks no oracle distinguishing "never existed" from
 # "already claimed" (the server-side log DOES distinguish what it can, by hash prefix).
-_UNKNOWN_TOKEN_MESSAGE = "unknown or already used claim token"
+_UNKNOWN_TOKEN_MESSAGE = "unknown or already used claim token"  # noqa: S105 constant identifier, not a secret value
 
 # The number of hex chars of ``sha256(token)`` a log line names — enough to correlate a
 # creation with its exchange in the log stream, far too few to be the credential.
@@ -71,20 +71,24 @@ class ClaimLinkError(Exception):
 
     ``status`` is 400 (an unresolvable submitted key), 403 (a key that is not the
     caller's to share), or 404 (the uniform exchange miss). The adapters translate it
-    to the matching operation error; the message is the operator-facing text."""
+    to the matching operation error; the message is the operator-facing text.
+    """
 
     def __init__(self, status: int, message: str) -> None:
+        """Set the HTTP ``status`` and the operator-facing ``message``."""
         super().__init__(message)
         self.status = status
         self.message = message
 
 
 def _verifier(settings: AccessControlSettings) -> AccessControlVerifier:
-    """The verifier chain the gate itself resolves credentials through, built from the
-    SAME module-level identity-provider registry (never a parallel provider
-    construction): each configured provider is resolved through
-    ``get_identity_provider_factory`` in order, first-match-wins. An unknown provider
-    name raises loudly out of the factory on first use."""
+    """The verifier chain the gate itself resolves credentials through.
+
+    Built from the SAME module-level identity-provider registry (never a parallel provider
+    construction): each configured provider is resolved through ``get_identity_provider_factory``
+    in order, first-match-wins. An unknown provider name raises loudly out of the factory on
+    first use.
+    """
 
     def _factories() -> list[IdentityProvider]:
         return [get_identity_provider_factory(name)(settings) for name in settings.auth_providers]
@@ -121,7 +125,8 @@ async def create_claim_link(
     settings ceiling; an over-cap request is a loud 400 (never a silent clamp). Returns
     ``{"claim_path": "/login#claim=<token>", "token": <token>, "expires_at": <iso8601>}``
     — the token rides the URL fragment, and the server returns a PATH, not an absolute
-    URL (it does not know the public origin behind a reverse proxy)."""
+    URL (it does not know the public origin behind a reverse proxy).
+    """
     settings = access_control_settings()
     ttl = _resolve_ttl(settings, ttl_seconds)
 
@@ -153,9 +158,11 @@ async def create_claim_link(
 
 
 def _resolve_ttl(settings: AccessControlSettings, ttl_seconds: int | None) -> int:
-    """The effective ttl: the settings default when unset, else the request value —
-    which must be a positive integer no greater than the settings ceiling. An out-of-
-    range request is a loud 400 naming both numbers, never a silent clamp."""
+    """The effective ttl: the settings default when unset, else the request value.
+
+    The request value must be a positive integer no greater than the settings ceiling. An
+    out-of-range request is a loud 400 naming both numbers, never a silent clamp.
+    """
     if ttl_seconds is None:
         return settings.claim_link_ttl_seconds
     if ttl_seconds <= 0:
@@ -168,9 +175,11 @@ def _resolve_ttl(settings: AccessControlSettings, ttl_seconds: int | None) -> in
 
 
 async def _write_record(settings: AccessControlSettings, record: str, ttl: int) -> str:
-    """Write ``record`` under a freshly minted token with ``SET ... EX ttl NX`` and
-    return the token. An ``NX`` collision (astronomically rare — 256 bits of entropy)
-    retries ONCE with a new token, then raises rather than looping."""
+    """Write ``record`` under a freshly minted token with ``SET ... EX ttl NX`` and return the token.
+
+    An ``NX`` collision (astronomically rare — 256 bits of entropy) retries ONCE with a new
+    token, then raises rather than looping.
+    """
     async with client_ctx(RedisClient, settings.redis) as r:
         for _attempt in range(2):
             token = f"clm-{secrets.token_urlsafe(32)}"
@@ -189,7 +198,8 @@ async def exchange_claim_token(token: str) -> dict:
     404, with the record already gone — a revoked credential is never handed out. The
     guarantee is not-REVOKED, not owner-alive (owner-death is enforced by the gate on
     every request, not here). Returns ``{"token": <raw key>, "user_id": ...}`` — the
-    ``loginResult`` wire shape."""
+    ``loginResult`` wire shape.
+    """
     settings = access_control_settings()
     token_hash = hash_api_key(token)
     async with client_ctx(RedisClient, settings.redis) as r:

@@ -36,13 +36,13 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 # server-side AFTER the caller's arguments are read, so a caller can never forge it;
 # namespaced under the ``backend_`` dispatch-kwarg convention so it cannot collide
 # with a tool parameter.
-WORKER_SECRET_CAPABILITY_ARG = "backend_secret_capability"
+WORKER_SECRET_CAPABILITY_ARG = "backend_secret_capability"  # noqa: S105 constant identifier, not a secret value
 
 
 class _WorkerAccessControlSettings(TaiBaseSettings):
-    """The one access-control field a worker needs — whether the gate is enabled —
-    read from the SAME ``ACCESS_CONTROL_`` env the skeleton gate reads.
+    """The one access-control field a worker needs — whether the gate is enabled.
 
+    Read from the SAME ``ACCESS_CONTROL_`` env the skeleton gate reads.
     Registry-excluded: it is a narrow read-only mirror of the skeleton's own
     ``AccessControlSettings.enable``, not a second configurable group. The default
     matches the skeleton gate's (enabled), so a worker fail-closes on a stray
@@ -63,8 +63,7 @@ def _worker_access_control_settings() -> _WorkerAccessControlSettings:
 
 @contextmanager
 def bind_worker_secret_capability(capability: bool | None = None) -> Iterator[None]:
-    """Bind the secret-read capability for a backend-worker tool run and restore it
-    in the ``finally``.
+    """Bind the secret-read capability for a backend-worker tool run and restore it in the ``finally``.
 
     ``capability`` is the submitting caller's own secret-read capability, propagated
     with the job from the backend-submit seam. Given, it is bound verbatim, so the

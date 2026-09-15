@@ -36,7 +36,7 @@ def test_declares_input_schema_support_and_fenced_tier_at_load() -> None:
         importlib.import_module("tai42_skeleton.tools.builtin.sandbox_exec")
         support = tai42_app.presets.input_schema_support("sandbox_exec")
         assert support is not None
-        assert support.payload_arg == "input"
+        assert support.payload_arg == "payload"
         # The tier is declared through the tools facet and read back through both facet
         # names — the SAME shared registry.
         assert tai42_app.tools.tier("sandbox_exec") == "fenced"

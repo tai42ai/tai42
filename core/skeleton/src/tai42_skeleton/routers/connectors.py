@@ -68,13 +68,15 @@ from tai42_skeleton.operations.connectors import reencrypt_connector_tokens as _
 from tai42_skeleton.operations.connectors import start_connect as _start_connect_op
 
 
-class _BadRequest(ValueError):
+class _BadRequestError(ValueError):
     """A malformed request body — surfaced as a 400."""
 
 
 class OAuthComplete(BaseModel):
-    """The OAuth provider callback payload — the signed ``state`` and the
-    authorization ``code``, or a provider-reported ``error``."""
+    """The OAuth provider callback payload.
+
+    The signed ``state`` and the authorization ``code``, or a provider-reported ``error``.
+    """
 
     state: str | None = None
     code: str | None = None
@@ -95,16 +97,22 @@ class OAuthCancelled(BaseModel):
 
 
 class OAuthFailed(BaseModel):
-    """A post-exchange completion failure — ``reason`` is the failure class name
-    (invalid state, alias collision, CAS miss, removed provider). Served 400."""
+    """A post-exchange completion failure, served 400.
+
+    ``reason`` is the failure class name (invalid state, alias collision, CAS miss, removed
+    provider).
+    """
 
     kind: Literal["failed"]
     reason: str
 
 
 class OAuthSuccess(BaseModel):
-    """A completed connection (served 200): the new connection's id, the same-origin
-    ``return_url`` to send the operator back to, and the fleet reload fan-out."""
+    """A completed connection (served 200).
+
+    The new connection's id, the same-origin ``return_url`` to send the operator back to, and
+    the fleet reload fan-out.
+    """
 
     kind: Literal["success"]
     connection_id: str
@@ -120,12 +128,13 @@ class OAuthCompletionResult(
         ]
     ]
 ):
-    """The discriminated ``/oauth/complete`` body. The door serves ALL four variants
-    through the ``{"data": {"kind": ...}}`` envelope (never the ``{"error": ...}``
-    shape): ``cancelled``/``success`` answer 200, ``not_configured``/``failed``
-    answer 400 with the same discriminated body, so the union describes the route's
-    whole success surface honestly. The HTTP status is a router behavior, not part of
-    this body model."""
+    """The discriminated ``/oauth/complete`` body.
+
+    The door serves ALL four variants through the ``{"data": {"kind": ...}}`` envelope (never the
+    ``{"error": ...}`` shape): ``cancelled``/``success`` answer 200, ``not_configured``/``failed``
+    answer 400 with the same discriminated body, so the union describes the route's whole success
+    surface honestly. The HTTP status is a router behavior, not part of this body model.
+    """
 
 
 def _error(message: str, status_code: int) -> JSONResponse:
@@ -136,9 +145,9 @@ async def _json_body(request: Request) -> dict:
     try:
         body = await request.json()
     except (JSONDecodeError, ValueError) as exc:
-        raise _BadRequest(f"invalid JSON body: {exc}") from exc
+        raise _BadRequestError(f"invalid JSON body: {exc}") from exc
     if not isinstance(body, dict):
-        raise _BadRequest("request body must be a JSON object")
+        raise _BadRequestError("request body must be a JSON object")
     return body
 
 
@@ -146,11 +155,12 @@ async def _json_body(request: Request) -> dict:
 
 
 async def _extract_list_connections(request: Request) -> dict:
-    """The optional ``?health=`` filter and ``?limit=`` page cap as the list
-    operation's flat arguments (a GET reads its parameters from the query string,
-    never a body). ``health`` stays a string the operation validates against the
-    health-state enum; ``limit`` is parsed to an int here (a non-integer is a loud
-    400), and the operation range-checks it."""
+    """The optional ``?health=`` filter and ``?limit=`` page cap as the list operation's flat arguments.
+
+    A GET reads its parameters from the query string, never a body. ``health`` stays a string the
+    operation validates against the health-state enum; ``limit`` is parsed to an int here (a
+    non-integer is a loud 400), and the operation range-checks it.
+    """
     health = request.query_params.get("health")
     raw_limit = request.query_params.get("limit")
     if raw_limit is None:
@@ -167,7 +177,7 @@ async def _extract_start_connect(request: Request) -> dict:
     try:
         body = await _json_body(request)
         req = StartConnectRequest.model_validate(body)
-    except _BadRequest as exc:
+    except _BadRequestError as exc:
         raise BadRequestError(str(exc)) from exc
     except ValidationError as exc:
         # Never echo the rejected values (config_values can hold secrets): the body
@@ -188,7 +198,7 @@ async def _extract_reconnect(request: Request) -> dict:
     try:
         body = await _json_body(request)
         req = StartReconnectRequest.model_validate(body)
-    except _BadRequest as exc:
+    except _BadRequestError as exc:
         raise BadRequestError(str(exc)) from exc
     except ValidationError as exc:
         # Field paths + error types only — never the rejected input values.
@@ -205,7 +215,7 @@ async def _extract_patch_sub_services(request: Request) -> dict:
     try:
         body = await _json_body(request)
         req = PatchSubServicesRequest.model_validate(body)
-    except _BadRequest as exc:
+    except _BadRequestError as exc:
         raise BadRequestError(str(exc)) from exc
     except ValidationError as exc:
         # Field paths + error types only — never the rejected input values.
@@ -309,6 +319,7 @@ reencrypt_connector_tokens = register_operation_route(
     action="write",
 )
 async def oauth_complete(request: Request) -> Response:
+    """Complete an OAuth connection flow, serving the discriminated ``/oauth/complete`` body."""
     # OFF gate: with no connector store configured the flow cannot complete. This
     # door carries a discriminated ``{"data": {"kind": ...}}`` body with a
     # load-bearing status, so the OFF state rides that native envelope — a 400 with
@@ -317,7 +328,7 @@ async def oauth_complete(request: Request) -> Response:
         return JSONResponse({"data": {"kind": "not_configured"}}, status_code=400)
     try:
         body = await _json_body(request)
-    except _BadRequest as exc:
+    except _BadRequestError as exc:
         return _error(str(exc), 400)
 
     # A provider-reported error (user cancelled / denied) short-circuits.

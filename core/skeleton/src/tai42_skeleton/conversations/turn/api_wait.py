@@ -14,9 +14,11 @@ from tai42_skeleton.conversations.turn.schedule import _spawn_delivery_on_succes
 
 @dataclass(frozen=True)
 class ApiSubmitResult:
-    """The outcome the API door turns into its HTTP response. ``answer`` is set only when
-    the bounded sync-wait finished the turn in time (→ ``200``); otherwise the turn is
-    still running behind the callback (→ ``202``)."""
+    """The outcome the API door turns into its HTTP response.
+
+    ``answer`` is set only when the bounded sync-wait finished the turn in time (→ ``200``);
+    otherwise the turn is still running behind the callback (→ ``202``).
+    """
 
     message_id: str
     thread_id: str
@@ -26,12 +28,14 @@ class ApiSubmitResult:
 async def _api_wait_or_callback(
     task: asyncio.Task[ConversationRecord], message_id: str, thread_id: str, wait_seconds: int
 ) -> ApiSubmitResult:
-    """The api door's sync-wait / async-callback split, shared by every api-door turn (the
-    message door and an event's turn on an api-door thread). Within ``wait_seconds`` a turn
-    that finished — an answer or an explicit silent marker — is returned inline in the
-    ``200`` and its callback suppressed; otherwise, or on a lost claim to a racing delivery,
-    the delivery spawn is attached to the task's completion so exactly one of the wait path
-    and the callback delivers, and the ``202`` shape is returned."""
+    """The api door's sync-wait / async-callback split, shared by every api-door turn.
+
+    Shared by the message door and an event's turn on an api-door thread. Within
+    ``wait_seconds`` a turn that finished — an answer or an explicit silent marker — is returned
+    inline in the ``200`` and its callback suppressed; otherwise, or on a lost claim to a racing
+    delivery, the delivery spawn is attached to the task's completion so exactly one of the wait
+    path and the callback delivers, and the ``202`` shape is returned.
+    """
     if wait_seconds > 0:
         done, _pending = await asyncio.wait({task}, timeout=wait_seconds)
         if task in done and task.exception() is None:

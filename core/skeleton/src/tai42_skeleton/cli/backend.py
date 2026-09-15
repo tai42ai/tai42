@@ -1,3 +1,5 @@
+"""The ``backend`` CLI command — runs an execution-backend runtime (worker / beat / dashboard)."""
+
 import asyncio
 import logging
 import os
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 async def run_backend(extra_args):
+    """Boot the app and launch the execution-backend runtime, tearing down cleanly on SIGTERM."""
     # Handle SIGTERM (the deployment-standard stop signal) by cancelling this main
     # task: the cancellation unwinds through ``app_context``'s ``finally`` (shutdown
     # handlers + ``_teardown_resources``) so teardown is guaranteed, where an
@@ -32,7 +35,8 @@ async def run_backend(extra_args):
     # last-writer-wins, so a direct install here would be destroyed by it — taking
     # the only guarantee of teardown with it.
     main_task = asyncio.current_task()
-    assert main_task is not None
+    if main_task is None:
+        raise AssertionError
     signal_chain.add(signal.SIGTERM, main_task.cancel, name="backend-main-task-cancel")
 
     # Worker-bus boot rule (fail loud, naming TAI_BUS_REDIS_URL). Run BEFORE the app
@@ -99,7 +103,7 @@ async def run_backend(extra_args):
 @click.argument("extra_args", nargs=-1)
 @click.pass_context
 def main(ctx, manifest_path, extra_args):
-    """Run a tai execution-backend runtime (worker / beat / dashboard).
+    r"""Run a tai execution-backend runtime (worker / beat / dashboard).
 
     \b
     A backend runtime always registers a task backend, so it requires the worker

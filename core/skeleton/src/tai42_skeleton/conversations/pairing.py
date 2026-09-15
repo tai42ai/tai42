@@ -1,5 +1,6 @@
-"""Pairing: the pure inbound classifier the turn engine dispatches on, and the pair-code
-mint behind the ``get_pairing_code`` builtin tool.
+"""Pairing: the pure inbound classifier the turn engine dispatches on, plus the pair-code mint.
+
+The mint sits behind the ``get_pairing_code`` builtin tool.
 
 :func:`classify` turns one inbound message — with NO model judgement and NO fuzzy matching —
 into one of four actions the turn engine dispatches on: mint a fresh pair code (``/link``),
@@ -18,7 +19,8 @@ as plain text (byte-identical to today).
 the resolved target has multichannel turned off, and otherwise mints a fresh single-use code
 for the ``sender`` address — rotating out any code already open for that same conversation. The
 RAW code is returned once, here, and never stored recoverably; composing an invite (typed code,
-or a channel-web ``?tai_pair=`` URL) around it is the operator's job, never the platform's."""
+or a channel-web ``?tai_pair=`` URL) around it is the operator's job, never the platform's.
+"""
 
 from __future__ import annotations
 
@@ -65,8 +67,11 @@ PairingAction = Link | Unlink | Redeem | Passthrough
 
 
 def classify(text: str) -> PairingAction:
-    """Classify ``text`` into a :data:`PairingAction`. Exact-match commands first (the whole
-    trimmed message), then the first embedded pair code, else a passthrough."""
+    """Classify ``text`` into a :data:`PairingAction`.
+
+    Exact-match commands first (the whole trimmed message), then the first embedded pair code,
+    else a passthrough.
+    """
     trimmed = text.strip()
     if trimmed == "/link":
         return Link()
@@ -79,8 +84,9 @@ def classify(text: str) -> PairingAction:
 
 
 async def mint_pairing_code(channel: str, our_identity: str, sender: str) -> tuple[str, datetime]:
-    """Mint a fresh pair code for the ``(channel, our_identity, sender)`` conversation and
-    return ``(code, expires_at)``.
+    """Mint a fresh pair code for the ``(channel, our_identity, sender)`` conversation.
+
+    Returns ``(code, expires_at)``.
 
     ``channel``/``our_identity`` name the medium address the conversation is texted at (the
     route); ``sender`` is the address the code will link. All three must be non-blank: a

@@ -1,5 +1,6 @@
-"""The inbound descriptor, subject/locale, ambient state context and run attribution a turn
-surfaces on its payload and deposits around its target run.
+"""The inbound descriptor, subject/locale, ambient state context and run attribution a turn surfaces.
+
+Surfaced on the turn's payload and deposited around its target run.
 """
 
 from __future__ import annotations
@@ -14,10 +15,13 @@ from tai42_skeleton.conversations.models import ConversationRecord
 
 
 def _inbound_id_and_source(record: ConversationRecord, route: ConversationRoute) -> tuple[str | None, str | None]:
-    """The inbound descriptor's ``id`` and ``source``: the channel provider id / the event
-    id / the api record id, and the channel name / ``event:{kind}`` / ``api`` — the door the
-    turn entered through, named generically. Shared by the ``turn`` block and the ambient
-    conversation state context so both name the same inbound message."""
+    """The inbound descriptor's ``id`` and ``source`` for this record.
+
+    The ``id`` is the channel provider id / the event id / the api record id; the
+    ``source`` is the channel name / ``event:{kind}`` / ``api`` — the door the
+    turn entered through, named generically. Shared by the ``turn`` block and the
+    ambient conversation state context so both name the same inbound message.
+    """
     if record.inbound_kind == "event":
         # The model invariant guarantees an event record carries its ``inbound_event``.
         event = record.inbound_event or {}
@@ -28,11 +32,14 @@ def _inbound_id_and_source(record: ConversationRecord, route: ConversationRoute)
 
 
 def _resolved_locale(person: Person | None, record: ConversationRecord, route: ConversationRoute) -> str | None:
-    """The subject's locale for the rendering layer, by precedence: a person's STORED locale
-    (an operator override or a first-contact seed) wins, else the channel's per-message hint
-    on this record, else the route's operator-declared default, else ``None`` — the explicit
-    "no locale known" the renderer never silently defaults away. Every stored form is already
-    canonical, so no reparse here."""
+    """The subject's locale for the rendering layer, by precedence.
+
+    A person's STORED locale (an operator override or a first-contact seed) wins,
+    else the channel's per-message hint on this record, else the route's
+    operator-declared default, else ``None`` — the explicit "no locale known" the
+    renderer never silently defaults away. Every stored form is already canonical,
+    so no reparse here.
+    """
     if person is not None and person.locale is not None:
         return person.locale
     if record.inbound_locale is not None:
@@ -43,12 +50,15 @@ def _resolved_locale(person: Person | None, record: ConversationRecord, route: C
 def _turn_block(
     record: ConversationRecord, route: ConversationRoute, *, person: Person | None, thread_id: str
 ) -> dict[str, object]:
-    """The generic ``turn`` block surfaced on EVERY tool turn's payload: the turn id (the
-    record's ``message_id``, no new mint), the inbound descriptor (``inbound.id`` /
-    ``inbound.kind`` message/event / ``inbound.source``), and the ``subject`` block a flow's
-    ``subject_expr`` reads — the target scope plus the ``person`` id (null off a
-    non-multichannel target) and the resolved ``thread`` id, the same candidates the ambient
-    state context carries."""
+    """The generic ``turn`` block surfaced on every tool turn's payload.
+
+    Carries the turn id (the record's ``message_id``, no new mint), the inbound
+    descriptor (``inbound.id`` / ``inbound.kind`` message/event /
+    ``inbound.source``), and the ``subject`` block a flow's ``subject_expr``
+    reads — the target scope plus the ``person`` id (null off a non-multichannel
+    target) and the resolved ``thread`` id, the same candidates the ambient state
+    context carries.
+    """
     inbound_id, source = _inbound_id_and_source(record, route)
     return {
         "id": record.message_id,
@@ -66,13 +76,14 @@ def _turn_block(
 def _conversation_state_context(
     route: ConversationRoute, intake: ConversationRecord, person: Person | None, *, actor: str | None
 ) -> StateContext:
-    """The ambient :class:`StateContext` a conversation turn deposits so every downstream
-    state write resolves its subject and completes its provenance from this one door.
+    """The ambient :class:`StateContext` a conversation turn deposits for downstream state writes.
 
-    The candidates are the ``thread`` (always) and the ``person`` id (only a multichannel
+    Every downstream state write resolves its subject and completes its
+    provenance from this one door. The candidates are the ``thread`` (always) and the ``person`` id (only a multichannel
     target resolves a person), keyed under the route's target scope; ``actor`` is the turn's
     generic attribution ``user_id``, ``turn_id`` the intake's ``message_id`` and ``inbound_id``
-    the inbound message the turn answers — the same identity the run trace is stamped with."""
+    the inbound message the turn answers — the same identity the run trace is stamped with.
+    """
     by_kind: dict[str, str] = {"thread": intake.thread_id}
     if person is not None:
         by_kind["person"] = person.person_id
@@ -102,7 +113,8 @@ def _conversation_attribution(
     RESOLVED thread — the route-keyed ``bridge:{route}:{address}`` or the ``@person``
     aggregated thread — so a person's runs across channels group under one session.
     ``tags`` carry the route; ``metadata`` carries the channel + our-identity (present
-    only for a channel door). All generic — the platform assigns no meaning."""
+    only for a channel door). All generic — the platform assigns no meaning.
+    """
     metadata: dict[str, Any] = {}
     if intake.channel is not None:
         metadata["channel"] = intake.channel

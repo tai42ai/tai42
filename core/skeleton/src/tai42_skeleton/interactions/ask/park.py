@@ -1,6 +1,9 @@
-"""The async park's resume binding: capture the resume continuation + execution
-identity + fingerprint + state-context + bound thread when a park is raised, and
-notify a chained caller when the run it addresses re-parks."""
+"""The async park's resume binding and re-park notice.
+
+Capture the resume continuation + execution identity + fingerprint +
+state-context + bound thread when a park is raised, and notify a chained caller
+when the run it addresses re-parks.
+"""
 
 from __future__ import annotations
 
@@ -29,9 +32,12 @@ _PARK_COMPLETION_THREAD_KEY = PARK_COMPLETION_THREAD_KEY
 
 @dataclass(frozen=True)
 class AsyncParkBinding:
-    """The resume binding an async park is stamped with: the resume continuation tool,
-    the execution identity + key fingerprint to rebind it as, the parking turn's state
-    context, and the bound conversation thread (all ``None`` for a sync ask)."""
+    """The fields an async park's resume binding carries.
+
+    The resume continuation tool, the execution identity + key fingerprint to
+    rebind it as, the parking turn's state context, and the bound conversation
+    thread (all ``None`` for a sync ask).
+    """
 
     continuation_tool: str | None = None
     continuation_identity: str | None = None
@@ -41,10 +47,13 @@ class AsyncParkBinding:
 
 
 def resolve_async_continuation() -> AsyncParkBinding:
-    """Resolve the async park's resume tool + execution identity + fingerprint +
-    state-context + bound thread, raising loudly when a driver/identity is missing —
-    an async ask with no bound driver or no identity to rebind it as is a caller error
-    that must fail loudly, never persist a question no answer/expiry could resume."""
+    """Resolve the async park's resume binding, raising loudly when a driver/identity is missing.
+
+    Captures the resume tool + execution identity + fingerprint + state-context +
+    bound thread. An async ask with no bound driver or no identity to rebind it
+    as is a caller error that must fail loudly, never persist a question no
+    answer/expiry could resume.
+    """
     continuation_tool = get_resume_continuation_tool()
     if continuation_tool is None:
         raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
@@ -80,8 +89,9 @@ def resolve_async_continuation() -> AsyncParkBinding:
 
 
 def bound_park_thread_id() -> str | None:
-    """The conversation thread this async park belongs to, or ``None`` when none is bound
-    (a background tool run, a direct/agent-less ask). Two turn-layer bindings expose it and
+    """The conversation thread this async park belongs to, or ``None`` when none is bound.
+
+    A background tool run or a direct/agent-less ask has none. Two turn-layer bindings expose it and
     this reads whichever is set, staying engine-agnostic (it names no engine, only the
     generic bindings):
 
@@ -115,7 +125,8 @@ def bound_park_thread_id() -> str | None:
       to the same thread; an unchained one clears the binding, and the park is unindexed.
 
     Closing the open cases means the resume drive (and the tool-turn door) establishing the thread
-    binding in their own right, left to a follow-up."""
+    binding in their own right, left to a follow-up.
+    """
     _completion_tool, completion_ctx = get_park_completion()
     if completion_ctx is not None:
         candidate = completion_ctx.get(_PARK_COMPLETION_THREAD_KEY)
@@ -132,15 +143,17 @@ def bound_park_thread_id() -> str | None:
 
 
 async def notify_repark(expiry_at: datetime | None, *, interaction_id: str) -> None:
-    """Tell a CHAINED completion binding that the run it addresses just parked on a new ask,
-    so a caller whose own suspension horizon was inherited from that run can refresh it.
+    """Tell a CHAINED completion binding that the run it addresses just parked on a new ask.
+
+    A caller whose own suspension horizon was inherited from that run can then refresh it.
 
     Fired only when :func:`repark_notice` reports a chained binding — every other completion
     binding (and no binding at all) is silent, so no delivery tool ever sees a fire it has no
     horizon to answer. BEST-EFFORT by construction: the notice refreshes a horizon, it never
     carries an answer, so a failing notifier is logged and swallowed rather than turning a
     successfully persisted park into a failed ``ask_user``. The cost of a lost notice is a
-    caller whose horizon stays at the previous ask's deadline."""
+    caller whose horizon stays at the previous ask's deadline.
+    """
     notice = repark_notice(expiry_at)
     if notice is None:
         return

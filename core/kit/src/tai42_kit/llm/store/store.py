@@ -1,3 +1,5 @@
+"""Key-value store creation for the LLM runtime across the supported providers."""
+
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -137,8 +139,7 @@ async def _create_redis_store(conn_string: str | None, store_kwargs: dict[str, A
 
 
 async def create_store_resource(provider: str, conn_string: str | None = None, **kwargs) -> tuple[Resource, CleanupFn]:
-    """
-    Creates a long-lived connection resource for the Store.
+    """Creates a long-lived connection resource for the Store.
 
     A ``None`` conn string falls back per provider to the base connection
     namespace: ``redis`` to the base Redis URL (``REDIS_URL`` /
@@ -148,7 +149,6 @@ async def create_store_resource(provider: str, conn_string: str | None = None, *
     ARCHITECTURAL NOTES:
         Resources are cached indefinitely (no LRU) as this is a single-deployment instance.
     """
-
     store_kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
     match provider:
@@ -165,6 +165,7 @@ async def create_store_resource(provider: str, conn_string: str | None = None, *
 
 
 def get_store_from_resource(provider: str, resource: Resource, **kwargs) -> BaseStore:
+    """Build the store for ``provider`` from an already-open ``resource``, passing ``kwargs`` to the store."""
     match provider:
         case "memory" | "sqlite" | "redis":
             return resource

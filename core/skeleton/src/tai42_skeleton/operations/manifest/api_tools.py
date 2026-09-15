@@ -15,10 +15,12 @@ from .models import ApiToolsListsUpdate
 
 
 def _edit_name_list(current: list[Any], add: list[str], remove: list[str], field: str) -> list[str]:
-    """The edited ``api_tools`` include/exclude list. A name in ``add`` already present is
-    refused (``ValueError`` naming it); a name in ``remove`` absent is refused
-    (``LookupError`` naming it). Order-stable: kept names first, additions appended. Pure
-    / re-runnable: builds a fresh list from the arguments."""
+    """The edited ``api_tools`` include/exclude list.
+
+    A name in ``add`` already present is refused (``ValueError`` naming it); a name in
+    ``remove`` absent is refused (``LookupError`` naming it). Order-stable: kept names
+    first, additions appended. Pure / re-runnable: builds a fresh list from the arguments.
+    """
     names = [str(n) for n in current]
     present = set(names)
     already = sorted(n for n in add if n in present)
@@ -47,6 +49,11 @@ async def update_api_tools(
     exclude_add: list[str] | None = None,
     exclude_remove: list[str] | None = None,
 ) -> dict:
+    """Add/remove names on the ``api_tools`` include/exclude lists and hot-reload the manifest.
+
+    Returns the apply response. An empty change, a duplicate add, or a missing remove is a
+    loud 400/404.
+    """
     include_add = include_add or []
     include_remove = include_remove or []
     exclude_add = exclude_add or []
@@ -54,7 +61,7 @@ async def update_api_tools(
     with translate_orphan_env_write():
         try:
             if not (include_add or include_remove or exclude_add or exclude_remove):
-                raise ValueError("nothing to change")
+                raise ValueError("nothing to change")  # noqa: TRY301 translated to BadRequestError below
 
             def mutator(document: dict[str, Any]) -> None:
                 api_tools = document.get("api_tools")

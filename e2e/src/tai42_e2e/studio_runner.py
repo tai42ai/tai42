@@ -70,7 +70,7 @@ from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.topology import Infra, StackConfig, StackResources
 from tai42_e2e.variants import Variants
-from tai42_e2e.waiting import WaitTimeout, wait_for
+from tai42_e2e.waiting import WaitTimeoutError, wait_for
 
 
 class StudioRunnerSettings(BaseSettings):
@@ -225,7 +225,7 @@ def _free_pinned_ports(pinned: list[int]) -> None:
     for pid in holders:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGTERM)
-    with contextlib.suppress(WaitTimeout):
+    with contextlib.suppress(WaitTimeoutError):
         wait_for(_all_free, deadline=10.0)
     if not _all_free():
         for pid in holders:

@@ -1,5 +1,4 @@
-"""The one validate + apply layer over the subject-keyed record store — the platform
-half of the state feature.
+"""The one validate + apply layer over the subject-keyed record store — the platform half of the state feature.
 
 Holds a :class:`~tai42_skeleton.states.store.PostgresStatesStore`; every door refuses
 loudly (:class:`~tai42_contract.states.errors.StatesNotConfiguredError`, 501) while the

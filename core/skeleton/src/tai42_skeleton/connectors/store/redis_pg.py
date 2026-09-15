@@ -148,6 +148,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
     """Redis-cached, Postgres-durable token store."""
 
     def __init__(self) -> None:
+        """Load the connector-store settings and cache the Redis key prefix."""
         settings = connector_store_settings()
         self._settings = settings
         self._key_prefix = settings.key_prefix
@@ -181,7 +182,8 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         cache; that must never mask an already-durable Postgres write, so we log
         a WARNING, then delete the key so the next ``get`` repopulates from
         Postgres. If that delete also fails, we log LOUDLY (ERROR) — the record
-        may be served stale until its ``session_expires_at`` TTL elapses."""
+        may be served stale until its ``session_expires_at`` TTL elapses.
+        """
         key = self._rec_key(connection_id)
         expire_at = _expireat_arg(session_expires_at)
         try:
@@ -208,8 +210,10 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
             await self._invalidate_after_failed_write(connection_id)
 
     async def _invalidate_after_failed_write(self, connection_id: str) -> None:
-        """Drop a possibly-stale cache entry after a failed cache write. If the
-        delete itself fails the entry may linger until its TTL, so log LOUDLY."""
+        """Drop a possibly-stale cache entry after a failed cache write.
+
+        If the delete itself fails the entry may linger until its TTL, so log LOUDLY.
+        """
         try:
             async with client_ctx(RedisClient, self._settings.redis) as client:
                 await client.delete(self._rec_key(connection_id))
@@ -225,6 +229,10 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
     # -- ConnectorTokenStore API ---------------------------------------------
 
     async def get(self, connection_id: str, *, include_expired: bool = False) -> bytes | None:
+        """Return the connection's token blob, hot from Redis then durable from Postgres, or ``None``.
+
+        ``include_expired`` widens the durable fallback to a lapsed-session record for cleanup paths.
+        """
         # 1) Redis hot path. A cached entry is only ever an unexpired record (its
         # key carries the session EXPIREAT, so an expired record has already been
         # evicted), so this hot hit is valid for both callers — include_expired
@@ -287,6 +295,11 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         provider_id: str | None = None,
         alias: str | None = None,
     ) -> bool:
+        """Persist the connection's token ``blob`` durably, then refresh the cache; return whether it committed.
+
+        ``create_only`` inserts only when absent; ``expected_blob`` makes it a compare-and-set that
+        returns ``False`` on a miss (a peer rotated the record first).
+        """
         blob, expected_blob = self._validate_put_args(blob, create_only, expected_blob, provider_id, alias)
         conn_uuid = self._as_uuid(connection_id)
 
@@ -319,8 +332,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         provider_id: str | None,
         alias: str | None,
     ) -> tuple[bytes, bytes | None]:
-        """Validate and normalize the ``put`` arguments, returning the coerced ``blob`` and
-        ``expected_blob``."""
+        """Validate and normalize the ``put`` arguments, returning the coerced ``blob`` and ``expected_blob``."""
         if not isinstance(blob, (bytes, bytearray)):
             raise TypeError("blob must be bytes")
         blob = bytes(blob)
@@ -339,9 +351,10 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
 
     @staticmethod
     async def _put_create_only(cur, conn_uuid, provider_id, alias, blob, session_expires_at, connection_id) -> int:
-        """The create-only INSERT (ON CONFLICT DO NOTHING); raises AliasInUseError on an
-        alias collision and ConnectorError when the record already exists. Returns the
-        cache version."""
+        """The create-only INSERT (ON CONFLICT DO NOTHING), returning the cache version.
+
+        Raises AliasInUseError on an alias collision and ConnectorError when the record already exists.
+        """
         try:
             await cur.execute(
                 "INSERT INTO connector_connections "
@@ -364,9 +377,11 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
 
     @staticmethod
     async def _put_compare_and_set(cur, conn_uuid, blob, expected_blob, session_expires_at) -> int | None:
-        """Atomic compare-and-set on the durable source of truth: commit only if the stored
-        ciphertext still equals the blob the caller refreshed from, bumping the version. 0
-        rows ⇒ a peer rotated it first (or it's gone) ⇒ CAS miss (``None``), caller lost."""
+        """Atomic compare-and-set on the durable source of truth, bumping the version on commit.
+
+        Commit only if the stored ciphertext still equals the blob the caller refreshed from. 0
+        rows ⇒ a peer rotated it first (or it's gone) ⇒ CAS miss (``None``), caller lost.
+        """
         await cur.execute(
             "UPDATE connector_connections "
             "SET encrypted_blob = %s, "
@@ -385,11 +400,13 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
 
     @staticmethod
     async def _put_upsert(cur, conn_uuid, provider_id, alias, blob, session_expires_at, connection_id) -> int:
-        """The plain upsert (ON CONFLICT DO UPDATE). It writes the plaintext
-        provider_id/alias on both branches (EXCLUDED.*), so an update overwrites the stored
-        identity to match the incoming one; the ``UNIQUE (provider_id, alias)`` constraint
+        """The plain upsert (ON CONFLICT DO UPDATE), returning the cache version.
+
+        It writes the plaintext provider_id/alias on both branches (EXCLUDED.*), so an update overwrites
+        the stored identity to match the incoming one; the ``UNIQUE (provider_id, alias)`` constraint
         can therefore trip here too, surfaced as AliasInUseError like the create-only path.
-        Returns the cache version, raising loudly if RETURNING yields no row."""
+        Raises loudly if RETURNING yields no row.
+        """
         try:
             await cur.execute(
                 "INSERT INTO connector_connections "
@@ -417,6 +434,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         return int(row[0])
 
     async def delete(self, connection_id: str) -> None:
+        """Delete the connection's durable record, then version-fence-tombstone or drop its cache entry."""
         conn_uuid = self._as_uuid(connection_id)
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -469,6 +487,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
             await self._invalidate_after_failed_write(connection_id)
 
     async def list(self) -> list[str]:
+        """Every non-expired connection id, read Postgres-authoritatively and sorted."""
         # Postgres-authoritative: the primary key covers the listing read as an
         # index-only scan, it's a low-frequency path (catalog / connections
         # list), and it sidesteps the cold-vs-empty ambiguity a Redis index set

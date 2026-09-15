@@ -14,7 +14,7 @@ from urllib.parse import parse_qs
 import pytest
 from tai42_contract.secrets import SecretValue
 
-from tai42_tools_stripe._internal.tools.stripe_client import STRIPE_API_VERSION, StripeLivemodeMismatch
+from tai42_tools_stripe._internal.tools.stripe_client import STRIPE_API_VERSION, StripeLivemodeMismatchError
 from tai42_tools_stripe.tools.create_stripe_webhook_endpoint import create_stripe_webhook_endpoint
 
 _URL = "https://acme.example/hook"
@@ -109,7 +109,7 @@ def test_non_2xx_propagates(stripe_env: Callable[..., None], stub_server: Any) -
 def test_livemode_mismatch_on_created_endpoint_raises(stripe_env: Callable[..., None], stub_server: Any) -> None:
     stripe_env(secret_key="sk_test_abc", api_base=stub_server.base_url)
     stub_server.set_responder(_responder(livemode=True))  # test key, live endpoint -> mismatch
-    with pytest.raises(StripeLivemodeMismatch):
+    with pytest.raises(StripeLivemodeMismatchError):
         _call()
 
 

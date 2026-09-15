@@ -115,8 +115,10 @@ def volume_name(workspace_key: str) -> str:
 
 
 def _reject_vm(isolation: str | None) -> None:
-    """A ``vm`` floor is above the container boundary this provider can give — reject
-    it loudly rather than silently run a weaker tier."""
+    """A ``vm`` floor is above the container boundary this provider can give — reject it loudly.
+
+    Never silently run a weaker tier.
+    """
     if isolation == "vm":
         raise SandboxSpecRejectedError(
             "provider offers container isolation; the requested 'vm' isolation floor is above what it can give"
@@ -150,7 +152,8 @@ def _workspace_mount(spec: SandboxSessionSpec) -> dict[str, Any]:
     A persistent session binds the named ``tai-sbx-<key>`` volume; an ephemeral one
     binds an anonymous volume (empty ``Source``) removed with the container. No host
     bind mount of any path is ever produced — the single-workspace-mount isolation
-    invariant."""
+    invariant.
+    """
     source = volume_name(spec.workspace_key) if spec.durability == "persistent" else ""
     return {"Target": WORKSPACE_PATH, "Source": source, "Type": "volume", "ReadOnly": False}
 
@@ -161,13 +164,14 @@ def build_container_config(
     default_cpu: float | None = None,
     default_memory_mb: int | None = None,
 ) -> dict[str, Any]:
-    """Map a policy-resolved :class:`SandboxSessionSpec` onto the engine ContainerCreate
-    payload, or REJECT what the provider cannot enforce.
+    """Map a policy-resolved :class:`SandboxSessionSpec` onto the engine ContainerCreate payload, or REJECT it.
 
+    Rejects what the provider cannot enforce.
     Hardening is stamped on EVERY container (``no-new-privileges``, all capabilities
     dropped, never privileged, a writable rootfs only so ``/workspace`` is writable),
     and the mount set is exactly the one workspace volume. A ``spec.env`` value is a
-    ``SecretStr`` unwrapped ONLY here at the engine call."""
+    ``SecretStr`` unwrapped ONLY here at the engine call.
+    """
     _reject_vm(spec.isolation)
 
     host_config: dict[str, Any] = {
@@ -207,15 +211,15 @@ _PROBE_WORKDIR = "/"
 
 
 def probe_container_config(image: str) -> dict[str, Any]:
-    """The ContainerCreate payload for the throwaway egress-tier readiness-probe
-    container.
+    """The ContainerCreate payload for the throwaway egress-tier readiness-probe container.
 
     Anonymous (no name, so it never collides with a session's deterministic name), an
     idle init driven only by exec, the same hardening posture as a session container
     (``no-new-privileges``, all capabilities dropped, never privileged), on the
     ``egress`` tier the firewall governs, and carrying the reserved sandbox label plus
     the ephemeral durability marker so orphan recovery reaps it if the process dies
-    mid-probe. It mounts no workspace volume — the probe needs none."""
+    mid-probe. It mounts no workspace volume — the probe needs none.
+    """
     return {
         "Image": image,
         "Cmd": list(IDLE_COMMAND),
@@ -240,6 +244,7 @@ class DockerSandbox(ManagedSandbox):
     """
 
     def __init__(self, *, docker: Any | None = None, settings: DockerSandboxSettings | None = None) -> None:
+        """Store the optional injected ``docker`` client and ``settings`` override, deferring engine connect."""
         super().__init__()
         self._injected_client = docker
         self._settings_override = settings
@@ -276,9 +281,11 @@ class DockerSandbox(ManagedSandbox):
         return Docker(url=url, ssl_context=ssl_context)
 
     def _build_ssl_context(self, settings: DockerSandboxSettings) -> ssl.SSLContext:
-        """The mTLS client identity that speaks the engine control API. Loaded from the
-        canonical ``/certs/client`` mount; a load failure names the paths, never their
-        contents."""
+        """The mTLS client identity that speaks the engine control API.
+
+        Loaded from the canonical ``/certs/client`` mount; a load failure names the paths, never their
+        contents.
+        """
         try:
             context = ssl.create_default_context(cafile=settings.tls_ca_path)
             # Loading a real client identity needs real certs — exercised by the live
@@ -303,10 +310,11 @@ class DockerSandbox(ManagedSandbox):
         )
 
     def _engine_error(self, exc: DockerError) -> SandboxError:
-        """Re-type an engine :class:`DockerError` as a typed :class:`SandboxError`; a
-        connection-level status ALSO marks the engine unverified, so a disconnect on
-        any engine call (create, exec, list, destroy) makes the next create re-prove
-        the egress firewall."""
+        """Re-type an engine :class:`DockerError` as a typed :class:`SandboxError`.
+
+        A connection-level status ALSO marks the engine unverified, so a disconnect on any engine call
+        (create, exec, list, destroy) makes the next create re-prove the egress firewall.
+        """
         if is_engine_unreachable(exc.status):
             self._engine_verified = False
         return engine_error(exc)
@@ -357,7 +365,8 @@ class DockerSandbox(ManagedSandbox):
         of concurrent creates funnels through the lock so exactly one probe runs, and a
         create that waited behind a successful probe re-reads the flag and skips its own.
         A probe that cannot prove readiness raises loudly; the flag stays False so the
-        next create re-probes."""
+        next create re-probes.
+        """
         if not settings.readiness_probe_enabled or self._engine_verified:
             return
         async with self._probe_lock:
@@ -371,7 +380,8 @@ class DockerSandbox(ManagedSandbox):
 
         Derives the DENY target (the configured engine control address, resolved to an
         IP) and hands the probe to :meth:`_probe_egress`; on the bound expiring the
-        create is refused loudly."""
+        create is refused loudly.
+        """
         deny_host, deny_port = engine_control_address(settings.host)
         deny_ip = await self._resolve_deny_ip(deny_host)
         docker = await self._engine()
@@ -393,8 +403,7 @@ class DockerSandbox(ManagedSandbox):
         return await loop.run_in_executor(None, resolve_ipv4, host)
 
     async def _probe(self, docker: Any, settings: DockerSandboxSettings, deny_ip: str, deny_port: int) -> None:
-        """Create the throwaway probe container, run the two egress checks through it,
-        and force-remove it whether the probe passes or fails."""
+        """Create the throwaway probe container, run the two egress checks through it, then force-remove it."""
         await self._ensure_image(docker, settings.readiness_probe_image, settings.pull_policy)
         try:
             container = await docker.containers.create(probe_container_config(settings.readiness_probe_image))
@@ -419,9 +428,11 @@ class DockerSandbox(ManagedSandbox):
             await self._remove_probe_container(container)
 
     async def _probe_egress(self, session: DockerSandboxSession, deny_ip: str, deny_port: int) -> None:
-        """The two checks that mirror the e2e teeth: the DENY target (the engine control
-        address) must NOT connect from a session, and the ALLOW target (the session's own
-        resolver) MUST. A failure of either is a loud refusal — never a vacuous pass."""
+        """The two egress checks that mirror the e2e teeth.
+
+        The DENY target (the engine control address) must NOT connect from a session, and the ALLOW target
+        (the session's own resolver) MUST. A failure of either is a loud refusal — never a vacuous pass.
+        """
         resolver = resolver_from_resolv_conf(await self._probe_read_resolv_conf(session))
         if await self._probe_dial(session, deny_ip, deny_port):
             raise SandboxError(
@@ -444,8 +455,10 @@ class DockerSandbox(ManagedSandbox):
         return result.stdout
 
     async def _probe_dial(self, session: DockerSandboxSession, host: str, port: int) -> bool:
-        """Whether a ``nc`` TCP dial from inside the probe container connected to
-        ``host:port`` — exit 0 means the socket opened, mirroring the e2e ``tcp_dials``."""
+        """Whether a ``nc`` TCP dial from inside the probe container connected to ``host:port``.
+
+        Exit 0 means the socket opened, mirroring the e2e ``tcp_dials``.
+        """
         result = await session.exec(
             ["nc", "-w", str(PROBE_DIAL_WAIT_SECONDS), host, str(port)],
             cwd=_PROBE_WORKDIR,
@@ -464,8 +477,10 @@ class DockerSandbox(ManagedSandbox):
                 raise self._engine_error(exc) from exc
 
     async def _create_or_adopt(self, docker: Any, config: dict[str, Any], workspace_key: str) -> Any:
-        """Idempotent create for a persistent workspace: adopt an existing container of
-        the same name rather than racing a second one over the shared volume."""
+        """Idempotent create for a persistent workspace.
+
+        Adopt an existing container of the same name rather than racing a second one over the shared volume.
+        """
         name = container_name(workspace_key)
         existing = await self._get_container(docker, name)
         if existing is not None:
@@ -497,15 +512,19 @@ class DockerSandbox(ManagedSandbox):
             await container.start()
 
     async def _ensure_volume(self, docker: Any, spec: SandboxSessionSpec) -> None:
-        """Create (or adopt) the durable named volume. If the engine cannot provide a
-        named volume the persistent request is REJECTED — never downgraded to ephemeral."""
+        """Create (or adopt) the durable named volume.
+
+        If the engine cannot provide a named volume the persistent request is REJECTED — never downgraded
+        to ephemeral.
+        """
         name = volume_name(spec.workspace_key)
         try:
             await docker.volumes.get(name)
-            return
         except DockerError as exc:
             if exc.status != 404:
                 raise self._engine_error(exc) from exc
+        else:
+            return
         try:
             await docker.volumes.create(
                 {
@@ -526,10 +545,11 @@ class DockerSandbox(ManagedSandbox):
     async def _ensure_image(self, docker: Any, image: str, pull_policy: str) -> None:
         try:
             await docker.images.inspect(image)
-            return
         except DockerError as exc:
             if exc.status != 404:
                 raise self._engine_error(exc) from exc
+        else:
+            return
         if pull_policy == "never":
             raise SandboxError(
                 f"image {image!r} is absent on the engine and pull_policy is 'never' (airgapped): refusing to pull"
@@ -542,10 +562,11 @@ class DockerSandbox(ManagedSandbox):
     async def _ensure_internal_network(self, docker: Any) -> None:
         try:
             await docker.networks.get(INTERNAL_NETWORK)
-            return
         except DockerError as exc:
             if exc.status != 404:
                 raise self._engine_error(exc) from exc
+        else:
+            return
         try:
             await docker.networks.create({"Name": INTERNAL_NETWORK, "Internal": True, "Labels": {LABEL_SANDBOX: "1"}})
         except DockerError as exc:
@@ -555,7 +576,8 @@ class DockerSandbox(ManagedSandbox):
             raise self._engine_error(exc) from exc
 
     async def _destroy_session_resources(self, session: ManagedSandboxSession, *, remove_workspace: bool) -> None:
-        assert isinstance(session, DockerSandboxSession)
+        if not (isinstance(session, DockerSandboxSession)):
+            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         docker = await self._engine()
         try:
             await session._container.delete(force=True, v=True)

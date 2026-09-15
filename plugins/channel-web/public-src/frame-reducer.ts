@@ -8,17 +8,6 @@
  * de-duplicated by entry id and a redelivered entry replaces its twin in place
  * rather than appending a second bubble.
  */
-import type { SseFrame } from '@/sse';
-import {
-  ANSWER_FORMATS,
-  type AnswerFormat,
-  type CardOption,
-  type ChatItem,
-  type LocationPoint,
-  type MediaItem,
-  type OptionSection,
-  type StreamModel,
-} from '@/transcript-model';
 import {
   cardOptionsOf,
   clientMessageIdOf,
@@ -35,6 +24,17 @@ import {
   parseJson,
   sectionsOf,
 } from '@/frame-parse';
+import type { SseFrame } from '@/sse';
+import {
+  ANSWER_FORMATS,
+  type AnswerFormat,
+  type CardOption,
+  type ChatItem,
+  type LocationPoint,
+  type MediaItem,
+  type OptionSection,
+  type StreamModel,
+} from '@/transcript-model';
 
 /** What one frame did: advanced the model, completed the backlog, or arrived
  * malformed (which the caller surfaces — it is never swallowed). */

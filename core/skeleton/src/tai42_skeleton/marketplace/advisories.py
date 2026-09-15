@@ -47,8 +47,10 @@ logger = logging.getLogger(__name__)
 
 
 class AdvisoryState(BaseModel):
-    """A snapshot of the advisories affecting the installed plugins, with the
-    UTC time it was fetched. Frozen: a served state is an immutable snapshot."""
+    """A snapshot of the advisories affecting the installed plugins, with the UTC time it was fetched.
+
+    Frozen: a served state is an immutable snapshot.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -113,8 +115,7 @@ async def refresh() -> AdvisoryState:
 
 
 async def current(max_age_s: int) -> AdvisoryState:
-    """The cached snapshot when it is younger than ``max_age_s``, else a fresh
-    :func:`refresh`.
+    """The cached snapshot when it is younger than ``max_age_s``, else a fresh :func:`refresh`.
 
     The route passes ``marketplace_settings().advisories_interval_s``, so an
     operator never reads state older than the documented interval — whether or not
@@ -176,11 +177,13 @@ def _spawn_poll_if_enabled() -> None:
 
 
 def _register_task_with_epoch(task: asyncio.Task[None]) -> None:
-    """Register this poll task's cancel with the epoch under construction, so the epoch
-    retire cancels exactly the generation's own task and no timer outlives its epoch. A
-    no-op when no epoch is installed (a bare unit context). The cancel awaits the task
-    only when it lives on the loop the retire runs on, so a task left on a torn-down
-    build loop is cancelled without a cross-loop await."""
+    """Register this poll task's cancel with the epoch under construction.
+
+    So the epoch retire cancels exactly the generation's own task and no timer outlives
+    its epoch. A no-op when no epoch is installed (a bare unit context). The cancel awaits
+    the task only when it lives on the loop the retire runs on, so a task left on a
+    torn-down build loop is cancelled without a cross-loop await.
+    """
     from tai42_skeleton.app.epoch import epoch_under_construction_or_none
 
     epoch = epoch_under_construction_or_none()
@@ -199,8 +202,7 @@ def _register_task_with_epoch(task: asyncio.Task[None]) -> None:
 
 
 async def _cancel_and_await_poll_task() -> None:
-    """Cancel the running poll task and await it, suppressing only its
-    ``CancelledError``."""
+    """Cancel the running poll task and await it, suppressing only its ``CancelledError``."""
     global _poll_task
     task = _poll_task
     _poll_task = None
@@ -211,8 +213,7 @@ async def _cancel_and_await_poll_task() -> None:
 
 
 def _on_poll_done(task: asyncio.Task[None]) -> None:
-    """Surface an unexpected poll-task death at ERROR; a cancellation (the normal
-    stop) stays silent."""
+    """Surface an unexpected poll-task death at ERROR; a cancellation (the normal stop) stays silent."""
     if task.cancelled():
         return
     exc = task.exception()
@@ -248,11 +249,12 @@ async def _poll_loop() -> None:
 
 
 def _affects(affected_versions: Any, version: str) -> bool:
-    """Whether ``version`` falls in an advisory's ``affected_versions`` specifier
-    set. ``prereleases=True`` so an installed prerelease is matched against a range
-    (matching one exact version otherwise skips prerelease-preference semantics). A
-    malformed ``affected_versions`` is garbled registry data →
-    :class:`RegistryResponseError`."""
+    """Whether ``version`` falls in an advisory's ``affected_versions`` specifier set.
+
+    ``prereleases=True`` so an installed prerelease is matched against a range (matching
+    one exact version otherwise skips prerelease-preference semantics). A malformed
+    ``affected_versions`` is garbled registry data → :class:`RegistryResponseError`.
+    """
     try:
         specifier = SpecifierSet(affected_versions)
         return specifier.contains(version, prereleases=True)

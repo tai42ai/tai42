@@ -34,11 +34,12 @@ _LIST_PAGE_CEILING = 100
 
 
 class TwilioSettings(TaiBaseSettings):
-    """Twilio provisioning-tool configuration, read from the ``CHANNEL_TWILIO_``
-    env group shared with the deployment's Twilio channel: the same account SID,
-    auth token, and REST base configure both. The auth token is a ``SecretStr``
-    (never in a repr/log/traceback); its plaintext is read only at the Basic-auth
-    seam."""
+    """Twilio provisioning-tool configuration, read from the ``CHANNEL_TWILIO_`` env group.
+
+    Shared with the deployment's Twilio channel: the same account SID, auth token, and REST base configure
+    both. The auth token is a ``SecretStr`` (never in a repr/log/traceback); its plaintext is read only at
+    the Basic-auth seam.
+    """
 
     model_config = SettingsConfigDict(env_prefix="CHANNEL_TWILIO_")
 
@@ -57,8 +58,10 @@ def twilio_settings() -> TwilioSettings:
 
 
 def _account_sid() -> str:
-    """The configured account SID. Missing and EMPTY are the same failure and both
-    raise naming ``CHANNEL_TWILIO_ACCOUNT_SID``."""
+    """The configured account SID.
+
+    Missing and EMPTY are the same failure and both raise naming ``CHANNEL_TWILIO_ACCOUNT_SID``.
+    """
     sid = twilio_settings().account_sid
     if not sid:
         raise ValueError("CHANNEL_TWILIO_ACCOUNT_SID is not set (missing or empty)")
@@ -66,10 +69,12 @@ def _account_sid() -> str:
 
 
 def _auth_token() -> str:
-    """The configured auth token, revealed. Missing and EMPTY are the same failure
-    and both raise naming ``CHANNEL_TWILIO_AUTH_TOKEN`` (never the value): an empty
-    token parses to ``SecretStr("")`` (not ``None``), so a plain ``is None`` test
-    would send an empty-password Basic header to Twilio."""
+    """The configured auth token, revealed.
+
+    Missing and EMPTY are the same failure and both raise naming ``CHANNEL_TWILIO_AUTH_TOKEN`` (never the
+    value): an empty token parses to ``SecretStr("")`` (not ``None``), so a plain ``is None`` test would
+    send an empty-password Basic header to Twilio.
+    """
     token = twilio_settings().auth_token
     if not (token and token.get_secret_value()):
         raise ValueError("CHANNEL_TWILIO_AUTH_TOKEN is not set (missing or empty)")
@@ -89,11 +94,10 @@ async def _http_request(
     headers: dict[str, str],
     data: str | None = None,
 ) -> tuple[int, dict[str, str], str]:
-    """Issue one request through a fresh curl session and return ``(status,
-    lowercased headers, body text)``. Redirects are OFF: the request carries
-    ``Authorization: Basic <token>``, and libcurl replays custom headers across a
-    redirect hop -- a 302 off Twilio would hand the Basic-auth header to another
-    host.
+    """Issue one request through a fresh curl session and return ``(status, lowercased headers, body text)``.
+
+    Redirects are OFF: the request carries ``Authorization: Basic <token>``, and libcurl replays custom
+    headers across a redirect hop -- a 302 off Twilio would hand the Basic-auth header to another host.
     """
     session_ctx = tai42_app.clients.client_ctx(CurlClient, session_params={}, fresh=True)
     async with session_ctx as session:
@@ -121,9 +125,11 @@ def _number_resource_url(phone_number_sid: str) -> str:
 
 
 async def list_incoming_phone_numbers() -> list[dict[str, Any]]:
-    """GET every IncomingPhoneNumber resource for the account, following Twilio's
-    ``next_page_uri`` cursor to exhaustion. A non-2xx raises loudly, and the loop
-    RAISES at ``_LIST_PAGE_CEILING`` pages rather than following a cursor forever."""
+    """GET every IncomingPhoneNumber resource for the account, following the ``next_page_uri`` cursor.
+
+    Follows the cursor to exhaustion. A non-2xx raises loudly, and the loop RAISES at
+    ``_LIST_PAGE_CEILING`` pages rather than following a cursor forever.
+    """
     headers = {"Authorization": _auth_header()}
     url = _numbers_collection_url()
     numbers: list[dict[str, Any]] = []
@@ -150,8 +156,10 @@ async def list_incoming_phone_numbers() -> list[dict[str, Any]]:
 
 
 async def get_incoming_phone_number(phone_number_sid: str) -> dict[str, Any]:
-    """GET one IncomingPhoneNumber resource and return its JSON whole. A non-2xx
-    raises loudly with Twilio's status and body."""
+    """GET one IncomingPhoneNumber resource and return its JSON whole.
+
+    A non-2xx raises loudly with Twilio's status and body.
+    """
     headers = {"Authorization": _auth_header()}
     status, _resp_headers, text = await _http_request("GET", _number_resource_url(phone_number_sid), headers=headers)
     if not 200 <= status < 300:
@@ -160,9 +168,11 @@ async def get_incoming_phone_number(phone_number_sid: str) -> dict[str, Any]:
 
 
 async def update_incoming_phone_number_sms_url(phone_number_sid: str, sms_url: str) -> dict[str, Any]:
-    """POST a new ``SmsUrl`` to one IncomingPhoneNumber resource (Twilio's
-    form-encoded update convention) and return its JSON whole. A non-2xx raises
-    loudly with Twilio's status and body; no header content is ever echoed."""
+    """POST a new ``SmsUrl`` to one IncomingPhoneNumber resource and return its JSON whole.
+
+    Uses Twilio's form-encoded update convention. A non-2xx raises loudly with Twilio's status and body;
+    no header content is ever echoed.
+    """
     headers = {
         "Authorization": _auth_header(),
         "Content-Type": "application/x-www-form-urlencoded",

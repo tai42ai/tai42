@@ -8,15 +8,16 @@
  * The whole surface is built from `@tai42/studio-sdk` design-system components, so it
  * themes with the shell and stays inside the plugin styling contract.
  */
+import type { PluginPageProps } from '@tai42/studio-sdk';
+import { Button } from '@tai42/studio-sdk';
 import type { ReactElement } from 'react';
 import { useCallback, useState } from 'react';
-import { Button } from '@tai42/studio-sdk';
-import type { PluginPageProps } from '@tai42/studio-sdk';
-import { useUsersAdmin } from '@/use-users-admin';
-import { UsersBody } from '@/users-body';
+
 import { CreateUserDialog } from '@/create-user-dialog';
-import { UserActionDialogs } from '@/user-action-dialogs';
 import type { RowAction } from '@/row-actions';
+import { useUsersAdmin } from '@/use-users-admin';
+import { UserActionDialogs } from '@/user-action-dialogs';
+import { UsersBody } from '@/users-body';
 
 export function UsersPage(_props: PluginPageProps): ReactElement {
   const { api, users, roles, loadError, loading, reload } = useUsersAdmin();

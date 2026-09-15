@@ -1,6 +1,6 @@
 """The shared geographic-point model a message may carry.
 
-``LocationElement`` is one point used both ways — an outbound place a flow shares and
+``LocationElement`` is one point used both ways — an outbound place the sender shares and
 the inbound location a participant sent — with its optional-label caps.
 """
 
@@ -15,9 +15,9 @@ LOCATION_ADDRESS_MAX_CHARS = 1000
 
 
 class LocationElement(BaseModel):
-    """A geographic point shared on a message — the one shape used BOTH ways: an outbound place a
-    flow shares and the inbound location a participant sent.
+    """A geographic point shared on a message — the one shape used BOTH ways.
 
+    It is an outbound place the sender shares and the inbound location a participant sent.
     ``latitude``/``longitude`` are WGS84 decimal degrees, bounded to their valid ranges
     (latitude -90..90, longitude -180..180). ``name`` is an optional place label and ``address``
     an optional street address, each a single-line non-blank string within its cap when present

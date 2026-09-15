@@ -41,6 +41,8 @@ if TYPE_CHECKING:
 
 
 class ServingCoreAccessMixin(LifecycleState):
+    """Lifecycle mixin exposing per-epoch serving-core collaborators as forwarding reads."""
+
     # -- per-epoch serving core (forwarding reads) -----------------------------
     # Every collaborator the lifecycle swaps per epoch is read through the live
     # serving generation's ``ServingCore``: the half-built core during a build (so
@@ -71,7 +73,8 @@ class ServingCoreAccessMixin(LifecycleState):
         epoch is installed there is no live generation, so this falls back to the sole
         pre-boot core (``_building``), which registration and the pre-boot harness read;
         no request is served in that window, so the being-built generation is never
-        exposed here."""
+        exposed here.
+        """
         epoch = current_epoch_or_none()
         if epoch is not None and epoch.core is not None:
             return epoch.core

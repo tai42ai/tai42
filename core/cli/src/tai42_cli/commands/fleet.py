@@ -47,8 +47,10 @@ _WORKER_COLUMNS = ["name", "kind", "pid", "gen", "state", "seen-since", "last-op
 
 
 def _relative_since(beat_at: str | None) -> str:
-    """A coarse ``<n><unit> ago`` rendering of a presence ``beat_at`` for the human
-    table's seen-since column. ``—`` when the stamp is missing or unparseable."""
+    """A coarse ``<n><unit> ago`` rendering of a presence ``beat_at`` for the human table's seen-since column.
+
+    ``—`` when the stamp is missing or unparseable.
+    """
     if not beat_at:
         return "—"
     try:
@@ -63,10 +65,12 @@ def _relative_since(beat_at: str | None) -> str:
 
 
 def _worker_display_row(worker: Mapping[str, Any]) -> dict[str, Any]:
-    """Project one raw API worker row into the human table's display columns. The
-    ``state`` cell is suffixed ``(stale)`` when the server's ``stale`` flag is set (no
+    """Project one raw API worker row into the human table's display columns.
+
+    The ``state`` cell is suffixed ``(stale)`` when the server's ``stale`` flag is set (no
     client-side threshold); ``last-op`` is ``op:outcome`` or ``—`` when the worker has
-    applied none."""
+    applied none.
+    """
     state = str(worker.get("state", ""))
     if worker.get("stale"):
         state = f"{state} (stale)"

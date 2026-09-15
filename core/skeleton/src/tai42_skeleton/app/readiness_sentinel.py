@@ -16,20 +16,23 @@ import os
 logger = logging.getLogger(__name__)
 
 READY_SENTINEL_PATH_ENV = "TAI_READY_SENTINEL_PATH"
-DEFAULT_READY_SENTINEL_PATH = "/tmp/tai-ready"
+DEFAULT_READY_SENTINEL_PATH = "/tmp/tai-ready"  # noqa: S108 fixed, well-known path by design, not a randomized tempfile
 
 
 def ready_sentinel_path() -> str:
-    """The readiness sentinel path from ``TAI_READY_SENTINEL_PATH`` (default
-    ``/tmp/tai-ready``). Bare env read — the marker is X-classified, so a reload never
-    changes it."""
+    """The readiness sentinel path from ``TAI_READY_SENTINEL_PATH`` (default ``/tmp/tai-ready``).
+
+    Bare env read — the marker is X-classified, so a reload never changes it.
+    """
     return os.environ.get(READY_SENTINEL_PATH_ENV, "").strip() or DEFAULT_READY_SENTINEL_PATH
 
 
 def write_ready_sentinel() -> None:
-    """Atomically create the readiness sentinel (temp write + rename). Raises on an
-    unwritable path — a readiness signal that cannot be written is a loud boot fault,
-    never a silently unready pod."""
+    """Atomically create the readiness sentinel (temp write + rename).
+
+    Raises on an unwritable path — a readiness signal that cannot be written is a loud
+    boot fault, never a silently unready pod.
+    """
     path = ready_sentinel_path()
     tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as handle:
@@ -38,9 +41,11 @@ def write_ready_sentinel() -> None:
 
 
 def remove_ready_sentinel() -> None:
-    """Remove the readiness sentinel at shutdown start. A missing file is expected (boot
-    may have failed before the latch flipped); any other error is logged loudly and
-    does NOT abort the remaining shutdown teardown."""
+    """Remove the readiness sentinel at shutdown start.
+
+    A missing file is expected (boot may have failed before the latch flipped); any
+    other error is logged loudly and does NOT abort the remaining shutdown teardown.
+    """
     path = ready_sentinel_path()
     try:
         os.remove(path)

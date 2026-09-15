@@ -31,7 +31,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
-from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
+from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 from tai42_kit.settings import require_secret
 
 from tai42_channel_twilio.correlation import (
@@ -45,7 +45,8 @@ from tai42_channel_twilio.settings import twilio_settings
 logger = logging.getLogger(__name__)
 
 _SIGNATURE_HEADER = "X-Twilio-Signature"
-_SHA1_DIGEST_LEN = hashlib.sha1().digest_size  # 20 bytes; 28 chars in base64
+# Twilio's mandated request-signature digest is HMAC-SHA1; 20 bytes, 28 base64 chars.
+_SHA1_DIGEST_LEN = hashlib.sha1().digest_size  # noqa: S324
 # Bound what an unauthenticated door reads into memory — loud 413, never truncation.
 _MAX_BODY_BYTES = 1 * 1024 * 1024
 
@@ -105,10 +106,11 @@ def _validate_signature(
 
 
 async def _authenticated_form_pairs(request: Request) -> list[tuple[str, str]]:
-    """Bounded-read and Twilio-signature-validate the request; return the RAW form
-    pairs (duplicates kept). Nothing in the body is trusted until the signature
-    validates. Raises ``ValueError`` (auth token unset → logged 500),
-    ``PayloadTooLarge`` (→ 413), or ``SignatureRejectedError`` (→ 401)."""
+    """Bounded-read and Twilio-signature-validate the request; return the RAW form pairs (duplicates kept).
+
+    Nothing in the body is trusted until the signature validates. Raises ``ValueError`` (auth token unset →
+    logged 500), ``RequestBodyTooLargeError`` (→ 413), or ``SignatureRejectedError`` (→ 401).
+    """
     auth_token = require_secret(twilio_settings().auth_token, "Twilio channel", "CHANNEL_TWILIO_AUTH_TOKEN")
     raw = await read_bounded_body(request, _MAX_BODY_BYTES)
     try:
@@ -122,11 +124,13 @@ async def _authenticated_form_pairs(request: Request) -> list[tuple[str, str]]:
     return form_pairs
 
 
-def _auth_error_response(exc: ValueError | PayloadTooLarge | SignatureRejectedError, route: str) -> Response:
-    """Map an ``_authenticated_form_pairs`` failure to its response: 413 oversize,
-    401 bad signature, 500 for an unset auth token (operator misconfig, never a
-    401 that reads like an ordinary bad signature)."""
-    if isinstance(exc, PayloadTooLarge):
+def _auth_error_response(exc: ValueError | RequestBodyTooLargeError | SignatureRejectedError, route: str) -> Response:
+    """Map an ``_authenticated_form_pairs`` failure to its response.
+
+    413 oversize, 401 bad signature, 500 for an unset auth token (operator misconfig, never a
+    401 that reads like an ordinary bad signature).
+    """
+    if isinstance(exc, RequestBodyTooLargeError):
         return PlainTextResponse("payload too large", status_code=413)
     if isinstance(exc, SignatureRejectedError):
         logger.warning("rejected Twilio %s: %s", route, exc)
@@ -144,21 +148,20 @@ def _auth_error_response(exc: ValueError | PayloadTooLarge | SignatureRejectedEr
     no_body_reason="Twilio inbound webhook: 204/plain-text, no JSON body",
 )
 async def twilio_inbound(request: Request) -> Response:
-    """Receive a Twilio inbound message and resolve the pair's pending question,
-    or route it into the conversation bridge.
+    """Receive a Twilio inbound message and resolve the pair's pending question, or route it to the bridge.
 
     Order is load-bearing: bounded body read (413) → signature (nothing trusted
     before it) → MessageSid dedupe → the shared inbound-answer ladder. A correlated
     reply is resolved by the ladder (forward / retry-in-place / bridge over the
     plugin's :class:`CorrelationStore`); a correlation MISS (``NO_CORRELATION``)
-    goes to this channel's bridge, exactly as before. Every resolved/kept/bridged
+    goes to this channel's bridge. Every resolved/kept/bridged
     outcome acks 204 and marks the ``MessageSid`` seen; an ``AnswerForwardError``
     (401/413/5xx / transport fault) propagates so Twilio's retry re-runs the ladder —
     the answer is never silently lost, and the sid is NOT marked seen on that raise.
     """
     try:
         form_pairs = await _authenticated_form_pairs(request)
-    except (ValueError, PayloadTooLarge, SignatureRejectedError) as exc:
+    except (ValueError, RequestBodyTooLargeError, SignatureRejectedError) as exc:
         return _auth_error_response(exc, "inbound")
 
     # Collapse to single values only now, after the signature validated the raw pairs.
@@ -246,7 +249,7 @@ async def twilio_status(request: Request) -> Response:
     """
     try:
         form_pairs = await _authenticated_form_pairs(request)
-    except (ValueError, PayloadTooLarge, SignatureRejectedError) as exc:
+    except (ValueError, RequestBodyTooLargeError, SignatureRejectedError) as exc:
         return _auth_error_response(exc, "status")
 
     form = dict(form_pairs)

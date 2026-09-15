@@ -31,9 +31,11 @@ class ScopeUrlRemove(BaseModel):
 
 
 class ApiKeyCreate(BaseModel):
-    """Create an api key for ``user_id`` with a scope set and an optional jq
-    authorization ``condition`` (a templated text: inline ``content`` or a stored
-    ``id``, plus its render ``kwargs``)."""
+    """Create an api key for ``user_id`` with a scope set and an optional jq ``condition``.
+
+    The ``condition`` is a templated text: inline ``content`` or a stored ``id``, plus its render
+    ``kwargs``.
+    """
 
     user_id: str = Field(min_length=1)
     description: str = Field(min_length=1)
@@ -46,8 +48,10 @@ class ApiKeyCreate(BaseModel):
 
 
 class ApiKeyEdit(BaseModel):
-    """A partial api-key edit — only the fields present are overwritten; a
-    ``null``/``{}``/``""`` value clears an optional gate."""
+    """A partial api-key edit — only the fields present are overwritten.
+
+    A ``null``/``{}``/``""`` value clears an optional gate.
+    """
 
     description: str | None = Field(default=None, min_length=1)
     scopes: list[str] | None = None
@@ -56,17 +60,21 @@ class ApiKeyEdit(BaseModel):
 
 
 class KeyScopesModify(BaseModel):
-    """Add and/or remove individual scopes on an api key — a granular edit that changes
-    named scopes without replacing the whole set (the key ``edit`` door's ``scopes``
-    field does a full replace)."""
+    """Add and/or remove individual scopes on an api key — a granular edit of named scopes.
+
+    Changes named scopes without replacing the whole set (the key ``edit`` door's ``scopes``
+    field does a full replace).
+    """
 
     add: list[str] = Field(default_factory=list)
     remove: list[str] = Field(default_factory=list)
 
 
 class ConditionValidation(BaseModel):
-    """A fail-closed jq policy-condition check — compile and (with a
-    ``sample_context``) sample-evaluate a condition without persisting it."""
+    """A fail-closed jq policy-condition check.
+
+    Compile and (with a ``sample_context``) sample-evaluate a condition without persisting it.
+    """
 
     condition: TemplatedText | None = None
     sample_context: dict[str, Any] | None = None
@@ -79,9 +87,11 @@ class PolicyRollback(BaseModel):
 
 
 class ClaimLinkCreate(BaseModel):
-    """Create a one-time claim link for an existing API key. The ``api_key`` is a raw
-    key the caller holds; ``ttl_seconds`` overrides the default lifetime (capped at the
-    settings ceiling)."""
+    """Create a one-time claim link for an existing API key.
+
+    The ``api_key`` is a raw key the caller holds; ``ttl_seconds`` overrides the default lifetime
+    (capped at the settings ceiling).
+    """
 
     api_key: str = Field(min_length=1)
     ttl_seconds: int | None = None

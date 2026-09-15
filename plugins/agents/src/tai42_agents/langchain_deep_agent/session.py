@@ -53,20 +53,25 @@ _DRIVE_CEILING_SECONDS: Final[int] = 3600
 
 
 def _lease_ms() -> int:
-    """The workspace-lease TTL in milliseconds — the drive ceiling plus the volume-cleanup
-    headroom (skill copy / cred materialize / teardown scrub), so the lease outlives one whole
-    turn including its ``finally``."""
+    """The workspace-lease TTL in milliseconds — the drive ceiling plus the volume-cleanup headroom.
+
+    The headroom covers skill copy / cred materialize / teardown scrub, so the lease outlives one
+    whole turn including its ``finally``.
+    """
     return (_DRIVE_CEILING_SECONDS + LEASE_HEADROOM_SECONDS) * 1000
 
 
 @contextlib.asynccontextmanager
 async def _optional_workspace_lease(workspace_key: str, *, is_threaded: bool) -> AsyncIterator[None]:
-    """Hold the shared cross-worker per-workspace lease for the body — ONLY for a THREADED run (a
-    deterministic ``workspace_key`` two workers could both target). A tool-face ``uuid4`` workspace
-    no other worker can name takes none, so Redis is not touched. Kept module-level (not an instance
-    method) so :meth:`DeepAgentSession.leased` can take the lease BEFORE any session exists — the
-    lease must precede session creation, or two same-``thread_id`` workers each open a session on
-    the shared volume before either wins the lease (the leak this guards)."""
+    """Hold the shared cross-worker per-workspace lease for the body — ONLY for a THREADED run.
+
+    A threaded run has a deterministic ``workspace_key`` two workers could both target. A tool-face
+    ``uuid4`` workspace no other worker can name takes none, so Redis is not touched. Kept
+    module-level (not an instance method) so :meth:`DeepAgentSession.leased` can take the lease
+    BEFORE any session exists — the lease must precede session creation, or two same-``thread_id``
+    workers each open a session on the shared volume before either wins the lease (the leak this
+    guards).
+    """
     if not is_threaded:
         yield
         return
@@ -92,6 +97,7 @@ class DeepAgentSession:
         is_threaded: bool,
         bearer_creds: list[tuple[ConnectionCred, dict[str, SecretStr]]],
     ) -> None:
+        """Bind an acquired ``session`` with its ``settings``, ``workspace_key``, threaded flag, and bearer creds."""
         self.session = session
         self._settings = settings
         self.workspace_key = workspace_key
@@ -100,10 +106,13 @@ class DeepAgentSession:
 
     @staticmethod
     def _resolve_workspace_key(thread_id: str | None, workspace_key: str | None) -> str:
-        """The workspace key this drive targets: the resume-supplied key (reattach the parked
-        volume) if given, else the deterministic agent-namespaced key derived from ``thread_id``
-        (threaded), else a fresh ``uuid4`` no other worker can name (tool-face). Resolved WITHOUT a
-        session so :meth:`leased` can name the lease before one is created."""
+        """The workspace key this drive targets.
+
+        The resume-supplied key (reattach the parked volume) if given, else the deterministic
+        agent-namespaced key derived from ``thread_id`` (threaded), else a fresh ``uuid4`` no other
+        worker can name (tool-face). Resolved WITHOUT a session so :meth:`leased` can name the lease
+        before one is created.
+        """
         if workspace_key is not None:
             return workspace_key
         if thread_id is not None:
@@ -115,8 +124,9 @@ class DeepAgentSession:
     async def leased(
         cls, *, thread_id: str | None, workspace_key: str | None = None
     ) -> AsyncIterator[DeepAgentSession]:
-        """Take the shared workspace lease FIRST, then acquire the session + materialize creds
-        INSIDE it, yielding the guarded drive.
+        """Take the shared workspace lease FIRST, then acquire the session and materialize creds inside it.
+
+        Yields the guarded drive.
 
         On a THREADED (persistent) run the lease is what serializes session creation + credential
         materialization on the shared volume across workers, so it MUST precede
@@ -127,7 +137,8 @@ class DeepAgentSession:
         :class:`~tai42_agents._internal.park.errors.WorkspaceLeaseHeldError` from the lease
         ``__aenter__`` BEFORE any session or cred exists. A tool-face (ephemeral) run takes no lease
         and always proceeds. The credential scrub stays the caller's terminal-exit concern (skipped
-        on a park-suspend), run in the caller's ``finally`` inside this region."""
+        on a park-suspend), run in the caller's ``finally`` inside this region.
+        """
         is_threaded = thread_id is not None
         workspace_key = cls._resolve_workspace_key(thread_id, workspace_key)
         async with _optional_workspace_lease(workspace_key, is_threaded=is_threaded):
@@ -147,7 +158,8 @@ class DeepAgentSession:
         A THREADED run must reach here THROUGH :meth:`leased` (which holds the workspace lease
         around this call), so session creation + cred materialization on the shared volume stay
         serialized across workers; calling ``acquire`` directly on a threaded key is for tests that
-        exercise the create/cred path without the cross-worker lease."""
+        exercise the create/cred path without the cross-worker lease.
+        """
         settings = langchain_deep_agent_settings()
         sandbox = tai42_app.sandboxes.require_sandbox()
 
@@ -180,19 +192,23 @@ class DeepAgentSession:
 
     @property
     def workspace_retention_horizon(self) -> datetime:
-        """The latest wall-time this run's durable WORKSPACE volume is guaranteed to still
-        hold it: ``now + session_ttl`` (the idle-reap horizon; the park write is activity that
-        (re)starts the idle clock). Passed as the ``extra_retention_horizon`` so a park's bound
-        is ``min(checkpoint, workspace)``."""
+        """The latest wall-time this run's durable WORKSPACE volume is guaranteed to still hold it.
+
+        Computed as ``now + session_ttl`` (the idle-reap horizon; the park write is activity that
+        (re)starts the idle clock). Passed as the ``extra_retention_horizon`` so a park's bound is
+        ``min(checkpoint, workspace)``.
+        """
         return datetime.now(UTC) + timedelta(seconds=self._settings.session_ttl_seconds)
 
     async def scrub_credentials(self) -> None:
-        """Remove the bearer credential MATERIAL under ``{ws}/.creds`` — the TERMINAL-exit scrub
-        (normal, error, timeout, final-cancel), SKIPPED on a park-suspend (the run is still
-        LIVE; the file stays for the door-less expiry resume to reuse, whose own terminal exit
-        scrubs it). Honors the invariant: no injected credential material persists after the run
-        reaches a TERMINAL state. An un-removable directory raises loudly (never a silent
-        leave-behind)."""
+        """Remove the bearer credential MATERIAL under ``{ws}/.creds`` — the TERMINAL-exit scrub.
+
+        Runs on a normal, error, timeout, or final-cancel exit, SKIPPED on a park-suspend (the run
+        is still LIVE; the file stays for the door-less expiry resume to reuse, whose own terminal
+        exit scrubs it). Honors the invariant: no injected credential material persists after the
+        run reaches a TERMINAL state. An un-removable directory raises loudly (never a silent
+        leave-behind).
+        """
         if not self._bearer_creds:
             return
         result = await self.session.exec(["rm", "-rf", _CREDS_DIR], timeout_seconds=30)
@@ -203,19 +219,23 @@ class DeepAgentSession:
             )
 
     async def _materialize_bearer_creds(self) -> None:
-        """Write each resolved bearer cred as a credential-helper file under ``{ws}/.creds`` —
-        RE-WRITTEN every turn from the fresh ``resolve_connection_auth`` resolution, so a
-        refreshed token reaches a reused persistent session on the next turn. The material lands
-        OUTSIDE ``{ws}/project`` (unreachable through the agent's file tools)."""
+        """Write each resolved bearer cred as a credential-helper file under ``{ws}/.creds``.
+
+        RE-WRITTEN every turn from the fresh ``resolve_connection_auth`` resolution, so a refreshed
+        token reaches a reused persistent session on the next turn. The material lands OUTSIDE
+        ``{ws}/project`` (unreachable through the agent's file tools).
+        """
         for spec, resolved in self._bearer_creds:
             body = _credential_helper_body(resolved)
             await self.session.put_file(f"{_CREDS_DIR}/{spec.env_name}", body.encode("utf-8"))
 
 
 def _credential_helper_body(resolved: dict[str, SecretStr]) -> str:
-    """The credential-helper file body for one resolved bearer cred: an
-    ``Authorization: Bearer <token>`` line for the OAuth token, plus any transport-partitioned
-    static header lines injected alongside (never instead of the token)."""
+    """The credential-helper file body for one resolved bearer cred.
+
+    An ``Authorization: Bearer <token>`` line for the OAuth token, plus any transport-partitioned
+    static header lines injected alongside (never instead of the token).
+    """
     lines = [f"{name}: {value.get_secret_value()}" for name, value in resolved.items()]
     return "\n".join(lines) + "\n"
 
@@ -223,8 +243,10 @@ def _credential_helper_body(resolved: dict[str, SecretStr]) -> str:
 async def _resolve_creds(
     creds: list[SessionCredSpec],
 ) -> tuple[dict[str, SecretStr], list[tuple[ConnectionCred, dict[str, SecretStr]]]]:
-    """Split the operator cred list into the create-time session ``env`` (static + connection
-    ``delivery="env"`` values) and the per-turn bearer files to materialize.
+    """Split the operator cred list into the create-time session ``env`` and the per-turn bearer files.
+
+    The ``env`` carries static + connection ``delivery="env"`` values; the bearer files are
+    materialized per turn.
 
     Each connection-reference entry resolves PER-CALLER via
     ``tai42_app.connectors.resolve_connection_auth`` (which RAISES on an identity-less door — the
@@ -259,9 +281,11 @@ async def _resolve_creds(
 
 
 def _collect_material(resolved: object) -> dict[str, SecretStr]:
-    """Flatten a :class:`~tai42_contract.connectors.ResolvedConnectionAuth` into a
-    ``{name: SecretStr}`` map across its three channels (``access_token`` → ``Authorization``,
-    plus static ``env``/``headers``), or an empty map when it injects nothing."""
+    """Flatten a :class:`~tai42_contract.connectors.ResolvedConnectionAuth` into a ``{name: SecretStr}`` map.
+
+    Spans its three channels (``access_token`` → ``Authorization``, plus static ``env``/``headers``),
+    or an empty map when it injects nothing.
+    """
     if resolved is None:
         return {}
     material: dict[str, SecretStr] = {}

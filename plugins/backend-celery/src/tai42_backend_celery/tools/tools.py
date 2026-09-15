@@ -32,8 +32,10 @@ from tai42_backend_celery.core.settings import celery_settings
 
 
 def _redbeat_redis() -> AbstractAsyncContextManager[Any]:
-    """The pooled async Redis client for the RedBeat store, typed ``Any`` (redis-py
-    annotates each command as a sync/async union that cannot be awaited as-is)."""
+    """The pooled async Redis client for the RedBeat store, typed ``Any``.
+
+    redis-py annotates each command as a sync/async union that cannot be awaited as-is.
+    """
     return tai42_app.clients.client_ctx(RedisClient, url=celery_settings().redbeat_redis_url)
 
 
@@ -43,11 +45,13 @@ def _text(value: Any) -> Any:
 
 
 async def _read_definition_and_membership(r: Any, schedule_key: str, entry_key: str) -> tuple[Any, Any]:
-    """Read an entry's ``definition`` field and its schedule-zset score at one
-    server instant (a single MULTI/EXEC pipeline). The atomic read drives the
-    listing tools' dangling-member check: read separately, a concurrent
-    delete+re-create could show a false "no definition next to member present"
-    state the store never actually passed through."""
+    """Read an entry's ``definition`` field and its schedule-zset score at one server instant.
+
+    Uses a single MULTI/EXEC pipeline. The atomic read drives the listing tools'
+    dangling-member check: read separately, a concurrent delete+re-create could show a
+    false "no definition next to member present" state the store never actually passed
+    through.
+    """
     async with r.pipeline(transaction=True) as pipe:
         pipe.hget(entry_key, "definition")
         pipe.zscore(schedule_key, entry_key)
@@ -505,7 +509,7 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
                         day_of_week=norm["day_of_week"],
                     )
                 else:
-                    raise ValueError(f"Unsupported schedule type: {norm['__type__']}")
+                    raise ValueError(f"Unsupported schedule type: {norm['__type__']}")  # noqa: TRY301 recorded per-row
 
                 rb_entry = RedBeatSchedulerEntry(
                     name=record.name,

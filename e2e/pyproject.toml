@@ -228,11 +228,22 @@ line-length = 120
 
 [tool.ruff.lint]
 # e2e is test infrastructure, so it is held to the correctness bar (the base
-# families) plus TID only. The source size/complexity cap and the beyond-floor
-# quality families are excluded here, as they are from any test tree. TID
-# enforces the one-waiting-primitive rule: the banned-api below makes every
-# ad-hoc sleep a lint error (sanctioned internal sleeps carry an explicit noqa).
-select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
+# families) plus TID and the naming families (N, A). The source size/complexity
+# cap and the beyond-floor quality families are excluded here, as they are from
+# any test tree. TID enforces the one-waiting-primitive rule: the banned-api
+# below makes every ad-hoc sleep a lint error (sanctioned internal sleeps carry
+# an explicit noqa).
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID", "N", "A", "S", "TRY", "ERA", "D"]
+# N815: camelCase where a JSON wire shape is mirrored. TRY003: contextual messages
+# are intentional. The whole package is test infrastructure, so the docstring,
+# exception-style, dead-code and security-in-fixtures families (asserts, fake
+# credentials, temp paths, subprocess with fixed argv) that never apply to test
+# code are excluded, exactly as for any test tree.
+ignore = [
+    "N801", "N802", "N806", "N814", "N815", "TRY003", "D", "TRY", "ERA",
+    "S101", "S102", "S104", "S105", "S106", "S107", "S108",
+    "S112", "S113", "S311", "S324", "S506", "S603", "S607", "S608",
+]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "time.sleep".msg = "Blocking sleeps are banned; wait on a condition with tai42_e2e.waiting.wait_for."

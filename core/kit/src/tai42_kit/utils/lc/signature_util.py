@@ -1,3 +1,5 @@
+"""Callable-signature helpers for injecting extra keyword params and dropping the fastmcp context."""
+
 import inspect
 from collections.abc import Callable
 from typing import Any
@@ -8,6 +10,12 @@ def add_signature_params(
     additional_opts: dict[str, Any],
     exclude_fastmcp_ctx: bool = False,
 ) -> inspect.Signature:
+    """Return ``func``'s signature with ``additional_opts`` added as keyword-only params.
+
+    Each ``additional_opts`` entry becomes a keyword-only parameter (default ``None``) inserted
+    before any ``**kwargs``. When ``exclude_fastmcp_ctx`` is set, the fastmcp ``Context`` parameter
+    is retyped to ``Any``.
+    """
     original_sig = inspect.signature(func)
     additional_params = [
         inspect.Parameter(
@@ -47,6 +55,7 @@ def add_signature_params(
 
 
 def exclude_fastmcp_ctx_from_kwargs(func: Callable, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return ``arguments`` without ``func``'s fastmcp ``Context`` keyword, if it carries one."""
     # Imported function-local so importing this module pulls no fastmcp web/server stack
     # into a backend worker's shipped import graph.
     from fastmcp import Context

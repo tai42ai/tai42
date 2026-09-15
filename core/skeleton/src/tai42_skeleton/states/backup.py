@@ -44,8 +44,10 @@ _RESTORE_ORIGIN = WriteOrigin(consumer="backup-restore")
 
 
 async def export_states() -> dict[str, Any]:
-    """The section exporter: every template, declaration, attachment, record and alias — or
-    an empty payload when the feature is off."""
+    """The section exporter: every template, declaration, attachment, record and alias.
+
+    An empty payload when the feature is off.
+    """
     empty = {"version": _VERSION, "templates": [], "declarations": [], "attachments": [], "aliases": [], "records": []}
     if not states_store_configured():
         return empty
@@ -193,9 +195,10 @@ async def _import_records(payload: dict[str, Any], report: dict[str, Any]) -> No
 
 
 async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
-    """The section importer: upsert templates, declarations, attachments, aliases, then
-    records through the facet doors, reporting per-entity outcomes. A newer payload version
-    is refused."""
+    """The section importer: upsert templates, declarations, attachments, aliases, then records through the facet doors.
+
+    Reports per-entity outcomes. A newer payload version is refused.
+    """
     version = payload.get("version")
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         raise ValueError(f"states backup payload carries no valid version (got {version!r})")
@@ -215,8 +218,10 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def register_states_backup_section(registry: Any) -> None:
-    """Register the ``states`` section on ``registry`` — called once per app construction,
-    beside the host's core sections (never on reload)."""
+    """Register the ``states`` section on ``registry`` — called once per app construction.
+
+    Registered beside the host's core sections (never on reload).
+    """
     registry.register_section(_SECTION, export_states, import_states, secret=False)
 
 

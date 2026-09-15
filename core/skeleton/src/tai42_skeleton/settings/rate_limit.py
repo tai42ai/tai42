@@ -25,8 +25,10 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class FamilyBudget(BaseModel):
-    """One door family's resolved budget: whether the limiter charges it at all, and
-    the two window ceilings it charges against."""
+    """One door family's resolved budget.
+
+    Whether the limiter charges it at all, and the two window ceilings it charges against.
+    """
 
     enabled: bool
     limit: int
@@ -34,9 +36,11 @@ class FamilyBudget(BaseModel):
 
 
 class FamilyOverride(BaseModel):
-    """An operator's per-family override. Every field is optional and an unset one
-    falls through to the ``default_*`` budget, so tuning ONE window of ONE door
-    family never restates the rest."""
+    """An operator's per-family override.
+
+    Every field is optional and an unset one falls through to the ``default_*`` budget, so tuning
+    ONE window of ONE door family never restates the rest.
+    """
 
     model_config = {"extra": "forbid"}
 
@@ -63,9 +67,11 @@ SHIPPED_FAMILY_BUDGETS: dict[str, FamilyOverride] = {
 
 
 def _first_set[T](*candidates: T | None) -> T:
-    """The first candidate that is not ``None``. The last one is always a concrete
-    default, so a missing value is a programming error and raises rather than
-    resolving to something invented."""
+    """The first candidate that is not ``None``.
+
+    The last one is always a concrete default, so a missing value is a programming error and
+    raises rather than resolving to something invented.
+    """
     for candidate in candidates:
         if candidate is not None:
             return candidate
@@ -73,9 +79,11 @@ def _first_set[T](*candidates: T | None) -> T:
 
 
 class RateLimitRedisSettings(RedisConnectionSettings):
-    """Redis holding the per-bucket fixed-window counters. Connection values come
-    from the ``TAI_RATE_LIMIT_REDIS_*`` env, or the shared ``TAI_DEFAULT_REDIS_URL``;
-    absent = rate limiting is OFF (pass-through)."""
+    """Redis holding the per-bucket fixed-window counters.
+
+    Connection values come from the ``TAI_RATE_LIMIT_REDIS_*`` env, or the shared
+    ``TAI_DEFAULT_REDIS_URL``; absent = rate limiting is OFF (pass-through).
+    """
 
     model_config = SettingsConfigDict(env_prefix="TAI_RATE_LIMIT_")
 
@@ -90,6 +98,8 @@ class RateLimitRedisSettings(RedisConnectionSettings):
 
 
 class RateLimitSettings(TaiBaseSettings):
+    """The ``TAI_RATE_LIMIT_*`` budget config: the counter store, the default budget and per-family overrides."""
+
     model_config = SettingsConfigDict(env_prefix="TAI_RATE_LIMIT_", env_nested_delimiter="__")
 
     # Infra: the redis connection is composed from the kit (a field, not a base),
@@ -118,15 +128,20 @@ class RateLimitSettings(TaiBaseSettings):
     @field_validator("families")
     @classmethod
     def _validate_family_names(cls, value: dict[str, FamilyOverride]) -> dict[str, FamilyOverride]:
-        """Family names are lower-case; env-set keys arrive in whatever case the
-        operator typed, so they are folded once here rather than at every lookup."""
+        """Fold family names to lower-case once.
+
+        Env-set keys arrive in whatever case the operator typed, so they are folded here rather
+        than at every lookup.
+        """
         return {name.lower(): override for name, override in value.items()}
 
     def budget_for(self, family: str) -> FamilyBudget:
-        """The budget charged to ``family``: the operator's ``families`` override
-        first, then the shipped per-family default, then the ``default_*`` budget.
-        Each of the three fields resolves independently, so an override naming only a
-        limit keeps the shipped burst."""
+        """The budget charged to ``family``.
+
+        Resolved most-specific first: the operator's ``families`` override, then the shipped
+        per-family default, then the ``default_*`` budget. Each of the three fields resolves
+        independently, so an override naming only a limit keeps the shipped burst.
+        """
         shipped = SHIPPED_FAMILY_BUDGETS.get(family, FamilyOverride())
         operator = self.families.get(family, FamilyOverride())
         return FamilyBudget(
@@ -136,9 +151,11 @@ class RateLimitSettings(TaiBaseSettings):
         )
 
     def any_family_enabled(self) -> bool:
-        """Whether the limiter can charge ANY door family — false only when the
-        default is off and no override turns a family back on. The readiness probe
-        rides this to decide whether the counter store is a wired dependency."""
+        """Whether the limiter can charge ANY door family.
+
+        False only when the default is off and no override turns a family back on. The readiness
+        probe rides this to decide whether the counter store is a wired dependency.
+        """
         if self.default_enabled:
             return True
         return any(override.enabled for override in self.families.values())
@@ -146,4 +163,5 @@ class RateLimitSettings(TaiBaseSettings):
 
 @settings_cache
 def rate_limit_settings() -> RateLimitSettings:
+    """The process-cached :class:`RateLimitSettings`."""
     return RateLimitSettings()

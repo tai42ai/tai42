@@ -1,5 +1,7 @@
-"""Studio-plugin registry: discover installed plugins, validate their manifests,
-and build the served-URL → sha384 integrity map the import map injects.
+"""Studio-plugin registry: discover plugins, validate manifests, and build the integrity map.
+
+Discover installed plugins, validate their manifests, and build the served-URL → sha384
+integrity map the import map injects.
 
 The registry is rebuilt by a pass registered on BOTH ``lifecycle.on_startup`` and
 ``lifecycle.on_reload`` (wired in ``app/instance.py`` alongside the connector
@@ -110,25 +112,30 @@ OPTIONAL_VENDOR_MODULES: dict[str, str] = {
 
 
 def _is_valid_asset_path(value: str) -> bool:
-    """Charset-valid AND no ``..`` segment. The charset permits dots (for
-    ``index.min.js``), so ``..`` slips the regex — reject it explicitly here as
-    defense in depth; the realpath check at load is the backstop."""
+    """Charset-valid AND no ``..`` segment.
+
+    The charset permits dots (for ``index.min.js``), so ``..`` slips the regex — reject it
+    explicitly here as defense in depth; the realpath check at load is the backstop.
+    """
     return bool(_ASSET_PATH_RE.match(value)) and ".." not in value.split("/")
 
 
 class StudioPluginError(RuntimeError):
-    """A listed Studio plugin is missing, malformed, or unsafe. Raised at
-    startup/reload so a broken deployment fails loudly instead of silently
-    dropping a plugin's UI."""
+    """A listed Studio plugin is missing, malformed, or unsafe.
+
+    Raised at startup/reload so a broken deployment fails loudly instead of silently dropping a
+    plugin's UI.
+    """
 
 
 class Contributions(BaseModel):
-    """What a Studio plugin contributes to the shell. ``tool_panels`` is keyed by
-    the tool name whose run panel the plugin replaces; a tool with no entry here
-    falls back to the auto-form. ``nav_entries`` declares the ``pages`` the plugin
+    """What a Studio plugin contributes to the shell.
+
+    ``tool_panels`` is keyed by the tool name whose run panel the plugin replaces; a tool with
+    no entry here falls back to the auto-form. ``nav_entries`` declares the ``pages`` the plugin
     surfaces a nav entry for — the manifest-declared form of the shell's runtime
-    ``registerNavEntry``, so the catalog/manifest read-surface reports a
-    nav-contributing plugin."""
+    ``registerNavEntry``, so the catalog/manifest read-surface reports a nav-contributing plugin.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -150,8 +157,10 @@ class Contributions(BaseModel):
 
 
 class StudioPluginManifest(BaseModel):
-    """The parsed, validated ``studio-manifest.json``. ``extra="forbid"`` so an
-    unknown field is a loud rejection, not a silently-ignored typo."""
+    """The parsed, validated ``studio-manifest.json``.
+
+    ``extra="forbid"`` so an unknown field is a loud rejection, not a silently-ignored typo.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -192,9 +201,11 @@ class StudioPluginManifest(BaseModel):
 
 
 class InstalledStudioPlugin(BaseModel):
-    """A validated, installed Studio plugin: its parsed manifest, the realpath of
-    its ``studio/`` dist root, and the served-URL → sha384 integrity entries the
-    import map injects."""
+    """A validated, installed Studio plugin.
+
+    Its parsed manifest, the realpath of its ``studio/`` dist root, and the served-URL → sha384
+    integrity entries the import map injects.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -207,8 +218,10 @@ class InstalledStudioPlugin(BaseModel):
 
 
 class StudioPluginRegistry(BaseModel):
-    """The built registry both the authed registry route and the SPA import-map
-    injection read (once per request, no per-request re-walk)."""
+    """The built registry both the authed registry route and the SPA import-map injection read.
+
+    Read once per request, no per-request re-walk.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -226,10 +239,12 @@ class StudioPluginRegistry(BaseModel):
         return [p.manifest.model_dump() for p in self.plugins.values()]
 
     def import_map(self) -> dict:
-        """The import map injected into ``index.html``: bare/subpath vendor
-        specifiers — the required set plus whatever optional ones this dist
-        ships — plus the ``integrity`` block covering every vendor asset AND
-        every plugin bundle/chunk, keyed by fully-resolved absolute URL."""
+        """The import map injected into ``index.html``.
+
+        Bare/subpath vendor specifiers — the required set plus whatever optional ones this dist
+        ships — plus the ``integrity`` block covering every vendor asset AND every plugin
+        bundle/chunk, keyed by fully-resolved absolute URL.
+        """
         imports = {spec: f"/{rel}" for spec, rel in (self.optional_vendor_modules | VENDOR_MODULES).items()}
         integrity = dict(self.vendor_integrity_by_url)
         for plugin in self.plugins.values():
@@ -246,12 +261,13 @@ def _hash_file(path: Path) -> str:
 
 
 def _reject_forbidden_specifiers(package: str, filename: str, data: bytes) -> None:
-    """Reject a plugin file whose bytes contain a shell-only Studio SDK subpath
-    specifier. Called for every integrity-listed file during load; combined with
-    the asset route serving only integrity-listed files, this scans the exact
-    bytes the browser can load. The check is a literal byte match, so a
-    dynamically-built specifier is out of scope (see the module comment on
-    ``_FORBIDDEN_PLUGIN_SPECIFIERS``)."""
+    """Reject a plugin file whose bytes contain a shell-only Studio SDK subpath specifier.
+
+    Called for every integrity-listed file during load; combined with the asset route serving
+    only integrity-listed files, this scans the exact bytes the browser can load. The check is a
+    literal byte match, so a dynamically-built specifier is out of scope (see the module comment
+    on ``_FORBIDDEN_PLUGIN_SPECIFIERS``).
+    """
     for specifier in _FORBIDDEN_PLUGIN_SPECIFIERS:
         if specifier.encode("ascii") in data:
             raise StudioPluginError(
@@ -261,8 +277,10 @@ def _reject_forbidden_specifiers(package: str, filename: str, data: bytes) -> No
 
 
 def resolve_under(root: Path, relative: str) -> Path:
-    """Resolve ``relative`` under ``root`` (realpath, following symlinks) and
-    verify it stays inside — raise otherwise. The single traversal primitive."""
+    """Resolve ``relative`` under ``root`` (realpath, following symlinks) and verify it stays inside.
+
+    Raises otherwise. The single traversal primitive.
+    """
     root_real = root.resolve()
     target = (root_real / relative).resolve()
     if root_real != target and root_real not in target.parents:
@@ -339,9 +357,11 @@ def _load_plugin(package: str) -> InstalledStudioPlugin:
 
 
 def _shipped_optional_vendor_modules(dist_path: str | None) -> dict[str, str]:
-    """The optional vendor specifiers the deployed SPA dist actually ships. A
-    specifier whose asset is absent is simply not offered: it never reaches the
-    served import map, so nothing can request an asset this dist does not have."""
+    """The optional vendor specifiers the deployed SPA dist actually ships.
+
+    A specifier whose asset is absent is simply not offered: it never reaches the served import
+    map, so nothing can request an asset this dist does not have.
+    """
     if dist_path is None:
         return {}
     dist_root = Path(dist_path)
@@ -349,9 +369,11 @@ def _shipped_optional_vendor_modules(dist_path: str | None) -> dict[str, str]:
 
 
 def _vendor_integrity(dist_path: str | None, optional_modules: dict[str, str]) -> dict[str, str]:
-    """Hash every shared-vendor asset the served import map keys — the required
-    set plus the optional specifiers this dist ships. A listed asset that is
-    missing is loud: the map would name a URL the browser cannot resolve."""
+    """Hash every shared-vendor asset the served import map keys.
+
+    The required set plus the optional specifiers this dist ships. A listed asset that is missing
+    is loud: the map would name a URL the browser cannot resolve.
+    """
     if dist_path is None:
         return {}
     dist_root = Path(dist_path)
@@ -368,8 +390,7 @@ def _vendor_integrity(dist_path: str | None, optional_modules: dict[str, str]) -
 
 
 def build_registry(studio_plugins: list[str], dist_path: str | None) -> StudioPluginRegistry:
-    """Build the registry from the listed plugins, quarantining per-plugin
-    faults and hashing the vendor assets.
+    """Build the registry from the listed plugins, quarantining per-plugin faults and hashing vendor assets.
 
     A plugin that is contract-incompatible is never loaded (quarantined on the
     verdict alone); a plugin whose load raises — missing dist, bad manifest,
@@ -420,8 +441,10 @@ _staging: bool = False
 
 
 def set_current_registry(registry: StudioPluginRegistry) -> None:
-    """Install the freshly-built registry: STAGED during an epoch build (promoted at
-    commit), else swapped in immediately (boot)."""
+    """Install the freshly-built registry.
+
+    STAGED during an epoch build (promoted at commit), else swapped in immediately (boot).
+    """
     global _current, _pending
     if _staging:
         _pending = registry
@@ -430,34 +453,42 @@ def set_current_registry(registry: StudioPluginRegistry) -> None:
 
 
 def current_registry() -> StudioPluginRegistry:
-    """The COMMITTED registry built by the last startup/reload pass. Raises if the pass
-    has not run (the app is not started) — never returns a silent empty registry that
-    would hide a boot-order bug."""
+    """The COMMITTED registry built by the last startup/reload pass.
+
+    Raises if the pass has not run (the app is not started) — never returns a silent empty
+    registry that would hide a boot-order bug.
+    """
     if _current is None:
         raise StudioPluginError("studio plugin registry has not been built — is the app started?")
     return _current
 
 
 def current_registry_staged() -> StudioPluginRegistry:
-    """The STAGED registry if a build has rebuilt one, else the committed registry — the
-    build's own view (kind status). Serve-time reads use :func:`current_registry`
-    (committed only). Raises the same not-built error when neither exists."""
+    """The STAGED registry if a build has rebuilt one, else the committed registry.
+
+    The build's own view (kind status). Serve-time reads use :func:`current_registry` (committed
+    only). Raises the same not-built error when neither exists.
+    """
     if _pending is not None:
         return _pending
     return current_registry()
 
 
 def begin_staging() -> None:
-    """Open Studio-registry staging: a rebuild during the build stages rather than
-    swaps the live registry."""
+    """Open Studio-registry staging.
+
+    A rebuild during the build stages rather than swaps the live registry.
+    """
     global _staging, _pending
     _staging = True
     _pending = None
 
 
 def commit_staging() -> None:
-    """Promote the staged registry to committed if the build rebuilt one, else leave
-    the live registry in place. Idempotent when no build staged."""
+    """Promote the staged registry to committed if the build rebuilt one, else leave the live registry.
+
+    Idempotent when no build staged.
+    """
     global _current, _pending, _staging
     if _staging and _pending is not None:
         _current = _pending
@@ -473,11 +504,12 @@ def abort_staging() -> None:
 
 
 async def rebuild_studio_plugin_registry() -> None:
-    """Startup/reload handler: rebuild the registry from the LIVE manifest's
-    ``studio_plugins`` and the configured SPA dist path. Registered on both
-    ``lifecycle.on_startup`` and ``lifecycle.on_reload`` so a reload that changes
-    ``studio_plugins`` reflects without a process restart. Reads at call time via
-    the live-manifest seam — never captured at import.
+    """Startup/reload handler: rebuild the registry from the live manifest and SPA dist path.
+
+    Rebuilds from the LIVE manifest's ``studio_plugins`` and the configured SPA dist path.
+    Registered on both ``lifecycle.on_startup`` and ``lifecycle.on_reload`` so a reload that
+    changes ``studio_plugins`` reflects without a process restart. Reads at call time via the
+    live-manifest seam — never captured at import.
     """
     from tai42_contract.app import tai42_app
 

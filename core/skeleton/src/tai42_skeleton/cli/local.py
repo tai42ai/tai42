@@ -23,10 +23,11 @@ from tai42_skeleton.cli.native import catalog, db, doctor, openapi
 
 
 def _attach_offline(root: click.Group, parent_name: str, fn: Callable[..., None], name: str) -> None:
-    """Compile the offline command ``fn`` and add it as ``name`` under the client's
-    ``parent_name`` group. The offline validators emit human diagnostics and an exit
-    code only — no JSON output — so no ``--json`` flag is injected. The parent group
-    is created by the client; if it is absent the wiring is broken, so raise."""
+    """Compile the offline command ``fn`` and add it as ``name`` under the client's ``parent_name`` group.
+
+    The offline validators emit human diagnostics and an exit code only — no JSON output — so no ``--json``
+    flag is injected. The parent group is created by the client; if it is absent the wiring is broken, so raise.
+    """
     parent = root.commands.get(parent_name)
     if parent is None or getattr(parent, "commands", None) is None:
         raise RuntimeError(f"cannot attach '{name}': the '{parent_name}' command group is not mounted")

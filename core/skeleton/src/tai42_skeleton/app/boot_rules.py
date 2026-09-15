@@ -1,5 +1,4 @@
-"""Boot-time worker-bus invariants — refuse to start a deployment that needs the
-bus but has none configured.
+"""Boot-time worker-bus invariants — refuse to start a deployment that needs the bus but has none configured.
 
 The worker bus is what keeps sibling workers from serving stale config after a
 reload, so three shapes require ``TAI_BUS_REDIS_URL``:
@@ -41,7 +40,8 @@ class BackendNeedsBusError(RuntimeError):
     needs the bus. This is the one backend-needs-bus predicate, evaluated against the
     resolved config at boot, at every reload, and at mutation time — so the same
     invariant rejects a manifest/env change that ADDS a backend with no bus and one
-    that REMOVES the bus while a backend still needs it."""
+    that REMOVES the bus while a backend still needs it.
+    """
 
 
 def _bus_configured() -> bool:
@@ -56,7 +56,8 @@ def check_backend_needs_bus(*, backend_module: str | None, bus_configured: bool)
     ``bus_configured`` is whether the effective env configures the bus. The mutation
     pipeline evaluates both against the POST-change resolved config, so this one
     predicate covers both directions — a change that adds a backend without a bus and
-    a change that drops the bus while a backend remains."""
+    a change that drops the bus while a backend remains.
+    """
     if backend_module and not bus_configured:
         raise BackendNeedsBusError(
             f"Refusing a config that registers a task backend ({backend_module!r}) with no worker bus: "
@@ -65,8 +66,10 @@ def check_backend_needs_bus(*, backend_module: str | None, bus_configured: bool)
 
 
 def require_bus_for_workers(workers: int) -> None:
-    """Refuse a multi-worker server with no bus: sibling workers would serve stale
-    state after a reload with no channel to converge on."""
+    """Refuse a multi-worker server with no bus.
+
+    Sibling workers would serve stale state after a reload with no channel to converge on.
+    """
     if workers > 1 and not _bus_configured():
         raise RuntimeError(
             f"Refusing to start {workers} workers without the worker bus: sibling workers would serve "
@@ -76,9 +79,11 @@ def require_bus_for_workers(workers: int) -> None:
 
 
 def require_bus_for_shared_config() -> None:
-    """Refuse a shared-config boot with no bus: any non-``file`` config mode serves
-    shared config from an external provider, so instances must converge on a reload
-    and one instance cannot see how many siblings share the config."""
+    """Refuse a shared-config boot with no bus.
+
+    Any non-``file`` config mode serves shared config from an external provider, so instances must
+    converge on a reload and one instance cannot see how many siblings share the config.
+    """
     if config_mode() != ConfigMode.file and not _bus_configured():
         raise RuntimeError(
             f"Refusing to start in {config_mode()!r} config mode without the worker bus: an external "
@@ -88,10 +93,11 @@ def require_bus_for_shared_config() -> None:
 
 
 def require_bus_for_backend(manifest: Manifest) -> None:
-    """Refuse a boot / reload that registers a task backend with no bus: the
-    backend-runtime and server processes must converge on config reloads.
+    """Refuse a boot / reload that registers a task backend with no bus.
 
+    The backend-runtime and server processes must converge on config reloads.
     The boot-time and reload-time face of :func:`check_backend_needs_bus`, reading
     the process-wide bus configuration — so the mutate-time pipeline check and this
-    one agree on the same predicate."""
+    one agree on the same predicate.
+    """
     check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=_bus_configured())

@@ -14,7 +14,7 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
-from tai42_skeleton.operations.errors import BadRequestError, NotFoundError, ValidationRejected
+from tai42_skeleton.operations.errors import BadRequestError, NotFoundError, ValidationRejectedError
 
 from .conftest import _assert_park_cancelled, _seed_park
 
@@ -851,7 +851,7 @@ async def test_create_consults_the_registered_target_validator_and_refuses_on_me
 
     instance.app.conversations.register_target_validator("tool", _validator)
 
-    with pytest.raises(ValidationRejected, match="binds no such state"):
+    with pytest.raises(ValidationRejectedError, match="binds no such state"):
         await ops.create_conversation_route(
             route_name="chat",
             door="api",

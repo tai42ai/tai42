@@ -1,6 +1,6 @@
-"""Operations for the subject-keyed state store — ``/api/states*``, the sibling
-``/api/state-templates*`` and ``/api/state-retention/prune``.
+"""Operations for the subject-keyed state store and its sibling template and retention doors.
 
+Covers ``/api/states*``, ``/api/state-templates*`` and ``/api/state-retention/prune``.
 Thin, request-free operations over the ``tai42_app.states`` facet (the HTTP routes in
 :mod:`tai42_skeleton.routers.states` are their adapters). Every operation runs its facet
 call inside :func:`_states_door`, which maps the store's typed errors
@@ -57,7 +57,7 @@ from tai42_skeleton.operations import (
     ConflictError,
     NotFoundError,
     NotSupportedError,
-    ValidationRejected,
+    ValidationRejectedError,
     operation,
 )
 from tai42_skeleton.operations.response_models_group_states import (
@@ -96,19 +96,21 @@ _ERROR_MAP: dict[type[StatesError], type] = {
     TemplateExistsError: ConflictError,
     TemplateInUseError: ConflictError,
     AttachConflictError: ConflictError,
-    SubjectRefusedError: ValidationRejected,
-    SchemaValidationError: ValidationRejected,
-    InvalidPathError: ValidationRejected,
-    ValueValidationError: ValidationRejected,
-    RegimeViolationError: ValidationRejected,
-    TemplateValidationError: ValidationRejected,
+    SubjectRefusedError: ValidationRejectedError,
+    SchemaValidationError: ValidationRejectedError,
+    InvalidPathError: ValidationRejectedError,
+    ValueValidationError: ValidationRejectedError,
+    RegimeViolationError: ValidationRejectedError,
+    TemplateValidationError: ValidationRejectedError,
 }
 
 
 @contextmanager
 def _states_door() -> Iterator[None]:
-    """Translate the store's typed errors into the operation error the adapter maps to a
-    status. The one seam every states operation runs its facet call through."""
+    """Translate the store's typed errors into the operation error the adapter maps to a status.
+
+    The one seam every states operation runs its facet call through.
+    """
     try:
         yield
     except StatesNotConfiguredError as exc:
@@ -127,14 +129,16 @@ def _states():
 
 
 def _subject(target_kind: str, target_name: str, kind: str, key: str) -> StateSubject:
-    """Build a :class:`StateSubject` from the record route's path segments; a malformed
-    segment (a bad target kind, an over-long key) is a 422 rejected input."""
+    """Build a :class:`StateSubject` from the record route's path segments.
+
+    A malformed segment (a bad target kind, an over-long key) is a 422 rejected input.
+    """
     try:
         return StateSubject.model_validate(
             {"target_kind": target_kind, "target_name": target_name, "kind": kind, "key": key}
         )
     except ValidationError as exc:
-        raise ValidationRejected(f"invalid subject: {exc.errors(include_url=False)}") from exc
+        raise ValidationRejectedError(f"invalid subject: {exc.errors(include_url=False)}") from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -147,8 +151,10 @@ def _subject(target_kind: str, target_name: str, kind: str, key: str) -> StateSu
     response_model=StateDeclarationList,
 )
 async def list_states() -> list[dict[str, Any]]:
-    """Every declared state, base + composed effective schema included, each with its
-    ``updated_at`` timestamp (the Updated column)."""
+    """Every declared state, base + composed effective schema included, each with its ``updated_at``.
+
+    The ``updated_at`` timestamp is the Updated column.
+    """
     with _states_door():
         # ``mode="json"`` so the served ``updated_at`` datetime encodes as an ISO string;
         # a python-mode dump leaves a raw datetime the JSON response cannot serialize.
@@ -162,9 +168,12 @@ async def list_states() -> list[dict[str, Any]]:
     response_model=ServedStateView,
 )
 async def get_state(name: str) -> dict[str, Any]:
-    """One state's served declaration: base ``schema``, ``effective_schema``,
-    ``subject_kinds``, ``default_subject_kind``, its ``attachments``, computed ``regimes`` and
-    ``updated_at`` (the ISO timestamp of its last write)."""
+    """One state's served declaration.
+
+    Base ``schema``, ``effective_schema``, ``subject_kinds``, ``default_subject_kind``, its
+    ``attachments``, computed ``regimes`` and ``updated_at`` (the ISO timestamp of its last
+    write).
+    """
     with _states_door():
         return await _states().served_declaration(name)
 
@@ -173,24 +182,27 @@ async def get_state(name: str) -> dict[str, Any]:
     summary="Create or re-declare a state",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, ValidationRejected, ConflictError, NotFoundError],
+    errors=[NotSupportedError, ValidationRejectedError, ConflictError, NotFoundError],
     response_model=StateDeclaration,
 )
 async def put_state(name: str, declaration: dict[str, Any]) -> dict[str, Any]:
-    """Upsert a state declaration; the ``name`` is taken from the path. With records present
-    only additive schema changes are accepted — a narrowing is refused while records exist."""
+    """Upsert a state declaration; the ``name`` is taken from the path.
+
+    With records present only additive schema changes are accepted — a narrowing is refused
+    while records exist.
+    """
     body = {**declaration, "name": name}
     try:
         decl = StateDeclaration.model_validate(body)
     except ValidationError as exc:
-        raise ValidationRejected(f"invalid declaration: {exc.errors(include_url=False)}") from exc
+        raise ValidationRejectedError(f"invalid declaration: {exc.errors(include_url=False)}") from exc
     with _states_door():
         try:
             saved = await _states().put_declaration(decl)
         except ValueError as exc:
             # ``effective_schema`` supplied by a client (computed by the platform) is a
             # rejected input, not a store fault.
-            raise ValidationRejected(str(exc)) from exc
+            raise ValidationRejectedError(str(exc)) from exc
     return saved.model_dump(mode="json")
 
 
@@ -242,9 +254,10 @@ async def list_state_attachments(name: str) -> list[dict[str, Any]]:
     response_model=StateAttachmentRow,
 )
 async def get_state_attachment(name: str, template: str) -> dict[str, Any]:
-    """One template's attachment on the state — its path, resolved parameters and
-    declarations; the same row the list serves. A template not attached on the state is a
-    404."""
+    """One template's attachment on the state — its path, resolved parameters and declarations.
+
+    The same row the list serves. A template not attached on the state is a 404.
+    """
     with _states_door():
         rows = await _states().list_attachments(name, template=template)
     if not rows:
@@ -256,16 +269,18 @@ async def get_state_attachment(name: str, template: str) -> dict[str, Any]:
     summary="Attach a template on a state",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejected, ConflictError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError],
     response_model=AttachAck,
 )
 async def attach_state_template(name: str, template: str, body: dict[str, Any]) -> dict[str, Any]:
-    """Attach ``template`` on the state at the body's ``path`` with its parameters and static
-    declarations; recomposes and validates the effective schema in one transaction."""
+    """Attach ``template`` on the state at the body's ``path`` with its parameters and static declarations.
+
+    Recomposes and validates the effective schema in one transaction.
+    """
     try:
         attach_body = AttachBody.model_validate(body)
     except ValidationError as exc:
-        raise ValidationRejected(f"invalid attach body: {exc.errors(include_url=False)}") from exc
+        raise ValidationRejectedError(f"invalid attach body: {exc.errors(include_url=False)}") from exc
     with _states_door():
         await _states().attach(name, template, attach_body)
     return {"attached": True, "state": name, "template": template}
@@ -275,25 +290,29 @@ async def attach_state_template(name: str, template: str, body: dict[str, Any]) 
     summary="Update an attachment's declarations",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejected, ConflictError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError],
     response_model=AttachUpdateAck,
 )
 async def update_state_attachment(
     name: str, template: str, declarations: dict[str, Any], options: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Replace an attachment's static declaration values and reconcile ``options``, re-running
-    the attach validators and reconcilers and recomposing the effective schema."""
+    """Replace an attachment's static declaration values and reconcile ``options``.
+
+    Re-runs the attach validators and reconcilers and recomposes the effective schema.
+    """
     with _states_door():
         await _states().update_attachment_declarations(name, template, declarations, options=options)
     return {"updated": True, "state": name, "template": template}
 
 
 async def _detach_referees(state: str, template: str) -> list[str]:
-    """Every live door binding a detach of ``template`` from ``state`` would strand — the
-    union the detach gate blocks on. Each registered detach referee (the platform-internal
-    preset/conversation/hook/schedule holders + any plugin provider) is asked for the
-    ``(state, template)``; a referee RAISING propagates loudly — a detach never proceeds past
-    an unreadable holder store (no silent bypass)."""
+    """Every live door binding a detach of ``template`` from ``state`` would strand.
+
+    The union the detach gate blocks on. Each registered detach referee (the
+    platform-internal preset/conversation/hook/schedule holders + any plugin provider) is
+    asked for the ``(state, template)``; a referee RAISING propagates loudly — a detach never
+    proceeds past an unreadable holder store (no silent bypass).
+    """
     holders: list[str] = []
     for referee in instance.app.tools.detach_referees():
         holders.extend(await referee(state, template))
@@ -313,7 +332,8 @@ async def detach_state_template(name: str, template: str) -> dict[str, Any]:
     Consults the detach referees FIRST: a template still named by a live door binding (a
     preset version, a conversation config, a hook, a schedule) is a 409 that detaches nothing
     and lists the referencing bindings — the attach-at-save contract's referee, so a binding
-    never faults at run time on a template detached out from under it."""
+    never faults at run time on a template detached out from under it.
+    """
     referenced = await _detach_referees(name, template)
     if referenced:
         raise ConflictError(
@@ -358,16 +378,18 @@ async def search_state_records(
 @operation(
     summary="Read a subject's record",
     tags=["states"],
-    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
     response_model=StateRecordOrNull,
 )
 async def read_state_record(
     name: str, target_kind: str, target_name: str, kind: str, key: str
 ) -> dict[str, Any] | None:
-    """One subject's record, or ``null`` when none exists. An unknown ``person`` subject is a
-    refusal, never an empty document. A subject ``key`` that contains ``/`` (a thread key is
-    a thread id) is percent-encoded as one path segment; this holds for every single-record
-    door."""
+    """One subject's record, or ``null`` when none exists.
+
+    An unknown ``person`` subject is a refusal, never an empty document. A subject ``key``
+    that contains ``/`` (a thread key is a thread id) is percent-encoded as one path segment;
+    this holds for every single-record door.
+    """
     subject = _subject(target_kind, target_name, kind, key)
     with _states_door():
         view = await _states().read(name, subject)
@@ -377,7 +399,7 @@ async def read_state_record(
 @operation(
     summary="Evaluate an input-purpose template_jq program for a subject",
     tags=["states"],
-    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
     response_model=TemplateJqResult,
 )
 async def eval_state_template_jq(
@@ -389,11 +411,13 @@ async def eval_state_template_jq(
     program: str,
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """An ``input``-purpose ``template_jq`` program's result for one subject — its jq over the
-    subject's record. ``params`` supplies the program's declared parameters. ``program`` may be
-    unqualified or ``<template>.<name>``. An unknown program (or a subject with no attachment
-    declaring it) is a 404; an ambiguous unqualified name, an ``update``-purpose name, an
-    undeclared param or a program that fails to evaluate is a 422. Read-only."""
+    """An ``input``-purpose ``template_jq`` program's result for one subject — its jq over the record.
+
+    ``params`` supplies the program's declared parameters. ``program`` may be unqualified or
+    ``<template>.<name>``. An unknown program (or a subject with no attachment declaring it)
+    is a 404; an ambiguous unqualified name, an ``update``-purpose name, an undeclared param
+    or a program that fails to evaluate is a 422. Read-only.
+    """
     subject = _subject(target_kind, target_name, kind, key)
     with _states_door():
         result = await _states().eval_template_jq(name, subject, program, params or {})
@@ -404,7 +428,7 @@ async def eval_state_template_jq(
     summary="Apply an update-purpose template_jq program to a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
     response_model=TemplateJqApplyResult,
 )
 async def apply_state_template_jq(
@@ -414,19 +438,21 @@ async def apply_state_template_jq(
     kind: str,
     key: str,
     program: str,
-    input: Any = None,
+    input_: Any = None,
     op_id: str | None = None,
 ) -> dict[str, Any]:
-    """Apply an ``update``-purpose ``template_jq`` program to one subject. Its jq returns a
-    template-relative op batch applied through the same chokepoint as a delta — regimes, the
-    composing-shape guard, trace stamping and ``op_id`` idempotency all hold. ``program`` may be
-    unqualified or ``<template>.<name>``. An unknown program is a 404; an ambiguous unqualified
-    name, an ``input``-purpose name, or a program that fails to evaluate or returns the wrong
-    shape is a 422."""
+    """Apply an ``update``-purpose ``template_jq`` program to one subject.
+
+    Its jq returns a template-relative op batch applied through the same chokepoint as a
+    delta — regimes, the composing-shape guard, trace stamping and ``op_id`` idempotency all
+    hold. ``program`` may be unqualified or ``<template>.<name>``. An unknown program is a
+    404; an ambiguous unqualified name, an ``input``-purpose name, or a program that fails to
+    evaluate or returns the wrong shape is a 422.
+    """
     subject = _subject(target_kind, target_name, kind, key)
     with _states_door():
         result = await _states().apply_template_jq(
-            name, subject, program, input, op_id=op_id, origin=WriteOrigin(meta={"template_jq": program})
+            name, subject, program, input_, op_id=op_id, origin=WriteOrigin(meta={"template_jq": program})
         )
     return result.model_dump()
 
@@ -435,7 +461,7 @@ async def apply_state_template_jq(
     summary="Replace a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
     response_model=StateRecord,
 )
 async def replace_state_record(
@@ -452,7 +478,7 @@ async def replace_state_record(
     summary="Merge into a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
     response_model=StateRecord,
 )
 async def merge_state_record(
@@ -469,7 +495,7 @@ async def merge_state_record(
     summary="Apply ops to a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
     response_model=ApplyResult,
 )
 async def apply_state_record(
@@ -481,8 +507,11 @@ async def apply_state_record(
     ops: list[dict[str, Any]],
     op_id: str | None = None,
 ) -> dict[str, Any]:
-    """Apply an ordered op batch to a subject's document — refused if a whole-path write
-    violates an attached path's regime; idempotent on a replayed ``op_id``."""
+    """Apply an ordered op batch to a subject's document.
+
+    Refused if a whole-path write violates an attached path's regime; idempotent on a
+    replayed ``op_id``.
+    """
     subject = _subject(target_kind, target_name, kind, key)
     with _states_door():
         result = await _states().apply(name, subject, ops, op_id=op_id, origin=WriteOrigin())
@@ -493,7 +522,7 @@ async def apply_state_record(
     summary="Erase a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
     response_model=EraseAck,
 )
 async def erase_state_record(name: str, target_kind: str, target_name: str, kind: str, key: str) -> dict[str, Any]:
@@ -508,7 +537,7 @@ async def erase_state_record(name: str, target_kind: str, target_name: str, kind
     summary="Fold one subject into another",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejected, ConflictError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError],
     response_model=FoldReport,
 )
 async def fold_state_record(
@@ -520,13 +549,15 @@ async def fold_state_record(
     into: dict[str, Any],
     mode: str,
 ) -> dict[str, Any]:
-    """Fold this subject's record into the ``into`` subject under ``mode`` (an alias the reads
-    then resolve through). Refused on a self-fold, a cycle, or a merge that no longer validates."""
+    """Fold this subject's record into the ``into`` subject under ``mode`` (an alias the reads resolve through).
+
+    Refused on a self-fold, a cycle, or a merge that no longer validates.
+    """
     subject = _subject(target_kind, target_name, kind, key)
     try:
         into_subject = StateSubject.model_validate(into)
     except ValidationError as exc:
-        raise ValidationRejected(f"invalid fold target: {exc.errors(include_url=False)}") from exc
+        raise ValidationRejectedError(f"invalid fold target: {exc.errors(include_url=False)}") from exc
     with _states_door():
         return await _states().fold(name, subject, into_subject, mode, origin=WriteOrigin())
 
@@ -534,7 +565,7 @@ async def fold_state_record(
 @operation(
     summary="A subject's write audit trail",
     tags=["states"],
-    errors=[NotSupportedError, NotFoundError, ValidationRejected],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
     response_model=WritesPage,
 )
 async def list_state_writes(
@@ -546,9 +577,12 @@ async def list_state_writes(
     limit: int | None = None,
     cursor: str | None = None,
 ) -> dict[str, Any]:
-    """One keyset page of a subject's write ledger: ``items`` (each entry's seq, timestamp,
-    completed origin (door/actor/consumer/meta/run/turn) and the paths it touched) and the
-    ``next_cursor`` the next page reads from (null on the last page)."""
+    """One keyset page of a subject's write ledger.
+
+    ``items`` (each entry's seq, timestamp, completed origin (door/actor/consumer/meta/run/
+    turn) and the paths it touched) and the ``next_cursor`` the next page reads from (null on
+    the last page).
+    """
     subject = _subject(target_kind, target_name, kind, key)
     with _states_door():
         page = await _states().writes(name, subject, limit=limit, cursor=cursor)
@@ -562,8 +596,10 @@ async def list_state_writes(
     response_model=StateConsumerList,
 )
 async def state_consumers(name: str) -> list[dict[str, Any]]:
-    """Everything that binds the state — flows, hooks, schedules, agents — as the Consumers
-    tab reads it; a consumer family the deployment cannot list is a labelled, muted row."""
+    """Everything that binds the state — every registered consumer family — as the Consumers tab reads it.
+
+    A consumer family the deployment cannot list is a labelled, muted row.
+    """
     with _states_door():
         return [row.model_dump() for row in await _states().consumers(name)]
 
@@ -578,9 +614,11 @@ async def state_consumers(name: str) -> list[dict[str, Any]]:
     response_model=StateTemplateCatalog,
 )
 async def list_state_templates() -> list[dict[str, Any]]:
-    """Every platform state-template document (the reusable schema fragments), each with the
-    catalog columns ``attached_to`` (the number of states it is attached on) and
-    ``shipped_default`` (whether it is an unedited shipped default)."""
+    """Every platform state-template document (the reusable schema fragments), each with the catalog columns.
+
+    ``attached_to`` (the number of states it is attached on) and ``shipped_default``
+    (whether it is an unedited shipped default).
+    """
     with _states_door():
         return await _states().list_templates_catalog()
 
@@ -604,17 +642,19 @@ async def get_state_template(name: str) -> dict[str, Any]:
     summary="Create or replace a state template",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, ValidationRejected, ConflictError],
+    errors=[NotSupportedError, ValidationRejectedError, ConflictError],
     response_model=StateTemplateDocument,
 )
 async def put_state_template(name: str, document: dict[str, Any], replace: bool = False) -> dict[str, Any]:
-    """Upload a state-template document; the ``name`` is taken from the path. An existing name
-    without ``replace`` is refused so an overwrite is deliberate."""
+    """Upload a state-template document; the ``name`` is taken from the path.
+
+    An existing name without ``replace`` is refused so an overwrite is deliberate.
+    """
     body = {**document, "name": name}
     try:
         doc = StateTemplateDocument.model_validate(body)
     except ValidationError as exc:
-        raise ValidationRejected(f"invalid template document: {exc.errors(include_url=False)}") from exc
+        raise ValidationRejectedError(f"invalid template document: {exc.errors(include_url=False)}") from exc
     with _states_door():
         saved = await _states().put_template(doc, replace=replace)
     return saved.model_dump()
@@ -645,7 +685,9 @@ async def delete_state_template(name: str) -> dict[str, Any]:
     response_model=PruneResult,
 )
 async def prune_state_retention() -> dict[str, Any]:
-    """Delete every record past its state's ``retention_days`` horizon; returns the per-state
-    deleted counts."""
+    """Delete every record past its state's ``retention_days`` horizon.
+
+    Returns the per-state deleted counts.
+    """
     with _states_door():
         return {"pruned": await _states().prune_expired()}

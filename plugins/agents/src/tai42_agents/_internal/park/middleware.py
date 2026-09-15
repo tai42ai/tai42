@@ -70,14 +70,18 @@ PARK_ANSWER_ERROR_KEY: Final[str] = "tai42:agent_park_error"
 
 
 def park_error_answer(detail: str) -> dict[str, str]:
-    """The answer value that resumes a park with a FAILURE: ``detail`` is what the model reads
-    as the tool's error."""
+    """The answer value that resumes a park with a FAILURE.
+
+    ``detail`` is what the model reads as the tool's error.
+    """
     return {PARK_ANSWER_ERROR_KEY: detail}
 
 
 def read_park_error_answer(answer: Any) -> str | None:
-    """The failure detail an answer carries, or ``None`` for an ordinary answer (every value a
-    human or an expiry marker delivers)."""
+    """The failure detail an answer carries, or ``None`` for an ordinary answer.
+
+    An ordinary answer is every value a human or an expiry marker delivers.
+    """
     if isinstance(answer, dict) and PARK_ANSWER_ERROR_KEY in answer:
         detail = answer[PARK_ANSWER_ERROR_KEY]
         return detail if isinstance(detail, str) else str(detail)
@@ -102,7 +106,8 @@ def resuming_park_interaction_ids(interaction_ids: frozenset[str]) -> Iterator[N
     claim check treats a park whose id is in this set as claimable regardless of the marker's
     ``resume_owner``: a resume is fired only for a park THIS run owns, so an in-flight park stays
     resumable even when its persisted wire marker carries no owner (a park written by a released
-    predecessor and upgraded mid-flight). Set and reset around the drive."""
+    predecessor and upgraded mid-flight). Set and reset around the drive.
+    """
     token = _resuming_park_interaction_ids.set(interaction_ids)
     try:
         yield
@@ -111,8 +116,10 @@ def resuming_park_interaction_ids(interaction_ids: frozenset[str]) -> Iterator[N
 
 
 def _trailing_tool_messages(messages: list[AnyMessage]) -> list[ToolMessage]:
-    """The ToolMessages produced since the last AIMessage — the current super-step's tool
-    results. An empty list when the last message is not a tool result batch."""
+    """The ToolMessages produced since the last AIMessage — the current super-step's tool results.
+
+    An empty list when the last message is not a tool result batch.
+    """
     trailing: list[ToolMessage] = []
     for message in reversed(messages):
         if isinstance(message, ToolMessage):
@@ -126,16 +133,18 @@ def _trailing_tool_messages(messages: list[AnyMessage]) -> list[ToolMessage]:
 
 
 def _scan_parks(messages: list[AnyMessage]) -> list[dict[str, Any]]:
-    """Every parked ToolMessage in the current super-step, as
-    ``{message_id, tool_call_id, name, interaction_id, expiry_at, resume_owner}``. Empty when
-    no park marker is present (the common, non-parking case).
+    """Every parked ToolMessage in the current super-step, as a marker dict.
+
+    Each entry is ``{message_id, tool_call_id, name, interaction_id, expiry_at, resume_owner}``.
+    Empty when no park marker is present (the common, non-parking case).
 
     ``resume_owner`` is read off the marker with ``.get``: a marker that carries no such key —
     an older wire form, or content a model shaped without one — yields ``None``, which
     :func:`assert_park_adoptable` refuses as a nested/foreign park. Nothing here decides
     adoptability; it only surfaces what the claim check needs. The marker's SHAPE was already
     validated upstream (:func:`read_suspended_interaction_marker` returns ``None`` for anything
-    that is not a well-formed marker), so every entry here carries a real ``interaction_id``."""
+    that is not a well-formed marker), so every entry here carries a real ``interaction_id``.
+    """
     parks: list[dict[str, Any]] = []
     for message in _trailing_tool_messages(messages):
         marker = read_suspended_interaction_marker(message.content)
@@ -160,12 +169,14 @@ def _scan_parks(messages: list[AnyMessage]) -> list[dict[str, Any]]:
 
 
 def _error_message(park: dict[str, Any], reason: str) -> ToolMessage:
-    """The model-visible error ToolMessage a parked tool result is replaced by — a park this
-    run may not claim, or one whose awaited outcome came back a failure.
+    """The model-visible error ToolMessage a parked tool result is replaced by.
+
+    Replaces a park this run may not claim, or one whose awaited outcome came back a failure.
 
     An error RESULT, never a dropped marker: leaving the marker in place would hand the model
     the raw park JSON as if it were the tool's answer, and dropping the message would strand
-    the tool_call unanswered. The id is the marked message's, so the reducer replaces it."""
+    the tool_call unanswered. The id is the marked message's, so the reducer replaces it.
+    """
     return ToolMessage(
         id=park["message_id"],
         content=reason,
@@ -176,8 +187,7 @@ def _error_message(park: dict[str, Any], reason: str) -> ToolMessage:
 
 
 def _partition_claimable(parks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[ToolMessage]]:
-    """Split the super-step's parks into the ones THIS run may claim and the error messages
-    replacing the ones it may not.
+    """Split the super-step's parks into the ones THIS run may claim and error messages for the rest.
 
     This is the CLAIM POINT: recording resume state against an interaction is what the
     interrupt below leads to, so ownership is checked here — not only where a sentinel object
@@ -189,7 +199,8 @@ def _partition_claimable(parks: list[dict[str, Any]]) -> tuple[list[dict[str, An
     claimable regardless of the marker's owner: a resume is fired only for a park this run owns,
     so an in-flight park stays resumable even when its persisted wire marker predates the
     ``resume_owner`` field (a park written by a released predecessor, upgraded mid-flight). Its
-    ownerless marker would otherwise be refused here and the operator's delivered answer dropped."""
+    ownerless marker would otherwise be refused here and the operator's delivered answer dropped.
+    """
     resuming = _resuming_park_interaction_ids.get()
     claimable: list[dict[str, Any]] = []
     refusals: list[ToolMessage] = []
@@ -209,8 +220,7 @@ def _partition_claimable(parks: list[dict[str, Any]]) -> tuple[list[dict[str, An
 
 
 class AsyncParkMiddleware(AgentMiddleware):
-    """Interrupt the loop once for a super-step's async-ask parks, and substitute their
-    answers back on resume."""
+    """Interrupt the loop once for a super-step's async-ask parks, and substitute their answers back on resume."""
 
     name: str = "AsyncParkMiddleware"
 
@@ -236,7 +246,8 @@ def _park_or_resume(messages: list[AnyMessage]) -> dict[str, Any] | None:
     claimed ToolMessage's content to its answer (same message id → the messages reducer
     replaces it in place), alongside any refusals of the same super-step. A marker whose
     interaction id is absent from the answers map is a partial resume and raises loudly —
-    never a silent substitution."""
+    never a silent substitution.
+    """
     parks = _scan_parks(messages)
     if not parks:
         return None

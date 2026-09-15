@@ -20,8 +20,9 @@ from .models import _DISABLED_CODE, _DISABLED_MESSAGE, PublicRoutePin, PublicRou
     response_model=RouteMappingList,
 )
 async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
-    """Enumerate the app's own HTTP routes with each route's current scope mapping —
-    the mapper's route picker and its "unassigned routes" bucket (the ``mapped: null``
+    """Enumerate the app's own HTTP routes with each route's current scope mapping.
+
+    Covers the mapper's route picker and its "unassigned routes" bucket (the ``mapped: null``
     entries).
 
     ``routes`` is the app's live route table (the route-adapter extractor hands the
@@ -45,7 +46,8 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
     TEMPLATE + its method set with ``HEAD`` stripped on BOTH sides (Starlette auto-adds
     ``HEAD`` to a GET), so the two collections compare like-for-like; a registered route
     whose method set fails to join is a loud STOP (a normalization drift), never a
-    silently dropped row."""
+    silently dropped row.
+    """
     # OFF: access control disabled → no scope mappings exist, so the honest answer
     # is the empty route list (no AC store touched under the synthetic admin).
     if not _pkg.access_control_settings().enable:

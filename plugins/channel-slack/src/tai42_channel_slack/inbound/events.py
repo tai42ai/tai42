@@ -28,7 +28,7 @@ from tai42_contract.app import tai42_app
 
 from tai42_channel_slack.correlation import claim_dedupe, release_dedupe
 from tai42_channel_slack.inbound.routing import _bridge, _recipients, _resolve_answer
-from tai42_channel_slack.inbound.verification import _InboundRejected, _read_verified_body
+from tai42_channel_slack.inbound.verification import _InboundRejectedError, _read_verified_body
 from tai42_channel_slack.settings import slack_settings
 
 logger = logging.getLogger(__name__)
@@ -45,17 +45,17 @@ _RETRY_NUM_HEADER = "X-Slack-Retry-Num"
     no_body_reason="Slack Events API webhook: url_verification challenge / vendor ack",
 )
 async def slack_inbound(request: Request) -> Response:
-    """Receive a Slack Events API delivery, verify it, and route it: a correlated
-    threaded reply to its callback URL, any other human message to the bridge.
+    """Receive a Slack Events API delivery, verify it, and route it.
 
-    Unverifiable requests get a constant 401; a missing signing secret a logged
+    A correlated threaded reply goes to its callback URL; any other human message goes
+    to the bridge. Unverifiable requests get a constant 401; a missing signing secret a logged
     500. Verified traffic with nothing to do (the bot's own echoes, empty
     messages) is acked 200 ``ignored`` (Slack needs a 2xx or it retries and
     disables the subscription).
     """
     try:
         raw = await _read_verified_body(request)
-    except _InboundRejected as rejected:
+    except _InboundRejectedError as rejected:
         return rejected.response
 
     try:
@@ -100,10 +100,10 @@ async def slack_inbound(request: Request) -> Response:
 
 
 async def _process_event(payload: dict, event_id: str) -> Response:
-    """Route one verified, deduped ``event_callback``: a pending-question reply
-    forwards to its callback; any other human message bridges to a conversation.
+    """Route one verified, deduped ``event_callback``.
 
-    A pending-question correlation is attempted first and wins. On a miss — a thread
+    A pending-question reply forwards to its callback; any other human message bridges
+    to a conversation. A pending-question correlation is attempted first and wins. On a miss — a thread
     reply whose question expired or was never ours, a top-level message, or a message
     outside the ask_user allowlist — the message bridges. The bot's own echoes stay
     ignored throughout.
@@ -112,7 +112,7 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     recipients = _recipients(settings)
     event = payload.get("event")
     if not isinstance(event, dict):
-        raise ValueError("event_callback without an event object")
+        raise ValueError("event_callback without an event object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
     if event.get("type") != "message" or "subtype" in event or event.get("bot_id") is not None:
         # Not a plain human message: edits/joins/file shares carry a subtype, the

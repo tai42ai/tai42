@@ -36,30 +36,36 @@ class SettingsProfileStoreView(SettingsProfileStore):
     """Typed settings-profile view delegating to a generic :class:`VersionedStore`."""
 
     def __init__(self, store: VersionedStore) -> None:
+        """Wrap the generic ``store`` as a typed settings-profile view."""
         self._store = store
 
     async def create_profile(self, name: str, body: SettingsProfileBody) -> DocumentRecord:
+        """Create a new profile ``name`` from ``body``; raise on an existing name."""
         try:
             return await self._store.create(_KIND, name, body.model_dump())
         except DocumentExistsError as exc:
             raise SettingsProfileExistsError(name) from exc
 
     async def save_version(self, name: str, body: SettingsProfileBody) -> DocumentVersion:
+        """Save a new version of profile ``name`` from ``body``; raise on an unknown name."""
         try:
             return await self._store.save_version(_KIND, name, body.model_dump())
         except DocumentNotFoundError as exc:
             raise SettingsProfileNotFoundError(name) from exc
 
     async def list_profiles(self) -> list[DocumentRecord]:
+        """Every settings-profile record."""
         return await self._store.list(_KIND)
 
     async def get_profile(self, name: str) -> DocumentRecord:
+        """The record for profile ``name``; raise on an unknown name."""
         try:
             return await self._store.get(_KIND, name)
         except DocumentNotFoundError as exc:
             raise SettingsProfileNotFoundError(name) from exc
 
     async def get_active_body(self, name: str) -> SettingsProfileBody:
+        """The active body of profile ``name`` as a typed ``SettingsProfileBody``; raise on an unknown name."""
         try:
             raw = await self._store.get_active_body(_KIND, name)
         except DocumentNotFoundError as exc:
@@ -67,24 +73,28 @@ class SettingsProfileStoreView(SettingsProfileStore):
         return SettingsProfileBody.model_validate(raw)
 
     async def list_versions(self, name: str) -> list[DocumentVersion]:
+        """The version history of profile ``name``; raise on an unknown name."""
         try:
             return await self._store.list_versions(_KIND, name)
         except DocumentNotFoundError as exc:
             raise SettingsProfileNotFoundError(name) from exc
 
     async def get_version(self, name: str, version: int) -> DocumentVersion:
+        """One version of profile ``name`` by number; raise on an unknown version."""
         try:
             return await self._store.get_version(_KIND, name, version)
         except DocumentVersionNotFoundError as exc:
             raise SettingsProfileVersionNotFoundError(name, version) from exc
 
     async def rollback(self, name: str, version: int) -> DocumentRecord:
+        """Roll profile ``name`` back to ``version``; raise on an unknown version."""
         try:
             return await self._store.rollback(_KIND, name, version)
         except DocumentVersionNotFoundError as exc:
             raise SettingsProfileVersionNotFoundError(name, version) from exc
 
     async def soft_delete(self, name: str) -> None:
+        """Soft-delete profile ``name``; raise on an unknown name."""
         try:
             await self._store.soft_delete(_KIND, name)
         except DocumentNotFoundError as exc:

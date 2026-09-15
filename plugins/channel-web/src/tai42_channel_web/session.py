@@ -51,16 +51,21 @@ _HOST_PREFIX = "__Host-"
 
 
 def session_cookie_name(secure: bool) -> str:
-    """The cookie name this deployment mints and reads back. The two names are never
-    accepted interchangeably: the mode decides one name, and a cookie under the other
-    is not this deployment's."""
+    """The cookie name this deployment mints and reads back.
+
+    The two names are never accepted interchangeably: the mode decides one name, and a
+    cookie under the other is not this deployment's.
+    """
     return f"{_HOST_PREFIX}{SESSION_COOKIE_BASE}" if secure else SESSION_COOKIE_BASE
 
 
 def session_cookie_path(secure: bool, mount_base: str) -> str:
-    """The cookie's ``Path``. ``/`` is what the ``__Host-`` prefix requires; without
-    the prefix the capability is scoped to this deployment's mount prefix, so a
-    remapped base is followed rather than the default hardcoded."""
+    """The cookie's ``Path``.
+
+    ``/`` is what the ``__Host-`` prefix requires; without the prefix the capability is
+    scoped to this deployment's mount prefix, so a remapped base is followed rather than the
+    default hardcoded.
+    """
     return "/" if secure else mount_base
 
 
@@ -77,21 +82,28 @@ _VISITOR_ID_BYTES = 12
 
 
 def mint_session_token() -> str:
-    """A fresh session cookie token: CSPRNG bytes, urlsafe-encoded. The bearer
-    secret — it is never used as an address."""
+    """A fresh session cookie token: CSPRNG bytes, urlsafe-encoded.
+
+    The bearer secret — it is never used as an address.
+    """
     return secrets.token_urlsafe(_SESSION_TOKEN_BYTES)
 
 
 def mint_visitor_id() -> str:
-    """A fresh conversation address for one visitor. Opaque and non-secret: it is
-    published by the bridge and the operator plane, so it must not be the token."""
+    """A fresh conversation address for one visitor.
+
+    Opaque and non-secret: it is published by the bridge and the operator plane, so it must
+    not be the token.
+    """
     return secrets.token_urlsafe(_VISITOR_ID_BYTES)
 
 
 def session_token(request: Request, settings: WebSettings) -> str | None:
-    """The caller's cookie token, or ``None`` when there is no cookie under this
-    deployment's name or its value is not a minted token — both mean "no session"
-    before the store is even asked."""
+    """The caller's cookie token, or ``None`` when there is no session.
+
+    ``None`` when there is no cookie under this deployment's name or its value is not a
+    minted token — both mean "no session" before the store is even asked.
+    """
     value = request.cookies.get(session_cookie_name(settings.session_cookie_secure))
     if value is None or _SESSION_TOKEN.match(value) is None:
         return None
@@ -104,7 +116,8 @@ def set_session_cookie(response: Response, token: str, settings: WebSettings, mo
     ``mount_base`` is this deployment's absolute mount prefix for the web channel; a
     plain-http deployment scopes the cookie ``Path`` to it. ``httponly`` keeps the
     capability out of page script entirely; ``samesite=lax`` withholds it from
-    cross-site POSTs while still arriving on a link-followed page load."""
+    cross-site POSTs while still arriving on a link-followed page load.
+    """
     secure = settings.session_cookie_secure
     response.set_cookie(
         session_cookie_name(secure),
@@ -118,15 +131,17 @@ def set_session_cookie(response: Response, token: str, settings: WebSettings, mo
 
 
 def _request_origin(request: Request) -> str:
-    """This request's own public origin as the browser sees it: scheme and host from
-    ``X-Forwarded-Proto`` / ``X-Forwarded-Host`` when present (first value of a
-    list), else the request's own scheme and ``Host``.
+    """This request's own public origin as the browser sees it.
+
+    Scheme and host from ``X-Forwarded-Proto`` / ``X-Forwarded-Host`` when present (first
+    value of a list), else the request's own scheme and ``Host``.
 
     The forwarded headers are read with NO trusted-proxy check. That is sound for the
     one thing this feeds: a browser can attach ``X-Forwarded-Host`` only on a
     preflighted cross-origin fetch, and these doors return no CORS headers, so the
     preflight is what fails. A non-browser client can forge it, but it can equally
-    omit ``Origin`` — the CSRF guard was never the credential."""
+    omit ``Origin`` — the CSRF guard was never the credential.
+    """
     proto_header = request.headers.get("x-forwarded-proto")
     proto = proto_header.split(",")[0].strip() if proto_header else request.url.scheme
     host_header = request.headers.get("x-forwarded-host") or request.headers.get("host")
@@ -135,24 +150,26 @@ def _request_origin(request: Request) -> str:
 
 
 def is_document_navigation(request: Request) -> bool:
-    """``True`` when the browser says this request is a top-level document load, or
-    says nothing at all.
+    """``True`` when the browser says this request is a top-level document load, or says nothing at all.
 
     ``Sec-Fetch-Dest`` is what separates opening the chat page from a cross-site
     ``<img>``/``<script>``/``fetch`` pointed at the same URL. Only a navigation may
     MINT a session: a subresource load would otherwise overwrite a live visitor's
     cookie and strand their conversation. The header is absent on older browsers and
     on every non-browser client, and those are admitted — the guard removes a
-    cross-site denial, it is not a credential."""
+    cross-site denial, it is not a credential.
+    """
     dest = request.headers.get("sec-fetch-dest")
     return dest is None or dest.strip().lower() == "document"
 
 
 def is_cross_origin(request: Request) -> bool:
-    """``True`` when the request carries an ``Origin`` naming a DIFFERENT origin than
-    the one it reached. A browser sends ``Origin`` on every cross-site POST, so this
-    is the CSRF refusal; a request with no ``Origin`` at all (same-origin GET, a
-    non-browser client) is not cross-site by this test."""
+    """``True`` when the request carries an ``Origin`` naming a DIFFERENT origin than the one it reached.
+
+    A browser sends ``Origin`` on every cross-site POST, so this is the CSRF refusal; a
+    request with no ``Origin`` at all (same-origin GET, a non-browser client) is not
+    cross-site by this test.
+    """
     origin = request.headers.get("origin")
     if origin is None:
         return False

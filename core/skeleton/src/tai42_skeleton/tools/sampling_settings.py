@@ -13,6 +13,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class SamplingSettings(TaiBaseSettings):
+    """``TAI_SAMPLING_*`` sampling-fallback budget settings."""
+
     model_config = SettingsConfigDict(env_prefix="TAI_SAMPLING_")
 
     # Per-sample token ceiling on the platform-LLM fallback: applied as the
@@ -29,4 +31,5 @@ class SamplingSettings(TaiBaseSettings):
 
 @settings_cache
 def sampling_settings() -> SamplingSettings:
+    """Return the cached ``TAI_SAMPLING_*`` settings singleton."""
     return SamplingSettings()

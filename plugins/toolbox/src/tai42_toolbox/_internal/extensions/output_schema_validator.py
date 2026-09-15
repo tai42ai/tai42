@@ -25,7 +25,8 @@ async def enforce_output_schema(
     """Run ``func`` and validate its result against ``schema``, returning it unchanged on a match.
 
     Validates the JSON-able form (what the platform serializes over the wire), so rich return
-    values are checked as emitted. ``func`` may be sync or async; a mismatch raises loudly."""
+    values are checked as emitted. ``func`` may be sync or async; a mismatch raises loudly.
+    """
     if inspect.iscoroutinefunction(func):
         result = await func(*args, **kwargs)
     else:

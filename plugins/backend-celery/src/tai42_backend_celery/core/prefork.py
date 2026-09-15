@@ -60,11 +60,11 @@ _worker_ready = threading.Event()
 
 
 def register() -> None:
-    """Prepare this worker process for pool turnover (worker-scoped, called from
-    the worker runtime's ``build``, never at import): connect the setup/ready
-    signals that tell :func:`turnover_local_pool` who to address and when.
+    """Prepare this worker process for pool turnover.
 
-    The post-apply hook itself is not wired here — the shared backend base owns
+    Worker-scoped, called from the worker runtime's ``build``, never at import:
+    connects the setup/ready signals that tell :func:`turnover_local_pool` who to
+    address and when. The post-apply hook itself is not wired here — the shared backend base owns
     which ops warrant a turnover and drives this module through the runtime.
     """
     signals.celeryd_after_setup.connect(_record_local_nodename)
@@ -80,17 +80,19 @@ def _record_local_nodename(sender: Any = None, instance: Any = None, **kwargs: A
 
 
 def _mark_worker_ready(sender: Any = None, **kwargs: Any) -> None:
-    """Mark the worker ready to answer control commands, so the turnover only runs
-    once the local pidbox is consuming."""
+    """Mark the worker ready to answer control commands.
+
+    So the turnover only runs once the local pidbox is consuming.
+    """
     _worker_ready.set()
 
 
 def turnover_local_pool(reason: str, budget: float) -> None:
-    """Restart the local prefork pool within ``budget`` seconds and confirm the
-    whole pool re-forked. Blocking (control I/O), so the caller runs it off the
-    serving loop; a raise propagates, failing the op named by ``reason``.
+    """Restart the local prefork pool within ``budget`` seconds and confirm the whole pool re-forked.
 
-    ``budget`` is the caller's: the whole turnover — the wait for a consuming
+    Blocking (control I/O), so the caller runs it off the serving loop; a raise
+    propagates, failing the op named by ``reason``. ``budget`` is the caller's:
+    the whole turnover — the wait for a consuming
     worker, the restart, the kill guard and the confirmation — is spent inside it,
     so a stall reports a truthful ``failed`` before the caller's own window closes.
 
@@ -99,7 +101,8 @@ def turnover_local_pool(reason: str, budget: float) -> None:
     registry). A worker that reached setup but is not yet consuming control
     commands may have a bootstrap child forked from the pre-op registry it cannot
     yet recycle, so the turnover WAITS (bounded by the budget) for it to start
-    consuming, then recycles; a worker that never starts consuming raises loudly."""
+    consuming, then recycles; a worker that never starts consuming raises loudly.
+    """
     if _local_nodename is None:
         logger.debug("prefork turnover skipped for %s: worker has not reached setup (no forked pool yet)", reason)
         return
@@ -118,10 +121,11 @@ def turnover_local_pool(reason: str, budget: float) -> None:
 
 @contextmanager
 def _control_connection() -> Iterator[Any]:
-    """A fresh, short-lived broker connection for one turnover control call, never
-    the app's shared pool: the pooled connection is inherited by the prefork
-    children, and ``pool_restart`` terminating them would break the parent's next
-    write over it."""
+    """A fresh, short-lived broker connection for one turnover control call, never the app's shared pool.
+
+    The pooled connection is inherited by the prefork children, and
+    ``pool_restart`` terminating them would break the parent's next write over it.
+    """
     with celery_app.connection_for_write() as conn:
         yield conn
 
@@ -132,10 +136,11 @@ def _pool_pids(pool: dict[str, Any]) -> set[int]:
 
 
 def _prefork_pool_state(hostname: str) -> tuple[set[int], int] | None:
-    """This worker's prefork pool state ``(child_pids, max_concurrency)`` from a
-    single ``stats`` call, or ``None`` when the pool is not prefork (no forked
-    children to recycle). A worker that does not answer ``stats``, or answers
-    without a pool section, raises: its turnover cannot be verified.
+    """This worker's prefork pool state ``(child_pids, max_concurrency)`` from a single ``stats`` call.
+
+    ``None`` when the pool is not prefork (no forked children to recycle). A
+    worker that does not answer ``stats``, or answers without a pool section,
+    raises: its turnover cannot be verified.
     """
     with _control_connection() as conn:
         stats = (
@@ -146,10 +151,10 @@ def _prefork_pool_state(hostname: str) -> tuple[set[int], int] | None:
         )
     cfg = stats.get(hostname)
     if not isinstance(cfg, dict):
-        raise RuntimeError(f"worker {hostname} did not answer stats; cannot verify its pool for turnover")
+        raise RuntimeError(f"worker {hostname} did not answer stats; cannot verify its pool for turnover")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     pool = cfg.get("pool")
     if not isinstance(pool, dict):
-        raise RuntimeError(f"worker {hostname} stats carried no pool section; cannot verify turnover")
+        raise RuntimeError(f"worker {hostname} stats carried no pool section; cannot verify turnover")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     if "prefork" not in str(pool.get("implementation", "")).lower():
         return None
     pids = _pool_pids(pool)
@@ -158,8 +163,10 @@ def _prefork_pool_state(hostname: str) -> tuple[set[int], int] | None:
 
 
 def _restart_pool(hostname: str) -> None:
-    """Arm this worker's pool restart; the turnover itself is confirmed by
-    :func:`_confirm_turnover`."""
+    """Arm this worker's pool restart.
+
+    The turnover itself is confirmed by :func:`_confirm_turnover`.
+    """
     with _control_connection() as conn:
         replies = celery_app.control.broadcast(
             "pool_restart",
@@ -177,10 +184,11 @@ def _restart_pool(hostname: str) -> None:
 
 
 def _restart_pool_and_confirm(hostname: str, before: tuple[set[int], int], budget: float) -> None:
-    """Re-fork the pool within ``budget``: arm the restart under a bound, kill the
-    pre-restart children if that wedges, and confirm the turnover either way.
+    """Re-fork the pool within ``budget``, confirming the turnover either way.
 
-    The restart carries no hard bound of its own — the control call bounds only the
+    Arms the restart under a bound, kills the pre-restart children if that wedges,
+    and confirms the turnover either way. The restart carries no hard bound of its
+    own — the control call bounds only the
     reply drain, not the publish nor the pool-side apply, and the apply can wedge
     indefinitely inside billiard on the pool parent's ``_putlock``. So the arm gets
     a share of the budget and the rest pays for the hard path, which is the same
@@ -211,9 +219,12 @@ def _restart_pool_and_confirm(hostname: str, before: tuple[set[int], int], budge
 
 
 def _restart_propagation_timeout(budget: float) -> float:
-    """The bound on the restart propagation: a share of the turnover budget left
-    when the restart is issued, so the kill guard fires with the rest of the budget
-    still available for the kill and the confirmation."""
+    """The bound on the restart propagation.
+
+    A share of the turnover budget left when the restart is issued, so the kill
+    guard fires with the rest of the budget still available for the kill and the
+    confirmation.
+    """
     return max(0.0, budget) * _RESTART_PROPAGATION_SHARE
 
 
@@ -247,10 +258,10 @@ def _await_restart(hostname: str, timeout: float) -> bool:
 
 
 def _kill_pool_children(hostname: str, pids: set[int]) -> None:
-    """SIGKILL this worker's pre-restart pool children so billiard reaps and
-    re-forks them (never an in-place reload: only a fork re-inherits the registry).
+    """SIGKILL this worker's pre-restart pool children so billiard reaps and re-forks them.
 
-    The hard path is deliberately OS-level. Celery's own child-level hard stop
+    Never an in-place reload: only a fork re-inherits the registry. The hard path
+    is deliberately OS-level. Celery's own child-level hard stop
     (``billiard.pool.Pool.terminate_job``) is itself an ``os.kill`` on the child
     pid, but reaching it needs the in-process pool handle, and every route to it
     from this seam — another ``pool_restart``, ``pool_shrink``, a ``revoke`` with
@@ -277,10 +288,12 @@ def _kill_pool_children(hostname: str, pids: set[int]) -> None:
 
 
 def _confirm_turnover(hostname: str, before: tuple[set[int], int], timeout: float) -> None:
-    """Poll ``stats`` until the pool has fully re-forked (every pre-restart child
-    pid gone AND the pool back to full size), or raise loudly at the deadline. This
-    holds the bus reply until the re-fork completes, since ``pool_restart`` returns
-    once merely armed — a fast follow-up read could still reach a pre-restart child.
+    """Poll ``stats`` until the pool has fully re-forked, or raise loudly at the deadline.
+
+    Full re-fork means every pre-restart child pid gone AND the pool back to full
+    size. This holds the bus reply until the re-fork completes, since
+    ``pool_restart`` returns once merely armed — a fast follow-up read could still
+    reach a pre-restart child.
     """
     old_pids, max_conc = before
     surviving = old_pids

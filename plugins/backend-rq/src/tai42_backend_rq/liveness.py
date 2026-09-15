@@ -1,5 +1,4 @@
-"""The heartbeat-freshness contract that decides whether a registered RQ worker
-is actually alive.
+"""The heartbeat-freshness contract that decides whether a registered RQ worker is actually alive.
 
 RQ registers a worker's death only on a graceful exit, so a SIGKILLed worker's
 ``rq:worker:<name>`` registry entry survives until its key expiry (minutes) and
@@ -24,9 +23,11 @@ HEARTBEAT_FRESH_SECONDS = DEFAULT_JOB_MONITORING_INTERVAL + 60
 
 
 def heartbeat_fresh(last_heartbeat: datetime | None) -> bool:
-    """Whether a worker's ``last_heartbeat`` is recent enough to call it live. No
-    recorded heartbeat is never live; a naive timestamp is read as UTC (RQ stores
-    heartbeats in UTC)."""
+    """Whether a worker's ``last_heartbeat`` is recent enough to call it live.
+
+    No recorded heartbeat is never live; a naive timestamp is read as UTC (RQ stores heartbeats
+    in UTC).
+    """
     if last_heartbeat is None:
         return False
     if last_heartbeat.tzinfo is None:

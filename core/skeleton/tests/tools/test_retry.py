@@ -27,7 +27,7 @@ from tai42_skeleton.tools.retry import ToolRetryRegistry, dispatch_with_retry
 from .._fakes.recording_monitoring import RecordingMonitoring
 
 
-class _UpstreamBlip(Exception):
+class _UpstreamBlipError(Exception):
     """A typed transient upstream fault — kind-classified, no explicit verdict."""
 
     __tai_error_kind__ = ErrorKind.UPSTREAM_ERROR
@@ -155,7 +155,7 @@ async def test_default_transient_kinds_cover_timeouts(sleeps):
 
 async def test_declared_kind_allowlist_admits_only_its_kinds(sleeps):
     policy = _policy(retryable=(ErrorKind.UPSTREAM_ERROR,))
-    attempt, calls = _failing(1, _UpstreamBlip)
+    attempt, calls = _failing(1, _UpstreamBlipError)
     assert await dispatch_with_retry("fetch", policy, attempt) == "ok"
     assert calls["n"] == 2
 

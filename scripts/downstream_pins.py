@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Check the fleet's downstream repos for a ``tai42-<core>`` pin that EXCLUDES a
-just-released CORE member version, and open a tracking issue on this repo when
-one does — so a downstream never goes red (or latent-stale) unnoticed after a
-core major/minor.
+"""Check the fleet's downstream repos for a ``tai42-<core>`` pin that excludes a just-released core version.
+
+Open a tracking issue on this repo when one does — so a downstream never goes red
+(or latent-stale) unnoticed after a core major/minor.
 
 The audited downstreams and the manifests to read are supplied by CONFIG
 (``DOWNSTREAM_PINS_MANIFESTS`` JSON, or a ``DOWNSTREAM_PINS_FILE`` path to the
@@ -57,12 +57,15 @@ DRY_RUN = os.environ.get("DOWNSTREAM_PINS_DRY_RUN") == "1"
 
 
 def downstream_manifests() -> dict[str, list[str]]:
-    """The downstream ``repo -> [manifest paths]`` map to audit, read from CONFIG so this
-    source names no specific dependent. ``DOWNSTREAM_PINS_MANIFESTS`` carries the JSON
-    map inline; ``DOWNSTREAM_PINS_FILE`` points at a JSON file holding it (the inline var
-    wins). Explicit, not discovered: the map is a reviewed configuration value, never scanned
-    from a repo we were not told to read. Absent both, the map is empty and the sweep is a
-    harmless no-op, so an unconfigured checkout never crashes."""
+    """The downstream ``repo -> [manifest paths]`` map to audit, read from CONFIG.
+
+    Read from CONFIG so this source names no specific dependent.
+    ``DOWNSTREAM_PINS_MANIFESTS`` carries the JSON map inline; ``DOWNSTREAM_PINS_FILE``
+    points at a JSON file holding it (the inline var wins). Explicit, not discovered:
+    the map is a reviewed configuration value, never scanned from a repo we were not
+    told to read. Absent both, the map is empty and the sweep is a harmless no-op, so
+    an unconfigured checkout never crashes.
+    """
     raw = os.environ.get("DOWNSTREAM_PINS_MANIFESTS")
     if not raw:
         path = os.environ.get("DOWNSTREAM_PINS_FILE")
@@ -88,18 +91,19 @@ def _token() -> str:
 
 def _request(method: str, url: str, token: str, accept: str, data: dict | None = None):
     body = None if data is None else json.dumps(data).encode("utf-8")
-    request = urllib.request.Request(url, data=body, method=method)
+    request = urllib.request.Request(url, data=body, method=method)  # noqa: S310 fixed, trusted URL scheme
     request.add_header("Authorization", f"Bearer {token}")
     request.add_header("Accept", accept)
     request.add_header("X-GitHub-Api-Version", "2022-11-28")
     if body is not None:
         request.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 fixed, trusted URL scheme
         raw = response.read()
     return raw if accept.endswith("raw+json") else json.loads(raw or b"null")
 
 
 def fetch_manifest(repo: str, path: str, token: str) -> str:
+    """Fetch ``path`` from downstream ``repo`` over the GitHub contents API, as text."""
     # ``raw+json`` returns the file bytes directly (no base64 round-trip).
     url = f"{API}/repos/{OWNER}/{repo}/contents/{path}"
     return _request("GET", url, token, "application/vnd.github.raw+json").decode("utf-8")
@@ -125,6 +129,7 @@ def iter_requirements(text: str) -> list[str]:
 
 
 def line_of(text: str, needle: str) -> int | None:
+    """The 1-based line number of the first line containing ``needle``, or ``None``."""
     for number, line in enumerate(text.splitlines(), start=1):
         if needle in line:
             return number
@@ -147,6 +152,7 @@ def current_core_versions() -> dict[str, str]:
 
 
 def resolve_targets() -> dict[str, str]:
+    """The ``pkg -> version`` pairs to check: the pushed component tag, or every core member on dispatch."""
     event = os.environ.get("GITHUB_EVENT_NAME", "")
     ref = os.environ.get("GITHUB_REF_NAME", "")
     if event == "push" and "-v" in ref:
@@ -161,7 +167,7 @@ def resolve_targets() -> dict[str, str]:
 
 
 def find_violations(targets: dict[str, str], token: str, downstream: dict[str, list[str]]) -> dict[str, list[str]]:
-    """title -> sorted, de-duplicated ``repo/file:line — range`` rows."""
+    """Title -> sorted, de-duplicated ``repo/file:line — range`` rows."""
     violations: dict[str, set[str]] = {}
     for repo, manifests in downstream.items():
         for path in manifests:
@@ -176,7 +182,7 @@ def find_violations(targets: dict[str, str], token: str, downstream: dict[str, l
             for req_str in iter_requirements(text):
                 try:
                     req = Requirement(req_str)
-                except Exception:
+                except Exception:  # noqa: S112 malformed downstream input is skipped, not a reason to abort the sweep
                     # A malformed requirement line is the downstream's problem,
                     # not a reason to abort the sweep.
                     continue
@@ -210,6 +216,7 @@ def open_open_issues(token: str) -> dict[str, int]:
 
 
 def upsert_issue(title: str, rows: list[str], token: str, existing: dict[str, int]) -> None:
+    """Open a tracking issue for ``title``, or update the existing one, from the offending ``rows``."""
     body = (
         "A CORE fleet member was released whose version falls OUTSIDE a downstream "
         "requirement range, so that downstream will not resolve the new release "
@@ -244,6 +251,7 @@ def upsert_issue(title: str, rows: list[str], token: str, existing: dict[str, in
 
 
 def main() -> int:
+    """Run the downstream-pin sweep; return the process exit code."""
     token = _token()
     targets = resolve_targets()
     if not targets:

@@ -360,11 +360,11 @@ async def test_reconcile_refuses_a_declarations_edit_that_orphans(svc: StatesSer
 def test_states_door_propagates_structured_extra_to_the_operation_error() -> None:
     # The one seam every states op runs through carries a StatesError's structured ``extra``
     # onto the mapped operation error, so a 422 body exposes the orphan payload.
-    from tai42_skeleton.operations.errors import ValidationRejected
+    from tai42_skeleton.operations.errors import ValidationRejectedError
     from tai42_skeleton.operations.states import _states_door
 
     payload = {"reconcile": True, "orphans": [{"subject": "s", "id": "c"}]}
-    with pytest.raises(ValidationRejected) as excinfo, _states_door():
+    with pytest.raises(ValidationRejectedError) as excinfo, _states_door():
         raise TemplateValidationError("would orphan …", extra=payload)
     assert excinfo.value.extra == payload
 

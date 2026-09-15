@@ -82,7 +82,7 @@ async def create_stripe_payment_link(
         if key.startswith("tai_"):
             raise ValueError(f"metadata key {key!r} is reserved: keys starting with 'tai_' are the tool's own stamps")
         if not isinstance(value, str):
-            raise ValueError(f"metadata value for key {key!r} must be a string; got {type(value).__name__}")
+            raise ValueError(f"metadata value for key {key!r} must be a string; got {type(value).__name__}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
     stamps = {
         "tai_amount": str(amount),

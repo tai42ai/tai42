@@ -51,18 +51,21 @@ ALIAS_RE = re.compile(rf"^[a-z0-9][a-z0-9_-]{{0,{ALIAS_MAX_LEN - 1}}}$")
 
 
 def normalize_uuid(value: str) -> str:
+    """Return ``value`` lowercased, raising ``ValueError`` when it is not a canonical UUID string."""
     if not UUID_RE.match(value):
         raise ValueError(f"not a valid UUID: {value!r}")
     return value.lower()
 
 
 def check_slug(value: str) -> str:
+    """Return ``value`` unchanged when it is a valid slug, else raise ``ValueError``."""
     if not SLUG_RE.match(value):
         raise ValueError(f"must be lowercase, start with a letter, then alphanumeric or underscore: {value!r}")
     return value
 
 
 def check_alias(value: str) -> str:
+    """Return ``value`` unchanged when it is a valid connection alias, else raise ``ValueError``."""
     if not ALIAS_RE.match(value):
         raise ValueError(
             f"alias must be 1-{ALIAS_MAX_LEN} chars, lowercase alphanumeric "
@@ -75,8 +78,10 @@ def check_alias(value: str) -> str:
 
 
 class AuthHealthState(StrEnum):
-    """Connection-level auth health. Reachability is separate and computed live
-    by the status probe (never stored on the record)."""
+    """Connection-level auth health.
+
+    Reachability is separate and computed live by the status probe (never stored on the record).
+    """
 
     HEALTHY = "healthy"
     RECONNECT_REQUIRED = "reconnect_required"
@@ -180,12 +185,14 @@ class ConnectionRecord(BaseModel):
         return self
 
     def is_healthy(self) -> bool:
+        """Return True when the connection's stored auth health is HEALTHY."""
         return self.auth_health_state == AuthHealthState.HEALTHY
 
     def to_storage_json(self) -> str:
         """Serialize with token plaintext exposed (for the encrypt step).
-        Every other serializer keeps SecretStr redaction. No-auth records have
-        null tokens."""
+
+        Every other serializer keeps SecretStr redaction. No-auth records have null tokens.
+        """
         data = self.model_dump(mode="json")
         data["access_token"] = self.access_token.get_secret_value() if self.access_token else None
         data["refresh_token"] = self.refresh_token.get_secret_value() if self.refresh_token else None
@@ -194,8 +201,10 @@ class ConnectionRecord(BaseModel):
 
 
 class ConnectorRef(BaseModel):
-    """Marker on a manifest entry pointing back at a Connection. Hand-authored
-    entries leave ``managed`` as ``None`` and are unaffected."""
+    """Marker on a manifest entry pointing back at a Connection.
+
+    Hand-authored entries leave ``managed`` as ``None`` and are unaffected.
+    """
 
     connection_id: str
     provider_id: str = Field(min_length=1, max_length=64)
@@ -240,6 +249,8 @@ class ResolvedConnectionAuth(BaseModel):
 
 
 class SubServiceView(BaseModel):
+    """Wire view of one sub-service offered by a provider in the catalog."""
+
     id: str
     display_name: str
     description: str = ""
@@ -248,6 +259,8 @@ class SubServiceView(BaseModel):
 
 
 class ConnectedAccountView(BaseModel):
+    """Wire view of one connected account served by /api/connectors/*."""
+
     connection_id: str
     provider_id: str
     kind: Literal["oauth", "none"]
@@ -265,6 +278,8 @@ class ConnectedAccountView(BaseModel):
 
 
 class ProviderCatalogEntry(BaseModel):
+    """Wire view of one provider offered in the connector catalog."""
+
     id: str
     display_name: str
     description: str = ""
@@ -281,9 +296,10 @@ class ProviderCatalogEntry(BaseModel):
 
 
 class ConnectorCategoryView(BaseModel):
-    """One ``connector_category`` grouping row — the UI's label + sort key for the
-    providers it groups. Served alongside the provider catalog so clients can
-    group/order/label providers by category."""
+    """One ``connector_category`` grouping row — the UI's label and sort key for its providers.
+
+    Served alongside the provider catalog so clients can group/order/label providers by category.
+    """
 
     id: str
     display_name: str
@@ -291,14 +307,15 @@ class ConnectorCategoryView(BaseModel):
 
 
 class ProviderCatalogResponse(BaseModel):
-    """The provider catalog listing: the providers and the category groupings the
-    UI arranges them under."""
+    """The provider catalog listing: the providers and the category groupings the UI arranges them under."""
 
     providers: list[ProviderCatalogEntry]
     categories: list[ConnectorCategoryView]
 
 
 class ConnectionsListResponse(BaseModel):
+    """Wire response listing connected accounts with the unhealthy badge count."""
+
     items: list[ConnectedAccountView]
     total: int
     # Count of connections whose ``auth_health_state`` is not HEALTHY, across the
@@ -308,6 +325,8 @@ class ConnectionsListResponse(BaseModel):
 
 
 class StartConnectRequest(BaseModel):
+    """Request body to start connecting a provider."""
+
     provider_id: str
     alias: str
     enabled_sub_services: list[str] = Field(min_length=1, max_length=64)
@@ -335,16 +354,22 @@ class StartConnectNoAuthResponse(BaseModel):
 
 
 class StartReconnectRequest(BaseModel):
+    """Request body to start reconnecting an existing connection."""
+
     enabled_sub_services: list[str] = Field(min_length=1, max_length=64)
     return_url: str = "/connectors"
 
 
 class PatchSubServicesRequest(BaseModel):
+    """Request body to change a connection's enabled sub-services."""
+
     enabled_sub_services: list[str] = Field(min_length=1, max_length=64)
     return_url: str = "/connectors"
 
 
 class PatchSubServicesResponse(BaseModel):
+    """Wire response for a sub-service change, including any forked consent flow."""
+
     connection_id: str
     enabled_sub_services: list[str]
     consent_required: bool
@@ -359,6 +384,8 @@ class PatchSubServicesResponse(BaseModel):
 
 
 class DisconnectResponse(BaseModel):
+    """Wire response for a disconnect, including the upstream revoke outcome."""
+
     connection_id: str
     upstream_revoke_outcome: UpstreamRevokeOutcome
     upstream_revoke_status: int | None = None

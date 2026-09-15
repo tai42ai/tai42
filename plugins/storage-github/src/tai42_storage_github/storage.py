@@ -54,8 +54,10 @@ def _contents_url(settings: GithubStorageSettings, path: str) -> str:
 
 
 def _configured_settings() -> GithubStorageSettings:
-    """The cached settings; raises a clear config error naming the env vars when
-    owner/repo is unset."""
+    """The cached settings; raises a clear config error when owner/repo is unset.
+
+    The error names the env vars.
+    """
     settings = github_storage_settings()
     missing = [
         env
@@ -90,14 +92,19 @@ def _raise_for_status(resp: httpx.Response, action: str, path: str, url: str) ->
     try:
         resp.raise_for_status()
     except httpx.HTTPStatusError:
-        logger.error("HTTP error %s %s (%s): status=%s body=%s", action, path, url, resp.status_code, resp.text[:200])
+        logger.exception(
+            "HTTP error %s %s (%s): status=%s body=%s", action, path, url, resp.status_code, resp.text[:200]
+        )
         raise
 
 
 # Importing this module registers GithubStorage as the active storage provider.
 @tai42_app.storage.register_storage
 class GithubStorage(Storage):
+    """GitHub-backed storage: reads via the raw CDN endpoint, writes via the Contents API."""
+
     async def load(self, path: str) -> str:
+        """Read ``path`` as text via the raw endpoint; a missing object raises ``FileNotFoundError``."""
         settings = _configured_settings()
         url = _raw_url(settings, path)
         async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
@@ -106,6 +113,7 @@ class GithubStorage(Storage):
             return resp.text
 
     async def load_bytes(self, path: str) -> bytes:
+        """Read ``path`` as bytes via the raw endpoint (uncapped); a missing object raises ``FileNotFoundError``."""
         settings = _configured_settings()
         url = _raw_url(settings, path)
         async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
@@ -121,6 +129,7 @@ class GithubStorage(Storage):
         _raise_for_status(resp, "loading", path, url)
 
     async def list(self) -> list[str]:
+        """Every blob path in the repo."""
         return await self._list_blobs("")
 
     async def _list_blobs(self, prefix: str) -> list[str]:
@@ -136,7 +145,7 @@ class GithubStorage(Storage):
             _raise_for_status(resp, "listing", prefix or "/", url)
             data = resp.json()
             if not isinstance(data, dict):
-                raise RuntimeError(f"Expected a tree object from {url}, got {type(data).__name__}")
+                raise RuntimeError(f"Expected a tree object from {url}, got {type(data).__name__}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
             if data.get("truncated"):
                 raise RuntimeError(f"GitHub tree listing was truncated; the tree is too large to list safely: {url}")
             return [
@@ -148,9 +157,11 @@ class GithubStorage(Storage):
             ]
 
     async def upload(self, path: str, content: str) -> None:
+        """Write ``content`` (UTF-8) to ``path`` via the Contents API."""
         await self._put_contents(path, content.encode("utf-8"))
 
     async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
+        """Write ``data`` to ``path`` via the Contents API; ``content_type`` is unused (GitHub stores none)."""
         # GitHub stores no per-object content-type; content_type is unused.
         await self._put_contents(path, data)
 
@@ -189,6 +200,7 @@ class GithubStorage(Storage):
             _raise_for_status(resp, "uploading", path, url)
 
     async def delete(self, path: str) -> None:
+        """Delete the file at ``path``; a missing object raises ``FileNotFoundError``."""
         settings = _configured_settings()
         url = _contents_url(settings, path)
         headers = _api_headers(settings)

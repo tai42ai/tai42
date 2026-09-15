@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { applyFrame } from '@/frame-reducer';
+import { CALLBACK, DEADLINE, fold, frame, questionFrame } from '@/frame-reducer.test-support';
 import { EMPTY_MODEL } from '@/transcript-model';
-import { CALLBACK, DEADLINE, frame, fold, questionFrame } from '@/frame-reducer.test-support';
 
 const question = questionFrame('confirm');
 

@@ -1,5 +1,7 @@
-"""Record views, write-response shaping, and the dry-run verdict shape — the
-row / response dicts every preset door returns, built once so no two doors drift."""
+"""Record views, write-response shaping, and the dry-run verdict shape.
+
+The row / response dicts every preset door returns, built once so no two doors drift.
+"""
 
 from __future__ import annotations
 
@@ -23,14 +25,14 @@ def _store_record_view(
     uses: list[str],
     used_by: list[str],
 ) -> dict[str, Any]:
-    """A store-backed record row: identity + active-body fields + the
-    ``conflicted`` flag (name in the quarantine map) with its ``conflicted_reason``
-    (the human-readable cause, ``null`` when not conflicted), plus the ``uses`` /
-    ``used_by`` cross-references (sorted OTHER active presets this body composes, and
-    that compose it — see :func:`_reference_maps`). Takes the already-fetched active
-    ``body`` and this row's two reference lists so the caller batches the reads (the
-    list route) or reuses one read (the get route) rather than round-tripping per
-    row."""
+    """A store-backed record row: identity + active-body fields plus conflict and cross-reference metadata.
+
+    The ``conflicted`` flag (name in the quarantine map) with its ``conflicted_reason`` (the human-readable
+    cause, ``null`` when not conflicted), plus the ``uses`` / ``used_by`` cross-references (sorted OTHER
+    active presets this body composes, and that compose it — see :func:`_reference_maps`). Takes the
+    already-fetched active ``body`` and this row's two reference lists so the caller batches the reads (the
+    list route) or reuses one read (the get route) rather than round-tripping per row.
+    """
     mgr = instance.app.preset_manager
     return {
         "name": name,
@@ -59,11 +61,13 @@ def _new_record_view(
     uses: list[str],
     used_by: list[str],
 ) -> dict[str, Any]:
-    """The record shape a fresh create returns — the identity + active-body fields
-    from the just-applied spec (a fresh preset is never conflicted), plus this row's
-    ``uses`` / ``used_by`` cross-references (see :func:`_reference_maps`), computed by
-    the caller from the post-write active-body population so the create response
-    parses under the same record schema as the list / get rows."""
+    """The record shape a fresh create returns.
+
+    The identity + active-body fields from the just-applied spec (a fresh preset is never conflicted), plus
+    this row's ``uses`` / ``used_by`` cross-references (see :func:`_reference_maps`), computed by the caller
+    from the post-write active-body population so the create response parses under the same record schema as
+    the list / get rows.
+    """
     return {
         "name": name,
         "base_tool": base_tool,
@@ -80,9 +84,10 @@ def _new_record_view(
 
 
 async def _wire_snapshot(name: str) -> dict[str, Any] | None:
-    """The serialized wire tool for ``name`` (``to_mcp_tool().model_dump()``), or
-    ``None`` if the name is not currently bound — the client-visible listing state
-    the emit guard diffs across a reload."""
+    """The serialized wire tool for ``name`` (``to_mcp_tool().model_dump()``), or ``None`` if unbound.
+
+    The client-visible listing state the emit guard diffs across a reload.
+    """
     tools = await instance.app.tools.get_tools()
     tool = tools.get(name)
     return None if tool is None else tool.to_mcp_tool().model_dump()
@@ -99,16 +104,17 @@ async def _create_response(
     active_version: int,
     report: FleetResult,
 ) -> dict[str, Any]:
-    """The create response every create door returns, built once so no two doors drift:
-    the fresh record view plus its post-write ``uses`` / ``used_by`` cross-references,
-    with the per-worker rebind fan-out report embedded under ``fanout``.
+    """The create response every create door returns, built once so no two doors drift.
 
+    The fresh record view plus its post-write ``uses`` / ``used_by`` cross-references, with the per-worker
+    rebind fan-out report embedded under ``fanout``.
     Cross-references come from the post-write population — the new body may already
     compose other presets (``uses``), and a sibling authored against this name is picked
     up too (``used_by``); one source of truth with the list / get rows. The ``fanout``
     (the same shape the template writers return) is the read-your-writes barrier signal —
     proof the new binding propagated to every serving worker, not only the one that
-    applied this call."""
+    applied this call.
+    """
     bodies = await instance.app.presets.list_active_bodies()
     uses_map, used_by_map = _reference_maps(bodies)
     view = _new_record_view(
@@ -127,15 +133,17 @@ async def _create_response(
 
 
 def _save_version_response(row: Any, report: FleetResult) -> dict[str, Any]:
-    """The save-version response every save door returns, built once so no two doors
-    drift: the new version row plus the per-worker rebind fan-out report embedded under
-    ``fanout`` (mirrors the template writers) — the read-your-writes barrier proving the
-    new version reached every serving worker."""
+    """The save-version response every save door returns, built once so no two doors drift.
+
+    The new version row plus the per-worker rebind fan-out report embedded under ``fanout`` (mirrors the
+    template writers) — the read-your-writes barrier proving the new version reached every serving worker.
+    """
     return {**row.model_dump(), "fanout": fleet_fanout(report)}
 
 
 def _verdict(error: str | None) -> dict[str, Any]:
-    """A validation verdict — ``valid`` is the absence of an ``error``. The op
-    returns 200 for BOTH outcomes: an invalid draft is a SUCCESSFUL validation, not
-    a request failure."""
+    """A validation verdict — ``valid`` is the absence of an ``error``.
+
+    The op returns 200 for BOTH outcomes: an invalid draft is a SUCCESSFUL validation, not a request failure.
+    """
     return {"valid": error is None, "error": error}

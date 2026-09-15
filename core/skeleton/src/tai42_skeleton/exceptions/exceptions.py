@@ -1,3 +1,5 @@
+"""The MCP server's typed exception hierarchy, each error stamped with its :class:`ErrorKind`."""
+
 from __future__ import annotations
 
 from tai42_contract.errors import ErrorKind

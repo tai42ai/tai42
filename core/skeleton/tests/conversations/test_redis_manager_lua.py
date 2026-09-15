@@ -91,13 +91,13 @@ async def test_a_door_flip_is_refused_by_the_write_itself_not_by_an_earlier_coun
     # it guards: reading the count a round trip earlier lets a first message open a thread
     # in the window, and the flip lands on top of it. The script reads the stored door and
     # the thread count in the SAME step as the SET.
-    from tai42_skeleton.conversations.managers.base_conversations_manager import DoorFlipRefused
+    from tai42_skeleton.conversations.managers.base_conversations_manager import DoorFlipRefusedError
 
     settings = ConversationsSettings()
     await manager.put_route(_api_route())
     await lua_redis.zadd(settings.route_threads_key("chat"), {"bridge:chat:alice/user-1": 1.0})
 
-    with pytest.raises(DoorFlipRefused) as refused:
+    with pytest.raises(DoorFlipRefusedError) as refused:
         await manager.put_route(
             _api_route(door="channel", channel="twilio", our_identity="+15550001111", callback_url=None)
         )

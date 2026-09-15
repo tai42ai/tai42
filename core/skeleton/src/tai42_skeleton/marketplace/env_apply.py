@@ -1,6 +1,6 @@
-"""The env-store side of a provides change: the pre-check, the combined
-env+manifest apply, and the exact-restore revert.
+"""The env-store side of a provides change.
 
+The pre-check, the combined env+manifest apply, and the exact-restore revert.
 A spec that ACCEPTS env (an ``!ENV`` marker or a required connector env) writes its
 supplied values in the SAME pipeline unit as its provides entry, so the entry lands
 exactly once alongside the values. The unwind restores every key this operation
@@ -26,16 +26,17 @@ from tai42_skeleton.marketplace.provides import env_manifest_pointer
 
 # The operator's "treat these env keys as secret" marks (comma-separated key names),
 # the same var ``set_mcp_secret_env`` appends to so the Studio editor masks the value.
-SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"
+SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"  # noqa: S105 constant identifier, not a secret value
 
 
 def precheck_required_env(cm: Any, spec: PluginSpec, env: dict[str, str] | None) -> None:
-    """Refuse an install/update whose spec requires env var(s) none of the supplied
-    env, the env store, or the process env provides — a readable failure BEFORE any
-    pip work, naming the missing vars. The authoritative refusal is the config
-    pipeline's :func:`~tai42_skeleton.config.boundary.refuse_unresolved_env` at the
+    """Refuse an install/update whose required env is not supplied, stored, or in the process env.
+
+    A readable failure BEFORE any pip work, naming the missing vars. The authoritative refusal is
+    the config pipeline's :func:`~tai42_skeleton.config.boundary.refuse_unresolved_env` at the
     manifest write; this is only the early, named one so an operator sees the gap
-    before a minutes-long install begins."""
+    before a minutes-long install begins.
+    """
     required = required_env_for_spec(spec)
     if not required:
         return
@@ -54,23 +55,27 @@ def precheck_required_env(cm: Any, spec: PluginSpec, env: dict[str, str] | None)
 
 
 def env_to_write(env: dict[str, str] | None) -> dict[str, str]:
-    """The subset of ``env`` this install actually writes to the store: keys the
-    process env does not already provide. A deployment/already-set var is omitted
+    """The subset of ``env`` this install actually writes to the store.
+
+    Keys the process env does not already provide. A deployment/already-set var is omitted
     (its marker resolves from the live env), so no pre-existing marker can end up
-    referencing a key this install owns."""
+    referencing a key this install owns.
+    """
     return {key: value for key, value in (env or {}).items() if key not in os.environ}
 
 
 async def revert_env_write(svc: ConfigService, cm: Any, env_restore: dict[str, str] | None) -> None:
-    """Revert THIS install's env contribution through the ConfigService env door,
-    restoring every key this install wrote to the PRIOR store value ``prepare``
+    """Revert THIS install's env contribution through the ConfigService env door.
+
+    Restores every key this install wrote to the PRIOR store value ``prepare``
     captured (its exact prior string, or ``""`` to delete a key that was ABSENT
     before) — never a blind delete, so a key this install merely OVERWROTE keeps its
     operator value and the ``TAI_ENV_SECRET_KEYS`` marks var keeps an operator's OTHER
     marks. The change set is DIFFED against the live store, so when nothing actually
     persisted (the pre-persist dangling refusal) it is EMPTY and no env change fires —
     no fleet broadcast on a no-op. Runs AFTER any manifest restore, so no restored
-    marker references a dropped key."""
+    marker references a dropped key.
+    """
     if not env_restore:
         return
     try:
@@ -117,7 +122,8 @@ async def apply_provides_change(
     or clobbering their other secret marks.
 
     A spec that accepts no env routes through ``apply_change``; ``env`` /
-    ``secret_keys`` are meaningless there and supplying them is a loud input error."""
+    ``secret_keys`` are meaningless there and supplying them is a loud input error.
+    """
     if not accepts_env(spec):
         if env or secret_keys:
             raise InstallEnvError(

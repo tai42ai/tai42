@@ -35,8 +35,7 @@ _VISIBILITY_TO_HIDDEN: dict[str, bool | None] = {"default": None, "shown": False
 
 
 class _Unset:
-    """The absence of a ``--visibility`` flag, distinct from the ``"default"`` value
-    that maps to a ``None`` ``hidden``."""
+    """The absence of a ``--visibility`` flag, distinct from ``"default"`` which maps to a ``None`` ``hidden``."""
 
 
 _UNSET = _Unset()
@@ -66,8 +65,11 @@ def _reject_conflicting_flags(
 def _apply_patch_field(
     body: dict[str, Any], key: str, *, set_present: bool, set_value: Any, clear: bool, clear_value: Any
 ) -> None:
-    """Set ``body[key]`` to ``set_value`` when the field was set, else to
-    ``clear_value`` when its clear flag is on, else leave it absent (unchanged)."""
+    """Write one set/clear field pair into the merge-patch body.
+
+    ``body[key]`` becomes ``set_value`` when the field was set, or ``clear_value`` when its clear flag is on;
+    otherwise the key is left absent (unchanged).
+    """
     if set_present:
         body[key] = set_value
     elif clear:
@@ -75,8 +77,10 @@ def _apply_patch_field(
 
 
 def _visibility_hidden(visibility: str | None) -> bool | _Unset | None:
-    """Map ``--visibility`` to its ``hidden`` value, raising on a bad value; return
-    the unset sentinel when the flag was omitted."""
+    """Map ``--visibility`` to its ``hidden`` value, or the unset sentinel when the flag was omitted.
+
+    Raises a usage error on an unrecognised value.
+    """
     if visibility is None:
         return _UNSET
     if visibility not in _VISIBILITY_TO_HIDDEN:
@@ -95,8 +99,10 @@ def build_overlay_patch(
     clear_badges: bool,
     visibility: str | None,
 ) -> dict[str, Any]:
-    """Assemble the merge-patch body from the ``set`` command's set/clear pairs and
-    the visibility choice; only the flags actually passed appear in the result."""
+    """Assemble the merge-patch body from the ``set`` command's flags.
+
+    Combines the set/clear pairs with the visibility choice; only the flags actually passed appear in the result.
+    """
     body: dict[str, Any] = {}
     _apply_patch_field(
         body,
@@ -178,8 +184,9 @@ def set_tool_meta(
         bool, typer.Option("--clear-badges", help="Clear all capability badges (send an empty set).")
     ] = False,
 ) -> None:
-    """Merge-patch a tool's overlay. Only the flags you pass are sent; omit a field
-    to leave it unchanged.
+    """Merge-patch a tool's overlay.
+
+    Only the flags you pass are sent; omit a field to leave it unchanged.
 
     Example: ``tai tool-meta set web_search --display-name 'Web Search' --tag research``
     """

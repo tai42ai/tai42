@@ -99,9 +99,12 @@ _STREAM_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-A
 
 
 class AgentRunInput(RootModel[dict[str, object]]):
-    """The input object for an agent run. Fields are agent-specific — validated at
-    runtime against the target agent's dynamic ``ToolInput`` model — so the request
-    body is a free-form JSON object here."""
+    """The input object for an agent run.
+
+    Fields are agent-specific — validated at runtime against the target agent's
+    dynamic ``ToolInput`` model — so the request body is a free-form JSON object
+    here.
+    """
 
 
 def _error(message: str, status_code: int) -> JSONResponse:
@@ -109,10 +112,12 @@ def _error(message: str, status_code: int) -> JSONResponse:
 
 
 def _validation_detail(exc: ValidationError) -> str:
-    """Render a validation failure as ``loc: message`` parts WITHOUT echoing the
-    input values. The authored-run input embeds the baked ``fixed_kwargs`` — which
-    can carry credentials the runner is not entitled to see — so the surfaced error
-    omits the input values that ``str(exc)`` would otherwise include."""
+    """Render a validation failure as ``loc: message`` parts without echoing the input values.
+
+    The authored-run input embeds the baked ``fixed_kwargs`` — which can carry
+    credentials the runner is not entitled to see — so the surfaced error omits
+    the input values that ``str(exc)`` would otherwise include.
+    """
     parts: list[str] = []
     for err in exc.errors(include_url=False, include_input=False):
         loc = ".".join(str(part) for part in err["loc"])
@@ -121,8 +126,11 @@ def _validation_detail(exc: ValidationError) -> str:
 
 
 def _sse(data: str) -> str:
-    """One SSE frame carrying ``data``. The event ``type`` is the client's
-    discriminator and rides inside the JSON, so no ``event:`` line is emitted."""
+    """One SSE frame carrying ``data``.
+
+    The event ``type`` is the client's discriminator and rides inside the JSON, so
+    no ``event:`` line is emitted.
+    """
     return f"data: {data}\n\n"
 
 
@@ -155,17 +163,20 @@ list_spec_runnable_agents = register_operation_route(
 async def _build_run_kwargs(
     request: Request, agent: Agent, *, baked: dict[str, Any] | None = None
 ) -> dict[str, Any] | Response:
-    """Read the JSON body, reject a malformed body / an unknown ``ToolInput`` field / a
-    request field that names a baked (fixed) one with a loud 400, field-combine the
-    request with ``baked``, validate against the agent's ``ToolInput`` and map through
-    ``run_kwargs_from_tool_input``. Return the run kwargs, or a 400 ``Response`` on any
-    rejection.
+    """Read the JSON body, validate it against the agent's ``ToolInput``, and map to run kwargs.
+
+    Rejects a malformed body / an unknown ``ToolInput`` field / a request field
+    that names a baked (fixed) one with a loud 400, field-combines the request
+    with ``baked``, validates against the agent's ``ToolInput`` and maps through
+    ``run_kwargs_from_tool_input``. Returns the run kwargs, or a 400 ``Response``
+    on any rejection.
 
     The validation error is rendered value-free (``_validation_detail``): an authored
     run's ``baked`` fixed kwargs can carry credentials the runner is not entitled to
     see, so the surfaced error names the violated bound, never the input value.
     ``from_tool_input``'s own ``ValueError`` (a conflicting input) is hand-authored, so
-    it surfaces verbatim."""
+    it surfaces verbatim.
+    """
     baked = baked or {}
     try:
         body = await request.json()
@@ -200,10 +211,12 @@ async def _build_run_kwargs(
 
 
 async def _produce(agent: Agent, run_kwargs: dict[str, Any], queue: asyncio.Queue[tuple[str, Any]]) -> None:
-    """Drain ``agent.astream`` into ``queue`` as ``(kind, payload)`` items:
+    """Drain ``agent.astream`` into ``queue`` as ``(kind, payload)`` items.
+
     ``("event", StreamEvent)`` per event, then one terminal ``("end", None)`` or
     ``("error", exc)``. A cancellation (client disconnect) propagates into
-    ``astream`` and re-raises so the abandoned run stops."""
+    ``astream`` and re-raises so the abandoned run stops.
+    """
     try:
         # Route the live-caller drive through the shared budget+attribution seam: this
         # SSE route holds a live client connection, so it is not detached-exempt and its
@@ -222,17 +235,21 @@ async def _produce(agent: Agent, run_kwargs: dict[str, Any], queue: asyncio.Queu
 
 async def _wait_until_disconnected(request: Request) -> None:
     """Complete once the client has disconnected, polling on a fixed cadence.
+
     ``is_disconnected`` is cheap (a non-blocking receive peek), so a poll loop is
-    both correct and low-cost."""
+    both correct and low-cost.
+    """
     while not await request.is_disconnected():
         await asyncio.sleep(_DISCONNECT_POLL_SECONDS)
 
 
 def _render_stream_item(kind: str, payload: Any) -> tuple[str, bool]:
-    """Map one ``(kind, payload)`` queue item to its SSE frame string and whether the
-    stream ends after it: an ``event`` dumps the ``StreamEvent`` (never ends), an
-    ``end`` yields the terminal end frame, and an error logs the traceback and yields
-    the terminal ``stream.error`` frame. Both terminals end the stream."""
+    """Map one ``(kind, payload)`` queue item to its SSE frame and whether the stream ends after it.
+
+    An ``event`` dumps the ``StreamEvent`` (never ends), an ``end`` yields the
+    terminal end frame, and an error logs the traceback and yields the terminal
+    ``stream.error`` frame. Both terminals end the stream.
+    """
     if kind == "event":
         return _sse(payload.model_dump_json(fallback=str)), False
     if kind == "end":
@@ -242,14 +259,17 @@ def _render_stream_item(kind: str, payload: Any) -> tuple[str, bool]:
 
 
 async def _agent_event_stream(request: Request, agent: Agent, run_kwargs: dict[str, Any]) -> AsyncIterator[str]:
-    """Yield SSE frames for one agent run: one frame per ``StreamEvent`` (via
-    ``model_dump_json(fallback=str)`` so a live non-JSON-native payload serializes
-    instead of crashing the stream), a keep-alive comment on an idle gap, and a
-    terminal ``stream.end``/``stream.error`` frame.
+    """Yield SSE frames for one agent run.
+
+    One frame per ``StreamEvent`` (via ``model_dump_json(fallback=str)`` so a live
+    non-JSON-native payload serializes instead of crashing the stream), a
+    keep-alive comment on an idle gap, and a terminal
+    ``stream.end``/``stream.error`` frame.
 
     A disconnect monitor races the event feed; when the client drops, the run's
     producer task is cancelled in ``finally``, which propagates cancellation into
-    ``astream`` so the abandoned run stops."""
+    ``astream`` so the abandoned run stops.
+    """
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=_MAX_QUEUED_EVENTS)
     # A persistent get-task across keep-alive timeouts: cancelling and re-issuing
     # a fresh ``queue.get()`` each idle tick could drop an item that arrived at the
@@ -314,6 +334,7 @@ async def _agent_event_stream(request: Request, agent: Agent, run_kwargs: dict[s
     action="write",
 )
 async def run_agent(request: Request) -> Response:
+    """Stream a run of the named agent as SSE; 404 for an unknown agent, retriable while a reload holds the gate."""
     # An agent run dispatched against registries a reload is tearing down would
     # race the rebuild — reject while the gate is held (retriable).
     if reload_gate.locked:
@@ -356,8 +377,7 @@ async def run_agent(request: Request) -> Response:
     action="write",
 )
 async def run_authored_agent(request: Request) -> Response:
-    """Stream a run of an authored agent — a preset over an agent's run tool whose
-    baked fields the agent honors.
+    """Stream a run of an authored agent — a preset over an agent's run tool whose baked fields it honors.
 
     The baked spec is read from the ``PresetManager`` in-memory map (the single
     source of truth for every registered preset — versioning never gates
@@ -366,7 +386,8 @@ async def run_authored_agent(request: Request) -> Response:
     silent override. The baked fixed kwargs plus the request fields are combined at
     the FIELD level, validated against the agent's ``ToolInput``, and mapped through
     ``from_tool_input`` before ``astream`` — never a raw splat that would bypass
-    validation and the field mapping."""
+    validation and the field mapping.
+    """
     # An agent run dispatched against registries a reload is tearing down would
     # race the rebuild — reject while the gate is held (retriable).
     if reload_gate.locked:

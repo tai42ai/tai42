@@ -24,9 +24,10 @@ from .models import FailedMcpsQuery
 
 
 def _preserved_manifest_view() -> dict:
-    """The PRESERVED persisted manifest's MCP section + user tools — ``!ENV`` markers
-    intact, so NO resolved secret value ever leaves on the wire. A never-written store
-    yields an empty view."""
+    """The PRESERVED persisted manifest's MCP section + user tools, ``!ENV`` markers intact.
+
+    No resolved secret value ever leaves on the wire. A never-written store yields an empty view.
+    """
     try:
         preserved = tai42_app.config.config_manager.read_manifest_preserved()
     except FileNotFoundError:
@@ -42,9 +43,10 @@ def _preserved_manifest_view() -> dict:
     response_model=PreservedManifestView,
 )
 async def get_manifest() -> dict:
-    """Return the MCP section and user tools of the PRESERVED persisted manifest —
-    ``!ENV ${KEY}`` markers kept intact, so a secret leaf is its placeholder marker,
-    NEVER the plaintext value.
+    """Return the MCP section and user tools of the PRESERVED persisted manifest.
+
+    ``!ENV ${KEY}`` markers are kept intact, so a secret leaf is its placeholder marker, NEVER the
+    plaintext value.
 
     This door serves ONLY the preserved read: no resolved-view surface exists here, so no
     ``!ENV`` marker is ever materialized onto the wire. McpTab reads
@@ -59,11 +61,13 @@ async def get_manifest() -> dict:
     response_model=PreservedManifestView,
 )
 async def get_manifest_preserved() -> dict:
-    """Return the PRESERVED persisted manifest's MCP section + user tools with every
-    ``!ENV ${KEY}`` marker intact (no secret is resolved) — the source the Studio McpTab
-    config editor reads so it can round-trip markers instead of baking a resolved secret.
-    Same ``{mcp, user_tools}`` view as ``get_manifest`` — both serve the preserved read;
-    this explicit ``/preserved`` door names that no-resolve contract in its path."""
+    """Return the PRESERVED persisted manifest's MCP section + user tools, every ``!ENV`` marker intact.
+
+    No secret is resolved — the source the Studio McpTab config editor reads so it can round-trip
+    markers instead of baking a resolved secret. Same ``{mcp, user_tools}`` view as
+    ``get_manifest`` — both serve the preserved read; this explicit ``/preserved`` door names that
+    no-resolve contract in its path.
+    """
     return _pkg._preserved_manifest_view()
 
 
@@ -73,7 +77,8 @@ async def get_manifest_preserved() -> dict:
     response_model=McpEnvRefList,
 )
 async def get_mcp_env_refs() -> list[dict[str, Any]]:
-    """The ``!ENV ${VAR[:default]}`` markers carried by the manifest's MCP section —
+    """The ``!ENV ${VAR[:default]}`` markers carried by the manifest's MCP section.
+
     NAMES and BOOLEANS only, never values.
 
     Walks the PRESERVED manifest (markers intact) with the shared marker scan and
@@ -84,7 +89,8 @@ async def get_mcp_env_refs() -> list[dict[str, Any]]:
     effective env the store flows into and the source-marker resolution + dangling
     refusals read, so a var supplied only by the deployment environment shows green,
     never a false red. Works identically for hand-written marker-bearing entries (a
-    platform feature, not an mcp-server-kind feature)."""
+    platform feature, not an mcp-server-kind feature).
+    """
     section = {"mcp": _pkg._preserved_manifest_view()["mcp"]}
     return [
         {
@@ -99,11 +105,13 @@ async def get_mcp_env_refs() -> list[dict[str, Any]]:
 
 @operation(summary="Get the JSON schema for one MCP-config entry", tags=["manifest"], response_model=OpaqueJson)
 async def get_mcp_config_schema() -> dict:
+    """The JSON schema for one MCP-config entry."""
     return TaiMCPConfig.model_json_schema()
 
 
 @operation(summary="Snapshot the live MCP binding status", tags=["manifest"], response_model=McpStatusSnapshot)
 async def get_mcp_status() -> dict:
+    """A snapshot of the live MCP binding status."""
     return tai42_app.admin.live_mcp_status()
 
 
@@ -114,8 +122,9 @@ async def get_mcp_status() -> dict:
     response_model=FleetResult,
 )
 async def list_failed_mcps(targets: list[str] | None = None) -> Any:
-    """List MCP servers skipped due to a failed viability check (server down or
-    slow at boot or last reload). Use ``reload_mcp`` to re-attach one once healthy.
+    """List MCP servers skipped due to a failed viability check (server down or slow).
+
+    Skipped at boot or last reload. Use ``reload_mcp`` to re-attach one once healthy.
 
     Each entry is ``{"title": <name>, "status": "unavailable"}`` — title plus a
     coarse status only. A query op rides the same fan-out primitive as a mutation:

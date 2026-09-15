@@ -42,8 +42,10 @@ def _configured_schema(config: dict[str, Any]) -> dict[str, Any]:
 
 @tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="output_schema")
 def output_schema(func, orig_name, orig_desc, config):
-    """Branch ``func`` into an ``<orig_name>_output_schema`` variant that advertises
-    and validates its output against the configured JSON Schema."""
+    """Branch ``func`` into an ``<orig_name>_output_schema`` variant gated on a JSON Schema.
+
+    The variant advertises and validates its output against the configured JSON Schema.
+    """
     schema = _configured_schema(config)
 
     raw_name = f"{orig_name}_{output_schema.__name__}"

@@ -1,5 +1,6 @@
-"""Manifest impl: the include/exclude filtering + derived-map building +
-surgical reload logic behind the ``tai42_contract.manifest.Manifest`` interface.
+"""Manifest impl behind the ``tai42_contract.manifest.Manifest`` interface.
+
+The include/exclude filtering, derived-map building, and surgical reload logic.
 
 The model shape, the ``*Config`` models, the model validators, and the public
 predicate/query signatures are the contract (``tai42_contract.manifest``). This
@@ -28,8 +29,10 @@ from tai42_contract.manifest import (
 
 
 class Manifest(ManifestContract):
-    """Concrete manifest: builds the derived lookup maps and runs the
-    include/exclude filtering declared by ``tai42_contract.manifest.Manifest``."""
+    """Concrete manifest: builds the derived lookup maps and runs the include/exclude filtering.
+
+    The filtering is declared by ``tai42_contract.manifest.Manifest``.
+    """
 
     # The contract declares the derived lookup fields as optional; this impl
     # always builds them in ``model_post_init``, so they are non-None here.
@@ -58,6 +61,7 @@ class Manifest(ManifestContract):
     resolved_excludes: dict[str, set[str]] = Field(default_factory=dict, exclude=True)
 
     def model_post_init(self, __context) -> None:
+        """Build the derived include/exclude, config, tool and extension lookup maps."""
         (
             self.include_module_tools_map,
             self.exclude_module_tools_map,
@@ -167,12 +171,15 @@ class Manifest(ManifestContract):
         return should_include
 
     def should_include_tool(self, name: str, module: str) -> bool:
+        """Whether tool ``name`` from ``module`` passes the manifest's include/exclude filter."""
         return self._should_include(name, module, "module_tools", is_title_key=False)
 
     def should_include_agent(self, name: str, module: str) -> bool:
+        """Whether agent ``name`` from ``module`` passes the manifest's include/exclude filter."""
         return self._should_include(name, module, "module_agents", is_title_key=False)
 
     def should_include_mcp_tool(self, name: str, title: str) -> bool:
+        """Whether MCP tool ``name`` under ``title`` passes the manifest's include/exclude filter."""
         return self._should_include(name, title, "title_mcp_tools", is_title_key=True)
 
     def replace_mcp(self, mcp: list["TaiMCPConfig"]) -> None:
@@ -202,6 +209,7 @@ class Manifest(ManifestContract):
 
     @property
     def live_manifest(self) -> "Manifest":
+        """A copy whose tools/agents/mcp lists reflect the resolved (deduplicated) config rows."""
         manifest = deepcopy(self)
         manifest.tools = list(self.tools_map.values())
         manifest.agents = list(self.agents_map.values())
@@ -209,6 +217,7 @@ class Manifest(ManifestContract):
         return manifest
 
     def find_title(self, module: str) -> str:
+        """The tool title configured for ``module`` (nearest parent-package match), or ``module`` itself."""
         parts = module.split(".")
         candidates = [".".join(parts[:i]) for i in range(len(parts), 0, -1)]
         found = [candidate for candidate in candidates if candidate in self.tools_module_title_map]
@@ -218,10 +227,12 @@ class Manifest(ManifestContract):
         return module
 
     def _is_plugin_module(self, module: str) -> bool:
-        """Whether ``module`` belongs to an explicitly-loaded plugin the manifest
-        names directly (the backend/sandbox/storage/monitoring module or a lifecycle
-        module) rather than a ``tools:`` entry. Such a module's registered
-        tools/agents are always included — they carry no include/exclude list."""
+        """Whether ``module`` belongs to an explicitly-loaded plugin the manifest names directly.
+
+        Such a plugin is the backend/sandbox/storage/monitoring module or a lifecycle
+        module, rather than a ``tools:`` entry. Its registered tools/agents are always
+        included — they carry no include/exclude list.
+        """
         roots = [
             self.backend_module,
             self.sandbox_module,

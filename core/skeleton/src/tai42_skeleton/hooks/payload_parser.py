@@ -1,3 +1,5 @@
+"""Parsers that turn a webhook request body (JSON, XML, form, raw) into hook payload fields."""
+
 import base64
 import logging
 from typing import Any
@@ -47,8 +49,10 @@ async def _parse_xml_body(request: Request) -> dict[str, Any]:
 
 
 async def _parse_form_body(request: Request) -> dict[str, Any]:
-    """Parse a urlencoded/multipart form body into a dict. A malformed body
-    raises ``ValueError``."""
+    """Parse a urlencoded/multipart form body into a dict.
+
+    A malformed body raises ``ValueError``.
+    """
     try:
         form_data = await request.form()
     except Exception as e:
@@ -57,9 +61,10 @@ async def _parse_form_body(request: Request) -> dict[str, Any]:
 
 
 async def _parse_raw_body(request: Request) -> dict[str, Any]:
-    """Carry an untyped body whole: utf-8 text under ``raw_body``, else base64
-    under ``raw_body_base64``. An empty body yields ``{}``; the body is never
-    dropped."""
+    """Carry an untyped body whole: utf-8 text under ``raw_body``, else base64 under ``raw_body_base64``.
+
+    An empty body yields ``{}``; the body is never dropped.
+    """
     body_bytes = await request.body()
     if not body_bytes:
         return {}

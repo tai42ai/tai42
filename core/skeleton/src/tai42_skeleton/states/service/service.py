@@ -42,8 +42,11 @@ class StatesService(
     _RegistrationMixin,
     _ReconcileMixin,
 ):
-    """The one validate + apply layer. Holds a store and the consumer-owned registries;
-    every method refuses loudly while the feature is off."""
+    """The one validate + apply layer.
+
+    Holds a store and the consumer-owned registries; every method refuses loudly while the
+    feature is off.
+    """
 
     _TEMPLATE_CACHE_MAX: ClassVar[int] = 256
 
@@ -56,6 +59,7 @@ class StatesService(
         consumer_listers: StatesConsumerListerRegistry | None = None,
         seeds: StateTemplateSeedRegistry | None = None,
     ) -> None:
+        """Bind the store and the consumer-owned validator/reconciler/lister/seed registries."""
         from tai42_skeleton.states.seeds import StateTemplateSeedRegistry
 
         self._store = store or PostgresStatesStore()

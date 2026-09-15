@@ -1,15 +1,15 @@
-import type { ReactElement } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  GROUP_GAP_MS,
-  Transcript,
   buildRows,
   dayLabel,
+  GROUP_GAP_MS,
   isAtBottom,
   startOfNextDay,
+  Transcript,
   type TranscriptEntry,
   type TranscriptProps,
 } from '@/transcript';

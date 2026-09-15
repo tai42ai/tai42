@@ -91,10 +91,11 @@ def _structured_tool_names(strategy: Any) -> frozenset[str]:
 
 
 def _reasoning_text(message: AIMessage) -> str:
-    """Extract the model's reasoning/thinking text from an ``AIMessage``, across
-    the shapes providers use: Anthropic ``thinking`` content blocks, OpenAI
-    ``reasoning`` summaries, and the generic
-    ``additional_kwargs['reasoning_content']``. Returns "" when there is none."""
+    """Extract the model's reasoning/thinking text from an ``AIMessage`` across the shapes providers use.
+
+    Anthropic ``thinking`` content blocks, OpenAI ``reasoning`` summaries, and the generic
+    ``additional_kwargs['reasoning_content']``. Returns "" when there is none.
+    """
     parts: list[str] = []
     additional = getattr(message, "additional_kwargs", None)
     if isinstance(additional, dict):
@@ -197,18 +198,22 @@ async def astream_tools_agent_events(
 
 
 def _split_stream_item(item: Any) -> tuple[str, Any]:
-    """Split one ``astream`` item into ``(mode, chunk)``. With a list ``stream_mode`` LangGraph
-    yields ``(mode, chunk)``; anything that is not that pair is a bare single-mode chunk,
-    treated as an update."""
+    """Split one ``astream`` item into ``(mode, chunk)``.
+
+    With a list ``stream_mode`` LangGraph yields ``(mode, chunk)``; anything that is not that pair is a
+    bare single-mode chunk, treated as an update.
+    """
     if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
         return item[0], item[1]
     return "updates", item
 
 
 def _message_delta_text(chunk: Any) -> str | None:
-    """The token delta of a ``messages``-mode chunk (``(AIMessageChunk, metadata)``), or
-    ``None`` when the chunk carries no text delta. A chunk that is not a (message, metadata)
-    pair raises rather than being skipped."""
+    """The token delta of a ``messages``-mode chunk, or ``None`` when it carries no text delta.
+
+    The chunk is ``(AIMessageChunk, metadata)``. A chunk that is not a (message, metadata) pair raises
+    rather than being skipped.
+    """
     if not (isinstance(chunk, tuple) and len(chunk) == 2):
         raise ValueError(f"messages-mode stream chunk is not a (message, metadata) pair: {chunk!r}")
     message_chunk, _metadata = chunk
@@ -223,16 +228,17 @@ def _normalize_node_updates(chunk: Any) -> list[dict[str, Any]]:
     A node update value is normally a channel-write mapping (or a list of them when a node
     writes the same channel twice). ``None`` (node wrote nothing) and the ``__interrupt__``
     tuple (read from the snapshot by the resume path) are benign and skipped; any other shape
-    raises."""
+    raises.
+    """
     if not isinstance(chunk, dict):
-        raise ValueError(f"updates-mode stream chunk is not a node->update mapping: {chunk!r}")
+        raise ValueError(f"updates-mode stream chunk is not a node->update mapping: {chunk!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     normalized: list[dict[str, Any]] = []
     for node, update in chunk.items():
         if update is None or node == "__interrupt__":
             continue
         for one in update if isinstance(update, list) else [update]:
             if not isinstance(one, dict):
-                raise ValueError(f"updates-mode node update for {node!r} is not a mapping: {one!r}")
+                raise ValueError(f"updates-mode node update for {node!r} is not a mapping: {one!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
             normalized.append(one)
     return normalized
 
@@ -242,7 +248,8 @@ class _ToolCallDedup:
 
     The ``__synthetic_tool_call_`` prefix is outside every provider's id namespace and the
     counter keeps a synthesized id unique. :meth:`call_id` returns the id to surface a tool
-    call under, or ``None`` when that id was already seen (the call is a duplicate to skip)."""
+    call under, or ``None`` when that id was already seen (the call is a duplicate to skip).
+    """
 
     def __init__(self) -> None:
         self.seen: set[str] = set()
@@ -262,9 +269,11 @@ class _ToolCallDedup:
 def _ai_message_events(
     message: AIMessage, structured_tools: frozenset[str], dedup: _ToolCallDedup
 ) -> Iterator[StreamEvent]:
-    """The step events an ``updates``-channel ``AIMessage`` surfaces: a reasoning block, each
-    non-synthetic tool call (deduped), then the run-usage event. The synthetic structured-output
-    tool call is routing mechanics and never surfaces."""
+    """The step events an ``updates``-channel ``AIMessage`` surfaces.
+
+    A reasoning block, each non-synthetic tool call (deduped), then the run-usage event. The synthetic
+    structured-output tool call is routing mechanics and never surfaces.
+    """
     reasoning = _reasoning_text(message)
     if reasoning:
         yield ReasoningStep(text=reasoning)
@@ -285,8 +294,10 @@ def _ai_message_events(
 
 
 def _tool_message_event(message: ToolMessage, structured_tools: frozenset[str]) -> StreamEvent | None:
-    """The :class:`ToolResultStep` a ``ToolMessage`` surfaces, or ``None`` when it is the
-    synthetic structured-output tool's echo (routing mechanics kept out of the step events)."""
+    """The :class:`ToolResultStep` a ``ToolMessage`` surfaces, or ``None`` for the synthetic tool's echo.
+
+    The synthetic structured-output tool's echo is routing mechanics kept out of the step events.
+    """
     if getattr(message, "name", "") in structured_tools:
         return None
     return ToolResultStep(
@@ -298,9 +309,11 @@ def _tool_message_event(message: ToolMessage, structured_tools: frozenset[str]) 
 
 
 class _Projection:
-    """The accumulating state of one projection run: the tool-call dedup, the concatenated
-    answer deltas, the last ``updates``-channel AIMessage text (the fallback final), and the
-    latest structured-output payload seen on the updates channel."""
+    """The accumulating state of one projection run.
+
+    The tool-call dedup, the concatenated answer deltas, the last ``updates``-channel AIMessage text (the
+    fallback final), and the latest structured-output payload seen on the updates channel.
+    """
 
     def __init__(self, structured_tools: frozenset[str]) -> None:
         self.structured_tools = structured_tools
@@ -311,8 +324,10 @@ class _Projection:
 
 
 def _project_update_events(update: dict[str, Any], projection: _Projection) -> Iterator[StreamEvent]:
-    """The step events one ``updates``-channel node update surfaces, keeping the latest
-    structured-output payload and the fallback final text on ``projection``."""
+    """The step events one ``updates``-channel node update surfaces.
+
+    Keeps the latest structured-output payload and the fallback final text on ``projection``.
+    """
     if update.get("structured_response") is not None:
         projection.structured_response = update["structured_response"]
     for message in _channel_value(update.get("messages")) or []:
@@ -328,9 +343,11 @@ def _project_update_events(update: dict[str, Any], projection: _Projection) -> I
 
 
 def _terminal_events(projection: _Projection, response_format: Any) -> Iterator[StreamEvent]:
-    """The terminal events a drained projection ends on: the assembled :class:`MessageFinal`
-    (the concatenated deltas, falling back to the last AIMessage text) and, when a structured
-    response was produced, the validated :class:`StructuredFinal`."""
+    """The terminal events a drained projection ends on.
+
+    The assembled :class:`MessageFinal` (the concatenated deltas, falling back to the last AIMessage text)
+    and, when a structured response was produced, the validated :class:`StructuredFinal`.
+    """
     final_text = "".join(projection.answer_parts).strip() or projection.last_update_text.strip()
     if final_text:
         yield MessageFinal(text=final_text)

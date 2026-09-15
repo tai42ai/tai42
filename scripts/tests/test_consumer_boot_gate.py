@@ -513,7 +513,7 @@ def test_install_venv_raises_conflict_on_no_solution(tmp_path: Path, monkeypatch
     consumers = [
         gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
     ]
-    with pytest.raises(gate._ResolutionConflict) as excinfo:
+    with pytest.raises(gate._ResolutionConflictError) as excinfo:
         gate._install_venv(tmp_path, ["core/contract"], "id-pkg", consumers, tmp_path / "venv")
     assert "No solution found when resolving dependencies" in excinfo.value.resolver_stderr
 

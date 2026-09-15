@@ -12,6 +12,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class TurnSettings(TaiBaseSettings):
+    """``TAI_TURN_*`` settings for the synchronous turn budget."""
+
     model_config = SettingsConfigDict(env_prefix="TAI_TURN_")
 
     # Wall-clock budget for one synchronous turn. None = unbounded (a slow turn is
@@ -35,4 +37,5 @@ class TurnSettings(TaiBaseSettings):
 
 @settings_cache
 def turn_settings() -> TurnSettings:
+    """The cached :class:`TurnSettings`, re-read on a settings reload."""
     return TurnSettings()

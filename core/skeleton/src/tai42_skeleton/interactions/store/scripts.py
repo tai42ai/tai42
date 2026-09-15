@@ -1,6 +1,8 @@
-"""The four atomic server-side Lua scripts the store's writes and reads run — each
-folds a read-and-act sequence into one round trip so a concurrent caller can never
-observe or corrupt a torn intermediate state."""
+"""The four atomic server-side Lua scripts the store's writes and reads run.
+
+Each folds a read-and-act sequence into one round trip so a concurrent caller can never observe or corrupt
+a torn intermediate state.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from __future__ import annotations
 # would drop a group that is gaining a live question — invariant (b). The
 # phantom self-heal of a genuinely dead group still fires, driven by any UNRELATED
 # ``add``.
-#   KEYS[1] = pending_deadline_key,  KEYS[2] = pending_key
+#   KEYS[1] = pending_deadline_key,  KEYS[2] = pending_key  # noqa: ERA001 (Lua param docs)
 #   ARGV[1] = now_ms (purge cutoff),  ARGV[2] = group to skip (the current add's group)
 _PENDING_PURGE_LUA = """
 -- interactions:pending-deadline-purge
@@ -48,7 +50,7 @@ return purged
 # member — ONLY while the live count is below ``limit``. ZCARD and the ZADD run in
 # one server round trip, so a concurrent burst can never overshoot the cap the way
 # a separate count-then-add pair can (the check-then-act gap between two commands).
-#   KEYS[1] = open_key
+#   KEYS[1] = open_key  # noqa: ERA001 (Lua param docs)
 #   ARGV[1] = now_ms (stale-member cutoff),  ARGV[2] = limit,
 #   ARGV[3] = timeout_at_ms (member score),  ARGV[4] = interaction_id (member)
 _OPEN_RESERVE_LUA = """
@@ -72,7 +74,7 @@ return 1
 # never shrinks it. Like the phantom purge, it constructs the per-member ``media:{id}``
 # keys from members read at runtime — a single-node access (undeclared for Cluster),
 # consistent with this store's single-node assumption.
-#   KEYS[1] = media_index_key
+#   KEYS[1] = media_index_key  # noqa: ERA001 (Lua param docs)
 #   ARGV[1] = ttl seconds,  ARGV[2] = media_key prefix,  ARGV[3..] = the add's new ids
 _MEDIA_SET_OR_EXTEND_LUA = """
 -- interactions:media-set-or-extend
@@ -114,9 +116,9 @@ return #members
 # entry — reconciled off the index (ZREM) rather than re-firing a record that no
 # longer exists, and returns the ``'dropped'`` marker so the caller can surface a
 # LOUD terminal give-up (no further redelivery will ever fire that resume).
-#   KEYS[1] = continuation_due_index_key,  KEYS[2] = continuation_due_record_key
+#   KEYS[1] = continuation_due_index_key,  KEYS[2] = continuation_due_record_key  # noqa: ERA001 (Lua param docs)
 #   ARGV[1] = interaction_id (member),  ARGV[2] = now_ms (due cutoff),
-#   ARGV[3] = backoff_base_ms,  ARGV[4] = backoff_cap_ms
+#   ARGV[3] = backoff_base_ms,  ARGV[4] = backoff_cap_ms  # noqa: ERA001 (Lua param docs)
 _CONTINUATION_RETRY_CLAIM_LUA = """
 -- interactions:continuation-retry-claim
 local score = redis.call('ZSCORE', KEYS[1], ARGV[1])

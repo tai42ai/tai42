@@ -19,6 +19,8 @@ from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_
 
 
 class CelerySettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings):
+    """The Celery backend's ``CELERY_`` settings: broker, result backend, RedBeat store, and pool size."""
+
     model_config = SettingsConfigDict(env_prefix="CELERY_")
 
     # The broker, result backend, and RedBeat store are all Redis URLs, so each
@@ -60,4 +62,5 @@ class CelerySettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSett
 
 @settings_cache
 def celery_settings() -> CelerySettings:
+    """The cached :class:`CelerySettings` for this process."""
     return CelerySettings()

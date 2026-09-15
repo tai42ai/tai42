@@ -1,5 +1,4 @@
-"""HTTP routes for attaching tool extensions — ``/api/tools/{name}/extensions``
-(all AUTHED).
+"""HTTP routes for attaching tool extensions — ``/api/tools/{name}/extensions`` (all AUTHED).
 
 Applying an extension to a MANIFEST-provided tool is a manifest edit + reload:
 the ``extensions`` MAP on a ``tools``/``mcp`` config is the single source of
@@ -58,12 +57,13 @@ async def _json_object(request: Request) -> dict[str, Any]:
 
 
 def _read_element(element: Any) -> ExtensionElement:
-    """One combo element, structurally validated: a non-empty extension NAME (bare
-    string), or a ``{"name": <non-empty str>, "config": <dict>}`` mapping binding
-    author config (``config`` REQUIRED — a config-less selection is the bare-string
-    form, so a config-free dict is malformed) with no other keys. Anything else is
-    a loud 400. Registration of the name is checked later against the live
-    registry."""
+    """One combo element, structurally validated.
+
+    A non-empty extension NAME (bare string), or a ``{"name": <non-empty str>, "config": <dict>}`` mapping
+    binding author config (``config`` REQUIRED — a config-less selection is the bare-string form, so a
+    config-free dict is malformed) with no other keys. Anything else is a loud 400. Registration of the
+    name is checked later against the live registry.
+    """
     if isinstance(element, str):
         if not element:
             raise BadRequestError("an extension name must be a non-empty string")
@@ -83,9 +83,11 @@ def _read_element(element: Any) -> ExtensionElement:
 
 
 def _read_combo_members(combos: list[Any]) -> list[list[ExtensionElement]]:
-    """One list-of-combos, each inner combo a non-empty list of combo elements — the
-    empty inner combo (``[[]]`` or any ``[]`` member) is rejected because the bare
-    branch is seeded implicitly and is never requested as an empty combo."""
+    """One list-of-combos, each inner combo a non-empty list of combo elements.
+
+    The empty inner combo (``[[]]`` or any ``[]`` member) is rejected because the bare branch is seeded
+    implicitly and is never requested as an empty combo.
+    """
     result: list[list[ExtensionElement]] = []
     for combo in combos:
         if not isinstance(combo, list) or not combo:
@@ -95,8 +97,10 @@ def _read_combo_members(combos: list[Any]) -> list[list[ExtensionElement]]:
 
 
 def _read_combos(body: dict[str, Any]) -> list[list[ExtensionElement]]:
-    """The full list-of-combos to author. A top-level ``combos: []`` is legal — it
-    CLEARS the tool's extensions (drops the map key)."""
+    """The full list-of-combos to author.
+
+    A top-level ``combos: []`` is legal — it CLEARS the tool's extensions (drops the map key).
+    """
     if "combos" not in body:
         raise BadRequestError("body must contain a 'combos' list")
     combos = body["combos"]
@@ -106,8 +110,11 @@ def _read_combos(body: dict[str, Any]) -> list[list[ExtensionElement]]:
 
 
 def _read_change_combos(body: dict[str, Any], field: str) -> list[list[ExtensionElement]]:
-    """One side of the granular combo change. An absent field is an empty list (a
-    one-sided add or remove); a present non-list is a loud 400 naming it."""
+    """One side of the granular combo change.
+
+    An absent field is an empty list (a one-sided add or remove); a present non-list is a loud 400 naming
+    it.
+    """
     if field not in body:
         return []
     value = body[field]
@@ -117,16 +124,19 @@ def _read_change_combos(body: dict[str, Any], field: str) -> list[list[Extension
 
 
 async def _extract_combos(request: Request) -> dict:
-    """Parse the POST body into the operation's flat ``combos`` argument, rejecting
-    a malformed structure with a loud 400 before the operation runs."""
+    """Parse the POST body into the operation's flat ``combos`` argument.
+
+    Rejects a malformed structure with a loud 400 before the operation runs.
+    """
     body = await _json_object(request)
     return {"combos": _read_combos(body)}
 
 
 async def _extract_combo_changes(request: Request) -> dict:
-    """Parse the granular ``{"add": [...], "remove": [...]}`` body into the
-    operation's ``add``/``remove`` arguments, validating each combo's element shape
-    at the edge (as the full-write POST does) before the operation runs."""
+    """Parse the granular ``{"add": [...], "remove": [...]}`` body into the operation's ``add``/``remove`` args.
+
+    Validates each combo's element shape at the edge (as the full-write POST does) before the operation runs.
+    """
     body = await _json_object(request)
     return {"add": _read_change_combos(body, "add"), "remove": _read_change_combos(body, "remove")}
 

@@ -23,19 +23,25 @@ class AppAccounts(Protocol):
     """
 
     def active_provider(self, name: str) -> IdentityProvider | None:
-        """The provider the CURRENT epoch instantiated under ``name`` (an
-        ``AccountsProvider`` is an ``IdentityProvider``), or ``None`` when no provider is
-        active under that name — the name is not configured, or a build is mid-flight."""
+        """The provider the CURRENT epoch instantiated under ``name``, or ``None`` when none is active.
+
+        An ``AccountsProvider`` is an ``IdentityProvider``. ``None`` means no provider is
+        active under that name — the name is not configured, or a build is mid-flight.
+        """
         ...
 
 
 @runtime_checkable
 class AppConnectors(Protocol):
+    """Registration and credential resolution for connector providers."""
+
     def register_connector(self, descriptor: ProviderDescriptor) -> None:
-        """Register a connector provider from its pure descriptor data. Called for
-        every manifest ``connectors`` entry at boot/reload, and by any code holding
-        the handle (a connector is pure data, so this is a plain call, not a
-        decorator)."""
+        """Register a connector provider from its pure descriptor data.
+
+        Called for every manifest ``connectors`` entry at boot/reload, and by any
+        code holding the handle (a connector is pure data, so this is a plain call,
+        not a decorator).
+        """
         ...
 
     @property
@@ -61,5 +67,6 @@ class AppConnectors(Protocol):
         (2) ``connection_id`` is a REFERENCE supplied by operator settings, NEVER
         session-supplied, so a session can neither reach an identity-less door's
         creds nor name another connection. The contract carries no logic — the
-        skeleton owns the fail-close enforcement."""
+        skeleton owns the fail-close enforcement.
+        """
         ...

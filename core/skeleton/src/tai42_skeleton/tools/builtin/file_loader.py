@@ -1,5 +1,4 @@
-"""The ``file_loader`` builtin: load a resource from a url OR a storage id and
-return its text content or a media block.
+"""The ``file_loader`` builtin: load a resource from a url or a storage id, returning text or a media block.
 
 A thin shim over the app's ``resource_manager`` — it delegates to
 :meth:`ResourceManager.load_file`, which resolves the source (SSRF-pinned url

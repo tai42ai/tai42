@@ -16,11 +16,13 @@ from tai42_skeleton.states.service.base import _StatesServiceBase
 
 class _ProvenanceMixin(_StatesServiceBase):
     def _complete_origin(self, origin: WriteOrigin) -> CompletedOrigin:
-        """Complete a consumer's :class:`WriteOrigin` into a :class:`CompletedOrigin`:
-        ``door``/``actor``/``turn_id``/``inbound_id`` from the ambient context, or ``api``
-        + the request principal with none. The consumer's ``door``/``actor``/``turn_id``
-        cannot be supplied (absent from :class:`WriteOrigin`, ``extra='forbid'``), so the
-        ledger can never be forged."""
+        """Complete a consumer's :class:`WriteOrigin` into a :class:`CompletedOrigin`.
+
+        Stamps ``door``/``actor``/``turn_id``/``inbound_id`` from the ambient context, or
+        ``api`` + the request principal with none. The consumer's
+        ``door``/``actor``/``turn_id`` cannot be supplied (absent from
+        :class:`WriteOrigin`, ``extra='forbid'``), so the ledger can never be forged.
+        """
         ctx = current_state_context()
         if ctx is not None:
             return CompletedOrigin(

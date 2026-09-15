@@ -36,17 +36,21 @@ def _now() -> datetime:
 
 
 class ToolRunSubmission(BaseModel):
-    """A background tool-run submission: the ``tool_name`` and its keyword
-    ``arguments``. Mirrors the shape ``read_tool_call`` enforces at runtime."""
+    """A background tool-run submission: the ``tool_name`` and its keyword ``arguments``.
+
+    Mirrors the shape ``read_tool_call`` enforces at runtime.
+    """
 
     tool_name: str = Field(min_length=1, description="Registered tool name.")
     arguments: dict[str, object] = Field(default_factory=dict, description="Tool keyword arguments.")
 
 
 class ToolRunsListQuery(BaseModel):
-    """The per-tool run listing's ``?tool_name=`` query. ``tool_name`` is REQUIRED — a client
-    generated without it calls the door with no tool to list and is answered 400.
+    """The per-tool run listing's ``?tool_name=`` query.
 
-    Spec metadata only — the door parses its query at the HTTP edge."""
+    ``tool_name`` is REQUIRED — a client generated without it calls the door with
+    no tool to list and is answered 400. Spec metadata only — the door parses its
+    query at the HTTP edge.
+    """
 
     tool_name: str = Field(min_length=1, description="The registered tool whose recent runs to list.")

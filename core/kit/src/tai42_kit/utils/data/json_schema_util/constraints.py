@@ -59,8 +59,10 @@ def _array_constraints(schema: dict[str, Any]) -> list[Any]:
 
 
 def _value_constraint_metadata(prop_schema: dict[str, Any]) -> list[Any]:
-    """Metadata objects carrying the schema's value constraints, gated by the
-    declared ``type`` (a keyword on a non-matching type is a spec-level no-op)."""
+    """Metadata objects carrying the schema's value constraints, gated by the declared ``type``.
+
+    A keyword on a non-matching type is a spec-level no-op.
+    """
     t = prop_schema.get("type")
     metadata: list[Any] = []
     if _matches_type(t, "number") or _matches_type(t, "integer"):

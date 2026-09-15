@@ -60,9 +60,11 @@ class CacheStore:
         self._key_locks: dict[str, asyncio.Lock] = {}
 
     def read(self, key: str) -> Any:
-        """Return the live cached value for ``key``, or :data:`MISS` when absent
-        or expired (evicting an expired entry). A hit marks ``key`` most recently
-        used for LRU ordering."""
+        """Return the live cached value for ``key``, or :data:`MISS` when absent or expired.
+
+        Evicts an expired entry. A hit marks ``key`` most recently used for LRU
+        ordering.
+        """
         try:
             value, expire = self._values[key]
         except KeyError:
@@ -78,8 +80,10 @@ class CacheStore:
         return self._key_locks.setdefault(key, asyncio.Lock())
 
     def write(self, key: str, value: Any, exp: float | None) -> None:
-        """Store ``value`` under ``key`` with a ``exp``-seconds TTL (``None`` or a
-        non-positive ``exp`` stores it without expiry), enforcing the entry cap."""
+        """Store ``value`` under ``key`` with an ``exp``-seconds TTL, enforcing the entry cap.
+
+        ``None`` or a non-positive ``exp`` stores it without expiry.
+        """
         expire = time.monotonic() + exp if (exp is not None and exp > 0) else None
         # Reclaim expired entries before the cap check, so live ones aren't evicted first.
         self._drop_expired()

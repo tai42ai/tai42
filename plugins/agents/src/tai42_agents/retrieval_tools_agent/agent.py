@@ -97,7 +97,7 @@ def _terminal_result(text: str) -> str:
     if not found:
         raise ValueError(f"retrieval agent terminal message has no status JSON content: {text!r}")
     if not isinstance(terminal, dict):
-        raise ValueError(f"retrieval agent terminal payload is not a JSON object: {text!r}")
+        raise ValueError(f"retrieval agent terminal payload is not a JSON object: {text!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     status = terminal.get("status")
     if status not in ("success", "error"):
         raise ValueError(f"retrieval agent terminal status must be success/error, got {status!r} in {text!r}")
@@ -160,8 +160,10 @@ class RetrievalToolsAgentInput(BaseModel):
     @field_validator("user_content_kwargs")
     @classmethod
     def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """An empty dict carries no content-block keys — normalize {} to None so it
-        reads as unset, matching the builders that treat {} as no mark."""
+        """An empty dict carries no content-block keys — normalize {} to None so it reads as unset.
+
+        Matching the builders that treat {} as no mark.
+        """
         return value or None
 
 
@@ -196,11 +198,12 @@ class RetrievalToolsAgent(Agent):
         user_content_kwargs: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, Any], dict[str, Any], Any]:
-        """Resolve providers, embed the tools, compile the graph, and return
-        ``(agent, messages, config, llm)``. The ``llm`` is handed back so ``astream``
-        can run a structured finalization pass over the terminal result when a
-        ``response_format`` was requested. ``user_content_kwargs`` (e.g.
-        ``cache_control``) carries content-block keys onto the user message."""
+        """Resolve providers, embed the tools, compile the graph, and return ``(agent, messages, config, llm)``.
+
+        The ``llm`` is handed back so ``astream`` can run a structured finalization pass over the
+        terminal result when a ``response_format`` was requested. ``user_content_kwargs`` (e.g.
+        ``cache_control``) carries content-block keys onto the user message.
+        """
         rendered_system = await render_message(system_message)
         rendered_user = await render_message(user_message, allow_empty=False, field="user_message")
 
@@ -316,8 +319,7 @@ class RetrievalToolsAgent(Agent):
         yield MessageFinal(text=result_text)
 
     async def run(self, **kwargs: Any) -> Any:
-        """Reject the ABC parameters this runtime cannot honor, then drain
-        ``astream`` to the final value.
+        """Reject the ABC parameters this runtime cannot honor, then drain ``astream`` to the final value.
 
         A ``response_format`` is honored: its JSON-Schema dict must carry a top-level
         ``"title"``, and the drain returns the validated structured object, raising

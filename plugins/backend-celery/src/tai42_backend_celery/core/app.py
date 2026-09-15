@@ -47,8 +47,7 @@ def on_worker_process_init(sender: Any = None, **kwargs: Any) -> None:
 
 @signals.worker_process_shutdown.connect
 def on_worker_process_shutdown(sender: Any = None, **kwargs: Any) -> None:
-    """Runs in each pool child as it exits: flush buffered monitoring spans, then
-    close each task loop's pooled clients."""
+    """Flush buffered monitoring spans then close each task loop's pooled clients, in each pool child at exit."""
     try:
         tai42_app.monitoring.active.writer.flush()
     except Exception as e:
@@ -67,6 +66,7 @@ def on_worker_process_shutdown(sender: Any = None, **kwargs: Any) -> None:
 
 
 def create_celery_app() -> Celery:
+    """Build and configure the Celery app from ``TAI_CELERY_*`` settings."""
     settings = celery_settings()
     app = Celery(
         "TaiMCPCelery",

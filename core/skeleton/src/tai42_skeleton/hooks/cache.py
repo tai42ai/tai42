@@ -1,3 +1,5 @@
+"""Process-cached hooks-manager singleton, built from settings and dropped on a settings reset."""
+
 import logging
 from threading import RLock
 

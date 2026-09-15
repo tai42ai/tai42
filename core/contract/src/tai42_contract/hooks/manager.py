@@ -1,6 +1,7 @@
 """The ``HooksManager`` protocol — the hook registration + dispatch seam.
 
-Implementations add jq evaluation, monitoring spans, and concurrency."""
+Implementations add jq evaluation, monitoring spans, and concurrency.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ from tai42_contract.hooks.models import HookParams
 
 @runtime_checkable
 class HooksManager(Protocol):
+    """Registration and dispatch seam for event hooks."""
+
     async def register(self, params: HookParams) -> bool:
         """Register a hook; return whether it was newly stored."""
         ...

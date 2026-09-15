@@ -41,8 +41,7 @@ __all__ = ["SchemaOutOfDateError", "assert_chain_applied", "assert_skeleton_sche
 
 
 async def assert_skeleton_schema_applied() -> None:
-    """Startup gate: assert the ``skeleton`` chain is applied when the skeleton
-    database is configured.
+    """Startup gate: assert the ``skeleton`` chain is applied when the skeleton database is configured.
 
     Verifies the chain on the skeleton's runtime store connection — the exact
     database its features read and write. A deployment with no skeleton database

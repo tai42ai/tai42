@@ -21,7 +21,7 @@ async def test_version_metric_sort_is_unsupported(manager, mock_client):
         await LangfuseReader(manager).list_traces(
             from_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
             limit=5,
-            filter=MonitoringFilter(version="5"),
+            filter_=MonitoringFilter(version="5"),
             order_by=OrderBy(field="total_cost", direction="desc"),
         )
 
@@ -67,7 +67,7 @@ async def test_metric_sort_filters_exact_clauses(manager, mock_client, route_met
         order_by=OrderBy(field="total_cost"),
         from_timestamp=_NOW,
         limit=5,
-        filter=MonitoringFilter(name="flow-a", user_id="u1", session_id="s1", tags=["run:7"], metadata={"k": "v"}),
+        filter_=MonitoringFilter(name="flow-a", user_id="u1", session_id="s1", tags=["run:7"], metadata={"k": "v"}),
     )
     filters = metric_query()["filters"]
     # tags rides the metrics column `tags` (arrayOptions), never `traceTags`.
@@ -195,7 +195,7 @@ async def test_metric_sort_input_validation_raises_before_fetch(manager, mock_cl
 async def test_metric_sort_unsupported_filter_raises_before_fetch(manager, mock_client, flt):
     with pytest.raises(MonitoringReadNotSupportedError):
         await LangfuseReader(manager).list_traces(
-            order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=5, filter=flt
+            order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=5, filter_=flt
         )
     mock_client.api.legacy.metrics_v1.metrics.assert_not_called()
     mock_client.api.trace.list.assert_not_called()
@@ -207,7 +207,7 @@ async def test_metric_sort_unsupported_filter_names_clauses(manager, mock_client
             order_by=OrderBy(field="total_cost"),
             from_timestamp=_NOW,
             limit=5,
-            filter=MonitoringFilter(min_cost=1.0, max_tokens=10),
+            filter_=MonitoringFilter(min_cost=1.0, max_tokens=10),
         )
     assert "min_cost" in str(exc.value)
     assert "max_tokens" in str(exc.value)
@@ -217,7 +217,7 @@ async def test_metric_sort_filter_ok_on_default_sort(manager, mock_client):
     # The same level/range filter that a metric sort rejects works on the
     # default (native) sort via trace.list.
     mock_client.api.trace.list.return_value = SimpleNamespace(data=[])
-    await LangfuseReader(manager).list_traces(filter=MonitoringFilter(level=MonitoringLevel.ERROR, min_cost=1.0))
+    await LangfuseReader(manager).list_traces(filter_=MonitoringFilter(level=MonitoringLevel.ERROR, min_cost=1.0))
     mock_client.api.legacy.metrics_v1.metrics.assert_not_called()
 
 

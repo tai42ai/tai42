@@ -1,6 +1,8 @@
-"""The ask's budget/deadline and callback-ticket computation: derive the stored
-deadline + the monotonic answer-wait deadline + the async-park TTL margin, and mint
-the callback ticket + URL when an external/channel ask forces one."""
+"""The ask's budget/deadline and callback-ticket computation.
+
+Derives the stored deadline, the monotonic answer-wait deadline, and the async-park TTL margin,
+and mints the callback ticket + URL when an external/channel ask forces one.
+"""
 
 from __future__ import annotations
 
@@ -15,9 +17,12 @@ from tai42_skeleton.interactions.settings import InteractionsSettings
 
 @dataclass(frozen=True)
 class DeadlineWindow:
-    """The ask's time window: the answer ``budget``, the ``created_at`` anchor, the
-    STORED ``timeout_at`` (sync budget or async ``expiry_at``), the monotonic
-    ``deadline`` bounding the synchronous phase, and the async-park TTL margin."""
+    """The ask's time window.
+
+    Carries the answer ``budget``, the ``created_at`` anchor, the STORED ``timeout_at`` (sync budget
+    or async ``expiry_at``), the monotonic ``deadline`` bounding the synchronous phase, and the
+    async-park TTL margin.
+    """
 
     budget: float
     created_at: datetime
@@ -28,8 +33,10 @@ class DeadlineWindow:
 
 @dataclass(frozen=True)
 class CallbackTicket:
-    """A minted callback capability: the opaque ticket, its TTL, and the public
-    callback URL the human (or channel) acts on."""
+    """A minted callback capability: the opaque ticket, its TTL, and the public callback URL.
+
+    The URL is the one the human (or channel) acts on.
+    """
 
     ticket: str
     ticket_ttl: int
@@ -39,8 +46,10 @@ class CallbackTicket:
 def resolve_deadline(
     mode: str, timeout: float | None, expiry_at: datetime | None, settings: InteractionsSettings
 ) -> DeadlineWindow:
-    """Compute the ask's ``budget``, ``created_at``, stored ``timeout_at``, the
-    monotonic ``deadline`` for the synchronous phase, and the async-park TTL margin.
+    """Compute the ask's budget, anchor, stored deadline, monotonic deadline, and park TTL margin.
+
+    Produces ``budget``, ``created_at``, stored ``timeout_at``, the monotonic ``deadline`` for the
+    synchronous phase, and the async-park TTL margin.
 
     A sync question's stored deadline is its answer budget; an async park's is its
     ``expiry_at`` (no caller blocks on it — the expiry reaper resumes work). ONE
@@ -48,7 +57,8 @@ def resolve_deadline(
     the sync answer wait), so delivery time shrinks a sync caller's wait and a sync
     caller can never block past the budget. The park TTL margin ties the state
     ``_key_ttl`` and the callback ticket TTL to the reaper interval so a park's keys
-    outlive its ``expiry_at`` by enough reaper passes to fire."""
+    outlive its ``expiry_at`` by enough reaper passes to fire.
+    """
     budget = settings.answer_timeout_seconds if timeout is None else timeout
     if budget <= 0:
         # Redis BLPOP treats 0 as "block forever" — the opposite of no-wait — so a
@@ -56,7 +66,8 @@ def resolve_deadline(
         raise ValueError(f"timeout must be positive, got {budget!r}")
     created_at = datetime.now(UTC)
     if mode == "async":
-        assert expiry_at is not None  # async requires expiry_at (validated up front)
+        if expiry_at is None:
+            raise AssertionError
         timeout_at = expiry_at
     else:
         timeout_at = created_at + timedelta(seconds=budget)
@@ -81,12 +92,14 @@ def resolve_deadline(
 def mint_callback_ticket(
     settings: InteractionsSettings, window: DeadlineWindow, mode: str, *, force: bool
 ) -> CallbackTicket | None:
-    """Mint the callback ticket + URL when ``force`` (external format or a channel
-    delivers the question, which bridges the reply back through the public callback
-    door), else ``None``. The ticket TTL is the seconds to the stored deadline (ceiled,
-    floor 1s) plus — for an async park — the same reaper margin the state ``_key_ttl``
-    uses, so the callback door and the authenticated ``/answer`` door stay answerable
-    through the identical park window."""
+    """Mint the callback ticket + URL when ``force``, else ``None``.
+
+    ``force`` is set for an external format or a channel-delivered question, which bridges the reply
+    back through the public callback door. The ticket TTL is the seconds to the stored deadline
+    (ceiled, floor 1s) plus — for an async park — the same reaper margin the state ``_key_ttl``
+    uses, so the callback door and the authenticated ``/answer`` door stay answerable through the
+    identical park window.
+    """
     if not force:
         return None
     # The settings validator guarantees a set public_base_url is https:// (or localhost

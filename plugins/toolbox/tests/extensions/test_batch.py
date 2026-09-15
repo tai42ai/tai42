@@ -11,7 +11,11 @@ from tai42_contract.interactions import SuspendedInteraction
 
 import tai42_toolbox._internal.extensions.batch_executor as batch_executor
 import tai42_toolbox.extensions.batch as batch_module
-from tai42_toolbox._internal.extensions.batch_executor import BatchMultiParkUnsupported, BatchSettings, execute_batch
+from tai42_toolbox._internal.extensions.batch_executor import (
+    BatchMultiParkUnsupportedError,
+    BatchSettings,
+    execute_batch,
+)
 from tai42_toolbox.extensions.batch import batch
 
 from .conftest import FakeTools
@@ -116,7 +120,7 @@ def test_two_parked_bodies_raise_multi_park_unsupported(bind_fake_app, execution
     # raise loudly, naming the parked interactions, rather than silently corrupting.
     _bind_parking_app(bind_fake_app)
     params = [{"park": "i-a"}, {"n": 2}, {"park": "i-b"}]
-    with pytest.raises(BatchMultiParkUnsupported) as excinfo:
+    with pytest.raises(BatchMultiParkUnsupportedError) as excinfo:
         asyncio.run(execute_batch("tool", params, execution_mode=execution_mode))
     assert excinfo.value.interaction_ids == ["i-a", "i-b"]
     assert excinfo.value.tool_name == "tool"

@@ -1,5 +1,4 @@
-"""``tai states`` — manage the subject-keyed state store (``/api/states*`` and
-``/api/state-retention/prune``).
+"""``tai states`` — manage the subject-keyed state store (``/api/states*`` and ``/api/state-retention/prune``).
 
 Thin wrappers over the platform state routes: declare and inspect states, attach templates,
 read/write/erase/fold a subject's record, page a subject's write audit trail, list a
@@ -41,8 +40,10 @@ def _record_path(name: str, target_kind: str, target_name: str, kind: str, key: 
 
 
 def _read_document(data: str | None, file: Path | None) -> Any:
-    """A JSON document from ``--data``, a ``--file`` path, or stdin (in that order); a
-    document must be supplied through exactly one source."""
+    """Read a JSON document from ``--data``, a ``--file`` path, or stdin (in that order).
+
+    A document must be supplied through exactly one source.
+    """
     sources = [s for s in (data is not None, file is not None) if s]
     if len(sources) > 1:
         raise typer.BadParameter("pass the document through only one of --data / --file")
@@ -355,7 +356,7 @@ def apply_state_template_jq(
     kind: _KIND,
     key: _KEY,
     program: Annotated[str, typer.Argument(help="The template_jq program name (or <template>.<name>).")],
-    input: Annotated[
+    input_: Annotated[
         str | None,
         typer.Option("--input", help="The program's input as JSON, or @<file> to read it from a file."),
     ] = None,
@@ -364,11 +365,11 @@ def apply_state_template_jq(
     """Apply an update-purpose template_jq program to a subject's record."""
     ctx_obj = app_context(ctx)
     body: dict[str, Any] = {}
-    if input is not None:
-        if input.startswith("@"):
-            body["input"] = parse_json_value(Path(input[1:]).read_text(), param_hint=input)
+    if input_ is not None:
+        if input_.startswith("@"):
+            body["input"] = parse_json_value(Path(input_[1:]).read_text(), param_hint=input_)
         else:
-            body["input"] = parse_json_value(input, param_hint="--input")
+            body["input"] = parse_json_value(input_, param_hint="--input")
     if op_id is not None:
         body["op_id"] = op_id
     path = f"{_record_path(name, target_kind, target_name, kind, key)}/template-jq/{seg(program)}"

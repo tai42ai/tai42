@@ -50,7 +50,9 @@ _HANDLERS: dict[str, _MessageHandler] = {
 
 async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> None:
     """Resolve one inbound message's pending question, or route it to the bridge.
-    A message lacking a string id is odd and skipped (logged)."""
+
+    A message lacking a string id is odd and skipped (logged).
+    """
     wamid = message.get("id")
     if not isinstance(wamid, str) or not wamid:
         logger.warning("whatsapp message missing a string id; skipping: %r", message)

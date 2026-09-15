@@ -1,6 +1,9 @@
-"""Conversation-route CRUD doors and their body validators: create/upsert (pass-role bind +
-target-exists + jq compile + callback-secret mint), read/list (secret withheld), delete
-(with thread-index reclamation), and the single answer-record read."""
+"""Conversation-route CRUD doors and their body validators.
+
+Create/upsert (pass-role bind + target-exists + jq compile + callback-secret mint),
+read/list (secret withheld), delete (with thread-index reclamation), and the single
+answer-record read.
+"""
 
 from __future__ import annotations
 
@@ -16,10 +19,10 @@ from tai42_kit.utils.data import get_compiled_jq
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.managers.base_conversations_manager import (
     BaseConversationsManager,
-    DoorFlipRefused,
+    DoorFlipRefusedError,
 )
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError, ValidationRejected
+from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError, ValidationRejectedError
 from tai42_skeleton.operations.response_models_group_a import (
     ConversationRecordView,
     ConversationRouteCreateResult,
@@ -53,9 +56,12 @@ def _validate_route_name(route_name: str) -> None:
 
 
 async def _assert_target_exists(target_kind: str, target_name: str) -> None:
-    """Existence only: the turn runs as the key, so the key's authority over the target is
-    deliberately not checked here. An ``agent`` target must be registered; a ``tool`` target
-    must resolve on the live tool registry. A miss is a loud 404, mirroring either side."""
+    """Existence only — the key's authority over the target is not checked here.
+
+    The turn runs as the key, so authority is deliberately not checked here. An ``agent``
+    target must be registered; a ``tool`` target must resolve on the live tool registry.
+    A miss is a loud 404, mirroring either side.
+    """
     from tai42_skeleton.app import instance
     from tai42_skeleton.tools.binding import UnknownToolError
 
@@ -70,12 +76,13 @@ async def _assert_target_exists(target_kind: str, target_name: str) -> None:
 
 
 async def _assert_target_bindable(target_kind: str, target_name: str) -> None:
-    """Consult the registered bind validator for the target's kind, if any, once the target
-    is known to exist. A plugin registers a validator through
-    ``app.conversations.register_target_validator``; a validator returning message lines
-    refuses the route with them (a 422), so a defect the target carries — a flow reading a
-    state no binding supplies — is caught at bind, never deferred to run time. No validator
-    for the kind leaves the create unchanged."""
+    """Consult the registered bind validator for the target's kind, once the target exists.
+
+    A plugin registers a validator through ``app.conversations.register_target_validator``;
+    a validator returning message lines refuses the route with them (a 422), so a defect
+    the target carries — reading a state no binding supplies — is caught at bind, never
+    deferred to run time. No validator for the kind leaves the create unchanged.
+    """
     from tai42_skeleton.app import instance
 
     validator = instance.app.conversations.target_validator(target_kind)
@@ -83,14 +90,16 @@ async def _assert_target_bindable(target_kind: str, target_name: str) -> None:
         return
     messages = await validator(target_name)
     if messages:
-        raise ValidationRejected("\n".join(messages))
+        raise ValidationRejectedError("\n".join(messages))
 
 
 async def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
-    """Render a tool target's templated jq programs and compile each at create so an invalid
-    one is refused here, not at the first message. A by-id text whose stored resource cannot
-    be fetched fails the create loudly, naming the field and the id. The model already
-    forbids exprs on an ``agent`` target."""
+    """Render a tool target's templated jq programs and compile each at create.
+
+    An invalid one is refused here, not at the first message. A by-id text whose stored
+    resource cannot be fetched fails the create loudly, naming the field and the id. The
+    model already forbids exprs on an ``agent`` target.
+    """
     for field, text in (("payload_expr", create.payload_expr), ("reply_expr", create.reply_expr)):
         if text is None:
             continue
@@ -106,15 +115,15 @@ async def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
             raise BadRequestError(f"invalid {field}: {exc}") from exc
 
 
-def _door_flip_refusal(refused: DoorFlipRefused) -> BadRequestError:
-    """The operator-facing refusal for an edit that would change the ``door`` of a route
-    that already HOLDS threads.
+def _door_flip_refusal(refused: DoorFlipRefusedError) -> BadRequestError:
+    """The operator-facing refusal for an edit that would change a route's ``door`` while it holds threads.
 
     The two doors key their threads differently — an api thread names its owning caller
     principal in its own id, a channel thread names the medium's address — so the held
     threads cannot be re-keyed under the new door. The flip is refused rather than
     half-applied, and refused by the write itself so a first message opening a thread cannot
-    slip in behind a separate check."""
+    slip in behind a separate check.
+    """
     return BadRequestError(
         f"conversation route {refused.route_name!r} holds {refused.held} thread(s) opened on its "
         f"{refused.from_door!r} door and cannot be changed to {refused.to_door!r}: delete the route "
@@ -126,10 +135,11 @@ def _door_flip_refusal(refused: DoorFlipRefused) -> BadRequestError:
 async def _unclaimed_channel_identity(
     manager: BaseConversationsManager, *, route_name: str, channel: str, our_identity: str
 ) -> str:
-    """The canonical ``our_identity`` a ``channel`` row is STORED under, refused when
-    another route already claims that ``(channel, identity)`` pair. Inbound routing matches
-    the canonical form, so a second claimant would make every message to that identity
-    unresolvable; it is refused here at the write instead.
+    """The canonical ``our_identity`` a ``channel`` row is STORED under.
+
+    Refused when another route already claims that ``(channel, identity)`` pair. Inbound
+    routing matches the canonical form, so a second claimant would make every message to
+    that identity unresolvable; it is refused here at the write instead.
     """
     try:
         identity = canonical_address(our_identity)
@@ -155,6 +165,7 @@ async def _unclaimed_channel_identity(
 )
 async def list_conversation_routes() -> dict[str, Any]:
     """Every stored conversation route, each with its ``callback_secret`` withheld.
+
     Returns ``{"items", "total"}``.
     """
     manager = _require_backend()
@@ -170,8 +181,10 @@ async def list_conversation_routes() -> dict[str, Any]:
     response_model=ConversationRouteView,
 )
 async def get_conversation_route(route_name: str) -> dict[str, Any]:
-    """One conversation route by name, with its ``callback_secret`` withheld. An
-    unknown name is a loud 404; a name that is not a valid slug is a 400."""
+    """One conversation route by name, with its ``callback_secret`` withheld.
+
+    An unknown name is a loud 404; a name that is not a valid slug is a 400.
+    """
     _validate_route_name(route_name)
     manager = _require_backend()
     route = await manager.get_route(route_name)
@@ -185,7 +198,7 @@ async def get_conversation_route(route_name: str) -> dict[str, Any]:
     tags=["conversations"],
     destructive=True,
     authority_changing=True,
-    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError, ValidationRejected],
+    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError, ValidationRejectedError],
     request_model=ConversationRouteCreate,
     response_model=ConversationRouteCreateResult,
 )
@@ -205,8 +218,7 @@ async def create_conversation_route(
     error_reply_text: str | None = None,
     locale: str | None = None,
 ) -> dict[str, Any]:
-    """Create a conversation route from its flat parameters — an UPSERT, so this is the
-    create path AND the edit path for a route of that name.
+    """Create a conversation route from its flat parameters — an UPSERT (create AND edit path).
 
     ``initial_mode`` is the route's default control mode (``agent`` runs the turn, ``manual``
     suppresses it for an operator to answer) when a thread carries no per-thread override.
@@ -284,7 +296,7 @@ async def create_conversation_route(
     )
     try:
         created = await manager.put_route(route)
-    except DoorFlipRefused as refused:
+    except DoorFlipRefusedError as refused:
         raise _door_flip_refusal(refused) from refused
     return {
         "created": created,

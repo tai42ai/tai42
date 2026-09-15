@@ -67,8 +67,9 @@ def run_agent(
     input_json: Annotated[str | None, typer.Option("--input", help="The agent input as a JSON object.")] = None,
     input_file: Annotated[str | None, typer.Option("--input-file", help=_INPUT_FILE_HELP)] = None,
 ) -> None:
-    """Stream a run of an agent, one event frame at a time. Exactly one of ``--input`` or
-    ``--input-file`` is required.
+    """Stream a run of an agent, one event frame at a time.
+
+    Exactly one of ``--input`` or ``--input-file`` is required.
 
     Example: ``tai agents run researcher --input '{"query":"weather"}'``
     """
@@ -90,6 +91,7 @@ def run_authored_agent(
     input_file: Annotated[str | None, typer.Option("--input-file", help=_INPUT_FILE_HELP)] = None,
 ) -> None:
     """Stream a run of an authored agent (a preset baked over a spec-runnable agent).
+
     Exactly one of ``--input`` or ``--input-file`` is required.
 
     Example: ``tai agents authored-run my_researcher --input '{"query":"weather"}'``

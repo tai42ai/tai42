@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, cast
 
-SECRET_PLACEHOLDER = "[secret]"
+SECRET_PLACEHOLDER = "[secret]"  # noqa: S105 constant identifier, not a secret value
 
 
 class SecretValue:
@@ -28,17 +28,21 @@ class SecretValue:
     __slots__ = ("_value",)
 
     def __init__(self, value: Any) -> None:
+        """Wrap ``value`` so it never leaks through a repr, log, or serialization path."""
         self._value = value
 
     def reveal(self) -> Any:
+        """Return the wrapped real value — the sole path out of the envelope."""
         return self._value
 
     def __reduce__(self) -> Any:
+        """Refuse pickle/copy/deepcopy by raising, blocking every generic serialization transport."""
         # The reduce protocol backs pickle, copy, and deepcopy alike; refusing
         # it here blocks every generic serialization transport at one hook.
         raise TypeError("SecretValue refuses serialization transport")
 
     def __repr__(self) -> str:
+        """Return the placeholder form, never the wrapped value."""
         return f"SecretValue({SECRET_PLACEHOLDER})"
 
     __str__ = __repr__

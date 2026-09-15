@@ -26,8 +26,11 @@ _URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]{0,62}://[^\s\"'<>]+")
 
 
 def _redact(text: str) -> str:
-    """Redact URL-embedded credentials in arbitrary text: for each URL, userinfo and
-    every query-string VALUE become ``<redacted>``; non-URL text is left untouched."""
+    """Redact URL-embedded credentials in arbitrary text.
+
+    For each URL, userinfo and every query-string VALUE become ``<redacted>``;
+    non-URL text is left untouched.
+    """
 
     def _one(match: re.Match[str]) -> str:
         # Userinfo runs to the LAST ``@`` in the authority so an inner ``@`` in a
@@ -52,9 +55,12 @@ def _now_iso() -> str:
 
 @dataclass
 class _McpHealth:
-    """One MCP's dispatch health. ``consecutive_failures`` is the length of the
-    current failure run; ``failing_since`` marks its first error and is cleared
-    on the next success alongside ``last_error``."""
+    """One MCP's dispatch health.
+
+    ``consecutive_failures`` is the length of the current failure run;
+    ``failing_since`` marks its first error and is cleared on the next success
+    alongside ``last_error``.
+    """
 
     last_success: str | None = None
     last_error: dict[str, str] | None = None
@@ -78,10 +84,12 @@ def record_success(title: str) -> None:
 
 
 def record_failure(title: str, exc: BaseException) -> None:
-    """Record a failed dispatch for ``title`` — extends the current failure run
-    and pins ``failing_since`` to the run's first error.
+    """Record a failed dispatch for ``title`` — extends the current failure run.
 
-    The stored message never carries URL-embedded credentials — it is a read-tier surface."""
+    Pins ``failing_since`` to the run's first error.
+
+    The stored message never carries URL-embedded credentials — it is a read-tier surface.
+    """
     ts = _now_iso()
     message = _redact(str(exc))
     with _HEALTH_LOCK:
@@ -93,15 +101,19 @@ def record_failure(title: str, exc: BaseException) -> None:
 
 
 def forget(title: str) -> None:
-    """Drop ``title``'s health entry — a title that ceases to exist leaves no
-    residue. A missing title is a no-op (idempotent cleanup), not an error."""
+    """Drop ``title``'s health entry — a title that ceases to exist leaves no residue.
+
+    A missing title is a no-op (idempotent cleanup), not an error.
+    """
     with _HEALTH_LOCK:
         _HEALTH.pop(title, None)
 
 
 def retain(titles: set[str]) -> None:
-    """Drop every stored title NOT in ``titles`` — the store follows the live
-    manifest. Idempotent; an empty set clears all."""
+    """Drop every stored title NOT in ``titles`` — the store follows the live manifest.
+
+    Idempotent; an empty set clears all.
+    """
     with _HEALTH_LOCK:
         for stale in _HEALTH.keys() - titles:
             del _HEALTH[stale]

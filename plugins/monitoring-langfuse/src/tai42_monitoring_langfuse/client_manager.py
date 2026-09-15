@@ -41,6 +41,7 @@ class LangfuseClientManager:
         projects: list[ProjectConfig],
         default_public_key: str,
     ) -> None:
+        """Build the manager from ``projects`` and the ``default_public_key`` (clients are built lazily)."""
         if not projects:
             raise ValueError("LangfuseClientManager requires at least one project")
         self._projects: dict[str, ProjectConfig] = {p.public_key: p for p in projects}
@@ -93,6 +94,10 @@ class LangfuseClientManager:
         return current_scoped_public_key() or self._default_public_key
 
     def active_client(self) -> Langfuse:
+        """The cached Langfuse client for the active project.
+
+        Resolved via the shared registry when the active project is not configured here.
+        """
         self._ensure_built()
         public_key = self.resolve_public_key()
         client = self._clients.get(public_key)
@@ -116,12 +121,15 @@ class LangfuseClientManager:
         return cfg.source
 
     def read_timeout_seconds(self) -> int:
-        """Read timeout for the active project. The generated API client does not
-        inherit the SDK client timeout, so reads must pass it explicitly."""
+        """Read timeout for the active project.
+
+        The generated API client does not inherit the SDK client timeout, so reads must pass it explicitly.
+        """
         cfg = self._projects.get(self.resolve_public_key())
         return cfg.timeout_seconds if cfg else _DEFAULT_READ_TIMEOUT_SECONDS
 
     def is_disabled(self) -> bool:
+        """Whether emit is suppressed in the current context."""
         return _disabled.get()
 
     @contextmanager
@@ -135,6 +143,7 @@ class LangfuseClientManager:
 
     @contextmanager
     def disable(self) -> Iterator[None]:
+        """Suppress every emit for the duration of the block."""
         token = _disabled.set(True)
         try:
             yield
@@ -142,6 +151,7 @@ class LangfuseClientManager:
             _disabled.reset(token)
 
     def flush(self) -> None:
+        """Flush every built client's buffered events."""
         # Nothing is buffered before the first client is built, so don't build just to flush.
         if not self._built:
             return

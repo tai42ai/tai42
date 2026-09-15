@@ -1,4 +1,4 @@
-"""The chat page's SSE generator: transcript backlog, then a live tail.
+r"""The chat page's SSE generator: transcript backlog, then a live tail.
 
 Reimplements the interactions-stream backlog/XREAD/keepalive loop over the kit
 ``RedisClient`` (a channel plugin never imports the skeleton). The shape is
@@ -45,9 +45,11 @@ class StreamLimitError(RuntimeError):
     Carries both halves of the refusal: the exception's own text is the operator's
     detail (which cap, and whose), ``visitor_message`` is what the anonymous caller
     is told — and each cap says a different thing, so a visitor with too many tabs
-    open is never told the server is full."""
+    open is never told the server is full.
+    """
 
     def __init__(self, detail: str, visitor_message: str) -> None:
+        """Carry the operator ``detail`` and the anonymous caller's ``visitor_message``."""
         super().__init__(detail)
         self.visitor_message = visitor_message
 
@@ -74,7 +76,8 @@ def check_stream_admission(visitor_id: str, settings: WebSettings) -> None:
     Checking here is what keeps the 503 AHEAD of the SSE headers. The cost is that
     the counts can momentarily exceed a cap by the number of opens in flight between
     this check and their first frame — a bounded, self-clearing overshoot, never a
-    count that stays over."""
+    count that stays over.
+    """
     if sum(_open_streams.values()) >= settings.max_streams_total:
         raise StreamLimitError(
             f"this process already carries its cap of {settings.max_streams_total} concurrent web chat streams",
@@ -98,7 +101,8 @@ def _stream_slot(visitor_id: str) -> Iterator[None]:
     """Hold one stream's slot for exactly the lifetime of the block.
 
     Entered from inside the SSE generator's body, so a generator that is never
-    advanced never takes a slot and has none to leak."""
+    advanced never takes a slot and has none to leak.
+    """
     _open_streams[visitor_id] += 1
     try:
         yield
@@ -107,17 +111,19 @@ def _stream_slot(visitor_id: str) -> Iterator[None]:
 
 
 def _now() -> float:
-    """The monotonic loop clock the keepalive deadline reads. A module-level seam so
-    a test can drive the deadline without real wall-clock waits."""
+    """Return the monotonic loop clock the keepalive deadline reads.
+
+    A module-level seam so a test can drive the deadline without real wall-clock waits.
+    """
     return asyncio.get_running_loop().time()
 
 
 async def stream_transcript(request: Request, identity: str, address: str, settings: WebSettings) -> AsyncIterator[str]:
-    """Yield the pair's transcript backlog, a ``chat.backlog_done`` marker, then a
-    live tail of new entries with deadline-driven keepalives.
+    """Yield the pair's transcript backlog, a ``chat.backlog_done`` marker, then a live tail of new entries.
 
     The stream's slot is taken HERE and released however the stream ends; the door
-    only checked that one was available (``check_stream_admission``)."""
+    only checked that one was available (``check_stream_admission``).
+    """
     with _stream_slot(address):
         batch = settings.backlog_batch_entries
         async with connection.pooled_redis_ctx() as redis:

@@ -104,9 +104,9 @@ def _serialize_response(
 
 
 async def _validate_proxies(session_params: dict[str, Any]) -> list[str]:
-    """Resolve and validate every proxy host in ``session_params``, returning the curl
-    ``--resolve`` pins that hold each proxy to its validated address.
+    """Resolve and validate every proxy host in ``session_params``, returning the curl ``--resolve`` pins.
 
+    The pins hold each proxy to its validated address.
     A proxy carried as ``proxy`` (URL) or ``proxies`` (scheme-to-URL map) is caller-supplied,
     so each host is resolved and validated (a rejected host raises ``UrlGuardError``) and pinned
     with a ``host:port:address`` entry — closing DNS-rebinding on the proxy hop, since validation
@@ -149,8 +149,10 @@ async def _validate_proxies(session_params: dict[str, Any]) -> list[str]:
 
 
 def _redact_userinfo(url: str) -> str:
-    """Return ``url`` with any ``user:pass@`` credentials replaced by ``***@`` so a URL echoed
-    in an error never leaks the caller's credentials. Host and everything after it are preserved."""
+    """Return ``url`` with any ``user:pass@`` credentials replaced by ``***@``.
+
+    So a URL echoed in an error never leaks the caller's credentials. Host and everything after it are preserved.
+    """
     scheme, sep, rest = url.partition("://")
     if not sep:
         return url
@@ -162,8 +164,10 @@ def _redact_userinfo(url: str) -> str:
 
 
 def _resolve_pin_entry(host: str, port: int, validated_ip: str) -> str:
-    """Build curl's ``--resolve`` entry pinning ``host:port`` to the validated address. An IPv6
-    literal on either side is bracketed so its colons don't collide with the triple's separators."""
+    """Build curl's ``--resolve`` entry pinning ``host:port`` to the validated address.
+
+    An IPv6 literal on either side is bracketed so its colons don't collide with the triple's separators.
+    """
     pinned_host = f"[{host}]" if ":" in host else host
     pinned_ip = f"[{validated_ip}]" if ":" in validated_ip else validated_ip
     return f"{pinned_host}:{port}:{pinned_ip}"
@@ -181,9 +185,9 @@ _session_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, l
 
 @asynccontextmanager
 async def _session_guard(session_key: str) -> AsyncIterator[None]:
-    """Serialize same-``session_key`` requests on the current loop under a refcounted lock
-    evicted once no holder or waiter references it.
+    """Serialize same-``session_key`` requests on the current loop under a refcounted lock.
 
+    The lock is evicted once no holder or waiter references it.
     Refcount mutations are synchronous (no await between check and mutate), so concurrent guards
     for one key cannot interleave their bookkeeping.
     """
@@ -247,8 +251,10 @@ async def perform_request(
     session_params: dict[str, Any] | None = None,
     request_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Execute an HTTP request through a curl-backed session and return the
-    response data (status, body, headers, cookies, timing, and transfer metrics)."""
+    """Execute an HTTP request through a curl-backed session and return the response data.
+
+    Includes status, body, headers, cookies, timing, and transfer metrics.
+    """
     session_params = dict(session_params or {})
     request_params = dict(request_params or {})
 

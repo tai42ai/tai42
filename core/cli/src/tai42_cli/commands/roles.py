@@ -21,8 +21,10 @@ app = typer.Typer(
 
 
 def _parse_grants(grants: list[str]) -> dict[str, str]:
-    """Parse repeatable ``--grant tag=level`` options into a grant map. A malformed
-    entry fails loudly here (the server also validates the tag/level)."""
+    """Parse repeatable ``--grant tag=level`` options into a grant map.
+
+    A malformed entry fails loudly here (the server also validates the tag/level).
+    """
     parsed: dict[str, str] = {}
     for item in grants:
         tag, sep, level = item.partition("=")
@@ -93,8 +95,9 @@ def edit_role(
     grant: Annotated[list[str] | None, typer.Option("--grant", help="Repeatable tag=level (none/read/write).")] = None,
     description: Annotated[str | None, typer.Option("--description", help="New description.")] = None,
 ) -> None:
-    """Edit a role's per-tag grant map (and optionally its description). LIVE — every
-    holder's reach changes on their next request.
+    """Edit a role's per-tag grant map (and optionally its description).
+
+    LIVE — every holder's reach changes on their next request.
 
     Example: ``tai roles edit ops --grant hooks=write``
     """
@@ -113,8 +116,10 @@ def edit_role(
 
 
 def _parse_set(items: list[str]) -> dict[str, str]:
-    """Parse repeatable ``--set tag=level`` options into a grant map. Each value must carry
-    EXACTLY one ``=`` (the server validates the level)."""
+    """Parse repeatable ``--set tag=level`` options into a grant map.
+
+    Each value must carry EXACTLY one ``=`` (the server validates the level).
+    """
     parsed: dict[str, str] = {}
     for item in items:
         if item.count("=") != 1:
@@ -136,9 +141,10 @@ def modify_grants(
     ] = None,
     remove: Annotated[list[str] | None, typer.Option("--remove", help="Repeatable tag to remove.")] = None,
 ) -> None:
-    """Set (upsert) and/or remove single tag grants on a role without replacing the whole
-    map. At least one ``--set`` or ``--remove`` is required. LIVE — every holder's reach
-    changes on their next request.
+    """Set (upsert) and/or remove single tag grants on a role without replacing the whole map.
+
+    At least one ``--set`` or ``--remove`` is required. LIVE — every holder's reach changes on
+    their next request.
 
     Example: ``tai roles grants ops --set hooks=write --remove presets``
     """
@@ -147,7 +153,7 @@ def modify_grants(
     remove_items = remove or []
     if not set_items and not remove_items:
         raise typer.BadParameter("provide at least one --set or --remove")
-    body = {"set": _parse_set(set_items), "remove": remove_items}
+    body = {"upsert": _parse_set(set_items), "remove": remove_items}
     with ctx_obj.client() as client:
         data = client.post(f"/api/auth/roles/{seg(name)}/grants", json=body)
     emit_result(ctx_obj, data)

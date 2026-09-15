@@ -1,6 +1,6 @@
-"""The process-wide conversation target-bind-validator registry — the body behind
-``app.conversations.register_target_validator``.
+"""The process-wide conversation target-bind-validator registry.
 
+The body behind ``app.conversations.register_target_validator``.
 A plugin registers a validator under a target kind when its module loads (importing the
 module runs its ``tai42_app.conversations.register_target_validator(...)`` call). Route
 creation consults the registered validator for a route's target kind after the target
@@ -20,16 +20,22 @@ from tai42_contract.conversations import ConversationTargetKind, TargetBindValid
 
 
 class TargetBindValidatorRegistry:
+    """The registered target-bind validators, keyed by target kind."""
+
     def __init__(self) -> None:
+        """Create an empty registry."""
         self._validators: dict[str, TargetBindValidator] = {}
 
     def register(self, target_kind: ConversationTargetKind, validator: TargetBindValidator) -> None:
+        """Register ``validator`` for ``target_kind``; a duplicate kind raises loudly."""
         if target_kind in self._validators:
             raise ValueError(f"conversation target validator for kind {target_kind!r} is already registered")
         self._validators[target_kind] = validator
 
     def get(self, target_kind: str) -> TargetBindValidator | None:
+        """The validator registered for ``target_kind``, or ``None`` when none is."""
         return self._validators.get(target_kind)
 
     def reset(self) -> None:
+        """Clear every registered validator (called on each ``start()``)."""
         self._validators.clear()

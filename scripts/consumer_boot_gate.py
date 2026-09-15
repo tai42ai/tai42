@@ -50,7 +50,7 @@ from _consumer_boot_gate.install import (
     _install_venv,
     _is_resolution_conflict,
     _report_unresolvable_consumers,
-    _ResolutionConflict,
+    _ResolutionConflictError,
 )
 from _consumer_boot_gate.provides import Provides, read_provides
 from _consumer_boot_gate.versioning import break_is_accepted, governing_bump, read_project_version
@@ -64,7 +64,7 @@ __all__ = [
     "Consumer",
     "Infra",
     "Provides",
-    "_ResolutionConflict",
+    "_ResolutionConflictError",
     "_boot_env",
     "_channel_env",
     "_db_binding_env",

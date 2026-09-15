@@ -32,8 +32,10 @@ from tai42_skeleton.operations.resources import get_resource_by_id as _get_resou
 
 
 async def _extract_get_query(request: Request) -> dict:
-    """Read the required ``resource_id`` from the query into the operation's flat argument,
-    rejecting an absent or empty id with the explicit 400 (never a GET body)."""
+    """Read the required ``resource_id`` from the query into the operation's flat argument.
+
+    Rejects an absent or empty id with the explicit 400 (never a GET body).
+    """
     resource_id = request.query_params.get("resource_id")
     if not resource_id:
         raise BadRequestError("query param 'resource_id' is required")

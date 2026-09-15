@@ -1,5 +1,4 @@
-"""Expands a base tool into its extension-combo branches and registers each
-resulting tool onto the FastMCP server."""
+"""Expands a base tool into its extension-combo branches and registers each resulting tool onto the FastMCP server."""
 
 import inspect
 from collections.abc import Callable
@@ -21,9 +20,11 @@ from tai42_skeleton.tools.binding.state import _ToolBindingBase
 
 @dataclass(frozen=True)
 class _BranchBase:
-    """The resolved base a branch expansion builds from: the original registered
-    object/callable, the typed callable extensions wrap, its inherited docstring,
-    name, description, and derived output schema."""
+    """The resolved base a branch expansion builds from.
+
+    The original registered object/callable, the typed callable extensions wrap, its inherited docstring,
+    name, description, and derived output schema.
+    """
 
     func: Callable[..., Any] | Tool
     is_obj: bool
@@ -35,8 +36,7 @@ class _BranchBase:
 
 
 class _BranchBindingMixin(_ToolBindingBase):
-    """Builds the extension-combo branch set for a base tool and binds each
-    resulting tool (and the bare base) onto the live server."""
+    """Builds the extension-combo branch set for a base tool and binds each resulting tool onto the live server."""
 
     def bind_tool_func(self, *args, owner: str | None = None, **kwargs):
         def bind(func):
@@ -53,11 +53,14 @@ class _BranchBindingMixin(_ToolBindingBase):
         return bind
 
     def _prepared_branch(self, func: Callable[..., Any] | Tool, kwargs: dict[str, Any]) -> _BranchBase:
-        """Resolve the branch base for ``func``: the typed callable extensions wrap, the
-        inherited docstring, name, description, and derived output schema.
+        """Resolve the branch base for ``func``.
+
+        Yields the typed callable extensions wrap, the inherited docstring, name, description, and derived output
+        schema.
 
         Pops ``name``/``description`` off ``kwargs`` so each reaches ``bind_tool`` exactly
-        once (as the carried value), never a second time through ``**kwargs``."""
+        once (as the carried value), never a second time through ``**kwargs``.
+        """
         is_obj = isinstance(func, Tool)
         branch_base = self._branch_base_callable(func) if is_obj else func
         # The docstring an extension inherits from the layer it wraps: the
@@ -91,7 +94,8 @@ class _BranchBindingMixin(_ToolBindingBase):
 
         Each combo is expanded one layer at a time (:meth:`_apply_combo`), and EVERY
         intermediate layer is registered as its own branch tool. The bare base is
-        appended when no combo produced it, so the base tool always binds."""
+        appended when no combo produced it, so the base tool always binds.
+        """
         # curr_name -> (func/tool, description, stack_preserves_output_shape).
         # A branch preserves the base's output shape only when EVERY extension
         # in its stack does (one TRANSFORMER anywhere reshapes the result).
@@ -110,13 +114,15 @@ class _BranchBindingMixin(_ToolBindingBase):
     def _apply_combo(
         self, prepared: _BranchBase, extensions: Any
     ) -> list[tuple[str, Callable[..., Any], str | None, bool]]:
-        """Apply one combo's extension chain left-to-right, returning the branch tuple
-        ``(name, func, description, stack_preserves_output)`` produced at EACH layer.
+        """Apply one combo's extension chain left-to-right.
+
+        Returns the branch tuple ``(name, func, description, stack_preserves_output)`` produced at EACH layer.
 
         Per extension: resolve name/config/factory, enforce the locality-vs-relocation
         ordering, apply the factory, reject a same-name return, enforce the schema rule,
         track whether the stack still preserves the output shape, and carry the running
-        description forward."""
+        description forward.
+        """
         branches: list[tuple[str, Callable[..., Any], str | None, bool]] = []
         curr_func, curr_name, curr_desc = prepared.branch_base, prepared.orig_name, prepared.orig_desc
         stack_preserves_output = True
@@ -197,8 +203,10 @@ class _BranchBindingMixin(_ToolBindingBase):
         kwargs: dict[str, Any],
         owner: str | None,
     ) -> None:
-        """Bind every branch (and the bare base) onto the server with shape-aware
-        output-schema propagation, tracking each name under ``owner`` when given."""
+        """Bind every branch (and the bare base) onto the server with shape-aware output-schema propagation.
+
+        Tracks each name under ``owner`` when given.
+        """
         for curr_name, (tool_func, tool_desc, preserves_output) in extend_tools.items():
             bind_kwargs = dict(kwargs)
             # Shape-aware output-schema propagation: carry the base's
@@ -247,8 +255,7 @@ class _BranchBindingMixin(_ToolBindingBase):
         return self._fast_mcp.add_tool(tool_obj)
 
     def _branch_base_callable(self, tool_obj: Tool) -> Callable[..., Any]:
-        """The callable an extension branch wraps when the bound base is a prebuilt
-        Tool object.
+        """The callable an extension branch wraps when the bound base is a prebuilt Tool object.
 
         A ``FunctionTool`` exposes its real ``fn`` directly. A ``TransformedTool``
         (a preset's baked tool) has no plain callable — its ``fn`` takes one opaque
@@ -256,7 +263,8 @@ class _BranchBindingMixin(_ToolBindingBase):
         of the UNDERLYING function with the hidden baked args applied: it presents
         the remaining typed signature and returns the raw value, so a
         schema-preserving wrapper composes on it exactly as on a native tool.
-        Anything else has no branchable body and raises loudly."""
+        Anything else has no branchable body and raises loudly.
+        """
         if isinstance(tool_obj, FunctionTool):
             return tool_obj.fn
         if isinstance(tool_obj, TransformedTool):

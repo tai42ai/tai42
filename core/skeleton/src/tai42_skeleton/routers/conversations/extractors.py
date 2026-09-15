@@ -26,8 +26,10 @@ _RICH_FIELD_SPECS: tuple[tuple[str, type, str], ...] = (
 
 
 def _optional_typed(body: dict, field: str, expected: type, message: str) -> Any:
-    """Return ``body[field]`` when present and of ``expected`` type (or ``None`` — absent
-    reads as ``None``); raise ``BadRequestError(message)`` otherwise."""
+    """Return ``body[field]`` when present and of ``expected`` type, ``None`` when absent.
+
+    Raises ``BadRequestError(message)`` when it is present but the wrong type.
+    """
     value = body.get(field)
     if value is not None and not isinstance(value, expected):
         raise BadRequestError(message)
@@ -35,13 +37,15 @@ def _optional_typed(body: dict, field: str, expected: type, message: str) -> Any
 
 
 async def _extract_route_create(request: Request) -> dict:
-    """Parse + validate the client-facing route body into the operation's flat fields,
-    rejecting a malformed body with an explicit 400 (the adapter's plain parse would
-    yield 422).
+    """Parse + validate the client-facing route body into the operation's flat fields.
+
+    Rejects a malformed body with an explicit 400 (the adapter's plain parse would yield
+    422).
 
     The ``route_name`` rides the URL path, not the body, so it is injected from the path
     param before validation — a body that also carries a ``route_name`` disagreeing with
-    the path is rejected rather than silently overriding either."""
+    the path is rejected rather than silently overriding either.
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -61,9 +65,11 @@ async def _extract_route_create(request: Request) -> dict:
 
 
 async def _extract_page_window(request: Request) -> dict:
-    """The ``?page=`` / ``?pageSize=`` window as the thread read doors' flat arguments (a
-    GET reads its parameters from the query string, never a body). A non-integer is a loud
-    400 here; the operation range-checks the pair and caps the size."""
+    """The ``?page=`` / ``?pageSize=`` window as the thread read doors' flat arguments.
+
+    A GET reads its parameters from the query string, never a body. A non-integer is a
+    loud 400 here; the operation range-checks the pair and caps the size.
+    """
     page = request.query_params.get("page", "1")
     page_size = request.query_params.get("pageSize", "50")
     try:
@@ -73,8 +79,10 @@ async def _extract_page_window(request: Request) -> dict:
 
 
 async def _extract_message_search_query(request: Request) -> dict:
-    """The route message-search door's REQUIRED ``?q=`` on top of the shared window. A missing
-    one is a loud 400 here; a blank one is the operation's own 400."""
+    """The route message-search door's REQUIRED ``?q=`` on top of the shared window.
+
+    A missing one is a loud 400 here; a blank one is the operation's own 400.
+    """
     q = request.query_params.get("q")
     if q is None:
         raise BadRequestError("q is required: GET /api/conversations/{route_name}/messages/search?q=...")
@@ -82,12 +90,15 @@ async def _extract_message_search_query(request: Request) -> dict:
 
 
 async def _extract_paging(request: Request) -> dict:
-    """The thread listing's shared ``?page=`` / ``?pageSize=`` window plus its optional
-    ``?status=`` / ``?address=`` filters (a GET reads its parameters from the query string).
-    The two filters are passed through raw — the operation validates ``status`` against the
-    delivery-status vocabulary (400 on unknown) and treats a blank filter as absent. The
-    other read doors that only take the window parse it through :func:`_extract_page_window`
-    directly, so they never inherit these filter kwargs."""
+    """The thread listing's shared ``?page=`` / ``?pageSize=`` window plus its optional filters.
+
+    Adds the optional ``?status=`` / ``?address=`` filters (a GET reads its parameters
+    from the query string). The two filters are passed through raw — the operation
+    validates ``status`` against the delivery-status vocabulary (400 on unknown) and treats
+    a blank filter as absent. The other read doors that only take the window parse it
+    through :func:`_extract_page_window` directly, so they never inherit these filter
+    kwargs.
+    """
     return {
         **await _extract_page_window(request),
         "status": request.query_params.get("status"),
@@ -96,15 +107,15 @@ async def _extract_paging(request: Request) -> dict:
 
 
 async def _extract_transcript_query(request: Request) -> dict:
-    """The transcript door's ``?thread_id=``, ``?order=`` and optional ``?q=`` on top of the
-    shared window.
+    """The transcript door's ``?thread_id=``, ``?order=`` and optional ``?q=`` on top of the shared window.
 
     The thread id rides the QUERY, not the path: it carries the api door's percent-encoded
     ``{principal}/{end user}`` address, which no path spelling round-trips — sent raw the
     server decodes it before routing, sent already-encoded the access-control path
     canonicalizer reads it as a doubly-encoded byte. A query value is decoded exactly once,
     by the query parser, whatever it holds. A missing one is a loud 400 here; a blank or
-    unknown-order one is the operation's own 400."""
+    unknown-order one is the operation's own 400.
+    """
     thread_id = request.query_params.get("thread_id")
     if thread_id is None:
         raise BadRequestError("thread_id is required: GET /api/conversations/{route_name}/transcript?thread_id=...")
@@ -124,7 +135,8 @@ async def _extract_thread_delete_query(request: Request) -> dict:
     server decodes it before routing, sent already-encoded the access-control path
     canonicalizer reads it as a doubly-encoded byte. A query value is decoded exactly once,
     by the query parser, whatever it holds. A missing one is a loud 400 here; a blank one is
-    the operation's own 400."""
+    the operation's own 400.
+    """
     thread_id = request.query_params.get("thread_id")
     if thread_id is None:
         raise BadRequestError("thread_id is required: DELETE /api/conversations/{route_name}/thread?thread_id=...")
@@ -132,9 +144,11 @@ async def _extract_thread_delete_query(request: Request) -> dict:
 
 
 async def _extract_person_locale_body(request: Request) -> dict:
-    """The person-locale write body ``{locale}`` as the operation's ``locale`` field. A
-    non-object body or a ``locale`` that is neither a string nor ``null`` is a loud 400 here;
-    the operation validates the tag itself. ``null`` clears the stored locale."""
+    """The person-locale write body ``{locale}`` as the operation's ``locale`` field.
+
+    A non-object body or a ``locale`` that is neither a string nor ``null`` is a loud 400
+    here; the operation validates the tag itself. ``null`` clears the stored locale.
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -148,16 +162,19 @@ async def _extract_person_locale_body(request: Request) -> dict:
 
 
 async def _extract_thread_message(request: Request) -> dict:
-    """The operator-send body ``{thread_id, text, address, media?, template?, options?,
-    schema?, location?, sections?, header?, footer?}`` as
-    the operation's flat fields. A non-object body, a missing/blank ``thread_id``, a
-    non-string ``text``/``address``/``footer``, a non-list ``media``/``options``/``sections``
-    or a non-object ``template``/``schema``/``location``/``header`` is a loud 400 here; the
-    operation owns the blank-text, thread-belongs and
-    rich-field CONTENT guards (item shape, caps, exclusivity, the composition matrix).
+    """The operator-send body as the operation's flat fields.
+
+    The body is ``{thread_id, text, address, media?, template?, options?, schema?,
+    location?, sections?, header?, footer?}``. A non-object body, a missing/blank
+    ``thread_id``, a non-string ``text``/``address``/``footer``, a non-list
+    ``media``/``options``/``sections`` or a non-object
+    ``template``/``schema``/``location``/``header`` is a loud 400 here; the operation owns
+    the blank-text, thread-belongs and rich-field CONTENT guards (item shape, caps,
+    exclusivity, the composition matrix).
 
     ``thread_id`` rides the body, not the path: it carries the api door's percent-encoded
-    ``{principal}/{end user}`` address, which no path spelling round-trips."""
+    ``{principal}/{end user}`` address, which no path spelling round-trips.
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -186,9 +203,12 @@ async def _extract_thread_message(request: Request) -> dict:
 
 
 async def _extract_thread_mode_query(request: Request) -> dict:
-    """The mode read door's ``?thread_id=``. Rides the query for the same reason the
-    transcript door's does — the id carries a percent-encoded principal. A missing one is a
-    loud 400 here; a blank one is the operation's own 400."""
+    """The mode read door's ``?thread_id=``.
+
+    Rides the query for the same reason the transcript door's does — the id carries a
+    percent-encoded principal. A missing one is a loud 400 here; a blank one is the
+    operation's own 400.
+    """
     thread_id = request.query_params.get("thread_id")
     if thread_id is None:
         raise BadRequestError("thread_id is required: GET /api/conversations/{route_name}/thread/mode?thread_id=...")
@@ -196,9 +216,11 @@ async def _extract_thread_mode_query(request: Request) -> dict:
 
 
 async def _extract_thread_mode_body(request: Request) -> dict:
-    """The mode write body ``{thread_id, mode}`` as the operation's flat fields. A non-object
-    body, a missing/blank ``thread_id`` or a non-string ``mode`` is a loud 400 here; the
-    operation validates the mode vocabulary and the thread-belongs guard."""
+    """The mode write body ``{thread_id, mode}`` as the operation's flat fields.
+
+    A non-object body, a missing/blank ``thread_id`` or a non-string ``mode`` is a loud
+    400 here; the operation validates the mode vocabulary and the thread-belongs guard.
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -215,13 +237,15 @@ async def _extract_thread_mode_body(request: Request) -> dict:
 
 
 async def _extract_target_config(request: Request) -> dict:
-    """Parse + validate the ``TargetConversationConfig`` body into the operation's flat
-    fields, rejecting a malformed body with an explicit 400 (the adapter's plain parse would
-    yield 422).
+    """Parse + validate the ``TargetConversationConfig`` body into the operation's flat fields.
+
+    Rejects a malformed body with an explicit 400 (the adapter's plain parse would yield
+    422).
 
     ``target_kind`` and ``target_name`` ride the URL path, not the body, so they are
     injected from the path params before validation — a body that also carries either,
-    disagreeing with the path, is rejected rather than silently overriding either."""
+    disagreeing with the path, is rejected rather than silently overriding either.
+    """
     try:
         body = await request.json()
     except ValueError as exc:

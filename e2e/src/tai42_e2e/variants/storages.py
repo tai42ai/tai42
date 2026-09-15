@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from tai42_e2e.settings import REAL_SERVICES
-from tai42_e2e.topology import InfraUnavailable, StackResources
+from tai42_e2e.topology import InfraUnavailableError, StackResources
 
 
 class StorageVariant(abc.ABC):
@@ -332,7 +332,7 @@ def _real_leg_env(service: str) -> dict[str, str]:
     required = REAL_SERVICES[service].required_env
     missing = [key for key in required if not os.environ.get(key)]
     if missing:
-        raise InfraUnavailable(
+        raise InfraUnavailableError(
             f"real storage leg {service!r} needs env var(s): {', '.join(missing)} "
             f"(also select TAI_E2E_REAL={service} so they are checked at collection)"
         )

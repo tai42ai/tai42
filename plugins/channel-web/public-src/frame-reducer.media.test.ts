@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { applyFrame } from '@/frame-reducer';
+import { fold, frame, mediaFrame, TS } from '@/frame-reducer.test-support';
 import { EMPTY_MODEL } from '@/transcript-model';
-import { TS, frame, fold, mediaFrame } from '@/frame-reducer.test-support';
 
 describe('applyFrame: chat.media', () => {
   it('folds a media card with an image and its caption', () => {

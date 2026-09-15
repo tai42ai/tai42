@@ -1,5 +1,4 @@
-"""The frozen value objects of a platform state-template document and their wire
-projection.
+"""The frozen value objects of a platform state-template document and their wire projection.
 
 The document's sub-shapes — its declarations, ``template_jq`` programs and ``reconcile``
 programs — are the contract models (the single published source of their wire shape); the
@@ -25,10 +24,11 @@ TEMPLATE_KIND = "state-template"
 
 @dataclass(frozen=True, slots=True)
 class TemplateParameter:
-    """A fillable parameter: its value ``schema`` and an OPTIONAL ``default``. A
-    parameter without a default must be referenced by a marker in the fragment and
-    supplied at attach; ``has_default`` distinguishes an absent default from an explicit
-    ``null`` default."""
+    """A fillable parameter: its value ``schema`` and an OPTIONAL ``default``.
+
+    A parameter without a default must be referenced by a marker in the fragment and supplied at
+    attach; ``has_default`` distinguishes an absent default from an explicit ``null`` default.
+    """
 
     schema: dict[str, Any]
     has_default: bool = False
@@ -37,9 +37,12 @@ class TemplateParameter:
 
 @dataclass(frozen=True, slots=True)
 class RegimeRule:
-    """One per-path writer rule: a template-relative ``path`` (object keys and the ``"*"``
-    wildcard, which matches one list index or key) and its ``regime``
-    (``single`` / ``composing`` / ``free``). An undeclared path is ``free``."""
+    """One per-path writer rule.
+
+    A template-relative ``path`` (object keys and the ``"*"`` wildcard, which matches one list
+    index or key) and its ``regime`` (``single`` / ``composing`` / ``free``). An undeclared path
+    is ``free``.
+    """
 
     path: list[str]
     regime: str
@@ -47,18 +50,22 @@ class RegimeRule:
 
 @dataclass(frozen=True, slots=True)
 class TemplateTrace:
-    """The trace switch: when ``enabled``, the effective schema admits ``_trace`` and the
-    platform ``apply`` chokepoint stamps it on every write under an attachment of this
-    template."""
+    """The trace switch.
+
+    When ``enabled``, the effective schema admits ``_trace`` and the platform ``apply`` chokepoint
+    stamps it on every write under an attachment of this template.
+    """
 
     enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class StateTemplate:
-    """A validated platform state-template document. ``schema`` is the object-schema
-    fragment (with ``$parameter`` markers); ``defaults`` are the parameter values applied
-    when an attachment supplies none."""
+    """A validated platform state-template document.
+
+    ``schema`` is the object-schema fragment (with ``$parameter`` markers); ``defaults`` are the
+    parameter values applied when an attachment supplies none.
+    """
 
     name: str
     description: str
@@ -71,15 +78,16 @@ class StateTemplate:
     reconcile: StateTemplateReconcile | None = None
 
     def defaults(self) -> dict[str, Any]:
-        """The parameter values applied when an attachment supplies none — only defaulted
-        params."""
+        """The parameter values applied when an attachment supplies none — only defaulted params."""
         return {name: copy.deepcopy(p.default) for name, p in self.parameters.items() if p.has_default}
 
     def to_document(self) -> dict[str, Any]:
-        """The canonical JSON document for this template — the inverse of
-        :func:`~tai42_skeleton.states.templates.validate.validate_template`, re-validatable
-        and stable (the seed applier hashes it to tell a shipped default apart from an
-        operator edit)."""
+        """The canonical JSON document for this template.
+
+        The inverse of :func:`~tai42_skeleton.states.templates.validate.validate_template`,
+        re-validatable and stable (the seed applier hashes it to tell a shipped default apart from
+        an operator edit).
+        """
         doc: dict[str, Any] = {"kind": TEMPLATE_KIND, "name": self.name, "description": self.description}
         if self.parameters:
             doc["parameters"] = {
@@ -108,9 +116,11 @@ class StateTemplate:
 
 
 def _program_to_document(program: StateTemplateJq) -> dict[str, Any]:
-    """The canonical JSON of one ``template_jq`` entry — purpose-specific keys only. The
-    program body ``jq`` is emitted as its templated-text object (inline ``content`` or a stored
-    ``id``), so a by-id reference round-trips unchanged."""
+    """The canonical JSON of one ``template_jq`` entry — purpose-specific keys only.
+
+    The program body ``jq`` is emitted as its templated-text object (inline ``content`` or a
+    stored ``id``), so a by-id reference round-trips unchanged.
+    """
     if program.purpose == "input":
         return {
             "description": program.description,

@@ -1,5 +1,4 @@
-"""Tool lookup, the execution-identity authorization seam, and retry-policy
-resolution over the live server."""
+"""Tool lookup, the execution-identity authorization seam, and retry-policy resolution over the live server."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -20,8 +19,7 @@ MCP_VIRTUAL_MODULE_PREFIX = "tai42_mcp_virtual."
 
 
 class _ResolutionMixin(_ToolBindingBase):
-    """Resolves a tool name to its bound ``Tool``, authorizes a dispatch against the
-    bound execution identity, and reads a dispatch's retry policy."""
+    """Resolves a tool name to its bound ``Tool``, authorizes a dispatch, and reads a dispatch's retry policy."""
 
     # -- execution-identity seam ----------------------------------------------
 
@@ -29,7 +27,8 @@ class _ResolutionMixin(_ToolBindingBase):
     def _bound_execution_identity() -> "CallerIdentity | None":
         """The execution identity bound to the current fire, or ``None`` outside one.
 
-        Imported inside the function: ``authz`` reaches back into this module."""
+        Imported inside the function: ``authz`` reaches back into this module.
+        """
         from tai42_skeleton.authz.execution_identity import get_execution_identity
 
         return get_execution_identity()
@@ -37,13 +36,15 @@ class _ResolutionMixin(_ToolBindingBase):
     async def _authorize_execution_dispatch(
         self, identity: "CallerIdentity", tool_name: str, call_arguments: dict[str, Any]
     ) -> None:
-        """Authorize one tool dispatch against the bound execution ``identity``; a denial
-        raises ``PermissionDenied`` out of the dispatch.
+        """Authorize one tool dispatch against the bound execution ``identity``.
+
+        A denial raises ``PermissionDeniedError`` out of the dispatch.
 
         Call ONLY with a non-``None`` identity. The registries handed to the decision are
         the live ones, so a reload is reflected immediately; an unsettled surface is
         retried once behind the reload gate, since a background fire has no client to
-        retry it and would otherwise be lost."""
+        retry it and would otherwise be lost.
+        """
         from tai42_skeleton.app.reload_gate import reload_gate
         from tai42_skeleton.authz.execution import authorize_execution_tool_call
         from tai42_skeleton.authz.resolver import OperationSurfaceUnsettledError
@@ -87,7 +88,8 @@ class _ResolutionMixin(_ToolBindingBase):
         run-surface half of the retriable ``reloading`` contract the HTTP/MCP edges
         answer with a 503/``ToolError``: on a miss, wait for any reload holding the gate
         to release, then re-resolve once. A genuinely unknown tool (no reload in flight)
-        still fails fast — the gate is uncontended and the second lookup raises again."""
+        still fails fast — the gate is uncontended and the second lookup raises again.
+        """
         from tai42_skeleton.app.reload_gate import reload_gate
 
         try:
@@ -110,13 +112,13 @@ class _ResolutionMixin(_ToolBindingBase):
         return manifest.find_title(module)
 
     async def resolve_retry_policy(self, key: str) -> ToolRetryPolicy | None:
-        """The declared retry policy governing a dispatch of ``key``, resolved from the
-        live tool, or ``None``.
+        """The declared retry policy governing a dispatch of ``key``, resolved from the live tool, or ``None``.
 
         The MCP ``tools/call`` edge has no resolved target in hand (the in-process seam
         reads the policy off the target :meth:`_dispatch_tool` already resolved), so this
         resolves the tool and reads its policy for that edge. An unknown name yields
-        ``None`` — the edge's own dispatch surfaces the not-found, never this lookup."""
+        ``None`` — the edge's own dispatch surfaces the not-found, never this lookup.
+        """
         try:
             mcp_tool = await self._resolve_run_target(key)
         except UnknownToolError:
@@ -134,7 +136,8 @@ class _ResolutionMixin(_ToolBindingBase):
         An extension BRANCH tool inherits nothing: its stack may compose or
         relocate execution the base's declaration never spoke for (a chain re-fires
         OTHER tools), so only an exact-name declaration could ever arm it —
-        deliberately conservative on the double-send side."""
+        deliberately conservative on the double-send side.
+        """
         policy = self._tool_retry_registry.get(key)
         tool_obj = mcp_tool
         while policy is None and isinstance(tool_obj, TransformedTool):

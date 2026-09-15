@@ -38,27 +38,30 @@ _AGENT_PARKED = _AgentParked()
 
 @dataclass(frozen=True)
 class _SilentOutcome:
-    """A tool turn that produced no reply — a designed no-reply, never an error. On the
-    channel door nothing is ever sent (terminal ``silent``); on the api door an explicit
+    """A tool turn that produced no reply — a designed no-reply, never an error.
+
+    On the channel door nothing is ever sent (terminal ``silent``); on the api door an explicit
     silent marker is delivered through the durable machine.
 
     ``note`` is an OPTIONAL internal detail (recorded, never delivered) that names WHY the
     turn is silent when that is worth keeping — set for a turn that went silent because the
     run PAUSED with its reply still pending, so the record reads as not-yet-answered rather
     than a plain designed no-reply. ``None`` for an ordinary silent outcome, which records no
-    detail (byte-identical to before)."""
+    detail (byte-identical to before).
+    """
 
     note: str | None = None
 
 
 @dataclass(frozen=True)
 class _ResolvedOutcome:
-    """A turn that produced an outcome to deliver: an ``answered`` reply or a client-safe
-    ``error``. ``parts`` is the ORDERED, non-empty list of rich :class:`AnswerPart` messages
-    the turn produced — one for a single-message answer, several for an ordered multi-message
-    one (a tool route emitting an array of strings and/or part objects). ``answer`` is the
-    part MESSAGE texts joined with a blank line — the whole-text form every legacy reader
-    keeps consuming."""
+    """A turn that produced an outcome to deliver: an ``answered`` reply or a client-safe ``error``.
+
+    ``parts`` is the ORDERED, non-empty list of rich :class:`AnswerPart` messages the turn
+    produced — one for a single-message answer, several for an ordered multi-message one (a tool
+    route emitting an array of strings and/or part objects). ``answer`` is the part MESSAGE texts
+    joined with a blank line — the whole-text form every legacy reader keeps consuming.
+    """
 
     answer_status: Literal["answered", "error"]
     parts: list[AnswerPart]
@@ -66,9 +69,12 @@ class _ResolvedOutcome:
 
     @property
     def answer(self) -> str:
-        """The part messages as one joined string — what intake dedup, transcripts and the
-        api door body read, and byte-identical to the old single ``answer`` for one part. A
-        media-only part contributes nothing, so an all-media outcome joins to ``""``."""
+        """The part messages as one joined string.
+
+        What intake dedup, transcripts and the api door body read, and byte-identical to the old
+        single ``answer`` for one part. A media-only part contributes nothing, so an all-media
+        outcome joins to ``""``.
+        """
         return joined_answer_text(self.parts)
 
 
@@ -77,16 +83,22 @@ _ToolOutcome = _SilentOutcome | _ResolvedOutcome
 
 
 def _text_part(text: str) -> AnswerPart:
-    """A plain text-only :class:`AnswerPart` — the shape the platform's own replies (agent
-    answers, tool string replies, greetings, error/slow-down text, pairing replies) take."""
+    """A plain text-only :class:`AnswerPart`.
+
+    The shape the platform's own replies (agent answers, tool string replies, greetings,
+    error/slow-down text, pairing replies) take.
+    """
     return AnswerPart(message=text)
 
 
 def _error_answer_text(route: ConversationRoute | None) -> str:
-    """The participant-facing text for a failed turn: the route's configured ``error_reply_text``
-    when it carries one, else the built-in English default. A ``None`` route (no route in
-    scope) falls back to the default. Only the participant-facing ``answer`` resolves through the
-    route — the record's ``error`` detail and the logs keep the built-in wording."""
+    """The participant-facing text for a failed turn.
+
+    The route's configured ``error_reply_text`` when it carries one, else the built-in English
+    default. A ``None`` route (no route in scope) falls back to the default. Only the
+    participant-facing ``answer`` resolves through the route — the record's ``error`` detail and
+    the logs keep the built-in wording.
+    """
     return (route.error_reply_text if route is not None else None) or _ERROR_ANSWER_TEXT
 
 

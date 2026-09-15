@@ -37,7 +37,9 @@ OPTION_ID_MAX_CHARS = 256
 
 
 class ReplyOption(BaseModel):
-    """A tappable suggested reply. Tapping SUBMITS ``text`` as the participant's next inbound message —
+    """A tappable suggested reply.
+
+    Tapping SUBMITS ``text`` as the participant's next inbound message —
     the quick-reply / list-row case, where the option's own text becomes the turn. ``description``
     is an OPTIONAL secondary line a sectioned-list row renders under its ``text``; a channel that
     renders flat buttons (no descriptions) ignores it.
@@ -97,7 +99,9 @@ class ReplyOption(BaseModel):
 
 
 class LinkOption(BaseModel):
-    """A tappable link action. Tapping OPENS ``url`` (an absolute ``http(s)`` URL) in the human's
+    """A tappable link action.
+
+    Tapping OPENS ``url`` (an absolute ``http(s)`` URL) in the human's
     browser — NO message is submitted, distinct from a :class:`ReplyOption`. ``label`` is the
     button text. The URL-button / call-to-action case. Frozen.
     """
@@ -133,7 +137,9 @@ Option = Annotated[ReplyOption | LinkOption, Field(discriminator="kind")]
 
 
 class OptionSection(BaseModel):
-    """One titled section of a sectioned option list. ``title`` is the section header; ``rows`` are
+    """One titled section of a sectioned option list.
+
+    ``title`` is the section header; ``rows`` are
     its entries — a sectioned list holds :class:`ReplyOption` rows ONLY (a tapped row submits its
     text; a link action is a button, never a list row). A present ``rows`` is non-empty. Frozen.
     """
@@ -163,10 +169,13 @@ class OptionSection(BaseModel):
 
 
 def check_options(value: list[Option] | None) -> list[Option] | None:
-    """List-level caps on a flat interactive option list: None means none; a present list is
+    """List-level caps on a flat interactive option list.
+
+    None means none; a present list is
     non-empty and holds at most ``NOTIFICATION_OPTIONS_MAX`` entries. Each option's own shape
     (reply text / link label+url bounds) is the :class:`ReplyOption`/:class:`LinkOption` concern.
-    Raises ``ValueError``."""
+    Raises ``ValueError``.
+    """
     if value is None:
         return None
     if not value:
@@ -177,10 +186,13 @@ def check_options(value: list[Option] | None) -> list[Option] | None:
 
 
 def check_sections(value: list[OptionSection] | None) -> list[OptionSection] | None:
-    """List-level caps on a sectioned option list: None means none; a present list is non-empty,
+    """List-level caps on a sectioned option list.
+
+    None means none; a present list is non-empty,
     holds at most ``NOTIFICATION_SECTIONS_MAX`` sections, and its rows summed across every section
     stay within ``NOTIFICATION_OPTIONS_MAX`` (one message never fans out an unbounded tap set).
-    Raises ``ValueError``."""
+    Raises ``ValueError``.
+    """
     if value is None:
         return None
     if not value:
@@ -196,8 +208,11 @@ def check_sections(value: list[OptionSection] | None) -> list[OptionSection] | N
 
 
 def check_footer(value: str | None) -> str | None:
-    """A footer is the short trailing line under an interactive message: None means none; a
-    present value is non-blank and within ``NOTIFICATION_FOOTER_MAX_CHARS``. Raises ``ValueError``."""
+    """A footer is the short trailing line under an interactive message.
+
+    None means none; a present value is non-blank and within ``NOTIFICATION_FOOTER_MAX_CHARS``.
+    Raises ``ValueError``.
+    """
     if value is None:
         return None
     if not value.strip():
@@ -208,10 +223,13 @@ def check_footer(value: str | None) -> str | None:
 
 
 def check_header(value: MediaItem | None) -> MediaItem | None:
-    """A header is a SINGLE display-media item shown above an interactive message: None means
+    """A header is a SINGLE display-media item shown above an interactive message.
+
+    None means
     none; a present item is display media (image/document/video/audio), never a ``link`` (an
     anchor is content, not a header). The item's own url/kind shape is :class:`MediaItem`'s
-    concern. Raises ``ValueError``."""
+    concern. Raises ``ValueError``.
+    """
     if value is not None and value.kind is MediaKind.LINK:
         raise ValueError("header media must be a display item (image/document/video/audio), not a link")
     return value

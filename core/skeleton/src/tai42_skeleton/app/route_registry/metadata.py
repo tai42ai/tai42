@@ -1,5 +1,7 @@
-"""Route metadata + owner value types and the route-registry errors — the
-self-describing shape each registered route carries and the loud failures it raises."""
+"""Route metadata + owner value types and the route-registry errors.
+
+The self-describing shape each registered route carries and the loud failures it raises.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from tai42_skeleton.app.route_shapes import Shape
 
 __all__ = [
     "CORE_OWNER",
-    "CrossOwnerRouteCollision",
+    "CrossOwnerRouteCollisionError",
     "DeclaredRouteMetadata",
     "EpochRouteAuditError",
     "RouteMetadata",
@@ -22,25 +24,30 @@ __all__ = [
 ]
 
 
-class CrossOwnerRouteCollision(RuntimeError):
-    """A route registration whose shape+methods collide with a DIFFERENT owner's
-    already-registered route. Raised to kill silent registry shadowing by
-    construction — one owner per route, enforced at registration."""
+class CrossOwnerRouteCollisionError(RuntimeError):
+    """A route registration whose shape+methods collide with a DIFFERENT owner's registered route.
+
+    Raised to kill silent registry shadowing by construction — one owner per route, enforced at
+    registration.
+    """
 
 
 class EpochRouteAuditError(RuntimeError):
-    """An epoch rebuild produced a staged route generation that dropped EVERY HTTP
-    route of a plugin still declared in the manifest. Raised before the atomic
-    commit so the build discards the staged generation and the OLD epoch keeps
-    serving — a loud reload failure instead of a silent route unmount."""
+    """An epoch rebuild dropped EVERY HTTP route of a plugin still declared in the manifest.
+
+    Raised before the atomic commit so the build discards the staged generation and the OLD
+    epoch keeps serving — a loud reload failure instead of a silent route unmount.
+    """
 
 
 @dataclass(frozen=True)
 class RouteOwner:
-    """Who registered a route: ``core`` for a native/operator route, ``plugin``
-    for a declared plugin route (then ``owner_ref`` is the ``namespace/name``
-    listing and ``item_name`` the provided item). The identity the cross-owner
-    collision check compares — one owner per route shape."""
+    """Who registered a route: ``core`` for a native/operator route, ``plugin`` for a plugin route.
+
+    For a plugin route ``owner_ref`` is the ``namespace/name`` listing and ``item_name`` the
+    provided item. The identity the cross-owner collision check compares — one owner per route
+    shape.
+    """
 
     kind: Literal["core", "plugin"] = "core"
     owner_ref: str | None = None
@@ -52,8 +59,10 @@ CORE_OWNER = RouteOwner(kind="core")
 
 @dataclass(frozen=True)
 class RouteMetadata:
-    """One self-describing route: its wire shape plus the OpenAPI metadata the
-    emitter and the coverage/parity gates consume."""
+    """One self-describing route: its wire shape plus the OpenAPI metadata downstream gates consume.
+
+    Consumed by the emitter and the coverage/parity gates.
+    """
 
     path: str
     methods: tuple[str, ...]
@@ -116,8 +125,11 @@ class RouteMetadata:
 
 @dataclass(frozen=True)
 class _ShapeEntry:
-    """One owned ``/api`` route in the shape index: its parsed shape, the methods
-    it is SERVED on (``GET`` implies ``HEAD``), and its metadata (owner + public)."""
+    """One owned ``/api`` route in the shape index.
+
+    Carries its parsed shape, the methods it is SERVED on (``GET`` implies ``HEAD``), and its
+    metadata (owner + public).
+    """
 
     shape: Shape
     methods: frozenset[str]

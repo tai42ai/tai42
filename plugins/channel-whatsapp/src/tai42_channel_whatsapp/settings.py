@@ -21,6 +21,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class WhatsAppSettings(TaiBaseSettings):
+    """The WhatsApp channel's ``CHANNEL_WHATSAPP_`` settings: Graph API credentials, recipient policy, dedupe."""
+
     model_config = SettingsConfigDict(env_prefix="CHANNEL_WHATSAPP_")
 
     # Graph API bearer token (Basic bearer for the send; one token serves many numbers).
@@ -52,9 +54,12 @@ class WhatsAppSettings(TaiBaseSettings):
     @field_validator("allowed_recipients", mode="before")
     @classmethod
     def _parse_allowed_recipients(cls, value: object) -> object:
-        """A list passes through; a string parses as JSON when it starts with
-        ``[`` else splits on commas (items stripped, empties dropped); anything
-        else is rejected loudly."""
+        """Normalize ``allowed_recipients`` from a list, a JSON string, or a comma-separated string.
+
+        A list passes through; a string parses as JSON when it starts with ``[`` else
+        splits on commas (items stripped, empties dropped); anything else is rejected
+        loudly.
+        """
         if isinstance(value, list):
             return value
         if isinstance(value, str):
@@ -63,7 +68,7 @@ class WhatsAppSettings(TaiBaseSettings):
                 items = json.loads(text)
                 for item in items:
                     if not isinstance(item, str):
-                        raise ValueError(f"allowed_recipients JSON list items must be strings, got {item!r}")
+                        raise ValueError(f"allowed_recipients JSON list items must be strings, got {item!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
                 return [item for item in (part.strip() for part in items) if item]
             return [item for item in (part.strip() for part in text.split(",")) if item]
         raise ValueError("allowed_recipients must be a comma-separated string or a list")
@@ -71,6 +76,7 @@ class WhatsAppSettings(TaiBaseSettings):
 
 @settings_cache
 def whatsapp_settings() -> WhatsAppSettings:
+    """The cached :class:`WhatsAppSettings` for this process."""
     return WhatsAppSettings()
 
 
@@ -82,20 +88,25 @@ class WhatsAppRedisSettings(RedisConnectionSettings):
 
 @settings_cache
 def whatsapp_redis_settings() -> WhatsAppRedisSettings:
+    """The cached :class:`WhatsAppRedisSettings` for this process."""
     return WhatsAppRedisSettings()
 
 
 def require_delivery_setting(value: str | None, env_name: str) -> str:
-    """The configured value an outbound send needs; raises ``ChannelDeliveryError``
-    (naming only the env var) when unset. Checked before any network work."""
+    """The configured value an outbound send needs; raises ``ChannelDeliveryError`` when unset.
+
+    The error names only the env var. Checked before any network work.
+    """
     if not value:
         raise ChannelDeliveryError(f"WhatsApp channel is not configured: set {env_name}.")
     return value
 
 
 def require_delivery_secret(value: SecretStr | None, env_name: str) -> str:
-    """The plaintext secret an outbound send needs; raises ``ChannelDeliveryError``
-    (naming only the env var, never the value) when unset."""
+    """The plaintext secret an outbound send needs; raises ``ChannelDeliveryError`` when unset.
+
+    The error names only the env var, never the value.
+    """
     secret = value.get_secret_value() if value is not None else ""
     if not secret:
         raise ChannelDeliveryError(f"WhatsApp channel is not configured: set {env_name}.")

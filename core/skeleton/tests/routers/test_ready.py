@@ -36,7 +36,7 @@ def _clean_quarantine():
     reset_quarantine()
 
 
-class _RedisBoom(Exception):
+class _RedisBoomError(Exception):
     """Distinct exception type so the test can assert the type name surfaces."""
 
 
@@ -123,7 +123,7 @@ async def test_ready_failure_returns_503_type_only(monkeypatch, caplog) -> None:
     monkeypatch.setattr(
         health,
         "client_ctx",
-        _make_client_ctx(calls, fail_idents=frozenset({"redis://shared"}), fail_type=_RedisBoom),
+        _make_client_ctx(calls, fail_idents=frozenset({"redis://shared"}), fail_type=_RedisBoomError),
     )
     wired = [
         ("access_control", RedisClient, RedisConnectionSettings(redis_url="redis://ac")),
@@ -142,8 +142,8 @@ async def test_ready_failure_returns_503_type_only(monkeypatch, caplog) -> None:
     assert body["checks"]["access_control"] == "ok"
     # Both subsystems sharing the failed connection fail together, carrying only
     # the exception TYPE name.
-    assert body["checks"]["tool_runs"] == "_RedisBoom"
-    assert body["checks"]["interactions"] == "_RedisBoom"
+    assert body["checks"]["tool_runs"] == "_RedisBoomError"
+    assert body["checks"]["interactions"] == "_RedisBoomError"
     # The exception MESSAGE never reaches the public body...
     assert b"secret-redis-host" not in raw
     # ...but the full detail is in the logs, exactly one warning for the one failed

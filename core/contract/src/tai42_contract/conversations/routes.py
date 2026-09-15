@@ -49,8 +49,7 @@ def _is_https_url(value: str) -> bool:
 
 
 class ConversationRouteCreate(BaseModel):
-    """The client-facing create/edit body for a conversation route: the fields a caller
-    supplies.
+    """The client-facing create/edit body for a conversation route: the fields a caller supplies.
 
     Binds a ``(target_kind, target_name)`` — an ``agent`` run or a ``tool`` dispatch — to
     an ``execution_key`` the turn runs AS (bound with pass-role at create). A ``tool``
@@ -204,8 +203,9 @@ class ConversationRouteCreate(BaseModel):
 
 
 class ConversationRoute(ConversationRouteCreate):
-    """The stored routing row: :class:`ConversationRouteCreate` plus the two
-    server-derived fields. What the manager persists and backup restore validates.
+    """The stored routing row: :class:`ConversationRouteCreate` plus the two server-derived fields.
+
+    What the manager persists and backup restore validates.
 
     ``callback_secret`` (present only on an ``api`` row that declares a ``callback_url``)
     signs the delivery callback; it is excluded from export and re-minted per row on import,

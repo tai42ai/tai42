@@ -54,7 +54,7 @@ def find_oversized(files: Iterable[Path], root: Path, limit: int = MAX_SOURCE_LI
 def tracked_python_files(root: Path) -> list[Path]:
     """Every git-tracked ``.py`` file under ``root``."""
     output = subprocess.run(
-        ["git", "ls-files", "-z", "*.py"],
+        ["git", "ls-files", "-z", "*.py"],  # noqa: S607 fixed, trusted executable resolved from PATH
         cwd=root,
         check=True,
         capture_output=True,
@@ -64,6 +64,7 @@ def tracked_python_files(root: Path) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Report every tracked Python file over the line limit; return 1 when any is oversized."""
     root = Path(argv[0]).resolve() if argv else Path(__file__).resolve().parents[1]
     oversized = find_oversized(tracked_python_files(root), root)
     for relative_path, line_count in oversized:

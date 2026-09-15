@@ -29,7 +29,7 @@ from tai42_skeleton.app.route_registry import load_all_routes, route_registry
 from tai42_skeleton.authz import check, synthesize_path
 from tai42_skeleton.authz.identity import INTERNAL_PRINCIPAL, CallerIdentity, resolve_caller_identity
 from tai42_skeleton.operations import OperationRegistry, operation
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from .conftest import FENCED_TEMPLATE_ROUTE, PROBE_ROUTES, SHADOW_ROUTE
 
@@ -88,7 +88,7 @@ def test_synthesize_path_preserves_slash_in_path_converter_value():
 def test_synthesize_path_missing_arg_denies():
     reg = OperationRegistry()
     meta = _op(reg, route="/api/x/{id}")
-    with pytest.raises(PermissionDenied):
+    with pytest.raises(PermissionDeniedError):
         synthesize_path(meta, {})
 
 
@@ -109,7 +109,7 @@ def test_synthesize_path_refuses_an_empty_or_dot_segment(value):
     # Empty collapses the segment out of the path; a dot segment re-parents it.
     reg = OperationRegistry()
     meta = _op(reg, route="/api/x/{id}")
-    with pytest.raises(PermissionDenied, match="is not a path segment"):
+    with pytest.raises(PermissionDeniedError, match="is not a path segment"):
         synthesize_path(meta, {"id": value})
 
 
@@ -119,7 +119,7 @@ def test_synthesize_path_refuses_a_dot_segment_in_a_path_converter_value(value):
     # re-parents or collapses the path.
     reg = OperationRegistry()
     meta = _op(reg, route="/api/resources/{resource_id:path}")
-    with pytest.raises(PermissionDenied, match="is not a path segment"):
+    with pytest.raises(PermissionDeniedError, match="is not a path segment"):
         synthesize_path(meta, {"resource_id": value})
 
 
@@ -142,14 +142,14 @@ def test_internal_principal_allowed():
 def test_external_no_identity_denied():
     reg = OperationRegistry()
     meta = _op(reg)
-    with pytest.raises(PermissionDenied, match="no caller identity"):
+    with pytest.raises(PermissionDeniedError, match="no caller identity"):
         asyncio.run(check(CallerIdentity(user_id=None), meta, {}, settings=AccessControlSettings()))
 
 
 def test_unknown_route_denied(ac_env, bound_app):
     reg = OperationRegistry()
     meta = _op(reg)  # no route seeded in pg
-    with pytest.raises(PermissionDenied, match="no resource configured"):
+    with pytest.raises(PermissionDeniedError, match="no resource configured"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=AccessControlSettings()))
 
 
@@ -170,7 +170,7 @@ def test_scoped_caller_allowed_unscoped_denied(ac_env, bound_app):
     meta = _op(reg)
 
     asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
-    with pytest.raises(PermissionDenied, match="insufficient scope"):
+    with pytest.raises(PermissionDeniedError, match="insufficient scope"):
         asyncio.run(check(CallerIdentity(user_id="bob"), meta, {}, settings=settings))
 
 
@@ -189,7 +189,7 @@ def test_disabled_principal_denied(ac_env, bound_app):
     ac_env.add_policy("alice", scopes=["things"], policy_data={"disabled": True})
     reg = OperationRegistry()
     meta = _op(reg)
-    with pytest.raises(PermissionDenied, match="disabled"):
+    with pytest.raises(PermissionDeniedError, match="disabled"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
 
 
@@ -200,7 +200,7 @@ def test_jq_fence_denies_over_synthesized_path(ac_env, bound_app):
     ac_env.add_policy("alice", scopes=["things"], condition={"content": '.request.method == "GET"'})
     reg = OperationRegistry()
     meta = _op(reg, method="POST")
-    with pytest.raises(PermissionDenied, match="policy condition rejected"):
+    with pytest.raises(PermissionDeniedError, match="policy condition rejected"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
 
 
@@ -227,7 +227,7 @@ def test_route_resolution_failure_denies_fail_closed(ac_env, bound_app):
     ac_env.fault = ("SELECT scope_id FROM access_control_routes WHERE url", RuntimeError("redis down"))
     reg = OperationRegistry()
     meta = _op(reg)
-    with pytest.raises(PermissionDenied, match="access denied"):
+    with pytest.raises(PermissionDeniedError, match="access denied"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
 
 
@@ -237,7 +237,7 @@ def test_policy_fetch_failure_denies_fail_closed(ac_env, bound_app):
     ac_env.fault = ("SELECT scopes, policy_data, condition", RuntimeError("policy read failed"))
     reg = OperationRegistry()
     meta = _op(reg)
-    with pytest.raises(PermissionDenied, match="access denied"):
+    with pytest.raises(PermissionDeniedError, match="access denied"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
 
 
@@ -252,7 +252,7 @@ def test_enforcement_error_denies_fail_closed(ac_env, bound_app, monkeypatch):
     monkeypatch.setattr(bound_app.storage.resource_manager, "render_templated_text", _boom)
     reg = OperationRegistry()
     meta = _op(reg)
-    with pytest.raises(PermissionDenied, match="access denied"):
+    with pytest.raises(PermissionDeniedError, match="access denied"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
 
 
@@ -277,7 +277,7 @@ def test_owner_policy_fetch_failure_denies_fail_closed(ac_env, bound_app, monkey
         return await real_get_policy_at(self, user_id, version)
 
     monkeypatch.setattr(policy_module.PolicyEnforcer, "get_policy_at", _fault_on_the_owner)
-    with pytest.raises(PermissionDenied, match="access denied"):
+    with pytest.raises(PermissionDeniedError, match="access denied"):
         asyncio.run(check(identity, meta, {}, settings=settings))
 
 
@@ -297,7 +297,7 @@ def test_level_pass_infra_fault_denies_fail_closed(ac_env, bound_app, monkeypatc
         raise RuntimeError("grant resolution failed")
 
     monkeypatch.setattr(check_module, "role_level_decision_for_route", _boom)
-    with pytest.raises(PermissionDenied, match="access denied"):
+    with pytest.raises(PermissionDeniedError, match="access denied"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
 
 
@@ -334,7 +334,7 @@ def test_a_traversing_path_argument_is_denied_on_a_fenced_operation(ac_env, boun
     steered = canonicalize_path("/api/things/../login/z/fenced")
     assert is_always_public_prefix(steered, settings) is True
 
-    with pytest.raises(PermissionDenied, match="path argument 'target'"):
+    with pytest.raises(PermissionDeniedError, match="path argument 'target'"):
         asyncio.run(check(CallerIdentity(user_id="narrow"), meta, {"target": "../login/z"}, settings=settings))
 
 
@@ -349,7 +349,7 @@ def test_a_path_argument_spanning_segments_is_denied_on_a_fenced_operation(ac_en
     ac_env.add_policy("narrow", scopes=["things"])
     reg = OperationRegistry()
     meta = _fenced_op(reg)
-    with pytest.raises(PermissionDenied, match="is not a well-formed path"):
+    with pytest.raises(PermissionDeniedError, match="is not a well-formed path"):
         asyncio.run(check(CallerIdentity(user_id="narrow"), meta, {"target": "a/b"}, settings=settings))
 
 
@@ -360,7 +360,7 @@ def test_an_empty_or_dot_path_argument_is_denied(ac_env, bound_app, fenced_templ
     ac_env.add_policy("narrow", scopes=["things"])
     reg = OperationRegistry()
     meta = _fenced_op(reg)
-    with pytest.raises(PermissionDenied, match="is not a path segment"):
+    with pytest.raises(PermissionDeniedError, match="is not a path segment"):
         asyncio.run(check(CallerIdentity(user_id="narrow"), meta, {"target": value}, settings=settings))
 
 
@@ -376,7 +376,7 @@ def test_a_single_segment_path_argument_dispatches_the_operation(ac_env, bound_a
 
     asyncio.run(check(CallerIdentity(user_id="root"), meta, {"target": "deploy"}, settings=settings))
 
-    with pytest.raises(PermissionDenied, match="is not permitted"):
+    with pytest.raises(PermissionDeniedError, match="is not permitted"):
         asyncio.run(check(CallerIdentity(user_id="narrow"), meta, {"target": "deploy"}, settings=settings))
 
 
@@ -395,7 +395,7 @@ def test_an_argument_steering_onto_another_registered_route_is_denied(ac_env, bo
     assert resolved is not None
     assert resolved.action == "write"
 
-    with pytest.raises(PermissionDenied, match="does not resolve to the route"):
+    with pytest.raises(PermissionDeniedError, match="does not resolve to the route"):
         asyncio.run(check(CallerIdentity(user_id="narrow"), meta, {"target": "shadow"}, settings=settings))
 
 
@@ -410,7 +410,7 @@ def test_an_operation_whose_route_is_not_registered_is_denied(ac_env, bound_app)
     ac_env.add_policy("alice", scopes=["things"])
     reg = OperationRegistry()
 
-    with pytest.raises(PermissionDenied, match="does not resolve to the route"):
+    with pytest.raises(PermissionDeniedError, match="does not resolve to the route"):
         asyncio.run(check(CallerIdentity(user_id="alice"), _op(reg, route=unregistered), {}, settings=settings))
 
     # Non-vacuous: the same caller and policy on a REGISTERED route is allowed.
@@ -574,7 +574,7 @@ def test_http_mcp_parity_for_same_operation(ac_env, bound_app):
         try:
             await check(CallerIdentity(user_id=user), meta, {}, settings=settings)
             return True
-        except PermissionDenied:
+        except PermissionDeniedError:
             return False
 
     async def run():
@@ -694,7 +694,7 @@ def test_owned_key_attenuation_parity_http_mcp(ac_env, bound_app):
             try:
                 await check(identity, op_meta, {}, settings=settings)
                 return True
-            except PermissionDenied:
+            except PermissionDeniedError:
                 return False
 
         reached = await _run_owned_key_request("/mcp", verifier, settings, inside=inside)
@@ -712,7 +712,7 @@ def test_owned_key_attenuation_parity_http_mcp(ac_env, bound_app):
         try:
             await check(CallerIdentity(user_id="key1"), op_meta, {}, settings=settings)
             return True
-        except PermissionDenied:
+        except PermissionDeniedError:
             return False
 
     async def run():
@@ -786,7 +786,7 @@ def test_owned_key_owner_condition_parity_http_mcp(ac_env, bound_app):
             try:
                 await check(identity, op_meta, {}, settings=settings)
                 return True
-            except PermissionDenied:
+            except PermissionDeniedError:
                 return False
 
         reached = await _run_owned_key_request("/mcp", verifier, settings, inside=inside)
@@ -809,7 +809,7 @@ def test_owned_key_owner_condition_parity_http_mcp(ac_env, bound_app):
                 settings=settings,
             )
             return True
-        except PermissionDenied:
+        except PermissionDeniedError:
             return False
 
     async def run():
@@ -844,7 +844,7 @@ def test_owned_key_denied_when_owner_disabled(ac_env, bound_app):
     reg = OperationRegistry()
     meta = _op(reg, method="POST")
     identity = CallerIdentity(user_id="key1", effective_scopes=("things",), claims={OWNER_USER_ID_CLAIM: "owner1"})
-    with pytest.raises(PermissionDenied, match="owner is disabled"):
+    with pytest.raises(PermissionDeniedError, match="owner is disabled"):
         asyncio.run(check(identity, meta, {}, settings=settings))
 
 
@@ -858,7 +858,7 @@ def test_owned_key_denied_when_owner_has_no_policy(ac_env, bound_app):
     reg = OperationRegistry()
     meta = _op(reg, method="POST")
     identity = CallerIdentity(user_id="key1", effective_scopes=("things",), claims={OWNER_USER_ID_CLAIM: "owner1"})
-    with pytest.raises(PermissionDenied, match="owner has no policy"):
+    with pytest.raises(PermissionDeniedError, match="owner has no policy"):
         asyncio.run(check(identity, meta, {}, settings=settings))
 
 
@@ -938,7 +938,7 @@ def test_identity_claims_parity_http_mcp(ac_env, bound_app):
                 settings=settings,
             )
             return True
-        except PermissionDenied:
+        except PermissionDeniedError:
             return False
 
     headers = {"X-Api-Key": "tok-alice"}
@@ -1042,7 +1042,7 @@ def test_always_public_operation_short_circuits_every_policy_layer(ac_env, bound
         # route-table public pin, and the LEVEL pass denies.
         pinned = AccessControlSettings(always_public_path_prefixes=())
         ac_env.add_route(_LOGIN_PATH, pinned.public_resource_id)
-        with pytest.raises(PermissionDenied, match=f"GET {_LOGIN_PATH} is not permitted"):
+        with pytest.raises(PermissionDeniedError, match=f"GET {_LOGIN_PATH} is not permitted"):
             await check(identity, meta, {}, settings=pinned)
         return http
 

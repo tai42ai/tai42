@@ -1,5 +1,7 @@
-"""Classify a tool run's returned envelope: a failed terminal, a suspended re-park, an
-interrupt pause, or a value-free structural shape diagnostic.
+"""Classify a tool run's returned envelope.
+
+Distinguishes a failed terminal, a suspended re-park, an interrupt pause, or a value-free
+structural shape diagnostic.
 
 Every classifier is positive discrimination on a CLOSED, exact, case-sensitive status set —
 never "anything not success" — so a status from a tool's own vocabulary keeps mapping as an
@@ -45,9 +47,11 @@ _FAILED_RESULT_DETAIL_ELLIPSIS = "…(truncated)"
 
 
 def _capped_repr(value: object) -> str:
-    """``value``'s repr, clipped to :data:`_FAILED_RESULT_DETAIL_LIMIT` with an explicit
-    truncation marker. Never silently: a clipped value that read as a whole one would make a
-    recorded detail lie about the envelope it came from."""
+    """``value``'s repr, clipped to :data:`_FAILED_RESULT_DETAIL_LIMIT` with an explicit truncation marker.
+
+    Never silently: a clipped value that read as a whole one would make a recorded detail lie about
+    the envelope it came from.
+    """
     text = repr(value)
     if len(text) <= _FAILED_RESULT_DETAIL_LIMIT:
         return text
@@ -55,8 +59,7 @@ def _capped_repr(value: object) -> str:
 
 
 def _failed_result_detail(result: object) -> str | None:
-    """The internal detail for a tool result that NAMES a non-success terminal, or ``None``
-    when it names none.
+    """The internal detail for a tool result that NAMES a non-success terminal, or ``None`` when it names none.
 
     A result envelope reports its own outcome: a ``status`` of :data:`_FAILED_RESULT_STATUSES`
     is a run that was aborted, stopped early, or failed. Anything else — a success, a status
@@ -64,7 +67,8 @@ def _failed_result_detail(result: object) -> str | None:
     or a non-dict result — names no terminal and stays on the normal reply path.
 
     The detail names the terminal plus whichever of :data:`_FAILED_RESULT_DETAIL_KEYS` the
-    envelope carries, each capped. It is recorded and logged, never delivered."""
+    envelope carries, each capped. It is recorded and logged, never delivered.
+    """
     if not isinstance(result, dict):
         return None
     status = result.get("status")
@@ -108,16 +112,17 @@ _INTERRUPT_RESULT_STATUSES: frozenset[str] = frozenset({"interrupt"})
 
 
 def _suspended_result_note(result: object) -> str | None:
-    """The internal note for a tool result that NAMES a non-terminal SUSPENDED re-park
-    (:data:`_SUSPENDED_RESULT_STATUSES`), or ``None`` when it names none.
+    """The internal note for a tool result that NAMES a non-terminal SUSPENDED re-park, or ``None`` otherwise.
 
+    Matches :data:`_SUSPENDED_RESULT_STATUSES`.
     A suspended envelope is the run handing control back mid-run on an engine-caller async park,
     with its flagged reply surface still downstream of the pause, so it must never be mapped as a
     reply. The turn ends SILENTLY and the real reply delivers out of band when the resume drives
     past the pause. The note names the paused status and, for a producer that rides it, the
     ``missing_results`` surfaces the run has not produced YET, so the record can say WHY the turn
     produced no reply; a producer that does not ride it omits that cleanly. Recorded and logged,
-    never delivered — the paused-run sibling of :func:`_failed_result_detail`."""
+    never delivered — the paused-run sibling of :func:`_failed_result_detail`.
+    """
     if not isinstance(result, dict):
         return None
     status = result.get("status")
@@ -130,15 +135,16 @@ def _suspended_result_note(result: object) -> str | None:
 
 
 def _interrupt_result_detail(result: object) -> str | None:
-    """The internal error detail for a tool result that NAMES an INTERRUPT pause
-    (:data:`_INTERRUPT_RESULT_STATUSES`), or ``None`` when it names none.
+    """The internal error detail for a tool result that NAMES an INTERRUPT pause, or ``None`` otherwise.
 
+    Matches :data:`_INTERRUPT_RESULT_STATUSES`.
     An interrupt reaching a conversation turn is a permanent route misconfiguration: the turn
     cannot drive such a run, so the pause has NO delivery leg and the reply would never
     arrive. It is surfaced as the SAME client-safe error a failed run is, so the failure is loud
     and noticed rather than silent data loss. The detail names the real cause and, for a producer
     that rides it, the ``missing_results`` surfaces the run will never produce here. Recorded and
-    logged, never delivered — the loud sibling of :func:`_suspended_result_note`."""
+    logged, never delivered — the loud sibling of :func:`_suspended_result_note`.
+    """
     if not isinstance(result, dict):
         return None
     status = result.get("status")
@@ -158,18 +164,23 @@ _RESULT_SHAPE_KEY_CAP = 40
 
 
 def _shape_key_names(mapping: dict[Any, Any]) -> list[str]:
-    """The mapping's string keys, sorted and capped — NAMES only. An envelope key, a
-    ``result`` key, or a ``return_result`` surface id is a protocol/authoring identifier, never
-    participant content, so its NAME is client-safe to log; its VALUE is not and never reaches here."""
+    """The mapping's string keys, sorted and capped — NAMES only.
+
+    An envelope key, a ``result`` key, or a ``return_result`` surface id is a protocol/authoring
+    identifier, never participant content, so its NAME is client-safe to log; its VALUE is not and
+    never reaches here.
+    """
     return sorted(key for key in mapping if isinstance(key, str))[:_RESULT_SHAPE_KEY_CAP]
 
 
 def _shape_surface_sizes(outputs: dict[Any, Any]) -> dict[str, int]:
-    """Each ``result.outputs`` surface's NAME mapped to the approximate serialized SIZE of its
-    value — never the value itself. The size is the one datum that separates an ABSENT surface
-    (not here at all) from a PRESENT-BUT-EMPTY one (a size of ~2, an empty list/object), decided
-    without a participant byte reaching the log. An unserializable value records ``-1`` rather than
-    rendering it."""
+    """Each ``result.outputs`` surface's NAME mapped to the approximate serialized SIZE of its value.
+
+    Never the value itself. The size is the one datum that separates an ABSENT surface (not here at
+    all) from a PRESENT-BUT-EMPTY one (a size of ~2, an empty list/object), decided without a
+    participant byte reaching the log. An unserializable value records ``-1`` rather than rendering
+    it.
+    """
     sizes: dict[str, int] = {}
     for name in _shape_key_names(outputs):
         try:
@@ -180,8 +191,9 @@ def _shape_surface_sizes(outputs: dict[Any, Any]) -> dict[str, int]:
 
 
 def _result_shape(result: object) -> str:
-    """A VALUE-FREE structural descriptor of a tool result, logged when the reply mapping faults
-    so the next live failure yields the envelope's SHAPE as ground truth — which flagged surface
+    """A VALUE-FREE structural descriptor of a tool result, logged when the reply mapping faults.
+
+    Yields the envelope's SHAPE as ground truth on the next live failure — which flagged surface
     is ABSENT vs PRESENT-BUT-EMPTY — instead of an inference from the guard's error text.
 
     Client-safe by construction: it emits only STRUCTURE — the type, the envelope's own key NAMES
@@ -189,7 +201,8 @@ def _result_shape(result: object) -> str:
     ``return_result`` surface NAMES present under ``result.outputs`` with their approximate
     serialized SIZES, and the ``missing_results`` surface NAMES the run reported unproduced. A
     participant's message text lives in the VALUES under those surfaces, which this NEVER renders — only
-    names, counts, and sizes cross into the log."""
+    names, counts, and sizes cross into the log.
+    """
     if not isinstance(result, dict):
         length = len(result) if isinstance(result, (str, bytes, list, tuple, dict, set)) else None
         return f"type={type(result).__name__}" + (f" len={length}" if length is not None else "")

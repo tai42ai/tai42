@@ -11,7 +11,7 @@ from urllib.parse import parse_qs
 
 import pytest
 
-from tai42_tools_stripe._internal.tools.stripe_client import StripeLivemodeMismatch
+from tai42_tools_stripe._internal.tools.stripe_client import StripeLivemodeMismatchError
 from tai42_tools_stripe.tools.create_stripe_payment_link import create_stripe_payment_link
 
 _URL = "https://checkout.stripe.example/pay/cs_link_1"
@@ -129,7 +129,7 @@ def test_same_metadata_yields_same_key(stripe_env: Callable[..., None], stub_ser
 def test_livemode_mismatch_on_created_session_raises(stripe_env: Callable[..., None], stub_server: Any) -> None:
     stripe_env(secret_key="sk_test_abc", api_base=stub_server.base_url)
     stub_server.set_responder(_responder(livemode=True))  # test key, live session -> mismatch
-    with pytest.raises(StripeLivemodeMismatch):
+    with pytest.raises(StripeLivemodeMismatchError):
         _call()
 
 

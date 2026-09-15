@@ -1,5 +1,4 @@
-"""Connection lifecycle — start_connect, complete_connect, reconnect,
-disconnect, patch_sub_services.
+"""Connection lifecycle — start_connect, complete_connect, reconnect, disconnect, patch_sub_services.
 
 Single-namespace: a connection is keyed by its uuid4 ``connection_id`` alone
 (globally unique). Every record read-modify-write runs under

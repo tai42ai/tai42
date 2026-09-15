@@ -1,6 +1,8 @@
-"""Format-payload shaping and external-URL construction: turn the ask's
-answer-format arguments into the stored ``format_payload`` and resolve the ``link``
-into the final external URL a human visits."""
+"""Format-payload shaping and external-URL construction.
+
+Turn the ask's answer-format arguments into the stored ``format_payload`` and resolve the
+``link`` into the final external URL a human visits.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ _CALLBACK_PLACEHOLDER = "{callback_url}"
 
 
 def normalize_schema(schema: type[BaseModel] | dict[str, Any]) -> dict:
+    """The JSON schema for ``schema`` — a pydantic model's, or a dict passed through."""
     if isinstance(schema, type) and issubclass(schema, BaseModel):
         return schema.model_json_schema()
     if isinstance(schema, dict):
@@ -30,6 +33,7 @@ def build_payload(
     data: FormData | dict[str, Any] | None = None,
     pages: list[FormPage] | list[dict[str, Any]] | None = None,
 ) -> dict | None:
+    """Build the stored ``format_payload`` for ``answer_format``, or ``None`` when it carries none."""
     if answer_format is AnswerFormat.SELECT:
         if not options:
             raise ValueError("answer_format 'select' requires options")

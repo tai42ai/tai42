@@ -50,13 +50,18 @@ _TTL_SECONDS = 600
 
 
 class StateInvalidError(ValueError):
-    """The ``state`` envelope is malformed or tampered. Reported to clients as a
-    generic mismatch; the reason is logged only."""
+    """The ``state`` envelope is malformed or tampered.
+
+    Reported to clients as a generic mismatch; the reason is logged only.
+    """
 
 
 class DecodedState(BaseModel):
-    """The verified contents of an OAuth ``state`` envelope: the single-use
-    ``flow_id`` and the originating deployment ``origin`` the code came from."""
+    """The verified contents of an OAuth ``state`` envelope.
+
+    The single-use ``flow_id`` and the originating deployment ``origin`` the
+    code came from.
+    """
 
     flow_id: str
     origin: str
@@ -71,9 +76,11 @@ def _b64url_decode(s: str) -> bytes:
 
 
 def encode(*, flow_id: str, origin: str) -> str:
-    """Encode ``flow_id`` + originating deployment ``origin`` into a signed
-    envelope. Fails loudly if either is empty or if
-    ``CONNECTORS_STATE_HMAC_KEY`` is not configured."""
+    """Encode ``flow_id`` + originating deployment ``origin`` into a signed envelope.
+
+    Fails loudly if either is empty or if ``CONNECTORS_STATE_HMAC_KEY`` is not
+    configured.
+    """
     if not flow_id:
         raise ValueError("flow_id must be non-empty")
     if not origin:
@@ -90,8 +97,11 @@ def encode(*, flow_id: str, origin: str) -> str:
 
 
 def decode(state: str) -> DecodedState:
-    """Return the verified :class:`DecodedState` after HMAC verification. Raises
-    :class:`StateInvalidError` on every failure, logging a short reason code."""
+    """Return the verified :class:`DecodedState` after HMAC verification.
+
+    Raises :class:`StateInvalidError` on every failure, logging a short reason
+    code.
+    """
     if not isinstance(state, str) or not state:
         raise StateInvalidError("state must be a non-empty string")
 
@@ -131,6 +141,8 @@ def decode(state: str) -> DecodedState:
 
 
 class OAuthFlowState(BaseModel):
+    """The transient record of an in-flight OAuth connect flow, held in redis until callback."""
+
     flow_id: str
     provider_id: str
     alias: str
@@ -151,8 +163,10 @@ def _key(flow_id: str) -> str:
 
 
 async def put(state: OAuthFlowState) -> None:
-    """Write a flow record with the standard TTL. ``flow_id`` is a fresh uuid4,
-    so the key is always new."""
+    """Write a flow record with the standard TTL.
+
+    ``flow_id`` is a fresh uuid4, so the key is always new.
+    """
     async with client_ctx(RedisClient, connector_store_settings().redis) as redis:
         await redis.set(_key(state.flow_id), state.model_dump_json(), ex=_TTL_SECONDS)
 

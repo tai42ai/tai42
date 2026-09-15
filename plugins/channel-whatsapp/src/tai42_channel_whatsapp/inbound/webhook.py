@@ -9,7 +9,7 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_kit.net.request_body import PayloadTooLarge
+from tai42_kit.net.request_body import RequestBodyTooLargeError
 
 from tai42_channel_whatsapp.inbound.auth import (
     SignatureRejectedError,
@@ -50,7 +50,7 @@ async def whatsapp_inbound(request: Request) -> Response:
 
     try:
         raw = await _authenticated_body(request)
-    except (ValueError, PayloadTooLarge, SignatureRejectedError) as exc:
+    except (ValueError, RequestBodyTooLargeError, SignatureRejectedError) as exc:
         return _auth_error_response(exc)
 
     try:
@@ -72,9 +72,9 @@ async def whatsapp_inbound(request: Request) -> Response:
 
 
 async def _process_value(value: dict[str, Any]) -> Exception | None:
-    """Dispatch every status then every message in one webhook value; process all
-    of them even if some fail, and return the FIRST propagating failure (or None).
+    """Dispatch every status then every message in one webhook value, returning the FIRST propagating failure or None.
 
+    Processes all of them even if some fail.
     A non-object ``statuses``/``messages`` item is odd and skipped (logged), never
     a 500. A per-item propagating (non-LookupError) failure does not abort the
     batch — it is remembered so the caller can re-raise a single aggregated error.

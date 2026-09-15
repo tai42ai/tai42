@@ -35,9 +35,11 @@ class _TemplateStore:
             return list(await cur.fetchall())
 
     async def attached_template_counts(self) -> dict[str, int]:
-        """The number of states each template is attached on, keyed by template name — one
-        aggregate over the attachments table for the whole catalog. A template with no attach is
-        absent from the map (the caller reads a missing key as zero)."""
+        """The number of states each template is attached on, keyed by template name.
+
+        One aggregate over the attachments table for the whole catalog. A template with no
+        attach is absent from the map (the caller reads a missing key as zero).
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -47,9 +49,12 @@ class _TemplateStore:
             return {row["template"]: int(row["n"]) for row in await cur.fetchall()}
 
     async def upsert_template(self, name: str, body: dict[str, Any], shipped_hash: str | None) -> None:
-        """Write a template document. ``shipped_hash`` is the seed applier's canonical-body
-        hash on a shipped default (NULL for an operator upload); it is the only field the
-        applier uses to tell an unedited shipped template from an operator-owned one."""
+        """Write a template document.
+
+        ``shipped_hash`` is the seed applier's canonical-body hash on a shipped default (NULL
+        for an operator upload); it is the only field the applier uses to tell an unedited
+        shipped template from an operator-owned one.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,

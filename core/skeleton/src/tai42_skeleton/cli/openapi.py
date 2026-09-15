@@ -74,8 +74,10 @@ _RELOADING_OR_UNAVAILABLE_DESCRIPTION = (
 
 
 def _openapi_path(path: str) -> str:
-    """Rewrite Starlette path params to OpenAPI form, dropping the ``:path``
-    converter suffix (``/x/{p:path}`` -> ``/x/{p}``)."""
+    """Rewrite Starlette path params to OpenAPI form, dropping the ``:path`` converter suffix.
+
+    ``/x/{p:path}`` -> ``/x/{p}``.
+    """
     return _PATH_PARAM.sub(lambda m: "{" + m.group(1) + "}", path)
 
 
@@ -103,11 +105,12 @@ _RESERVED_SCHEMA_NAMES = frozenset({_ERROR_SCHEMA, _RELOADING_ERROR_SCHEMA})
 
 
 def _assign_component(components: dict[str, Any], name: str, schema: dict[str, Any]) -> None:
-    """Write ``schema`` under ``name`` in ``components``, raising LOUDLY on a name
-    collision that would otherwise silently keep or overwrite the wrong schema — a
-    reserved envelope name, or two distinct models (or ``$defs``) sharing a
-    ``__name__`` with differing schemas. Re-registering an identical schema (the
-    same model reached twice) is a no-op."""
+    """Write ``schema`` under ``name`` in ``components``, raising LOUDLY on a name collision.
+
+    A silent keep or overwrite would otherwise land the wrong schema. The collision cases: a
+    reserved envelope name, or two distinct models (or ``$defs``) sharing a ``__name__`` with
+    differing schemas. Re-registering an identical schema (the same model reached twice) is a no-op.
+    """
     if name in _RESERVED_SCHEMA_NAMES:
         raise ValueError(f"schema name {name!r} collides with a reserved response-envelope component")
     existing = components.get(name)
@@ -117,8 +120,10 @@ def _assign_component(components: dict[str, Any], name: str, schema: dict[str, A
 
 
 def _register_model(model: type[BaseModel], components: dict[str, Any]) -> str:
-    """Merge ``model``'s JSON schema (and its ``$defs``) into ``components`` and
-    return the component name to ``$ref``."""
+    """Merge ``model``'s JSON schema (and its ``$defs``) into ``components``.
+
+    Returns the component name to ``$ref``.
+    """
     schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
     for def_name, def_schema in schema.pop("$defs", {}).items():
         _assign_component(components, def_name, def_schema)
@@ -136,7 +141,8 @@ def _query_schema(prop_schema: dict[str, Any]) -> dict[str, Any]:
     valued null. So pydantic's rendering of ``T | None`` — ``anyOf [T, null]`` plus
     ``default: null`` — is collapsed to plain ``T`` with no default, and a union of several
     real branches keeps its ``anyOf`` minus the null branch. Sibling keywords (``title``,
-    ``description``, bounds) survive the collapse. A non-nullable schema passes through."""
+    ``description``, bounds) survive the collapse. A non-nullable schema passes through.
+    """
     schema = dict(prop_schema)
     branches = schema.get("anyOf")
     if isinstance(branches, list) and _NULL_BRANCH in branches:
@@ -152,8 +158,7 @@ def _query_schema(prop_schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def _query_parameters(model: type[BaseModel], components: dict[str, Any]) -> list[dict[str, Any]]:
-    """A model's fields as ``in: query`` parameters — a read method's ``request_model``,
-    or any method's ``query_model``.
+    """A model's fields as ``in: query`` parameters — a read method's ``request_model``, or any ``query_model``.
 
     A model whose fields are query inputs (a GET reading its inputs from the query string,
     or a door declaring a ``query_model``) turns each field into a query parameter, never a
@@ -164,7 +169,8 @@ def _query_parameters(model: type[BaseModel], components: dict[str, Any]) -> lis
     optional). The field's description rides on the PARAMETER, not on its schema: it is the
     Parameter Object's own ``description`` that a generator renders, so it is moved there
     rather than left where only a schema-aware reader would find it. Any ``$defs`` a field
-    schema references are merged into ``components`` so the ``$ref``s resolve."""
+    schema references are merged into ``components`` so the ``$ref``s resolve.
+    """
     schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
     for def_name, def_schema in schema.pop("$defs", {}).items():
         _assign_component(components, def_name, def_schema)
@@ -188,7 +194,8 @@ def _check_unique_parameters(parameters: list[dict[str, Any]], *, path: str, met
     OpenAPI forbids the duplicate, and the sources can collide unseen: a path param named
     like a model field, a read door's ``request_model`` overlapping its ``query_model``, or
     two fields aliased to one query key. Emitting it would ship an invalid document, so it
-    fails the emission LOUDLY naming the route and the parameter."""
+    fails the emission LOUDLY naming the route and the parameter.
+    """
     seen: set[tuple[str, str]] = set()
     for parameter in parameters:
         key = (parameter["name"], parameter["in"])
@@ -219,7 +226,8 @@ def _json_body_schema(meta: RouteMetadata, components: dict[str, Any]) -> dict[s
     declared ``enveloped=False`` answers a RAW top-level body, so its model is the body
     schema DIRECTLY — a ``$ref`` with no ``data`` wrapper. An unwrapped route always
     carries a ``response_model`` (the registration guard enforces it); a missing one
-    here is a broken registration, raised LOUDLY rather than emitting an empty body."""
+    here is a broken registration, raised LOUDLY rather than emitting an empty body.
+    """
     if meta.enveloped:
         return _json_envelope_schema(meta, components)
     if meta.response_model is None:
@@ -229,6 +237,7 @@ def _json_body_schema(meta: RouteMetadata, components: dict[str, Any]) -> dict[s
 
 def _success_response(meta: RouteMetadata, method: str, components: dict[str, Any]) -> dict[str, Any]:
     """The 200/2xx response for ``method``, documenting every content type it serves.
+
     ``application/json`` carries the ``{"data": ...}`` envelope by default, or the
     model's schema DIRECTLY when the route is declared ``enveloped=False`` (a raw
     top-level body); a streaming, CSV, HTML, or asset/download type answers its own
@@ -239,7 +248,8 @@ def _success_response(meta: RouteMetadata, method: str, components: dict[str, An
     ``no_body_reason`` (the registration guard enforces the pairing): the reason
     becomes the response ``description`` and rides an ``x-no-body`` extension, so the
     absence of a ``{"data": <model>}`` schema is a declared, described exception
-    rather than a silent empty ``data``."""
+    rather than a silent empty ``data``.
+    """
     media_types = meta.success_media_types[method]
     content: dict[str, Any] = {}
     for media_type in media_types:
@@ -261,8 +271,10 @@ def _success_response(meta: RouteMetadata, method: str, components: dict[str, An
 
 
 def _error_response(status: int) -> dict[str, Any]:
-    """The response for a status the route answers with the plain ``{"error": ...}``
-    envelope — every entry of ``error_statuses``, the declared ``503`` included."""
+    """The response for a status the route answers with the plain ``{"error": ...}`` envelope.
+
+    Covers every entry of ``error_statuses``, the declared ``503`` included.
+    """
     return {
         "description": _STATUS_DESCRIPTIONS.get(status, "Error."),
         "content": {"application/json": {"schema": {"$ref": f"#/components/schemas/{_ERROR_SCHEMA}"}}},
@@ -270,9 +282,9 @@ def _error_response(status: int) -> dict[str, Any]:
 
 
 def _reload_gate_response(*, also_unavailable: bool) -> dict[str, Any]:
-    """The reload gate's ``503``: the constant-message ``ReloadingError`` body plus the
-    ``Retry-After`` header the gate stamps.
+    """The reload gate's ``503``: the constant-message ``ReloadingError`` body plus the ``Retry-After`` header.
 
+    The ``Retry-After`` header is the one the gate stamps.
     ``also_unavailable`` marks a route that ALSO answers a typed ``UnavailableError``
     ``503`` with the plain ``{"error": ...}`` envelope; its one ``503`` slot must then
     admit either body, and ``Retry-After`` rides only the reloading half.
@@ -298,10 +310,12 @@ def _reload_gate_response(*, also_unavailable: bool) -> dict[str, Any]:
 
 
 def _operation_responses(meta: RouteMetadata, method: str, components: dict[str, Any]) -> dict[str, Any]:
-    """The operation's ``responses`` map: the success status, any additional success
-    statuses, the plain-envelope error statuses, and — merged into the ``503`` slot,
-    OVERWRITING a declared 503 so one slot admits both bodies — the reload gate's
-    response when the route is ``reload_gated``."""
+    """The operation's ``responses`` map.
+
+    Covers the success status, any additional success statuses, the plain-envelope error statuses,
+    and — merged into the ``503`` slot, OVERWRITING a declared 503 so one slot admits both bodies —
+    the reload gate's response when the route is ``reload_gated``.
+    """
     responses: dict[str, Any] = {str(meta.success_status): _success_response(meta, method, components)}
     for status in meta.additional_success_statuses:
         responses[str(status)] = _success_response(meta, method, components)
@@ -313,10 +327,12 @@ def _operation_responses(meta: RouteMetadata, method: str, components: dict[str,
 
 
 def _operation_parameters(meta: RouteMetadata, method: str, components: dict[str, Any]) -> list[dict[str, Any]]:
-    """The operation's parameters: path params, then a read method's ``request_model``
-    fields as ``in: query`` (a GET reads its inputs from the query string, never a
-    body), then any ``query_model`` fields (``in: query`` for ANY method). Refuses a
-    duplicate ``(name, in)`` pair before returning."""
+    """The operation's parameters.
+
+    Path params, then a read method's ``request_model`` fields as ``in: query`` (a GET reads its
+    inputs from the query string, never a body), then any ``query_model`` fields (``in: query`` for
+    ANY method). Refuses a duplicate ``(name, in)`` pair before returning.
+    """
     parameters = _path_parameters(meta.path)
     if meta.request_model is not None and method_to_action(method) == "read":
         parameters = parameters + _query_parameters(meta.request_model, components)

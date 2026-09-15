@@ -49,9 +49,10 @@ class StaticCred(BaseModel):
 
 
 class ConnectionCred(BaseModel):
-    """A per-caller connection-reference cred resolved through
-    ``tai42_app.connectors.resolve_connection_auth`` (which fails CLOSED on an identity-less
-    door and takes ``connection_id`` from operator settings, never a session-supplied value).
+    """A per-caller connection-reference cred resolved through ``tai42_app.connectors.resolve_connection_auth``.
+
+    The resolver fails CLOSED on an identity-less door and takes ``connection_id`` from
+    operator settings, never a session-supplied value.
 
     ``delivery="bearer"`` (the DEFAULT, REQUIRED for any refreshable/expiring cred — the primary
     OAuth case) re-materializes an ``Authorization: Bearer`` credential-helper FILE under the

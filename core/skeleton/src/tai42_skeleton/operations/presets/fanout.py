@@ -1,5 +1,7 @@
-"""Worker-bus rebind / removal fan-out and the membership census the mutating
-preset doors publish so every serving worker converges on the new binding state."""
+"""Worker-bus rebind/removal fan-out and the membership census the mutating preset doors publish.
+
+Every serving worker converges on the new binding state.
+"""
 
 from __future__ import annotations
 
@@ -15,15 +17,15 @@ _REMOVE_OP = "remove_tool"
 
 
 def _fleet_fanout_ready() -> bool:
-    """Whether this worker can fan a preset op out to the fleet: its bus is built AND
-    its slot identity is minted.
+    """Report whether this worker can fan a preset op out to the fleet (bus built and slot identity minted).
 
     ``False`` only during the boot startup handlers — the declared-preset-seed applier
     runs as an ``on_startup`` handler, BEFORE the bus subscription claims this worker's
     slot (the bus is built and its identity minted only after the handlers). Every worker
     runs that applier on its OWN boot, so a boot-time seed create/upgrade needs no fan-out
     — each worker applies it locally. A reload re-runs the applier with the bus already
-    subscribed, so it fans out normally, as does every API-door mutation."""
+    subscribed, so it fans out normally, as does every API-door mutation.
+    """
     try:
         _ = instance.app.bus.identity
     except RuntimeError:
@@ -32,10 +34,10 @@ def _fleet_fanout_ready() -> bool:
 
 
 async def _census_at_start(op_name: str) -> dict[str, int] | None:
-    """Pin the expected-confirmation membership BEFORE this worker's store write and
-    local rebind — the untargeted-publisher discipline
-    :func:`~tai42_skeleton.operations._broadcast.snapshot_membership` owns.
+    """Pin the expected-confirmation membership BEFORE this worker's store write and local rebind.
 
+    The untargeted-publisher discipline
+    :func:`~tai42_skeleton.operations._broadcast.snapshot_membership` owns.
     These publishers apply locally and broadcast afterwards, so ``publish``'s own
     census is taken on the far side of the store write: a sibling whose presence
     faded across it would simply be absent from the expected set, and the op would
@@ -43,19 +45,20 @@ async def _census_at_start(op_name: str) -> dict[str, int] | None:
     which is why it is a parameter of the fan-out rather than taken inside it.
 
     ``None`` when the bus cannot yet fan out (the boot-time seed applier, pre-subscribe):
-    :func:`_fanout_reload` / :func:`_fanout_remove` collapse to a local-only report."""
+    :func:`_fanout_reload` / :func:`_fanout_remove` collapse to a local-only report.
+    """
     if not _fleet_fanout_ready():
         return None
     return await snapshot_membership(instance.app.bus, op_name)
 
 
 async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) -> FleetResult:
-    """Broadcast a preset rebind on the worker bus so every worker re-reads the active
-    body and rebinds ``name``. The op carries only ``kind`` + ``name``; each worker
-    re-reads the store itself. The store write and local rebind have already landed by
-    the time this runs (its self entry is a truthful ``applied``), so an unconfirmed
-    sibling is surfaced as a loud non-convergence ERROR log, and re-running the
-    mutation (or a ``reload_config``) is the recovery.
+    """Broadcast a preset rebind on the worker bus so every worker re-reads the active body and rebinds ``name``.
+
+    The op carries only ``kind`` + ``name``; each worker re-reads the store itself. The store
+    write and local rebind have already landed by the time this runs (its self entry is a
+    truthful ``applied``), so an unconfirmed sibling is surfaced as a loud non-convergence
+    ERROR log, and re-running the mutation (or a ``reload_config``) is the recovery.
 
     The local apply is separate and compensation-rolled-back upstream, so this cannot
     ride ``broadcast()``'s apply-inside model — but it shares its non-convergence
@@ -70,7 +73,8 @@ async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) ->
 
     Collapses to a ``local_only`` report when the bus cannot yet fan out (the boot-time
     seed applier, before this worker's slot is claimed) — the local rebind has already
-    landed and every sibling seeds itself on its own boot, so there is no fleet to reach."""
+    landed and every sibling seeds itself on its own boot, so there is no fleet to reach.
+    """
     if not _fleet_fanout_ready():
         return FleetResult(op=_RELOAD_OP, local_only=True)
     report = await instance.app.bus.publish(
@@ -84,19 +88,23 @@ async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) ->
 
 
 def _addressed_siblings(report: FleetResult) -> set[str]:
-    """The sibling names a broadcast actually ADDRESSED (self excluded) — the report IS
-    that set, expected verdicts and gap rows alike. A rename's second fan-out needs it:
-    see :func:`_union_census`."""
+    """Return the sibling names a broadcast actually ADDRESSED, self excluded.
+
+    The report IS that set, expected verdicts and gap rows alike. A rename's second fan-out
+    needs it: see :func:`_union_census`.
+    """
     self_name = instance.app.bus.identity.name
     return {result.name for result in report.results if result.name != self_name}
 
 
 async def _fanout_remove(name: str, expected_at_start: dict[str, int] | None) -> FleetResult:
-    """Broadcast a preset removal on the worker bus so every worker tears ``name``
-    down. Same already-applied self entry, op-start census, and non-convergence
-    logging as :func:`_fanout_reload`, and it likewise returns the per-worker fleet
-    report so the delete door can embed it in its response. Collapses to a ``local_only``
-    report when the bus cannot yet fan out (the boot-time seed applier, pre-subscribe)."""
+    """Broadcast a preset removal on the worker bus so every worker tears ``name`` down.
+
+    Same already-applied self entry, op-start census, and non-convergence logging as
+    :func:`_fanout_reload`, and it likewise returns the per-worker fleet report so the delete
+    door can embed it in its response. Collapses to a ``local_only`` report when the bus
+    cannot yet fan out (the boot-time seed applier, pre-subscribe).
+    """
     if not _fleet_fanout_ready():
         return FleetResult(op=_REMOVE_OP, local_only=True)
     report = await instance.app.bus.publish(

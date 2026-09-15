@@ -36,7 +36,8 @@ def workspace_key_for(agent_name: str, thread_id: str) -> str:
     ``str(uuid5(M39_NS, f"{agent_name}:{thread_id}"))`` — a 36-char value valid under the
     ``[A-Za-z0-9_-]{1,64}`` workspace-key charset, AGENT-NAMESPACED so the two engines never
     collide on one volume for the same ``thread_id``, and stable so a cross-worker resume
-    reattaches the SAME volume."""
+    reattaches the SAME volume.
+    """
     return str(uuid.uuid5(M39_NS, f"{agent_name}:{thread_id}"))
 
 
@@ -61,7 +62,8 @@ def build_policied_spec(
     The helper enforces NO ceiling/floor/durable gate — the KIT create chokepoint does (a
     ``network`` looser than the ceiling, an ``isolation`` below the floor, or a ``persistent``
     spec while durable is off is a LOUD error there, never a silent widen/clamp/downgrade).
-    The returned policy carries ``scrub_transcript`` for the adapter to read."""
+    The returned policy carries ``scrub_transcript`` for the adapter to read.
+    """
     policy = tai42_app.sandboxes.sandbox_policy()
     network: SandboxNetwork = network_setting if network_setting is not None else policy.egress
     spec = SandboxSessionSpec(

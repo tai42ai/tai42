@@ -31,14 +31,17 @@ ENCODED_SLASH = "%2F"
 
 
 class MalformedPathError(ValueError):
-    """A request path that cannot be reasoned about safely: after its single decode a
-    segment carries a NUL byte, an ASCII control char, or a backslash, or the raw target
-    is not ASCII. The classifier treats it as fail-closed (never the SPA shell) and logs
-    it; settings validation treats it as a config error."""
+    """A request path that cannot be reasoned about safely.
+
+    After its single decode a segment carries a NUL byte, an ASCII control char,
+    or a backslash, or the raw target is not ASCII. The classifier treats it as
+    fail-closed (never the SPA shell) and logs it; settings validation treats it
+    as a config error.
+    """
 
 
 def canonicalize_path(path: str) -> str:
-    """The single canonical form of ``path``.
+    r"""The single canonical form of ``path``.
 
     ``path`` is the RAW (undecoded) request target, a registered route template, or an
     already-canonical path (this function is idempotent). Each ``/``-separated segment is
@@ -78,13 +81,15 @@ def canonicalize_path(path: str) -> str:
 
 
 def request_canonical_path(scope: Mapping[str, Any]) -> str:
-    """The canonical form of the CURRENT request's path, taken from the RAW target
-    (``scope["raw_path"]``, bytes/ASCII) with any mounted ``root_path`` stripped, so a
-    percent-encoded slash inside a segment (a state record ``{key}``) is reasoned about as
-    ONE segment — the SAME form the router matches. Falls back to the once-decoded
-    ``scope["path"]`` only when the ASGI server supplies no ``raw_path`` (no encoded slash
-    can then be present to lose). A non-ASCII raw target raises
-    :class:`MalformedPathError` (fail-closed)."""
+    """The canonical form of the CURRENT request's path, taken from the RAW target.
+
+    Uses ``scope["raw_path"]`` (bytes/ASCII) with any mounted ``root_path`` stripped,
+    so a percent-encoded slash inside a segment (a state record ``{key}``) is
+    reasoned about as ONE segment — the SAME form the router matches. Falls back to
+    the once-decoded ``scope["path"]`` only when the ASGI server supplies no
+    ``raw_path`` (no encoded slash can then be present to lose). A non-ASCII raw
+    target raises :class:`MalformedPathError` (fail-closed).
+    """
     raw = scope.get("raw_path")
     root_path = scope.get("root_path", "")
     if raw is None:
@@ -97,10 +102,11 @@ def request_canonical_path(scope: Mapping[str, Any]) -> str:
 
 
 def strip_root_path(path: str, root_path: str) -> str:
-    """``path`` with a mounted ``root_path`` prefix removed, exactly as Starlette's
-    ``get_route_path`` strips it before routing. ``root_path`` is a mount literal without
-    percent-encoding, so the plain prefix strip keeps the remainder — an encoded slash
-    inside a parameter included — intact."""
+    """``path`` with a mounted ``root_path`` prefix removed, as Starlette's ``get_route_path`` does.
+
+    ``root_path`` is a mount literal without percent-encoding, so the plain prefix
+    strip keeps the remainder — an encoded slash inside a parameter included — intact.
+    """
     if not root_path or not path.startswith(root_path):
         return path
     if path == root_path:
@@ -111,7 +117,9 @@ def strip_root_path(path: str, root_path: str) -> str:
 
 
 def under_prefix(path: str, prefix: str) -> bool:
-    """Whether ``path`` is ``prefix`` itself or a path-segment descendant of it —
-    ``path == prefix or path.startswith(prefix + "/")``. Segment-aware, never a bare
-    ``startswith`` (which would leak ``/apiary`` past a ``/api`` guard)."""
+    """Whether ``path`` is ``prefix`` itself or a path-segment descendant of it.
+
+    Equivalent to ``path == prefix or path.startswith(prefix + "/")``. Segment-aware,
+    never a bare ``startswith`` (which would leak ``/apiary`` past a ``/api`` guard).
+    """
     return path == prefix or path.startswith(f"{prefix}/")

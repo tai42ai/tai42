@@ -17,11 +17,13 @@ from .models import _ENV_KEY_RE, _ENV_KEY_START, _NON_ENV_KEY_CHAR, _SECRET_MARK
 
 
 def _parse_manifest_pointer(pointer: str) -> list[str]:
-    """Split a slash-delimited, no-leading-slash manifest pointer into segments and
-    enforce the mcp-only authority: the HEAD segment MUST be ``mcp`` (a loud 400 like
+    """Split a slash-delimited, no-leading-slash manifest pointer into segments, enforcing mcp-only authority.
+
+    The HEAD segment MUST be ``mcp`` (a loud 400 like
     ``set_mcp_config``'s), and the pointer must address a leaf UNDER ``mcp`` (at least
     one segment past the head). A leading slash, an empty segment, or a wrong head is a
-    loud 400."""
+    loud 400.
+    """
     segments = pointer.split("/")
     if not segments or segments[0] != "mcp":
         raise BadRequestError(
@@ -41,7 +43,8 @@ def _derive_secret_env_key(key_hint: str, taken: frozenset[str]) -> str:
     non-identifier result falls back to ``SECRET``. The name is then made unique against
     ``taken`` (stored env keys and the X band) by appending ``_2``, ``_3``, … — so a
     generated key never clobbers an existing key nor collides with a deployment X-band
-    name. The value is NEVER derived from the secret and is never returned to the caller."""
+    name. The value is NEVER derived from the secret and is never returned to the caller.
+    """
     base = _NON_ENV_KEY_CHAR.sub("_", key_hint).strip("_").upper()
     if not base or not _ENV_KEY_START.match(base):
         base = f"SECRET_{base}".rstrip("_") if base else "SECRET"
@@ -54,15 +57,16 @@ def _derive_secret_env_key(key_hint: str, taken: frozenset[str]) -> str:
 
 
 def _resolve_secret_env_key(explicit: str | None, hint: str | None, value: str, stored: dict[str, str]) -> str:
-    """Resolve the env KEY a secret is stored under: exactly one of an EXPLICIT ``explicit``
-    key or a ``hint`` to generate from (``key | key_hint``).
+    """Resolve the env KEY a secret is stored under: exactly one of an EXPLICIT ``explicit`` key or a ``hint``.
 
+    ``hint`` is a base to generate from (``key | key_hint``).
     An explicit key is validated to the shell-identifier charset (an odd value is a loud
     ``ValueError`` → 400) and REFUSED if it collides with an existing stored key holding a
     DIFFERENT value (never a silent overwrite of a live secret; an identical value is an
     idempotent re-send, no collision). A generated key is made unique against the stored keys,
     the X band, AND every registered settings ``env_var``, so it never clobbers a stored key
-    nor SHADOWS a registered var. Raises ``ValueError`` (the op maps it to a 400)."""
+    nor SHADOWS a registered var. Raises ``ValueError`` (the op maps it to a 400).
+    """
     if (explicit is None) == (hint is None):
         raise ValueError("provide exactly one of 'key' (explicit) or 'key_hint' (to generate from)")
     if explicit is not None:
@@ -86,7 +90,8 @@ def _set_marker_at_pointer(document: dict[str, Any], segments: list[str], marker
     segment is numeric, else a mapping) so a NEW leaf under an existing MCP entry can be
     written. Pure / re-runnable: it only edits ``document`` (the external-store 409-replay contract).
     A path that traverses a non-container, or a numeric segment out of range, is a
-    ``ValueError`` the door maps to a 400."""
+    ``ValueError`` the door maps to a 400.
+    """
     node: Any = document
     for depth, seg in enumerate(segments[:-1]):
         nxt = segments[depth + 1]
@@ -97,19 +102,21 @@ def _set_marker_at_pointer(document: dict[str, Any], segments: list[str], marker
                 node[seg] = [] if nxt.isdigit() else {}
             node = node[seg]
         else:
-            raise ValueError(f"manifest_pointer traverses a non-container at {seg!r} in {'/'.join(segments)!r}")
+            raise ValueError(f"manifest_pointer traverses a non-container at {seg!r} in {'/'.join(segments)!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     last = segments[-1]
     if isinstance(node, list):
         node[_pointer_index(node, last, segments)] = marker
     elif isinstance(node, dict):
         node[last] = marker
     else:
-        raise ValueError(f"manifest_pointer traverses a non-container at {last!r} in {'/'.join(segments)!r}")
+        raise ValueError(f"manifest_pointer traverses a non-container at {last!r} in {'/'.join(segments)!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
 
 def _pointer_index(node: list[Any], segment: str, segments: list[str]) -> int:
-    """A numeric list-index segment resolved against ``node``; a non-numeric or
-    out-of-range segment is a loud ``ValueError`` (→ 400)."""
+    """A numeric list-index segment resolved against ``node``.
+
+    A non-numeric or out-of-range segment is a loud ``ValueError`` (→ 400).
+    """
     if not segment.isdigit():
         raise ValueError(f"manifest_pointer segment {segment!r} must be a list index in {'/'.join(segments)!r}")
     index = int(segment)
@@ -144,7 +151,8 @@ async def set_mcp_secret_env(
     ``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response
     is the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling
     ``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary
-    validator, same as ``POST /api/mcp-config``)."""
+    validator, same as ``POST /api/mcp-config``).
+    """
     segments = _parse_manifest_pointer(manifest_pointer)  # loud 400 on a non-mcp head
 
     service = ConfigService.from_app()

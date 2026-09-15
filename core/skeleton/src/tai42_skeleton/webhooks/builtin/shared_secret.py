@@ -38,8 +38,11 @@ _DEFAULT_REPLAY_WINDOW_SECONDS = 86400
 
 
 def _lookup(headers: Mapping[str, str], name: str) -> str | None:
-    """Return ``name``'s value from ``headers`` case-insensitively (HTTP header
-    names are case-insensitive; a plain Mapping is not, so scan on lowered keys)."""
+    """Return ``name``'s value from ``headers`` case-insensitively.
+
+    HTTP header names are case-insensitive; a plain Mapping is not, so scan on
+    lowered keys.
+    """
     wanted = name.lower()
     for key, value in headers.items():
         if key.lower() == wanted:
@@ -55,6 +58,7 @@ class SharedSecretVerifier:
     post_only = False
 
     async def verify(self, body: bytes, headers: Mapping[str, str], config: dict[str, Any]) -> None:
+        """Raise unless the configured header on the request equals the shared secret (constant-time compare)."""
         # A missing/malformed config key is an operator misconfiguration of the
         # BINDING (not a request-level failure), so it raises a plain exception ->
         # HTTP 500 (fails CLOSED), distinct from the 401 a bad request signature
@@ -97,7 +101,7 @@ class SharedSecretVerifier:
             raise ValueError("shared_secret verifier config requires a non-empty 'id_header'")
         window = config.get("replay_window_seconds", _DEFAULT_REPLAY_WINDOW_SECONDS)
         if isinstance(window, bool) or not isinstance(window, int):
-            raise ValueError(f"replay_window_seconds must be an int, got {window!r}")
+            raise ValueError(f"replay_window_seconds must be an int, got {window!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         if window <= 0:
             raise ValueError(f"replay_window_seconds must be positive, got {window!r}")
         delivery_id = _lookup(headers, id_header)

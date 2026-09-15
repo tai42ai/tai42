@@ -31,6 +31,7 @@ class JsonSchemaValidationError(JsonSchemaError):
     """
 
     def __init__(self, message: str, *, json_path: str, offending_value: Any) -> None:
+        """Build the error with the offending node's ``json_path`` and its ``offending_value``."""
         self.json_path = json_path
         self.offending_value = offending_value
         super().__init__(message)

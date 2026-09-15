@@ -156,8 +156,7 @@ def _connection_account(
 
 
 async def _probe_unreachable(record: ConnectionRecord) -> list[str]:
-    """Probe every enabled sub-service concurrently and return the ones that did
-    not answer.
+    """Probe every enabled sub-service concurrently and return the ones that did not answer.
 
     Reachability is computed live (never stored). A connection whose provider
     plugin is no longer registered has nothing reachable, so every enabled
@@ -232,15 +231,16 @@ def _start_result_view(result: StartConnectResult | NoAuthConnectResult) -> dict
 
 @operation(summary="List connector providers", tags=["connectors"], response_model=ProviderCatalogResponse)
 async def list_connector_providers() -> dict[str, Any]:
-    """The provider catalog — one entry per registered connector provider, plus
-    the category groupings the UI arranges them under.
+    """The provider catalog — one entry per registered connector provider, plus category groupings.
 
+    The category groupings are those the UI arranges the providers under.
     Providers come from the in-memory registry (populated from the manifest's
     ``connectors`` list at boot/reload), so they list regardless of store
     configuration. The category
     groupings live in the connector store's Postgres, so they are served only when
     that store is configured (otherwise an empty grouping list, mirroring the
-    OFF-state connections read)."""
+    OFF-state connections read).
+    """
     providers = [_provider_view(p) for p in list_providers()]
     if component_store_configured(SKELETON_COMPONENT):
         categories = [
@@ -260,7 +260,8 @@ ConnectionHealthFilter = Literal["healthy", "reconnect_required", "refresh_faili
 class ConnectionsListQuery(BaseModel):
     """The connections listing's optional ``?health=`` filter and ``?limit=`` page cap.
 
-    Spec metadata only — the door parses its query at the HTTP edge."""
+    Spec metadata only — the door parses its query at the HTTP edge.
+    """
 
     health: ConnectionHealthFilter | None = Field(
         default=None, description="Restrict items to this auth-health state; omit for all connections."
@@ -334,8 +335,10 @@ def _parse_limit(limit: int | None) -> int | None:
     response_model=ConnectedAccountView,
 )
 async def get_connection(connection_id: str) -> dict[str, Any]:
-    """One connection's secret-free view, with live sub-service reachability; an
-    unknown id is a loud 404."""
+    """One connection's secret-free view, with live sub-service reachability.
+
+    An unknown id is a loud 404.
+    """
     # OFF gate: with no store no connection can exist — a 404 byte-identical to the
     # genuine miss below, so the door is no oracle for the store's absence.
     if not component_store_configured(SKELETON_COMPONENT):

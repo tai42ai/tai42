@@ -46,14 +46,16 @@ _BIDI_FORMAT_CONTROLS = frozenset(
 
 
 def is_control_char(ch: str) -> bool:
-    """True if ``ch`` is a control, line/paragraph separator, or bidirectional /
-    zero-width format character: a C0 control (``ord < 0x20``), ``DEL`` or any C1
-    control (``0x7F..0x9F``, which covers U+0085 NEL, U+009B CSI, U+009D OSC,
-    ...), U+2028/U+2029, or one of the bidi/zero-width format controls in
+    """True if ``ch`` is a control, line/paragraph separator, or bidi/zero-width format character.
+
+    Covers a C0 control (``ord < 0x20``), ``DEL`` or any C1 control
+    (``0x7F..0x9F``, which covers U+0085 NEL, U+009B CSI, U+009D OSC, ...),
+    U+2028/U+2029, or one of the bidi/zero-width format controls in
     :data:`_BIDI_FORMAT_CONTROLS` (LRM/RLM, embeddings/overrides, isolates, ALM,
     ZWSP, BOM). This is the terminal-escape / line-overwrite / Trojan-Source
     injection class. A regular ASCII space (``0x20``), U+200D ZWJ, and U+200C
-    ZWNJ are NOT rejected."""
+    ZWNJ are NOT rejected.
+    """
     return ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or ch in _UNICODE_LINE_SEPARATORS or ch in _BIDI_FORMAT_CONTROLS
 
 

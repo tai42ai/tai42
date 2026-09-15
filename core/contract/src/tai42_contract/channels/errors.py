@@ -27,6 +27,13 @@ class ChannelDeliveryError(Exception):
     __tai_error_kind__ = ErrorKind.DELIVERY_FAILED
 
     def __init__(self, message: str, *, retryable: bool = False, retry_after: float | None = None) -> None:
+        """Build the error with the caller's retry classification.
+
+        Args:
+            message: The human-facing description of the delivery failure.
+            retryable: True when the failure is transient and a fresh attempt may land.
+            retry_after: Seconds the medium asked the caller to wait; meaningful only when ``retryable``.
+        """
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
@@ -49,12 +56,11 @@ class ChannelInputError(Exception):
 
 
 class AnswerForwardError(Exception):
-    """The interactions answer door did not accept a forwarded answer on a status the
-    shared inbound-answer ladder cannot resolve (401/413/5xx or a transport fault).
+    """The interactions answer door rejected a forwarded answer on a status the shared ladder cannot resolve.
 
-    Raised by :meth:`AppChannels.handle_inbound_answer` WITHOUT releasing the
+    The unresolvable statuses are 401/413/5xx or a transport fault. Raised by
+    :meth:`AppChannels.handle_inbound_answer` WITHOUT releasing the
     correlation, so the channel's transport-level retry (the provider's webhook
     redelivery) re-runs the ladder and the answer is never silently lost. A channel
-    lets it propagate out of its inbound webhook so the provider redelivers — the
-    same loud-failure contract each channel kept when it hand-rolled the ladder.
+    lets it propagate out of its inbound webhook so the provider redelivers.
     """

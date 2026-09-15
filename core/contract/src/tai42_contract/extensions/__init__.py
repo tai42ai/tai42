@@ -43,22 +43,27 @@ class ExtensionKind(StrEnum):
 
     @property
     def preserves_schema(self) -> bool:
-        """Whether an extension of this kind must present the extended tool's
-        input schema unchanged (parameter names/types identical; the tool NAME
-        always changes — every extension branches to a new-named tool)."""
+        """Whether an extension of this kind must present the extended tool's input schema unchanged.
+
+        Parameter names/types stay identical; the tool NAME always changes —
+        every extension branches to a new-named tool.
+        """
         return _PRESERVES_SCHEMA[self]
 
     @property
     def declares_schema(self) -> bool:
-        """Whether an extension of this kind must present its OWN concrete input
-        schema (a real makefun-presented signature, never bare
-        ``*args/**kwargs``)."""
+        """Whether an extension of this kind must present its OWN concrete input schema.
+
+        The signature is a real makefun-presented one, never bare
+        ``*args/**kwargs``.
+        """
         return _DECLARES_SCHEMA[self]
 
     @property
     def relocates_execution(self) -> bool:
-        """Whether an extension of this kind moves the tool body's execution to
-        another process. A BACKEND swaps the execution strategy for a worker (the
+        """Whether an extension of this kind moves the tool body's execution to another process.
+
+        A BACKEND swaps the execution strategy for a worker (the
         wrapped callable is submitted and runs there, not in the process that
         received the call); a WRAPPER and a TRANSFORMER execute the body
         in-process, inside their own frame.
@@ -69,18 +74,21 @@ class ExtensionKind(StrEnum):
         a task-scoped contextvar) must bind INSIDE any relocating extension, so
         its wrapper travels with the body to the worker. Bound outside, the
         relocating layer ships only the inner callable and the locality-requiring
-        wrapper stays behind in the submitting process, silently not applying."""
+        wrapper stays behind in the submitting process, silently not applying.
+        """
         return _RELOCATES_EXECUTION[self]
 
     @property
     def preserves_output_shape(self) -> bool:
-        """Whether an extension of this kind returns the extended tool's result
-        shape unchanged, so a branch it mints may inherit the base tool's
-        OUTPUT schema. This is an OUTPUT-schema concern, distinct from
-        ``preserves_schema`` (which is about the INPUT schema): a WRAPPER returns
-        the wrapped tool's result unchanged and a BACKEND swaps the execution
-        strategy but returns the same output shape (both preserve), while a
-        TRANSFORMER reshapes the result (does not preserve)."""
+        """Whether an extension of this kind returns the extended tool's result shape unchanged.
+
+        A branch it mints may then inherit the base tool's OUTPUT schema. This is
+        an OUTPUT-schema concern, distinct from ``preserves_schema`` (which is
+        about the INPUT schema): a WRAPPER returns the wrapped tool's result
+        unchanged and a BACKEND swaps the execution strategy but returns the same
+        output shape (both preserve), while a TRANSFORMER reshapes the result
+        (does not preserve).
+        """
         return _PRESERVES_OUTPUT_SHAPE[self]
 
 

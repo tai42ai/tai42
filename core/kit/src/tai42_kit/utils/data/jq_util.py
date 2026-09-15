@@ -1,3 +1,5 @@
+"""jq expression compilation and bounded evaluation, with the process environment sealed out."""
+
 import asyncio
 import itertools
 import re
@@ -61,21 +63,26 @@ def _compile_jq(expression: str, prelude: str, args: dict[str, Any] | None):
 
 @lru_cache(maxsize=512)
 def get_compiled_jq(expression: str, prelude: str = ""):
+    """Compile ``expression`` (LRU-cached) with an optional ``prelude`` of ``def`` declarations."""
     return _compile_jq(expression, prelude, None)
 
 
 def compile_check(expression: str, *, variables: Iterable[str] = ()) -> None:
-    """Prove ``expression`` is a valid jq program, with ``variables`` predeclared as
-    available named ``$name`` bindings. jq resolves variable references at compile time, so
+    """Prove ``expression`` is a valid jq program, with ``variables`` predeclared as named ``$name`` bindings.
+
+    jq resolves variable references at compile time, so
     an expression that will read a ``$name`` bound only at evaluation must have that name
     declared here or it fails to compile; the bound VALUES are irrelevant to a compile
     check (bound to null). Raises ``ValueError`` on a syntax error or a reference to a
     variable outside ``variables``. Discards the program — a caller wanting to run it
-    compiles (cached) through :func:`run_jq_first`."""
+    compiles (cached) through :func:`run_jq_first`.
+    """
     _compile_jq(expression, "", dict.fromkeys(variables))
 
 
 class JqSettings(TaiBaseSettings):
+    """Process-wide jq settings, read from ``JQ_``-prefixed environment variables."""
+
     model_config = SettingsConfigDict(env_prefix="JQ_")
 
     # Wall-clock budget for one jq evaluation, run on a worker thread. Must be positive.
@@ -101,8 +108,9 @@ async def run_jq_first(
     prelude: str = "",
     variables: dict[str, Any] | None = None,
 ) -> Any:
-    """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker
-    thread, bounded by ``JQ_TIMEOUT_SECONDS``; returns ``.first()``.
+    """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker thread.
+
+    Bounded by ``JQ_TIMEOUT_SECONDS``; returns ``.first()``.
 
     ``variables`` predeclares named jq variables (the ``--argjson`` equivalent): each
     key ``k`` is readable as ``$k`` in the expression, bound to its value. An expression
@@ -142,9 +150,10 @@ async def run_jq_first(
 
 
 async def run_jq_bounded(expression: str, payload: Any, limit: int, *, prelude: str = "") -> list[Any]:
-    """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker
-    thread, bounded by ``JQ_TIMEOUT_SECONDS``; returns AT MOST ``limit + 1`` emitted
-    values, taken lazily from the program's iterator.
+    """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker thread.
+
+    Bounded by ``JQ_TIMEOUT_SECONDS``; returns AT MOST ``limit + 1`` emitted values, taken lazily
+    from the program's iterator.
 
     For a caller that must enforce an exact emit count: it passes its allowed count as
     ``limit`` and reads ``len(result) > limit`` as "emitted too many". The extra slot

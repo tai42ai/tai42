@@ -1,3 +1,5 @@
+"""Build the MCP transport for one server config."""
+
 from typing import Any
 
 from tai42_contract.manifest import TaiMCPConfig

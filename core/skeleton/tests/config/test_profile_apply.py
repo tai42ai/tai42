@@ -140,7 +140,7 @@ def _epoch_state() -> Iterator[None]:
         quarantine_registry._pending = None
 
 
-class _BuildBoom(RuntimeError):
+class _BuildBoomError(RuntimeError):
     pass
 
 
@@ -152,7 +152,7 @@ async def test_failed_build_leaves_store_untouched_and_restores_env(monkeypatch:
     env_before = dict(os.environ)
 
     async def _fail_serve(_epoch: Epoch) -> Any:
-        raise _BuildBoom("deliberate build failure under the proposed env")
+        raise _BuildBoomError("deliberate build failure under the proposed env")
 
     async def _noop() -> None:
         return None
@@ -168,7 +168,7 @@ async def test_failed_build_leaves_store_untouched_and_restores_env(monkeypatch:
             drain_tolerate_driver=drain_tolerate_driver,
         )
 
-    with pytest.raises(_BuildBoom):
+    with pytest.raises(_BuildBoomError):
         await _service(store).apply_replace_env(
             {"APP_KEY": "proposed", "NEW_KEY": "x"},
             driven=True,
@@ -268,9 +268,9 @@ async def test_apply_releases_the_fork_gate_when_the_build_raises(monkeypatch: p
     store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
 
     async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
-        raise _BuildBoom("deliberate build failure")
+        raise _BuildBoomError("deliberate build failure")
 
-    with pytest.raises(_BuildBoom):
+    with pytest.raises(_BuildBoomError):
         await _service(store).apply_replace_env(
             {"MY_APP_FLAG": "new"}, driven=True, save_previous=_PrevSpy(), build_and_swap=_build
         )

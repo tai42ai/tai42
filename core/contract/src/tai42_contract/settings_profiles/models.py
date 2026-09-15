@@ -1,8 +1,8 @@
-"""The settings-profile body model — the typed JSONB ``body`` a profile stores
-under ``kind="settings_profile"`` in the generic versioned-document store.
+"""The settings-profile body model — the typed JSONB ``body`` a profile stores under ``kind="settings_profile"``.
 
-This is the SHAPE only. The concrete view that persists and versions it lives in
-the skeleton, mirroring the preset view — a contract holds models, never logic.
+This is stored in the generic versioned-document store. This is the SHAPE only.
+The concrete view that persists and versions it lives in the skeleton,
+mirroring the preset view — a contract holds models, never logic.
 """
 
 from __future__ import annotations

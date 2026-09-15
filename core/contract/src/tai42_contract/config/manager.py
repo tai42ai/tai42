@@ -32,7 +32,7 @@ class ConfigManager(ABC):
     def read_env(self) -> dict[str, str]:
         """Read environment key-value pairs.
 
-        raises:
+        Raises:
             FileNotFoundError: If the env source does not exist.
         """
 
@@ -61,7 +61,7 @@ class ConfigManager(ABC):
     def read_manifest(self) -> dict[str, Any]:
         """Read the active manifest.
 
-        raises:
+        Raises:
             FileNotFoundError: If the manifest does not exist.
         """
 
@@ -76,7 +76,7 @@ class ConfigManager(ABC):
         no secret values are read. The marker strings are plain (JSON-safe)
         strings.
 
-        raises:
+        Raises:
             FileNotFoundError: If the manifest does not exist.
         """
 

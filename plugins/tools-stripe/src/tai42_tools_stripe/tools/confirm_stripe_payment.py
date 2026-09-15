@@ -49,7 +49,7 @@ async def confirm_stripe_payment(event: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"event type must be 'checkout.session.completed'; got {event.get('type')!r}")
     session = event.get("session")
     if not isinstance(session, dict):
-        raise ValueError("event 'session' is missing or not an object")
+        raise ValueError("event 'session' is missing or not an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
     payment_status = session.get("payment_status")
     if payment_status != "paid":

@@ -39,8 +39,10 @@ _NUMBERED_FALLBACK_FOOTER = "Reply with the text of one option."
 
 
 def _numbered_body(body: str, options: list[str]) -> str:
-    """The numbered-text fallback body for a tappable choice past the interactive
-    caps: the body, the options numbered 1-based, then the type-an-option footer."""
+    """The numbered-text fallback body for a tappable choice past the interactive caps.
+
+    The body, the options numbered 1-based, then the type-an-option footer.
+    """
     lines = [body]
     lines.extend(f"{index}. {option}" for index, option in enumerate(options, start=1))
     lines.append(_NUMBERED_FALLBACK_FOOTER)
@@ -54,9 +56,10 @@ def _interactive_choice_kind(
     allow_buttons: bool = True,
     descriptions: list[str | None] | None = None,
 ) -> str:
-    """Which native shape a tappable-choice message renders as: ``"buttons"``,
-    ``"list"``, or ``"fallback"`` (numbered text) when it fits neither interactive
-    shape. Shared by the select ask and the interactive notification.
+    """Which native shape a tappable-choice message renders as: ``"buttons"``, ``"list"``, or ``"fallback"``.
+
+    ``"fallback"`` is numbered text, used when it fits neither interactive shape. Shared by
+    the select ask and the interactive notification.
 
     ``allow_buttons=False`` skips the reply-buttons shape (buttons render no per-row
     description, so a notification whose reply options carry descriptions prefers the list
@@ -66,7 +69,8 @@ def _interactive_choice_kind(
     secondary line. A description longer than ``_LIST_ROW_DESCRIPTION_MAX_CHARS`` cannot
     ride the list either — and a described option can never be a button (its caller sets
     ``allow_buttons=False``), so the WHOLE message degrades a tier to numbered text rather
-    than silently dropping authored content or shipping an over-cap value Meta 400s."""
+    than silently dropping authored content or shipping an over-cap value Meta 400s.
+    """
     if len(body) > _INTERACTIVE_BODY_MAX_CHARS:
         return "fallback"
     if (
@@ -95,10 +99,11 @@ def _interactive_choice_kind(
 async def _send_choice(
     phone_number_id: str, target: str, body: str, options: list[str], ids: list[tuple[str, str]]
 ) -> list[str]:
-    """Send one tappable-choice message in its native shape and return its
-    ``wamid`` (one message). ``ids`` are the ``(id, title)`` reply ids; the numbered
-    fallback carries no ids (the human types an option). Shared by the select ask
-    and the interactive notification."""
+    """Send one tappable-choice message in its native shape and return its ``wamid`` (one message).
+
+    ``ids`` are the ``(id, title)`` reply ids; the numbered fallback carries no ids (the
+    human types an option). Shared by the select ask and the interactive notification.
+    """
     kind = _interactive_choice_kind(body, options)
     if kind == "buttons":
         return [await send_interactive_buttons(phone_number_id=phone_number_id, to=target, body=body, buttons=ids)]

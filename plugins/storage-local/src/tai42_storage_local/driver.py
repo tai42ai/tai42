@@ -19,7 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncLocalDriver:
+    """Async local-filesystem storage driver rooted at a base path, refusing any escape."""
+
     def __init__(self, root_path: str, create_dirs: bool):
+        """Bind the driver to ``root_path``, creating parent dirs on write when ``create_dirs`` is set."""
         self.root_path = root_path
         self.create_dirs = create_dirs
         # Test seam only: a hook invoked between an empty-directory emptiness scan and
@@ -93,10 +96,11 @@ class AsyncLocalDriver:
 
     @staticmethod
     def _blocking_ancestor_id(root: Path, target: Path) -> str | None:
-        """The store id of the nearest ancestor of ``target`` that exists as a
-        non-directory (a file, a device) — the one blocking a directory
-        from being created for ``target``; ``None`` when the walk reaches the root
-        with nothing blocking."""
+        """The store id of the nearest ancestor of ``target`` that exists as a non-directory.
+
+        A file or a device — the one blocking a directory from being created for
+        ``target``; ``None`` when the walk reaches the root with nothing blocking.
+        """
         for ancestor in target.parents:
             if ancestor == root:
                 break
@@ -106,8 +110,10 @@ class AsyncLocalDriver:
 
     @staticmethod
     def _prune_empty_parents(root: Path, target: Path) -> None:
-        """Remove now-empty directories from ``target``'s parent up to (never
-        including) the store root, so a delete leaves no empty scaffolding."""
+        """Remove now-empty directories from ``target``'s parent up to the store root.
+
+        Never including the root, so a delete leaves no empty scaffolding.
+        """
         for parent in target.parents:
             if parent == root:
                 break
@@ -118,26 +124,31 @@ class AsyncLocalDriver:
                 break
 
     async def read_file(self, path: str) -> str:
+        """Read the UTF-8 text file at ``path``."""
         _, target = await self._resolve_under_root(path)
         async with aiofiles.open(target, encoding="utf-8") as f:
             return await f.read()
 
     async def write_file(self, path: str, content: str) -> None:
+        """Write ``content`` as UTF-8 text to ``path``, resolving id collisions."""
         target = await self._prepare_write_target(path)
         async with aiofiles.open(target, mode="w", encoding="utf-8") as f:
             await f.write(content)
 
     async def read_bytes(self, path: str) -> bytes:
+        """Read the raw bytes of the file at ``path``."""
         _, target = await self._resolve_under_root(path)
         async with aiofiles.open(target, mode="rb") as f:
             return await f.read()
 
     async def write_bytes(self, path: str, data: bytes) -> None:
+        """Write ``data`` bytes to ``path``, resolving id collisions."""
         target = await self._prepare_write_target(path)
         async with aiofiles.open(target, mode="wb") as f:
             await f.write(data)
 
     async def delete_file(self, path: str) -> None:
+        """Delete the file at ``path`` and prune now-empty parents."""
         root, target = await self._resolve_under_root(path)
 
         def _remove() -> None:
@@ -147,6 +158,7 @@ class AsyncLocalDriver:
         await asyncio.to_thread(_remove)
 
     async def delete_dir(self, path: str) -> None:
+        """Delete the directory tree at ``path`` and prune now-empty parents."""
         root, target = await self._resolve_under_root(path)
         if target == root:
             raise ValueError(f"Refusing to delete the storage root (path resolves to it): {path}")
@@ -167,6 +179,8 @@ class AsyncLocalDriver:
         await asyncio.to_thread(_remove)
 
     async def list_recursive(self) -> list[str]:
+        """List every stored file, as root-relative paths."""
+
         def _walk() -> list[str]:
             root = Path(self.root_path).resolve()
             results: list[str] = []

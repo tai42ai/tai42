@@ -1,6 +1,6 @@
-"""The subject-keyed state store contract: the wire models, the typed errors, and
-the callable seams a consumer registers on the ``app.states`` facet.
+"""The subject-keyed state store contract: wire models, typed errors, and callable seams.
 
+A consumer registers the seams on the ``app.states`` facet.
 The facet Protocol itself lives with the other app facets
 (:class:`~tai42_contract.app.facets.AppStates`); this package holds the data
 shapes and errors that facet passes across the door-agnostic seam.

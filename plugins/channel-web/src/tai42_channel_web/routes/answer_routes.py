@@ -1,5 +1,7 @@
-"""The answer door: forward a pending question's answer to its interactions callback
-and apply the callback's reply as the status policy."""
+"""The answer door: forward a pending question's answer to its interactions callback.
+
+Applies the callback's reply as the status policy.
+"""
 
 from __future__ import annotations
 
@@ -46,13 +48,13 @@ class AnswerForwardError(Exception):
 
 
 def _door_error_detail(response: httpx.Response) -> str:
-    """The callback door's OWN error message, or a fixed refusal when the reply does
-    not carry one.
+    """The callback door's OWN error message, or a fixed refusal when the reply does not carry one.
 
     Only a body in this platform's envelope is relayed. Anything else — a proxy or WAF
     page that answered instead of the door, a framework traceback, an upstream banner
     — is replaced and logged: it is written by an intermediary, names hosts and
-    software the visitor is not entitled to, and this is an anonymous public door."""
+    software the visitor is not entitled to, and this is an anonymous public door.
+    """
     try:
         payload = response.json()
     except ValueError:
@@ -69,9 +71,10 @@ def _door_error_detail(response: httpx.Response) -> str:
 
 
 def _is_already_answered(response: httpx.Response) -> bool:
-    """``True`` for the callback door's idempotent lost-claim reply,
-    ``200 {"data": {"status": "already_answered"}}`` — the door's ONLY answer to a
-    lost claim; it has no 409."""
+    """``True`` for the callback door's idempotent lost-claim reply.
+
+    ``200 {"data": {"status": "already_answered"}}`` — the door's ONLY answer to a lost claim; it has no 409.
+    """
     try:
         payload = response.json()
     except ValueError:
@@ -83,11 +86,13 @@ def _is_already_answered(response: httpx.Response) -> bool:
 
 
 async def _forward_answer(callback_url: str, answer: Any, params: dict[str, str] | None = None) -> httpx.Response:
-    """POST ``{"answer": <value>}`` (plus ``"params"`` when the session carried link
-    enrichment) to the interaction's callback door and return its response; the caller
+    """POST the answer to the interaction's callback door and return its response.
+
+    Sends ``{"answer": <value>}`` plus ``"params"`` when the session carried link enrichment; the caller
     applies the status policy. Mirrors the skeleton seam's body shape, so a web answer
     delivers the same enrichment beside its answer that a MESSAGE turn does; absent
-    params keep the body byte-identical to a plain forward."""
+    params keep the body byte-identical to a plain forward.
+    """
     body: dict[str, Any] = {"answer": answer}
     if params:
         body["params"] = params
@@ -96,10 +101,12 @@ async def _forward_answer(callback_url: str, answer: Any, params: dict[str, str]
 
 
 def _answer_from_body(raw: Any) -> tuple[Any, JSONResponse | None]:
-    """The forwardable answer value carried by a parsed answer body, or ``(None,
-    <refusal>)``: the body must be a JSON object carrying ``answer``, and the value
+    """The forwardable answer value carried by a parsed answer body, or ``(None, <refusal>)``.
+
+    The body must be a JSON object carrying ``answer``, and the value
     must pass the door's transport bound (a scalar or a size-capped object). The
-    callback door stays authoritative on format and schema match."""
+    callback door stays authoritative on format and schema match.
+    """
     if not isinstance(raw, dict) or "answer" not in raw:
         return None, _error("body must contain 'answer'", 400)
     answer = raw["answer"]
@@ -115,7 +122,8 @@ async def _claim_owned_question(registration: Any, interaction_id: str) -> Quest
     The record is READ first and refused as not-found unless BOTH the web route
     identity and the address are the caller's own — a foreign question is never
     revealed as existing — then claimed with ``GETDEL`` (a missing record, or a claim
-    a racing duplicate already took, is the same 404)."""
+    a racing duplicate already took, is the same 404).
+    """
     pending = await peek_question(interaction_id)
     if pending is None or not _serves(registration, pending.identity) or pending.address != registration.visitor_id:
         return _error(_QUESTION_NOT_FOUND, 404)
@@ -136,7 +144,8 @@ async def _apply_forward_result(
     terminal (the ticket is gone). A 400 rejected THIS answer: the record is restored
     so the visitor can re-answer — until the restore cap is spent, when the question is
     gone and they are told so — and the door's OWN error is surfaced. Anything else
-    restores the record and raises so the visitor can retry."""
+    restores the record and raises so the visitor can retry.
+    """
     if forwarded.status_code // 100 == 2:
         if _is_already_answered(forwarded):
             logger.info("interaction %s was already answered elsewhere; this forward recorded nothing", interaction_id)

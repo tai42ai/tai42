@@ -40,7 +40,7 @@ from tai42_skeleton.conversations.turn.tool_result import (
     _result_shape,
     _suspended_result_note,
 )
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
@@ -58,10 +58,13 @@ def _tool_payload(
     attachments: list[MediaItem] | None,
     location: LocationElement | None,
 ) -> dict[str, object]:
-    """Assemble the dispatch payload dict: the message/sender/event/person/params/form/
-    attachments/location fields plus the generic ``turn`` block. An event turn nulls
-    ``message``/``sender`` and carries its structured ``event``; the person and the optional
-    structured fields ride only when present."""
+    """Assemble the dispatch payload dict for a tool turn.
+
+    Carries the message/sender/event/person/params/form/attachments/location
+    fields plus the generic ``turn`` block. An event turn nulls
+    ``message``/``sender`` and carries its structured ``event``; the person and
+    the optional structured fields ride only when present.
+    """
     payload: dict[str, object] = {
         "message": text,
         "sender": client_address,
@@ -95,9 +98,12 @@ def _tool_payload(
 async def _dispatch_tool(
     route: ConversationRoute, kwargs: dict[str, object], thread_id: str, *, route_state_binding: StateBinding | None
 ) -> object:
-    """Run the tool under the bound execution identity, with the generic tool-route completion
-    bound around the dispatch and the route's optional state binding set/reset. Returns the raw
-    result; the caller owns the denied/failed dispatch guards."""
+    """Run the tool under the bound execution identity and return the raw result.
+
+    The generic tool-route completion is bound around the dispatch and the
+    route's optional state binding is set/reset. The caller owns the
+    denied/failed dispatch guards.
+    """
     async with bind_execution_identity(route.execution_key, bound_fingerprint=route.execution_key_fingerprint):
         # ``completion_delivery`` imports this module, so the constant is read lazily to keep
         # the door↔turn package free of an import cycle.
@@ -130,10 +136,14 @@ async def _dispatch_tool(
 
 
 async def _tool_outcome_of_result(route: ConversationRoute, result: object) -> _ToolOutcome:
-    """Map a raw tool run result to an outcome: the ordered SuspendedInteraction / suspended-note
-    / interrupt / failure / reply-mapping disposition chain. A paused/suspended run is silent, an
-    interrupt or non-success terminal is a client-safe error, and a clean result maps through
-    ``reply_expr`` to an answer or (null/blank) a silent outcome."""
+    """Map a raw tool run result to an outcome.
+
+    Applies the ordered SuspendedInteraction / suspended-note / interrupt /
+    failure / reply-mapping disposition chain. A paused/suspended run is silent,
+    an interrupt or non-success terminal is a client-safe error, and a clean
+    result maps through ``reply_expr`` to an answer or (null/blank) a silent
+    outcome.
+    """
     if isinstance(result, SuspendedInteraction):
         # The tool parked the caller on an async ask (a generic contract sentinel —
         # the turn learns nothing of the driver's resume state): produce no reply and
@@ -175,12 +185,12 @@ async def _tool_outcome_of_result(route: ConversationRoute, result: object) -> _
     try:
         reply = await _tool_reply(route, result)
     except Exception as exc:
-        logger.error("conversations: mapping the tool result for route %r failed", route.route_name, exc_info=exc)
+        logger.exception("conversations: mapping the tool result for route %r failed", route.route_name, exc_info=exc)
         # VALUE-FREE ground truth: the mapped envelope's SHAPE — never its participant-content values —
         # so a mapping fault is diagnosed from the structure the run actually returned (which
         # flagged surface is absent vs present-but-empty) instead of inferred from the guard text.
         try:
-            logger.error(
+            logger.exception(
                 "conversations: the tool result that failed to map for route %r had shape: %s",
                 route.route_name,
                 _result_shape(result),
@@ -207,9 +217,9 @@ async def _run_tool_turn(
     *,
     record: ConversationRecord,
 ) -> _ToolOutcome:
-    """Dispatch one tool turn as the route's execution key and return its resolved outcome
-    (a :class:`_SilentOutcome` or a :class:`_ResolvedOutcome`).
+    """Dispatch one tool turn as the route's execution key and return its resolved outcome.
 
+    The outcome is a :class:`_SilentOutcome` or a :class:`_ResolvedOutcome`.
     Stateless per message — no conversation memory. The inbound payload maps to
     the tool kwargs (``payload_expr`` or a fixed ``{message, sender, turn}``), the tool runs under
     the bound execution identity (whose ``run_tool`` seam authorizes the dispatch), and the
@@ -248,7 +258,8 @@ async def _run_tool_turn(
     with that address so the deferred outcome is mapped through the route's ``reply_expr`` and
     posted back here. A tool that never parks never fires it; the turn stays byte-identical to
     a plain dispatch. The platform learns nothing of the tool's resume machinery — only that a
-    park may deliver later through this bound address."""
+    park may deliver later through this bound address.
+    """
     payload = _tool_payload(
         route,
         text,
@@ -269,7 +280,7 @@ async def _run_tool_turn(
         # persisted into the record — so it names the error CLASS only, never its message
         # and never ``exc_info``. The adjacent tool-run/reply-mapping paths keep their
         # diagnosable text: they render the tool's own output, not the platform's jq input.
-        logger.error(
+        logger.exception(
             "conversations: mapping the inbound payload for route %r failed with %s",
             route.route_name,
             type(exc).__name__,
@@ -282,18 +293,21 @@ async def _run_tool_turn(
     route_state_binding = target_config.state_binding if target_config is not None else None
     try:
         result = await _dispatch_tool(route, kwargs, thread_id, route_state_binding=route_state_binding)
-    except PermissionDenied as exc:
+    except PermissionDeniedError as exc:
         return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:
-        logger.error("conversations: tool turn for route %r failed", route.route_name, exc_info=exc)
+        logger.exception("conversations: tool turn for route %r failed", route.route_name, exc_info=exc)
         return _tool_error(f"turn error: {exc}", route)
     return await _tool_outcome_of_result(route, result)
 
 
 async def _tool_kwargs(route: ConversationRoute, payload: dict[str, object]) -> dict[str, object]:
-    """The kwargs the tool is dispatched with. No ``payload_expr`` → the fixed
-    ``{message, sender, turn}`` (plus ``event`` on an event turn). Otherwise the jq program
-    over the full payload, which MUST emit exactly one value and it MUST be a JSON object."""
+    """The kwargs the tool is dispatched with.
+
+    No ``payload_expr`` → the fixed ``{message, sender, turn}`` (plus ``event``
+    on an event turn). Otherwise the jq program over the full payload, which MUST
+    emit exactly one value and it MUST be a JSON object.
+    """
     if route.payload_expr is None:
         kwargs: dict[str, object] = {
             "message": payload["message"],
@@ -313,23 +327,26 @@ async def _tool_kwargs(route: ConversationRoute, payload: dict[str, object]) -> 
         raise ValueError(f"payload_expr must emit exactly one value, emitted {'more than one' if values else 'none'}")
     kwargs = values[0]
     if not isinstance(kwargs, dict):
-        raise ValueError(f"payload_expr must emit a JSON object, emitted {type(kwargs).__name__}")
+        raise ValueError(f"payload_expr must emit a JSON object, emitted {type(kwargs).__name__}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     return kwargs
 
 
 async def _tool_reply(route: ConversationRoute, result: object) -> str | list[AnswerPart] | None:
-    """The reply a tool result maps to: ``None`` for a silent outcome, a single string, or an
-    ORDERED LIST OF RICH :class:`AnswerPart` messages the delivery machine sends as separate
-    messages in order. No ``reply_expr`` → the result must itself be ``None``, a string, or a
-    list. Otherwise the jq program over the raw result, which MUST emit exactly one value and
-    it MUST be null, a string, or an array.
+    """The reply a tool result maps to.
+
+    Either ``None`` for a silent outcome, a single string, or an ORDERED LIST OF
+    RICH :class:`AnswerPart` messages the delivery machine sends as separate
+    messages in order. No ``reply_expr`` → the result must itself be ``None``, a
+    string, or a list. Otherwise the jq program over the raw result, which MUST
+    emit exactly one value and it MUST be null, a string, or an array.
 
     A reply ARRAY is the multi-message authoring surface: each element is EITHER a plain
     string (shorthand for a text-only part) or a part OBJECT (``{message, media?, options?,
     template?}``) — both normalize to the one internal :class:`AnswerPart` model. An empty
     array, a blank string element, or a malformed part object (an unknown key, a bad shape) is
     a loud ``ValueError`` — never silently coerced (order is meaning; parts are strict from
-    birth)."""
+    birth).
+    """
     if route.reply_expr is None:
         if result is None or isinstance(result, str):
             return result
@@ -356,11 +373,14 @@ async def _tool_reply(route: ConversationRoute, result: object) -> str | list[An
 
 
 def _checked_reply_parts(value: list[object]) -> list[AnswerPart]:
-    """A tool reply array normalized to ordered :class:`AnswerPart` messages: non-empty, and
-    every element EITHER a plain string (a text-only part) or a part object. A blank string, a
-    malformed/unknown-key part object (``AnswerPart`` is ``extra="forbid"``), or an
-    unsupported element type is a loud ``ValueError`` — an empty array has no message to send,
-    and a bad element would deliver an empty or garbled part."""
+    """A tool reply array normalized to ordered :class:`AnswerPart` messages.
+
+    Non-empty, and every element EITHER a plain string (a text-only part) or a
+    part object. A blank string, a malformed/unknown-key part object
+    (``AnswerPart`` is ``extra="forbid"``), or an unsupported element type is a
+    loud ``ValueError`` — an empty array has no message to send, and a bad element
+    would deliver an empty or garbled part.
+    """
     if not value:
         raise ValueError("a tool reply array must carry at least one message, emitted an empty array")
     parts: list[AnswerPart] = []
@@ -375,17 +395,19 @@ def _checked_reply_parts(value: list[object]) -> list[AnswerPart]:
             except ValueError as exc:
                 raise ValueError(f"tool reply array element {index} is not a valid part: {exc}") from exc
         else:
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
                 f"tool reply array element {index} must be a string or a part object, got {type(element).__name__}"
             )
     return parts
 
 
 def _reply_parts(reply: str | list[AnswerPart] | None) -> list[AnswerPart] | None:
-    """The ordered parts a :func:`_tool_reply` result delivers, or ``None`` for a silent
-    outcome. A ``None`` reply and a blank single string are both silent; a non-blank single
-    string is one text part; a list is already normalized and validated by
-    :func:`_tool_reply`, so it passes through as the ordered parts."""
+    """The ordered parts a :func:`_tool_reply` result delivers, or ``None`` for a silent outcome.
+
+    A ``None`` reply and a blank single string are both silent; a non-blank
+    single string is one text part; a list is already normalized and validated by
+    :func:`_tool_reply`, so it passes through as the ordered parts.
+    """
     if reply is None:
         return None
     if isinstance(reply, str):

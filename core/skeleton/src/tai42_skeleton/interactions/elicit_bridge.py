@@ -35,11 +35,11 @@ logger = logging.getLogger(__name__)
 
 
 async def answer_elicit_via_ask_user(message: str, schema: dict[str, Any]) -> dict[str, Any]:
-    """Ask a human ``message`` with ``schema`` as the form answer-schema and
-    return the validated answer dict. Schema fidelity is the point: the schema
-    is carried through intact so the caller gets exactly the shape it asked for.
-    A timeout / no-answer raises out of ``ask_user`` (accept-or-raise); nothing
-    is swallowed."""
+    """Ask a human ``message`` with ``schema`` as the form answer-schema and return the validated answer dict.
+
+    Schema fidelity is the point: the schema is carried through intact so the caller gets exactly the shape
+    it asked for. A timeout / no-answer raises out of ``ask_user`` (accept-or-raise); nothing is swallowed.
+    """
     # Deferred: this module is reached through the app's tool wiring
     # (context_bridge) while ``tai42_skeleton.interactions`` is still
     # initializing, so a module-level import of ``ask_user`` from its helper
@@ -56,9 +56,11 @@ async def resolve_elicit(
     response_title: str | None = None,
     response_description: str | None = None,
 ) -> AcceptedElicitation[Any]:
-    """DERIVE the elicit schema from a Python ``response_type``, ask a
-    human through ``ask_user``, then map the validated answer back to the typed
-    ``AcceptedElicitation``. No decline/cancel round-trip — a no-answer raises."""
+    """Derive the elicit schema from a Python ``response_type`` and ask a human through ``ask_user``.
+
+    Maps the validated answer back to the typed ``AcceptedElicitation``. No decline/cancel round-trip —
+    a no-answer raises.
+    """
     config = parse_elicit_response_type(
         response_type,
         response_title=response_title,

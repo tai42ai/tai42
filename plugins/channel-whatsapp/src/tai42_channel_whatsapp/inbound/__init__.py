@@ -1,5 +1,4 @@
-"""Inbound WhatsApp webhook — where the human's reply and delivery
-receipts enter the system.
+"""Inbound WhatsApp webhook — where the human's reply and delivery receipts enter the system.
 
 ``/api/channels/whatsapp/inbound`` is unauthenticated (Meta cannot send the
 platform api key):

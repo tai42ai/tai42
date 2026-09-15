@@ -21,8 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 def _reap_interval_seconds() -> float:
-    """The reap sweep interval — the kit-declared dispatch default, so the skeleton
-    names no concrete provider."""
+    """The reap sweep interval — the kit-declared dispatch default.
+
+    Read from the kit default so the skeleton names no concrete provider.
+    """
     return SandboxDispatchSettings().reap_interval_seconds
 
 
@@ -33,7 +35,8 @@ async def run_sandbox_reap_loop() -> None:
     tick with no provider is a benign no-op (the task is only spawned with one, but a
     reload could retire it). A cancellation propagates for a clean shutdown exit; any
     other per-tick error is logged loudly and the loop survives to the next tick — a
-    silently dead reaper is the exact failure mode this task removes."""
+    silently dead reaper is the exact failure mode this task removes.
+    """
     interval = _reap_interval_seconds()
     while True:
         await asyncio.sleep(interval)

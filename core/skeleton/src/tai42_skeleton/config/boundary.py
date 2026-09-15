@@ -1,6 +1,6 @@
-"""The shared env-write boundary validator — three refusals every env/manifest
-writer crosses at the :class:`~tai42_skeleton.config.service.ConfigService`
-validation layer.
+"""The shared env-write boundary validator — three refusals every env/manifest writer crosses.
+
+The refusals are enforced at the :class:`~tai42_skeleton.config.service.ConfigService` validation layer.
 
 X-band refusal
     An env write may never carry a deployment / boot-identity key: the registry's
@@ -73,13 +73,13 @@ X_BAND_EXTRA: frozenset[str] = frozenset(
 
 
 def excluded_env_var_names() -> frozenset[str]:
-    """Half (a): every registered field whose resolved ``reload_class`` is
-    ``excluded`` and that carries a non-empty ``env_var``.
+    """Half (a): every registered ``excluded``-``reload_class`` field carrying a non-empty ``env_var``.
 
     Sourced from :func:`~tai42_kit.settings.registered_settings`, so it reflects
     only the settings classes IMPORTED into the process — a caller that needs the
     full set (including an externally-installed provider's ``excluded`` group) must
-    boot / import the settings modules first."""
+    boot / import the settings modules first.
+    """
     return frozenset(
         field.env_var
         for info in registered_settings()
@@ -93,7 +93,8 @@ def registered_env_var_names() -> frozenset[str]:
 
     Reflects only IMPORTED settings classes. Used to keep a GENERATED secret key from
     SHADOWING any registered settings env var — not just the X band, which covers
-    only the ``excluded`` subset."""
+    only the ``excluded`` subset.
+    """
     return frozenset(field.env_var for info in registered_settings() for field in info.fields if field.env_var)
 
 
@@ -103,7 +104,8 @@ def reload_class_by_env_var() -> dict[str, str]:
     Reflects only IMPORTED settings classes (the running kit + skeleton + manifest
     plugin modules), so a caller diffing env keys against it (the profile diff / apply
     recycle classification) sees exactly the live registry's classes. A key absent from
-    the map has no registered field and is treated as the ``hot`` default by callers."""
+    the map has no registered field and is treated as the ``hot`` default by callers.
+    """
     mapping: dict[str, str] = {}
     for info in registered_settings():
         for field in info.fields:
@@ -113,9 +115,10 @@ def reload_class_by_env_var() -> dict[str, str]:
 
 
 def x_band_env_keys() -> frozenset[str]:
-    """The full X band: the registry's ``excluded`` fields, the deployment
-    bare-reads, and the boot-identity extras, unioned. The single source of truth
-    for X refusal."""
+    """The full X band: ``excluded`` fields, deployment bare-reads, and boot-identity extras, unioned.
+
+    The single source of truth for X refusal.
+    """
     return excluded_env_var_names() | X_CLASSIFIED_DEPLOYMENT_BARE_READS | X_BAND_EXTRA
 
 
@@ -124,7 +127,8 @@ def refuse_x_band(written_keys: Iterable[str]) -> None:
 
     ``written_keys`` is the writer's declared payload — the keys it intends to
     write — NEVER the post-carry effective env. Raises :class:`ValueError` naming
-    every offender (names only) — the operations layer maps it to a 400."""
+    every offender (names only) — the operations layer maps it to a 400.
+    """
     offenders = sorted(set(written_keys) & x_band_env_keys())
     if offenders:
         raise ValueError(
@@ -134,9 +138,11 @@ def refuse_x_band(written_keys: Iterable[str]) -> None:
 
 
 def key_material_env_keys() -> frozenset[str]:
-    """Every registered field flagged ``key_material`` (the kit ``KeyMaterial`` type)
-    that carries a non-empty ``env_var``. Reflects only IMPORTED settings classes, so a
-    key-material field only enters the set once its settings module is loaded."""
+    """Every registered field flagged ``key_material`` (the kit ``KeyMaterial`` type) with a non-empty ``env_var``.
+
+    Reflects only IMPORTED settings classes, so a key-material field only enters the set once its settings
+    module is loaded.
+    """
     return frozenset(
         field.env_var for info in registered_settings() for field in info.fields if field.key_material and field.env_var
     )
@@ -159,7 +165,8 @@ def refuse_key_material(written: Mapping[str, str], current: Mapping[str, str]) 
     and is allowed. (A client that sent a MASKED placeholder for a key-material key would look
     "changed" and be refused; but every read surface here returns real values, so the
     read-modify-write contract these editors use holds.) Raises :class:`ValueError` naming
-    every offender and the rotation path (names only) — the operations layer maps it to 400."""
+    every offender and the rotation path (names only) — the operations layer maps it to 400.
+    """
     key_material = key_material_env_keys()
     offenders = sorted(key for key, value in written.items() if key in key_material and value != current.get(key))
     if offenders:
@@ -187,7 +194,8 @@ def refuse_incomplete_admin_pair(effective_env: Mapping[str, str]) -> None:
     key present with a non-empty value counts as set — the store never persists empties, so
     this matches what a reload materializes and the registry then loads). Raises
     :class:`ValueError` naming both vars per incomplete database — the ops layer maps it to a
-    400."""
+    400.
+    """
     halves: dict[str, set[str]] = {}
     for key, value in effective_env.items():
         match = _ADMIN_PAIR_RE.match(key)
@@ -214,7 +222,8 @@ def refuse_dangling_env_markers(preserved_manifest: Mapping[str, Any], effective
     it carries no ``:default`` (``ref.required``) AND its var is absent from
     *effective_env* — ``${VAR:default}`` and a bare ``!ENV VAR`` never dangle. Raises
     :class:`ValueError` naming each ``(VAR, json-pointer)`` pair (names only, never the
-    marker value) — the operations layer maps it to a 400."""
+    marker value) — the operations layer maps it to a 400.
+    """
     dangling = [
         f"{ref.var} (at {ref.pointer})"
         for ref in scan_env_marker_refs(preserved_manifest)
@@ -238,7 +247,8 @@ def refuse_unset_connector_env(preserved_manifest: Mapping[str, Any], effective_
     band — a profile that omits a deployment-supplied cred does not remove it from the
     process env), so both must be present in it, else :class:`ValueError` naming each
     ``(VAR, json-pointer)`` pair (names only, never a value) — the operations layer maps
-    it to a 400."""
+    it to a 400.
+    """
     connectors = preserved_manifest.get("connectors")
     if not isinstance(connectors, list):
         return
@@ -263,8 +273,7 @@ def refuse_unresolved_env(
     *,
     connector_env: Mapping[str, str] | None = None,
 ) -> None:
-    """The single env-resolution authority: run BOTH the dangling ``!ENV`` refusal and the
-    unset connector-env refusal.
+    """The single env-resolution authority: run BOTH the dangling ``!ENV`` refusal and the unset connector-env refusal.
 
     Markers resolve against *effective_env* — the modeled post-change band. Connector
     client-credential env resolves against *connector_env* (defaulting to *effective_env*):
@@ -277,6 +286,7 @@ def refuse_unresolved_env(
     Every former :func:`refuse_dangling_env_markers` caller (the config pipeline's four
     validate seams and the offline ``tai manifest validate`` / ``tai config lint`` door)
     crosses this one function, so a manifest write is refused whenever it would leave EITHER
-    a marker or an oauth connector's credential env unresolved."""
+    a marker or an oauth connector's credential env unresolved.
+    """
     refuse_dangling_env_markers(preserved_manifest, effective_env)
     refuse_unset_connector_env(preserved_manifest, effective_env if connector_env is None else connector_env)

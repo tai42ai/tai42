@@ -1,5 +1,7 @@
-"""The ``ask_user`` error types: the timeout and the open-question-limit refusals,
-each tagged with the error kind the tool layer surfaces."""
+"""The ``ask_user`` error types: the timeout and the open-question-limit refusals.
+
+Each is tagged with the error kind the tool layer surfaces.
+"""
 
 from __future__ import annotations
 
@@ -14,8 +16,10 @@ class InteractionTimeoutError(Exception):
 
 
 class InteractionLimitError(Exception):
-    """Raised when a new ``ask_user`` call is refused because too many questions
-    are already open (the ``max_concurrent`` guard)."""
+    """Raised when a new ``ask_user`` call is refused because too many questions are already open.
+
+    Enforced by the ``max_concurrent`` guard.
+    """
 
     # Judgment call: the open-question ceiling is a saturated resource, so the ask is
     # refused as UNAVAILABLE (a temporary refusal), not a caller BAD_INPUT.

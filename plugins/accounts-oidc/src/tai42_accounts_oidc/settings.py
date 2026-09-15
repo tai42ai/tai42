@@ -90,8 +90,10 @@ class OidcProviderConfig(BaseModel):
 
 
 def _normalize_public_base_url(value: str) -> str:
-    """Validate an absolute ``https`` base URL (loopback ``http`` excepted) and
-    strip a trailing slash so the derived paths never double a separator."""
+    """Validate an absolute ``https`` base URL (loopback ``http`` excepted) and strip a trailing slash.
+
+    Stripping the trailing slash keeps the derived paths from doubling a separator.
+    """
     parts = urlsplit(value)
     if not parts.scheme or not parts.netloc:
         raise ValueError(f"TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL must be an absolute URL, got {value!r}")

@@ -1,5 +1,7 @@
-"""The Observations API query surface: ``list_spans_in_window`` -> one item per
-tool/node run, tag-enriched and client-sorted."""
+"""The Observations API query surface for ``list_spans_in_window``.
+
+Returns one item per tool/node run, tag-enriched and client-sorted.
+"""
 
 from __future__ import annotations
 
@@ -48,14 +50,15 @@ class SpanWindowQuery(_LangfuseQuery):
         *,
         run: str | None = None,
         kind: SpanKind | None = None,
-        filter: MonitoringFilter | None = None,
+        filter_: MonitoringFilter | None = None,
         order_by: OrderBy | None = None,
     ) -> list[SpanWindowItem]:
+        """List tool/node spans in ``[t0, t1]``, optionally narrowed by ``run``/``kind``/``filter_`` and ordered."""
         client = await self._active_client()
         source = self._m.active_source()
 
         type_filter = _KIND_TO_TYPE.get(kind) if kind is not None else None
-        advanced = _observation_advanced_filter(filter)
+        advanced = _observation_advanced_filter(filter_)
         filter_json = json.dumps(advanced) if advanced else None
 
         observations = await self._fetch_observations(
@@ -66,16 +69,16 @@ class SpanWindowQuery(_LangfuseQuery):
             type_filter=type_filter,
             filter_json=filter_json,
             environment=source,
-            name=filter.name if filter else None,
-            user_id=filter.user_id if filter else None,
-            level=_level_value(filter.level if filter else None),
+            name=filter_.name if filter_ else None,
+            user_id=filter_.user_id if filter_ else None,
+            level=_level_value(filter_.level if filter_ else None),
         )
 
         # session_id has no native get_many param. Resolve the session to its
         # trace-id set and filter the RAW observations before mapping —
         # SpanWindowItem drops trace_id, so it can't be done after.
-        if filter and filter.session_id:
-            trace_ids = await self._session_trace_ids(client, filter.session_id, source)
+        if filter_ and filter_.session_id:
+            trace_ids = await self._session_trace_ids(client, filter_.session_id, source)
             observations = [obs for obs in observations if obs.trace_id in trace_ids]
 
         selected = [obs for obs in observations if self._is_tool_granularity(obs, kind)]
@@ -176,8 +179,9 @@ class SpanWindowQuery(_LangfuseQuery):
         return obs_type in {"SPAN", "TOOL", "AGENT", "CHAIN", "RETRIEVER"}
 
     async def _resolve_trace_tags(self, client: Any, trace_ids: set[str]) -> dict[str, list[str]]:
-        """Tags per trace, resolved from the parent trace (the observation row
-        carries none), fetching each distinct trace once.
+        """Tags per trace, resolved from the parent trace, fetching each distinct trace once.
+
+        The observation row carries no tags, so the parent trace is the source.
 
         A failed tag fetch is logged and degrades to an empty tag list; the span
         itself stays in the result.

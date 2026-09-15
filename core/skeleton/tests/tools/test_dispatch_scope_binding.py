@@ -69,8 +69,8 @@ class _FakeStates:
         self.evals.append(name)
         return TemplateJqResult(name=name, value={"from": name})
 
-    async def apply_template_jq(self, state, subject, name, input, *, op_id, origin) -> TemplateJqApplyResult:
-        self.applies.append((name, input))
+    async def apply_template_jq(self, state, subject, name, input_, *, op_id, origin) -> TemplateJqApplyResult:
+        self.applies.append((name, input_))
         return TemplateJqApplyResult(name=name, applied=True, data={}, seq=1.0, skipped=[])
 
     async def apply(self, state, subject, ops, *, op_id, origin) -> ApplyResult:

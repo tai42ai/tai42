@@ -56,8 +56,10 @@ def _is_active_name_violation(exc: UniqueViolation) -> bool:
 
 @dataclass(frozen=True)
 class _PgTransaction:
-    """The concrete unit-of-work handle: the single pooled connection every write in
-    the scope shares, so they commit or roll back together (see :meth:`transaction`)."""
+    """The concrete unit-of-work handle: the single pooled connection every write in the scope shares.
+
+    They commit or roll back together (see :meth:`transaction`).
+    """
 
     conn: Any
 
@@ -67,11 +69,12 @@ class PostgresVersionedStore(VersionedStore):
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[VersionedStoreTransaction]:
-        """Open one unit of work over a single pooled connection: BEGIN on entry,
-        COMMIT on a clean exit, ROLLBACK on any exception. Every write passed the
-        yielded handle as ``tx=`` runs on that one connection, so a role change and its
-        audit append commit or roll back together — never a live change without its
-        audit."""
+        """Open one unit of work over a single pooled connection (BEGIN on entry, COMMIT/ROLLBACK on exit).
+
+        Every write passed the yielded handle as ``tx=`` runs on that one connection, so a role
+        change and its audit append commit or roll back together — never a live change without
+        its audit.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -81,10 +84,13 @@ class PostgresVersionedStore(VersionedStore):
 
     @asynccontextmanager
     async def _cursor(self, tx: VersionedStoreTransaction | None) -> AsyncIterator[Any]:
-        """A cursor for one write. WITHIN a passed ``tx`` it rides that transaction's
-        shared connection (no own BEGIN/COMMIT — the outer scope owns the commit);
-        WITHOUT one it acquires its own pooled connection and wraps a self-contained
-        transaction, preserving each write's stand-alone atomicity."""
+        """Yield a cursor for one write.
+
+        WITHIN a passed ``tx`` it rides that transaction's shared connection (no own
+        BEGIN/COMMIT — the outer scope owns the commit); WITHOUT one it acquires its own pooled
+        connection and wraps a self-contained transaction, preserving each write's stand-alone
+        atomicity.
+        """
         if tx is not None:
             async with cast("_PgTransaction", tx).conn.cursor() as cur:
                 yield cur
@@ -99,10 +105,13 @@ class PostgresVersionedStore(VersionedStore):
 
     @asynccontextmanager
     async def _read_cursor(self, tx: VersionedStoreTransaction | None) -> AsyncIterator[Any]:
-        """A cursor for one read. WITHIN a passed ``tx`` it rides that transaction's shared
-        connection, so the read sees the transaction's own uncommitted writes and can take
-        a row lock the transaction goes on to hold; WITHOUT one it acquires its own pooled
-        connection with no surrounding transaction — exactly a stand-alone read."""
+        """Yield a cursor for one read.
+
+        WITHIN a passed ``tx`` it rides that transaction's shared connection, so the read sees
+        the transaction's own uncommitted writes and can take a row lock the transaction goes on
+        to hold; WITHOUT one it acquires its own pooled connection with no surrounding
+        transaction — exactly a stand-alone read.
+        """
         if tx is not None:
             async with cast("_PgTransaction", tx).conn.cursor() as cur:
                 yield cur
@@ -123,6 +132,7 @@ class PostgresVersionedStore(VersionedStore):
         *,
         tx: VersionedStoreTransaction | None = None,
     ) -> DocumentRecord:
+        """Create a new document at version 1; a live duplicate ``(kind, name)`` raises :class:`DocumentExistsError`."""
         async with self._cursor(tx) as cur:
             # The claim is CONFLICT-FREE: ``ON CONFLICT ... DO NOTHING`` absorbs the live
             # duplicate, so a LOSING concurrent creator (two replicas seeding the same
@@ -160,6 +170,7 @@ class PostgresVersionedStore(VersionedStore):
         *,
         tx: VersionedStoreTransaction | None = None,
     ) -> DocumentVersion:
+        """Append a new version and point active at it; an unknown document raises :class:`DocumentNotFoundError`."""
         async with self._cursor(tx) as cur:
             # ``FOR UPDATE`` row-locks the active document so two concurrent
             # saves serialize: the second waits here, then reads the MAX the
@@ -200,6 +211,7 @@ class PostgresVersionedStore(VersionedStore):
             )
 
     async def list(self, kind: str) -> list[DocumentRecord]:
+        """List every active document of ``kind``, ordered by name."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -223,12 +235,14 @@ class PostgresVersionedStore(VersionedStore):
         ]
 
     async def list_active_bodies(self, kind: str) -> dict[str, dict[str, Any]]:
-        """Every active document body of ``kind``, keyed by name — the batched
-        read that replaces a per-record ``get_active_body`` round-trip (the list
+        """Return every active document body of ``kind``, keyed by name.
+
+        The batched read that replaces a per-record ``get_active_body`` round-trip (the list
         route + rehydrate N+1). One JOIN on ``version = active_version``.
 
         Concrete-only (not on the ``VersionedStore`` protocol): callers reach it
-        through the concretely-typed ``_versioned_store`` accessor."""
+        through the concretely-typed ``_versioned_store`` accessor.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -251,7 +265,8 @@ class PostgresVersionedStore(VersionedStore):
         that must retain the version beside the body (the preset engine's rehydration)
         can never pair a body with a version from a skewed second read. Concrete-only
         (not on the ``VersionedStore`` protocol): reached through the concretely-typed
-        ``_versioned_store`` accessor."""
+        ``_versioned_store`` accessor.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -274,7 +289,8 @@ class PostgresVersionedStore(VersionedStore):
         (the preset engine's edit reload retains the freshly-active version beside the
         body it re-binds). Raises :class:`DocumentNotFoundError` for an unknown
         document, matching :meth:`get_active_body`. Concrete-only (reached through the
-        concretely-typed ``_versioned_store`` accessor)."""
+        concretely-typed ``_versioned_store`` accessor).
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -292,6 +308,7 @@ class PostgresVersionedStore(VersionedStore):
         return row[0], row[1]
 
     async def get(self, kind: str, name: str) -> DocumentRecord:
+        """Return the active document record for ``(kind, name)``; unknown raises :class:`DocumentNotFoundError`."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -318,6 +335,11 @@ class PostgresVersionedStore(VersionedStore):
         tx: VersionedStoreTransaction | None = None,
         for_update: bool = False,
     ) -> dict[str, Any]:
+        """Return the active version body for ``(kind, name)``.
+
+        ``for_update`` locks the active row and requires a ``tx``; an unknown document raises
+        :class:`DocumentNotFoundError`.
+        """
         if for_update and tx is None:
             raise ValueError(
                 "get_active_body(for_update=True) requires a tx: a FOR UPDATE lock outside a "
@@ -338,8 +360,7 @@ class PostgresVersionedStore(VersionedStore):
         return row[0]
 
     async def _locked_active_body(self, kind: str, name: str, tx: VersionedStoreTransaction | None) -> dict[str, Any]:
-        """The active body under a row lock, read in TWO statements — never a JOIN under
-        the lock.
+        """Return the active body under a row lock, read in TWO statements — never a JOIN under the lock.
 
         A single ``JOIN ... FOR UPDATE`` re-scans the versions table under READ COMMITTED
         with an EvalPlanQual hazard: when a second concurrent editor blocks on the lock and
@@ -349,7 +370,8 @@ class PostgresVersionedStore(VersionedStore):
         document that plainly exists. Instead: statement (1) locks the parent document row
         ALONE (no join) and yields its ``active_version``; statement (2) is a FRESH read of
         that version's body, issued AFTER the lock, so it sees the committed active version
-        (matching ``save_version``'s proven lock-then-read pattern)."""
+        (matching ``save_version``'s proven lock-then-read pattern).
+        """
         async with self._read_cursor(tx) as cur:
             await cur.execute(
                 "SELECT id, active_version FROM versioned_documents "
@@ -367,6 +389,7 @@ class PostgresVersionedStore(VersionedStore):
             return _require_row(await cur.fetchone())[0]
 
     async def list_versions(self, kind: str, name: str) -> list[DocumentVersion]:
+        """List every version oldest first, flagging the current one; unknown raises :class:`DocumentNotFoundError`."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -400,6 +423,10 @@ class PostgresVersionedStore(VersionedStore):
     async def get_version(
         self, kind: str, name: str, version: int, *, tx: VersionedStoreTransaction | None = None
     ) -> DocumentVersion:
+        """Return one specific ``version`` of a document.
+
+        An unknown document or version raises :class:`DocumentVersionNotFoundError`.
+        """
         async with self._read_cursor(tx) as cur:
             await cur.execute(
                 "SELECT d.active_version, v.body, v.tags, v.created_at FROM versioned_documents d "
@@ -420,14 +447,15 @@ class PostgresVersionedStore(VersionedStore):
         )
 
     async def set_version_tags(self, kind: str, name: str, version: int, tags: list[str]) -> None:
-        """Replace the ``tags`` annotation on one version row — labels on an
-        immutable version body, edited without touching the body.
+        """Replace the ``tags`` annotation on one version row, without touching the body.
 
+        Labels on an immutable version body, edited independently.
         Concrete-only (not on the ``VersionedStore`` protocol): reached through the
         concretely-typed ``_versioned_store`` accessor. Resolves the active
         document, then UPDATEs the named version's ``tags`` column. Raises
         :class:`DocumentVersionNotFoundError` for an unknown document or version,
-        mirroring :meth:`get_version`'s error style."""
+        mirroring :meth:`get_version`'s error style.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -450,6 +478,10 @@ class PostgresVersionedStore(VersionedStore):
     async def rollback(
         self, kind: str, name: str, version: int, *, tx: VersionedStoreTransaction | None = None
     ) -> DocumentRecord:
+        """Re-point active to an existing ``version`` with no data copy.
+
+        An unknown document or version raises :class:`DocumentVersionNotFoundError`.
+        """
         async with self._cursor(tx) as cur:
             # ``FOR UPDATE`` row-locks the active document so a rollback never
             # races a concurrent save's pointer bump — the two serialize on the
@@ -478,6 +510,7 @@ class PostgresVersionedStore(VersionedStore):
             )
 
     async def soft_delete(self, kind: str, name: str) -> None:
+        """Mark ``(kind, name)`` inactive, keeping its rows; unknown raises :class:`DocumentNotFoundError`."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -491,6 +524,10 @@ class PostgresVersionedStore(VersionedStore):
                 raise DocumentNotFoundError(kind, name)
 
     async def delete(self, kind: str, name: str, *, tx: VersionedStoreTransaction | None = None) -> None:
+        """Hard-delete the active document, cascading its version rows.
+
+        An unknown document raises :class:`DocumentNotFoundError`.
+        """
         async with self._cursor(tx) as cur:
             # HARD delete of the ACTIVE row only (structurally at most one per
             # name); the FK cascade drops its version rows with it, while any
@@ -503,6 +540,10 @@ class PostgresVersionedStore(VersionedStore):
                 raise DocumentNotFoundError(kind, name)
 
     async def rename(self, kind: str, name: str, new_name: str) -> DocumentRecord:
+        """Rename the active document to ``new_name``, moving its full history.
+
+        A name clash with a live document raises :class:`DocumentExistsError`.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -539,9 +580,11 @@ class PostgresVersionedStore(VersionedStore):
 
 
 def _require_row(row: Any) -> Any:
-    """Return ``row`` or fail loudly — a ``RETURNING``/aggregate read the store
-    just issued must produce a row; a ``None`` here is a broken invariant, never a
-    silent default."""
+    """Return ``row`` or fail loudly.
+
+    A ``RETURNING``/aggregate read the store just issued must produce a row; a ``None`` here is
+    a broken invariant, never a silent default.
+    """
     if row is None:
         raise RuntimeError("expected a row from the preceding statement, got none")
     return row

@@ -1,5 +1,4 @@
-"""The WhatsApp channel: ``deliver`` sends one question, ``notify`` sends
-one fire-and-forget message.
+"""The WhatsApp channel: ``deliver`` sends one question, ``notify`` sends one fire-and-forget message.
 
 Tier-1 formats (``confirm``, ``external``) carry the callback_url as a tappable
 link and store NO correlation — the human answers via the callback door; confirm

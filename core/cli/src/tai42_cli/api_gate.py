@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Release API-diff gate: fail a publish whose public-API change class exceeds
-the version bump the release-please label produced.
+"""Release API-diff gate: fail a publish whose public-API change class exceeds its version bump.
 
 The gate compares a to-be-released package's public API at the pushed tag
 against its previous released tag with ``griffe`` and classifies the result as
@@ -94,10 +93,11 @@ def _version_class(new_major: int) -> str:
 
 
 def _allowed_bumps(mode: str, new_major: int) -> frozenset[str]:
-    """Bump classes that may carry a breaking surface change, given the mode and
-    the NEW version's major component. Strict allows only a major for every
-    version; label-honesty allows a major for a ``>=1.0`` package and both a
-    minor and a major for a ``0.x`` one (the 0.x breaking slot)."""
+    """Bump classes that may carry a breaking surface change, given mode and new-version major.
+
+    Strict allows only a major for every version; label-honesty allows a major for a
+    ``>=1.0`` package and both a minor and a major for a ``0.x`` one (the 0.x breaking slot).
+    """
     if mode == "strict":
         return frozenset({"major"})
     if mode == "label-honesty":
@@ -136,8 +136,8 @@ def _bump_class(old: str, new: str) -> str:
 def _previous_tag(package: str, new_version: str, repo_root: Path) -> str | None:
     """Highest ``<package>-v<version>`` tag strictly below ``new_version``."""
     prefix = f"{package}-v"
-    out = subprocess.run(
-        ["git", "tag", "--list", f"{prefix}*"],
+    out = subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
+        ["git", "tag", "--list", f"{prefix}*"],  # noqa: S607 fixed, trusted executable resolved from PATH
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -186,8 +186,8 @@ def _top_modules_worktree(src: Path) -> set[str]:
 
 
 def _top_modules_ref(ref: str, src_rel: str, repo_root: Path) -> set[str]:
-    out = subprocess.run(
-        ["git", "ls-tree", ref, f"{src_rel}/"],
+    out = subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
+        ["git", "ls-tree", ref, f"{src_rel}/"],  # noqa: S607 fixed, trusted executable resolved from PATH
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -211,8 +211,11 @@ def _top_modules_ref(ref: str, src_rel: str, repo_root: Path) -> set[str]:
 
 
 def _call_callee_name(func: ast.expr) -> str | None:
-    """Callee name of a call node when it is a bare name (``Field``) or a dotted
-    attribute (``pydantic.Field`` -> ``Field``), else ``None``."""
+    """Callee name of a call node, else ``None``.
+
+    A bare name (``Field``) or a dotted attribute (``pydantic.Field`` -> ``Field``)
+    yields the final name; any other expression yields ``None``.
+    """
     if isinstance(func, ast.Name):
         return func.id
     if isinstance(func, ast.Attribute):
@@ -221,11 +224,12 @@ def _call_callee_name(func: ast.expr) -> str | None:
 
 
 def _pop_kwarg(node: ast.Call, name: str) -> ast.expr | None:
-    """Remove and return the value of the keyword literally named ``name`` from
-    ``node`` (mutating its ``keywords``), or ``None`` when it is absent. A
-    ``**expansion`` (``kw.arg is None``) is never matched and is left in place, so
-    a spread ``json_schema_extra`` survives into the structural comparison and, if
-    it differs at all, keeps the change breaking."""
+    """Remove and return the value of keyword ``name`` from ``node``, or ``None`` when absent.
+
+    Mutates ``node.keywords``. A ``**expansion`` (``kw.arg is None``) is never matched and is
+    left in place, so a spread ``json_schema_extra`` survives into the structural comparison
+    and, if it differs at all, keeps the change breaking.
+    """
     for i, kw in enumerate(node.keywords):
         if kw.arg == name:
             del node.keywords[i]
@@ -234,10 +238,12 @@ def _pop_kwarg(node: ast.Call, name: str) -> ast.expr | None:
 
 
 def _literal_str_key_dict(node: ast.expr) -> dict[str, str] | None:
-    """Map each key to ``ast.dump`` of its value when ``node`` is an ``ast.Dict``
-    whose keys are ALL literal strings, else ``None``. A ``**expansion`` (a ``None``
-    key node) or a non-string/duplicate key makes the mapping non-literal and
-    returns ``None`` so the caller fails closed."""
+    """Map each literal-string key to ``ast.dump`` of its value, else ``None``.
+
+    Returns the mapping only when ``node`` is an ``ast.Dict`` whose keys are ALL literal
+    strings; a ``**expansion`` (a ``None`` key node) or a non-string/duplicate key makes the
+    mapping non-literal and returns ``None`` so the caller fails closed.
+    """
     if not isinstance(node, ast.Dict):
         return None
     result: dict[str, str] = {}
@@ -252,11 +258,13 @@ def _literal_str_key_dict(node: ast.expr) -> dict[str, str] | None:
 
 def _schema_extra_delta_is_doc_only(old_value: ast.expr | None, new_value: ast.expr | None) -> bool:
     """True when a ``json_schema_extra`` change is confined to documentation keys.
+
     Both values must be literal string-keyed dicts (an absent side, ``None``, counts
     as the empty dict); the change is forgiven only when every key whose dumped value
     differs between the two — added, removed or edited — is in
     :data:`_SCHEMA_EXTRA_DOC_KEYS`. A non-dict/callable value, a non-literal key, or
-    any delta touching a behavioural or unknown key returns ``False`` (fail closed)."""
+    any delta touching a behavioural or unknown key returns ``False`` (fail closed).
+    """
     old_map = {} if old_value is None else _literal_str_key_dict(old_value)
     new_map = {} if new_value is None else _literal_str_key_dict(new_value)
     if old_map is None or new_map is None:
@@ -268,14 +276,16 @@ def _schema_extra_delta_is_doc_only(old_value: ast.expr | None, new_value: ast.e
 
 
 def _is_literal_to_doc_field(old_node: ast.expr, new_node: ast.Call) -> bool:
-    """True when a plain-literal default was merely wrapped into a known callee's
-    call whose ONLY non-documentation content is a ``default=`` equal to that same
-    literal — e.g. ``None`` -> ``Field(default=None, json_schema_extra={...})``.
-    The default must be passed by keyword and be structurally identical to the old
-    literal; any positional argument, any missing/differing default, or any non-doc
-    keyword (``alias``/``ge``/…) makes it real surface and returns ``False``. A
-    wrapped ``json_schema_extra`` payload is allowed only when its delta versus the
-    empty mapping is documentation-only (see :func:`_schema_extra_delta_is_doc_only`)."""
+    """True when a plain-literal default was merely wrapped into a known callee's ``default=``.
+
+    The wrapping call's ONLY non-documentation content must be a ``default=`` equal to that
+    same literal — e.g. ``None`` -> ``Field(default=None, json_schema_extra={...})``. The
+    default must be passed by keyword and be structurally identical to the old literal; any
+    positional argument, any missing/differing default, or any non-doc keyword
+    (``alias``/``ge``/…) makes it real surface and returns ``False``. A wrapped
+    ``json_schema_extra`` payload is allowed only when its delta versus the empty mapping is
+    documentation-only (see :func:`_schema_extra_delta_is_doc_only`).
+    """
     callee = _call_callee_name(new_node.func)
     if callee not in _SCHEMA_EXTRA_CALLEES or new_node.args:
         return False
@@ -295,8 +305,9 @@ def _is_literal_to_doc_field(old_node: ast.expr, new_node: ast.Call) -> bool:
 
 
 def _is_doc_only_call_change(old_expr: str, new_expr: str) -> bool:
-    """True only when the value change is confined to documentation metadata of a
-    known decorator/constructor callee. Two shapes qualify:
+    """True only when a value change is confined to a known decorator/constructor callee's documentation metadata.
+
+    Two shapes qualify:
 
     * call -> call to the SAME known callee (a key of ``_DOC_KEYWORDS``) that is
       structurally equal after dropping that callee's documentation-only keywords.
@@ -310,7 +321,8 @@ def _is_doc_only_call_change(old_expr: str, new_expr: str) -> bool:
 
     A parse failure, a non-call new expression, an unknown callee or a callee
     mismatch returns ``False`` — the classification stays breaking — and any other
-    surprise propagates to the caller as a loud crash."""
+    surprise propagates to the caller as a loud crash.
+    """
     try:
         old_node = ast.parse(old_expr, mode="eval").body
         new_node = ast.parse(new_expr, mode="eval").body
@@ -346,11 +358,13 @@ _COLLECTION_WRAPPERS = frozenset({"MappingProxyType", "frozenset", "tuple", "lis
 
 
 def _unwrap_collection(node: ast.expr) -> tuple[ast.expr, tuple[str, ...]]:
-    """Peel any chain of recognised single-argument collection wrappers off
-    ``node``, returning the innermost expression and the wrapper-name chain that
-    was peeled (outermost first). A wrapper only unwraps when its callee is a
-    bare or dotted name in :data:`_COLLECTION_WRAPPERS` with EXACTLY one
-    positional argument and NO keywords; anything else stops the peeling."""
+    """Peel any chain of recognised single-argument collection wrappers off ``node``.
+
+    Returns the innermost expression and the wrapper-name chain that was peeled (outermost
+    first). A wrapper only unwraps when its callee is a bare or dotted name in
+    :data:`_COLLECTION_WRAPPERS` with EXACTLY one positional argument and NO keywords;
+    anything else stops the peeling.
+    """
     chain: list[str] = []
     while (
         isinstance(node, ast.Call)
@@ -360,24 +374,29 @@ def _unwrap_collection(node: ast.expr) -> tuple[ast.expr, tuple[str, ...]]:
         and not isinstance(node.args[0], ast.Starred)
     ):
         name = _call_callee_name(node.func)
-        assert name is not None  # guarded by the membership test above
+        if name is None:
+            raise AssertionError
         chain.append(name)
         node = node.args[0]
     return node, tuple(chain)
 
 
 def _is_subsequence(old: list[str], new: list[str]) -> bool:
-    """True when every element of ``old`` appears in ``new`` in the same relative
-    order (insertions anywhere are allowed, reorderings are not)."""
+    """True when every element of ``old`` appears in ``new`` in the same relative order.
+
+    Insertions anywhere are allowed, reorderings are not.
+    """
     it = iter(new)
     return all(elem in it for elem in old)
 
 
 def _dict_is_additive(old_inner: ast.Dict, new_inner: ast.Dict) -> bool:
-    """True when ``new_inner`` is a strict superset of ``old_inner``: every old key
-    is preserved with an unchanged value and at least one key was added. A ``**``
-    expansion (a ``None`` key node) or a duplicate key makes the mapping ambiguous
-    and fails closed."""
+    """True when ``new_inner`` is a strict superset of ``old_inner``.
+
+    Every old key is preserved with an unchanged value and at least one key was added. A
+    ``**`` expansion (a ``None`` key node) or a duplicate key makes the mapping ambiguous and
+    fails closed.
+    """
     old_pairs = [
         (ast.dump(k), ast.dump(v)) for k, v in zip(old_inner.keys, old_inner.values, strict=True) if k is not None
     ]
@@ -398,8 +417,10 @@ def _dict_is_additive(old_inner: ast.Dict, new_inner: ast.Dict) -> bool:
 
 
 def _set_is_additive(old_inner: ast.Set, new_inner: ast.Set) -> bool:
-    """True when ``new_inner`` is a strict multiset-superset of ``old_inner`` and
-    grew; a ``*`` unpack element fails closed."""
+    """True when ``new_inner`` is a strict multiset-superset of ``old_inner`` and grew.
+
+    A ``*`` unpack element fails closed.
+    """
     if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
         return False
     old_dumps = [ast.dump(e) for e in old_inner.elts]
@@ -408,8 +429,10 @@ def _set_is_additive(old_inner: ast.Set, new_inner: ast.Set) -> bool:
 
 
 def _sequence_is_additive(old_inner: ast.Tuple | ast.List, new_inner: ast.Tuple | ast.List) -> bool:
-    """True when the new tuple/list grew and keeps the old elements as an ordered
-    subsequence; a ``*`` unpack element fails closed."""
+    """True when the new tuple/list grew and keeps the old elements as an ordered subsequence.
+
+    A ``*`` unpack element fails closed.
+    """
     if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
         return False
     old_dumps = [ast.dump(e) for e in old_inner.elts]
@@ -418,15 +441,16 @@ def _sequence_is_additive(old_inner: ast.Tuple | ast.List, new_inner: ast.Tuple 
 
 
 def _is_additive_collection_growth(old_expr: str, new_expr: str) -> bool:
-    """True only when both value expressions are same-typed collection constants
-    and the new one is a STRICT SUPERSET of the old — a purely additive growth
-    (dict/set gained entries, tuple/list gained elements without disturbing the
-    order of the pre-existing ones). Every other relation — element removal or
-    edit, a changed value for a preserved dict key, a reorder, a wrapper-type or
-    collection-type change, a duplicate dict key, a non-collection expression, or
-    an identical collection — returns ``False`` so the classification stays
-    breaking. The comparison is purely structural (parse-only, never evaluated);
-    a parse failure or any ambiguity fails closed to ``False``."""
+    """True only when both values are same-typed collection constants and the new is a strict superset.
+
+    The growth must be purely additive (dict/set gained entries, tuple/list gained elements
+    without disturbing the order of the pre-existing ones). Every other relation — element
+    removal or edit, a changed value for a preserved dict key, a reorder, a wrapper-type or
+    collection-type change, a duplicate dict key, a non-collection expression, or an identical
+    collection — returns ``False`` so the classification stays breaking. The comparison is
+    purely structural (parse-only, never evaluated); a parse failure or any ambiguity fails
+    closed to ``False``.
+    """
     try:
         old_node = ast.parse(old_expr, mode="eval").body
         new_node = ast.parse(new_expr, mode="eval").body
@@ -481,11 +505,11 @@ def _breakages(module: str, ref: str, src_rel: str, repo_root: Path) -> list[str
 
 
 def _gate_passes(mode: str, old_version: str, new_version: str, has_breaking: bool) -> tuple[bool, str]:
-    """The gate's pass/fail decision, factored out of the git/griffe I/O so the
-    whole mode x version x bump matrix is unit-testable without those deps.
+    """The gate's pass/fail decision, factored out of the git/griffe I/O for unit testing.
 
-    Returns ``(passes, reason)``; the reason names mode, the version class, the
-    computed allowed bump set and the actual bump, so a failure explains itself.
+    Factoring it out keeps the whole mode x version x bump matrix testable without those deps.
+    Returns ``(passes, reason)``; the reason names mode, the version class, the computed
+    allowed bump set and the actual bump, so a failure explains itself.
     """
     bump = _bump_class(old_version, new_version)
     new_major = _parse_version(new_version)[0]
@@ -502,6 +526,7 @@ def _gate_passes(mode: str, old_version: str, new_version: str, has_breaking: bo
 
 
 def main() -> None:
+    """Parse CLI arguments, run the gate, and exit non-zero when the release is dishonest."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package", required=True, help="release-please package-name")
     parser.add_argument("--dir", required=True, help="member dir under the repo root")

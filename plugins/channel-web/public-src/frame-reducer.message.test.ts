@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { applyFrame } from '@/frame-reducer';
+import { fold, frame, questionFrame, TS } from '@/frame-reducer.test-support';
 import { EMPTY_MODEL } from '@/transcript-model';
-import { TS, frame, fold, questionFrame } from '@/frame-reducer.test-support';
 
 const message = frame('chat.message', { id: 'm1', direction: 'out', text: 'hi', ts: TS });
 

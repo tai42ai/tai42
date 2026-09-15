@@ -2,16 +2,16 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { QuestionCard, countdownAnnouncement, secondsLeft } from '@/question-card';
-import type { MediaItem } from '@/transcript-model';
+import { countdownAnnouncement, QuestionCard, secondsLeft } from '@/question-card';
 import {
-  T0,
   freezeClock,
   question,
   renderCard,
+  T0,
   tick,
   tickSeconds,
 } from '@/question-card.test-support';
+import type { MediaItem } from '@/transcript-model';
 
 afterEach(() => {
   cleanup();

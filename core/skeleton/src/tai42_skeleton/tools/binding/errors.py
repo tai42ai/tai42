@@ -1,5 +1,4 @@
-"""The typed not-found error raised when a tool name is not registered on the
-live server."""
+"""The typed not-found error raised when a tool name is not registered on the live server."""
 
 from tai42_contract.errors import ErrorKind
 
@@ -19,11 +18,13 @@ class UnknownToolError(Exception):
     (:meth:`ToolBinding.get_tool`, :meth:`ToolBinding.get_client_tools`) only ever
     raises for a name the caller itself asked for — the single requested name, or the
     first missing name of a requested list — so a catch around a lookup needs no such
-    comparison."""
+    comparison.
+    """
 
     # The requested tool name is not registered — a not-found target.
     __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, tool_name: str) -> None:
+        """Record the missing ``tool_name`` so a caller can tell WHICH tool was not found."""
         super().__init__(f"No such tool: {tool_name}.")
         self.tool_name = tool_name

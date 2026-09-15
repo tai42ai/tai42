@@ -24,7 +24,7 @@ from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz.execution import bind_execution_identity, build_execution_identity
 from tai42_skeleton.authz.execution_identity import get_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity, resolve_caller_identity
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 
 
 @pytest.fixture(autouse=True)
@@ -98,13 +98,13 @@ def test_access_control_disabled_yields_the_bare_key(monkeypatch: pytest.MonkeyP
 def test_an_unknown_key_is_refused(ac_env, bound_app) -> None:
     # Refusing here, rather than returning an authority-less identity, is what stops a
     # capability-tool fire (never scope-checked) under a key that no longer exists.
-    with pytest.raises(PermissionDenied, match="has no policy"):
+    with pytest.raises(PermissionDeniedError, match="has no policy"):
         asyncio.run(build_execution_identity("ghost", bound_fingerprint="fp-ghost"))
 
 
 def test_a_disabled_key_is_refused(ac_env, bound_app) -> None:
     ac_env.add_policy("k-fire", scopes=["hooks"], policy_data={"disabled": True, KEY_FINGERPRINT_CLAIM: "fp-k-fire"})
-    with pytest.raises(PermissionDenied, match="is disabled"):
+    with pytest.raises(PermissionDeniedError, match="is disabled"):
         asyncio.run(build_execution_identity("k-fire", bound_fingerprint="fp-k-fire"))
 
 
@@ -113,7 +113,7 @@ def test_a_key_whose_owner_is_disabled_is_refused(ac_env, bound_app) -> None:
         "k-fire", scopes=["hooks"], policy_data={OWNER_USER_ID_CLAIM: "alice", KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
     )
     ac_env.add_policy("alice", scopes=["hooks"], policy_data={"disabled": True})
-    with pytest.raises(PermissionDenied, match="owner 'alice' of execution key 'k-fire' is disabled"):
+    with pytest.raises(PermissionDeniedError, match="owner 'alice' of execution key 'k-fire' is disabled"):
         asyncio.run(build_execution_identity("k-fire", bound_fingerprint="fp-k-fire"))
 
 
@@ -121,7 +121,7 @@ def test_a_key_whose_owner_has_no_policy_is_refused(ac_env, bound_app) -> None:
     ac_env.add_policy(
         "k-fire", scopes=["hooks"], policy_data={OWNER_USER_ID_CLAIM: "alice", KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
     )
-    with pytest.raises(PermissionDenied, match="owner 'alice' of execution key 'k-fire' has no policy"):
+    with pytest.raises(PermissionDeniedError, match="owner 'alice' of execution key 'k-fire' has no policy"):
         asyncio.run(build_execution_identity("k-fire", bound_fingerprint="fp-k-fire"))
 
 
@@ -134,7 +134,7 @@ def test_deleting_the_key_denies_the_next_fire(ac_env, bound_app) -> None:
 
     ac_env.policies = [p for p in ac_env.policies if p["user_id"] != "k-fire"]
 
-    with pytest.raises(PermissionDenied, match="has no policy"):
+    with pytest.raises(PermissionDeniedError, match="has no policy"):
         asyncio.run(build_execution_identity("k-fire", bound_fingerprint="fp-k-fire"))
 
 
@@ -151,7 +151,7 @@ def test_a_revoke_remint_of_the_same_user_id_denies_the_old_binding(ac_env, boun
     ac_env.policies = [p for p in ac_env.policies if p["user_id"] != "svc"]
     ac_env.add_policy("svc", scopes=["*"], policy_data={KEY_FINGERPRINT_CLAIM: "F2"})
 
-    with pytest.raises(PermissionDenied, match="execution key 'svc' no longer matches the bound key identity"):
+    with pytest.raises(PermissionDeniedError, match="execution key 'svc' no longer matches the bound key identity"):
         asyncio.run(build_execution_identity("svc", bound_fingerprint="F1"))
 
 
@@ -164,7 +164,7 @@ def test_a_live_key_carrying_the_bound_fingerprint_still_fires(ac_env, bound_app
 def test_a_live_key_with_no_fingerprint_is_refused(ac_env, bound_app) -> None:
     # Absent is not a wildcard: no stored fingerprint fails the same equality.
     ac_env.add_policy("svc", scopes=["hooks"])
-    with pytest.raises(PermissionDenied, match="execution key 'svc' no longer matches the bound key identity"):
+    with pytest.raises(PermissionDeniedError, match="execution key 'svc' no longer matches the bound key identity"):
         asyncio.run(build_execution_identity("svc", bound_fingerprint="F1"))
 
 
@@ -200,7 +200,7 @@ def test_bind_releases_even_when_the_body_raises(ac_env, bound_app) -> None:
 def test_a_refused_key_never_enters_the_body_and_binds_nothing(ac_env, bound_app) -> None:
     async def run() -> None:
         entered = False
-        with pytest.raises(PermissionDenied, match="execution key 'ghost' has no policy"):
+        with pytest.raises(PermissionDeniedError, match="execution key 'ghost' has no policy"):
             async with bind_execution_identity("ghost", bound_fingerprint="fp-ghost"):
                 entered = True  # pragma: no cover - the body must not run
         assert entered is False

@@ -98,8 +98,10 @@ _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"tools", "presets", "s
 
 
 def _final_evaluator_input() -> dict[str, Any]:
-    """The prompt that asks the approved Evaluator for its final user-facing
-    answer, run against the same checkpointed thread the loop built up."""
+    """The prompt that asks the approved Evaluator for its final user-facing answer.
+
+    Run against the same checkpointed thread the loop built up.
+    """
     return {"messages": [{"role": "user", "content": "Critic Approved."}]}
 
 
@@ -112,8 +114,7 @@ async def _build_role_agent(
     is_enabled_for_debug: bool,
     response_format: Any = None,
 ) -> Any:
-    """Build one role's ``create_agent`` stack — the Evaluator, the Critic, or the
-    structured final Evaluator.
+    """Build one role's ``create_agent`` stack — the Evaluator, the Critic, or the structured final Evaluator.
 
     Each role runs the same middleware stack: system purge first (so a stored system
     message never reaches the model), the context-overflow strategies fed this role's
@@ -258,9 +259,10 @@ async def _run_refine_loop(
 
 
 class RefineAgentInput(BaseModel):
-    """JSON tool-face parameters for ``refine_agent``. ``tool_names`` is a list of
-    registered client-tool names (resolved to live tools at run time); the two
-    role prompts are supplied inline or by template id.
+    """JSON tool-face parameters for ``refine_agent``.
+
+    ``tool_names`` is a list of registered client-tool names (resolved to live tools at
+    run time); the two role prompts are supplied inline or by template id.
 
     ``base_url``/``api_key`` in ``evaluator_llm_kwargs``/``critic_llm_kwargs``
     legitimately route to a caller-chosen model endpoint; expose any agent or tool
@@ -268,7 +270,8 @@ class RefineAgentInput(BaseModel):
     redirect the model call to a hostile endpoint and leak the key/context.
 
     ``extra="forbid"`` rejects any unknown key loudly at validation rather than
-    letting a typo at the run door vanish silently."""
+    letting a typo at the run door vanish silently.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -299,15 +302,20 @@ class RefineAgentInput(BaseModel):
     @field_validator("user_content_kwargs")
     @classmethod
     def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """An empty dict carries no content-block keys — normalize {} to None so it
-        reads as unset, matching the builders that treat {} as no mark."""
+        """An empty dict carries no content-block keys — normalize {} to None.
+
+        Reads as unset, matching the builders that treat {} as no mark.
+        """
         return value or None
 
 
 @tai42_app.agents.agent("refine_agent", tags={"agents"})
 class RefineAgent(Agent):
-    """Evaluator↔Critic refinement agent. ``astream`` runs the loop silently, then
-    streams the final approved evaluator pass; ``run`` drains that stream."""
+    """Evaluator↔Critic refinement agent.
+
+    ``astream`` runs the loop silently, then streams the final approved evaluator pass;
+    ``run`` drains that stream.
+    """
 
     tool_name: ClassVar[str] = "refine_agent"
     tool_description: ClassVar[str] = (
@@ -317,8 +325,9 @@ class RefineAgent(Agent):
     ToolInput: ClassVar[type[BaseModel]] = RefineAgentInput
 
     async def run(self, **kwargs: Any) -> Any:
-        """Reject the contract parameters the loop has no seat for, then run the loop
-        and return the final approved answer by draining :meth:`astream`.
+        """Reject the unseated contract parameters, then run the loop and drain the final answer.
+
+        Returns the final approved answer by draining :meth:`astream`.
 
         A ``response_format`` is honored: its JSON-Schema dict must carry a top-level
         ``"title"``, and the drain returns the validated structured object the final
@@ -346,8 +355,9 @@ class RefineAgent(Agent):
         response_format: Any = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream the final evaluator pass; the Evaluator↔Critic loop runs silently
-        until approval (or raises at ``max_iterations``).
+        """Stream the final evaluator pass; the Evaluator↔Critic loop runs silently until approval.
+
+        The loop raises at ``max_iterations`` if approval never comes.
 
         ``tool_names``, ``checkpoint_provider``, ``response_format`` and
         ``user_content_kwargs`` are the honored contract parameters;

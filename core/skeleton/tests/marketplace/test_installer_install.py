@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+
 import pytest
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
-from tai42_skeleton.marketplace import installer as installer_module
 from tai42_skeleton.marketplace import package_ops
 from tai42_skeleton.marketplace.errors import (
     ArtifactIntegrityError,
@@ -33,7 +34,7 @@ from .test_installer import (
 
 
 async def test_install_happy_step_order_manifest_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec(provides=[{"kind": "tool", "name": "gen-uuid", "module": "pkg.tools.uuid", "description": "d"}])
     h.registry.resolved = make_resolved(spec, version="1.0.0")
@@ -60,7 +61,7 @@ async def test_install_happy_step_order_manifest_response(monkeypatch: pytest.Mo
 
 
 async def test_install_config_item_contributes_a_note(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec(provides=[{"kind": "config", "name": "vault", "module": "pkg.config.vault", "description": "d"}])
     h.registry.resolved = make_resolved(spec)
@@ -69,7 +70,7 @@ async def test_install_config_item_contributes_a_note(monkeypatch: pytest.Monkey
 
 
 async def test_install_version_pinning_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec(version="1.2.3")
     h.registry.resolved = make_resolved(spec, version="1.2.3")
@@ -79,7 +80,7 @@ async def test_install_version_pinning_honoured(monkeypatch: pytest.MonkeyPatch)
 
 
 async def test_install_github_fetches_verifies_and_installs_local_tarball(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     calls = _fake_verified_fetch(monkeypatch)
     h = Harness()
     spec = make_spec(version="2.0.0")
@@ -109,7 +110,7 @@ async def test_install_github_fetches_verifies_and_installs_local_tarball(monkey
 async def test_install_github_integrity_mismatch_never_calls_pip(monkeypatch: pytest.MonkeyPatch) -> None:
     # A sha256 mismatch during the verified fetch aborts the install: no pip, no
     # manifest write, no attribution — and no git fallback.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
 
     async def mismatch(package, version, artifact_ref, sha256, dest_dir):
         raise ArtifactIntegrityError(expected_sha256="a" * 64, actual_sha256="b" * 64, artifact_ref=artifact_ref)
@@ -129,7 +130,7 @@ async def test_install_github_integrity_mismatch_never_calls_pip(monkeypatch: py
 
 async def test_install_github_fetch_failure_never_calls_pip(monkeypatch: pytest.MonkeyPatch) -> None:
     # A download failure likewise aborts with no pip and no git fallback.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
 
     async def boom(package, version, artifact_ref, sha256, dest_dir):
         raise RuntimeError("network down")
@@ -176,7 +177,7 @@ async def test_install_killed_version_refused(monkeypatch: pytest.MonkeyPatch) -
 
 
 async def test_install_critical_advisory_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec()
     h.registry.resolved = make_resolved(
@@ -188,7 +189,7 @@ async def test_install_critical_advisory_refused(monkeypatch: pytest.MonkeyPatch
 
 
 async def test_install_noncritical_advisory_installs_and_rides_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec()
     adv = [{"severity": "medium", "withdrawn_at": None, "summary": "minor"}]
@@ -210,7 +211,7 @@ async def test_install_invalid_spec_is_registry_response_error(monkeypatch: pyte
 
 
 async def test_install_contract_incompatible_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "2.0.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "2.0.0")
     h = Harness()
     spec = make_spec()
     h.registry.resolved = make_resolved(spec, contract_range=">=0.1,<1.0")
@@ -224,7 +225,7 @@ async def test_install_contract_incompatible_refused(monkeypatch: pytest.MonkeyP
 async def test_install_dev_versioned_contract_inside_range_passes(monkeypatch: pytest.MonkeyPatch) -> None:
     # A dev/pre-release installed contract inside the range must NOT be refused
     # (the SpecifierSet is evaluated with prereleases=True).
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.5.0.dev3")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.5.0.dev3")
     h = Harness()
     spec = make_spec()
     h.registry.resolved = make_resolved(spec, contract_range=">=0.1,<1.0")
@@ -233,7 +234,7 @@ async def test_install_dev_versioned_contract_inside_range_passes(monkeypatch: p
 
 
 async def test_install_manifest_collision_preflight_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness(manifest={"tools": [{"title": "x", "module": "pkg.tools.uuid"}]})
     spec = make_spec(provides=[{"kind": "tool", "name": "gen-uuid", "module": "pkg.tools.uuid", "description": "d"}])
     h.registry.resolved = make_resolved(spec)
@@ -254,7 +255,7 @@ async def test_install_bad_ref_raises_malformed_ref_error() -> None:
 
 
 async def test_install_pip_failure_leaves_manifest_and_store_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     h.pip.fail_on = {0}
     spec = make_spec()
@@ -266,7 +267,7 @@ async def test_install_pip_failure_leaves_manifest_and_store_untouched(monkeypat
 
 
 async def test_install_manifest_persist_failure_unwinds_with_pip_uninstall(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     # The manifest persist fails BEFORE the change lands (nothing persisted), so the
     # pipeline aborts and the installer needs no manifest restore — just the pip
@@ -283,7 +284,7 @@ async def test_install_manifest_persist_failure_unwinds_with_pip_uninstall(monke
 
 
 async def test_install_reload_failure_restores_manifest_and_uninstalls(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     # The apply persists but its local reload fails afterwards (FleetBroadcastError):
     # the change landed, so the unwind must restore the manifest through the pipeline.
@@ -302,7 +303,7 @@ async def test_install_reload_failure_restores_manifest_and_uninstalls(monkeypat
 async def test_install_broadcast_failure_after_persist_restores_manifest_and_uninstalls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     # The apply persists and the local reload succeeds, but the FLEET BROADCAST then
     # raises. ConfigService wraps that raw broadcast fault as a FleetBroadcastError with
@@ -324,7 +325,7 @@ async def test_install_broadcast_failure_after_persist_restores_manifest_and_uni
 
 
 async def test_install_store_failure_full_unwind(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     h.store.record_error = RuntimeError("pg down")
     spec = make_spec()
@@ -337,7 +338,7 @@ async def test_install_store_failure_full_unwind(monkeypatch: pytest.MonkeyPatch
 
 
 async def test_install_unwind_substep_failure_escalates(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     h.svc.fail_reload_on = {0}  # forward apply persists then its reload fails
     h.pip.fail_on = {1}  # the unwind pip uninstall also fails
@@ -357,7 +358,7 @@ async def test_install_compose_failure_is_manifest_compose_error(monkeypatch: py
     # persists) and the installer maps that ValidationError to the typed compose error
     # (a 500), then unwinds the pip install. Here a pre-existing api_tools entry carries
     # a non-bool literal, so the resolved compose fails Manifest.model_validate.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness(manifest={"api_tools": {"expose_destructive": "not-a-bool"}})
     spec = make_spec()
     h.registry.resolved = make_resolved(spec)
@@ -376,7 +377,7 @@ async def test_install_env_marker_on_non_string_field_validates_resolved(monkeyp
     # !ENV marker persists verbatim — the resolved bool never bakes in. Validating the
     # PRESERVED document instead would reject "!ENV ${EXPOSE_DESTRUCTIVE}" as an invalid
     # bool and 500 the install even though the resolved manifest is valid.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     monkeypatch.setenv("EXPOSE_DESTRUCTIVE", "true")
     marker = "!ENV ${EXPOSE_DESTRUCTIVE}"
     h = Harness(manifest={"api_tools": {"expose_destructive": marker}})
@@ -402,7 +403,7 @@ async def test_install_backend_needs_bus_maps_to_manifest_compose_error(monkeypa
     # family, so the installer maps that refusal to the typed compose error — a loud,
     # attributed 500 carrying the "Set TAI_BUS_REDIS_URL" message — rather than letting
     # the RuntimeError escape untyped. Nothing persists; the pip install unwinds.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     h.svc.raise_on_validate = BackendNeedsBusError(
         "Refusing a config that registers a task backend ('pkg.backend') with no worker bus. Set TAI_BUS_REDIS_URL."
@@ -423,7 +424,7 @@ async def test_install_unwind_reload_back_failure_escalates(monkeypatch: pytest.
     # unwind; the unwind's restore apply (call 1) then fails its reload too. That
     # failed sub-step escalates to InstallUnwindError before the pip uninstall is
     # ever attempted.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     h.svc.fail_reload_on = {0, 1}  # forward apply AND the unwind restore apply both fail their reload
     spec = make_spec()

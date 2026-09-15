@@ -78,13 +78,13 @@ class RecordingWriter(NoOpWriter):
         name: str,
         kind: SpanKind,
         trace_context: TraceContext | None = None,
-        input: Any = None,
+        input_: Any = None,
         model: str | None = None,
         model_parameters: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Iterator[RecordingSpan]:
         span = RecordingSpan(self.next_span_id)
-        self.spans.append({"name": name, "kind": kind, "input": input, "metadata": metadata, "span": span})
+        self.spans.append({"name": name, "kind": kind, "input": input_, "metadata": metadata, "span": span})
         opened_root = self.active_trace_id is None
         if opened_root:
             self.active_trace_id = self.root_trace_id
@@ -100,7 +100,7 @@ class RecordingWriter(NoOpWriter):
         name: str,
         level: MonitoringLevel = DEFAULT_LEVEL,
         trace_context: TraceContext | None = None,
-        input: Any = None,
+        input_: Any = None,
         output: Any = None,
         status_message: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -110,7 +110,7 @@ class RecordingWriter(NoOpWriter):
                 "name": name,
                 "level": level,
                 "trace_context": trace_context,
-                "input": input,
+                "input": input_,
             }
         )
 

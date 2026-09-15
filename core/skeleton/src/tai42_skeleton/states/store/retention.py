@@ -1,5 +1,7 @@
-"""The retention sweep — op-ledger and expired-record pruning — plus the fresh reads of the
-op-ledger and default record retention windows."""
+"""The retention sweep — op-ledger and expired-record pruning.
+
+Plus the fresh reads of the op-ledger and default record retention windows.
+"""
 
 from __future__ import annotations
 
@@ -27,9 +29,12 @@ class _RetentionStore:
             )
 
     async def prune_expired(self, default_retention_days: int | None) -> dict[str, int]:
-        """Delete every record past its state's EFFECTIVE retention (the state's own
-        ``retention_days`` when set, else the global default; ``NULL`` keeps records
-        forever), in ONE atomic statement. Returns ``{state: rows_deleted}``."""
+        """Delete every record past its state's EFFECTIVE retention, in ONE atomic statement.
+
+        Effective retention is the state's own ``retention_days`` when set, else
+        the global default; ``NULL`` keeps records forever. Returns
+        ``{state: rows_deleted}``.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -49,9 +54,11 @@ class _RetentionStore:
 
 
 def store_settings_retention() -> int:
-    """The op-ledger retention window in days, read fresh and validated LOUDLY: a
-    ``0``/negative value would turn the opportunistic prune inside every write into a
-    full ledger wipe, so a misconfigured value refuses the write instead."""
+    """The op-ledger retention window in days, read fresh and validated LOUDLY.
+
+    A ``0``/negative value would turn the opportunistic prune inside every write
+    into a full ledger wipe, so a misconfigured value refuses the write instead.
+    """
     value = sys.modules["tai42_skeleton.states.store"].states_settings().op_retention_days
     if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value > MAX_RETENTION_DAYS:
         raise StatesError(f"STATES_OP_RETENTION_DAYS must be a positive integer ≤ {MAX_RETENTION_DAYS}, got {value!r}")
@@ -59,6 +66,8 @@ def store_settings_retention() -> int:
 
 
 def store_settings_default_retention() -> int | None:
-    """The global default RECORD retention window in days, read fresh (``None`` keeps
-    records forever unless a state sets its own ``retention_days``)."""
+    """The global default RECORD retention window in days, read fresh.
+
+    ``None`` keeps records forever unless a state sets its own ``retention_days``.
+    """
     return sys.modules["tai42_skeleton.states.store"].states_settings().default_retention_days

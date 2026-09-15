@@ -1,6 +1,8 @@
-"""The read model over the thread indexes (keyspaces 7-8): thread listings, transcript
-pages, and the bounded text searches — each a page whose cost is the page, never the whole
-history, and every over-budget scan surfaced LOUDLY as truncated."""
+"""The read model over the thread indexes (keyspaces 7-8): thread listings, transcript pages, text searches.
+
+Each read is a page whose cost is the page, never the whole history, and every over-budget scan is
+surfaced LOUDLY as truncated.
+"""
 
 from __future__ import annotations
 
@@ -23,18 +25,20 @@ class RecordQueryMixin(RecordStoreBase):
     """Thread listings, transcript pages and bounded text searches (keyspaces 7-8)."""
 
     async def thread_exists(self, route_name: str, thread_id: str) -> bool:
-        """Whether ``thread_id`` is a live thread of ``route_name`` — one ZSCORE on the
-        route's thread index, the membership check a door takes before entering a thread it
-        did not itself just create."""
+        """Whether ``thread_id`` is a live thread of ``route_name`` — one ZSCORE on the route's thread index.
+
+        The membership check a door takes before entering a thread it did not itself just create.
+        """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             score = await awaited(r.zscore(self.settings.route_threads_key(route_name), thread_id))
         return score is not None
 
     async def latest_thread_record(self, route_name: str, thread_id: str) -> ConversationRecord | None:
-        """The newest readable record of a thread, read through its transcript index
-        (newest first, keyspace 7). ``None`` when the thread has no readable record — a
-        member whose row is gone or unparseable is logged and skipped by the shared loader,
-        never a silent empty result."""
+        """The newest readable record of a thread, read through its transcript index (newest first, keyspace 7).
+
+        ``None`` when the thread has no readable record — a member whose row is gone or unparseable is
+        logged and skipped by the shared loader, never a silent empty result.
+        """
         thread_key = self.settings.thread_index_key(route_name, thread_id)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             for member in await awaited(r.zrevrange(thread_key, 0, 0)):
@@ -52,16 +56,18 @@ class RecordQueryMixin(RecordStoreBase):
         status: frozenset[DeliveryStatus] | None = None,
         address: str | None = None,
     ) -> ThreadPage:
-        """One page of ``route_name``'s threads, newest activity first, each summarized from
-        its NEWEST readable record — so the cost is the page, never the route's whole
-        history. Reads nothing back into the index: a thread with no readable record left is
+        """One page of ``route_name``'s threads, newest activity first.
+
+        Each thread is summarized from its NEWEST readable record — so the cost is the page, never the
+        route's whole history. Reads nothing back into the index: a thread with no readable record left is
         logged and omitted from the page, and the prune pass reclaims it.
 
         With a ``status`` (the summary ``last_delivery_status`` must be one of the set) or an
         ``address`` (a substring of the thread id's client-address suffix) filter, the read is
         a BOUNDED app-side post-scan — there is no per-route+status index — so ``total`` is
         the number of matches the scan found and it may report ``truncated`` (see
-        :meth:`_filter_route_threads`)."""
+        :meth:`_filter_route_threads`).
+        """
         key = self.settings.route_threads_key(route_name)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             if status is None and address is None:
@@ -89,17 +95,19 @@ class RecordQueryMixin(RecordStoreBase):
         status: frozenset[DeliveryStatus] | None,
         address: str | None,
     ) -> ThreadPage:
-        """A FILTERED page of a route's threads: a bounded forward scan of the route index,
-        newest activity first, post-filtering each candidate by the client address in its id
-        (a cheap id test, applied first) and/or its summary ``last_delivery_status``. The
-        per-status indexes are GLOBAL and hold ``message_id``s, not thread ids, so there is no
-        direct per-route+status serve; this is the correct app-side post-filter.
+        """A FILTERED page of a route's threads: a bounded forward scan of the route index, newest activity first.
+
+        Post-filters each candidate by the client address in its id (a cheap id test, applied first) and/or
+        its summary ``last_delivery_status``. The per-status indexes are GLOBAL and hold ``message_id``s,
+        not thread ids, so there is no direct per-route+status serve; this is the correct app-side
+        post-filter.
 
         The scan spends at most :data:`_FILTER_THREAD_SCAN` candidates, read in windows of
         :data:`_FILTER_SCAN_WINDOW`. If it spends that budget before the index is exhausted it
         reports ``truncated`` — the page (and ``total``) is then a bounded view and matches may
         lie beyond it. ``total`` is the number of matches found; the page is the
-        ``offset``/``limit`` slice of them."""
+        ``offset``/``limit`` slice of them.
+        """
         matched: list[ThreadSummary] = []
         examined = 0
         rank = 0
@@ -130,9 +138,11 @@ class RecordQueryMixin(RecordStoreBase):
         return ThreadPage(threads=matched[offset : offset + limit], total=len(matched), truncated=truncated)
 
     async def _load_searched_record(self, r: AsyncRedis, message_id: str) -> ConversationRecord | None:
-        """The record ``message_id`` names, or ``None`` when its row is gone or unparseable —
-        both logged LOUDLY and left for the prune pass, never a silent skip. The shared read a
-        text search's bounded scan takes for each candidate id."""
+        """The record ``message_id`` names, or ``None`` when its row is gone or unparseable.
+
+        A gone or unparseable row is logged LOUDLY and left for the prune pass, never a silent skip. The
+        shared read a text search's bounded scan takes for each candidate id.
+        """
         hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
         if not hashed:
             logger.warning(
@@ -156,10 +166,10 @@ class RecordQueryMixin(RecordStoreBase):
         newest_first: bool = False,
         q: str | None = None,
     ) -> TranscriptPage:
-        """One page of a thread's records — oldest first by default, newest first with
-        ``newest_first`` (the live-tail order, where page 1 always holds the latest
-        messages). Either way the window is ``offset``/``limit`` ranks from that end of the
-        index, which is scored by ``created_at``.
+        """One page of a thread's records — oldest first by default, newest first with ``newest_first``.
+
+        ``newest_first`` is the live-tail order, where page 1 always holds the latest messages. Either way
+        the window is ``offset``/``limit`` ranks from that end of the index, which is scored by ``created_at``.
 
         ``total`` is 0 exactly when the index holds no record for that thread, which is how
         an unknown or fully expired thread is told from an empty page. A member whose row is
@@ -172,7 +182,8 @@ class RecordQueryMixin(RecordStoreBase):
         runs out of budget before the index is exhausted. ``total`` is then the number of
         matches found and the page is the ``offset``/``limit`` slice of them; a thread with no
         match reads as an empty page, told from an unknown thread by the empty-index short
-        circuit above."""
+        circuit above.
+        """
         thread_key = self.settings.thread_index_key(route_name, thread_id)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             total = int(await awaited(r.zcard(thread_key)))
@@ -195,10 +206,11 @@ class RecordQueryMixin(RecordStoreBase):
     async def _search_thread(
         self, r: AsyncRedis, thread_key: str, *, newest_first: bool, needle: str
     ) -> tuple[list[ConversationRecord], bool]:
-        """The records of one thread index matching ``needle``, walked in the requested order
-        in bounded windows, spending at most :data:`_FILTER_RECORD_SCAN` candidate reads.
-        Returns ``(matches, truncated)`` — ``truncated`` True when the budget ran out before
-        the index was exhausted."""
+        """The records of one thread index matching ``needle``, walked in the requested order in bounded windows.
+
+        Spends at most :data:`_FILTER_RECORD_SCAN` candidate reads. Returns ``(matches, truncated)`` —
+        ``truncated`` True when the budget ran out before the index was exhausted.
+        """
         matched: list[ConversationRecord] = []
         examined = 0
         rank = 0
@@ -227,8 +239,9 @@ class RecordQueryMixin(RecordStoreBase):
         newest_first: bool = False,
         q: str | None = None,
     ) -> TranscriptPage:
-        """One page of a LINKED person's aggregated transcript — the k-way merge of the same
-        ``thread_id`` (``bridge:@person:{id}``) across the person's N per-route indexes, so
+        """One page of a LINKED person's aggregated transcript — a k-way merge across N per-route indexes.
+
+        Merges the same ``thread_id`` (``bridge:@person:{id}``) across the person's N per-route indexes, so
         one full history is served and never a partial slice.
 
         ``total`` is ``Σ zcard`` over the N indexes. For a page at ``offset``/``limit`` the
@@ -244,7 +257,8 @@ class RecordQueryMixin(RecordStoreBase):
         members are fetched from EACH index (an index that fills that window may hold more, so
         the search reports ``truncated``), merged in the requested order, then read and matched
         up to the same candidate budget. ``total`` is then the number of matches found and the
-        page is the ``offset``/``limit`` slice of them."""
+        page is the ``offset``/``limit`` slice of them.
+        """
         thread_keys = [self.settings.thread_index_key(route_name, thread_id) for route_name in route_names]
         scored: list[tuple[float, str]] = []
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
@@ -284,10 +298,12 @@ class RecordQueryMixin(RecordStoreBase):
         newest_first: bool,
         needle: str,
     ) -> TranscriptPage:
-        """The bounded text search over a person's aggregated transcript: at most
-        :data:`_FILTER_RECORD_SCAN` members from each index (a filled window means the index
-        may hold more), merged in the requested order, read and matched up to the same budget.
-        ``truncated`` if any index filled its window or the match scan spent its budget."""
+        """The bounded text search over a person's aggregated transcript.
+
+        At most :data:`_FILTER_RECORD_SCAN` members from each index (a filled window means the index may
+        hold more), merged in the requested order, read and matched up to the same budget. ``truncated``
+        if any index filled its window or the match scan spent its budget.
+        """
         end = _records._FILTER_RECORD_SCAN - 1
         scored: list[tuple[float, str]] = []
         truncated = False
@@ -311,16 +327,17 @@ class RecordQueryMixin(RecordStoreBase):
         return TranscriptPage(records=matched[offset : offset + limit], total=len(matched), truncated=truncated)
 
     async def search_route_messages(self, route_name: str, *, offset: int, limit: int, q: str) -> TranscriptPage:
-        """Every record on ``route_name`` whose text matches ``q``, across ALL the route's
-        threads — a BOUNDED nested scan (the route's threads newest-active first, then each
-        thread's records newest first), since there is no per-route record index. The scan is
-        bounded in BOTH dimensions: it visits at most :data:`_FILTER_THREAD_SCAN` threads and
-        reads at most :data:`_FILTER_RECORD_SCAN` records, reporting ``truncated`` if either
-        budget runs out before the route is exhausted. Bounding threads too is load-bearing: a
-        route of many stranded members whose per-thread index is momentarily empty would
-        otherwise let the thread loop run unbounded without ever spending a record. ``total`` is
-        the number of matches found; the page is the ``offset``/``limit`` slice of them. A
-        member whose row is gone or unparseable is logged LOUDLY and skipped."""
+        """Every record on ``route_name`` whose text matches ``q``, across ALL the route's threads.
+
+        A BOUNDED nested scan (the route's threads newest-active first, then each thread's records newest
+        first), since there is no per-route record index. The scan is bounded in BOTH dimensions: it visits
+        at most :data:`_FILTER_THREAD_SCAN` threads and reads at most :data:`_FILTER_RECORD_SCAN` records,
+        reporting ``truncated`` if either budget runs out before the route is exhausted. Bounding threads
+        too is load-bearing: a route of many stranded members whose per-thread index is momentarily empty
+        would otherwise let the thread loop run unbounded without ever spending a record. ``total`` is the
+        number of matches found; the page is the ``offset``/``limit`` slice of them. A member whose row is
+        gone or unparseable is logged LOUDLY and skipped.
+        """
         needle = q.lower()
         route_key = self.settings.route_threads_key(route_name)
         matched: list[ConversationRecord] = []
@@ -357,11 +374,12 @@ class RecordQueryMixin(RecordStoreBase):
     async def _scan_thread_for_matches(
         self, r: AsyncRedis, route_name: str, thread_id: str, needle: str, record_budget: int
     ) -> tuple[list[ConversationRecord], int, bool]:
-        """Scan ONE thread's records newest first for ``needle``, reading at most
-        ``record_budget`` records. Returns ``(matches, examined, hit_budget)`` — the matching
-        records, how many records were examined, and whether the budget ran out before the
-        thread was exhausted. A member whose row is gone or unparseable is logged LOUDLY and
-        skipped by the shared loader."""
+        """Scan ONE thread's records newest first for ``needle``, reading at most ``record_budget`` records.
+
+        Returns ``(matches, examined, hit_budget)`` — the matching records, how many records were examined,
+        and whether the budget ran out before the thread was exhausted. A member whose row is gone or
+        unparseable is logged LOUDLY and skipped by the shared loader.
+        """
         thread_key = self.settings.thread_index_key(route_name, thread_id)
         matches: list[ConversationRecord] = []
         examined = 0
@@ -387,12 +405,14 @@ class RecordQueryMixin(RecordStoreBase):
     async def _thread_summary(
         self, r: AsyncRedis, route_name: str, thread_id: str, *, last_activity_at: float
     ) -> ThreadSummary | None:
-        """``thread_id`` summarized from the newest record readable among its
-        :data:`_THREAD_SUMMARY_SCAN` newest members, or ``None`` when none of them is.
+        """Summarize ``thread_id`` from the newest readable record among its newest members, or ``None``.
+
+        Scans its :data:`_THREAD_SUMMARY_SCAN` newest members and returns ``None`` when none is readable.
 
         ``last_activity_at`` is the route index's own score — the value the listing SORTS
         by — passed in so the row shown and the order it is shown in can never disagree.
-        Reads nothing back into the index."""
+        Reads nothing back into the index.
+        """
         thread_key = self.settings.thread_index_key(route_name, thread_id)
         for member in await awaited(r.zrevrange(thread_key, 0, _records._THREAD_SUMMARY_SCAN - 1)):
             message_id = _member(member)

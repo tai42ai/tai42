@@ -80,9 +80,9 @@ def _error(message: str, status_code: int) -> JSONResponse:
 
 
 def _is_static_asset_request(spa_path: str) -> bool:
-    """True when the request targets a static asset — the last path segment carries
-    a file extension that is not an HTML document (``.js``/``.css``/``.wasm``/…).
+    """True when the request targets a static asset — a last segment with a non-HTML file extension.
 
+    The extension is one like ``.js``/``.css``/``.wasm``/… but not an HTML document.
     The SPA-fallback contract: an extension-bearing path is a request for a concrete
     file, so a miss is a genuine 404, NEVER the index.html shell. Serving the shell
     for a missing binary asset masks a 404 as a ``text/html`` body — a missing
@@ -132,6 +132,7 @@ list_studio_plugins = register_operation_route(
     ),
 )
 async def serve_studio_asset(request: Request) -> Response:
+    """Serve an integrity-pinned static asset for a studio plugin, or a 404/500 error response."""
     name = request.path_params["name"]
     rel = request.path_params["path"]
     try:
@@ -174,14 +175,16 @@ async def serve_studio_asset(request: Request) -> Response:
 
 
 def _serve_index(dist_root: Path) -> Response:
-    """Serve ``index.html`` with the injected import map, a fresh CSP nonce, the
-    security headers, and ``no-store, must-revalidate``. The index path is
-    realpath-resolved under the bundle root (a constant basename, so it can never
-    escape), keeping the "every served byte is inside the bundle" invariant whole."""
+    """Serve ``index.html`` with the injected import map, a fresh CSP nonce, security headers, and no-store.
+
+    The cache-control is ``no-store, must-revalidate``. The index path is realpath-resolved under
+    the bundle root (a constant basename, so it can never escape), keeping the "every served byte
+    is inside the bundle" invariant whole.
+    """
     try:
         index = resolve_under(dist_root, _INDEX_FILENAME)
-    except StudioPluginError as exc:
-        logger.error("studio SPA index path escaped the dist root %s: %s", dist_root, exc)
+    except StudioPluginError:
+        logger.exception("studio SPA index path escaped the dist root %s", dist_root)
         return _error("studio SPA index.html not found in the configured dist path", 500)
     if not index.is_file():
         return _error("studio SPA index.html not found in the configured dist path", 500)
@@ -201,9 +204,12 @@ def _serve_index(dist_root: Path) -> Response:
 
 
 def _serve_static(dist_root: Path, rel: str, target: Path) -> Response:
-    """Serve an existing static file. HTML files (the OAuth pages) also carry the
-    security headers + a nonce — the app's ``script-src 'self'`` protection depends
-    on the header being present here, not only on the fallback branch."""
+    """Serve an existing static file.
+
+    HTML files (the OAuth pages) also carry the security headers + a nonce — the app's
+    ``script-src 'self'`` protection depends on the header being present here, not only on the
+    fallback branch.
+    """
     if target.name.lower().endswith((".html", ".htm")):
         nonce = generate_nonce()
         headers = security_headers(nonce)
@@ -228,6 +234,7 @@ def _serve_static(dist_root: Path, rel: str, target: Path) -> Response:
     authed=False,
 )
 async def serve_spa(request: Request) -> Response:
+    """Serve the studio SPA — history-fallback index or an existing static file — for ``spa_path``."""
     spa_path = request.path_params["spa_path"]
     # The catch-all must never serve index.html over an API/MCP path: those own
     # their own routes (an unknown one is a genuine 404, not the SPA shell).

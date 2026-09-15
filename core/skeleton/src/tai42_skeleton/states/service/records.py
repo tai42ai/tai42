@@ -1,5 +1,7 @@
-"""The record doors: read, replace, merge, apply, erase, fold, listing, search, the write
-audit page, the retention prune, and the backup restore paths.
+"""The record doors.
+
+Read, replace, merge, apply, erase, fold, listing, search, the write audit page, the retention
+prune, and the backup restore paths.
 
 Every write completes its origin through the provenance chokepoint and validates the whole
 document against the effective schema before it lands.
@@ -43,10 +45,12 @@ class _RecordMixin(_StatesServiceBase):
     async def read(
         self, state: str, subject: StateSubject, *, conn: AsyncConnection[Any] | None = None
     ) -> StateRecord | None:
-        """The record for ``subject`` (resolving a fold), or ``None`` when none exists. An
-        unknown person or a target mismatch is a refusal, never an empty document. With
-        ``conn`` the read joins the caller's transaction (a attach reconciler reading its own
-        in-flight merges)."""
+        """The record for ``subject`` (resolving a fold), or ``None`` when none exists.
+
+        An unknown person or a target mismatch is a refusal, never an empty document. With ``conn``
+        the read joins the caller's transaction (a attach reconciler reading its own in-flight
+        merges).
+        """
         self._ensure_available()
         decl = await self._require_declaration_decl(state)
         await self.validate_subject(decl, subject)
@@ -74,15 +78,17 @@ class _RecordMixin(_StatesServiceBase):
         completed = self._complete_origin(origin)
         await self._store.replace(state, subject, data, origin=completed, validate_doc=_validate_document)
         view = await self.read(state, subject)
-        assert view is not None  # a record was just written
+        if view is None:
+            raise AssertionError
         return view
 
     async def merge(
         self, state: str, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin
     ) -> StateRecord:
-        """Shallow top-level merge ``patch`` into ``subject``'s document — one ``set`` op
-        per top-level key, applied atomically under the record lock — and return the new
-        record."""
+        """Shallow top-level merge ``patch`` into ``subject``'s document and return the new record.
+
+        One ``set`` op per top-level key, applied atomically under the record lock.
+        """
         self._ensure_available()
         if not isinstance(patch, dict):
             raise ValueValidationError("a merge patch must be a JSON object")
@@ -105,11 +111,13 @@ class _RecordMixin(_StatesServiceBase):
         origin: WriteOrigin,
         conn: AsyncConnection[Any] | None = None,
     ) -> ApplyResult:
-        """Apply an op batch to ``subject``'s document under the effective schema. Refuses a
-        composing-path shape violation before the ledger insert, stamps ``_trace`` under a
-        traced attach, and records one write row. A replayed ``op_id`` returns
-        ``applied=False``; guarded ops land in ``skipped``. With ``conn`` the write joins
-        the caller's transaction (a attach reconciler's resolution)."""
+        """Apply an op batch to ``subject``'s document under the effective schema.
+
+        Refuses a composing-path shape violation before the ledger insert, stamps ``_trace`` under a
+        traced attach, and records one write row. A replayed ``op_id`` returns ``applied=False``;
+        guarded ops land in ``skipped``. With ``conn`` the write joins the caller's transaction (a
+        attach reconciler's resolution).
+        """
         self._ensure_available()
         if not isinstance(ops, list):
             raise InvalidPathError("ops must be a list of operations")
@@ -148,8 +156,7 @@ class _RecordMixin(_StatesServiceBase):
     async def fold(
         self, state: str, subject: StateSubject, into: StateSubject, mode: str, *, origin: WriteOrigin
     ) -> dict[str, Any]:
-        """Fold ``subject`` into ``into`` (``switch`` drops, ``merge`` combines; survivor
-        wins) and return the fold report."""
+        """Fold ``subject`` into ``into`` (``switch`` drops, ``merge`` combines; survivor wins), return the report."""
         self._ensure_available()
         if mode not in ("switch", "merge"):
             raise SubjectFoldError(f"unknown fold mode {mode!r} (supported: merge, switch)")
@@ -170,9 +177,11 @@ class _RecordMixin(_StatesServiceBase):
         cursor: str | None = None,
         conn: AsyncConnection[Any] | None = None,
     ) -> dict[str, Any]:
-        """One keyset page of a state's subjects, ordered by the full subject identity
-        ``(target_kind, target_name, kind, key)``. With ``conn`` the read joins the caller's
-        transaction (a attach reconciler paging its own in-flight merges)."""
+        """One keyset page of a state's subjects, ordered by the full subject identity.
+
+        The order is ``(target_kind, target_name, kind, key)``. With ``conn`` the read joins the
+        caller's transaction (a attach reconciler paging its own in-flight merges).
+        """
         self._ensure_available()
         page = _page_limit(limit)
         if await self._store.get_declaration(state) is None:
@@ -190,9 +199,11 @@ class _RecordMixin(_StatesServiceBase):
     async def search(
         self, state: str, filters: dict[str, Any], *, limit: int | None = None, cursor: str | None = None
     ) -> dict[str, Any]:
-        """Content search — the subjects whose record data CONTAINS ``filters`` (a JSONB
-        containment document, matched with ``data @> filters``). A non-object or empty
-        ``filters`` is a loud client error."""
+        """Content search — the subjects whose record data CONTAINS ``filters``.
+
+        ``filters`` is a JSONB containment document, matched with ``data @> filters``. A non-object
+        or empty ``filters`` is a loud client error.
+        """
         self._ensure_available()
         page = _page_limit(limit)
         if not isinstance(filters, dict) or not filters:
@@ -212,9 +223,12 @@ class _RecordMixin(_StatesServiceBase):
     async def writes(
         self, state: str, subject: StateSubject, *, limit: int | None = None, cursor: str | None = None
     ) -> WritesPage:
-        """One keyset page of ``subject``'s audit trail, newest first — the ``items`` (each
-        a write with its completed origin and touched paths) and the ``next_cursor`` the
-        next call pages from (the last row's id when the page is full, else ``None``)."""
+        """One keyset page of ``subject``'s audit trail, newest first.
+
+        The ``items`` (each a write with its completed origin and touched paths) and the
+        ``next_cursor`` the next call pages from (the last row's id when the page is full, else
+        ``None``).
+        """
         self._ensure_available()
         page = _page_limit(limit)
         if cursor is not None:
@@ -244,8 +258,10 @@ class _RecordMixin(_StatesServiceBase):
         return WritesPage(items=items, next_cursor=next_cursor)
 
     async def prune_expired(self) -> dict[str, int]:
-        """The explicit retention sweep — delete every record past its state's effective
-        retention. A misconfigured global default is refused loudly before any delete."""
+        """The explicit retention sweep — delete every record past its state's effective retention.
+
+        A misconfigured global default is refused loudly before any delete.
+        """
         self._ensure_available()
         from tai42_skeleton.states import service as _pkg
 
@@ -263,15 +279,16 @@ class _RecordMixin(_StatesServiceBase):
         return counts
 
     async def restore_records(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
-        """Restore record rows for ``state`` under the completed origin, validating each
-        document against the effective schema. The backup section's own record-restore
-        path (off the ``AppStates`` protocol).
+        """Restore record rows for ``state`` under the completed origin, validating each document against the schema.
+
+        The backup section's own record-restore path (off the ``AppStates`` protocol).
 
         EVERY row's subject is validated (declared kind, non-empty key, and — for kind
         ``person`` — a known person of the row's target) through :meth:`validate_subject`
         BEFORE any write; a refusal names the offending row index and its subject and
         nothing is written, so a restore never lands records under an undeclared kind or an
-        unknown person."""
+        unknown person.
+        """
         self._ensure_available()
         from pydantic import ValidationError
 
@@ -299,7 +316,9 @@ class _RecordMixin(_StatesServiceBase):
         await self._store.restore_records(state, row_list, origin=completed, validate_doc=_validate_document)
 
     async def restore_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
-        """Restore subject-alias rows for ``state`` verbatim (identity, not a write) — the
-        backup section's restore path, off the ``AppStates`` protocol."""
+        """Restore subject-alias rows for ``state`` verbatim (identity, not a write).
+
+        The backup section's restore path, off the ``AppStates`` protocol.
+        """
         self._ensure_available()
         await self._store.restore_aliases(state, list(rows))

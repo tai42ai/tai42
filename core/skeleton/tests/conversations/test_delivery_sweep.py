@@ -29,7 +29,7 @@ from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 _CHUNK_CHARS = 10
 
 
-class WorkerDied(RuntimeError):
+class WorkerDiedError(RuntimeError):
     """What a channel raises to stand in for the worker vanishing mid-send — not a
     ``ChannelDeliveryError``, so the executor does not turn it into a ``failed`` record."""
 
@@ -65,7 +65,7 @@ class FakeChannel:
             if inspect.isawaitable(watched):
                 await watched
         if self._crash_on is not None and len(self.sends) == self._crash_on:
-            raise WorkerDied("the worker died mid-send")
+            raise WorkerDiedError("the worker died mid-send")
         if self._fail_on is not None and len(self.sends) == self._fail_on:
             raise ChannelDeliveryError("the provider refused the chunk")
         if self._input_fail_on is not None and len(self.sends) == self._input_fail_on:

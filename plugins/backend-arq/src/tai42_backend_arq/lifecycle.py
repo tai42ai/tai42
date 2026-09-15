@@ -9,4 +9,5 @@ from tai42_backend_arq.pool import RedisPoolManager
 
 @tai42_app.lifecycle.on_shutdown
 async def close_arq_pool() -> None:
+    """Close the shared ArqRedis pool at app shutdown."""
     await RedisPoolManager.close()

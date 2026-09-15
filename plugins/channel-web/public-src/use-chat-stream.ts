@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { applyFrame } from '@/frame-reducer';
-import { EMPTY_MODEL, type ChatItem, type StreamModel } from '@/transcript-model';
+import { type ChatItem, EMPTY_MODEL, type StreamModel } from '@/transcript-model';
 import { streamTranscript, type TranscriptSink } from '@/transcript-subscription';
 
 /** The live state of one visitor's transcript. */

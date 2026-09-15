@@ -105,9 +105,11 @@ class PublicBuildError(RuntimeError):
 
 @dataclass(frozen=True)
 class PublicBuild:
-    """The built bundle as the page and asset doors need it: the module entry, the
-    stylesheets to link, and the name -> sha384 map that is both the SRI source and
-    the serving allowlist."""
+    """The built bundle as the page and asset doors need it.
+
+    The module entry, the stylesheets to link, and the name -> sha384 map that is both the SRI source and
+    the serving allowlist.
+    """
 
     entry: str
     styles: tuple[str, ...]
@@ -115,8 +117,11 @@ class PublicBuild:
 
 
 def _public_dir() -> Path:
-    """The packaged bundle directory. A module-level seam so a test can point the
-    loader at a fixture build — repointing it requires ``load_build.cache_clear()``."""
+    """The packaged bundle directory.
+
+    A module-level seam so a test can point the loader at a fixture build — repointing it requires
+    ``load_build.cache_clear()``.
+    """
     return Path(__file__).resolve().parent / "public"
 
 
@@ -138,7 +143,8 @@ def load_build() -> PublicBuild:
 
     Every failure mode is loud: an unbuilt bundle, unreadable or non-JSON manifest,
     a missing/mistyped field, or an entry/stylesheet absent from the integrity map
-    (which would serve a 404 for a file the page links)."""
+    (which would serve a 404 for a file the page links).
+    """
     path = _public_dir() / PUBLIC_MANIFEST_FILENAME
     try:
         raw = path.read_text(encoding="utf-8")
@@ -173,15 +179,19 @@ def load_build() -> PublicBuild:
 
 
 def asset_path(name: str) -> Path:
-    """The on-disk path of one built asset. ``name`` MUST already have matched a key
-    of the build's integrity map — that exact-name lookup is what keeps this join
-    inside the bundle."""
+    """The on-disk path of one built asset.
+
+    ``name`` MUST already have matched a key of the build's integrity map — that exact-name lookup is what keeps
+    this join inside the bundle.
+    """
     return _public_dir() / name
 
 
 def asset_content_type(filename: str) -> str:
-    """Content-type for a built asset by extension. Unmapped -> octet-stream; never
-    text/html."""
+    """Content-type for a built asset by extension.
+
+    Unmapped -> octet-stream; never text/html.
+    """
     lower = filename.lower()
     for suffix, content_type in _CONTENT_TYPES.items():
         if lower.endswith(suffix):

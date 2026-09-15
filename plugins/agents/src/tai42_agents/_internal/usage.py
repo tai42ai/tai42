@@ -32,8 +32,7 @@ class CallUsage:
 
 @dataclass(frozen=True)
 class AgentInvokeResult:
-    """An agent invocation's result: user output, per-call usage, and structured
-    response.
+    """An agent invocation's result: user output, per-call usage, and structured response.
 
     ``structured`` is ``None`` when no ``response_format`` was requested; otherwise
     it is ``state["structured_response"]`` validated against that format (a missing
@@ -65,9 +64,9 @@ def _int_token_count(usage_metadata: Mapping[str, Any], key: str) -> int:
 
 
 def aggregate_usage(state: dict[str, Any]) -> CallUsage:
-    """Sum ``usage_metadata`` across every ``AIMessage`` in ``state["messages"]``
-    and pick the most recent ``response_metadata.model_name``.
+    """Sum ``usage_metadata`` across every ``AIMessage`` and pick the most recent model name.
 
+    Reads ``state["messages"]`` and each message's ``response_metadata.model_name``.
     Returns a zero-token ``CallUsage`` with ``model=None`` when no message
     carries usage (honest provider omission / fabricated test state). A present
     but malformed ``usage_metadata`` raises ``ValueError``.
@@ -94,9 +93,12 @@ def aggregate_usage(state: dict[str, Any]) -> CallUsage:
 
 
 def usage_event(message: Any) -> RunUsage | None:
-    """Build a :class:`RunUsage` stream event from a single message's
-    ``usage_metadata`` and model label, or ``None`` when the provider surfaced no
-    usage (an honest omission — fewer events, never a fabricated zero record)."""
+    """Build a :class:`RunUsage` stream event from a single message's usage, or ``None``.
+
+    Reads the message's ``usage_metadata`` and model label; returns ``None`` when
+    the provider surfaced no usage (an honest omission — fewer events, never a
+    fabricated zero record).
+    """
     usage_metadata = getattr(message, "usage_metadata", None)
     if not usage_metadata:
         return None

@@ -33,18 +33,23 @@ from tai42_skeleton.operations.response_models_group_c import BackendInfo
 
 
 class ReloadConfig(BaseModel):
-    """A fleet reload-config request — an optional ``targets`` list restricting the
-    soft-restart to named workers (all workers when omitted)."""
+    """A fleet reload-config request.
+
+    An optional ``targets`` list restricts the soft-restart to named workers (all workers when
+    omitted).
+    """
 
     targets: list[str] | None = None
 
 
 class WorkerListingRow(BaseModel):
-    """One worker on the fleet listing: the census row plus a server-computed ``stale``
-    flag. ``stale`` is derived from the SAME bus-owned freshness predicate the ready+fresh
-    expected set uses (:func:`~tai42_skeleton.app.bus.presence_fresh` on the row's captured PTTL
-    against the serving bus's TTL) — a client never hardcodes a threshold. ``last_op`` is
-    ``null`` until the worker has applied one."""
+    """One worker on the fleet listing: the census row plus a server-computed ``stale`` flag.
+
+    ``stale`` is derived from the SAME bus-owned freshness predicate the ready+fresh expected set
+    uses (:func:`~tai42_skeleton.app.bus.presence_fresh` on the row's captured PTTL against the
+    serving bus's TTL) — a client never hardcodes a threshold. ``last_op`` is ``null`` until the
+    worker has applied one.
+    """
 
     name: str
     kind: WorkerKind
@@ -58,14 +63,17 @@ class WorkerListingRow(BaseModel):
 
 
 class WorkerListing(BaseModel):
-    """The fleet listing payload for ``GET /api/fleet/workers`` — one row per live
-    presence key, each with its server-computed ``stale`` flag."""
+    """The fleet listing payload for ``GET /api/fleet/workers``.
+
+    One row per live presence key, each with its server-computed ``stale`` flag.
+    """
 
     workers: list[WorkerListingRow]
 
 
 @operation(summary="Get the backend identity", tags=["backend"], response_model=BackendInfo)
 async def backend_info() -> dict:
+    """The backend identity — whether one is registered and, if so, its class and module."""
     backend = tai42_app.backends.backend
     if backend is None:
         return {"present": False, "backend": None, "module": None}
@@ -74,6 +82,7 @@ async def backend_info() -> dict:
 
 @operation(summary="List the worker fleet", tags=["backend"], response_model=WorkerListing)
 async def list_workers() -> WorkerListing:
+    """The fleet listing — one row per live worker presence key, each with a server-computed ``stale`` flag."""
     # The census IS the fleet listing now — every process on the bus, via its presence
     # key. No try/except: a presence-store read that cannot read must fail loudly (500),
     # never return an empty fleet. ``stale`` is server-computed from the ONE bus-owned
@@ -107,6 +116,7 @@ async def list_workers() -> WorkerListing:
     response_model=FleetResult,
 )
 async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
+    """Soft-restart the worker fleet, optionally restricted to the named ``targets``."""
     # ``targets`` is validated at the HTTP edge (the route's ``_reload_targets``
     # extractor raises ``BadRequestError`` for a malformed body / non-string-list
     # targets), so the route answers a loud 400 there — the operation receives an

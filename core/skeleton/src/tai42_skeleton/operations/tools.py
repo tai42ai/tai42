@@ -1,5 +1,6 @@
-"""Tool-surface operations — ``/api/tools*`` and ``/api/run-tool``, plus the live
-app-management tools (run, reload, and remove a tool).
+"""Tool-surface operations — ``/api/tools*`` and ``/api/run-tool``, plus live tool management.
+
+Also exposes the live app-management tools (run, reload, and remove a tool).
 
 Reads:
 
@@ -52,8 +53,8 @@ from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
     OperationError,
-    OperationFailed,
-    PermissionDenied,
+    OperationFailedError,
+    PermissionDeniedError,
     operation,
 )
 from tai42_skeleton.operations._broadcast import broadcast
@@ -72,16 +73,20 @@ logger = logging.getLogger(__name__)
 
 
 class RunToolRequest(BaseModel):
-    """A synchronous tool-run request: the ``tool_name`` and its keyword
-    ``arguments``. Mirrors the shape ``read_tool_call`` enforces at runtime."""
+    """A synchronous tool-run request: the ``tool_name`` and its keyword ``arguments``.
+
+    Mirrors the shape ``read_tool_call`` enforces at runtime.
+    """
 
     tool_name: str = Field(min_length=1, description="Registered tool name.")
     arguments: dict[str, object] = Field(default_factory=dict, description="Tool keyword arguments.")
 
 
 class ToolReloadRequest(BaseModel):
-    """Re-register or remove one app tool by ``kind`` and ``name``, optionally
-    restricting the fleet fan-out to specific ``targets``."""
+    """Re-register or remove one app tool by ``kind`` and ``name``.
+
+    Optionally restricting the fleet fan-out to specific ``targets``.
+    """
 
     kind: str = Field(min_length=1, description='The tool kind (e.g. "example_tool").')
     name: str = Field(min_length=1, description="The tool name.")
@@ -99,6 +104,7 @@ def _tool_schema(tool: Tool) -> dict[str, object]:
 
 @operation(summary="List the registered tool names", tags=["tools"], response_model=StringListResponse)
 async def list_tools() -> list[str]:
+    """The sorted registered tool names."""
     tools = await tai42_app.tools.get_tools()
     return sorted(tools.keys())
 
@@ -109,16 +115,17 @@ async def list_tools() -> list[str]:
     response_model=ToolTagListResponse,
 )
 async def tool_tags() -> list[dict]:
-    """The per-tool native-``tags`` map plus the plugin-declared visibility and
-    capability badges — one ``{name, tags, hidden, badges}`` entry per registered
-    tool, ``tags`` and ``badges`` each sorted for a stable wire order. ``hidden`` is
-    the tool's OWN declaration, read from the FastMCP ``meta`` under the namespaced
-    ``tai42/hidden`` key (a tool that never declared it is not hidden); ``badges`` is
-    likewise the tool's OWN declared INFORMATIONAL capability badges, read from
-    ``meta`` under ``tai42/badges`` (a tool that declared none carries an empty list).
-    The tool_meta overlay's tri-state override and its own badge set are merged on
-    top client-side; this read exposes only the declaration. Additive to the flat
-    names contract; a tool with no tags carries an empty list."""
+    """The per-tool native-``tags`` map plus the plugin-declared visibility and capability badges.
+
+    One ``{name, tags, hidden, badges}`` entry per registered tool, ``tags`` and ``badges`` each
+    sorted for a stable wire order. ``hidden`` is the tool's OWN declaration, read from the
+    FastMCP ``meta`` under the namespaced ``tai42/hidden`` key (a tool that never declared it is
+    not hidden); ``badges`` is likewise the tool's OWN declared INFORMATIONAL capability badges,
+    read from ``meta`` under ``tai42/badges`` (a tool that declared none carries an empty list).
+    The tool_meta overlay's tri-state override and its own badge set are merged on top
+    client-side; this read exposes only the declaration. Additive to the flat names contract; a
+    tool with no tags carries an empty list.
+    """
     tools = await tai42_app.tools.get_tools()
     return [
         {
@@ -138,6 +145,7 @@ async def tool_tags() -> list[dict]:
     response_model=ToolSchemaView,
 )
 async def tool_schema(tool_name: str) -> dict:
+    """One tool's input/output/description view (unknown name → 404)."""
     tools = await tai42_app.tools.get_tools()
     tool = tools.get(tool_name)
     if tool is None:
@@ -147,6 +155,7 @@ async def tool_schema(tool_name: str) -> dict:
 
 @operation(summary="Get the input/output schema of every tool", tags=["tools"], response_model=ToolsSchemaMap)
 async def tools_schema() -> dict:
+    """The input/output/description view of every registered tool, keyed by name."""
     tools = await tai42_app.tools.get_tools()
     # A schema view needs no callable body, so every registered tool's schema is served
     # here — identical to the per-tool route, which 404s only an unknown name and serves
@@ -167,7 +176,7 @@ async def tools_schema() -> dict:
     destructive=True,
     reload_gated=True,
     meta_executor=True,
-    errors=[BadRequestError, NotFoundError, PermissionDenied, OperationFailed],
+    errors=[BadRequestError, NotFoundError, PermissionDeniedError, OperationFailedError],
     request_model=RunToolRequest,
     response_model=OpaqueJson,
 )
@@ -256,16 +265,16 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
             logger.warning("run-tool: %r resolved at lookup but did not resolve at dispatch; answering 404", tool_name)
             raise NotFoundError(f"unknown tool: {tool_name}") from exc
         logger.exception("run-tool %r raised unknown-tool %r during execution", tool_name, exc.tool_name)
-        raise OperationFailed(str(exc)) from exc
+        raise OperationFailedError(str(exc)) from exc
     except OperationError:
-        # A typed operation error is the tool's own answer (e.g. a PermissionDenied 403);
-        # flattening it into ``OperationFailed`` would report a refusal as a crash.
+        # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
+        # flattening it into ``OperationFailedError`` would report a refusal as a crash.
         raise
     except Exception as exc:
         logger.exception("run-tool %r raised during execution", tool_name)
         # A bare raise stringifies to ""; the class-name fallback keeps the envelope
         # from emitting {"error": ""}.
-        raise OperationFailed(str(exc) or type(exc).__name__) from exc
+        raise OperationFailedError(str(exc) or type(exc).__name__) from exc
     finally:
         # The binding must not outlive this dispatch — a later op on the same request
         # context must see the request-scope world, not a lingering execution identity.

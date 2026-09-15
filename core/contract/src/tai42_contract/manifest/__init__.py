@@ -1,5 +1,6 @@
-"""Manifest contract: ``Manifest`` + the ``*Config`` models (incl. the transport
-config ``TaiMCPConfig``) + the filter-predicate signatures.
+"""Manifest contract: ``Manifest``, the ``*Config`` models, and the filter-predicate signatures.
+
+The ``*Config`` models include the transport config ``TaiMCPConfig``.
 
 The impl methods that build the derived lookup maps and run the include/exclude
 filtering (``model_post_init`` + the private ``_build_*``/``_should_include``
@@ -25,12 +26,16 @@ ExtensionElement = str | dict[str, Any]
 
 
 class BaseConfig(BaseModel):
+    """Shared config fields: a ``title`` plus ``include``/``exclude`` selection lists."""
+
     title: str
     include: list[str] = Field(default_factory=list)
     exclude: list[str] = Field(default_factory=list)
 
 
 class MCPConfig(BaseModel):
+    """Transport config for one MCP server: exactly one of ``url``/``uds``/``command``."""
+
     type: str | None = None
     url: str | None = None
     uds: str | None = None
@@ -44,9 +49,11 @@ class MCPConfig(BaseModel):
     @field_validator("url", "uds", "command", mode="before")
     @classmethod
     def _empty_transport_to_none(cls, value: object) -> object:
-        """Normalize an empty transport string to ``None`` (mirrors
-        ``McpServerDescriptor._check_url``) so the transport gate and the
-        ``is_*`` predicates agree that an empty value is "not set"."""
+        """Normalize an empty transport string to ``None``.
+
+        So the transport gate and the ``is_*`` predicates agree that an empty
+        value is "not set".
+        """
         if value == "":
             return None
         return value
@@ -54,6 +61,7 @@ class MCPConfig(BaseModel):
     @field_validator("args", mode="before")
     @classmethod
     def normalize_args(cls, value: object) -> list[str]:
+        """Coerce a ``None`` ``args`` value to an empty list."""
         if value is None:
             return []
         return cast("list[str]", value)
@@ -61,10 +69,11 @@ class MCPConfig(BaseModel):
     @field_validator("headers", "env", mode="before")
     @classmethod
     def normalize_dict_values(cls, value: object) -> dict[str, str]:
+        """Coerce ``None`` to an empty dict and stringify values, failing loudly on a ``None`` value."""
         if value is None:
             return {}
         if not isinstance(value, dict):
-            raise ValueError(f"Expected a dictionary, got {type(value).__name__}")
+            raise ValueError(f"Expected a dictionary, got {type(value).__name__}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
         # Keys pass through as-is; pydantic validates them against the field's
         # dict[str, str] annotation after this hook. A None value is a malformed
@@ -147,7 +156,7 @@ def _normalize_extension_element(key: str, member: object) -> ExtensionElement:
             raise ValueError(f"extensions[{key!r}] element must have a non-empty string 'name'")
         config = entry.get("config")
         if not isinstance(config, dict):
-            raise ValueError(f"extensions[{key!r}] element {name!r} must carry a 'config' mapping")
+            raise ValueError(f"extensions[{key!r}] element {name!r} must carry a 'config' mapping")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         extra = set(entry) - {"name", "config"}
         if extra:
             raise ValueError(f"extensions[{key!r}] element {name!r} has unexpected keys: {sorted(extra)!r}")
@@ -156,8 +165,9 @@ def _normalize_extension_element(key: str, member: object) -> ExtensionElement:
 
 
 class ExtensionsConfigMixin(BaseModel):
-    """Carries the ``extensions`` attachment map, mixed into the config kinds
-    that support clip-on extensions (``ToolsConfig`` and ``TaiMCPConfig``).
+    """Carries the ``extensions`` attachment map for config kinds that support clip-on extensions.
+
+    Mixed into ``ToolsConfig`` and ``TaiMCPConfig``.
 
     ``extensions`` maps a tool base-name to the extension combo(s) attached to
     it, applied AFTER selection and independent of ``include``/``exclude``. The
@@ -173,8 +183,9 @@ class ExtensionsConfigMixin(BaseModel):
     @field_validator("extensions", mode="before")
     @classmethod
     def normalize_extensions(cls, value: object) -> dict[str, list[list[ExtensionElement]]]:
-        """Normalize each value to a list of combos and reject malformed input
-        loudly (no silent coercion, mirroring ``normalize_dict_values`` above).
+        """Normalize each value to a list of combos and reject malformed input loudly.
+
+        No silent coercion.
 
         A flat combo value is a single combo and is wrapped
         (``{weather: [chain]}`` -> ``{"weather": [["chain"]]}``); a list-of-combos
@@ -187,13 +198,13 @@ class ExtensionsConfigMixin(BaseModel):
         if value is None:
             return {}
         if not isinstance(value, dict):
-            raise ValueError(f"extensions must be a mapping, got {type(value).__name__}")
+            raise ValueError(f"extensions must be a mapping, got {type(value).__name__}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
         items = cast("dict[str, object]", value)
         result: dict[str, list[list[ExtensionElement]]] = {}
         for key, combos in items.items():
             if not isinstance(combos, list):
-                raise ValueError(f"extensions[{key!r}] must be a list of names or a list of combos")
+                raise ValueError(f"extensions[{key!r}] must be a list of names or a list of combos")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
             if not combos:
                 raise ValueError(f"extensions[{key!r}] must not be empty; omit the key instead of attaching nothing")
 
@@ -223,10 +234,14 @@ class ExtensionsConfigMixin(BaseModel):
 
 
 class ToolsConfig(BaseConfig, ExtensionsConfigMixin):
+    """A tools block: a ``module`` import path plus selection and extension config."""
+
     module: str
 
 
 class AgentsConfig(BaseConfig):
+    """An agents block: a ``module`` import path plus selection config (no extensions)."""
+
     # ``extra="forbid"``: an ``extensions`` key on an agents config is a
     # misconfig (agents carry no clip-on extensions) — reject it loudly as a
     # pydantic extra-field error rather than silently ignoring it.
@@ -236,11 +251,14 @@ class AgentsConfig(BaseConfig):
 
 
 class TaiMCPConfig(BaseConfig, ExtensionsConfigMixin):
+    """An MCP block: a transport ``config`` plus optional managed-connector binding."""
+
     config: MCPConfig
     managed: ConnectorRef | None = None
 
     @property
     def is_managed(self) -> bool:
+        """Whether this MCP block is backed by a managed connector."""
         return self.managed is not None
 
 
@@ -273,6 +291,8 @@ class ApiToolsConfig(ExtensionsConfigMixin):
 
 
 class Manifest(BaseModel):
+    """The whole application manifest: tool/agent/MCP blocks, module lists, and derived maps."""
+
     # ``extra="forbid"``: an unknown top-level manifest key is a misconfig — fail
     # loudly naming the key rather than silently dropping it.
     model_config = ConfigDict(extra="forbid")
@@ -367,9 +387,11 @@ class Manifest(BaseModel):
 
     @model_validator(mode="after")
     def _reject_duplicate_connector_ids(self):
-        """Reject two ``connectors`` entries sharing an ``id``: the reload seam
-        registers each descriptor by id and the registry's duplicate guard would
-        crash the boot — fail loudly here naming the duplicate id instead."""
+        """Reject two ``connectors`` entries sharing an ``id``.
+
+        The reload seam registers each descriptor by id and the registry's duplicate
+        guard would crash the boot — fail loudly here naming the duplicate id instead.
+        """
         seen: set[str] = set()
         for descriptor in self.connectors:
             if descriptor.id in seen:
@@ -382,18 +404,22 @@ class Manifest(BaseModel):
     # -- Filter-predicate signatures (impl builds the maps these read) --------
 
     def should_include_tool(self, name: str, module: str) -> bool:
-        """Whether tool ``name`` from ``module`` survives the include/exclude
-        filter (and record the decision on the matching config)."""
+        """Whether tool ``name`` from ``module`` survives the include/exclude filter.
+
+        Also records the decision on the matching config.
+        """
         raise NotImplementedError(
             "Manifest.should_include_tool is contract-only; the impl Manifest subclass supplies the body"
         )
 
     def should_include_agent(self, name: str, module: str) -> bool:
+        """Whether agent ``name`` from ``module`` survives the include/exclude filter."""
         raise NotImplementedError(
             "Manifest.should_include_agent is contract-only; the impl Manifest subclass supplies the body"
         )
 
     def should_include_mcp_tool(self, name: str, title: str) -> bool:
+        """Whether MCP tool ``name`` under ``title`` survives the include/exclude filter."""
         raise NotImplementedError(
             "Manifest.should_include_mcp_tool is contract-only; the impl Manifest subclass supplies the body"
         )
@@ -404,8 +430,10 @@ class Manifest(BaseModel):
 
     @property
     def live_manifest(self) -> Manifest:
-        """A deep copy whose ``tools``/``agents``/``mcp`` reflect the live
-        (post-filter) config maps."""
+        """A deep copy whose ``tools``/``agents``/``mcp`` reflect the live config maps.
+
+        The maps are post-filter.
+        """
         raise NotImplementedError(
             "Manifest.live_manifest is contract-only; the impl Manifest subclass supplies the body"
         )

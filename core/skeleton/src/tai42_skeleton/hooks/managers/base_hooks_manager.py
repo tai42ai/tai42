@@ -1,3 +1,5 @@
+"""The abstract hooks-manager base: hook registration, event fan-out, and replay defense."""
+
 import asyncio
 import logging
 from abc import ABC, abstractmethod
@@ -16,14 +18,21 @@ from tai42_kit.utils.data.jq_util import get_compiled_jq
 from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.monitoring import get_monitoring
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.states.context import state_context
 
 logger = logging.getLogger(__name__)
 
 
 class BaseHooksManager(ABC):
+    """Base for hook managers: registration, per-topic verifier bindings, and event fan-out.
+
+    Backends supply the storage of hooks, verifier bindings, and the replay seen-set; this base
+    supplies the shared firing, condition checks, and the manager-wide concurrency bound.
+    """
+
     def __init__(self, settings: HooksSettings):
+        """Store ``settings`` and size the manager-wide in-flight execution semaphore."""
         self.settings = settings
         # One semaphore for the manager's lifetime, bounding TOTAL in-flight hook
         # executions across ALL events at ``settings.max_workers`` — concurrent
@@ -37,7 +46,8 @@ class BaseHooksManager(ABC):
         A broken condition/expr would otherwise surface only as a hook that
         never fires (indistinguishable from a false condition). A templated text
         naming a stored resource renders per event and cannot be compiled here —
-        its failures surface loudly at fire time instead."""
+        its failures surface loudly at fire time instead.
+        """
         for field in ("condition", "expr"):
             text: TemplatedText | None = getattr(params, field)
             if text is None or not text.content:
@@ -78,7 +88,8 @@ class BaseHooksManager(ABC):
 
         The bind must stay HERE, inside the per-hook coroutine: a contextvar set inside a
         task is invisible to its siblings, which is what gives each fanned-out hook its
-        own key rather than a sibling's or the server's unbounded authority."""
+        own key rather than a sibling's or the server's unbounded authority.
+        """
         # Imported at call time: the operation module runs a module-level app-lifecycle
         # decorator, so a top-level import would force it to load before the app is bound.
         from tai42_skeleton.operations.tool_runs import run_recorded
@@ -95,7 +106,7 @@ class BaseHooksManager(ABC):
             if not hook.execution_key:
                 # No bound key means no authority to fire under; the server's own is not a
                 # substitute. Refuse before any work.
-                raise PermissionDenied(f"hook {hook.name!r} binds no execution key; refusing to fire")
+                raise PermissionDeniedError(f"hook {hook.name!r} binds no execution key; refusing to fire")
 
             rendered_expr = (
                 await tai42_app.storage.resource_manager.render_templated_text(hook.expr)
@@ -137,16 +148,24 @@ class BaseHooksManager(ABC):
             await self._run_hook(hook, payload, tool_kwargs_override)
 
     @abstractmethod
-    async def register(self, params: HookParams) -> bool: ...
+    async def register(self, params: HookParams) -> bool:
+        """Register the hook described by ``params``; return whether it was newly added."""
+        ...
 
     @abstractmethod
-    async def unregister(self, name: str) -> bool: ...
+    async def unregister(self, name: str) -> bool:
+        """Remove the hook named ``name``; return whether one was removed."""
+        ...
 
     @abstractmethod
-    async def list_hooks(self) -> dict[str, HookParams]: ...
+    async def list_hooks(self) -> dict[str, HookParams]:
+        """Return every registered hook, keyed by name."""
+        ...
 
     @abstractmethod
-    async def list_hooks_by_topic(self, topic: str) -> dict[str, HookParams]: ...
+    async def list_hooks_by_topic(self, topic: str) -> dict[str, HookParams]:
+        """Return the hooks bound to ``topic``, keyed by name."""
+        ...
 
     # -- Per-topic webhook-verifier bindings ---------------------------------
     #
@@ -157,16 +176,24 @@ class BaseHooksManager(ABC):
     # four methods.
 
     @abstractmethod
-    async def set_topic_verifier(self, topic: str, binding: dict[str, Any]) -> None: ...
+    async def set_topic_verifier(self, topic: str, binding: dict[str, Any]) -> None:
+        """Store the webhook-verifier ``binding`` for ``topic``."""
+        ...
 
     @abstractmethod
-    async def get_topic_verifier(self, topic: str) -> dict[str, Any] | None: ...
+    async def get_topic_verifier(self, topic: str) -> dict[str, Any] | None:
+        """Return the webhook-verifier binding for ``topic``, or ``None`` when none is set."""
+        ...
 
     @abstractmethod
-    async def delete_topic_verifier(self, topic: str) -> bool: ...
+    async def delete_topic_verifier(self, topic: str) -> bool:
+        """Remove ``topic``'s webhook-verifier binding; return whether one was removed."""
+        ...
 
     @abstractmethod
-    async def all_topic_verifiers(self) -> dict[str, dict[str, Any]]: ...
+    async def all_topic_verifiers(self) -> dict[str, dict[str, Any]]:
+        """Return every topic's webhook-verifier binding, keyed by topic."""
+        ...
 
     # -- Webhook replay defense (seen-set) -----------------------------------
     #
@@ -179,11 +206,13 @@ class BaseHooksManager(ABC):
 
     @abstractmethod
     async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
-        """Atomically claim a delivery id for ``topic``: ``True`` on the FIRST claim
-        (a legitimate first delivery — proceed), ``False`` when the id was already
-        claimed within ``ttl_seconds`` (a replay — the caller returns the idempotent
-        already-seen response and dispatches nothing). Raises on a non-positive
-        ``ttl_seconds`` — a claim is never taken without a bounded TTL."""
+        """Atomically claim a delivery id for ``topic``.
+
+        Returns ``True`` on the FIRST claim (a legitimate first delivery — proceed), ``False`` when
+        the id was already claimed within ``ttl_seconds`` (a replay — the caller returns the
+        idempotent already-seen response and dispatches nothing). Raises on a non-positive
+        ``ttl_seconds`` — a claim is never taken without a bounded TTL.
+        """
         ...
 
     async def on_event(
@@ -197,7 +226,8 @@ class BaseHooksManager(ABC):
 
         Each hook runs in its own task and binds its own execution identity there, so a
         hook is never fired under a sibling's key; a denied fire is that hook's error
-        outcome and leaves the rest of the fan-out untouched."""
+        outcome and leaves the rest of the fan-out untouched.
+        """
         writer = get_monitoring().writer
         with (
             writer.start_span(name="hook_on_event", kind=SpanKind.CHAIN),
@@ -229,11 +259,13 @@ class BaseHooksManager(ABC):
 
 
 async def _hook_state_context(hook: HookParams, payload: dict[str, Any]) -> StateContext | None:
-    """The ambient ``hook``-door state context for a fire, or ``None`` when the hook declares
-    no ``subject``. The subject's ``key_expr`` runs over the event payload and MUST yield a
-    non-empty string — an empty/blank/non-string key fails the fire loudly, never a silent
-    skip — so a state write during the fire is keyed and attributed to the hook (actor = the
-    hook's execution key; ``turn_id`` is None, a hook fire is not a conversation turn)."""
+    """The ambient ``hook``-door state context for a fire, or ``None`` when the hook declares no subject.
+
+    The subject's ``key_expr`` runs over the event payload and MUST yield a non-empty string — an
+    empty/blank/non-string key fails the fire loudly, never a silent skip — so a state write during
+    the fire is keyed and attributed to the hook (actor = the hook's execution key; ``turn_id`` is
+    None, a hook fire is not a conversation turn).
+    """
     subject: HookSubject | None = hook.subject
     if subject is None:
         return None

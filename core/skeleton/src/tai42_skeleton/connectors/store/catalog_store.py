@@ -28,8 +28,7 @@ class ConnectorCategory(BaseModel):
 
 
 async def fetch_categories() -> list[ConnectorCategory]:
-    """Read every ``connector_category`` row, ordered for display
-    (``sort_order``, then id)."""
+    """Read every ``connector_category`` row, ordered for display (``sort_order``, then id)."""
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,

@@ -79,10 +79,11 @@ _CONTINUATION_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def _log_continuation_done(task: asyncio.Task[Any], tool: str, interaction_id: str) -> None:
-    """Surface a detached continuation's outcome loudly. A cancellation (shutdown)
-    is a WARNING; any other failure — including a refused rebind of a since-disabled
-    key — is an ERROR: the park resolved but its driver never resumed, which must
-    never be swallowed."""
+    """Surface a detached continuation's outcome loudly.
+
+    A cancellation (shutdown) is a WARNING; any other failure — including a refused rebind of a since-disabled
+    key — is an ERROR: the park resolved but its driver never resumed, which must never be swallowed.
+    """
     if task.cancelled():
         logger.warning("interaction %s continuation %r was cancelled before completing", interaction_id, tool)
         return
@@ -99,16 +100,17 @@ async def _run_continuation(
     answer: Any,
     park_context: StateContext | None = None,
 ) -> None:
-    """Rebind ``identity`` (under the captured ``fingerprint``) and run ``tool`` with
-    the park's ``{interaction_id, answer}``. Runs in a detached task so a long resume
-    never blocks the resolving door; the bind is refused loudly if the key can no
-    longer carry the fire.
+    """Rebind ``identity`` under ``fingerprint`` and run ``tool`` with the park's ``{interaction_id, answer}``.
+
+    Runs in a detached task so a long resume never blocks the resolving door; the bind is refused loudly if the key
+    can no longer carry the fire.
 
     ``park_context`` is the original turn's ambient state context, carried verbatim
     across the park and re-deposited around ``run_tool`` so the resumed run's state
     writes complete their provenance from the SAME door the park entered through — every
     resolution door (an answer, the expiry reaper, an at-least-once redelivery) supplies
-    it, so the door coverage holds on all three."""
+    it, so the door coverage holds on all three.
+    """
     # ATTRIBUTION SEAM (deliberately UNATTRIBUTED): this continuation/reaper
     # re-drive resumes a parked run OUT OF BAND on a fresh detached task, so no ambient
     # ``RunAttribution`` is deposited and ``run_tool``'s ``stamp_run_attribution`` no-ops
@@ -158,14 +160,16 @@ async def _run_and_clear(
     answer: Any,
     park_context: StateContext | None = None,
 ) -> None:
-    """Run the continuation, then clear its durable due-record — the at-least-once
-    delivery body. ``run_tool`` returning means the consumer durably applied the
+    """Run the continuation, then clear its durable due-record — the at-least-once delivery body.
+
+    ``run_tool`` returning means the consumer durably applied the
     resume, so the record is cleared. If ``run_tool`` RAISES (e.g. its target
     state was not yet persisted — an ordering race — or any transient fault),
     the record is deliberately NOT cleared: the exception propagates to the task's
     done-callback (logged loudly, never swallowed) and the record stays for the reaper
     to redeliver on backoff. The clear opens its own client: the detached task outlives
-    the resolving door's connection."""
+    the resolving door's connection.
+    """
     await _run_continuation(identity, fingerprint, tool, interaction_id, answer, park_context)
     async with client_ctx(RedisClient, interactions_settings().redis) as r:
         await store.clear_continuation_due(r, interaction_id)
@@ -181,9 +185,10 @@ def _spawn_continuation_task(
     park_context: StateContext | None = None,
 ) -> None:
     """Spawn the detached run-and-clear task, holding a strong reference until it ends.
+
     The loop's own reference is weak, so an untracked task can be GC'd mid-flight and
-    lose the resume; the done-callback drops the reference and surfaces the outcome
-    loudly."""
+    lose the resume; the done-callback drops the reference and surfaces the outcome loudly.
+    """
     task = asyncio.create_task(
         _run_and_clear(store, identity, fingerprint, tool, interaction_id, answer, park_context),
         name=f"interaction-continuation-{interaction_id}",
@@ -198,12 +203,14 @@ def _spawn_continuation_task(
 
 
 def continuation_due_timing(settings: InteractionsSettings) -> tuple[int, int]:
-    """``(record TTL, first-attempt time in ms)`` for a durable continuation-due
-    record, computed at call time. TTL = the idle retention horizon; the first
+    """``(record TTL, first-attempt time in ms)`` for a durable continuation-due record, computed at call time.
+
+    TTL = the idle retention horizon; the first
     redelivery attempt is seeded one reaper interval out, so a healthy fire clears the
     record before the reaper would ever redeliver it. Callers pass these to
     ``record_answer`` so the outbox enqueue commits in the SAME transaction as the
-    claim; the caller supplies its own ``settings`` (the store holds none)."""
+    claim; the caller supplies its own ``settings`` (the store holds none).
+    """
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     return settings.idle_ttl_seconds, now_ms + int(settings.expiry_reaper_interval_seconds * 1000)
 
@@ -211,16 +218,19 @@ def continuation_due_timing(settings: InteractionsSettings) -> tuple[int, int]:
 def dispatch_continuation(
     store: InteractionStore, request: InteractionRequest, fingerprint: str | None, answer: Any
 ) -> None:
-    """Fire ``request``'s stored continuation ONCE, as its stored identity — a no-op
-    for a sync question. Call only after a TRUE claim, which has ALREADY enqueued the
+    """Fire ``request``'s stored continuation ONCE, as its stored identity — a no-op for a sync question.
+
+    Call only after a TRUE claim, which has ALREADY enqueued the
     durable continuation-due record ATOMICALLY (see ``InteractionStore.record_answer``);
     this only spawns the detached run-and-clear task. Detached so neither a slow resume
     nor a rebind refusal blocks (or 500s) the door that committed the answer; the task
-    clears the durable record when ``run_tool`` returns."""
+    clears the durable record when ``run_tool`` returns.
+    """
     if request.mode != "async" or request.continuation_tool is None:
         return
     # The model's async validator guarantees the identity is set alongside the tool.
-    assert request.continuation_identity is not None
+    if request.continuation_identity is None:
+        raise AssertionError
     _spawn_continuation_task(
         store,
         request.continuation_identity,
@@ -233,11 +243,12 @@ def dispatch_continuation(
 
 
 def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> None:
-    """The reaper's redelivery path: re-fire an already-persisted continuation-due
-    record WITHOUT re-persisting (the retry-claim already rescheduled its next
-    attempt). A healthy fire clears the record; a raised ``run_tool`` leaves it for the
-    next backoff window. At-least-once — the consumer's idempotency covers a redelivery
-    that races the original fire to completion."""
+    """The reaper's redelivery path: re-fire an already-persisted continuation-due record WITHOUT re-persisting.
+
+    The retry-claim already rescheduled its next attempt. A healthy fire clears the record; a raised ``run_tool``
+    leaves it for the next backoff window. At-least-once — the consumer's idempotency covers a redelivery
+    that races the original fire to completion.
+    """
     _spawn_continuation_task(
         store, due.identity, due.fingerprint, due.tool, due.interaction_id, due.answer, due.state_context
     )
@@ -246,10 +257,12 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
 async def fire_continuation_after_claim(
     r: Any, store: InteractionStore, request: InteractionRequest, answer: Any
 ) -> None:
-    """The shared post-claim seam both answer doors call after a TRUE claim: read the
-    stashed fire fingerprint and fire the stored continuation. A sync question is a
+    """The shared post-claim seam both answer doors call after a TRUE claim.
+
+    Reads the stashed fire fingerprint and fires the stored continuation. A sync question is a
     no-op; an async park fires its continuation (the claim already made this the sole
-    resolver AND atomically enqueued the durable due-record)."""
+    resolver AND atomically enqueued the durable due-record).
+    """
     if request.mode != "async" or request.continuation_tool is None:
         return
     fingerprint = await store.continuation_fingerprint(r, request.interaction_id)
@@ -257,18 +270,22 @@ async def fire_continuation_after_claim(
 
 
 def _current_state_context_for_park() -> StateContext | None:
-    """The ambient state context a park records so its resume re-deposits the original
-    door's subject + write provenance — or ``None`` when the park ran under no state
-    context. Read at request-build time, inside the parking turn's own context."""
+    """The ambient state context a park records for its resume, or ``None`` when the park ran under no state context.
+
+    The resume re-deposits the original door's subject + write provenance. Read at request-build time, inside the
+    parking turn's own context.
+    """
     return current_state_context()
 
 
 def _current_execution_identity_for_park() -> tuple[str | None, str]:
-    """Read the current execution identity as ``(user id, fingerprint)`` for a park to record,
-    or ``(None, "")`` when none is bound — the same two values this module captures onto the
+    """Read the current execution identity as ``(user id, fingerprint)`` for a park to record.
+
+    ``(None, "")`` when none is bound — the same two values this module captures onto the
     durable resume-continuation record (``continuation_identity`` + fingerprint). Imported
     function-locally to keep an ``authz`` module-load edge (its ``access_control.backend`` chain)
-    out of this module's import."""
+    out of this module's import.
+    """
     from tai42_skeleton.authz.execution_identity import get_execution_identity
 
     identity = get_execution_identity()
@@ -278,8 +295,10 @@ def _current_execution_identity_for_park() -> tuple[str | None, str]:
 
 
 def _bind_execution_identity_for_park_fire(execution_key: str, fingerprint: str) -> Any:
-    """Bind ``execution_key`` (under ``fingerprint``) as the execution identity for an
-    out-of-band park completion fire — the SAME bind ``_run_continuation`` uses for a resume."""
+    """Bind ``execution_key`` (under ``fingerprint``) as the execution identity for an out-of-band park completion fire.
+
+    The SAME bind ``_run_continuation`` uses for a resume.
+    """
     return bind_execution_identity(execution_key, bound_fingerprint=fingerprint)
 
 

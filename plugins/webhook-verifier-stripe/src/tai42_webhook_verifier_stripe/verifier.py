@@ -136,7 +136,7 @@ def _tolerance_seconds(config: dict[str, Any]) -> int:
     """
     tolerance = config.get("tolerance_seconds", _DEFAULT_TOLERANCE_SECONDS)
     if isinstance(tolerance, bool) or not isinstance(tolerance, int):
-        raise ValueError(f"tolerance_seconds must be an int, got {tolerance!r}")
+        raise ValueError(f"tolerance_seconds must be an int, got {tolerance!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     if tolerance <= 0:
         raise ValueError(f"tolerance_seconds must be positive, got {tolerance!r}")
     return tolerance

@@ -104,7 +104,7 @@ def _replay_window_seconds(config: dict[str, Any]) -> int:
     """
     window = config.get("replay_window_seconds", _DEFAULT_REPLAY_WINDOW_SECONDS)
     if isinstance(window, bool) or not isinstance(window, int):
-        raise ValueError(f"replay_window_seconds must be an int, got {window!r}")
+        raise ValueError(f"replay_window_seconds must be an int, got {window!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     if window <= 0:
         raise ValueError(f"replay_window_seconds must be positive, got {window!r}")
     return window

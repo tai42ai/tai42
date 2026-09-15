@@ -42,8 +42,10 @@ _pkg = sys.modules["tai42_skeleton.app.bus"]
 
 
 class WorkerBusPublishMixin:
-    """The publisher surface of :class:`WorkerBus`: broadcast an op and collect a
-    per-worker outcome, computing verdicts for workers that never reply."""
+    """The publisher surface of :class:`WorkerBus`: broadcast an op and collect a per-worker outcome.
+
+    Computes verdicts for workers that never reply.
+    """
 
     if TYPE_CHECKING:
         # State and read surface supplied by the composed WorkerBus (declared here so
@@ -53,7 +55,9 @@ class WorkerBusPublishMixin:
         _local: bool
 
         @property
-        def identity(self) -> WorkerIdentity: ...
+        def identity(self) -> WorkerIdentity:
+            """This worker's identity, supplied by the composed :class:`WorkerBus`."""
+            ...
 
         @staticmethod
         def _op_name(op: dict[str, Any]) -> str: ...
@@ -89,7 +93,8 @@ class WorkerBusPublishMixin:
         BOTH the expected set and the gap set, and the op would report converged
         without ever having expected it. Every name carried in stays expected at its
         snapshot generation, so it is either collected or given an honest computed
-        verdict. See :meth:`_carry_expected` for what it does NOT override."""
+        verdict. See :meth:`_carry_expected` for what it does NOT override.
+        """
         op_name = self._op_name(op)
         self._validate_local_targets(local, targets)
 
@@ -152,10 +157,10 @@ class WorkerBusPublishMixin:
     async def _classify_workers(
         self, r: Any, targets: list[str] | None, expected_at_start: dict[str, int] | None = None
     ) -> tuple[dict[str, int | None], dict[str, WorkerResult]]:
-        """Split the live fleet into the EXPECTED set (keyed name → generation, awaited
-        for a reply) and the GAP set (keyed name → its actual-condition result).
+        """Split the live fleet into the EXPECTED set and the GAP set.
 
-        A gap row fails the ready+fresh gate, so it is not an expected worker; rather
+        EXPECTED is keyed name → generation, awaited for a reply; GAP is keyed name → its
+        actual-condition result. A gap row fails the ready+fresh gate, so it is not an expected worker; rather
         than being dropped it is landed as its own condition (``resyncing`` /
         ``recycling`` / ``stale``). Whole-fleet: expected = the READY rows past the
         freshness gate, minus self; every other row is a gap. Targeted: each named
@@ -164,7 +169,8 @@ class WorkerBusPublishMixin:
         generation ``None`` so it is reported ``departed`` at the cut.
 
         This census runs at publish time; ``expected_at_start`` re-admits what the
-        caller's earlier op-start census saw — see :meth:`_carry_expected`."""
+        caller's earlier op-start census saw — see :meth:`_carry_expected`.
+        """
         rows = await self._scan_workers(r)
         by_name = {row.name: row for row in rows}
         self_name = self.identity.name
@@ -202,8 +208,7 @@ class WorkerBusPublishMixin:
         targets: list[str] | None,
         expected_at_start: dict[str, int] | None,
     ) -> None:
-        """Re-admit a worker the CALLER censused as ready+fresh at op start that this
-        publish-time census no longer sees at all.
+        """Re-admit a worker censused ready+fresh at op start that this publish-time census no longer sees.
 
         The window is the caller's own local apply, which runs between the two censuses:
         a worker whose presence TTL faded across it would land in neither set here, and
@@ -216,7 +221,8 @@ class WorkerBusPublishMixin:
         (a worker that announced ``recycling`` is departing on purpose and is reported as
         such, not awaited). It never widens ``targets``, and never re-admits self (the
         publisher reports itself from its own local result). Each re-admission is logged:
-        a live worker going off-census mid-op is an anomaly even when it later confirms."""
+        a live worker going off-census mid-op is an anomaly even when it later confirms.
+        """
         if not expected_at_start:
             return
         self_name = self.identity.name
@@ -235,15 +241,16 @@ class WorkerBusPublishMixin:
             expected[name] = generation
 
     def _is_ready_fresh(self, row: WorkerRow) -> bool:
-        """The ready+fresh gate: a row is an expected worker only when it advertises
-        ``ready`` AND its captured PTTL clears the freshness bound."""
+        """The ready+fresh gate: a row is expected only when it advertises ``ready`` and its PTTL clears the bound."""
         return row.state == WorkerState.ready and presence_fresh(row.pttl_ms, self._settings.heartbeat_ttl)
 
     def _gap_result(self, row: WorkerRow) -> WorkerResult:
-        """Classify a gap row (one that fails the ready+fresh gate) as its actual
-        condition. A decayed row is ``stale`` regardless of its written state — a worker
-        that died mid-resync/mid-recycle carries no convergence promise; a fresh
-        resyncing/recycling row keeps its written state as the outcome."""
+        """Classify a gap row (one that fails the ready+fresh gate) as its actual condition.
+
+        A decayed row is ``stale`` regardless of its written state — a worker that died
+        mid-resync/mid-recycle carries no convergence promise; a fresh resyncing/recycling
+        row keeps its written state as the outcome.
+        """
         if not presence_fresh(row.pttl_ms, self._settings.heartbeat_ttl):
             outcome = OpOutcome.stale
         elif row.state == WorkerState.resyncing:
@@ -283,8 +290,11 @@ class WorkerBusPublishMixin:
         ack_deadline: float,
         apply_deadline: float,
     ) -> tuple[dict[str, WorkerResult], set[str], str | None]:
-        """Gather terminal/ack replies until the deadline, returning the terminal map,
-        the ack set, and a transport error string if the poll hit a blip."""
+        """Gather terminal/ack replies until the deadline.
+
+        Returns the terminal map, the ack set, and a transport error string if the poll
+        hit a blip.
+        """
         terminal: dict[str, WorkerResult] = {}
         acked: set[str] = set()
         loop = asyncio.get_running_loop()
@@ -329,9 +339,12 @@ class WorkerBusPublishMixin:
     def _classify_reply_frame(
         self, frame: dict[str, Any], expected: dict[str, int | None], op_id: str
     ) -> tuple[str | None, str | None]:
-        """Admit/classify a reply frame: return ``(phase, name)`` for an in-expected
-        frame whose generation and op_id match, or ``(None, None)`` when it is discarded
-        (the generation/op_id mismatches are logged)."""
+        """Admit/classify a reply frame.
+
+        Returns ``(phase, name)`` for an in-expected frame whose generation and op_id
+        match, or ``(None, None)`` when it is discarded (the generation/op_id mismatches
+        are logged).
+        """
         name = frame.get("name")
         if name not in expected:
             return None, None
@@ -368,8 +381,11 @@ class WorkerBusPublishMixin:
         acked: set[str],
         transport_error: str | None,
     ) -> dict[str, WorkerResult]:
-        """Compute the final per-worker verdicts: a collected terminal, else a
-        presence-rechecked computed verdict, then the gap rows folded in."""
+        """Compute the final per-worker verdicts.
+
+        A collected terminal, else a presence-rechecked computed verdict, then the gap
+        rows folded in.
+        """
         results: dict[str, WorkerResult] = {}
         for name in expected:
             verdict = terminal.get(name)
@@ -396,7 +412,8 @@ class WorkerBusPublishMixin:
         one expected at publish, the target's life ended and a replacement took its slot
         mid-apply — ``departed`` (the reply gate already discarded the stale life's
         replies). An absent key is ``departed``; a still-live same-life key is
-        ``timed_out`` (acked) or ``missing`` (never acked)."""
+        ``timed_out`` (acked) or ``missing`` (never acked).
+        """
         status, current_gen = await self._recheck_presence(r, name)
         if status == "alive" and expected_gen is not None and current_gen is not None and current_gen > expected_gen:
             return WorkerResult(
@@ -428,12 +445,15 @@ class WorkerBusPublishMixin:
         return WorkerResult(name=name, outcome=OpOutcome.missing, detail=detail)
 
     async def _recheck_presence(self, r: Any, name: str) -> tuple[str, int | None]:
-        """Re-read a worker's presence key at the report cut, returning ``("absent",
+        """Re-read a worker's presence key at the report cut.
+
+        Returns ``("absent",
         None)`` when the key is gone, ``("alive", generation)`` when it is present (the
         generation parsed from the value, ``None`` if the value does not parse), or
         ``("unreachable", None)`` when the check itself could not reach Redis (the caller
         degrades to a loud missing/timed_out). The generation lets the verdict see a
-        replacement that took the slot mid-apply."""
+        replacement that took the slot mid-apply.
+        """
         try:
             raw = await r.get(self._settings.presence_key(name))
         except _TRANSPORT_ERRORS:
@@ -489,15 +509,17 @@ class WorkerBusPublishMixin:
 
         This is the fleet worker listing (it backs ``GET /api/fleet/workers``). The
         busless variant returns its ONE synthesized ready row, its ``beat_at``
-        computed fresh at call time (never frozen at construction)."""
+        computed fresh at call time (never frozen at construction).
+        """
         if self._local:
             return [self._local_row()]
         async with _pkg.client_ctx(RedisClient, self._settings.redis) as conn:
             return await self._scan_workers(conn)
 
     async def expected_at_start(self) -> dict[str, int]:
-        """The siblings owed a confirmation right now, as ``{name: generation}`` — the
-        snapshot a publisher takes BEFORE its own local side effect and hands back to
+        """The siblings owed a confirmation right now, as ``{name: generation}``.
+
+        The snapshot a publisher takes BEFORE its own local side effect and hands back to
         :meth:`publish` as ``expected_at_start``.
 
         :meth:`publish` censuses when it is called, which for a publisher that applies
@@ -510,7 +532,8 @@ class WorkerBusPublishMixin:
         with self excluded (a publisher reports itself from its own local result). Gap
         rows are left out on purpose: they already carry no confirmation promise, so
         carrying one back in would turn a worker that announced its own departure into a
-        wait. A busless bus sees only its own row and so snapshots nothing."""
+        wait. A busless bus sees only its own row and so snapshots nothing.
+        """
         self_name = self.identity.name
         return {
             row.name: row.generation
@@ -519,11 +542,14 @@ class WorkerBusPublishMixin:
         }
 
     async def validate_targets(self, targets: list[str] | None) -> None:
-        """Raise naming any target absent from the census — a caller-side seam run
-        BEFORE the caller's local apply, so validation precedes side effects.
+        """Raise naming any target absent from the census.
+
+        A caller-side seam run BEFORE the caller's local apply, so validation precedes side
+        effects.
 
         ``targets=None`` (whole fleet) is always valid. A typo'd worker name is an
-        error here, never a silent narrowing at publish time."""
+        error here, never a silent narrowing at publish time.
+        """
         if targets is None:
             return
         # Seed self into the live set ONLY for a member: a non-member's own name

@@ -25,7 +25,7 @@ from tai42_skeleton.operations import (
     BadRequestError,
     ForbiddenError,
     NotFoundError,
-    OperationFailed,
+    OperationFailedError,
     OperationRegistry,
     operation_metadata_of,
 )
@@ -325,7 +325,7 @@ async def test_create_trigger_link_identity_less_created_by_null(capture_create)
 async def test_create_trigger_link_gate_on_unset_identity_raises(monkeypatch) -> None:
     _gate_on(monkeypatch, caller_id=None, policies={})
     # A refactor must not quietly return None under gate-on — it RAISES (a typed 500).
-    with pytest.raises(OperationFailed, match="internal authority-resolution failure"):
+    with pytest.raises(OperationFailedError, match="internal authority-resolution failure"):
         await hooks_ops.create_trigger_link(
             topic="t", execution_key="k-fire", name="n", ttl_seconds=None, tool_kwargs=None
         )

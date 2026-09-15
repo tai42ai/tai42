@@ -40,4 +40,5 @@ from tai42_skeleton.routers.prometheus import render_metrics
     action="read",
 )
 async def metrics_scrape(request: Request) -> Response:
+    """Render the Prometheus exposition text for a scrape."""
     return Response(render_metrics(), media_type="text/plain")

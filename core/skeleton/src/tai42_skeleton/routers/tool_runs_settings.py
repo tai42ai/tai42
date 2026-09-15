@@ -14,11 +14,12 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class ToolRunsRedisSettings(RedisConnectionSettings):
-    """Per-deploy Redis holding the run records, per-run liveness keys, and the
-    per-tool recent-runs index. Connection values come from the
-    ``TAI_TOOL_RUNS_REDIS_*`` env (``TAI_TOOL_RUNS_REDIS_URL`` ...), or the shared
-    ``TAI_DEFAULT_REDIS_URL``; absent = the tool-run store is unconfigured and the
-    feature answers OFF."""
+    """Per-deploy Redis holding the run records, per-run liveness keys, and the recent-runs index.
+
+    Connection values come from the ``TAI_TOOL_RUNS_REDIS_*`` env (``TAI_TOOL_RUNS_REDIS_URL``
+    ...), or the shared ``TAI_DEFAULT_REDIS_URL``; absent = the tool-run store is unconfigured
+    and the feature answers OFF.
+    """
 
     model_config = SettingsConfigDict(env_prefix="TAI_TOOL_RUNS_")
 
@@ -33,6 +34,8 @@ class ToolRunsRedisSettings(RedisConnectionSettings):
 
 
 class ToolRunsSettings(TaiBaseSettings):
+    """``TAI_TOOL_RUNS_*`` feature settings for the background tool-run surface."""
+
     model_config = SettingsConfigDict(env_prefix="TAI_TOOL_RUNS_")
 
     # Infra: the redis connection is composed from the kit (a field, not a base),
@@ -72,6 +75,7 @@ class ToolRunsSettings(TaiBaseSettings):
 
 @settings_cache
 def tool_runs_settings() -> ToolRunsSettings:
+    """Return the cached ``TAI_TOOL_RUNS_*`` settings singleton."""
     return ToolRunsSettings()
 
 
@@ -82,5 +86,6 @@ def tool_runs_store_configured() -> bool:
     ``TAI_TOOL_RUNS_REDIS_*`` env or the shared ``TAI_DEFAULT_REDIS_URL``), read
     fresh — not the cached singleton — so a config reload re-evaluates. A set
     ``redis_url`` is the signal the store is wired up; without one, the tool-run
-    surface answers OFF rather than reaching for an absent Redis."""
+    surface answers OFF rather than reaching for an absent Redis.
+    """
     return bool(ToolRunsRedisSettings().redis_url)

@@ -1,3 +1,5 @@
+"""Helpers for fetching a URL into an in-memory file behind the SSRF guard."""
+
 import logging
 import mimetypes
 import uuid
@@ -68,10 +70,8 @@ async def url_to_filelike(
         resp = await client.get(url)
         try:
             resp.raise_for_status()
-        except HTTPStatusError as e:
-            logger.error(
-                "HTTPError for %s: %s, %s %s: %s", url, str(e), resp.status_code, resp.reason_phrase, resp.text[:1000]
-            )
+        except HTTPStatusError:
+            logger.exception("HTTPError for %s: %s %s: %s", url, resp.status_code, resp.reason_phrase, resp.text[:1000])
             raise
         content = resp.content
         content_type = resp.headers.get("Content-Type")
@@ -86,10 +86,11 @@ async def url_to_filelike(
 
 
 async def _guarded_client_fetch(url: str, client: AsyncClient) -> tuple[bytes, str | None]:
-    """Download ``url`` on the caller's ``client`` behind the SSRF guard's
-    transport-independent pre-flight: resolve and validate the URL host first
-    (no host raises :class:`UrlGuardError`), then stream the body enforcing the
-    guard's size cap per chunk."""
+    """Download ``url`` on the caller's ``client`` behind the SSRF guard's transport-independent pre-flight.
+
+    Resolve and validate the URL host first (no host raises :class:`UrlGuardError`), then stream the body
+    enforcing the guard's size cap per chunk.
+    """
     host = urlparse(url).hostname
     if not host:
         raise UrlGuardError(f"SSRF guard: URL has no host to check: {url!r}")
@@ -98,7 +99,7 @@ async def _guarded_client_fetch(url: str, client: AsyncClient) -> tuple[bytes, s
     async with client.stream("GET", url) as resp:
         try:
             resp.raise_for_status()
-        except HTTPStatusError as e:
+        except HTTPStatusError:
             # The body is streaming and deliberately never read in full on error;
             # log a bounded snippet of it for diagnosis.
             snippet = bytearray()
@@ -106,10 +107,9 @@ async def _guarded_client_fetch(url: str, client: AsyncClient) -> tuple[bytes, s
                 snippet.extend(chunk)
                 if len(snippet) >= _ERROR_BODY_SNIPPET_BYTES:
                     break
-            logger.error(
-                "HTTPError for %s: %s, %s %s: %s",
+            logger.exception(
+                "HTTPError for %s: %s %s: %s",
                 url,
-                str(e),
                 resp.status_code,
                 resp.reason_phrase,
                 bytes(snippet[:_ERROR_BODY_SNIPPET_BYTES]).decode("utf-8", errors="replace"),

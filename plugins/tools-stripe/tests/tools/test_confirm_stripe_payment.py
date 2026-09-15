@@ -125,11 +125,11 @@ def test_currency_stamp_mismatch_raises(stripe_env: Callable[..., None]) -> None
     ],
 )
 def test_livemode_mismatch_raises(stripe_env: Callable[..., None], key: str, livemode: bool) -> None:
-    from tai42_tools_stripe._internal.tools.stripe_client import StripeLivemodeMismatch
+    from tai42_tools_stripe._internal.tools.stripe_client import StripeLivemodeMismatchError
 
     stripe_env(secret_key=key)
     session = _session("https://acme.example/cb", livemode=livemode)
-    with pytest.raises(StripeLivemodeMismatch):
+    with pytest.raises(StripeLivemodeMismatchError):
         asyncio.run(confirm_stripe_payment(_event(session)))
 
 

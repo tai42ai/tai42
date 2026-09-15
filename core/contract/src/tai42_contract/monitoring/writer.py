@@ -77,7 +77,7 @@ class MonitoringWriter(Protocol):
         name: str,
         kind: SpanKind,
         trace_context: TraceContext | None = None,
-        input: Any = None,
+        input_: Any = None,
         model: str | None = None,
         model_parameters: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -99,7 +99,7 @@ class MonitoringWriter(Protocol):
         start: datetime,
         end: datetime,
         trace_context: TraceContext,
-        input: Any = None,
+        input_: Any = None,
         output: Any = None,
         level: MonitoringLevel | None = None,
         status_message: str | None = None,
@@ -125,7 +125,7 @@ class MonitoringWriter(Protocol):
         name: str,
         level: MonitoringLevel = DEFAULT_LEVEL,
         trace_context: TraceContext | None = None,
-        input: Any = None,
+        input_: Any = None,
         output: Any = None,
         status_message: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -182,15 +182,18 @@ class MonitoringWriter(Protocol):
     # --- propagation / callbacks (propagate errors loudly) -----------------
 
     def inject_context(self, ctx: TraceContext) -> dict[str, Any]:
-        """Build the opaque downstream-propagation blob merged into the
-        langgraph ``RunnableConfig``. Carries ``ctx.tags`` + ``ctx.metadata``."""
+        """Build the opaque downstream-propagation blob merged into the langgraph ``RunnableConfig``.
+
+        Carries ``ctx.tags`` + ``ctx.metadata``.
+        """
         ...
 
     def get_monitoring_callbacks(self, ctx: TraceContext) -> list[object]:
-        """The LangChain/LangGraph callback handlers appended to the langgraph
-        ``config["callbacks"]``. The caller builds ``ctx`` (keeping the
-        auto-generated-trace-id fallback); the impl reads its fields to
-        construct the vendor handler."""
+        """The LangChain/LangGraph callback handlers appended to the langgraph ``config["callbacks"]``.
+
+        The caller builds ``ctx`` (keeping the auto-generated-trace-id fallback);
+        the impl reads its fields to construct the vendor handler.
+        """
         ...
 
     # --- scoping / suppression (no-op success allowed; real failure raises) -
@@ -228,8 +231,7 @@ class MonitoringWriter(Protocol):
 
 
 def attribute_run(writer: MonitoringWriter, attribution: RunAttribution) -> AbstractContextManager[None]:
-    """Return the context manager that stamps ``attribution`` on the ambient
-    trace for the WRAPPED block.
+    """Return the context manager that stamps ``attribution`` on the ambient trace for the WRAPPED block.
 
     A free function composing ``writer`` over :meth:`MonitoringWriter.trace_attributes`,
     kept off the Protocol so structural writers conform without inheriting it. The

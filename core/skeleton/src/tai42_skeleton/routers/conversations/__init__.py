@@ -1,5 +1,6 @@
-"""HTTP surface for the conversation-route management feature — the authed CRUD doors
-the operator and Studio drive over the routing table.
+"""HTTP surface for the conversation-route management feature.
+
+The authed CRUD doors the operator and Studio drive over the routing table.
 
 - ``GET /api/conversations`` (AUTHED) — list the stored routes, each with its
   ``callback_secret`` withheld.

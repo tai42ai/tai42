@@ -1,3 +1,5 @@
+"""Agent middleware that keeps system messages out of a thread's checkpointed history."""
+
 import uuid
 from typing import Any, cast
 
@@ -20,6 +22,7 @@ class SystemPurgeMiddleware(AgentMiddleware):
     """
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        """Strip any stored ``SystemMessage`` from state before the model call; return ``None`` when there is none."""
         messages = state["messages"]
         if not any(isinstance(message, SystemMessage) for message in messages):
             return None
@@ -36,5 +39,6 @@ class SystemPurgeMiddleware(AgentMiddleware):
         }
 
     async def abefore_model(self, state: AgentState, runtime: Runtime | None = None) -> dict[str, Any] | None:
+        """Async form of :meth:`before_model`; a pure list rewrite, so it reuses the sync implementation."""
         # Pure list rewrite (no I/O); reuse the sync implementation.
         return self.before_model(state, cast(Runtime, runtime))

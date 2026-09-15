@@ -1,3 +1,5 @@
+"""Embedding-model factory: build a cached langchain ``Embeddings`` client per provider."""
+
 import asyncio
 from functools import lru_cache
 
@@ -7,10 +9,12 @@ from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
 
 
 async def get_embedding_async(provider: str, **kwargs) -> Embeddings:
+    """Build (or return the cached) ``Embeddings`` client for ``provider``, off the event loop."""
     return await asyncio.to_thread(get_embedding, provider=provider, **kwargs)
 
 
 def get_embedding(provider: str, **kwargs) -> Embeddings:
+    """Build (or return the cached) ``Embeddings`` client for ``provider`` with the given kwargs."""
     return _cached_embedding(provider, KwargsCacheKey(kwargs))
 
 

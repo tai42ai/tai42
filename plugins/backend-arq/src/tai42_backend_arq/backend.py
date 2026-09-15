@@ -37,7 +37,8 @@ class ArqBackend(ManagedBackend):
         arq's own ``job_completion_wait`` is how long it lets in-flight jobs
         finish, so the host's wait has to outlast it. Read live rather than frozen
         at import, so a settings epoch flip that widens the window widens the
-        drain with it."""
+        drain with it.
+        """
         return float(arq_settings().job_completion_wait) + _DRAIN_MARGIN_SECONDS
 
 

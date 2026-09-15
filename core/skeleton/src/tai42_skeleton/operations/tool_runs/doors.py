@@ -45,12 +45,14 @@ logger = logging.getLogger(__name__)
     response_model=RunSubmitted,
 )
 async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
-    """Submit a tool for background execution — returns ``202 {run_id}`` at once
-    and runs the tool through the same seam the sync door uses.
+    """Submit a tool for background execution — returns ``202 {run_id}`` at once.
+
+    Runs the tool through the same seam the sync door uses.
 
     The submitted tool is authorized against the caller with the full tool-edge decision
     before anything is recorded, so a fenced/secret target is admin-only here exactly as
-    at the sync door and the MCP edge."""
+    at the sync door and the MCP edge.
+    """
     # OFF gate — before ANY side effect (the concurrency slot, the authorize
     # decision, the registry read): with no store configured the surface is cleanly
     # OFF and refuses with a named, machine-readable reason rather than reaching for
@@ -160,6 +162,7 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
     response_model=ToolRunView,
 )
 async def get_run(run_id: str) -> dict:
+    """Get a background tool run by ``run_id``; a restricted caller may read only its own runs."""
     # OFF gate: with no store, no run can exist — a 404 byte-identical to the
     # genuine miss below, so the door is no oracle for the store's absence.
     if not tool_runs_store_configured():
@@ -198,7 +201,8 @@ async def list_tool_runs(tool_name: str) -> list[dict]:
     window); an unrestricted caller reads the shared index unchanged. An empty list
     is the honest answer to "my runs of this tool" — this filters a collection to the
     caller's own slice (distinct from GET-by-id, which raises ``403`` for a NAMED run
-    owned by another identity)."""
+    owned by another identity).
+    """
     # OFF gate: with no store, the honest answer to "my runs of this tool" is the
     # empty collection — no store touched.
     if not tool_runs_store_configured():

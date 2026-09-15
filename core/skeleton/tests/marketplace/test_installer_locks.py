@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 from contextlib import asynccontextmanager
 
 import pytest
 
-from tai42_skeleton.marketplace import installer as installer_module
 from tai42_skeleton.marketplace import locks
 from tai42_skeleton.marketplace.errors import (
     OperationInProgressError,
@@ -22,7 +22,7 @@ from .test_installer import (
 
 
 async def test_operation_in_progress_refuses_second_same_worker_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     spec = make_spec()
     h.registry.resolved = make_resolved(spec)

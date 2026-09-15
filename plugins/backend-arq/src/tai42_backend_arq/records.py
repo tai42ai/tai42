@@ -17,9 +17,11 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class ScheduleRecord(BaseModel):
-    """The durable definition of one schedule; runtime state (job id, timestamps,
-    abort markers) is absent and re-derived on import. ``kwargs`` carries the
-    queued call's keyword arguments verbatim (including the tool-name key)."""
+    """The durable definition of one schedule.
+
+    Runtime state (job id, timestamps, abort markers) is absent and re-derived on import. ``kwargs`` carries the
+    queued call's keyword arguments verbatim (including the tool-name key).
+    """
 
     name: str
     args: list[Any] = Field(default_factory=list)
@@ -66,8 +68,7 @@ def derive_cron_or_interval(norm: dict[str, Any]) -> int | float | str:
 
 
 def parse_cron_or_interval(raw: str) -> int | float | str:
-    """Parse the stored compact form back into seconds (numeric) or a crontab
-    string (anything non-numeric)."""
+    """Parse the stored compact form back into seconds (numeric) or a crontab string (anything non-numeric)."""
     try:
         value = float(raw)
     except ValueError:
@@ -76,8 +77,7 @@ def parse_cron_or_interval(raw: str) -> int | float | str:
 
 
 def next_run_after(cron_or_interval: int | float | str, now: datetime | None = None) -> tuple[float, float]:
-    """Compute ``(defer_by_seconds, next_run_timestamp)`` for the first run
-    strictly after ``now`` (UTC)."""
+    """Compute ``(defer_by_seconds, next_run_timestamp)`` for the first run strictly after ``now`` (UTC)."""
     now = now or datetime.now(UTC)
     if isinstance(cron_or_interval, str):
         next_time = croniter(cron_or_interval, now).get_next(datetime)

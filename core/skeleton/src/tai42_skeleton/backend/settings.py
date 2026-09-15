@@ -1,9 +1,13 @@
+"""Backend dispatch settings — the manifest key, task timeout and tool-name arg, from ``BACKEND_*``."""
+
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class BackendSettings(TaiBaseSettings):
+    """The backend dispatch wiring read from ``BACKEND_*`` env: manifest key, task timeout, tool-name arg."""
+
     # Declared here rather than inherited from
     # ``tai42_kit.backend.BackendDispatchSettings``, which carries the same three
     # fields for the backend plugins: the API-diff gate loads this package with
@@ -22,4 +26,5 @@ class BackendSettings(TaiBaseSettings):
 
 @settings_cache
 def base_backend_settings() -> BackendSettings:
+    """The process-cached :class:`BackendSettings`."""
     return BackendSettings()

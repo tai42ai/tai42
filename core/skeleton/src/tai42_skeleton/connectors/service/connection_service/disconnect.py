@@ -1,5 +1,8 @@
-"""Tear down a connection: best-effort upstream revoke, then purge the encrypted blob
-and remove its managed manifest entries under the connection lock."""
+"""Tear down a connection under the connection lock.
+
+Best-effort upstream revoke, then purge the encrypted blob and remove its managed
+manifest entries.
+"""
 
 from __future__ import annotations
 
@@ -20,8 +23,7 @@ async def disconnect(
     *,
     connection_id: str,
 ) -> DisconnectResult:
-    """Disconnect a connection: best-effort upstream revoke, then purge the
-    encrypted blob and remove managed manifest entries.
+    """Disconnect a connection: best-effort upstream revoke, then purge the blob and managed manifest entries.
 
     Runs under the connection lock so an in-flight ``patch`` / reconnect (which
     reconciles the manifest under the same lock) cannot add managed entries after

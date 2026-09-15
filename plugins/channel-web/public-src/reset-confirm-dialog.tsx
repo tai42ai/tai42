@@ -2,8 +2,8 @@
  * The confirm-first dialog for starting a new conversation: it clears the
  * conversation on screen and rotates the session, which cannot be undone.
  */
-import type { ReactElement } from 'react';
 import { ConfirmDialog } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
 
 export function ResetConfirmDialog({
   isPending,

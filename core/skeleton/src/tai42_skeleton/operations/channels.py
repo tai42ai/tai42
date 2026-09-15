@@ -15,4 +15,5 @@ from tai42_skeleton.operations.response_models_group_c import ChannelListing
 
 @operation(summary="List registered channels", tags=["channels"], response_model=ChannelListing)
 async def list_channels() -> dict:
+    """The registered channel names ``ask_user(channel=...)`` can resolve."""
     return {"channels": tai42_app.channels.names()}

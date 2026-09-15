@@ -1,5 +1,6 @@
-"""The host-internal answer/delivery record — transient runtime state for one accepted
-message. Not a contract type; the wire shapes live in :mod:`tai42_contract.conversations`.
+"""The host-internal answer/delivery record — transient runtime state for one accepted message.
+
+Not a contract type; the wire shapes live in :mod:`tai42_contract.conversations`.
 
 ``delivery_status`` and ``answer_status`` are ORTHOGONAL: ``answer_status`` is the nature
 of the turn's outcome, fixed when the turn completes; ``delivery_status`` is where that
@@ -54,9 +55,10 @@ ANSWERLESS_STATUSES = frozenset({DeliveryStatus.ACCEPTED, DeliveryStatus.SHED, D
 
 
 class ConversationRecord(BaseModel):
-    """One accepted message's durable record — its admission, the answer its turn produced
-    and its delivery state. Frozen: a store read is a snapshot, and a transition is a fresh
-    write through the record store's atomic seam.
+    """One accepted message's durable record — its admission, the answer its turn produced, and its delivery state.
+
+    Frozen: a store read is a snapshot, and a transition is a fresh write through
+    the record store's atomic seam.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -166,12 +168,14 @@ class ConversationRecord(BaseModel):
 
     @model_validator(mode="after")
     def _outcome_matches_status(self) -> ConversationRecord:
-        """A record carries a turn outcome exactly when its status says it has one, so
-        nothing reaching the delivery machine can be missing the outcome it must send.
-        An ``answered``/``error`` outcome carries answer text — a string, EMPTY only for an
-        all-media answer whose ``answer_parts`` carry the content, in which case ``answer_parts``
-        must be present. A ``silent`` one (an api-door no-reply the delivery machine still marks)
-        carries none."""
+        """A record carries a turn outcome exactly when its status says it has one.
+
+        So nothing reaching the delivery machine can be missing the outcome it
+        must send. An ``answered``/``error`` outcome carries answer text — a
+        string, EMPTY only for an all-media answer whose ``answer_parts`` carry
+        the content, in which case ``answer_parts`` must be present. A ``silent``
+        one (an api-door no-reply the delivery machine still marks) carries none.
+        """
         answerless = self.delivery_status in ANSWERLESS_STATUSES
         if answerless != (self.answer_status is None):
             raise ValueError(
@@ -189,12 +193,14 @@ class ConversationRecord(BaseModel):
 
     @model_validator(mode="after")
     def _parts_mirror_the_answer(self) -> ConversationRecord:
-        """The record's ``answer_parts`` obeys the same invariant the wire
-        :class:`ConversationAnswer` does: a present list is non-empty, rides an
-        ``answered``/``error`` outcome, and its NON-BLANK part messages join with ``"\n\n"`` to
-        exactly ``answer`` (a media-only part contributes nothing) — so the joined text the
-        send/transcript/callback paths read and the ordered parts the delivery machine sends can
-        never disagree."""
+        r"""The record's ``answer_parts`` obeys the same invariant the wire :class:`ConversationAnswer` does.
+
+        A present list is non-empty, rides an ``answered``/``error`` outcome, and
+        its NON-BLANK part messages join with ``"\n\n"`` to exactly ``answer`` (a
+        media-only part contributes nothing) — so the joined text the
+        send/transcript/callback paths read and the ordered parts the delivery
+        machine sends can never disagree.
+        """
         if self.answer_parts is None:
             return self
         if not self.answer_parts:
@@ -207,12 +213,15 @@ class ConversationRecord(BaseModel):
 
     @model_validator(mode="after")
     def _origin_matches_fields(self) -> ConversationRecord:
-        """A ``client`` record answers a non-blank inbound message; an ``operator`` record
-        carries no inbound (``""``) and is always an ``answered`` outcome with non-blank
-        answer text — it IS the operator's reply, sent into the thread with no turn to run.
-        An ``event`` inbound is a structured ``client`` turn with no human text: it carries
-        its ``inbound_event`` and an empty ``inbound_text``, while a ``message`` inbound
-        carries no ``inbound_event``."""
+        """A ``client`` record answers a non-blank inbound; an ``operator`` record carries none.
+
+        An ``operator`` record carries no inbound (``""``) and is always an
+        ``answered`` outcome with non-blank answer text — it IS the operator's
+        reply, sent into the thread with no turn to run. An ``event`` inbound is a
+        structured ``client`` turn with no human text: it carries its
+        ``inbound_event`` and an empty ``inbound_text``, while a ``message``
+        inbound carries no ``inbound_event``.
+        """
         if self.origin == "operator":
             self._check_operator_inbound()
         elif self.inbound_kind == "event":
@@ -224,8 +233,10 @@ class ConversationRecord(BaseModel):
         return self
 
     def _check_operator_inbound(self) -> None:
-        """An operator record is a message send carrying no inbound (text/form/media/event)
-        and is always an ``answered`` outcome that names the operator that sent it."""
+        """An operator record is a message send carrying no inbound (text/form/media/event).
+
+        It is always an ``answered`` outcome that names the operator that sent it.
+        """
         if self.inbound_kind != "message":
             raise ValueError("an operator record is a message send, never an event")
         if self.inbound_text != "":
@@ -249,9 +260,12 @@ class ConversationRecord(BaseModel):
             raise ValueError("an event record carries its structured inbound_event")
 
     def answer_payload(self) -> ConversationAnswer:
-        """The :class:`ConversationAnswer` this record delivers — the one shape both the
-        signed callback body and the sync-wait payload carry. A ``silent`` outcome carries
-        no answer text. Raises on a record with no turn outcome at all."""
+        """The :class:`ConversationAnswer` this record delivers.
+
+        The one shape both the signed callback body and the sync-wait payload
+        carry. A ``silent`` outcome carries no answer text. Raises on a record
+        with no turn outcome at all.
+        """
         if self.answer_status is None:
             raise RuntimeError(
                 f"conversation record {self.message_id!r} is {self.delivery_status.value} and carries no outcome"
@@ -265,13 +279,18 @@ class ConversationRecord(BaseModel):
         )
 
     def view(self) -> dict[str, object]:
-        """The record as an ADMIN read door returns it. Includes ``error``, the turn's raw
-        internal detail, so it is only for a caller with authority over the route's key."""
+        """The record as an ADMIN read door returns it.
+
+        Includes ``error``, the turn's raw internal detail, so it is only for a
+        caller with authority over the route's key.
+        """
         return self.model_dump(mode="json")
 
     def caller_view(self) -> dict[str, object]:
-        """The record as the CALLER-scoped read door returns it: the message, its outcome
-        and where delivery stands. An allow-list, so a newly added field stays withheld
+        """The record as the CALLER-scoped read door returns it.
+
+        Returns the message, its outcome and where delivery stands. An
+        allow-list, so a newly added field stays withheld
         until deliberately published here. ``error`` and the delivery bookkeeping are
         withheld — the turn ran as the ROUTE's key, not the caller's. ``inbound_text``,
         ``inbound_form``, ``inbound_attachments``, ``inbound_location``, ``inbound_kind``,

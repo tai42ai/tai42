@@ -35,25 +35,31 @@ if TYPE_CHECKING:
 
 
 class ToolTierRegistry:
-    """The one process-shared map ``base_tool -> RouteAction``, reset on every
-    ``start()`` so a reload re-imports the tool modules and re-registers cleanly.
+    """The one process-shared map ``base_tool -> RouteAction``, reset on every ``start()``.
+
+    Reset so a reload re-imports the tool modules and re-registers cleanly.
 
     A duplicate registration for a base tool raises loudly: a silent overwrite could swap
     a tool's authorization character out from under both the authoring gate and the run
-    fence."""
+    fence.
+    """
 
     def __init__(self) -> None:
+        """Start with an empty ``base_tool -> RouteAction`` map."""
         self._tiers: dict[str, RouteAction] = {}
 
     def register(self, base_tool: str, tier: RouteAction) -> None:
+        """Register ``tier`` for ``base_tool``; a duplicate base-tool registration raises loudly."""
         if base_tool in self._tiers:
             raise ValueError(f"registration tier for base tool {base_tool!r} is already registered")
         self._tiers[base_tool] = tier
 
     def get(self, base_tool: str) -> RouteAction | None:
+        """The tier registered for ``base_tool``, or ``None`` when none is."""
         return self._tiers.get(base_tool)
 
     def reset(self) -> None:
+        """Clear every registration so a reload re-registers cleanly."""
         self._tiers.clear()
 
 
@@ -63,7 +69,8 @@ def resolve_run_tier(app: TaiMCP, key: str) -> RouteAction | None:
     A preset keys on its base tool, so a registered preset resolves to
     ``spec.base_tool`` first; an extension BRANCH resolves to its origin base
     (``base_of``). The tier is then read for that base tool — a preset over a fenced base,
-    and a branch of one, both inherit the fence."""
+    and a branch of one, both inherit the fence.
+    """
     manager = app.preset_manager
     base = manager.get_spec(key).base_tool if manager.is_registered(key) else key
     base = app.tools.base_of(base)
@@ -71,15 +78,17 @@ def resolve_run_tier(app: TaiMCP, key: str) -> RouteAction | None:
 
 
 async def enforce_run_tier(app: TaiMCP, key: str) -> None:
-    """Fence a ``fenced``/``secret`` tool at execution: the acting principal must be an
-    administrator, else refuse LOUDLY with the platform's ``ForbiddenError`` naming the
-    tool and the tier.
+    """Fence a ``fenced``/``secret`` tool at execution — only an administrator may run it.
+
+    The acting principal must be an administrator, else refuse LOUDLY with the platform's
+    ``ForbiddenError`` naming the tool and the tier.
 
     A non-fenced tool never resolves a caller, so this is a dict read on the hot path.
     ``resolve_caller`` returns an admin with access control off, so the fence bites only
     where the platform fences at all; a background/hook/schedule fire resolves its bound
     execution identity, so the refusal there is a recorded failed run, never a silent
-    no-op."""
+    no-op.
+    """
     tier = resolve_run_tier(app, key)
     if tier not in ("fenced", "secret"):
         return
@@ -99,9 +108,11 @@ class ToolTierFenceMiddleware(Middleware):
     enforces the same fence itself. A denial raises a :class:`~fastmcp.exceptions.ToolError`
     backed by the platform's ``ForbiddenError``. Installed on the main server and every
     sub-MCP mount (mirroring ``AuthzMiddleware``) and added before the turn-budget
-    middleware so a fenced denial never opens a budget window."""
+    middleware so a fenced denial never opens a budget window.
+    """
 
     def __init__(self, app: TaiMCP) -> None:
+        """Store the app whose tier registry the fence reads."""
         self._app = app
 
     async def on_call_tool(
@@ -109,6 +120,7 @@ class ToolTierFenceMiddleware(Middleware):
         context: MiddlewareContext[Any],
         call_next: Callable[[MiddlewareContext[Any]], Awaitable[Any]],
     ) -> Any:
+        """Enforce the run-time tier fence at the MCP tool-call edge, then continue the chain."""
         from fastmcp.exceptions import ToolError
 
         from tai42_skeleton.operations.errors import ForbiddenError

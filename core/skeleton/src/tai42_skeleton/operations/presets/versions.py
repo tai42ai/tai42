@@ -1,5 +1,7 @@
-"""The version-write doors: save a new version, roll back to one, and set a
-version's tags — plus the shared save core that validates before it persists."""
+"""The version-write doors: save a new version, roll back to one, and set a version's tags.
+
+Plus the shared save core that validates before it persists.
+"""
 
 from __future__ import annotations
 
@@ -61,15 +63,18 @@ def _effective_version_body(
     description: str | None,
     input_schema: TemplatedText | dict[str, Any] | CarryForward | None,
 ) -> PresetBody:
-    """The EFFECTIVE new body under the carry-forward sentinels (omitted → carry the
-    active value; an explicit value — including a clearing ``[]`` — wins). The store
-    applies the same rule on write; this mirrors it for pre-write validation.
+    """The EFFECTIVE new body under the carry-forward sentinels.
+
+    Omitted → carry the active value; an explicit value — including a clearing
+    ``[]`` — wins. The store applies the same rule on write; this mirrors it for
+    pre-write validation.
 
     ``input_schema`` carries forward in the STORE (sentinel passed straight through); it
     enters validation only when EXPLICITLY provided (the seed path), so the carry-forward
     sentinel resolves to ``None`` in the effective body. ``description`` is editable per
     version under the None-carry sentinel; the resulting value is validated non-empty in
-    the store view (this mirror only feeds the dry run)."""
+    the store view (this mirror only feeds the dry run).
+    """
     validation_input_schema = None if isinstance(input_schema, CarryForward) else input_schema
     return PresetBody(
         base_tool=active.base_tool,
@@ -88,12 +93,15 @@ async def _validate_version_body(
     input_schema: TemplatedText | dict[str, Any] | CarryForward | None,
     fixed_kwargs_provided: bool,
 ) -> None:
-    """Run the SAME validate-before-commit chain create runs over the effective new body,
-    so a bad edit is a 400 that commits nothing (never a version that can never bind, which
-    would brick the preset into delete-only): authoring gate (only when ``fixed_kwargs`` was
-    provided) → combo registry → output schema → dry-run bake → input-schema support (only
-    when explicitly provided; a carried-forward schema was vetted at its own authoring) →
-    write validator. Raises the mapped 400."""
+    """Run the SAME validate-before-commit chain create runs over the effective new body.
+
+    A bad edit is a 400 that commits nothing (never a version that can never
+    bind, which would brick the preset into delete-only): authoring gate (only
+    when ``fixed_kwargs`` was provided) → combo registry → output schema →
+    dry-run bake → input-schema support (only when explicitly provided; a
+    carried-forward schema was vetted at its own authoring) → write validator.
+    Raises the mapped 400.
+    """
     # Read the authoring gate through the package object so a monkeypatch bites.
     if fixed_kwargs_provided:
         authoring_error = await _pkg._agent_authoring_error(body.base_tool, body.fixed_kwargs)
@@ -137,16 +145,19 @@ async def _save_version_core(
     tags: list[str] | None = None,
     enforce_tier: bool = True,
 ) -> tuple[Any, FleetResult]:
-    """The save door's reusable save-a-new-version path: read the active body, resolve the
-    carry-forward sentinels, run create's validation over the effective new body,
-    (optionally) fence on the base tool's authoring tier, save THEN reload (re-pointing the
-    active version back on a residual register failure), guard the ``list_changed`` emit on a
-    real wire/extension change, and fan the rebind out. Returns the new version row + the
-    per-worker fleet report.
+    """The save door's reusable save-a-new-version path.
+
+    Read the active body, resolve the carry-forward sentinels, run create's
+    validation over the effective new body, (optionally) fence on the base tool's
+    authoring tier, save THEN reload (re-pointing the active version back on a
+    residual register failure), guard the ``list_changed`` emit on a real
+    wire/extension change, and fan the rebind out. Returns the new version row +
+    the per-worker fleet report.
 
     ``input_schema`` carries forward by default (the save door's behavior). ``tags`` labels
     the new version in the SAME save commit (``None`` is the door's untagged save).
-    ``enforce_tier`` runs the caller-authorization fence."""
+    ``enforce_tier`` runs the caller-authorization fence.
+    """
     store = instance.app.presets.store
     if instance.app.preset_manager.is_quarantined(name):
         raise ConflictError(f"preset {name!r} is conflicted and is delete-only")
@@ -251,11 +262,12 @@ async def save_version(
     state_binding: StateBinding | None = None,
     state_binding_provided: bool = False,
 ) -> dict[str, Any]:
-    """Save a new version (carry-forward sentinels on omitted fields) then reload and
-    fan out; 409 if the record is conflicted, 404 for an absent name. The
-    ``list_changed`` emit is GUARDED on a real change to the serialized wire tool OR
-    its extension combos. The response embeds the per-worker fleet report under
-    ``fanout``."""
+    """Save a new version (carry-forward sentinels on omitted fields) then reload and fan out.
+
+    409 if the record is conflicted, 404 for an absent name. The ``list_changed``
+    emit is GUARDED on a real change to the serialized wire tool OR its extension
+    combos. The response embeds the per-worker fleet report under ``fanout``.
+    """
     # ``input_schema`` mirrors ``output_schema``'s presence flag: an ABSENT field carries
     # the active value forward (the ``CARRY_FORWARD`` sentinel the core accepts), a PRESENT
     # one — including an explicit ``null`` that clears — is the deliberate value the store
@@ -283,10 +295,12 @@ async def save_version(
     response_model=PresetRollbackResult,
 )
 async def rollback_preset(name: str, version: int) -> dict[str, Any]:
-    """Re-point the active version then reload and fan out; 409 if the record is
-    conflicted, 404 for an absent name or version, 400 if the target version cannot
-    bind against the current live registry. The response embeds the per-worker fleet
-    report under ``fanout``."""
+    """Re-point the active version then reload and fan out.
+
+    409 if the record is conflicted, 404 for an absent name or version, 400 if
+    the target version cannot bind against the current live registry. The
+    response embeds the per-worker fleet report under ``fanout``.
+    """
     store = instance.app.presets.store
     if instance.app.preset_manager.is_quarantined(name):
         raise ConflictError(f"preset {name!r} is conflicted and is delete-only")
@@ -368,11 +382,14 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
     response_model=PresetVersionTagsResult,
 )
 async def set_preset_version_tags(name: str, version: str, tags: list[str]) -> dict[str, Any]:
-    """Replace one version's ``tags`` annotation. Tags are labels on an immutable
-    version body, so this edits only the annotation and never rebinds the live tool
-    (no reload / no fan-out). 404 for an unknown preset or version; a 501
-    ``NotSupportedError`` (versioning-not-configured) on a store-less deploy, exactly as
-    the create route refuses."""
+    """Replace one version's ``tags`` annotation.
+
+    Tags are labels on an immutable version body, so this edits only the
+    annotation and never rebinds the live tool (no reload / no fan-out). 404 for
+    an unknown preset or version; a 501 ``NotSupportedError``
+    (versioning-not-configured) on a store-less deploy, exactly as the create
+    route refuses.
+    """
     try:
         version_num = int(version)
     except ValueError as exc:

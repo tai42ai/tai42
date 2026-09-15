@@ -52,8 +52,8 @@ class _SpyStore:
         self.list_calls: list[dict] = []
         self.pruned_cutoff: datetime | None = None
 
-    async def list(self, filter: RunIndexFilter, *, page: int, page_size: int) -> list[RunRow]:
-        self.list_calls.append({"filter": filter, "page": page, "page_size": page_size})
+    async def list(self, filter_: RunIndexFilter, *, page: int, page_size: int) -> list[RunRow]:
+        self.list_calls.append({"filter": filter_, "page": page, "page_size": page_size})
         return self.rows
 
     async def prune(self, cutoff: datetime) -> int:

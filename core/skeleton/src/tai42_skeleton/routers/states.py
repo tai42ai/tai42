@@ -1,6 +1,7 @@
-"""HTTP routes for the subject-keyed state store — ``/api/states*``, the sibling
-``/api/state-templates*`` and ``/api/state-retention/prune`` (all AUTHED).
+"""HTTP routes for the subject-keyed state store (all AUTHED).
 
+Covers ``/api/states*``, the sibling ``/api/state-templates*`` and
+``/api/state-retention/prune``.
 Thin adapters over the operations in :mod:`tai42_skeleton.operations.states`; each door's
 body/query is parsed at the HTTP edge into the operation's flat kwargs. The sibling
 ``/api/state-templates`` collection keeps the templates OFF the ``/api/states/{name}``
@@ -214,9 +215,11 @@ async def _extract_apply(request: Request) -> dict[str, Any]:
 
 
 async def _extract_template_jq_params(request: Request) -> dict[str, Any]:
-    """An input-purpose ``template_jq`` program's declared parameters from the query string:
-    each ``?<name>=<json>`` is decoded as a JSON value (so a param may be any JSON, not only a
-    string). A value that is not valid JSON is a loud 400."""
+    """An input-purpose ``template_jq`` program's declared parameters from the query string.
+
+    Each ``?<name>=<json>`` is decoded as a JSON value (so a param may be any JSON, not
+    only a string). A value that is not valid JSON is a loud 400.
+    """
     params: dict[str, Any] = {}
     for name, raw in request.query_params.items():
         try:
@@ -227,14 +230,16 @@ async def _extract_template_jq_params(request: Request) -> dict[str, Any]:
 
 
 async def _extract_template_jq_body(request: Request) -> dict[str, Any]:
-    """An update-purpose ``template_jq`` apply body ``{input?, op_id?}`` — ``input`` (any JSON,
-    the program's ``.input``, absent → null) and an optional string ``op_id`` idempotency
-    key."""
+    """An update-purpose ``template_jq`` apply body ``{input?, op_id?}``.
+
+    ``input`` (any JSON, the program's ``.input``, absent → null) and an optional string
+    ``op_id`` idempotency key.
+    """
     body = await _json_object(request)
     op_id = body.get("op_id")
     if op_id is not None and not isinstance(op_id, str):
         raise BadRequestError("'op_id' must be a string")
-    return {"input": body.get("input"), "op_id": op_id}
+    return {"input_": body.get("input"), "op_id": op_id}
 
 
 async def _extract_fold(request: Request) -> dict[str, Any]:

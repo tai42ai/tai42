@@ -29,18 +29,23 @@ class ManagedSandboxSession(SandboxSession):
     """
 
     def __init__(self, *, sandbox: ManagedSandbox, session_id: str) -> None:
+        """Bind the session to its owning ``sandbox`` and its ``session_id``."""
         self._sandbox = sandbox
         self._session_id = session_id
 
     @property
     def id(self) -> str:
+        """The session's stable identifier."""
         return self._session_id
 
     async def info(self) -> SandboxSessionInfo:
+        """Return the session's observable state, read from the sandbox ledger."""
         return self._sandbox.session_info(self._session_id)
 
     async def touch(self) -> None:
+        """Extend the session's TTL through the sandbox ledger."""
         self._sandbox.extend_session(self._session_id)
 
     async def destroy(self) -> None:
+        """Tear the session down through the sandbox ledger."""
         await self._sandbox.destroy_session(self._session_id)

@@ -1,3 +1,5 @@
+"""Provider-keyed construction of LangChain chat models."""
+
 import asyncio
 from functools import lru_cache
 
@@ -7,10 +9,12 @@ from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
 
 
 async def get_llm_async(provider: str, **kwargs) -> BaseChatModel:
+    """Build the chat model for ``provider`` in a worker thread, off the event loop."""
     return await asyncio.to_thread(get_llm, provider=provider, **kwargs)
 
 
 def get_llm(provider: str, **kwargs) -> BaseChatModel:
+    """Build (or return the cached) chat model for ``provider`` with the given kwargs."""
     return _cached_llm(provider, KwargsCacheKey(kwargs))
 
 

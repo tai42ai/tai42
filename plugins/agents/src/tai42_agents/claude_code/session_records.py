@@ -1,6 +1,9 @@
-"""Durable per-session records ``claude_code`` keeps under ``.runner``: the SDK session id a
-threaded turn resumes from, and the crash-after-terminal idempotence record a resume drive
-writes so a redelivery re-produces the same terminal output without re-driving the SDK."""
+"""Durable per-session records ``claude_code`` keeps under ``.runner``.
+
+The SDK session id a threaded turn resumes from, and the crash-after-terminal idempotence
+record a resume drive writes so a redelivery re-produces the same terminal output without
+re-driving the SDK.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +32,8 @@ class _TerminalRecord(BaseModel):
 
     Captures the exact terminal OUTPUT (a message ``text`` or a structured ``data``) plus the
     session id and usage; ``extra="forbid"`` so an in-session-forged record with stray keys fails
-    validation and is treated as absent (the resume re-drives rather than honoring garbage)."""
+    validation and is treated as absent (the resume re-drives rather than honoring garbage).
+    """
 
     model_config = ConfigDict(extra="forbid")
     superstep_id: str
@@ -41,6 +45,10 @@ class _TerminalRecord(BaseModel):
 
 
 async def read_session_id(session: SandboxSession) -> str | None:
+    """The persisted SDK session id for a threaded turn, or ``None`` when none is stored.
+
+    Raises :class:`ProtocolError` when the stored record is present but malformed.
+    """
     try:
         raw = await session.get_file(_SESSION_ID_PATH)
     except Exception:
@@ -56,17 +64,22 @@ async def read_session_id(session: SandboxSession) -> str | None:
 
 
 async def persist_session_id(session: SandboxSession, session_id: str) -> None:
+    """Persist ``session_id`` under ``.runner`` for a later threaded turn to resume from."""
     await session.put_file(_SESSION_ID_PATH, json.dumps({"session_id": session_id}).encode("utf-8"))
 
 
 async def read_terminal_record(session: SandboxSession, superstep_id: str) -> _TerminalRecord | None:
-    """Read + schema-validate the durable terminal record for a resumed super-step, or
-    ``None`` when there is none (the common first-drive case) or it does not validate.
+    """Read + schema-validate the durable terminal record for a resumed super-step.
 
-    UNTRUSTED UNTIL VERIFIED: the in-session Bash can write under ``.runner``, so the record
-    is schema-validated and its ``superstep_id`` must match the one being resumed before it is
-    honored — a forged record only controls THIS thread's own output. A malformed or mismatched
-    record is treated as absent, so the resume re-drives rather than returning garbage."""
+    Returns ``None`` when there is none (the common first-drive case) or it does not
+    validate.
+
+    UNTRUSTED UNTIL VERIFIED: the in-session Bash can write under ``.runner``, so the
+    record is schema-validated and its ``superstep_id`` must match the one being resumed
+    before it is honored — a forged record only controls THIS thread's own output. A
+    malformed or mismatched record is treated as absent, so the resume re-drives rather
+    than returning garbage.
+    """
     try:
         raw = await session.get_file(f"{_TERMINAL_DIR}/{superstep_id}.json")
     except Exception:
@@ -83,8 +96,10 @@ async def read_terminal_record(session: SandboxSession, superstep_id: str) -> _T
 async def persist_terminal_record(
     session: SandboxSession, superstep_id: str, frame: ResultFrame, event: StreamEvent
 ) -> None:
-    """Write the durable terminal record for a resumed super-step BEFORE reporting the
-    terminal, capturing the exact output plus the session id + usage for observability."""
+    """Write the durable terminal record for a resumed super-step BEFORE reporting the terminal.
+
+    Captures the exact output plus the session id + usage for observability.
+    """
     record = _TerminalRecord(
         superstep_id=superstep_id,
         session_id=frame.session_id,
@@ -97,9 +112,11 @@ async def persist_terminal_record(
 
 
 def event_from_terminal_record(record: _TerminalRecord) -> StreamEvent:
-    """Reconstruct the terminal stream event from a durable terminal record, mirroring
-    :func:`~tai42_agents.claude_code.frames.terminal_event` so a redelivered resume re-produces
-    the SAME drained value the original terminal did."""
+    """Reconstruct the terminal stream event from a durable terminal record.
+
+    Mirrors :func:`~tai42_agents.claude_code.frames.terminal_event` so a redelivered resume
+    re-produces the SAME drained value the original terminal did.
+    """
     if record.structured:
         return StructuredFinal(data=record.data)
     return MessageFinal(text=record.text or "")

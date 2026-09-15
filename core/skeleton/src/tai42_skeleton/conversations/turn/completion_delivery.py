@@ -48,14 +48,14 @@ _COMPLETION_PRINCIPAL = "system:agent-resume"
 
 
 async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute, str]:
-    """Reverse a parked bridge ``thread_id`` to the ``(route, client_address)`` a resumed
-    answer is delivered against.
+    """Reverse a parked bridge ``thread_id`` to the ``(route, client_address)`` a resumed answer targets.
 
     A route-keyed thread (``bridge:{route_name}:{address}``) carries both directly. A LINKED
     person's aggregated thread (``bridge:@person:{id}``) has no single address, so the reply
     returns to where they LAST wrote from — the newest record's route + client_address. A
     thread outside the reserved namespace, an unknown/deleted route, or an empty person
-    thread raises loudly rather than delivering to a guessed target."""
+    thread raises loudly rather than delivering to a guessed target.
+    """
     if thread_id.startswith(PERSON_THREAD_PREFIX):
         person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
         person = await accessors._person_store().get_by_id(person_id)
@@ -83,9 +83,9 @@ async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute,
 
 
 def _completion_succeeded(tool_name: str, completion_id: str, status: str | None) -> bool:
-    """Whether a completion fire's ``status`` names the clean-success terminal — and the one
-    place a non-success fire is ANNOUNCED.
+    """Whether a completion fire's ``status`` names the clean-success terminal.
 
+    Also the one place a non-success fire is ANNOUNCED.
     The shared contract vocabulary carries exactly two values: :data:`PARK_COMPLETION_SUCCEEDED`
     (deliver the terminal ``result``) and :data:`PARK_COMPLETION_FAILED` (deliver the uniform
     client-safe notice). Every other shape is non-success — an UNSTAMPED fire (``None``: a
@@ -98,7 +98,8 @@ def _completion_succeeded(tool_name: str, completion_id: str, status: str | None
     silently degrade every successful answer into an error notice with nothing anywhere to see
     it. This warning is the only detection, so EVERY non-success fire — the explicit failure
     included — names the completion id and WHICH shape arrived: nothing distinguishes a degraded
-    fleet's records from a genuinely failing one's, so both have to be visible."""
+    fleet's records from a genuinely failing one's, so both have to be visible.
+    """
     if status == PARK_COMPLETION_SUCCEEDED:
         return True
     if status is None:
@@ -166,7 +167,8 @@ async def deliver_agent_completion(
     would risk a duplicate reply on every retry — worse for the person reading the thread than a
     bounded retry of a malformed fire. A missing ``thread_id`` DROPS: the payload is permanently
     unroutable, so raising would only buy an unending retry storm against a fire no attempt can
-    ever land."""
+    ever land.
+    """
     if not completion_id:
         raise ValueError("deliver_agent_completion requires a completion_id — it is the exactly-once delivery key")
     existing = await accessors._store().get_record(completion_id)
@@ -292,7 +294,8 @@ async def deliver_tool_completion(
     ``{"message_id": None}``): nothing reverses a completion id to a thread, so the payload is
     permanently unroutable and raising the retriable error would only buy an unending retry storm
     against a fire no attempt can ever land. An unresolvable but PRESENT thread still raises —
-    that one can come back (a route can be restored), so it is the resumer's to retry."""
+    that one can come back (a route can be restored), so it is the resumer's to retry.
+    """
     if not completion_id:
         raise ValueError("deliver_tool_completion requires a completion_id — it is the exactly-once delivery key")
     existing = await accessors._store().get_record(completion_id)
@@ -329,7 +332,7 @@ async def deliver_tool_completion(
         except Exception as exc:
             # A terminal the route's reply_expr cannot map is delivered as the client-safe
             # notice rather than crashing the resumer or dropping the outcome.
-            logger.error(
+            logger.exception(
                 "conversations: mapping a resumed tool result for route %r failed",
                 mapping_route.route_name,
                 exc_info=exc,

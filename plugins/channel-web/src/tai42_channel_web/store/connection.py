@@ -31,7 +31,8 @@ def _redis_settings() -> WebRedisSettings:
     """The plugin's store connection, raising a clear config error when unset.
 
     ``redis_url`` falls back to ``TAI_DEFAULT_REDIS_URL`` via the mixin; the guard
-    fires only when NEITHER the channel's own URL nor the shared default is set."""
+    fires only when NEITHER the channel's own URL nor the shared default is set.
+    """
     settings = web_redis_settings()
     if not settings.redis_url:
         raise ValueError("web channel transcript store is not configured: set CHANNEL_WEB_REDIS_URL.")
@@ -43,8 +44,10 @@ def _redis():
 
 
 def tail_redis_ctx():
-    """A FRESH, non-pooled store connection with the socket read timeout stripped —
-    the SSE live tail's blocking XREAD, which a blanket read timeout would kill."""
+    """A FRESH, non-pooled store connection with the socket read timeout stripped.
+
+    For the SSE live tail's blocking XREAD, which a blanket read timeout would kill.
+    """
     return tai42_app.clients.client_ctx(
         RedisClient, _redis_settings().model_copy(update={"socket_timeout": None}), fresh=True
     )

@@ -36,8 +36,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Distinct prefixes let validate_token fast-reject non-session tokens without a DB hit.
-SESSION_TOKEN_PREFIX = "tai-sess-"
-INVITE_TOKEN_PREFIX = "tai-inv-"
+SESSION_TOKEN_PREFIX = "tai-sess-"  # noqa: S105 constant identifier, not a secret value
+INVITE_TOKEN_PREFIX = "tai-inv-"  # noqa: S105 constant identifier, not a secret value
 
 # ``"admin"`` is a reserved, non-renamable, non-deletable role name, so admin-ness
 # is exactly ``role == "admin"`` — the basis the last-admin guard keys on.
@@ -55,8 +55,11 @@ PASSWORD_MIN_LENGTH = 10
 
 
 def provider_settings() -> AccountsProviderSettings:
-    """The injected settings of the CURRENT epoch's provider instance; RAISE when no
-    provider is active (the accounts kind is disabled / not configured)."""
+    """The injected settings of the CURRENT epoch's provider instance.
+
+    Raises when no provider is active (the accounts kind is disabled / not
+    configured).
+    """
     from tai42_contract.app import tai42_app
 
     provider = tai42_app.accounts.active_provider("accounts-postgres")
@@ -69,8 +72,7 @@ def provider_settings() -> AccountsProviderSettings:
 
 
 def provider_settings_populated() -> bool:
-    """Whether an accounts-postgres provider is active this epoch — the boot guard's
-    input."""
+    """Whether an accounts-postgres provider is active this epoch — the boot guard's input."""
     from tai42_contract.app import tai42_app
 
     return tai42_app.accounts.active_provider("accounts-postgres") is not None

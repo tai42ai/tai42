@@ -1,6 +1,8 @@
-"""The persist tail — locally reload through the gate and broadcast the reload to the whole
-fleet, guaranteeing every post-persist failure surfaces as a fleet-report-carrying error
-rather than a raw exception."""
+"""The persist tail: locally reload through the gate, then broadcast the reload to the whole fleet.
+
+Guarantees every post-persist failure surfaces as a fleet-report-carrying error rather
+than a raw exception.
+"""
 
 from __future__ import annotations
 
@@ -17,34 +19,36 @@ from tai42_skeleton.operations._broadcast import FleetBroadcastError, log_non_co
 
 
 async def _release_llm_pools() -> None:
-    """Close the loop-bound langgraph checkpoint + store resource pools so a following
-    ``build_and_swap_epoch`` can reset settings: its resource-registry reset REFUSES to
-    drop a per-loop registry still holding live resources on a running loop. The default
-    ``release_llm_pools`` seam of :meth:`ConfigService.apply_replace_env`, mirroring
-    :meth:`AppLifecycle._reload_config` (the other ``build_and_swap_epoch`` caller). Must
-    run on the serving loop that owns the registries (the apply holds the reload gate on
-    that loop)."""
+    """Close the loop-bound langgraph checkpoint and store resource pools.
+
+    A following ``build_and_swap_epoch`` can then reset settings: its resource-registry
+    reset REFUSES to drop a per-loop registry still holding live resources on a running
+    loop. The default ``release_llm_pools`` seam of :meth:`ConfigService.apply_replace_env`,
+    mirroring :meth:`AppLifecycle._reload_config` (the other ``build_and_swap_epoch``
+    caller). Must run on the serving loop that owns the registries (the apply holds the
+    reload gate on that loop).
+    """
     await checkpoint_registry().close_all()
     await store_registry().close_all()
 
 
 class _BroadcastMixin(_ConfigServiceBase):
-    """The post-persist reload + fleet-broadcast tail shared by the manifest/env pipeline
-    and the profile-apply pipeline."""
+    """Post-persist reload and fleet-broadcast tail shared by the manifest/env and profile-apply pipelines."""
 
     async def _broadcast_profile_reload(self, expected_at_start: dict[str, int] | None) -> FleetResult:
-        """Broadcast the profile apply's reload to the whole fleet AFTER the local swap
-        already landed (the swap IS this worker's local apply, so no second local reload
-        runs here). Mirrors the post-persist contract: a raw broadcast failure surfaces as
-        a :class:`FleetBroadcastError` carrying the honest bus-unreachable report, never a
-        raw exception, so the committed env change is never hidden behind a broadcast
-        fault.
+        """Broadcast the profile apply's reload to the whole fleet AFTER the local swap already landed.
+
+        The swap IS this worker's local apply, so no second local reload runs here. Mirrors
+        the post-persist contract: a raw broadcast failure surfaces as a
+        :class:`FleetBroadcastError` carrying the honest bus-unreachable report, never a raw
+        exception, so the committed env change is never hidden behind a broadcast fault.
 
         ``expected_at_start`` is the caller's PRE-SWAP membership snapshot. The swap is
         this door's local apply and it is the slowest one in the codebase (a full epoch
         rebuild), so it is exactly the window in which a sibling's presence can fade
         unnoticed — the snapshot has to be read before the swap, hence passed in rather
-        than taken here."""
+        than taken here.
+        """
         local = LocalApplyResult(outcome=OpOutcome.applied, payload={"status": "ok"})
         try:
             report = await self._bus.publish({"op": "reload_config"}, None, local, expected_at_start=expected_at_start)
@@ -56,8 +60,7 @@ class _BroadcastMixin(_ConfigServiceBase):
         return report
 
     async def _reload_and_broadcast(self, *, document: dict[str, Any] | None) -> ApplyResult:
-        """Locally reload through the gate, then broadcast the reload to the whole
-        fleet and embed the report.
+        """Locally reload through the gate, then broadcast the reload to the whole fleet and embed the report.
 
         Post-persist contract: this runs only after the persist has committed, and it
         guarantees EVERY subsequent failure — the local reload OR the broadcast itself
@@ -78,7 +81,8 @@ class _BroadcastMixin(_ConfigServiceBase):
         list, only the error) — the same shape the bus returns for a transport
         failure — so a raw broadcast error can never escape the committed persist. An
         unconfirmed worker on the happy path is a loud ERROR log and an explicit
-        report entry, but the call returns successfully."""
+        report entry, but the call returns successfully.
+        """
         op_name = "reload_config"
         # Pin the expected membership BEFORE the local reload — a reimporting reload is
         # slow enough for a sibling's presence to fade across it, and the publish census

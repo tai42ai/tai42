@@ -23,16 +23,18 @@ from tai42_skeleton.conversations.turn.keys import _person_thread_id, _thread_id
 
 @dataclass(frozen=True)
 class _Multichannel:
-    """The per-accept multichannel context for a target with ``multichannel: true`` — the
-    target, the sending address in the door's own terms, the accountable party the redeem
-    throttle keys on, and the first-contact greeting template. ``None`` everywhere
-    multichannel is OFF, which is what keeps an unconfigured or unlinked conversation
-    byte-identical to today.
+    """The per-accept multichannel context for a target with ``multichannel: true``.
 
-    ``address`` is the PERSON IDENTITY (the thread, the transcript, the pair-code's stored
-    conversation); ``accountable`` is the rotation-resistant party the brute-force throttle
-    scopes to — the api ``caller_principal`` or the channel ``cap_key`` — and is NEVER the
-    conversation address."""
+    Carries the target, the sending address in the door's own terms, the accountable
+    party the redeem throttle keys on, and the first-contact greeting template. ``None``
+    everywhere multichannel is OFF, which leaves an unconfigured or unlinked
+    conversation unchanged.
+
+    ``address`` is the PERSON IDENTITY (the thread, the transcript, the pair-code's
+    stored conversation); ``accountable`` is the rotation-resistant party the
+    brute-force throttle scopes to — the api ``caller_principal`` or the channel
+    ``cap_key`` — and is NEVER the conversation address.
+    """
 
     target: PairingTarget
     door: ConversationDoor
@@ -55,8 +57,10 @@ class _Multichannel:
         )
 
     def minting_conversation(self) -> MintingConversation:
-        """This conversation as the value a minted pair code stores, so the redeem side can
-        rebuild a complete address for it."""
+        """This conversation as the value a minted pair code stores.
+
+        The redeem side rebuilds a complete address from it.
+        """
         return MintingConversation(
             target_kind=self.target.target_kind,
             target_name=self.target.target_name,
@@ -68,9 +72,12 @@ class _Multichannel:
         )
 
     def throttle_source_key(self) -> str:
-        """The redeem-throttle source key: this accept's DOOR-QUALIFIED accountable party (the
-        api ``caller_principal`` or the channel ``cap_key``), NOT the conversation address —
-        so an attacker cannot rotate a caller-composed address to dodge the lock."""
+        """The redeem-throttle source key for this accept.
+
+        This accept's DOOR-QUALIFIED accountable party (the api ``caller_principal`` or
+        the channel ``cap_key``), NOT the conversation address — so an attacker cannot
+        rotate a caller-composed address to dodge the lock.
+        """
         return _throttle_source_key(self.door, self.accountable)
 
 
@@ -83,12 +90,16 @@ async def _multichannel_context(
     address: str,
     accountable: str,
 ) -> _Multichannel | None:
-    """The multichannel context for ``route``, or ``None`` when the target has no config row
-    or its ``multichannel`` is off (default-false). Read once per accept, BEFORE the gates:
-    it decides the thread key and, later, the pairing turn and greeting.
+    """The multichannel context for ``route``, or ``None`` when multichannel is off.
 
-    ``address`` is the conversation identity; ``accountable`` is the rotation-resistant party
-    the redeem throttle scopes to (the caller of the door, the same key its rate cap uses)."""
+    ``None`` when the target has no config row or its ``multichannel`` is off
+    (default-false). Read once per accept, BEFORE the gates: it decides the thread key
+    and, later, the pairing turn and greeting.
+
+    ``address`` is the conversation identity; ``accountable`` is the rotation-resistant
+    party the redeem throttle scopes to (the caller of the door, the same key its rate
+    cap uses).
+    """
     config = await accessors._config_store().get(route.target_kind, route.target_name)
     if config is None or not config.multichannel:
         return None
@@ -105,14 +116,18 @@ async def _multichannel_context(
 
 
 async def _resolve_thread_id(route: ConversationRoute, multichannel: _Multichannel | None, address: str) -> str:
-    """The thread key for this accept. A LINKED person on any multichannel target keys the
-    aggregated ``bridge:@person:{person_id}`` thread; everyone else keeps today's
-    route-keyed ``bridge:{route}:{address}``. Read-only: no person row is created here,
-    so a redelivered, refused or shed message never mints identity.
+    """The thread key for this accept.
 
-    In-flight merge race: a turn admitted under the old key while the merge lands completes
-    under that key (its FIFO slot lives there); the NEXT message keys to the person thread.
-    Histories are never migrated (linked memory starts at the pairing moment)."""
+    A LINKED person on any multichannel target keys the aggregated
+    ``bridge:@person:{person_id}`` thread; everyone else uses the route-keyed
+    ``bridge:{route}:{address}``. Read-only: no person row is created here, so a
+    redelivered, refused or shed message never mints identity.
+
+    In-flight merge race: a turn admitted under the old key while the merge lands
+    completes under that key (its FIFO slot lives there); the NEXT message keys to the
+    person thread. Histories are never migrated (linked memory starts at the pairing
+    moment).
+    """
     if multichannel is not None:
         person = await accessors._person_store().get_person(
             multichannel.target,
@@ -127,10 +142,12 @@ async def _resolve_thread_id(route: ConversationRoute, multichannel: _Multichann
 
 
 async def _resolve_channel_route(channel: str, our_identity_canonical: str) -> ConversationRoute:
-    """The single ``door=channel`` route matching ``(channel, our_identity)`` by EXACT
-    equality on the canonical address form. No match raises
-    :class:`ConversationRouteResolutionError`; more than one is a corrupt table and raises
-    rather than picking one."""
+    """The single ``door=channel`` route matching ``(channel, our_identity)`` exactly.
+
+    Matched by EXACT equality on the canonical address form. No match raises
+    :class:`ConversationRouteResolutionError`; more than one is a corrupt table and
+    raises rather than picking one.
+    """
     routes = await cache.get_conversations_manager().list_routes()
     matches = [
         route

@@ -32,9 +32,10 @@ class _TaiAppHandle:
 
     @contextmanager
     def bound(self, impl: object) -> Generator[None]:
-        """Bind ``impl`` for the block, restoring exactly what was bound on entry
-        (another impl, or the unbound state). Nesting is safe. Use this rather than
-        ``bind(None)``, which erases a binding another component made.
+        """Bind ``impl`` for the block, restoring exactly what was bound on entry.
+
+        Restores another impl or the unbound state. Nesting is safe. Use this rather
+        than ``bind(None)``, which erases a binding another component made.
         """
         previous = self._impl
         self._impl = impl

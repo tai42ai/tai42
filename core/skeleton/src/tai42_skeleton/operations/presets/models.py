@@ -11,11 +11,13 @@ from tai42_contract.template import TemplatedText
 
 
 class PresetCreate(BaseModel):
-    """A preset-creation request. ``description`` is the bound tool's LLM-facing
-    docstring — REQUIRED non-empty on every create. ``extensions`` is the list of
-    extension combos (each element an extension name or a ``{"name", "config"}``
-    mapping binding author config). ``output_schema`` is the optional author-set
-    OUTPUT JSON Schema (an object schema)."""
+    """A preset-creation request.
+
+    ``description`` is the bound tool's LLM-facing docstring — REQUIRED non-empty on every
+    create. ``extensions`` is the list of extension combos (each element an extension name or a
+    ``{"name", "config"}`` mapping binding author config). ``output_schema`` is the optional
+    author-set OUTPUT JSON Schema (an object schema).
+    """
 
     name: str
     base_tool: str
@@ -28,14 +30,15 @@ class PresetCreate(BaseModel):
 
 
 class PresetVersionSave(BaseModel):
-    """A new-preset-version request. At least one field must be present; an
-    omitted field carries forward, an explicit ``[]`` clears (the store sentinel
-    rule). ``output_schema`` carries forward when omitted, clears on an explicit
-    ``null``, and wins on an explicit object schema; ``input_schema`` follows the
-    SAME carry-forward rule (omitted carries, ``null`` clears, an object schema
-    wins). ``description`` carries forward when omitted and is SET by an explicit
-    non-empty string (an explicit ``""`` is rejected — the resulting description is
-    validated non-empty on every save)."""
+    """A new-preset-version request.
+
+    At least one field must be present; an omitted field carries forward, an explicit ``[]``
+    clears (the store sentinel rule). ``output_schema`` carries forward when omitted, clears on
+    an explicit ``null``, and wins on an explicit object schema; ``input_schema`` follows the
+    SAME carry-forward rule (omitted carries, ``null`` clears, an object schema wins).
+    ``description`` carries forward when omitted and is SET by an explicit non-empty string (an
+    explicit ``""`` is rejected — the resulting description is validated non-empty on every save).
+    """
 
     fixed_kwargs: dict[str, Any] | None = None
     extensions: list[list[ExtensionElement]] | None = None
@@ -61,11 +64,13 @@ class PresetRename(BaseModel):
 
 
 class PresetValidate(BaseModel):
-    """A preset validation (dry-run) request — the full create field set. When a
-    preset named ``name`` already exists the door validates a NEW VERSION: then
-    ``base_tool`` / ``description`` carry forward from the active body (a provided
-    value that differs is rejected) and any absent field merges from it, exactly as
-    the save-version route merges."""
+    """A preset validation (dry-run) request — the full create field set.
+
+    When a preset named ``name`` already exists the door validates a NEW VERSION: then
+    ``base_tool`` / ``description`` carry forward from the active body (a provided value that
+    differs is rejected) and any absent field merges from it, exactly as the save-version route
+    merges.
+    """
 
     name: str
     base_tool: str | None = None
@@ -78,7 +83,9 @@ class PresetValidate(BaseModel):
 
 
 class PresetVersionTags(BaseModel):
-    """Replace a preset version's ``tags`` annotation (labels on an immutable
-    version body — no rebind)."""
+    """Replace a preset version's ``tags`` annotation.
+
+    Labels on an immutable version body — no rebind.
+    """
 
     tags: list[str]

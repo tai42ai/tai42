@@ -1,10 +1,11 @@
-"""Park capability: the provider-free park identity and the gates that decide whether a run
-can be parked and rebuilt by a later, possibly different, worker.
+"""Park capability: the provider-free park identity and the gates for parking and rebuilding a run.
 
-Holds the :class:`ParkIdentity` shape both the LangGraph engines and ``claude_code`` record a
-park through, the LangGraph-only :func:`build_park_identity` convenience, the directly
-constructed park's structural gate :func:`assert_park_capable`, and the checkpoint-retention
-horizon a durable checkpoint provider is kept to.
+The gates decide whether a run can be parked and rebuilt by a later, possibly
+different, worker. Holds the :class:`ParkIdentity` shape both the LangGraph engines and
+``claude_code`` record a park through, the LangGraph-only :func:`build_park_identity`
+convenience, the directly constructed park's structural gate
+:func:`assert_park_capable`, and the checkpoint-retention horizon a durable checkpoint
+provider is kept to.
 """
 
 from __future__ import annotations
@@ -102,8 +103,10 @@ def _thread_id(config: dict[str, Any]) -> str | None:
 
 
 def _min_horizon(left: datetime | None, right: datetime | None) -> datetime | None:
-    """The nearer of two retention horizons, treating ``None`` as unbounded (keep-forever)
-    on that side — so the min of ``None`` and a datetime is the datetime."""
+    """The nearer of two retention horizons, treating ``None`` as unbounded (keep-forever) on that side.
+
+    So the min of ``None`` and a datetime is the datetime.
+    """
     if left is None:
         return right
     if right is None:
@@ -143,7 +146,8 @@ def build_park_identity(
     provider, never a defaulted-away one. ``retention_bound`` is the checkpoint retention
     horizon narrowed by ``extra_retention_horizon`` (a durable-workspace engine passes its
     volume horizon so the bound is ``min(checkpoint, workspace)``; ``None`` = no extra
-    bound, so the bound is the checkpoint horizon alone)."""
+    bound, so the bound is the checkpoint horizon alone).
+    """
     resolved_provider = checkpoint_provider or llm_provider_settings().checkpoint
     if resolved_provider not in DURABLE_CHECKPOINT_PROVIDERS:
         return None
@@ -186,15 +190,16 @@ def build_park_identity(
 
 
 def _checkpoint_retention_horizon(provider: str) -> datetime | None:
-    """The latest wall-time a parked graph's checkpoint is guaranteed to still exist, or
-    ``None`` when retention is unbounded (keep-forever). LangGraph-only.
+    """The latest wall-time a parked graph's checkpoint is guaranteed to still exist (LangGraph-only).
 
+    ``None`` when retention is unbounded (keep-forever).
     ``redis`` is an idle-TTL saver: the checkpoint is swept ``checkpoint_ttl_minutes`` after
     its last read/write. The park write is itself a write, so it (re)starts that idle clock —
     the deadline comparison against ``now + ttl`` is sound. ``checkpoint_ttl_minutes is None``
     means keep-forever, so no horizon bounds it. ``postgres`` carries no TTL on its saver, so
     it too is keep-forever. Any other provider is not park-capable (never reaches here); an
-    unexpected one raises rather than assuming a retention it cannot know."""
+    unexpected one raises rather than assuming a retention it cannot know.
+    """
     if provider == "postgres":
         return None
     if provider == "redis":
@@ -206,13 +211,16 @@ def _checkpoint_retention_horizon(provider: str) -> datetime | None:
 
 
 def assert_park_capable(identity: ParkIdentity, *, durable: bool, retention_bound: datetime | None) -> None:
-    """The pre-ask structural gate a directly-constructed park (``claude_code``) calls before
-    any async ask: raise LOUDLY (pre-persist, zero state) when the run is not park-capable —
-    not ``durable`` (its workspace/state is ephemeral), its ``rebuild_kwargs`` is not
-    JSON-serializable (so a fresh worker cannot rebuild it), or ``bind`` is false (no resume
-    path). ``retention_bound`` is accepted for parity with :func:`persist_park` and to keep
-    the caller's computed bound at hand; the gate itself never persists. So an async ask under
-    a non-park-capable run dies loudly here rather than half-parking with no way to resume."""
+    """The pre-ask structural gate a directly-constructed park (``claude_code``) calls before any async ask.
+
+    Raise LOUDLY (pre-persist, zero state) when the run is not park-capable — not
+    ``durable`` (its workspace/state is ephemeral), its ``rebuild_kwargs`` is not
+    JSON-serializable (so a fresh worker cannot rebuild it), or ``bind`` is false (no
+    resume path). ``retention_bound`` is accepted for parity with :func:`persist_park`
+    and to keep the caller's computed bound at hand; the gate itself never persists. So
+    an async ask under a non-park-capable run dies loudly here rather than half-parking
+    with no way to resume.
+    """
     if not durable:
         raise RuntimeError(
             f"agent {identity.agent_name!r} cannot park an async ask: the run's workspace/state is "

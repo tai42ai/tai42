@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 
 
 def _render_answer_for_bridge(answer: str | dict[str, Any], pending: PendingQuestion) -> str:
-    """A faithful, ALWAYS non-empty text rendering of a correlated reply for the
-    conversation bridge when the interaction is terminally gone.
+    """A faithful, ALWAYS non-empty text rendering of a correlated reply for the conversation bridge.
 
-    A typed reply or a resolved select tap is already its human-readable string; a
+    Used when the interaction is terminally gone. A typed reply or a resolved
+    select tap is already its human-readable string; a
     completed Flow form renders through :func:`render_form_text` against the
     pending ask's schema.
     """

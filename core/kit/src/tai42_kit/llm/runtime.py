@@ -1,3 +1,5 @@
+"""Helpers for building an LLM run's system prompt, extracting its output, and validating it."""
+
 import json
 from typing import Any
 
@@ -44,8 +46,7 @@ def build_system_message(
     system_message: str | None,
     system_content_kwargs: dict[str, Any] | None = None,
 ) -> SystemMessage | None:
-    """Build the per-run system prompt as a ``SystemMessage``, or ``None`` for an
-    empty one.
+    """Build the per-run system prompt as a ``SystemMessage``, or ``None`` for an empty one.
 
     With *system_content_kwargs* (e.g. ``cache_control`` for prompt caching) the
     content is a single structured text block carrying those keys; otherwise it is
@@ -105,8 +106,7 @@ def build_user_output(state: dict[str, Any]) -> str:
 
 
 def validate_structured_output(structured: Any, response_format: Any) -> Any:
-    """Validate a produced structured output against the ``response_format`` that
-    forced it.
+    """Validate a produced structured output against the ``response_format`` that forced it.
 
     Every produced value is first walked UNCONDITIONALLY for an integer outside
     the platform int64 range (a pydantic instance is model-dumped to JSON-native

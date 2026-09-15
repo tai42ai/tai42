@@ -61,8 +61,7 @@ async def send_chat_action(chat_id: int, action: str) -> None:
 
 
 async def answer_callback_query(callback_query_id: str) -> None:
-    """POST one Bot API ``answerCallbackQuery`` so the tapped inline button stops
-    showing its loading spinner.
+    """POST one Bot API ``answerCallbackQuery`` so the tapped inline button stops showing its loading spinner.
 
     Fire-and-forget from the caller's view: returns on the Bot API's ``ok: true``
     and raises :class:`~tai42_contract.channels.ChannelDeliveryError` on an unset

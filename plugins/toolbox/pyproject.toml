@@ -94,10 +94,15 @@ target-version = "py313"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID", "C901", "PLR0912", "PLR0915", "RET", "PERF", "FURB", "T20"]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID", "C901", "PLR0912", "PLR0915", "RET", "PERF", "FURB", "T20", "N", "A", "S", "TRY", "ERA", "D"]
+# N815: response models use camelCase field names to match the JSON wire shape.
+# TRY003: exception call sites carry rich contextual messages by design.
+ignore = ["N815", "TRY003"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["C901", "PLR0912", "PLR0915", "RET", "PERF", "FURB", "T20"]
+"tests/**" = ["C901", "PLR0912", "PLR0915", "RET", "PERF", "FURB", "T20", "D", "TRY", "ERA", "S101", "S102", "S104", "S105", "S106", "S107", "S108", "S112", "S113", "S311", "S324", "S603", "S607", "N801", "N802", "N806", "N814"]
+# RoutingSocket mirrors the stdlib socket.socket(family, type, proto, fileno) signature for drop-in use.
+"src/tai42_toolbox/_internal/extensions/socket_routing.py" = ["A001", "A002"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "tai42_skeleton".msg = "tai42-toolbox is contract-facing: it never imports tai42-skeleton."
@@ -135,3 +140,6 @@ docs = [
     "mkdocs-material>=9.5",
     "mkdocstrings[python]>=0.27",
 ]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

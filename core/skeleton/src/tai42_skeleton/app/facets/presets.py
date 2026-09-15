@@ -36,6 +36,7 @@ class VersioningFacet(_Facet):
 
     @property
     def store(self) -> VersionedStore:
+        """The generic versioned-document store."""
         return self._app._versioned_store
 
 
@@ -52,6 +53,7 @@ class PresetsFacet(_Facet):
         output_schema: TemplatedText | dict[str, Any] | None = None,
         input_schema: TemplatedText | dict[str, Any] | None = None,
     ) -> Tool:
+        """Bind ``base_tool`` with ``fixed_kwargs`` as a live tool named ``name`` and return it."""
         return await self._app._preset_bind(
             base_tool,
             fixed_kwargs,
@@ -74,17 +76,18 @@ class PresetsFacet(_Facet):
         state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Create a preset in-process, returning the record view the HTTP create door
-        returns (shared response builder — the two doors cannot drift). Runs the
-        identical content path: the ordered name pre-checks, combo/schema/bind
-        validation, input-schema support, the base tool's write validator, store write
-        THEN register, one ``list_changed``, and the rebind fan-out.
+        """Create a preset in-process, returning the record view the HTTP create door returns.
+
+        Shared response builder — the two doors cannot drift. Runs the identical content path: the ordered
+        name pre-checks, combo/schema/bind validation, input-schema support, the base tool's write validator,
+        store write THEN register, one ``list_changed``, and the rebind fan-out.
 
         The caller-authorization tier fence is OFF: the registration-tier fence belongs to
         the HTTP doors, where it authorizes a request principal. An in-process caller
         authorizes its own callers and passes only the base tools it is entitled to author,
         so there is no request principal to fence here — ``enforce_tier`` is ``False`` while
-        every content check stays on."""
+        every content check stays on.
+        """
         from tai42_skeleton.operations.presets import _create_preset_core, _create_response
 
         combos = extensions or []
@@ -124,15 +127,17 @@ class PresetsFacet(_Facet):
         state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Save a new preset version in-process, returning the version row the HTTP save
-        door returns (shared response builder — the two doors cannot drift). Omitted
-        fields carry the active value forward (``input_schema`` via the ``CARRY_FORWARD``
-        sentinel; ``output_schema`` only when ``output_schema_provided`` is ``True``).
+        """Save a new preset version in-process, returning the version row the HTTP save door returns.
+
+        Shared response builder — the two doors cannot drift. Omitted fields carry the active value forward
+        (``input_schema`` via the ``CARRY_FORWARD`` sentinel; ``output_schema`` only when
+        ``output_schema_provided`` is ``True``).
 
         The tier fence is OFF for the reason :meth:`create` states — the registration-tier
         fence authorizes a request principal at the HTTP doors, and an in-process caller
         authorizes its own callers and passes only the base tools it may author — while
-        every content check stays on."""
+        every content check stays on.
+        """
         from tai42_skeleton.operations.presets import _save_version_core, _save_version_response
 
         row, report = await _save_version_core(
@@ -150,59 +155,72 @@ class PresetsFacet(_Facet):
         return _save_version_response(row, report)
 
     def register_write_validator(self, base_tool: str, validator: PresetWriteValidator) -> None:
+        """Register ``validator`` as the preset write validator for ``base_tool``."""
         return self._app._write_validator_registry.register(base_tool, validator)
 
     def register_input_schema_support(self, base_tool: str, support: PresetInputSchemaSupport) -> None:
+        """Register ``support`` as the input-schema support for ``base_tool``."""
         return self._app._input_schema_support_registry.register(base_tool, support)
 
     def input_schema_support(self, base_tool: str) -> PresetInputSchemaSupport | None:
+        """Return ``base_tool``'s registered input-schema support, or ``None`` when none is registered."""
         return self._app._input_schema_support_registry.get(base_tool)
 
     def register_registration_tier(self, base_tool: str, tier: RouteAction) -> None:
-        """The authoring-side name for the tier registry :meth:`ToolsFacet.register_tier`
-        writes — the SAME registry object, so a tier declared through either name gates
-        both authoring a preset over the base tool and running it."""
+        """The authoring-side name for the tier registry :meth:`ToolsFacet.register_tier` writes.
+
+        The SAME registry object, so a tier declared through either name gates both authoring a preset
+        over the base tool and running it.
+        """
         return self._app._registration_tier_registry.register(base_tool, tier)
 
     def registration_tier(self, base_tool: str) -> RouteAction | None:
+        """Return the registration tier declared for ``base_tool``, or ``None`` when none is declared."""
         return self._app._registration_tier_registry.get(base_tool)
 
     def register_seed(self, seed: PresetSeed) -> None:
+        """Register a preset seed applied at startup and on reload."""
         return self._app._seed_registry.register(seed)
 
     def seeds(self) -> list[PresetSeed]:
-        """Every declared preset seed. Skeleton-only — the startup/reload seed applier
-        consults it, so it is not on the ``AppPresets`` protocol (the register-only
-        seam), the same precedent :meth:`write_validator` sets."""
+        """Every declared preset seed.
+
+        Skeleton-only — the startup/reload seed applier consults it, so it is not on the ``AppPresets``
+        protocol (the register-only seam), the same precedent :meth:`write_validator` sets.
+        """
         return self._app._seed_registry.all()
 
     def write_validator(self, base_tool: str) -> PresetWriteValidator | None:
-        """The registered write validator for ``base_tool``, or ``None`` when none
-        is registered. Skeleton-only — the preset write path consults it, so it is
-        not on the ``AppPresets`` protocol (the precedent :meth:`list_active_bodies`
-        sets)."""
+        """The registered write validator for ``base_tool``, or ``None`` when none is registered.
+
+        Skeleton-only — the preset write path consults it, so it is not on the ``AppPresets`` protocol
+        (the precedent :meth:`list_active_bodies` sets).
+        """
         return self._app._write_validator_registry.get(base_tool)
 
     @property
     def store(self) -> PresetStore:
+        """The preset document store."""
         return self._app._preset_store
 
     async def list_active_bodies(self) -> dict[str, PresetBody]:
-        """Every store-backed preset's active body, keyed by name — one batched
-        JOIN read (replaces a per-record ``get_active_body`` round-trip on the list
-        route + rehydrate). Reached through the concrete ``_versioned_store`` so the
-        concrete-only ``list_active_bodies`` resolves."""
+        """Every store-backed preset's active body, keyed by name — one batched JOIN read.
+
+        Replaces a per-record ``get_active_body`` round-trip on the list route + rehydrate. Reached through
+        the concrete ``_versioned_store`` so the concrete-only ``list_active_bodies`` resolves.
+        """
         from tai42_contract.presets import PresetBody
 
         raw = await self._app._versioned_store.list_active_bodies("preset")
         return {name: PresetBody.model_validate(body) for name, body in raw.items()}
 
     async def list_active_versioned_bodies(self) -> dict[str, tuple[int, PresetBody]]:
-        """Every preset's ``(active_version, active_body)``, keyed by name — one batched
-        JOIN read that captures the version pointer and its body TOGETHER (never a
-        skewed second read). The version-aware sibling of :meth:`list_active_bodies`,
-        used by the rehydration path so the engine retains each preset's version beside
-        its body. Reached through the concrete ``_versioned_store``."""
+        """Every preset's ``(active_version, active_body)``, keyed by name — one batched JOIN read.
+
+        Captures the version pointer and its body TOGETHER (never a skewed second read). The version-aware
+        sibling of :meth:`list_active_bodies`, used by the rehydration path so each preset's version is
+        retained beside its body. Reached through the concrete ``_versioned_store``.
+        """
         from tai42_contract.presets import PresetBody
 
         raw = await self._app._versioned_store.list_active_versioned_bodies("preset")
@@ -216,7 +234,8 @@ class PresetsFacet(_Facet):
         Maps the generic store's ``DocumentNotFoundError`` to
         :class:`~tai42_contract.presets.errors.PresetNotFoundError`, mirroring
         :class:`~tai42_skeleton.presets.store.PresetStoreView`. Reached through the
-        concrete ``_versioned_store``."""
+        concrete ``_versioned_store``.
+        """
         from tai42_contract.presets import PresetBody
         from tai42_contract.presets.errors import PresetNotFoundError
         from tai42_contract.versioning.errors import DocumentNotFoundError
@@ -236,17 +255,21 @@ class PresetsFacet(_Facet):
         concrete-store member, not on the ``VersionedStore`` protocol), the same
         precedent as :meth:`list_active_bodies`. Raises
         :class:`~tai42_contract.versioning.errors.DocumentVersionNotFoundError` for an
-        unknown preset or version."""
+        unknown preset or version.
+        """
         await self._app._versioned_store.set_version_tags("preset", name, version, tags)
 
 
 class ToolMetaFacet(_Facet):
-    """``app.tool_meta`` — the tool-metadata overlay (folders + per-tool rows), the
-    ``tai42_contract.app.AppToolMeta`` namespace: the ``store`` view plus the
-    in-process ``patch`` edit seam."""
+    """``app.tool_meta`` — the tool-metadata overlay (folders + per-tool rows).
+
+    The ``tai42_contract.app.AppToolMeta`` namespace: the ``store`` view plus the in-process ``patch``
+    edit seam.
+    """
 
     @property
     def store(self) -> ToolMetaStore:
+        """The tool-metadata overlay store."""
         return self._app._tool_meta_store
 
     async def patch(
@@ -256,13 +279,14 @@ class ToolMetaFacet(_Facet):
         tags: list[str] | None = None,
         folder_id: str | None = None,
     ) -> dict[str, Any]:
-        """Patch a tool's overlay row in-process, returning the record the HTTP PATCH
-        door returns (the same operation, so validation is identical: an unknown
-        ``folder_id`` is the same loud error). Only the arguments given are written:
-        ``folder_id`` places the tool, and a ``tags`` list REPLACES the whole tag set
-        (the door's merge-patch semantic — array values are set replacements, never
-        merges). ``tags=None`` leaves the tag set untouched; ``folder_id=None`` leaves
-        the placement untouched."""
+        """Patch a tool's overlay row in-process, returning the record the HTTP PATCH door returns.
+
+        The same operation, so validation is identical: an unknown ``folder_id`` is the same loud error.
+        Only the arguments given are written: ``folder_id`` places the tool, and a ``tags`` list REPLACES
+        the whole tag set (the door's merge-patch semantic — array values are set replacements, never
+        merges). ``tags=None`` leaves the tag set untouched; ``folder_id=None`` leaves the placement
+        untouched.
+        """
         from tai42_skeleton.operations.tool_meta import upsert_tool_meta
 
         patch: dict[str, Any] = {}
@@ -279,13 +303,17 @@ class BackupFacet(_Facet):
     def register_section(
         self, name: str, exporter: Callable[[], Any], importer: Callable[[Any], Any], *, secret: bool = False
     ) -> None:
+        """Register a named backup section with its ``exporter`` and ``importer``."""
         return self._app._backup_registry.register_section(name, exporter, importer, secret=secret)
 
     def sections(self) -> list[BackupSectionInfo]:
+        """Return the info for every registered backup section."""
         return self._app._backup_registry.sections()
 
     def export_section(self, name: str) -> Any:
+        """Export the backup section named ``name``."""
         return self._app._backup_registry.export_section(name)
 
     def import_section(self, name: str, payload: Any) -> Any:
+        """Import ``payload`` into the backup section named ``name``."""
         return self._app._backup_registry.import_section(name, payload)

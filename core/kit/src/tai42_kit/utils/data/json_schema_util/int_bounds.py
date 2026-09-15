@@ -1,6 +1,6 @@
-"""Platform int64 / msgpack integer range: the encode-range constants, the
-oversized-integer finder, and the in-place tightening of integer schema nodes.
+"""Platform int64 / msgpack integer range helpers.
 
+The encode-range constants, the oversized-integer finder, and the in-place tightening of integer schema nodes.
 The checkpoint serializer encodes an ``int`` as a native msgpack integer, so a
 value outside the encodable range aborts serialization; these helpers name such a
 value and tighten every integer schema node to the platform range before a value
@@ -28,8 +28,10 @@ MSGPACK_INT_MAX = 18446744073709551615
 
 
 def _overflow_children(obj: Any, path: str) -> list[tuple[str, Any]] | None:
-    """The child ``(path, value)`` pairs of ``obj`` to recurse for a mapping,
-    sequence, or attribute-bearing object; ``None`` for a leaf or opaque value."""
+    """The child ``(path, value)`` pairs of ``obj`` to recurse (a mapping, sequence, or attribute-bearing object).
+
+    ``None`` for a leaf or opaque value.
+    """
     if isinstance(obj, dict):
         return [(f"{path}[{key!r}]", value) for key, value in obj.items()]
     if isinstance(obj, (list, tuple, set, frozenset)):
@@ -48,14 +50,14 @@ def find_oversized_int(
     depth: int = 0,
     seen: set[int] | None = None,
 ) -> tuple[str, int] | None:
-    """First ``(path, value)`` in ``obj`` whose integer falls outside
-    ``[minimum, maximum]``, or ``None``.
+    """First ``(path, value)`` in ``obj`` whose integer falls outside ``[minimum, maximum]``, or ``None``.
 
     Walks mappings, sequences, and object/model attributes, guarding against
     cycles and unbounded depth. The bound is caller-supplied: the checkpoint
     guard scans the native msgpack range (``MSGPACK_INT_MIN``/``MSGPACK_INT_MAX``)
     to name the true encode-failure culprit, while structured-output validation
-    scans the stricter int64 platform range (``INT64_MIN``/``INT64_MAX``)."""
+    scans the stricter int64 platform range (``INT64_MIN``/``INT64_MAX``).
+    """
     if depth > 200:
         return None
     # bool is an int subclass but always encodes; only true integers can overflow.
@@ -82,8 +84,7 @@ def find_oversized_int(
 
 
 def inject_int64_bounds(schema: dict[str, Any]) -> dict[str, Any]:
-    """Return a deep copy of ``schema`` with every integer node tightened to the
-    platform int64 range.
+    """Return a deep copy of ``schema`` with every integer node tightened to the platform int64 range.
 
     For each integer-typed node the bounds are tightened, never loosened:
     ``minimum = max(existing, INT64_MIN)`` and ``maximum = min(existing, INT64_MAX)``
@@ -99,9 +100,11 @@ def inject_int64_bounds(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def _subschemas(node: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Every child schema node of ``node`` — ``properties``/``patternProperties``/
-    ``$defs`` values, ``anyOf``/``oneOf``/``allOf``/``prefixItems`` members,
-    ``items``, and ``additionalProperties``."""
+    """Every child schema node of ``node``.
+
+    ``properties``/``patternProperties``/``$defs`` values, ``anyOf``/``oneOf``/``allOf``/``prefixItems``
+    members, ``items``, and ``additionalProperties``.
+    """
     for mapping_key in ("properties", "patternProperties", "$defs"):
         mapping = node.get(mapping_key)
         if isinstance(mapping, dict):

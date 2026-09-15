@@ -1,3 +1,5 @@
+"""The abstract base for the manifest-driven registries."""
+
 from abc import ABC, abstractmethod
 
 
@@ -10,4 +12,6 @@ class BaseRegistry(ABC):
     """
 
     @abstractmethod
-    def validation(self) -> None: ...
+    def validation(self) -> None:
+        """Verify the registered entries against what was requested, raising on a mismatch."""
+        ...

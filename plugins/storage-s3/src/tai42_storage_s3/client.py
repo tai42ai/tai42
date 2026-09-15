@@ -23,6 +23,8 @@ _ALLOWED_KWARGS: frozenset[str] = frozenset()
 
 
 class S3Client(PooledClient[Any]):
+    """A pooled aioboto3 S3 client, one per event loop, configured from ``s3_settings``."""
+
     async def _create(self, **kwargs: Any) -> Any:
         reject_unknown_connection_kwargs("S3 client", kwargs, _ALLOWED_KWARGS)
         settings = s3_settings()

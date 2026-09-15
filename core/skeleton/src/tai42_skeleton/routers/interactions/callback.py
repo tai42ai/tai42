@@ -1,6 +1,6 @@
-"""The unauthenticated external-answer callback door (GET page + POST claim) for the
-interactions surface — ``/api/interactions/callback/{ticket}``.
+"""The unauthenticated external-answer callback door (GET page + POST claim) for the interactions surface.
 
+Serves ``/api/interactions/callback/{ticket}``.
 The callback ticket is a bearer capability minted by the ``ask_user`` helper; it is
 never deleted, single-use is enforced by the answered-state guard in ``record_answer``,
 and a duplicate callback resolves idempotently to 200. The door is NOT audience-gated —
@@ -29,7 +29,7 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.webhooks import WebhookVerificationError
 from tai42_kit.clients.impl.redis import RedisClient
-from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
+from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
@@ -41,7 +41,7 @@ from tai42_skeleton.interactions.store import InteractionStore
 # the still-handler callback door shares its answer-validation, reply-TTL, and
 # serializer-guarded claim helpers, imported from that module.
 from tai42_skeleton.operations.interactions import (
-    _AnswerInvalid,
+    _AnswerInvalidError,
     _claim_or_serialization_error,
     _reply_ttl,
     _schema_mismatch,
@@ -81,18 +81,19 @@ def _callback_json(payload: dict, status_code: int) -> JSONResponse:
 
 
 async def _callback_post_size_guard(request: Request, settings: InteractionsSettings) -> Response | None:
-    """Enforce ``callback_max_body_bytes`` on BOTH the raw query string (the
-    confirm-flow answer rides the URL) and the actual body bytes. Return the 413
-    response when either exceeds the cap, or ``None`` when both are within it.
+    """Enforce ``callback_max_body_bytes`` on BOTH the raw query string and the actual body bytes.
 
+    The confirm-flow answer rides the URL, so both are capped. Return the 413 response
+    when either exceeds the cap, or ``None`` when both are within it.
     Runs identically in the OFF gate and the configured POST path so an oversized
     POST answers the SAME 413 whether or not the store is configured — the public
-    door leaks no configured-vs-off oracle through the size cap."""
+    door leaks no configured-vs-off oracle through the size cap.
+    """
     if len(request.url.query.encode()) > settings.callback_max_body_bytes:
         return _callback_json({"error": "payload too large"}, 413)
     try:
         body = await read_bounded_body(request, settings.callback_max_body_bytes)
-    except PayloadTooLarge:
+    except RequestBodyTooLargeError:
         return _callback_json({"error": "payload too large"}, 413)
     # Cache the read bytes on the request (Starlette's own ``_body`` slot) so
     # ``_callback_post`` replays them instead of re-consuming the drained stream.
@@ -101,9 +102,11 @@ async def _callback_post_size_guard(request: Request, settings: InteractionsSett
 
 
 def _params_to_answer(request: Request) -> dict:
-    """The query params as the delivered answer: a single occurrence yields the
-    scalar string (``?a=1`` -> ``{"a": "1"}``), a repeated key yields a list
-    (``?tag=a&tag=b`` -> ``{"tag": ["a", "b"]}``) — never silent last-wins."""
+    """The query params as the delivered answer, never silent last-wins.
+
+    A single occurrence yields the scalar string (``?a=1`` -> ``{"a": "1"}``), a
+    repeated key yields a list (``?tag=a&tag=b`` -> ``{"tag": ["a", "b"]}``).
+    """
     result: dict[str, Any] = {}
     for key, value in request.query_params.multi_items():
         if key in result:
@@ -127,11 +130,14 @@ async def _record_callback_answer(
     answer: Any,
     params: dict[str, str] | None = None,
 ) -> JSONResponse:
-    """Atomically claim ``answer`` for the ticketed question. A lost race maps
-    to the same idempotent 200 already_answered. ``params`` is the OPTIONAL channel enrichment the
-    inbound-answer ladder forwarded alongside the answer (the answer-seam counterpart of a bridged
-    turn's entry params); it rides the stored :class:`InteractionResponse.params` for the asking
-    flow to read beside ``answer``. ``None`` keeps the envelope byte-identical to a plain answer."""
+    """Atomically claim ``answer`` for the ticketed question.
+
+    A lost race maps to the same idempotent 200 already_answered. ``params`` is the
+    OPTIONAL channel enrichment the inbound-answer ladder forwarded alongside the answer
+    (the answer-seam counterpart of a bridged turn's entry params); it rides the stored
+    :class:`InteractionResponse.params` for the asking flow to read beside ``answer``.
+    ``None`` keeps the envelope byte-identical to a plain answer.
+    """
     response = InteractionResponse(
         interaction_id=interaction_id,
         answer=answer,
@@ -184,26 +190,30 @@ async def _claim_external(
 
 
 def _callback_verifier(state: InteractionState) -> dict | None:
-    """The verifier binding stashed in the external ``format_payload`` (``{"name",
-    "config"}``), or ``None`` for an unbound ticket-only external question."""
+    """The verifier binding stashed in the external ``format_payload`` (``{"name", "config"}``).
+
+    ``None`` for an unbound ticket-only external question.
+    """
     binding = (state.request.format_payload or {}).get("verifier")
     return binding if isinstance(binding, dict) else None
 
 
 async def _verify_callback(request: Request, raw: bytes, state: InteractionState) -> tuple[Response | None, bool]:
-    """Run the question's bound verifier over the raw callback body. Return
-    ``(deny_response, False)`` on any failure (nothing recorded, ticket
-    unconsumed), or ``(None, post_only)`` when the question is unbound or
-    verification passes — ``post_only`` tells the caller whether the verifier
-    signs only the body (True for a body-signature verifier), so an empty-body
-    POST must not draw its answer from the unauthenticated query string.
+    """Run the question's bound verifier over the raw callback body.
+
+    Return ``(deny_response, False)`` on any failure (nothing recorded, ticket
+    unconsumed), or ``(None, post_only)`` when the question is unbound or verification
+    passes — ``post_only`` tells the caller whether the verifier signs only the body
+    (True for a body-signature verifier), so an empty-body POST must not draw its answer
+    from the unauthenticated query string.
 
     The unbound question returns ``(None, False)`` so its ticket-only query-param
     path stays open; only a passing body-signature verifier returns
     ``(None, True)``.
 
     Fails CLOSED: a signature failure -> 401 (constant message); an unknown
-    verifier name / missing secret env / verifier bug -> 500."""
+    verifier name / missing secret env / verifier bug -> 500.
+    """
     binding = _callback_verifier(state)
     if binding is None:
         return None, False
@@ -216,7 +226,7 @@ async def _verify_callback(request: Request, raw: bytes, state: InteractionState
     try:
         verifier = tai42_app.webhook_verifiers.get(name)
     except Exception:
-        logger.error("callback verify: no registered verifier %r for interaction %s", name, interaction_id)
+        logger.exception("callback verify: no registered verifier %r for interaction %s", name, interaction_id)
         return _callback_json({"error": "webhook verification error"}, 500), False
     post_only = bool(getattr(verifier, "post_only", False))
     try:
@@ -232,11 +242,13 @@ async def _verify_callback(request: Request, raw: bytes, state: InteractionState
 
 
 def _parse_typed_answer(raw: bytes, fmt: AnswerFormat) -> Response | tuple[Any, dict[str, str] | None]:
-    """Parse a channel-delivered typed answer body into ``(value, params)``, or a 400
-    ``Response`` on a malformed body. An empty body is an affirmative confirm tap (CONFIRM)
-    or a required-answer 400 (text/select); a JSON object supplies ``answer`` and OPTIONAL
-    ``params`` (channel enrichment validated against the shared transport bounds). Query
-    params never carry the answer here."""
+    """Parse a channel-delivered typed answer body into ``(value, params)``, or a 400 ``Response``.
+
+    A malformed body yields the 400. An empty body is an affirmative confirm tap
+    (CONFIRM) or a required-answer 400 (text/select); a JSON object supplies ``answer``
+    and OPTIONAL ``params`` (channel enrichment validated against the shared transport
+    bounds). Query params never carry the answer here.
+    """
     if not raw:
         if fmt is AnswerFormat.CONFIRM:
             # The GET-confirm page's form POSTs an empty body — an affirmative tap.
@@ -273,16 +285,19 @@ async def _claim_channel_typed(
     state: InteractionState,
     raw: bytes,
 ) -> Response:
-    """The non-EXTERNAL branch: a ticketed channel-delivered question. The plugin
-    forwards the human's reply as ``{"answer": <value>}``. The value is validated against
-    the STORED format (the authed door's exact rules) and the TYPED value recorded."""
+    """The non-EXTERNAL branch: a ticketed channel-delivered question.
+
+    The plugin forwards the human's reply as ``{"answer": <value>}``. The value is
+    validated against the STORED format (the authed door's exact rules) and the TYPED
+    value recorded.
+    """
     parsed = _parse_typed_answer(raw, state.request.answer_format)
     if isinstance(parsed, Response):
         return parsed
     value, answer_params = parsed
     try:
         validated = _validate_answer(state.request, value)
-    except _AnswerInvalid as exc:
+    except _AnswerInvalidError as exc:
         # The failing field's dotted path rides as an optional ``field`` key so a
         # channel can pin the error on the right control; absent when unlocated.
         # ``retry_in_place`` is the door's policy signal to a correlated channel:
@@ -308,12 +323,14 @@ async def _claim_verbatim_external(
     raw: bytes,
     post_only: bool,
 ) -> Response:
-    """The EXTERNAL branch: verbatim payload semantics. Dispatch on the body FIRST —
-    the empty-body branch first (``json.loads("")`` raises). Body wins: query params
-    alongside a JSON-object body are ignored as routing metadata (webhook providers
-    decorate the URL with their own params while POSTing the event body). A
-    body-signature verifier signs only the raw body, so a replayed signature over an
-    empty body must never let ``?approved=true`` inject an answer."""
+    """The EXTERNAL branch: verbatim payload semantics.
+
+    Dispatch on the body FIRST — the empty-body branch first (``json.loads("")``
+    raises). Body wins: query params alongside a JSON-object body are ignored as routing
+    metadata (webhook providers decorate the URL with their own params while POSTing the
+    event body). A body-signature verifier signs only the raw body, so a replayed
+    signature over an empty body must never let ``?approved=true`` inject an answer.
+    """
     if not raw:
         if post_only:
             return _callback_json({"error": _POST_ONLY_EMPTY_BODY_DENY}, 400)
@@ -417,10 +434,12 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
 
 
 class InteractionCallbackAck(BaseModel):
-    """The POST callback door's JSON body: ``answered`` (with the ``interaction_id``
-    just recorded) or the idempotent ``already_answered`` (no id — someone else's
-    answer already landed). The GET method of this route serves an HTML page, not
-    this body."""
+    """The POST callback door's JSON body.
+
+    ``answered`` (with the ``interaction_id`` just recorded) or the idempotent
+    ``already_answered`` (no id — someone else's answer already landed). The GET method
+    of this route serves an HTML page, not this body.
+    """
 
     interaction_id: str | None = None
     status: Literal["answered", "already_answered"]
@@ -441,6 +460,7 @@ class InteractionCallbackAck(BaseModel):
     ),
 )
 async def callback(request: Request) -> Response:
+    """Serve the external interaction callback door (GET page, POST answer claim)."""
     # Rate limiting for this public door lives in the app-level
     # ``RateLimitMiddleware``, registered at app construction so it is always on
     # (tunable/disable via ``TAI_RATE_LIMIT_*``); it runs ahead of this route for

@@ -1,5 +1,4 @@
-"""Server-side rendering of a channel-delivered form question's schema into an
-escaped HTML page."""
+"""Server-side rendering of a channel-delivered form question's schema into an escaped HTML page."""
 
 from __future__ import annotations
 
@@ -12,12 +11,14 @@ from .pages import _FORM_SUBMIT_SCRIPT
 
 
 class _FormRenderError(Exception):
-    """Raised when a stored form question's schema cannot be rendered into a page —
-    a schema outside the channel-deliverable subset (``form_schema``). ``ask_user``
+    """Raised when a stored form question's schema cannot be rendered into a page.
+
+    The schema is outside the channel-deliverable subset (``form_schema``). ``ask_user``
     refuses such a schema before persisting, so a form record that reaches the GET
     door MUST render; failing to is a server bug (a record that bypassed
     ``ask_user``), so it surfaces as a loud 500 with a logged reason, never a blank
-    or half-rendered page silently dropping fields."""
+    or half-rendered page silently dropping fields.
+    """
 
 
 def _string_select(esc_name: str, req_attr: str, choices: list[tuple[str, str]], value: Any) -> str:
@@ -41,7 +42,8 @@ def _render_field(
     value: Any = None,
     options: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render one subset-validated schema property into an escaped form control:
+    """Render one subset-validated schema property into an escaped form control.
+
     ``string`` (per-send ``options`` or ``enum`` -> ``<select>``, else text),
     ``boolean`` -> checkbox, ``integer``/``number`` -> number input. The property is
     pre-validated by ``channel_form_fields`` (the one subset definition), so its type
@@ -49,7 +51,8 @@ def _render_field(
     type is a server bug and raises ``_FormRenderError``. ``value`` prefills the
     control; ``options`` (a per-send choice list, ``{"value", "label"?}`` each)
     REPLACES the schema ``enum`` for this send, showing labels and posting values.
-    ``data-field``/``data-kind`` drive the submit script's typed collection."""
+    ``data-field``/``data-kind`` drive the submit script's typed collection.
+    """
     esc_name = html.escape(name, quote=True)
     esc_label = html.escape(str(prop.get("title") or name))
     req_attr = " required" if is_required else ""
@@ -78,13 +81,15 @@ def _render_field(
 
 
 def _render_form_page(format_payload: dict[str, Any] | None) -> str:
-    """Render the schema-driven HTML form for a channel-delivered form question,
-    over the SAME subset walk (``channel_form_fields``) that ``ask_user`` enforces
+    """Render the schema-driven HTML form for a channel-delivered form question.
+
+    Uses the SAME subset walk (``channel_form_fields``) that ``ask_user`` enforces
     at ask time. Per-send ``data`` prefills known values and renders per-send option
     lists; ``pages`` split the fields into ordered steps (Back/Next/Submit, one
     visible at a time), the answer being the union of every step's fields. A schema
     outside the subset raises ``_FormRenderError``; the GET door maps that to a loud
-    500 (the server-bug backstop for a record that bypassed ``ask_user``)."""
+    500 (the server-bug backstop for a record that bypassed ``ask_user``).
+    """
     payload = format_payload or {}
     schema = payload.get("schema")
     try:

@@ -10,8 +10,7 @@ from tai42_kit.utils.data.json_schema_util import inject_int64_bounds, json_sche
 
 
 def _bounded_schema(schema: dict[str, Any]) -> Any:
-    """Tighten a raw JSON-Schema ``response_format`` to the int64 range and pin it
-    to a ``TypedDict`` shape the tool-calling parse enforces.
+    """Tighten a raw JSON-Schema ``response_format`` to the int64 range and pin it to an enforced ``TypedDict`` shape.
 
     A raw JSON-Schema dict is otherwise handed to the tool-calling strategy
     unvalidated — langchain returns the tool args as-is — so an out-of-range

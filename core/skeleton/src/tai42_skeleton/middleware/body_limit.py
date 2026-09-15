@@ -7,7 +7,7 @@ bytes read is bounded (never a client-declared ``Content-Length``, which is
 advisory), and an over-cap request is answered with 413, loudly — never a
 silently truncated stream.
 
-The escape signal is a module-private ``_BodyTooLarge`` that subclasses
+The escape signal is a module-private ``_BodyTooLargeError`` that subclasses
 ``Exception`` DIRECTLY, never ``ValueError``: several routes wrap
 ``request.json()`` in ``except ValueError`` (``routers/backup.py``,
 ``routers/_tool_call.py``), so a ``ValueError``-based escape would be swallowed
@@ -18,7 +18,7 @@ after start it is re-raised (the stream cannot be un-sent).
 This runs INSIDE the base app's own Starlette stack (via the base-app middleware
 list, so it sits inside that app's ``ServerErrorMiddleware``): the over-cap escape
 must reach this handler and become a 413 before any error middleware turns the
-raised ``_BodyTooLarge`` into a 500. Always on; tune via
+raised ``_BodyTooLargeError`` into a 500. Always on; tune via
 ``TAI_BODY_LIMIT_MAX_BODY_BYTES``.
 """
 
@@ -31,7 +31,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from tai42_skeleton.settings.body_limit import body_limit_settings
 
 
-class _BodyTooLarge(Exception):
+class _BodyTooLargeError(Exception):
     """Internal escape raised once the accumulated body exceeds the cap.
 
     Subclasses ``Exception`` DIRECTLY (never ``ValueError``) so a route's
@@ -40,13 +40,17 @@ class _BodyTooLarge(Exception):
 
 
 class BodyLimitMiddleware:
-    """Caps every request body at ``TAI_BODY_LIMIT_MAX_BODY_BYTES`` actual bytes;
-    over-cap answers 413. Non-http scopes pass straight through."""
+    """Caps every request body at ``TAI_BODY_LIMIT_MAX_BODY_BYTES`` actual bytes.
+
+    Over-cap answers 413. Non-http scopes pass straight through.
+    """
 
     def __init__(self, app: ASGIApp) -> None:
+        """Wrap the inner ASGI ``app``."""
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Cap this request's body, converting an over-cap read into a 413 before response start."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -67,7 +71,7 @@ class BodyLimitMiddleware:
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > cap:
-                    raise _BodyTooLarge
+                    raise _BodyTooLargeError
             return message
 
         response_started = False
@@ -80,7 +84,7 @@ class BodyLimitMiddleware:
 
         try:
             await self.app(scope, limited_receive, tracking_send)
-        except _BodyTooLarge:
+        except _BodyTooLargeError:
             if response_started:
                 # The response head is already on the wire; the stream cannot be
                 # un-sent, so surface the over-cap loudly rather than truncate.
@@ -89,9 +93,11 @@ class BodyLimitMiddleware:
 
     @staticmethod
     def _declared_length_over_cap(scope: Scope, cap: int) -> bool:
-        """Whether the advisory ``Content-Length`` header already declares a body over
-        the cap. The header is advisory, so this only powers the up-front reject; the
-        real bound is the running total of body bytes actually read."""
+        """Whether the advisory ``Content-Length`` header already declares a body over the cap.
+
+        The header is advisory, so this only powers the up-front reject; the real bound
+        is the running total of body bytes actually read.
+        """
         declared = Headers(scope=scope).get("content-length")
         if declared is None:
             return False

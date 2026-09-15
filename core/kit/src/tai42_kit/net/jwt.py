@@ -42,26 +42,32 @@ class JwtError(Exception):
 
 
 class JwksFetchError(JwtError):
-    """A discovery or JWKS fetch failed: transport error, non-200 status, a
-    redirect, the size cap, an ``https`` violation, a malformed document, or an
-    issuer that does not match the discovery document's own ``issuer``."""
+    """A discovery or JWKS fetch failed.
+
+    Causes: transport error, non-200 status, a redirect, the size cap, an
+    ``https`` violation, a malformed document, or an issuer that does not match
+    the discovery document's own ``issuer``.
+    """
 
 
 class JwtVerifyError(JwtError):
-    """A token failed verification: bad structure, an algorithm outside the
-    allowlist, an unknown ``kid`` after a refetch, a bad signature, or an
+    """A token failed verification.
+
+    Causes: bad structure, an algorithm outside the allowlist, an unknown
+    ``kid`` after a refetch, a bad signature, or an
     ``iss``/``aud``/``exp``/``nbf``/``nonce`` claim failure. The message names
-    which check refused the token."""
+    which check refused the token.
+    """
 
 
 _JWT_STRUCTURE = re.compile(r"\A[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\Z")
 
 
 def looks_like_jwt(token: str) -> bool:
-    """Return whether ``token`` is structurally a compact JWS: three
-    dot-separated non-empty base64url segments.
+    """Return whether ``token`` is structurally a compact JWS.
 
-    This is a pure string shape check — it decodes nothing beyond confirming the
+    Three dot-separated non-empty base64url segments. This is a pure string
+    shape check — it decodes nothing beyond confirming the
     base64url charset. Consumers use it as a cheap chain gate so non-JWT
     credentials (API keys, session tokens) fall through without a verification
     attempt.
@@ -102,9 +108,10 @@ def _require_fetchable_scheme(url: str) -> None:
 
 
 async def _fetch_json(url: str, *, timeout: float, max_bytes: int) -> dict[str, Any]:
-    """GET ``url`` and return its parsed JSON object under the module's hardening:
-    ``https`` (or loopback ``http``), no redirects, a streamed size cap, and a
-    connect/read timeout. Every failure mode is a :class:`JwksFetchError`.
+    """GET ``url`` and return its parsed JSON object under the module's hardening.
+
+    Applies ``https`` (or loopback ``http``), no redirects, a streamed size cap,
+    and a connect/read timeout. Every failure mode is a :class:`JwksFetchError`.
     """
     _require_fetchable_scheme(url)
     try:
@@ -197,6 +204,7 @@ class JwksCache:
         timeout: float = 5.0,
         max_bytes: int = 65536,
     ) -> None:
+        """Configure the cache with the ``jwks_uri`` and its TTL, refetch-cooldown, timeout, and size bounds."""
         self._jwks_uri = jwks_uri
         self._ttl_seconds = ttl_seconds
         self._refetch_cooldown_seconds = refetch_cooldown_seconds
@@ -210,9 +218,10 @@ class JwksCache:
         self._last_forced_refetch: float | None = None
 
     async def get_key(self, kid: str, alg: str) -> Key:
-        """Return the key for ``kid``, refreshing or refetching as the caching
-        policy allows. Raises :class:`JwtVerifyError` when the ``kid`` is unknown
-        after the allowed refetch (or when a refetch is barred by the cooldown).
+        """Return the key for ``kid``, refreshing or refetching as the caching policy allows.
+
+        Raises :class:`JwtVerifyError` when the ``kid`` is unknown after the
+        allowed refetch (or when a refetch is barred by the cooldown).
         """
         async with self._lock:
             now = time.monotonic()

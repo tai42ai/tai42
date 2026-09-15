@@ -14,9 +14,9 @@
  * the visitor — by settling, or by sending the answer they just gave — keeps focus
  * on itself rather than dropping it to the document.
  */
+import { Badge } from '@tai42/studio-sdk';
 import type { ReactElement, RefObject } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Badge } from '@tai42/studio-sdk';
 
 import { MediaItems } from '@/media-card';
 import { QuestionControls, type QuestionItem } from '@/question-controls';

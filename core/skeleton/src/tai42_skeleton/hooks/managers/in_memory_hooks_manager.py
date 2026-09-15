@@ -1,3 +1,5 @@
+"""In-process (single-worker) implementation of the hooks manager."""
+
 import heapq
 import time
 from typing import Any
@@ -9,7 +11,10 @@ from tai42_skeleton.hooks.settings import HooksSettings
 
 
 class InMemoryHooksManager(BaseHooksManager):
+    """A single-process hooks manager — registrations and the webhook seen-set live in memory."""
+
     def __init__(self, settings: HooksSettings):
+        """Bind ``settings`` and initialise the in-memory hook, verifier, and webhook seen-set maps."""
         super().__init__(settings)
         self._hooks: dict[str, dict[str, HookParams]] = {}
         self._name_topic_map: dict[str, str] = {}
@@ -36,6 +41,7 @@ class InMemoryHooksManager(BaseHooksManager):
         return sum(len(bucket) for bucket in self._hooks.values())
 
     async def register(self, params: HookParams) -> bool:
+        """Register a hook by name, moving it off any prior topic's bucket; returns ``True``."""
         self.validate_jq_fields(params)
         key = self.settings.get_hook_key(params.topic)
 
@@ -55,6 +61,7 @@ class InMemoryHooksManager(BaseHooksManager):
         return True
 
     async def unregister(self, name: str) -> bool:
+        """Remove the hook named ``name``; returns ``True`` when one was present."""
         topic = self._name_topic_map.pop(name, None)
         if not topic:
             return False
@@ -68,6 +75,7 @@ class InMemoryHooksManager(BaseHooksManager):
         return True
 
     async def list_hooks_by_topic(self, topic: str) -> dict[str, HookParams]:
+        """A copy of the hooks registered under ``topic``, keyed by name."""
         key = self.settings.get_hook_key(topic)
         # Return a copy, not the live bucket: ``on_event`` iterates this map
         # across an await (condition render), so a concurrent register/unregister
@@ -76,28 +84,34 @@ class InMemoryHooksManager(BaseHooksManager):
         return dict(self._hooks.get(key, {}))
 
     async def list_hooks(self) -> dict[str, HookParams]:
+        """Every registered hook across all topics, keyed by name."""
         all_hooks: dict[str, HookParams] = {}
         for hooks in self._hooks.values():
             all_hooks.update(hooks)
         return all_hooks
 
     async def set_topic_verifier(self, topic: str, binding: dict[str, Any]) -> None:
+        """Store the verifier ``binding`` for ``topic``, validating its shape on write."""
         # Validate the shape on write (loud on a wrong shape) so both backends
         # enforce the same binding contract; store the canonical dict.
         self._topic_verifiers[topic] = TopicVerifierBinding.model_validate(binding).model_dump()
 
     async def get_topic_verifier(self, topic: str) -> dict[str, Any] | None:
+        """A copy of ``topic``'s verifier binding, or ``None`` when none is set."""
         binding = self._topic_verifiers.get(topic)
         # Return a copy so a caller cannot mutate the stored binding in place.
         return dict(binding) if binding is not None else None
 
     async def delete_topic_verifier(self, topic: str) -> bool:
+        """Delete ``topic``'s verifier binding; returns ``True`` when one was present."""
         return self._topic_verifiers.pop(topic, None) is not None
 
     async def all_topic_verifiers(self) -> dict[str, dict[str, Any]]:
+        """A copy of every topic's verifier binding, keyed by topic."""
         return {topic: dict(binding) for topic, binding in self._topic_verifiers.items()}
 
     async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
+        """Claim a webhook delivery once per ``(topic, replay_key)`` within ``ttl_seconds``; ``True`` on first claim."""
         if ttl_seconds <= 0:
             raise ValueError(f"webhook replay claim requires a positive ttl_seconds, got {ttl_seconds!r}")
         # No await between the presence check and the write, so the check-and-set is

@@ -1,6 +1,7 @@
-"""Serving primitives for the Studio SPA host: per-response CSP nonce, the
-security-header set, the asset content-type map, and the import-map injection
-(HTML-escaped so a hostile manifest string can never break out of the inline
+"""Serving primitives for the Studio SPA host.
+
+Covers the per-response CSP nonce, the security-header set, the asset content-type map, and the
+import-map injection (HTML-escaped so a hostile manifest string can never break out of the inline
 script into the PUBLIC index.html).
 """
 
@@ -41,8 +42,10 @@ HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 
 
 def asset_content_type(filename: str) -> str:
-    """Content-type for a served plugin/static asset by extension. Unmapped ->
-    octet-stream; never text/html."""
+    """Content-type for a served plugin/static asset by extension.
+
+    Unmapped -> octet-stream; never text/html.
+    """
     lower = filename.lower()
     for suffix, ctype in _CONTENT_TYPES.items():
         if lower.endswith(suffix):
@@ -51,14 +54,17 @@ def asset_content_type(filename: str) -> str:
 
 
 def generate_nonce() -> str:
-    """A fresh CSPRNG nonce per response (>=128 bits). Never a counter/timestamp —
-    a predictable nonce defeats the inline-script gate."""
+    """A fresh CSPRNG nonce per response (>=128 bits).
+
+    Never a counter/timestamp — a predictable nonce defeats the inline-script gate.
+    """
     return secrets.token_urlsafe(16)
 
 
 def security_headers(nonce: str) -> dict[str, str]:
-    """The app CSP designed for the NATIVE plugin-loading model (no shim, so no
-    ``blob:``/``unsafe-eval``). The nonce authorizes the ONE first-party inline
+    """The app CSP designed for the NATIVE plugin-loading model.
+
+    No shim, so no ``blob:``/``unsafe-eval``. The nonce authorizes the ONE first-party inline
     script (the import map); ``wasm-unsafe-eval`` permits WebAssembly instantiation
     (CSP-gated separately from JS eval) for rich wasm-using plugins; the three
     non-inheriting directives (``base-uri``/``object-src``/``form-action``) are set
@@ -95,22 +101,27 @@ def security_headers(nonce: str) -> dict[str, str]:
 
 
 def _escape_json_for_html(payload: str) -> str:
-    """Render ``<``, ``>``, ``&``, ``/`` as ``\\u`` escapes so a manifest string
-    can never close the <script> block (``</script>``) or open a new tag in the
-    PUBLIC index.html. The browser's JSON parser decodes the escapes back, so URL
-    values stay correct."""
+    r"""Render ``<``, ``>``, ``&``, ``/`` as ``\\u`` escapes so a manifest string cannot break out.
+
+    A manifest string can never close the <script> block (``</script>``) or open a new tag in the
+    PUBLIC index.html. The browser's JSON parser decodes the escapes back, so URL values stay
+    correct.
+    """
     return payload.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026").replace("/", "\\u002f")
 
 
 def render_importmap_script(registry: StudioPluginRegistry, nonce: str) -> str:
+    """The nonce-stamped ``<script type="importmap">`` for ``registry``'s import map, HTML-escaped."""
     payload = json.dumps(registry.import_map(), separators=(",", ":"), sort_keys=True)
     return f'<script type="importmap" nonce="{nonce}">{_escape_json_for_html(payload)}</script>'
 
 
 def inject_importmap(html: str, registry: StudioPluginRegistry, nonce: str) -> str:
-    """Replace the anchor token with the nonce-stamped importmap script. A missing
-    anchor is LOUD — shipping index.html without the map would leave the app dead
-    on unresolved bare specifiers."""
+    """Replace the anchor token with the nonce-stamped importmap script.
+
+    A missing anchor is LOUD — shipping index.html without the map would leave the app dead on
+    unresolved bare specifiers.
+    """
     if IMPORTMAP_ANCHOR not in html:
         raise StudioPluginError(f"served index.html is missing the {IMPORTMAP_ANCHOR!r} import-map anchor")
     return html.replace(IMPORTMAP_ANCHOR, render_importmap_script(registry, nonce), 1)

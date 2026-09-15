@@ -1,8 +1,8 @@
-"""The builtin ``ask_user`` tool: a thin, LLM-facing shim over the interactions
-feature's ``ask_user`` helper. It lets an agent pause mid-run to ask a human a
-question — in ``mode="sync"`` it blocks until the answer (or a timeout) returns;
-in ``mode="async"`` it PARKS, returning a ``SuspendedInteraction`` at once, and a
-later answer/expiry resumes the agent out of band.
+"""The builtin ``ask_user`` tool: a thin, LLM-facing shim over the interactions ``ask_user`` helper.
+
+It lets an agent pause mid-run to ask a human a question — in ``mode="sync"`` it blocks
+until the answer (or a timeout) returns; in ``mode="async"`` it PARKS, returning a
+``SuspendedInteraction`` at once, and a later answer/expiry resumes the agent out of band.
 """
 
 from datetime import datetime
@@ -47,8 +47,10 @@ async def ask_user(
     data: dict[str, Any] | None = None,
     pages: list[dict[str, Any]] | None = None,
 ) -> Any:
-    """Ask a human a question mid-run: in "sync" mode block until they answer; in
-    "async" mode park the caller and return a suspension sentinel immediately.
+    """Ask a human a question mid-run.
+
+    In "sync" mode block until they answer; in "async" mode park the caller and return a
+    suspension sentinel immediately.
 
     Args:
         question: The question shown to the human.

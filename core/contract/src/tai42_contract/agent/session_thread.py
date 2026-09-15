@@ -32,23 +32,28 @@ def get_agent_session_thread() -> str | None:
 
 
 def set_agent_session_thread(thread_id: str | None) -> Token[str | None]:
-    """Bind ``thread_id`` as the current run's session thread; pass the returned token to
-    :func:`reset_agent_session_thread` to restore the previous value."""
+    """Bind ``thread_id`` as the current run's session thread.
+
+    Pass the returned token to :func:`reset_agent_session_thread` to restore the previous value.
+    """
     return _current_session_thread.set(thread_id)
 
 
 def reset_agent_session_thread(token: Token[str | None]) -> None:
-    """Restore the session thread to the value captured in ``token`` by the matching
-    :func:`set_agent_session_thread` call."""
+    """Restore the session thread to the value captured in ``token``.
+
+    ``token`` is the return value of the matching :func:`set_agent_session_thread` call.
+    """
     _current_session_thread.reset(token)
 
 
 @contextmanager
 def agent_session_thread(thread_id: str) -> Generator[None]:
-    """Deposit ``thread_id`` as the ambient session thread for the wrapped block, resetting
-    it in a ``finally``. A task created inside the block inherits it on a copy. Absent this
-    wrap the deposit stays ``None`` and a run mints its own fresh thread — byte-identical to
-    the pre-deposit behavior."""
+    """Deposit ``thread_id`` as the ambient session thread for the wrapped block.
+
+    The deposit is reset in a ``finally``. A task created inside the block inherits it on a
+    copy. Absent this wrap the deposit stays ``None`` and a run mints its own fresh thread.
+    """
     token = set_agent_session_thread(thread_id)
     try:
         yield

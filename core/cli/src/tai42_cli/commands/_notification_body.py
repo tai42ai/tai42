@@ -1,5 +1,4 @@
-"""Assemble the ``POST /api/notifications`` request body, validating each
-rich-send field into its contract model."""
+"""Assemble the ``POST /api/notifications`` request body, validating each rich-send field into its contract model."""
 
 from __future__ import annotations
 
@@ -39,8 +38,10 @@ def _reject_unknown_keys(raw: object, model: type[BaseModel], *, param_hint: str
 
 
 def _list_field(raw: str, adapter: TypeAdapter[Any], label: str, *, param_hint: str) -> list[Any]:
-    """Parse one JSON-array option, validate it through ``adapter``, and return the
-    json-dumped list; a validation error raises ``invalid {label}`` loudly."""
+    """Parse one JSON-array option, validate it through ``adapter``, and return the json-dumped list.
+
+    A validation error raises ``invalid {label}`` loudly.
+    """
     parsed = parse_json_value(raw, param_hint=param_hint)
     try:
         items = adapter.validate_python(parsed)
@@ -50,8 +51,10 @@ def _list_field(raw: str, adapter: TypeAdapter[Any], label: str, *, param_hint: 
 
 
 def _model_field(raw: str, model: type[BaseModel], label: str, *, param_hint: str) -> dict[str, Any]:
-    """Parse one JSON-object option, reject unknown keys, validate it into ``model``,
-    and return the json-dumped dict; a validation error raises ``invalid {label}``."""
+    """Parse one JSON-object option, reject unknown keys, validate it into ``model``, and return the json-dumped dict.
+
+    A validation error raises ``invalid {label}``.
+    """
     parsed = parse_json_value(raw, param_hint=param_hint)
     raw_object = _reject_unknown_keys(parsed, model, param_hint=param_hint)
     try:
@@ -62,9 +65,10 @@ def _model_field(raw: str, model: type[BaseModel], label: str, *, param_hint: st
 
 
 def _schema_field(raw: str) -> dict[str, Any]:
-    """Parse ``--schema`` as a JSON object (the ask-less form's answer schema);
-    the server owns the deeper subset walk, so this shape check is its whole local
-    validation."""
+    """Parse ``--schema`` as a JSON object (the ask-less form's answer schema).
+
+    The server owns the deeper subset walk, so this shape check is its whole local validation.
+    """
     parsed = parse_json_value(raw, param_hint="--schema")
     if not isinstance(parsed, dict):
         raise typer.BadParameter("invalid schema: must be a JSON object", param_hint="--schema")

@@ -25,8 +25,7 @@ _HASH_CONCURRENCY_CPU_MULTIPLE = 2
 
 
 def _default_hash_concurrency() -> int:
-    """A small multiple of the CPU count, falling to a loud floor when
-    ``os.cpu_count()`` returns ``None``."""
+    """A small multiple of the CPU count, falling to a loud floor when ``os.cpu_count()`` returns ``None``."""
     cpu = os.cpu_count()
     if cpu is not None:
         return _HASH_CONCURRENCY_CPU_MULTIPLE * cpu
@@ -75,8 +74,10 @@ class AccountsSettings(TaiBaseSettings):
 
     @property
     def key_prefix(self) -> str:
-        """The resolved Redis namespace segment: the explicit override, else the
-        bound database's name (which requires the store be configured)."""
+        """The resolved Redis namespace segment: the explicit override, else the bound database's name.
+
+        Falling back to the database name requires the store be configured.
+        """
         if self.redis_key_prefix is not None:
             return self.redis_key_prefix
         from tai42_accounts_postgres.db import COMPONENT

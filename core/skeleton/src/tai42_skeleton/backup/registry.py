@@ -57,6 +57,7 @@ class BackupRegistry:
     """Ordered registry of named backup sections (``tai42_contract.app.AppBackup``)."""
 
     def __init__(self) -> None:
+        """Create an empty registry."""
         # Insertion-ordered: ``sections()`` reports registration order.
         self._sections: dict[str, _Section] = {}
 
@@ -68,8 +69,10 @@ class BackupRegistry:
         *,
         secret: bool = False,
     ) -> None:
-        """Register a section under ``name``. A duplicate name raises rather than
-        silently overwrite an existing section."""
+        """Register a section under ``name``.
+
+        A duplicate name raises rather than silently overwrite an existing section.
+        """
         if name in self._sections:
             raise ValueError(f"backup section {name!r} is already registered")
         self._sections[name] = _Section(name=name, exporter=exporter, importer=importer, secret=secret)
@@ -83,8 +86,7 @@ class BackupRegistry:
         return self._require(name).exporter()
 
     def import_section(self, name: str, payload: Any) -> Any:
-        """Run ``name``'s importer over ``payload`` and return its report. Unknown
-        name raises."""
+        """Run ``name``'s importer over ``payload`` and return its report; unknown name raises."""
         return self._require(name).importer(payload)
 
     def _require(self, name: str) -> _Section:

@@ -1,6 +1,8 @@
-"""Channel delivery with bounded retry: build the delivery frame, deliver within the
-ask's budget retrying typed-retryable failures with backoff, and on terminal failure
-prune the question and state the loud abandonment event."""
+"""Channel delivery with bounded retry.
+
+Build the delivery frame, deliver within the ask's budget retrying typed-retryable failures with backoff,
+and on terminal failure prune the question and state the loud abandonment event.
+"""
 
 from __future__ import annotations
 
@@ -22,11 +24,12 @@ logger = logging.getLogger(__name__)
 
 
 def retry_delay(exc: BaseException, attempt: int, remaining: float, settings: InteractionsSettings) -> float | None:
-    """Seconds to wait before re-attempting a failed channel delivery, or ``None``
-    when it must not be retried: a non-transient (or non-delivery) failure, the
-    attempt budget spent, or too little of the ask's budget left for the wait
-    itself. The delay is the exponential backoff off the configured base,
-    widened to the medium's own ``retry_after`` when it asked for longer."""
+    """Seconds to wait before re-attempting a failed channel delivery, or ``None`` when it must not be retried.
+
+    ``None`` covers a non-transient (or non-delivery) failure, the attempt budget spent, or too little of the
+    ask's budget left for the wait itself. The delay is the exponential backoff off the configured base,
+    widened to the medium's own ``retry_after`` when it asked for longer.
+    """
     if not isinstance(exc, ChannelDeliveryError) or not exc.retryable:
         return None
     if attempt >= settings.delivery_max_attempts:
@@ -38,11 +41,12 @@ def retry_delay(exc: BaseException, attempt: int, remaining: float, settings: In
 async def prune(
     settings: InteractionsSettings, store: InteractionStore, interaction_id: str, group_id: str
 ) -> PruneResult:
-    """Prune an abandoned question on its OWN connection — never the cancelled
-    BLPOP connection, which is not safely reusable for a WATCH/MULTI. Returns
+    """Prune an abandoned question on its OWN connection, never the cancelled BLPOP connection.
+
+    The cancelled BLPOP connection is not safely reusable for a WATCH/MULTI. Returns
     ``prune_pending``'s result: ``"pruned"`` when it pruned, ``"answered"`` when an
-    answer was already recorded, ``"gone"`` when the state key was already
-    missing/expired."""
+    answer was already recorded, ``"gone"`` when the state key was already missing/expired.
+    """
     from tai42_kit.clients.impl.redis import RedisClient
 
     from tai42_skeleton.interactions import helper
@@ -52,8 +56,9 @@ async def prune(
 
 
 async def emit_delivery_failed(*, channel: str, interaction_id: str, recipient: str | None, error: str) -> None:
-    """Emit the ``interactions_delivery_failed`` platform event ONCE when a channel
-    delivery of a question has been TERMINALLY abandoned — the question pruned, nothing
+    """Emit the ``interactions_delivery_failed`` platform event ONCE on a terminally abandoned question delivery.
+
+    Fires when a channel delivery of a question has been TERMINALLY abandoned — the question pruned, nothing
     answered — alongside the unchanged raise that propagates the failure.
 
     Core states the fact; a deployment wires a hook on this topic (e.g. a ``notify_user``
@@ -99,10 +104,11 @@ def build_delivery_frame(
     callback_url: str,
     timeout_at: Any,
 ) -> ChannelDelivery:
-    """Build the frozen ``ChannelDelivery`` frame reused across delivery attempts: the
-    question + format + suggested options, a form's normalized schema/prefill/pages, the
-    display media (absolute served refs), the digression policy/notice, the callback URL
-    and the stored deadline."""
+    """Build the frozen ``ChannelDelivery`` frame reused across delivery attempts.
+
+    Carries the question + format + suggested options, a form's normalized schema/prefill/pages, the
+    display media (absolute served refs), the digression policy/notice, the callback URL and the stored deadline.
+    """
     payload = format_payload or {}
     is_form = fmt is AnswerFormat.FORM
     return ChannelDelivery(
@@ -151,18 +157,19 @@ async def deliver_with_retry(
     question: str,
     sensitive: bool,
 ) -> None:
-    """Deliver the question within the ask's budget, retrying typed-retryable failures
-    with exponential backoff (all inside the one monotonic ``deadline`` the answer wait
-    shares). On terminal failure prune the question and re-raise loudly — UNLESS the
-    reply already landed first (``answered``/``gone``), in which case fall through so
-    the recorded answer is returned by the wait that follows.
+    """Deliver the question within the ask's budget, retrying typed-retryable failures with exponential backoff.
+
+    All retries run inside the one monotonic ``deadline`` the answer wait shares. On terminal failure prune the
+    question and re-raise loudly — UNLESS the reply already landed first (``answered``/``gone``), in which case
+    fall through so the recorded answer is returned by the wait that follows.
 
     Each ``deliver`` is ONE send attempt; a failure the plugin typed as ``retryable``
     (a medium 5xx, a rate limit, a transport fault, a hung send) is re-attempted up to
     ``delivery_max_attempts``, and everything else fails on the first try. A deliver
     call that does not return within the remaining budget is itself a typed, retryable
     delivery failure — an unbounded await would block the caller forever with the
-    question persisted."""
+    question persisted.
+    """
     loop = asyncio.get_running_loop()
     attempt = 0
     retry_in: float | None = None
@@ -228,12 +235,14 @@ async def _prune_and_report_failure(
     channel: str,
     recipient: str | None,
 ) -> bool:
-    """Handle a delivery failure with no retry left: prune the question, then decide
-    whether the caller must re-raise. Returns ``True`` when the failure is terminal
+    """Handle a delivery failure with no retry left: prune the question, then decide whether the caller must re-raise.
+
+    Returns ``True`` when the failure is terminal
     (pruned, or a non-``Exception`` like cancellation — the caller re-raises loudly),
     ``False`` when a recorded answer beat the failure (``answered``/``gone`` — fall
     through to the answer wait). On a pruned cancellation the parked-question turn
-    budget is marked; on a pruned genuine failure the abandonment event is stated."""
+    budget is marked; on a pruned genuine failure the abandonment event is stated.
+    """
     result = await prune(settings, store, interaction_id, group)
     if result == "pruned" or not isinstance(exc, Exception):
         # Pruned → nothing was answered; propagate the failure loudly. A non-Exception

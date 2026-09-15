@@ -1,3 +1,5 @@
+"""The ASGI resource-guard middleware that authorizes each request against its route's policy."""
+
 import logging
 from datetime import UTC, datetime
 
@@ -43,7 +45,7 @@ _DISABLE_HINT = "set ACCESS_CONTROL_ENABLE=false to disable access control for l
 
 
 class ResourceGuardMiddleware:
-    """The route-authorization guard, resolving three prefix/path families:
+    """The route-authorization guard, resolving three prefix/path families.
 
     * RESERVED (``reserved_public_pin_prefixes``) — never public. Resolved in the
       verifier BEFORE this middleware: it drops the public marker for a reserved-prefix
@@ -66,6 +68,7 @@ class ResourceGuardMiddleware:
         public_resource_id: str,
         authenticated_always_allowed_paths: tuple[str, ...] = (),
     ):
+        """Bind the wrapped ``app``, the ``verifier``, the public resource id, and the always-allowed paths."""
         self.app = app
         self.verifier = verifier
         self.public_id = public_resource_id
@@ -73,6 +76,7 @@ class ResourceGuardMiddleware:
         self.authenticated_always_allowed_paths = frozenset(authenticated_always_allowed_paths)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        """Guard the request: resolve its route's resource, enforce access, then pass to the wrapped app."""
         # 1. Skip non-HTTP scopes (lifespan, etc.); http + websocket are guarded.
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
@@ -153,9 +157,11 @@ class ResourceGuardMiddleware:
         auth,
         path_to_check: str,
     ):
-        """Decide a resolved resource-id set: CASE A (unknown route + super-admin
-        carve-out), CASE B (public deny-wins), CASE C (protected/auth), CASE D (scope
-        coverage), then run the app on success."""
+        """Decide a resolved resource-id set and run the app on success.
+
+        CASE A (unknown route + super-admin carve-out), CASE B (public deny-wins), CASE C
+        (protected/auth), CASE D (scope coverage).
+        """
         # CASE A: Unknown Route (403) — with a SUPER-ADMIN carve-out. A route with no
         # configured resource fails closed for every ordinary identity, but the admin
         # discriminator (a condition-free "*" policy that is not an owned key, stamped on
@@ -231,17 +237,17 @@ class ResourceGuardMiddleware:
     async def _deny(
         scope: Scope, receive: Receive, send: Send, status_code: int, message: str, reason: str | None = None
     ):
-        """Emit a deny shaped for the scope type, and — for http — the refusal audit
-        line (this is the route-authorization refusal site; the accept trail covers
-        only ADMITTED requests).
+        """Emit a deny shaped for the scope type, and — for http — the refusal audit line.
 
+        This is the route-authorization refusal site; the accept trail covers only ADMITTED requests.
         A websocket scope cannot receive an ``http.response.start`` (it would be a
         malformed close); it is closed with a websocket close frame and writes no
         audit line (the trail is http-shaped, as AuditLogMiddleware is). An http scope
         gets the JSON error body plus one refusal line (gated on the audit switch): the
         REAL caller id when the denial is authenticated-but-unauthorized, else the
         ``unauthenticated`` marker; the clean route TEMPLATE (never a path-borne
-        secret); the deny ``reason``; duration 0 (refused at the door)."""
+        secret); the deny ``reason``; duration 0 (refused at the door).
+        """
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": _WS_POLICY_VIOLATION})
             return
@@ -265,8 +271,8 @@ class ResourceGuardMiddleware:
         await response(scope, receive, send)
 
     async def _run_app_with_context(self, scope, receive, send, user):
-        """
-        Runs the app within the context variable scope.
+        """Runs the app within the context variable scope.
+
         Pure ASGI implementation avoids 'call_next' overhead.
         """
         context_token = None
@@ -325,12 +331,15 @@ class DisabledAccessControlSecretCapabilityMiddleware:
     (:func:`~tai42_skeleton.authz.execution.bind_execution_identity`), and a backend-worker
     run — a dequeued task in a process with no HTTP request — binds the SUBMITTER's own
     capability carried with the job at its worker seam
-    (:func:`~tai42_kit.utils.worker_secret_capability.bind_worker_secret_capability`)."""
+    (:func:`~tai42_kit.utils.worker_secret_capability.bind_worker_secret_capability`).
+    """
 
     def __init__(self, app: ASGIApp):
+        """Wrap the ASGI ``app`` whose request span the capability is bound over."""
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        """Bind the secret-read capability TRUE for the request span, then run the wrapped app."""
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return

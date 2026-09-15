@@ -51,8 +51,11 @@ _READ_CHUNK = 65536
 
 
 def _returncode(proc: asyncio.subprocess.Process) -> int:
-    """The exit code of an already-exited process (an unfinished process is a
-    programming error at every call site here, which all await the process first)."""
+    """The exit code of an already-exited process.
+
+    An unfinished process is a programming error at every call site here, which all await
+    the process first.
+    """
     code = proc.returncode
     if code is None:  # pragma: no cover - defensive; every caller awaits exit first
         raise SandboxError("sandbox exec exit code read before the process exited")
@@ -64,7 +67,8 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
 
     The child was spawned with ``start_new_session=True``, so its process-group id
     equals its pid. Idempotent: an already-exited process is a no-op, and a racing
-    reap surfaces as :class:`ProcessLookupError`, swallowed."""
+    reap surfaces as :class:`ProcessLookupError`, swallowed.
+    """
     if proc.returncode is not None:
         return
     with contextlib.suppress(ProcessLookupError):
@@ -84,6 +88,7 @@ class LocalSandboxExecHandle(SandboxExecHandle):
     """
 
     def __init__(self, proc: asyncio.subprocess.Process, *, timeout_seconds: float) -> None:
+        """Bind the handle to a started ``proc`` with the total ``timeout_seconds`` deadline."""
         self._proc = proc
         self._timeout_seconds = timeout_seconds
         # Serializes concurrent write_stdin calls so a single call's bytes are never
@@ -95,6 +100,7 @@ class LocalSandboxExecHandle(SandboxExecHandle):
         self._stderr_len = 0
 
     async def write_stdin(self, data: bytes) -> None:
+        """Write ``data`` to the exec's stdin; raises once stdin is closed or the exec has exited."""
         async with self._write_lock:
             stdin = self._proc.stdin
             if stdin is None or self._proc.returncode is not None or stdin.is_closing():
@@ -106,17 +112,20 @@ class LocalSandboxExecHandle(SandboxExecHandle):
                 raise SandboxError(f"sandbox exec stdin write failed: {exc}") from exc
 
     async def close_stdin(self) -> None:
+        """Close the exec's stdin so the in-session process reads EOF."""
         stdin = self._proc.stdin
         if stdin is not None and not stdin.is_closing():
             stdin.close()
 
     @property
     def output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
+        """The exec's merged output stream (stdout/stderr chunks then an exit), iterated once."""
         if self._output_iter is None:
             self._output_iter = self._stream_output()
         return self._output_iter
 
     async def kill(self) -> None:
+        """Kill the exec's whole process group; a no-op once it has exited (idempotent)."""
         _kill_process_group(self._proc)
 
     async def _drain_stream(
@@ -201,6 +210,7 @@ class LocalSandboxSession(ManagedSandboxSession):
         teardown_dir: str,
         sidecar_path: str | None,
     ) -> None:
+        """Bind the session to its realpath-resolved ``workspace_path``, base env, and teardown paths."""
         super().__init__(sandbox=sandbox, session_id=session_id)
         # The ABSOLUTE, realpath-resolved workspace root (equal to the child's cwd for
         # an unset cwd, and the anchor for workspace-relative path resolution).
@@ -216,26 +226,32 @@ class LocalSandboxSession(ManagedSandboxSession):
 
     @property
     def workspace_path(self) -> str:
+        """The absolute, realpath-resolved workspace root on the host filesystem."""
         return self._workspace_path
 
     @property
     def durability(self) -> SandboxDurability:
+        """This session's durability (``ephemeral`` or ``persistent``)."""
         return self._durability
 
     @property
     def teardown_dir(self) -> str:
+        """The directory removed on teardown (the workspace for ephemeral, the named persistent dir otherwise)."""
         return self._teardown_dir
 
     @property
     def sidecar_path(self) -> str | None:
+        """The sidecar file removed alongside a persistent workspace, or ``None`` for an ephemeral session."""
         return self._sidecar_path
 
     # -- env + path resolution ----------------------------------------------------
 
     def _build_env(self, env: dict[str, SecretStr] | None) -> dict[str, str]:
-        """The CLEAN subprocess env: the fixed ``PATH`` base, overlaid by ``spec.env``,
-        overlaid by the per-exec ``env`` (per-exec keys win, a supplied ``PATH`` wins
-        over the base). SecretStr values are unwrapped ONLY here, never logged."""
+        """The CLEAN subprocess env: the fixed ``PATH`` base, overlaid by ``spec.env`` then per-exec ``env``.
+
+        Per-exec keys win, a supplied ``PATH`` wins over the base. SecretStr values are
+        unwrapped ONLY here, never logged.
+        """
         merged: dict[str, str] = {"PATH": self._base_path}
         for key, value in self._spec_env.items():
             merged[key] = value.get_secret_value()
@@ -245,11 +261,13 @@ class LocalSandboxSession(ManagedSandboxSession):
         return merged
 
     def _resolve_cwd(self, cwd: str | None) -> str:
-        """The child's working directory. Unset defaults to the workspace root; a
-        relative value resolves WITHIN the workspace with realpath containment; an
-        ABSOLUTE value is allowed as given — this provider is isolation=none, so the
-        subprocess already has full host reach and containing an absolute cwd adds no
-        security."""
+        """The child's working directory.
+
+        Unset defaults to the workspace root; a relative value resolves WITHIN the
+        workspace with realpath containment; an ABSOLUTE value is allowed as given — this
+        provider is isolation=none, so the subprocess already has full host reach and
+        containing an absolute cwd adds no security.
+        """
         if cwd is None:
             return self._workspace_path
         if os.path.isabs(cwd):
@@ -257,8 +275,10 @@ class LocalSandboxSession(ManagedSandboxSession):
         return self._contained_path(cwd)
 
     def _contained_path(self, path: str) -> str:
-        """Resolve a workspace-relative ``path`` against the workspace root and REJECT
-        a resolved path that escapes it (realpath containment)."""
+        """Resolve a workspace-relative ``path`` against the workspace root, rejecting an escape.
+
+        A resolved path that escapes the root is refused (realpath containment).
+        """
         root = self._workspace_path
         resolved = os.path.realpath(os.path.join(root, path))
         if resolved != root and not resolved.startswith(root + os.sep):
@@ -275,9 +295,11 @@ class LocalSandboxSession(ManagedSandboxSession):
         env: dict[str, str],
         stdin: bool,
     ) -> asyncio.subprocess.Process:
-        """Spawn a host subprocess in its own session/process-group. A spawn failure
-        (a missing binary, an unwritable cwd) raises a typed error NAMING the binary,
-        never any env value."""
+        """Spawn a host subprocess in its own session/process-group.
+
+        A spawn failure (a missing binary, an unwritable cwd) raises a typed error NAMING
+        the binary, never any env value.
+        """
         if not argv:
             raise SandboxError("sandbox exec requires a non-empty argv")
         try:
@@ -302,6 +324,7 @@ class LocalSandboxSession(ManagedSandboxSession):
         stdin: bytes | None = None,
         timeout_seconds: float,
     ) -> ExecResult:
+        """Run ``argv`` to completion and return its :class:`ExecResult`; a host-side timeout kills it and raises."""
         proc = await self._spawn(
             argv,
             cwd=self._resolve_cwd(cwd),
@@ -354,6 +377,7 @@ class LocalSandboxSession(ManagedSandboxSession):
         env: dict[str, SecretStr] | None = None,
         timeout_seconds: float,
     ) -> SandboxExecHandle:
+        """Start ``argv`` as a live interactive subprocess and return its :class:`SandboxExecHandle`."""
         proc = await self._spawn(
             argv,
             cwd=self._resolve_cwd(cwd),
@@ -367,12 +391,14 @@ class LocalSandboxSession(ManagedSandboxSession):
     # -- file transfer ------------------------------------------------------------
 
     async def put_file(self, path: str, data: bytes) -> None:
-        """Write ``data`` under the workspace. UNLIKE ``cwd``, file transfer is I/O the
-        PROVIDER performs on the host, so realpath containment is enforced
-        unconditionally: an absolute ``path`` built from ``workspace_path`` passes, but
-        an absolute ``path`` resolving OUTSIDE the workspace is refused loudly because on
-        a host provider it would be a real host write (a permitted tightening — see the
-        contract path invariant)."""
+        """Write ``data`` under the workspace, with realpath containment enforced.
+
+        UNLIKE ``cwd``, file transfer is I/O the PROVIDER performs on the host, so realpath
+        containment is enforced unconditionally: an absolute ``path`` built from
+        ``workspace_path`` passes, but an absolute ``path`` resolving OUTSIDE the workspace
+        is refused loudly because on a host provider it would be a real host write (a
+        permitted tightening — see the contract path invariant).
+        """
         target = Path(self._contained_path(path))
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -381,10 +407,13 @@ class LocalSandboxSession(ManagedSandboxSession):
             raise SandboxError(f"sandbox put_file failed for {path!r}: {exc}") from exc
 
     async def get_file(self, path: str) -> bytes:
-        """Read ``path`` from the workspace. Containment is enforced unconditionally for
-        the same reason as :meth:`put_file`: this provider performs a real host read, so
-        an absolute ``path`` built from ``workspace_path`` passes while one resolving
-        OUTSIDE the workspace is refused loudly."""
+        """Read ``path`` from the workspace, with realpath containment enforced.
+
+        Containment is enforced unconditionally for the same reason as :meth:`put_file`:
+        this provider performs a real host read, so an absolute ``path`` built from
+        ``workspace_path`` passes while one resolving OUTSIDE the workspace is refused
+        loudly.
+        """
         target = Path(self._contained_path(path))
         try:
             return target.read_bytes()
@@ -396,7 +425,9 @@ class LocalSandboxSession(ManagedSandboxSession):
     # -- teardown -----------------------------------------------------------------
 
     async def terminate_handles(self) -> None:
-        """Kill every live interactive subprocess this session started (idempotent on
-        an already-exited process). Called by the provider teardown primitive."""
+        """Kill every live interactive subprocess this session started.
+
+        Idempotent on an already-exited process. Called by the provider teardown primitive.
+        """
         for handle in self._handles:
             await handle.kill()

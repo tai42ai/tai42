@@ -15,11 +15,13 @@ class SessionRecordError(RuntimeError):
 
 @dataclass(frozen=True)
 class SessionRegistration:
-    """What one cookie token is registered as: the conversation address every door
-    uses for that visitor, the web route identity the session was minted on, and the
-    link params captured with the entry. A request naming a different identity is not
-    this session's to serve. ``params`` is dumb transport — carried and delivered to
-    the turn payload, never interpreted here."""
+    """What one cookie token is registered as.
+
+    The conversation address every door uses for that visitor, the web route identity the session was
+    minted on, and the link params captured with the entry. A request naming a different identity is not
+    this session's to serve. ``params`` is dumb transport — carried and delivered to the turn payload,
+    never interpreted here.
+    """
 
     visitor_id: str
     identity: str
@@ -31,8 +33,11 @@ def _session_key(token: str) -> str:
 
 
 def _encode_session(visitor_id: str, identity: str, params: dict[str, str]) -> str:
-    """The single on-disk shape both writers emit. ``params`` is ALWAYS present (an
-    empty dict included); the decoder requires it, so there is no absent-key shape."""
+    """The single on-disk shape both writers emit.
+
+    ``params`` is ALWAYS present (an empty dict included); the decoder requires it, so there is no
+    absent-key shape.
+    """
     return json.dumps({"visitor_id": visitor_id, "identity": identity, "created_at": _now_iso(), "params": params})
 
 
@@ -55,13 +60,14 @@ def _decode_session(raw: str | bytes) -> SessionRegistration:
 
 
 async def register_session(token: str, visitor_id: str, identity: str, params: dict[str, str]) -> None:
-    """Register a freshly minted cookie token against its visitor id, the web route it
-    was minted on, and the link params the entry carried. Until this lands the token is
-    not a session, so it is written BEFORE the cookie is set.
+    """Register a freshly minted cookie token against its visitor id, route, and captured link params.
+
+    Until this lands the token is not a session, so it is written BEFORE the cookie is set.
 
     A mint gets only the SHORT pending TTL: nothing has come back with this cookie
     yet, so an anonymous mint loop leaves keys that expire in minutes rather than one
-    full-TTL registration per request. ``resolve_session`` promotes it."""
+    full-TTL registration per request. ``resolve_session`` promotes it.
+    """
     settings = web_settings()
     async with _redis() as redis:
         await redis.set(
@@ -70,10 +76,11 @@ async def register_session(token: str, visitor_id: str, identity: str, params: d
 
 
 async def update_session_params(token: str, registration: SessionRegistration, params: dict[str, str]) -> None:
-    """Rewrite a live visitor's captured params — same token, same visitor id, new
-    params — at the FULL session TTL, because the cookie came back and this is a real
-    visitor. A plain SET, so a key that expired mid-flight is simply recreated under
-    the token the visitor presented; no special casing."""
+    """Rewrite a live visitor's captured params — same token, same visitor id, new params — at the FULL TTL.
+
+    The full session TTL, because the cookie came back and this is a real visitor. A plain SET, so a key
+    that expired mid-flight is simply recreated under the token the visitor presented; no special casing.
+    """
     settings = web_settings()
     async with _redis() as redis:
         await redis.set(
@@ -84,10 +91,11 @@ async def update_session_params(token: str, registration: SessionRegistration, p
 
 
 async def resolve_session(token: str) -> SessionRegistration | None:
-    """The registration a cookie token stands for, promoting it to the full session
-    TTL (the cookie came back, so this is a real visitor); ``None`` when the token was
-    never registered or has expired — both mean "no session". One ``GETEX``: read and
-    TTL in a single round trip."""
+    """The registration a cookie token stands for, or ``None`` — non-registered and expired both mean no session.
+
+    Promotes it to the full session TTL (the cookie came back, so this is a real visitor). One ``GETEX``:
+    read and TTL in a single round trip.
+    """
     settings = web_settings()
     async with _redis() as redis:
         raw = await redis.getex(_session_key(token), ex=settings.session_ttl_seconds)

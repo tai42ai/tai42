@@ -58,9 +58,10 @@ def _callback_path(name: str) -> str:
 
 
 def authorize_path(name: str) -> str:
-    """The absolute authorize path for provider ``name`` under the resolved mount —
-    the login button's ``href``, resolved through the router's mount so a remap
-    moves it too."""
+    """The absolute authorize path for provider ``name`` under the resolved mount.
+
+    The login button's ``href``, resolved through the router's mount so a remap moves it too.
+    """
     return f"{_MOUNT_BASE}/oidc/{name}/authorize"
 
 
@@ -207,8 +208,7 @@ async def oidc_authorize(request: Request) -> Response:
     no_body_reason="OAuth callback: 302 redirect to the app after code exchange",
 )
 async def oidc_callback(request: Request) -> Response:
-    """Verify state, exchange the code, verify the id_token, mint a session, and
-    302 back to ``/login?sso={code}``.
+    """Verify state, exchange the code, verify the id_token, mint a session, and 302 back to ``/login``.
 
     No role or policy write happens here — an unknown subject stays denied until an
     operator provisions its policy (deny-by-default).
@@ -377,8 +377,10 @@ def _namespaced_id(config: ResolvedProvider, value: object) -> str:
 
 
 async def _post_token(url: str, data: dict[str, str]) -> dict:
-    """POST the token-exchange form and return the parsed JSON object, or raise a
-    ``_CallbackError`` naming the transport/status/parse failure."""
+    """POST the token-exchange form and return the parsed JSON object.
+
+    Raises a ``_CallbackError`` naming the transport/status/parse failure.
+    """
     try:
         async with httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(10.0)) as client:
             response = await client.post(url, data=data, headers={"Accept": "application/json"})
@@ -424,8 +426,10 @@ async def sso_exchange(request: Request) -> Response:
 
 @tai42_app.lifecycle.on_startup
 def _assert_accounts_provider_instantiated() -> None:
-    """Fail boot loudly if the login routes are mounted but the provider was never
-    instantiated — access control is disabled and the settings holder is empty."""
+    """Fail boot loudly if the login routes are mounted but the provider was never instantiated.
+
+    That state means access control is disabled and the settings holder is empty.
+    """
     if not provider.provider_settings_populated():
         raise RuntimeError(
             "tai42-accounts-oidc routes are mounted but its provider was never instantiated — "

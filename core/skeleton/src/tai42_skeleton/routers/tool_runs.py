@@ -34,9 +34,11 @@ from tai42_skeleton.routers._tool_call import ToolCallRequestError, read_tool_ca
 
 
 async def _extract_submission(request: Request) -> dict:
-    """Parse the tool-call body into the operation's flat ``tool_name``/``arguments``
-    arguments, mapping the shared parser's loud ``ToolCallRequestError`` to the same
-    explicit 400 (the adapter's plain parse would yield 422)."""
+    """Parse the tool-call body into the operation's flat ``tool_name``/``arguments`` arguments.
+
+    Maps the shared parser's loud ``ToolCallRequestError`` to the same explicit 400 (the adapter's plain
+    parse would yield 422).
+    """
     try:
         tool_name, arguments = await read_tool_call(request)
     except ToolCallRequestError as exc:
@@ -45,8 +47,10 @@ async def _extract_submission(request: Request) -> dict:
 
 
 async def _extract_list_query(request: Request) -> dict:
-    """Read the required ``tool_name`` query param into the operation's flat argument,
-    rejecting its absence with the explicit 400 (never a GET body)."""
+    """Read the required ``tool_name`` query param into the operation's flat argument.
+
+    Rejects its absence with the explicit 400 (never a GET body).
+    """
     tool_name = request.query_params.get("tool_name")
     if not tool_name:
         raise BadRequestError("query param 'tool_name' is required")

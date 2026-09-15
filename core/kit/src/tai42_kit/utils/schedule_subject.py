@@ -1,5 +1,7 @@
-"""The reserved job kwargs a scheduled fire carries its subject and its door-layer state
-binding under, and the worker pop that turns them back into a
+"""The reserved schedule job kwargs and the worker pop that turns them back into state context.
+
+A scheduled fire carries its subject and its door-layer state binding under reserved job
+kwargs; the worker pop turns them back into a
 :class:`~tai42_contract.states.StateSubject` context and a deposited
 :class:`~tai42_contract.tools.ToolInvocation` state binding.
 
@@ -44,12 +46,13 @@ SCHEDULE_STATE_BINDING_ARG = "backend_schedule_state_binding"
 
 
 def pop_schedule_subject(kwargs: dict[str, Any]) -> StateSubject | None:
-    """Strip :data:`SCHEDULE_SUBJECT_ARG` from ``kwargs`` and parse it into a
-    :class:`StateSubject`, or return ``None`` when the job carries none.
+    """Strip :data:`SCHEDULE_SUBJECT_ARG` from ``kwargs`` and parse it into a :class:`StateSubject`.
 
-    Mutates ``kwargs`` in place so the popped dispatch kwarg never reaches the tool,
-    the same shape the worker's secret-capability pop uses. A malformed value raises
-    loudly — a stamped-but-unparseable subject is a bug, never a silent skip."""
+    Returns ``None`` when the job carries none. Mutates ``kwargs`` in place so the popped
+    dispatch kwarg never reaches the tool, the same shape the worker's secret-capability pop
+    uses. A malformed value raises loudly — a stamped-but-unparseable subject is a bug, never a
+    silent skip.
+    """
     raw = kwargs.pop(SCHEDULE_SUBJECT_ARG, None)
     if raw is None:
         return None
@@ -59,12 +62,12 @@ def pop_schedule_subject(kwargs: dict[str, Any]) -> StateSubject | None:
 
 
 def pop_schedule_state_binding(kwargs: dict[str, Any]) -> StateBinding | None:
-    """Strip :data:`SCHEDULE_STATE_BINDING_ARG` from ``kwargs`` and parse it into a
-    :class:`StateBinding`, or return ``None`` when the job carries none.
+    """Strip :data:`SCHEDULE_STATE_BINDING_ARG` from ``kwargs`` and parse it into a :class:`StateBinding`.
 
-    Mutates ``kwargs`` in place so the reserved kwarg never reaches the tool. A
-    malformed value raises loudly — a stamped-but-unparseable binding is a bug, never a
-    silent skip."""
+    Returns ``None`` when the job carries none. Mutates ``kwargs`` in place so the reserved
+    kwarg never reaches the tool. A malformed value raises loudly — a stamped-but-unparseable
+    binding is a bug, never a silent skip.
+    """
     raw = kwargs.pop(SCHEDULE_STATE_BINDING_ARG, None)
     if raw is None:
         return None
@@ -75,9 +78,10 @@ def pop_schedule_state_binding(kwargs: dict[str, Any]) -> StateBinding | None:
 
 @contextmanager
 def schedule_state_context(kwargs: dict[str, Any]) -> Iterator[None]:
-    """The ``schedule``-door state context a worker fire runs the tool inside — the one
-    seam all three backend workers share so a scheduled write is keyed, attributed, and
-    bound identically on every backend.
+    """The ``schedule``-door state context a worker fire runs the tool inside.
+
+    This is the one seam all three backend workers share so a scheduled write is keyed,
+    attributed, and bound identically on every backend.
 
     Pops :data:`SCHEDULE_SUBJECT_ARG` and :data:`SCHEDULE_STATE_BINDING_ARG` from ``kwargs``
     (in place, so neither reaches the tool). When the job carried a subject, enters a
@@ -86,7 +90,8 @@ def schedule_state_context(kwargs: dict[str, Any]) -> Iterator[None]:
     stamped at the write chokepoint). INDEPENDENTLY — a binding with no schedule subject
     still deposits — when the job carried a binding, it is deposited onto
     :attr:`ToolInvocation.state_binding` so the dispatch chokepoint carries it forward and
-    merges it exactly like every other door's binding."""
+    merges it exactly like every other door's binding.
+    """
     subject = pop_schedule_subject(kwargs)
     binding = pop_schedule_state_binding(kwargs)
     token = None

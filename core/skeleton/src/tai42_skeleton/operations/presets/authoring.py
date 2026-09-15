@@ -1,5 +1,7 @@
-"""Validate-before-commit gates and the agent-authoring checks every mutating door
-runs so a bad edit is a loud 400 that never persists a version that cannot bind."""
+"""Validate-before-commit gates and the agent-authoring checks every mutating door runs.
+
+A bad edit is a loud 400 that never persists a version that cannot bind.
+"""
 
 from __future__ import annotations
 
@@ -33,16 +35,16 @@ _pkg = sys.modules["tai42_skeleton.operations.presets"]
 
 
 async def _agent_authoring_error(base_tool: str, fixed_kwargs: dict[str, Any]) -> str | None:
-    """When ``base_tool`` names a registered agent, the first authoring violation, or
-    ``None`` if the spec is valid. Returns ``None`` for a NON-agent base — a plain
-    tool preset is governed by the create route's base rules alone.
+    """When ``base_tool`` names a registered agent, the first authoring violation, else ``None`` if valid.
 
-    Each baked ``fixed_kwargs`` field must be preset-bakeable for the agent: a
-    ``spec_runnable`` agent honors every ``ToolInput`` field, so all of them are
-    bakeable; otherwise only the fields the agent declares in
+    Returns ``None`` for a NON-agent base — a plain tool preset is governed by the create
+    route's base rules alone. Each baked ``fixed_kwargs`` field must be preset-bakeable for
+    the agent: a ``spec_runnable`` agent honors every ``ToolInput`` field, so all of them
+    are bakeable; otherwise only the fields the agent declares in
     ``preset_bakeable_fields`` are. A baked field the runtime does not honor is
     rejected here rather than persisted as a silent no-op bake. An EMPTY
-    ``fixed_kwargs`` bakes nothing, so there is nothing to gate."""
+    ``fixed_kwargs`` bakes nothing, so there is nothing to gate.
+    """
     agent = instance.app.agents.all_agents().get(base_tool)
     if agent is None:
         return None
@@ -81,10 +83,11 @@ async def _agent_authoring_error(base_tool: str, fixed_kwargs: dict[str, Any]) -
 
 
 def _combo_registry_error(extensions: Sequence[Sequence[ExtensionElement]]) -> str | None:
-    """The first extension combo that fails the LIVE registry (unknown name or a
-    non-stackable-kind clash), as a 400 message, or ``None`` if all combos are
-    valid — shared by create/save-version/rollback, via the public
-    ``app.extensions.validate_combo`` accessor."""
+    """The first extension combo that fails the LIVE registry, as a 400 message, or ``None`` if all are valid.
+
+    A failure is an unknown name or a non-stackable-kind clash. Shared by
+    create/save-version/rollback, via the public ``app.extensions.validate_combo`` accessor.
+    """
     for combo in extensions:
         try:
             instance.app.extensions.validate_combo(combo)
@@ -98,9 +101,10 @@ async def _output_schema_error(
     output_schema: TemplatedText | dict[str, Any] | None,
     extensions: Sequence[Sequence[ExtensionElement]],
 ) -> str | None:
-    """The first author-time violation of an ``output_schema``, as a 400 message, or
-    ``None`` if it is unset or valid — shared by create/save-version/rollback so a
-    bad schema is a 400 that never persists nor reaches the bind kernel.
+    """The first author-time violation of an ``output_schema``, as a 400 message, or ``None`` if unset or valid.
+
+    Shared by create/save-version/rollback so a bad schema is a 400 that never persists nor
+    reaches the bind kernel.
 
     Rejects, in order: a by-id schema whose stored resource cannot be rendered or does not
     render to a JSON object (the ``TemplatedText | dict`` union is resolved here the same
@@ -109,14 +113,16 @@ async def _output_schema_error(
     object root); a clash with an explicit ``output_schema`` extension entry (the shape
     declared in two places); and an agent base whose run tool does not advertise
     ``response_format`` (voting_agent) — that base cannot force structured output, so reject
-    at authoring rather than let the bake target a missing parameter at bind time."""
+    at authoring rather than let the bake target a missing parameter at bind time.
+    """
     if output_schema is None:
         return None
     try:
         resolved = await resolve_schema_body("output_schema", output_schema)
     except SchemaBodyError as exc:
         return str(exc)
-    assert resolved is not None  # a non-None union resolves to a non-None schema
+    if resolved is None:
+        raise AssertionError
     try:
         check_json_schema(resolved)
     except InvalidJsonSchemaError as exc:
@@ -145,12 +151,13 @@ async def _dry_run_bind_error(
     output_schema: TemplatedText | dict[str, Any] | None = None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
 ) -> str | None:
-    """Bake the body through the kernel WITHOUT registering, returning a 400 message
-    if the bake raises (unknown base tool, a ``fixed_kwargs`` key that is not an
-    argument of the base, an ``output_schema`` the base cannot carry, an ``input_schema``
-    over a base tool with no support) or ``None`` if it binds. The dry run never touches
-    the live registry, so a rejected edit leaves both the store and the bindings
-    untouched."""
+    """Bake the body through the kernel WITHOUT registering, returning a 400 message or ``None`` if it binds.
+
+    Returns a 400 message if the bake raises (unknown base tool, a ``fixed_kwargs`` key
+    that is not an argument of the base, an ``output_schema`` the base cannot carry, an
+    ``input_schema`` over a base tool with no support). The dry run never touches the live
+    registry, so a rejected edit leaves both the store and the bindings untouched.
+    """
     try:
         await instance.app.presets.bind(
             base_tool,
@@ -166,10 +173,12 @@ async def _dry_run_bind_error(
 
 
 async def _write_validator_error(body: PresetBody) -> str | None:
-    """The base tool's write-validator verdict for the FULL body about to persist,
-    as a 400 message joining its blocking issues (one per line), or ``None`` when
-    the base tool has no registered validator or it passes. Any exception the
-    validator raises propagates loudly — never swallowed, never treated as a pass."""
+    """The base tool's write-validator verdict for the FULL body about to persist.
+
+    A 400 message joining its blocking issues (one per line), or ``None`` when the base tool
+    has no registered validator or it passes. Any exception the validator raises propagates
+    loudly — never swallowed, never treated as a pass.
+    """
     validator = instance.app.presets.write_validator(body.base_tool)
     if validator is None:
         return None
@@ -180,10 +189,13 @@ async def _write_validator_error(body: PresetBody) -> str | None:
 
 
 async def _state_binding_error(state_binding: StateBinding | None) -> str | None:
-    """The binding's dry-run verdict: the SAME shape/state/template/jq/adapter checks create
-    and save-version run through ``validate_and_attach_binding``, but WITHOUT the attach — the
-    validate door performs no attach. A rejection is a message (the write door would 4xx it);
-    ``None`` when there is no binding or it validates."""
+    """The binding's dry-run verdict: the same shape/state/template/jq/adapter checks, without the attach.
+
+    Runs the SAME checks create and save-version run through
+    ``validate_and_attach_binding``, but WITHOUT the attach — the validate door performs no
+    attach. A rejection is a message (the write door would 4xx it); ``None`` when there is no
+    binding or it validates.
+    """
     if state_binding is None:
         return None
     from tai42_contract.states.errors import StatesError
@@ -198,12 +210,14 @@ async def _state_binding_error(state_binding: StateBinding | None) -> str | None
 
 
 async def _attach_body_binding(state_binding: StateBinding | CarryForward | None) -> None:
-    """Validate + attach-on-use a NEWLY provided door binding at the write that activates it —
-    the shared seam create, save-version and rollback all call so their binding handling never
-    drifts. Its named templates attach idempotently (shared by every door/node that binds the
-    state) and its expressions/adapters compile, so a bad binding is a loud 400 that commits or
-    re-points nothing. A carry-forward (already vetted at its own save) and an absent binding
-    attach nothing."""
+    """Validate + attach-on-use a NEWLY provided door binding at the write that activates it.
+
+    The shared seam create, save-version and rollback all call so their binding handling
+    never drifts. Its named templates attach idempotently (shared by every door/node that
+    binds the state) and its expressions/adapters compile, so a bad binding is a loud 400
+    that commits or re-points nothing. A carry-forward (already vetted at its own save) and
+    an absent binding attach nothing.
+    """
     if not isinstance(state_binding, StateBinding):
         return
     from tai42_contract.states.errors import StatesError
@@ -225,16 +239,18 @@ async def _enforce_registration_tier(base_tool: str) -> None:
     tool with no declaration keeps the presets' own default ``write`` action (no extra
     gate). ``resolve_caller`` returns an admin when access-control is disabled, so the
     fence bites only where the platform fences at all — the same semantics as a static
-    ``action="fenced"`` route."""
+    ``action="fenced"`` route.
+    """
     tier = instance.app.presets.registration_tier(base_tool)
     if tier in ("fenced", "secret"):
         require_admin(await _pkg.resolve_caller())
 
 
 def _input_schema_authoring_error(body: PresetBody) -> str | None:
-    """A 400 message when ``body`` sets an ``input_schema`` over a base tool with no
-    registered input-schema support, else ``None``. Loud, never a silently-ignored
-    schema — the ``_write_validator_error`` precedent."""
+    """A 400 message when ``body`` sets an ``input_schema`` over a base tool with no support, else ``None``.
+
+    Loud, never a silently-ignored schema — the ``_write_validator_error`` precedent.
+    """
     if body.input_schema is None:
         return None
     if instance.app.presets.input_schema_support(body.base_tool) is None:

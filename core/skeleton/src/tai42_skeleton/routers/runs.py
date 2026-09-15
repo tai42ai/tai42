@@ -45,8 +45,10 @@ def _instant(request: Request, key: str) -> datetime | None:
 
 
 async def _extract_runs_query(request: Request) -> dict[str, Any]:
-    """Decode the runs-list query string into the operation's flat params, raising the
-    door's explicit 400 on a malformed filter, page, or time bound."""
+    """Decode the runs-list query string into the operation's flat params.
+
+    Raises the door's explicit 400 on a malformed filter, page, or time bound.
+    """
     version_raw = request.query_params.get("version")
     version: int | None = None
     if version_raw is not None:

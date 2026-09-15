@@ -1,5 +1,6 @@
-"""Data shapes for the runs index: the terminal outcome vocabulary, the persisted
-row, and the read filter.
+"""Data shapes for the runs index.
+
+The terminal outcome vocabulary, the persisted row, and the read filter.
 
 All generic and store-facing — the store never interprets ``user_id``/``session_id``
 beyond equality, and the outcome set is the closed vocabulary the ``run_index``
@@ -42,7 +43,8 @@ class RunRow:
     logical run's parked and resume rows; a plain run has none. ``ended_at`` is
     ``None`` while the run is still ``running`` (in-flight or crash-interrupted).
     Timestamps are ISO-8601 strings, matching the versioned-store row convention
-    (the DB ``timestamptz`` rendered via ``.isoformat()``)."""
+    (the DB ``timestamptz`` rendered via ``.isoformat()``).
+    """
 
     run_id: str
     preset_name: str
@@ -58,11 +60,14 @@ class RunRow:
 
 @dataclass(frozen=True)
 class RunIndexFilter:
-    """The read filter the list door passes the store — every field optional, an unset
-    field is not filtered on. ``preset`` / ``version`` / ``user`` / ``session`` /
-    ``interaction`` are equality matches (``interaction`` selects every row of one
-    park's lifecycle — the parked dispatch and its resume); ``outcome`` is one of
-    :data:`RUN_OUTCOMES`; ``t0`` / ``t1`` are an inclusive ``started_at`` range."""
+    """The read filter the list door passes the store — every field optional.
+
+    An unset field is not filtered on. ``preset`` / ``version`` / ``user`` /
+    ``session`` / ``interaction`` are equality matches (``interaction`` selects
+    every row of one park's lifecycle — the parked dispatch and its resume);
+    ``outcome`` is one of :data:`RUN_OUTCOMES`; ``t0`` / ``t1`` are an inclusive
+    ``started_at`` range.
+    """
 
     preset: str | None = None
     version: int | None = None

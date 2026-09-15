@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { applyFrame } from '@/frame-reducer';
+import { fold, formFrame, TS } from '@/frame-reducer.test-support';
 import { EMPTY_MODEL } from '@/transcript-model';
-import { TS, fold, formFrame } from '@/frame-reducer.test-support';
 
 describe('applyFrame: chat.form', () => {
   it('folds a form entry with its schema and submission token', () => {

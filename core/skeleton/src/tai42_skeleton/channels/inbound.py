@@ -107,9 +107,9 @@ _REASON_MAX_CHARS = 300
 
 
 def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id: str) -> str | None:
-    """The reason a stored ``callback_url`` must NOT receive the forwarded answer, or
-    ``None`` when it passes and the answer may be forwarded.
+    """The reason a stored ``callback_url`` must NOT receive the forwarded answer.
 
+    ``None`` means the check passes and the answer may be forwarded.
     A correlation's ``callback_url`` is a bearer capability THIS platform minted from
     ``INTERACTIONS_PUBLIC_BASE_URL`` (``helper.py`` builds it as
     ``{public_base_url}/api/interactions/callback/{ticket}``). Before the handler POSTs a
@@ -140,7 +140,7 @@ def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id:
         )
         target_netloc, base_netloc = target.netloc, base.netloc
     except ValueError:
-        logger.error(
+        logger.exception(
             "inbound: correlation for interaction %s on channel %r carries a malformed callback URL "
             "(unparseable host/port) — discarding it and treating as no correlation (fail-closed)",
             interaction_id,
@@ -161,11 +161,12 @@ def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id:
 
 
 async def _forward_answer(callback_url: str, answer: Any, params: dict[str, str] | None) -> httpx.Response:
-    """POST ``{"answer": <value>}`` (plus ``"params"`` when the inbound reply carried channel
-    enrichment) to the interaction's callback door and return its response; the caller applies the
-    status policy. Mirrors each channel's ``_forward_answer`` — a bounded-timeout app-pooled httpx
-    client. Absent params keep the body byte-identical to the pre-enrichment forward, so the seam
-    is opt-in and back-compatible."""
+    """POST the answer (plus optional ``params``) to the interaction's callback door and return its response.
+
+    The body is ``{"answer": <value>}``, with ``"params"`` added when the inbound reply carried
+    channel enrichment; the caller applies the status policy. Uses a bounded-timeout app-pooled
+    httpx client. Absent params, the body carries only ``answer``, so the params seam is opt-in.
+    """
     body: dict[str, Any] = {"answer": answer}
     if params:
         body["params"] = params
@@ -174,16 +175,16 @@ async def _forward_answer(callback_url: str, answer: Any, params: dict[str, str]
 
 
 async def _bridge(bridge: InboundBridge) -> None:
-    """Hand the reply to the conversation bridge as a fresh turn (the reply is not,
-    or no longer, an answer). Idempotent on ``(channel, provider_message_id)`` at
-    the conversation seam, so a provider redelivery does not double-bridge.
+    """Hand the reply to the conversation bridge as a fresh turn (the reply is not, or no longer, an answer).
 
-    Tolerant parity with the hand-rolled channels: a blank reply
-    (:class:`BlankInboundTextError`) or an address with no bound route
-    (:class:`LookupError`) is nothing to bridge — it is logged and swallowed so the
-    outcome still returns and the webhook still acks, exactly as each channel did
-    before the migration (never a 5xx that would provoke a provider retry-storm on a
-    permanently-blank/unrouted message)."""
+    Idempotent on ``(channel, provider_message_id)`` at the conversation seam, so a provider
+    redelivery does not double-bridge.
+
+    Tolerant by design: a blank reply (:class:`BlankInboundTextError`) or an address with no bound
+    route (:class:`LookupError`) is nothing to bridge — it is logged and swallowed so the outcome
+    still returns and the webhook still acks (never a 5xx that would provoke a provider retry-storm
+    on a permanently-blank/unrouted message).
+    """
     try:
         await tai42_app.conversations.accept(
             channel=bridge.channel_id,
@@ -209,10 +210,13 @@ async def _bridge(bridge: InboundBridge) -> None:
 
 
 def _retry_notice_text(custom: str | None, reason: str) -> str:
-    """The participant-facing retry notice for a ``retry``-policy rejection. ``None`` uses the built-in
-    :data:`ANSWER_REJECTED_RETRY_NOTICE`; a per-ask ``custom`` notice REPLACES it, with a literal
-    ``{reason}`` token filled by a PLAIN substitution (``str.replace``, never ``str.format``) so a
-    notice without the token is sent verbatim and stray braces in authored text never raise."""
+    """The participant-facing retry notice for a ``retry``-policy rejection.
+
+    ``None`` uses the built-in :data:`ANSWER_REJECTED_RETRY_NOTICE`; a per-ask ``custom`` notice
+    REPLACES it, with a literal ``{reason}`` token filled by a PLAIN substitution (``str.replace``,
+    never ``str.format``) so a notice without the token is sent verbatim and stray braces in
+    authored text never raise.
+    """
     if custom is None:
         return ANSWER_REJECTED_RETRY_NOTICE.format(reason=reason)
     return custom.replace("{reason}", reason)
@@ -257,8 +261,7 @@ async def _emit_answer_rejected(
     notice_owner: str,
     policy: str = "retry",
 ) -> None:
-    """Emit the ``interactions_answer_rejected`` platform event ONCE for a
-    door-rejected answer.
+    """Emit the ``interactions_answer_rejected`` platform event ONCE for a door-rejected answer.
 
     Core states the fact; a deployment wires a hook on this topic (e.g. a
     ``notify_user`` tool) to decide what an operator sees. ``notice_owner`` records
@@ -299,9 +302,9 @@ async def _emit_answer_rejected(
 
 
 async def _emit_callback_discarded(bridge: InboundBridge, *, interaction_id: str, reason: str) -> None:
-    """Emit the ``interactions_callback_discarded`` platform event ONCE when the handler
-    fail-closes on a stored callback instead of forwarding the answer to it.
+    """Emit the ``interactions_callback_discarded`` event ONCE when the handler fail-closes on a stored callback.
 
+    Fires instead of forwarding the answer to the callback.
     ``reason`` is one of ``"host_mismatch"`` / ``"public_base_unset"`` / ``"malformed_url"``.
     The payload deliberately carries NO ``callback_url`` (it embeds the bearer ticket) —
     only the channel, interaction, participant address and reason. Best-effort: a hooks-manager
@@ -517,10 +520,11 @@ async def handle_inbound_answer(
 
 
 def _parse_rejection(response: httpx.Response) -> tuple[str, str | None, bool]:
-    """Read the door's structured 400 body: ``{"error": msg, "field": path,
-    "retry_in_place": bool}``. Missing/malformed fields degrade safely — an
-    unreadable body means an empty reason and the default retry-in-place True, so a
-    rejection is never mistaken for a hard mismatch."""
+    """Read the door's structured 400 body ``{"error": msg, "field": path, "retry_in_place": bool}``.
+
+    Missing/malformed fields degrade safely — an unreadable body means an empty reason and the
+    default retry-in-place True, so a rejection is never mistaken for a hard mismatch.
+    """
     try:
         body = response.json()
     except ValueError:

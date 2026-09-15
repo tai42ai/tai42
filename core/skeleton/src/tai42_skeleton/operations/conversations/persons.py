@@ -1,5 +1,8 @@
-"""Linked-person read doors: fetch a person row (identity, folded addresses, stored locale)
-and set or clear its operator-declared locale override."""
+"""Linked-person read doors.
+
+Fetch a person row (identity, folded addresses, stored locale) and set or clear its
+operator-declared locale override.
+"""
 
 from __future__ import annotations
 
@@ -30,10 +33,12 @@ _pkg = sys.modules["tai42_skeleton.operations.conversations"]
     response_model=Person,
 )
 async def get_conversation_person(person_id: str) -> dict[str, Any]:
-    """The person row named by ``person_id`` — its identity, folded addresses and stored
-    ``locale`` (the BCP 47 tag the rendering layer resolves text against, or ``null`` when
-    none is known). The subject read that serves a person's locale. A blank ``person_id`` is a
-    400; an unknown one a 404; no backend a loud 501."""
+    """The person row named by ``person_id`` — its identity, folded addresses and stored ``locale``.
+
+    ``locale`` is the BCP 47 tag the rendering layer resolves text against, or ``null`` when
+    none is known. The subject read that serves a person's locale. A blank ``person_id`` is a
+    400; an unknown one a 404; no backend a loud 501.
+    """
     if not person_id.strip():
         raise BadRequestError("person_id must be a non-blank person identifier")
     _require_backend()
@@ -50,11 +55,14 @@ async def get_conversation_person(person_id: str) -> dict[str, Any]:
     response_model=Person,
 )
 async def set_conversation_person_locale(person_id: str, locale: str | None) -> dict[str, Any]:
-    """Set (or clear) a person's stored ``locale`` — the operator override the rendering layer
-    resolves text against, winning over the channel-seeded value on every later turn. ``locale``
-    is a BCP 47 tag (canonicalized here — ``he-il`` stores as ``he-IL``); ``null`` clears it back
-    to no-locale-known. A blank ``person_id`` or a malformed ``locale`` is a 400; an unknown
-    person a 404; no backend a loud 501. Returns the updated person."""
+    """Set (or clear) a person's stored ``locale``.
+
+    The operator override the rendering layer resolves text against, winning over the
+    channel-seeded value on every later turn. ``locale`` is a BCP 47 tag (canonicalized here —
+    ``he-il`` stores as ``he-IL``); ``null`` clears it back to no-locale-known. A blank
+    ``person_id`` or a malformed ``locale`` is a 400; an unknown person a 404; no backend a loud
+    501. Returns the updated person.
+    """
     if not person_id.strip():
         raise BadRequestError("person_id must be a non-blank person identifier")
     try:

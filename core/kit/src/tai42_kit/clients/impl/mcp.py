@@ -1,3 +1,5 @@
+"""Pooled FastMCP client: connect over the configured transport and evict dead sessions."""
+
 import asyncio
 from typing import Literal
 
@@ -36,6 +38,8 @@ _SESSION_TERMINATED_MESSAGE = "Session terminated"
 
 
 class FastMCPClient(PooledClient[Client]):
+    """A pooled ``fastmcp`` client keyed by connection ``config``, evicting dead sessions."""
+
     async def _create(self, **kwargs) -> Client:
         if "config" not in kwargs:
             raise KeyError("FastMCP client requires a `config` kwarg")

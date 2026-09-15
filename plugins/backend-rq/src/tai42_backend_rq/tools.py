@@ -36,15 +36,19 @@ from tai42_backend_rq.tasks import tool_execution
 
 
 def _async_redis(settings: RqSettings) -> AbstractAsyncContextManager[Any]:
-    """The pooled async Redis client, typed ``Any``: redis-py shares one command
-    stub between its sync and async clients, so the erasure keeps every ``await
-    r...`` call sound."""
+    """The pooled async Redis client, typed ``Any``.
+
+    redis-py shares one command stub between its sync and async clients, so the erasure keeps every
+    ``await r...`` call sound.
+    """
     return client_ctx(RedisClient, url=settings.redis_url)
 
 
 def _sync_redis(settings: RqSettings) -> AbstractAsyncContextManager[Any]:
-    """The pooled sync Redis client (for the blocking scheduler/Job APIs),
-    typed ``Any`` for the same stub-sharing reason as :func:`_async_redis`."""
+    """The pooled sync Redis client for the blocking scheduler/Job APIs.
+
+    Typed ``Any`` for the same stub-sharing reason as :func:`_async_redis`.
+    """
     return client_ctx(SyncRedisClient, url=settings.redis_url)
 
 
@@ -53,9 +57,11 @@ def _text(value: bytes | str) -> str:
 
 
 def _heartbeat_fresh(raw: bytes | str) -> bool:
-    """Whether a worker's stored ``last_heartbeat`` proves it is alive. Parses the
-    stored value; the freshness window is the shared contract in
-    :mod:`tai42_backend_rq.liveness`."""
+    """Whether a worker's stored ``last_heartbeat`` proves it is alive.
+
+    Parses the stored value; the freshness window is the shared contract in
+    :mod:`tai42_backend_rq.liveness`.
+    """
     return heartbeat_fresh(datetime.fromisoformat(_text(raw)))
 
 
@@ -67,16 +73,20 @@ def _next_run_fields(ts: float | None) -> dict[str, Any]:
 
 
 async def _worker_names(r: Any, settings: RqSettings) -> list[str]:
-    """Every registered worker's bare name (RQ's registry set stores full keys
-    ``rq:worker:<name>``, so the prefix is stripped)."""
+    """Every registered worker's bare name.
+
+    RQ's registry set stores full keys ``rq:worker:<name>``, so the prefix is stripped.
+    """
     members = await r.smembers(settings.rq_workers_key)
     prefix = settings.rq_worker_key("")
     return [_text(m).removeprefix(prefix) for m in members]
 
 
 async def _queue_names(r: Any, settings: RqSettings) -> list[str]:
-    """Every registered queue's bare name (RQ's registry set stores full keys
-    ``rq:queue:<name>``, so the prefix is stripped)."""
+    """Every registered queue's bare name.
+
+    RQ's registry set stores full keys ``rq:queue:<name>``, so the prefix is stripped.
+    """
     members = await r.smembers(settings.rq_queues_key)
     prefix = settings.rq_queue_key("")
     return [_text(m).removeprefix(prefix) for m in members]
@@ -115,9 +125,11 @@ async def backend_task_status(task_id: str) -> str:
 
 
 async def _read_failure_reason(r: Any, settings: RqSettings, task_id: str) -> str:
-    """The failed task's stored exception traceback text (its newest result). RQ
-    persists a failed job's exception only as compressed ``exc_string`` in the
-    result stream; when absent, no details are retained."""
+    """The failed task's stored exception traceback text (its newest result).
+
+    RQ persists a failed job's exception only as compressed ``exc_string`` in the
+    result stream; when absent, no details are retained.
+    """
     entries = await r.xrevrange(settings.rq_result_key(task_id), count=1)
     if entries:
         raw = entries[0][1].get(b"exc_string")
@@ -166,7 +178,7 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
         result_bytes = entry[1].get(b"return_value")
         if result_bytes:
             try:
-                return pickle.loads(base64.b64decode(result_bytes))
+                return pickle.loads(base64.b64decode(result_bytes))  # noqa: S301 deserializes this worker's own result payload, not external input
             except (binascii.Error, pickle.UnpicklingError) as e:
                 raise ValueError(f"Failed to decode result for task {task_id}: {e}") from e
         return None

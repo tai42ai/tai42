@@ -1,6 +1,6 @@
-"""The one canonical form and validator for a subject's locale — a BCP 47 language
-tag the platform's rendering layer resolves text against.
+"""The one canonical form and validator for a subject's locale — a BCP 47 language tag.
 
+The platform's rendering layer resolves text against the tag.
 Kept dependency-free (no ``babel`` in the contract layer) so every wire model that
 carries a locale — a :class:`~tai42_contract.conversations.Person`, the ambient
 :class:`~tai42_contract.states.SubjectCandidates` — validates and canonicalizes it
@@ -28,11 +28,11 @@ class InvalidLocaleError(ValueError):
 
 
 def canonical_locale(tag: str) -> str:
-    """Return the canonical BCP 47 spelling of ``tag`` (language lowercase, a 2-letter
-    region uppercase, a 4-letter script titlecase), or raise
-    :class:`InvalidLocaleError` when it is not a well-formed tag.
+    """Return the canonical BCP 47 spelling of ``tag``, or raise :class:`InvalidLocaleError` when malformed.
 
-    A blank or malformed tag raises — the boundary never stores an unusable locale."""
+    Canonicalization lowercases the language, uppercases a 2-letter region and titlecases a
+    4-letter script. A blank or malformed tag raises — the boundary never stores an unusable locale.
+    """
     stripped = tag.strip()
     if not _LANGTAG_RE.match(stripped):
         raise InvalidLocaleError(f"{tag!r} is not a well-formed BCP 47 language tag")
@@ -49,8 +49,10 @@ def canonical_locale(tag: str) -> str:
 
 
 def normalize_optional_locale(tag: str | None) -> str | None:
-    """Canonicalize ``tag`` when present; pass ``None`` through unchanged — the explicit
-    "no locale supplied" marker every carrier stores rather than a silent default."""
+    """Canonicalize ``tag`` when present; pass ``None`` through unchanged.
+
+    ``None`` is the explicit "no locale supplied" marker every carrier stores rather than a silent default.
+    """
     if tag is None:
         return None
     return canonical_locale(tag)

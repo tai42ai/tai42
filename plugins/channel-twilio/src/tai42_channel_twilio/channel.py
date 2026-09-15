@@ -1,5 +1,4 @@
-"""The Twilio channel: ``deliver`` sends one question, ``notify`` sends one
-fire-and-forget message.
+"""The Twilio channel: ``deliver`` sends one question, ``notify`` sends one fire-and-forget message.
 
 Tier-1 formats (``confirm``, ``external``) carry the callback_url as a tappable
 link and store NO correlation — the human answers via the callback door; confirm
@@ -86,7 +85,8 @@ def _text_media_lines(media: list[MediaItem] | None) -> list[str]:
     taps) and a ``document`` as ``filename: url`` (its download name preserved as a tappable
     link; MMS document rendering is carrier-unreliable, so a named link is the honest
     degradation). ``image``/``video``/``audio`` ride as MMS ``MediaUrl`` instead (see
-    :func:`_media_urls`)."""
+    :func:`_media_urls`).
+    """
     lines: list[str] = []
     for item in media or []:
         if item.kind is MediaKind.LINK:
@@ -98,11 +98,14 @@ def _text_media_lines(media: list[MediaItem] | None) -> list[str]:
 
 
 def _media_urls(media: list[MediaItem] | None) -> list[str]:
-    """The ``image``/``video``/``audio`` items' urls to attach as MMS ``MediaUrl`` — the
-    binary media Twilio fetches from a public url and delivers as an MMS bubble (the carrier
-    applies its own per-type fallback). Refuses an inline ``data:`` image (only ``image`` may
-    carry one; Twilio fetches a public url, an inline data URI has none) before any send.
-    ``link``/``document`` ride as ``Body`` text lines instead (see :func:`_text_media_lines`)."""
+    """The ``image``/``video``/``audio`` items' urls to attach as MMS ``MediaUrl``.
+
+    The binary media Twilio fetches from a public url and delivers as an MMS
+    bubble (the carrier applies its own per-type fallback). Refuses an inline
+    ``data:`` image (only ``image`` may carry one; Twilio fetches a public url, an
+    inline data URI has none) before any send. ``link``/``document`` ride as
+    ``Body`` text lines instead (see :func:`_text_media_lines`).
+    """
     urls: list[str] = []
     for item in media or []:
         if item.kind in _MMS_MEDIA_KINDS:
@@ -116,9 +119,12 @@ def _media_urls(media: list[MediaItem] | None) -> list[str]:
 
 
 def _render_question(delivery: ChannelDelivery) -> str:
-    """The SMS body for a Tier-2 ask (``text`` or ``select``): the question, any
-    ``link``/``document`` media as labelled lines, plus numbered options (a select answer
-    set, or a text ask's suggested replies) the human answers by typing one."""
+    """The SMS body for a Tier-2 ask (``text`` or ``select``).
+
+    Carries the question, any ``link``/``document`` media as labelled lines, plus
+    numbered options (a select answer set, or a text ask's suggested replies) the
+    human answers by typing one.
+    """
     lines = [delivery.question, *_text_media_lines(delivery.media)]
     if delivery.options:
         lines.extend(f"{index}. {option}" for index, option in enumerate(delivery.options, start=1))
@@ -127,8 +133,11 @@ def _render_question(delivery: ChannelDelivery) -> str:
 
 
 def _render_link(delivery: ChannelDelivery) -> str:
-    """The SMS body for a Tier-1 ask (``confirm`` or ``external``): the question, any
-    ``link``/``document`` media as labelled lines, then the tappable callback link."""
+    """The SMS body for a Tier-1 ask (``confirm`` or ``external``).
+
+    Carries the question, any ``link``/``document`` media as labelled lines, then
+    the tappable callback link.
+    """
     lines = [delivery.question, *_text_media_lines(delivery.media), "", f"Answer here: {delivery.callback_url}"]
     return "\n".join(lines)
 
@@ -216,10 +225,10 @@ class TwilioChannel:
             raise
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
-        """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any
-        failure. Returns the single ``MessageSid`` Twilio assigned the send.
+        """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.
 
-        No reply is expected, so nothing touches the correlation store. Exactly
+        Returns the single ``MessageSid`` Twilio assigned the send. No reply is
+        expected, so nothing touches the correlation store. Exactly
         one send attempt (a plain return means Twilio ACCEPTED it, not that a
         human saw it). ``sender_identity`` set → send FROM it verbatim to the
         recipient, the recipient allowlist not consulted (a bridge reply goes to

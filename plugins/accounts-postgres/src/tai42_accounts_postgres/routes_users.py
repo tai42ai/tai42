@@ -49,6 +49,8 @@ class UserRecord(BaseModel):
 
 
 class UsersListResponse(BaseModel):
+    """The user-listing response — every account user."""
+
     users: list[UserRecord]
 
 
@@ -73,16 +75,22 @@ class UserUpdatedResponse(BaseModel):
 
 
 class CreateUserBody(BaseModel):
+    """The create-user request body: the new user's ``email`` and ``role``."""
+
     email: str
     role: str
 
 
 class UpdateUserBody(BaseModel):
+    """The update-user request body: an optional new ``role`` and/or ``disabled`` flag."""
+
     role: str | None = None
     disabled: bool | None = None
 
 
 class ChangePasswordBody(BaseModel):
+    """The change-password request body: the ``current_password`` and the ``new_password``."""
+
     current_password: str
     new_password: str
 
@@ -120,8 +128,10 @@ def _serialize_user(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _presented_session_hash(request: Request) -> str | None:
-    """Hash of the caller's own session token so a self password change can spare
-    it. Reads the bearer / X-Api-Key credential; ``None`` when not a session token."""
+    """Hash of the caller's own session token so a self password change can spare it.
+
+    Reads the bearer / X-Api-Key credential; ``None`` when not a session token.
+    """
     token: str | None = None
     auth = request.headers.get("Authorization")
     if auth:
@@ -170,7 +180,8 @@ async def create_user(request: Request) -> Response:
     body, error = await _parse(request, CreateUserBody)
     if error is not None:
         return error
-    assert body is not None
+    if body is None:
+        raise AssertionError
 
     email = service.normalize_email(body.email)
     store = service.users_store()
@@ -213,8 +224,10 @@ async def create_user(request: Request) -> Response:
     action="write",
 )
 async def change_own_password(request: Request) -> Response:
-    """Self password change: verify the current password, set the new one, and
-    revoke every other session (the presented one survives)."""
+    """Self password change: verify the current password, set the new one, and revoke every other session.
+
+    The presented session survives.
+    """
     caller = get_current_user_id()
     if caller is None:
         return _error("unauthenticated", 401)
@@ -222,7 +235,8 @@ async def change_own_password(request: Request) -> Response:
     body, error = await _parse(request, ChangePasswordBody)
     if error is not None:
         return error
-    assert body is not None
+    if body is None:
+        raise AssertionError
 
     if len(body.new_password) < service.PASSWORD_MIN_LENGTH:
         return _error(f"Password must be at least {service.PASSWORD_MIN_LENGTH} characters", 422)
@@ -252,9 +266,11 @@ async def _apply_role_under_lock(
     current_role: str,
     locked_disabled: bool,
 ) -> tuple[JSONResponse | None, str]:
-    """Apply a requested role change under the advisory lock. Returns the first
-    error (or ``None``) and the role in effect after the call. The last enabled
-    admin cannot be demoted (409); an unknown role name writes nothing (400)."""
+    """Apply a requested role change under the advisory lock.
+
+    Returns the first error (or ``None``) and the role in effect after the call. The last enabled
+    admin cannot be demoted (409); an unknown role name writes nothing (400).
+    """
     if requested_role is None or requested_role == current_role:
         return None, current_role
     demote = current_role == ADMIN_ROLE and requested_role != ADMIN_ROLE
@@ -275,8 +291,10 @@ async def _apply_disable_under_lock(
     user_id: str,
     current_role: str,
 ) -> JSONResponse | None:
-    """Disable a user under the advisory lock, credentials-die-first (marker +
-    sessions, then the row). The last enabled admin cannot be disabled (409)."""
+    """Disable a user under the advisory lock, credentials-die-first (marker + sessions, then the row).
+
+    The last enabled admin cannot be disabled (409).
+    """
     if current_role == ADMIN_ROLE and await guard.count_other_enabled_admins(user_id) == 0:
         return _error("cannot disable the last enabled admin", 409)
     await admin.set_user_disabled(user_id, True)
@@ -292,10 +310,11 @@ async def _apply_under_lock(
     body: UpdateUserBody,
     disable_requested: bool,
 ) -> JSONResponse | None:
-    """Apply a role change and/or a disable inside one advisory-locked transaction, then
-    run any post-commit re-enable. The target's role/disabled are re-read from committed
-    state under the lock, so concurrent last-admin removals cannot both pass. Returns the
-    first non-None error, else ``None``."""
+    """Apply a role change and/or a disable inside one advisory-locked transaction, then re-enable post-commit.
+
+    The target's role/disabled are re-read from committed state under the lock, so concurrent
+    last-admin removals cannot both pass. Returns the first non-None error, else ``None``.
+    """
     reenable_after_commit = False
     async with store.admin_guard_txn() as guard:
         locked = await guard.read_target(user_id)
@@ -351,7 +370,8 @@ async def update_user(request: Request) -> Response:
     body, error = await _parse(request, UpdateUserBody)
     if error is not None:
         return error
-    assert body is not None
+    if body is None:
+        raise AssertionError
 
     store = service.users_store()
     target = await store.get_by_user_id(user_id)
@@ -386,12 +406,14 @@ async def update_user(request: Request) -> Response:
     action="write",
 )
 async def delete_user(request: Request) -> Response:
-    """Delete a user. The last enabled admin cannot be deleted (409); the guard
-    re-reads role/disabled under the advisory lock and deletes inside one
-    transaction, so concurrent last-admin removals cannot both pass. Order: remove
-    the policy (revoking owned keys), then sessions, invites, and the user row — all
-    on the guard's connection. A mid-way failure leaves a re-deletable user, never
-    an orphaned live credential."""
+    """Delete a user.
+
+    The last enabled admin cannot be deleted (409); the guard re-reads role/disabled under the
+    advisory lock and deletes inside one transaction, so concurrent last-admin removals cannot both
+    pass. Order: remove the policy (revoking owned keys), then sessions, invites, and the user row —
+    all on the guard's connection. A mid-way failure leaves a re-deletable user, never an orphaned
+    live credential.
+    """
     user_id = request.path_params["user_id"]
     store = service.users_store()
     target = await store.get_by_user_id(user_id)
@@ -425,8 +447,10 @@ async def delete_user(request: Request) -> Response:
     action="write",
 )
 async def regenerate_invite(request: Request) -> Response:
-    """Replace the live invite for a user who has not set a password yet (409 once
-    a password is set — a set password rotates through the self-service route)."""
+    """Replace the live invite for a user who has not set a password yet.
+
+    A 409 once a password is set — a set password rotates through the self-service route.
+    """
     user_id = request.path_params["user_id"]
     target = await service.users_store().get_by_user_id(user_id)
     if target is None:

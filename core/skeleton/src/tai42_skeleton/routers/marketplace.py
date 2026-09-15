@@ -191,15 +191,17 @@ marketplace_advisories = register_operation_route(
 
 @tai42_app.lifecycle.on_post_swap
 def _start_advisories_poll() -> None:
-    """(Re)establish the advisory poll on the serving loop — run at boot and after
-    every epoch swap, both ON the serving loop, so the poll task attaches to the loop
+    """(Re)establish the advisory poll on the serving loop.
+
+    Run at boot and after every epoch swap, both ON the serving loop, so the poll task attaches to the loop
     its refreshes run on and retires with its generation. It is a no-op when
     ``MARKETPLACE_ADVISORIES_POLL`` is off.
 
     Skipped entirely with no install-attribution store configured: the poll would
     otherwise fail every interval reaching for an absent Postgres inventory, so a
     store-less deployment logs one INFO line and starts nothing (matching
-    ``start_poll``'s own documented-silence contract)."""
+    ``start_poll``'s own documented-silence contract).
+    """
     if not component_store_configured(SKELETON_COMPONENT):
         logger.info(
             "marketplace: advisory poll skipped — the skeleton database is not configured (%s); "

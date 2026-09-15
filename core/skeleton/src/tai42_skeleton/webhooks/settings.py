@@ -10,6 +10,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class WebhookIngressSettings(TaiBaseSettings):
+    """``WEBHOOK_INGRESS_*`` config bounding the public ``universal_webhook`` door's read size."""
+
     model_config = SettingsConfigDict(env_prefix="WEBHOOK_INGRESS_", frozen=True)
 
     # Hard cap (bytes) on the request body AND the raw query string the public
@@ -21,4 +23,5 @@ class WebhookIngressSettings(TaiBaseSettings):
 
 @settings_cache
 def webhook_ingress_settings() -> WebhookIngressSettings:
+    """Return the process-wide :class:`WebhookIngressSettings`, cached after first load."""
     return WebhookIngressSettings()

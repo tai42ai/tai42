@@ -1,5 +1,8 @@
-"""The preset create path: the ordered pre-write gates, the locked name claim
-(store write THEN register), the create door, and the declared-seed appliers."""
+"""The preset create path.
+
+The ordered pre-write gates, the locked name claim (store write THEN register),
+the create door, and the declared-seed appliers.
+"""
 
 from __future__ import annotations
 
@@ -66,10 +69,13 @@ _PRESET_LOCK_NAMESPACE = 0x70736574
 
 
 async def _check_create_name(name: str, mgr: Any) -> None:
-    """The ordered name pre-checks a create runs before any store write: name safety
-    (tool-name-safe), then the quarantine 409, the live-tool collision 409, the agent
-    tool-name collision 400, and the duplicate-preset 409 — the quarantine verdict
-    winning for a name that would also collide. Raises the mapped 400/409."""
+    """The ordered name pre-checks a create runs before any store write.
+
+    Name safety (tool-name-safe), then the quarantine 409, the live-tool collision
+    409, the agent tool-name collision 400, and the duplicate-preset 409 — the
+    quarantine verdict winning for a name that would also collide. Raises the
+    mapped 400/409.
+    """
     # A preset name is a live tool name + a ``{name}`` route segment, so it must be
     # tool-name-safe (a slash-bearing name would never match the routes; an
     # over-long one collides after client-tool truncation).
@@ -90,9 +96,11 @@ async def _check_create_name(name: str, mgr: Any) -> None:
 
 
 async def _check_create_base(base_tool: str, mgr: Any) -> None:
-    """A preset's base must be a registered NON-preset tool (a preset cannot be
-    another preset's base — chaining would make rehydration order-dependent). Raises
-    the mapped 400."""
+    """A preset's base must be a registered NON-preset tool.
+
+    A preset cannot be another preset's base — chaining would make rehydration
+    order-dependent. Raises the mapped 400.
+    """
     if base_tool in mgr.registered_names():
         raise BadRequestError(f"base tool {base_tool!r} is itself a preset")
     if base_tool not in await instance.app.tools.get_tools():
@@ -100,11 +108,13 @@ async def _check_create_base(base_tool: str, mgr: Any) -> None:
 
 
 async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None) -> tuple[Any, dict[str, int] | None]:
-    """Claim *name* for a new preset under the fleet-wide per-name advisory lock: the
-    store-side existence check, the overlay clean slate, the store write and the local
-    register (rolled fully back on a register failure) are ONE step no other process can
-    interleave with. Returns the store record plus the fan-out census pinned before the
-    first write, which the caller publishes with the lock already released.
+    """Claim ``name`` for a new preset under the fleet-wide per-name advisory lock.
+
+    The store-side existence check, the overlay clean slate, the store write and
+    the local register (rolled fully back on a register failure) are ONE step no
+    other process can interleave with. Returns the store record plus the fan-out
+    census pinned before the first write, which the caller publishes with the lock
+    already released.
 
     The create path acquires that lock here and nowhere else, and nothing under it creates
     a preset, so a create takes it exactly once: the lock runs on a connection of its own,
@@ -179,7 +189,7 @@ async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None
                 raise ConflictError(f"preset {name!r} already exists") from register_exc
             if isinstance(register_exc, PresetNameConflictError):
                 raise ConflictError(f"preset name {name!r} collides with an existing tool") from register_exc
-            raise register_exc
+            raise
     return record, census
 
 
@@ -196,11 +206,13 @@ async def _create_preset_core(
     tags: list[str] | None = None,
     enforce_tier: bool = True,
 ) -> tuple[Any, FleetResult]:
-    """The reusable create path shared by the create door and the seed applier: ordered
-    name pre-checks → base rule → agent-authoring → combo/schema/bind + input-schema +
-    write-validator validation → (optional) registration-tier fence → the locked name
-    claim (:func:`_claim_preset_name`: store write THEN register) → one ``list_changed``
-    → the bus rebind fan-out. Returns the store record + the per-worker fleet report.
+    """The reusable create path shared by the create door and the seed applier.
+
+    Ordered name pre-checks → base rule → agent-authoring → combo/schema/bind +
+    input-schema + write-validator validation → (optional) registration-tier fence
+    → the locked name claim (:func:`_claim_preset_name`: store write THEN register)
+    → one ``list_changed`` → the bus rebind fan-out. Returns the store record + the
+    per-worker fleet report.
 
     EVERY door that creates a preset flows through here — the HTTP create operation, the
     in-process facet ``instance.app.presets.create`` and the declared-seed applier — so
@@ -209,7 +221,8 @@ async def _create_preset_core(
     ``enforce_tier`` runs the caller-authorization fence (create's door behavior); the
     seed applier passes ``False`` — a platform seed has no caller to fence and runs the
     identical content path otherwise (no logic duplicated between the two). ``tags`` labels
-    version 1 in the SAME store commit (``None`` is the door's untagged create)."""
+    version 1 in the SAME store commit (``None`` is the door's untagged create).
+    """
     # The description is the bound tool's LLM-facing docstring — required non-empty on
     # every create path, so no path produces an empty-docstring preset tool.
     if not description.strip():
@@ -312,13 +325,16 @@ async def create_preset(
     input_schema: TemplatedText | dict[str, Any] | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
-    """Create a preset, ATOMIC: the shared :func:`_create_preset_core` runs the ordered
-    name pre-checks, validation, store write THEN register (rolling the row fully back on
-    a register failure), one ``list_changed``, and the bus rebind fan-out. The response
-    embeds the per-worker fleet report under ``fanout``.
+    """Create a preset, atomically.
+
+    The shared :func:`_create_preset_core` runs the ordered name pre-checks,
+    validation, store write THEN register (rolling the row fully back on a register
+    failure), one ``list_changed``, and the bus rebind fan-out. The response embeds
+    the per-worker fleet report under ``fanout``.
 
     A preset's NAME is its identity everywhere — it IS the live tool binding, and every
-    reference keys on it deliberately; there are no surrogate ids."""
+    reference keys on it deliberately; there are no surrogate ids.
+    """
     record, report = await _create_preset_core(
         name,
         base_tool,
@@ -342,10 +358,12 @@ async def create_preset(
 
 
 async def _apply_seed_tool_meta(seed: PresetSeed) -> None:
-    """Apply the seed's tool_meta display fields ONLY where the preset's tool_meta leaves
-    them absent — a seed never overwrites an operator-set display value. ``folder_path`` is
-    resolved to a leaf ``folder_id`` (creating missing folders), never a raw path string. A
-    no-op when the seed declares no tool_meta."""
+    """Apply the seed's tool_meta display fields ONLY where the preset's tool_meta leaves them absent.
+
+    A seed never overwrites an operator-set display value. ``folder_path`` is
+    resolved to a leaf ``folder_id`` (creating missing folders), never a raw path
+    string. A no-op when the seed declares no tool_meta.
+    """
     meta = seed.tool_meta
     if meta is None:
         return
@@ -371,8 +389,10 @@ async def _apply_seed_tool_meta(seed: PresetSeed) -> None:
 
 
 async def _seed_create(seed: PresetSeed) -> None:
-    """Create an absent seed through the shared create core (no caller fence), then apply
-    its tool_meta where absent."""
+    """Create an absent seed through the shared create core (no caller fence).
+
+    Then apply its tool_meta where absent.
+    """
     await _create_preset_core(
         seed.name,
         seed.base_tool,
@@ -388,14 +408,16 @@ async def _seed_create(seed: PresetSeed) -> None:
 
 
 async def _apply_one_seed(seed: PresetSeed) -> None:
-    """Create the seed when absent; a preset already present is left untouched. Idempotent
-    across boot/reload/epoch-swap and safe under concurrent fleet boot.
+    """Create the seed when absent; a preset already present is left untouched.
+
+    Idempotent across boot/reload/epoch-swap and safe under concurrent fleet boot.
 
     The presence check is the cheap fast path — every process of the deployment (each
     ``tai serve`` worker and the backend worker) runs this applier against ONE database, so
     a check that missed is decided by the create's own fleet-wide per-name lock
     (:func:`_claim_preset_name`), which conflicts on the sibling's committed row without
-    touching its overlay."""
+    touching its overlay.
+    """
     store = instance.app.presets.store
     try:
         await store.get_preset(seed.name)
@@ -433,7 +455,8 @@ async def apply_preset_seeds() -> None:
     epoch (resolvable in the tool registry) — it creates through the operations-layer internal
     path, which registers the tool. Feature-OFF is legal: with the versioned store unconfigured
     every seed logs a VISIBLE skip and nothing is touched. Any real failure raises loudly.
-    Idempotent across re-runs."""
+    Idempotent across re-runs.
+    """
     seeds = instance.app.presets.seeds()
     if not seeds:
         return

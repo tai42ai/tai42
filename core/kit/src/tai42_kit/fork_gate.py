@@ -97,6 +97,7 @@ class ForkGate:
     """
 
     def __init__(self) -> None:
+        """Create an empty gate: no live spans, no pending rebuilds, no owner."""
         self._cond = threading.Condition()
         # Job spans currently open (forked children that may still be importing).
         self._live_spans = 0
@@ -132,8 +133,7 @@ class ForkGate:
 
     @property
     def blocked(self) -> bool:
-        """Whether a rebuild is pending or in progress — i.e. whether a job span
-        entered now would have to wait."""
+        """Whether a rebuild is pending or in progress (a job span entered now would have to wait)."""
         with self._cond:
             return self._pending_rebuilds > 0
 
@@ -187,8 +187,10 @@ class ForkGate:
                     self._cond.notify_all()
 
     def _blocker(self) -> str:
-        """What is holding an ``exclusive`` wait open, for its timeout report. Called
-        under ``_cond``. Both conditions can hold at once, so both are named."""
+        """What is holding an ``exclusive`` wait open, for its timeout report.
+
+        Called under ``_cond``. Both conditions can hold at once, so both are named.
+        """
         reasons: list[str] = []
         if self._live_spans:
             reasons.append(f"{self._live_spans} job span(s) still open")
@@ -323,7 +325,7 @@ class ForkGate:
                     # The awaiting side gave up before the hold was taken. Its future is
                     # already settled (cancelled), so this resolve is a defensive no-op
                     # that also guarantees no caller can await a future nobody settles.
-                    loop.call_soon_threadsafe(_resolve, held, _AcquireAbandoned())
+                    loop.call_soon_threadsafe(_resolve, held, _AcquireAbandonedError())
                     return
                 loop.call_soon_threadsafe(_resolve, held, None)
                 release.wait()
@@ -364,13 +366,15 @@ class ForkGate:
         await asyncio.to_thread(done.wait)
 
 
-class _AcquireAbandoned(RuntimeError):
+class _AcquireAbandonedError(RuntimeError):
     """The async acquire was abandoned before the hold was taken (its awaiter went away)."""
 
 
 def _resolve(future: asyncio.Future[None], exc: BaseException | None) -> None:
-    """Settle the acquire future from the holder thread, ignoring a future the loop
-    already cancelled (the awaiting task went away while the gate was being taken)."""
+    """Settle the acquire future from the holder thread.
+
+    A future the loop already cancelled is ignored (the awaiting task went away while the gate was being taken).
+    """
     if future.done():
         return
     if exc is None:

@@ -1,5 +1,7 @@
-"""Thin operation-adapter registrations for the conversation route CRUD, thread,
-person and config doors."""
+"""Thin operation-adapter registrations for the conversation route doors.
+
+Covers the route CRUD, thread, person and config doors.
+"""
 
 from __future__ import annotations
 

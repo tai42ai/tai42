@@ -75,16 +75,20 @@ _resume_origin: ContextVar[str | None] = ContextVar("tai42_runs_resume_origin", 
 
 
 def get_resume_origin() -> str | None:
-    """The interaction id whose resolution fired the current dispatch, or ``None``
-    outside a continuation resume — a plain contextvar read, never raises."""
+    """The interaction id whose resolution fired the current dispatch, or ``None`` outside a resume.
+
+    A plain contextvar read, never raises.
+    """
     return _resume_origin.get()
 
 
 @contextmanager
 def resume_origin(interaction_id: str) -> Iterator[None]:
-    """Deposit ``interaction_id`` as the ambient resume origin for the wrapped
-    dispatch, resetting in a ``finally`` (token discipline). Entered by the
-    interactions continuation drive around its ``run_tool`` re-entry."""
+    """Deposit ``interaction_id`` as the ambient resume origin for the wrapped dispatch.
+
+    Resets in a ``finally`` (token discipline). Entered by the interactions continuation drive
+    around its ``run_tool`` re-entry.
+    """
     token = _resume_origin.set(interaction_id)
     try:
         yield
@@ -97,7 +101,8 @@ def _safe_trace_id() -> str | None:
 
     Imported lazily: monitoring reaches back across the app and the writer's
     ``current_trace_id`` is contractually a returns-``None``-never-raises guard, so a
-    missing/failed backend simply yields no deep link."""
+    missing/failed backend simply yields no deep link.
+    """
     try:
         from tai42_skeleton.monitoring import get_monitoring
 
@@ -126,7 +131,8 @@ async def _run_trace_root(ambient_trace_id: str | None) -> AsyncIterator[str | N
     Agnostic by construction: it opens a generic root and propagates the standard trace
     context every traced consumer already reads. It inspects NOTHING about what the
     preset wraps (no agent/flow/consumer concept) — whatever the preset runs nests by the
-    generic convention."""
+    generic convention.
+    """
     if ambient_trace_id is not None:
         yield ambient_trace_id
         return
@@ -143,19 +149,23 @@ async def _run_trace_root(ambient_trace_id: str | None) -> AsyncIterator[str | N
 
 
 class RunRecord:
-    """A live run row's handle: the binding calls :meth:`observe` with the dispatch
-    result so a park (a ``SuspendedInteraction`` return) is recorded as ``parked``
-    rather than ``success`` — capturing the sentinel's ``interaction_id`` as the
-    row's lifecycle-correlation key. A dispatch that raises never reaches ``observe``
-    — the chokepoint records ``aborted`` (a cancellation) or ``error`` (any other
-    escape) from the exception path."""
+    """A live run row's handle.
+
+    The binding calls :meth:`observe` with the dispatch result so a park (a
+    ``SuspendedInteraction`` return) is recorded as ``parked`` rather than ``success`` — capturing
+    the sentinel's ``interaction_id`` as the row's lifecycle-correlation key. A dispatch that
+    raises never reaches ``observe`` — the chokepoint records ``aborted`` (a cancellation) or
+    ``error`` (any other escape) from the exception path.
+    """
 
     def __init__(self) -> None:
+        """Start unrecorded, with a ``success`` outcome and no interaction id."""
         self.recorded = False
         self.outcome: RunOutcome = "success"
         self.interaction_id: str | None = None
 
     def observe(self, result: object) -> None:
+        """Record the outcome from a dispatch ``result``: ``parked`` on a park sentinel, else ``success``."""
         if isinstance(result, SuspendedInteraction):
             self.outcome = "parked"
             self.interaction_id = result.interaction_id
@@ -164,8 +174,10 @@ class RunRecord:
             self.interaction_id = None
 
     def observe_park(self, interaction_id: str) -> None:
-        """Record a park recognized from a SERIALIZED dispatch result — the MCP wire
-        marker, where the sentinel type is not available — by its interaction id."""
+        """Record a park recognized from a SERIALIZED dispatch result, by its interaction id.
+
+        Used at the MCP wire marker, where the sentinel type is not available.
+        """
         self.outcome = "parked"
         self.interaction_id = interaction_id
 
@@ -181,7 +193,8 @@ async def record_outermost_preset_run(preset_name: str, version: int) -> AsyncIt
     cancellation escaped the block, ``error`` if anything else raised, else the
     observed outcome (``success`` / ``parked``, a park carrying its interaction id) —
     with ``ended_at`` and a backfilled trace id. A no-op (still yields a handle) when
-    the store is OFF or the START write fails."""
+    the store is OFF or the START write fails.
+    """
     record = RunRecord()
     if not component_store_configured(SKELETON_COMPONENT):
         yield record

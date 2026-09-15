@@ -1,5 +1,4 @@
-"""The internal notifications sink — where ``notify_user(channel=None)`` writes
-a message when no external channel carries it.
+"""The internal notifications sink — where ``notify_user(channel=None)`` writes a message with no channel.
 
 Storage is Redis, reusing the interactions connection
 (``interactions_settings().redis``, the ``INTERACTIONS_REDIS_*`` env). The feed
@@ -84,8 +83,9 @@ _AUDIENCE_FEED_SUFFIX = "notifications:audience:"
 
 
 class NotificationSink:
-    """Redis-backed store for internal notifications: append one record, read the
-    feed newest-first. The feed key is built from the interactions ``key_prefix``
+    """Redis-backed store for internal notifications: append one record, read the feed newest-first.
+
+    The feed key is built from the interactions ``key_prefix``
     (``{key_prefix}notifications:feed``), mirroring how
     :class:`~tai42_skeleton.interactions.store.InteractionStore` prefixes its keys,
     so per-deployment isolation on a shared Redis holds. Operations take the redis
@@ -101,9 +101,11 @@ class NotificationSink:
     key on every push (from ``interactions_settings().notifications_feed_ttl_seconds``),
     so a per-identity key minted one-per-distinct-audience cannot accumulate forever.
     The shared feed key is deliberately NOT expired — a TTL there could drop the
-    operator inbox after a quiet period."""
+    operator inbox after a quiet period.
+    """
 
     def __init__(self, key_prefix: str, max_feed_length: int, audience_feed_ttl_seconds: int) -> None:
+        """Build a sink over ``key_prefix`` with the ring-buffer bound and per-audience TTL."""
         self._prefix = key_prefix
         self._feed_key = f"{key_prefix}{_FEED_SUFFIX}"
         self._max_feed_length = max_feed_length
@@ -113,13 +115,15 @@ class NotificationSink:
         return f"{self._prefix}{_AUDIENCE_FEED_SUFFIX}{audience}"
 
     def _queue_push_bounded(self, pipe: Any, feed_key: str, payload: str, ttl_seconds: int | None = None) -> None:
-        """Queue an LPUSH of ``payload`` onto ``feed_key`` plus an LTRIM to the newest
-        ``max_feed_length`` entries — the bounded newest-first ring buffer — onto
-        ``pipe``. When ``ttl_seconds`` is set, a rolling EXPIRE is queued too, so a
-        per-audience feed key (minted one-per-distinct-identity, read
-        non-destructively) cannot accumulate forever; the shared feed passes no TTL.
-        The eviction is the intended retention cap, NOT a silent truncation of an
-        error."""
+        """Queue a bounded LPUSH+LTRIM of ``payload`` onto ``feed_key`` (with an optional EXPIRE).
+
+        Queues the LPUSH plus an LTRIM to the newest ``max_feed_length`` entries — the
+        bounded newest-first ring buffer — onto ``pipe``. When ``ttl_seconds`` is set, a
+        rolling EXPIRE is queued too, so a per-audience feed key (minted
+        one-per-distinct-identity, read non-destructively) cannot accumulate forever; the
+        shared feed passes no TTL. The eviction is the intended retention cap, NOT a
+        silent truncation of an error.
+        """
         pipe.lpush(feed_key, payload)
         pipe.ltrim(feed_key, 0, self._max_feed_length - 1)
         if ttl_seconds is not None:
@@ -141,9 +145,10 @@ class NotificationSink:
         footer: str | None = None,
         schema: dict[str, Any] | None = None,
     ) -> dict:
-        """Append one notification and return the stored record. The id and the
-        ``created_at`` timestamp are minted here (server-side), never supplied by
-        the caller.
+        """Append one notification and return the stored record.
+
+        The id and the ``created_at`` timestamp are minted here (server-side), never
+        supplied by the caller.
 
         The record always lands on the shared feed (a bounded newest-first ring
         buffer). When ``audience`` is set, the SAME record is ALSO pushed onto that
@@ -163,7 +168,8 @@ class NotificationSink:
         delivered form); the sink door itself refuses a channel-less form notification.
 
         Both feed writes are issued in ONE pipeline executed once, so a failure can
-        never land the record on one feed but not the other."""
+        never land the record on one feed but not the other.
+        """
         record = {
             "id": str(uuid.uuid4()),
             "message": message,
@@ -192,15 +198,18 @@ class NotificationSink:
         return record
 
     async def read(self, r: Redis) -> list[dict]:
-        """Return every stored notification on the SHARED feed, newest-first. A
-        malformed stored record raises out of ``json.loads`` rather than being
-        skipped."""
+        """Return every stored notification on the SHARED feed, newest-first.
+
+        A malformed stored record raises out of ``json.loads`` rather than being skipped.
+        """
         return await self._read_feed(r, self._feed_key)
 
     async def read_for(self, r: Redis, audience: str) -> list[dict]:
-        """Return the records on ``audience``'s per-identity feed, newest-first — the
-        complete window a restricted caller reads, never truncated by other
-        identities' volume (never a post-filter over the shared feed)."""
+        """Return the records on ``audience``'s per-identity feed, newest-first.
+
+        The complete window a restricted caller reads, never truncated by other
+        identities' volume (never a post-filter over the shared feed).
+        """
         return await self._read_feed(r, self._audience_feed_key(audience))
 
     async def _read_feed(self, r: Redis, feed_key: str) -> list[dict]:

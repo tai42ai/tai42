@@ -1,5 +1,8 @@
-"""The browser-replay transcript stream: one Redis STREAM per conversation, its
-write-order gate, the appenders, and the backlog/tail reads."""
+"""The browser-replay transcript stream.
+
+One Redis STREAM per conversation, its write-order gate, the appenders, and the
+backlog/tail reads.
+"""
 
 from __future__ import annotations
 
@@ -29,15 +32,20 @@ def _transcript_key(identity: str, address: str) -> str:
 
 
 def frame(event: str, data: dict[str, Any]) -> str:
-    """One SSE frame. ``json.dumps`` of the whole payload is what keeps a newline or
-    ``data:`` sequence in a message body from injecting a second frame."""
+    """One SSE frame.
+
+    ``json.dumps`` of the whole payload is what keeps a newline or ``data:`` sequence in a
+    message body from injecting a second frame.
+    """
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 def _decode_entry(fields: dict[str, str]) -> str | None:
-    """Re-emit a stored transcript entry as its SSE frame, or ``None`` when the
-    entry is malformed (missing ``event``/``data``) — one bad entry is skipped, never
-    fatal to the whole tail. The stored ``data`` is already compact JSON."""
+    """Re-emit a stored transcript entry as its SSE frame, or ``None`` when malformed.
+
+    A malformed entry (missing ``event``/``data``) is skipped, never fatal to the whole
+    tail. The stored ``data`` is already compact JSON.
+    """
     event = fields.get("event")
     data = fields.get("data")
     if event is None or data is None:
@@ -59,7 +67,8 @@ async def transcript_order(identity: str, address: str) -> AsyncIterator[None]:
     The message door holds it across ``accept`` until the visitor's own frame is
     written; every agent-side append takes it first. Without the gate a reply
     ``accept`` spawns can XADD before the message that caused it, and the page then
-    replays the answer above the question."""
+    replays the answer above the question.
+    """
     key = (identity, address)
     lock = _transcript_locks.get(key)
     if lock is None:
@@ -76,9 +85,12 @@ async def transcript_order(identity: str, address: str) -> AsyncIterator[None]:
 
 
 async def _append(identity: str, address: str, event: str, data: dict[str, Any]) -> None:
-    """XADD one frame to the pair's transcript stream, trimming EXACTLY to the
-    max-entries cap and refreshing the key TTL — one pipeline, so an append is a
-    single round trip and the TTL cannot be left behind by a lost second command."""
+    """XADD one frame to the pair's transcript stream, trimmed to the cap with a refreshed TTL.
+
+    Trims EXACTLY to the max-entries cap and refreshes the key TTL — one pipeline, so an
+    append is a single round trip and the TTL cannot be left behind by a lost second
+    command.
+    """
     settings = web_settings()
     key = _transcript_key(identity, address)
     async with _redis() as redis:
@@ -101,15 +113,18 @@ async def append_message(
     entry_id: str | None = None,
     client_message_id: str | None = None,
 ) -> str:
-    """Append one ``chat.message`` entry and return its id. ``entry_id`` is supplied
-    for an inbound message (the accept-returned turn id, so the frame's id joins the
-    transcript to the bridge record); an outbound notify mints its own.
+    """Append one ``chat.message`` entry and return its id.
+
+    ``entry_id`` is supplied for an inbound message (the accept-returned turn id, so the
+    frame's id joins the transcript to the bridge record); an outbound notify mints its
+    own.
 
     ``client_message_id`` echoes the retry key the visitor sent back onto their own
     frame, so the page can match the replayed message to the bubble it drew
     optimistically and retire the duplicate after a lost response. It is absent from
     the frame when the sender sent none — the key is the page's, not the server's,
-    and an invented one would match nothing."""
+    and an invented one would match nothing.
+    """
     message_id = entry_id if entry_id is not None else _mint_id()
     data: dict[str, Any] = {"id": message_id, "direction": direction, "text": text, "ts": _now_iso()}
     if client_message_id is not None:
@@ -147,7 +162,8 @@ async def append_media(
       ``media`` entry; carried only when present.
     * ``footer`` — the short trailing line under the card; carried only when present.
     * ``location`` — a shared geographic point ``{"latitude", "longitude", "name"?,
-      "address"?}``, rendered as a map-pin element; carried only when present."""
+      "address"?}``, rendered as a map-pin element; carried only when present.
+    """
     entry_id = _mint_id()
     data: dict[str, Any] = {"id": entry_id, "direction": "out", "text": text, "ts": _now_iso()}
     if media:
@@ -180,8 +196,7 @@ async def append_question(
     form_data: dict[str, Any] | None = None,
     pages: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Append one ``chat.question`` entry (the UI renders the per-format widget) and
-    return its id.
+    """Append one ``chat.question`` entry (the UI renders the per-format widget) and return its id.
 
     ``callback_url`` is a bearer ticket for the interaction, so it is carried in the
     frame ONLY when the widget itself must open it (the ``external`` format);
@@ -203,7 +218,8 @@ async def append_question(
     "filename"?}`` (``filename`` on a ``document`` only), the SAME frame shape a
     ``chat.media`` card carries so the page renders them with the same media-card
     component — carried in the frame ONLY when non-empty; otherwise the key is absent.
-    It is display-only, never part of the answer."""
+    It is display-only, never part of the answer.
+    """
     entry_id = _mint_id()
     data: dict[str, Any] = {
         "id": entry_id,
@@ -229,8 +245,7 @@ async def append_question(
 
 
 async def append_answered(identity: str, address: str, interaction_id: str, answer: Any) -> str:
-    """Append one ``chat.answered`` entry (the UI settles the question's widget) and
-    return its id."""
+    """Append one ``chat.answered`` entry (the UI settles the question's widget) and return its id."""
     entry_id = _mint_id()
     await _append(
         identity,
@@ -265,7 +280,8 @@ async def append_form(
     media card carries) a form may ride alongside its fields, present ONLY when set.
     ``form_data`` is the card's per-send enrichment — ``{"values", "options"}``, the
     prefilled values shown filled in and the per-send choice lists — and ``pages`` its
-    step layout, each the same frame shape a form question carries, present ONLY when set."""
+    step layout, each the same frame shape a form question carries, present ONLY when set.
+    """
     entry_id = _mint_id()
     data: dict[str, Any] = {"id": entry_id, "text": text, "schema": schema, "token": token, "ts": _now_iso()}
     if media:
@@ -281,16 +297,20 @@ async def append_form(
 
 
 async def capture_cursor(redis: Any, identity: str, address: str) -> str:
-    """The transcript's newest entry id, captured BEFORE the backlog read so no live
-    entry arriving during the backlog is missed. Empty stream → ``"0-0"`` (``"$"``
-    would drop an entry written before the first XREAD)."""
+    """The transcript's newest entry id, captured BEFORE the backlog read.
+
+    No live entry arriving during the backlog is missed. Empty stream → ``"0-0"`` (``"$"``
+    would drop an entry written before the first XREAD).
+    """
     tail = await redis.xrevrange(_transcript_key(identity, address), count=1)
     return _as_str(tail[0][0]) if tail else "0-0"
 
 
 def _next_id(entry_id: str) -> str:
-    """The smallest stream id strictly after ``entry_id``. XRANGE bounds are
-    inclusive, so this is where the next page starts."""
+    """The smallest stream id strictly after ``entry_id``.
+
+    XRANGE bounds are inclusive, so this is where the next page starts.
+    """
     milliseconds, _, sequence = entry_id.partition("-")
     return f"{milliseconds}-{int(sequence or 0) + 1}"
 
@@ -298,14 +318,16 @@ def _next_id(entry_id: str) -> str:
 async def read_backlog_batch(
     redis: Any, identity: str, address: str, start: str, end: str, count: int
 ) -> tuple[str | None, list[str]]:
-    """One COUNT-bounded page of the transcript as SSE frames, plus the id the next
-    page starts at (``None`` once the last page is read).
+    """One COUNT-bounded page of the transcript as SSE frames, plus the next page's start id.
+
+    The next-page id is ``None`` once the last page is read.
 
     Paging is what keeps a replay's peak memory at one page rather than a whole
     transcript held live for the length of the stream. ``end`` is the cursor the tail
     will resume from: reading past it would emit every entry written during a slow
     replay twice, once here and once from the tail. A malformed entry is skipped
-    (logged) — one bad entry is never fatal to the replay."""
+    (logged) — one bad entry is never fatal to the replay.
+    """
     entries = await redis.xrange(_transcript_key(identity, address), min=start, max=end, count=count)
     frames: list[str] = []
     for entry_id, fields in entries:
@@ -320,8 +342,11 @@ async def read_backlog_batch(
 
 
 async def read_tail(redis: Any, identity: str, address: str, cursor: str, block_ms: int) -> tuple[str, list[str]]:
-    """One live-tail XREAD past ``cursor``; returns the advanced cursor and the new
-    entries as SSE frames (a malformed entry skipped, logged)."""
+    """One live-tail XREAD past ``cursor``.
+
+    Returns the advanced cursor and the new entries as SSE frames (a malformed entry
+    skipped, logged).
+    """
     key = _transcript_key(identity, address)
     result = await redis.xread({key: cursor}, block=block_ms)
     frames: list[str] = []

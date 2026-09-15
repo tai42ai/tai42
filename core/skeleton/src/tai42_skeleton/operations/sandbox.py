@@ -24,6 +24,7 @@ from tai42_skeleton.operations.response_models_group_c import SandboxInfo
 
 @operation(summary="Get the sandbox identity and resolved policy", tags=["sandbox"], response_model=SandboxInfo)
 async def sandbox_info() -> dict:
+    """Whether a sandbox provider is registered, plus the resolved security policy and live session count."""
     from tai42_skeleton.sandbox.policy import resolve_sandbox_policy
 
     policy = resolve_sandbox_policy()

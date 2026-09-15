@@ -1,5 +1,4 @@
-"""Reconstructs a transformed tool's typed callable with its hidden baked args
-applied, epoch-scoped LRU cached."""
+"""Reconstructs a transformed tool's typed callable with its hidden baked args applied, epoch-scoped LRU cached."""
 
 import inspect
 from collections import OrderedDict
@@ -15,14 +14,15 @@ from tai42_skeleton.tools.binding.schema import _resolved_signature
 
 
 def _baked_partial(tool_obj: TransformedTool) -> Callable[..., Any]:
-    """A typed partial of a transformed tool's underlying function with its hidden
-    baked args applied — the callable an extension branch wraps.
+    """A typed partial of a transformed tool's underlying function with its hidden baked args applied.
 
+    The callable an extension branch wraps.
     The remaining parameters keep the underlying function's real typed signature;
     a call that passes a baked key is rejected (the branch may not re-open a baked
     constant), matching the bound tool's own contract. A preset only ever bakes
     ``ArgTransform(hide=True, default=<value>)``, so a non-hidden transform arg has
-    no branch-composable meaning and raises loudly rather than mis-binding."""
+    no branch-composable meaning and raises loudly rather than mis-binding.
+    """
     parent = tool_obj.parent_tool
     if not isinstance(parent, FunctionTool):
         raise TypeError(f"transformed tool {tool_obj.name!r} has no callable base to branch")

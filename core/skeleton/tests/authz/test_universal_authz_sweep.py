@@ -6,7 +6,7 @@ every dispatch-derivative the sweep must cover, then dispatches each modality
 through the REAL ``AuthzMiddleware.on_call_tool`` installed on the booted
 FastMCP surfaces — proving that, with access control ENABLED, a caller with no
 resolvable identity (or insufficient scope) is DENIED and the denial surfaces as a
-``ToolError`` specifically backed by :class:`PermissionDenied` (never a generic
+``ToolError`` specifically backed by :class:`PermissionDeniedError` (never a generic
 error, never a silent allow), with ALLOW parity for a sufficient identity and for
 ``ACCESS_CONTROL_ENABLE=false``.
 
@@ -24,7 +24,7 @@ The modalities (cases a-e):
       proving ``AuthzMiddleware`` is installed on the sub-app's FastMCP, not only
       the main server.
 
-For every modality the denial is asserted to be the ``PermissionDenied``-backed
+For every modality the denial is asserted to be the ``PermissionDeniedError``-backed
 ``ToolError`` SPECIFICALLY (type + message), and ``call_next`` is proven NOT
 reached on a deny — mechanically enforcing "no projected tool is dispatchable
 externally without a check, on any MCP surface, through any derivative".
@@ -59,7 +59,7 @@ from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.authz.middleware import AuthzMiddleware
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
@@ -158,11 +158,11 @@ class _Dispatcher:
         return await self._mw.on_call_tool(ctx, self._call_next)
 
     async def assert_denied(self, name: str) -> None:
-        """The dispatch raises the ``PermissionDenied``-backed ``ToolError``
+        """The dispatch raises the ``PermissionDeniedError``-backed ``ToolError``
         SPECIFICALLY and never reaches ``call_next`` (before any enqueue)."""
         with pytest.raises(ToolError) as excinfo:
             await self.dispatch(name)
-        assert isinstance(excinfo.value.__cause__, PermissionDenied), excinfo.value.__cause__
+        assert isinstance(excinfo.value.__cause__, PermissionDeniedError), excinfo.value.__cause__
         assert self.reached == 0, f"{name} reached call_next on a deny"
 
     async def assert_allowed(self, name: str) -> None:
@@ -207,7 +207,7 @@ def _tear_down_sweep_preset():
 
 def test_authz_sweep_deny_without_identity_over_every_modality(monkeypatch: pytest.MonkeyPatch):
     """Access control ENABLED, no resolvable identity: every modality is DENIED
-    with the ``PermissionDenied``-backed ``ToolError`` before ``call_next``."""
+    with the ``PermissionDeniedError``-backed ``ToolError`` before ``call_next``."""
     _seed_ac(monkeypatch)
 
     async def run():
@@ -278,7 +278,7 @@ def test_authz_sweep_deny_with_insufficient_scope_over_every_modality(monkeypatc
                 for name in _MAIN_MODALITIES:
                     with pytest.raises(ToolError) as excinfo:
                         await d.dispatch(name)
-                    assert isinstance(excinfo.value.__cause__, PermissionDenied)
+                    assert isinstance(excinfo.value.__cause__, PermissionDeniedError)
                     assert "insufficient scope" in str(excinfo.value)
                     assert d.reached == 0
             finally:
@@ -412,7 +412,7 @@ def test_owned_key_attenuation_holds_on_the_mcp_dispatch_edge(monkeypatch: pytes
             try:
                 with pytest.raises(ToolError) as excinfo:
                     await d.dispatch(_A_PLAIN)
-                assert isinstance(excinfo.value.__cause__, PermissionDenied)
+                assert isinstance(excinfo.value.__cause__, PermissionDeniedError)
                 assert "insufficient scope" in str(excinfo.value)
                 assert d.reached == 0
             finally:
@@ -424,7 +424,7 @@ def test_owned_key_attenuation_holds_on_the_mcp_dispatch_edge(monkeypatch: pytes
             try:
                 with pytest.raises(ToolError) as excinfo:
                     await d.dispatch(_A_PLAIN)
-                assert isinstance(excinfo.value.__cause__, PermissionDenied)
+                assert isinstance(excinfo.value.__cause__, PermissionDeniedError)
                 assert "is not permitted" in str(excinfo.value)
                 assert d.reached == 0
             finally:

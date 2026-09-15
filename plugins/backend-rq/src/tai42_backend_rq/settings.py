@@ -19,6 +19,8 @@ from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_
 
 
 class RqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings):
+    """RQ backend settings from the ``RQ_`` env group, with RQ's Redis key shapes."""
+
     model_config = SettingsConfigDict(env_prefix="RQ_")
 
     # ``redis_url`` falls back to the shared ``TAI_DEFAULT_REDIS_URL`` when
@@ -36,29 +38,37 @@ class RqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings
 
     @property
     def rq_scheduler_zset(self) -> str:
+        """The zset key RQ's scheduler holds its scheduled jobs in."""
         return f"{self.rq_prefix}scheduler:scheduled_jobs"
 
     def rq_job_key(self, name: str) -> str:
+        """The hash key for job ``name``."""
         return f"{self.rq_prefix}job:{name}"
 
     def rq_job_dependencies(self, name: str) -> str:
+        """The dependency-set key for job ``name``."""
         return f"{self.rq_prefix}job::{name}:dependencies"
 
     def rq_result_key(self, name: str) -> str:
+        """The result key for job ``name``."""
         return f"{self.rq_prefix}results:{name}"
 
     def rq_worker_key(self, name: str) -> str:
+        """The registration key for worker ``name``."""
         return f"{self.rq_prefix}worker:{name}"
 
     @property
     def rq_workers_key(self) -> str:
+        """The set key listing every registered worker."""
         return f"{self.rq_prefix}workers"
 
     @property
     def rq_queues_key(self) -> str:
+        """The set key listing every known queue."""
         return f"{self.rq_prefix}queues"
 
     def rq_queue_key(self, queue_name: str) -> str:
+        """The list key for queue ``queue_name``."""
         return f"{self.rq_prefix}queue:{queue_name}"
 
     def rq_scheduled_registry_key(self, queue_name: str) -> str:
@@ -68,4 +78,5 @@ class RqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings
 
 @settings_cache
 def rq_settings() -> RqSettings:
+    """The cached :class:`RqSettings`."""
     return RqSettings()

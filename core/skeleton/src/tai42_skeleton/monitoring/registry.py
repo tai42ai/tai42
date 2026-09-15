@@ -34,14 +34,15 @@ _staging: bool = False
 
 
 def init_monitoring(backend: Monitoring) -> None:
-    """Register the monitoring backend, installed by a monitoring plugin
-    (``@tai42_app.monitoring.register_monitoring``).
+    """Register the monitoring backend, installed by a monitoring plugin.
 
-    During an epoch build (staging) the backend is STAGED, not activated: the live
+    Installed via ``@tai42_app.monitoring.register_monitoring``. During an epoch
+    build (staging) the backend is STAGED, not activated: the live
     backend keeps serving and is shut down only at commit, so a failed build leaves it
     running. At boot (no staging) it is activated immediately — shutting down any
     previously-installed backend's writer first so its background flush thread / vendor
-    client is not leaked. The no-op default's ``shutdown`` is a no-op."""
+    client is not leaked. The no-op default's ``shutdown`` is a no-op.
+    """
     global _backend, _staged_backend
     if _staging:
         _staged_backend = backend
@@ -52,17 +53,21 @@ def init_monitoring(backend: Monitoring) -> None:
 
 
 def begin_staging() -> None:
-    """Open monitoring staging: subsequent ``init_monitoring`` calls stage rather than
-    activate, leaving the live backend serving."""
+    """Open monitoring staging: subsequent ``init_monitoring`` calls stage rather than activate.
+
+    The live backend keeps serving.
+    """
     global _staging, _staged_backend
     _staging = True
     _staged_backend = None
 
 
 def commit_staging() -> None:
-    """Activate the staged backend if the build registered one — shutting down the
-    previous live backend's writer — else leave the live backend in place (the build
-    named no monitoring module). Idempotent when no build staged."""
+    """Activate the staged backend if the build registered one, else leave the live backend in place.
+
+    Activation shuts down the previous live backend's writer; a build that named
+    no monitoring module keeps it. Idempotent when no build staged.
+    """
     global _backend, _staged_backend, _staging
     if _staging and _staged_backend is not None:
         if _backend is not None:
@@ -80,10 +85,10 @@ def abort_staging() -> None:
 
 
 def register_monitoring(builder=None):
-    """Decorator installing the process monitoring backend (manifest
-    ``monitoring_module``) — the ``app.monitoring`` facet body.
+    """Decorator installing the process monitoring backend — the ``app.monitoring`` facet body.
 
-    A monitoring plugin (e.g. the Langfuse impl) decorates a zero-arg callable
+    Selected by the manifest ``monitoring_module``. A monitoring plugin (e.g. the
+    Langfuse impl) decorates a zero-arg callable
     that returns a ``Monitoring``; it is built and installed via
     ``init_monitoring``, replacing the no-op default. One provider per process,
     last registration wins. The skeleton never names a concrete vendor — the
@@ -100,11 +105,13 @@ def register_monitoring(builder=None):
 
 
 def reset_monitoring() -> None:
-    """Clear any registered backend so ``get_monitoring()`` falls back to the
-    no-op default. For test isolation: a test that installs its own recording
-    backend resets here (typically via an autouse fixture) so it cannot leak into
-    the next test. Not a production path — a real backend is registered once via
-    the monitoring plugin."""
+    """Clear any registered backend so ``get_monitoring()`` falls back to the no-op default.
+
+    For test isolation: a test that installs its own recording backend resets
+    here (typically via an autouse fixture) so it cannot leak into the next test.
+    Not a production path — a real backend is registered once via the monitoring
+    plugin.
+    """
     global _backend, _staged_backend, _staging
     _backend = None
     _staged_backend = None
@@ -112,10 +119,12 @@ def reset_monitoring() -> None:
 
 
 def get_monitoring_staged() -> Monitoring:
-    """The STAGED backend if a build registered one, else the committed backend — the
-    build's own view (kind status). During staging a build that names a monitoring
-    module records it in ``_staged_backend``; a build naming none keeps the committed
-    backend. Serve-time reads use :func:`get_monitoring` (committed only)."""
+    """The STAGED backend if a build registered one, else the committed backend — the build's own view.
+
+    During staging a build that names a monitoring module records it in
+    ``_staged_backend``; a build naming none keeps the committed backend.
+    Serve-time reads use :func:`get_monitoring` (committed only).
+    """
     if _staged_backend is not None:
         return _staged_backend
     return get_monitoring()

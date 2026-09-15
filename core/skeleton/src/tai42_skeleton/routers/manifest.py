@@ -63,8 +63,10 @@ from tai42_skeleton.operations.manifest import update_manifest as _update_manife
 
 
 async def _json_object(request: Request) -> dict:
-    """Read a JSON-object request body, mapping a malformed/non-object body to the
-    door's explicit 400 (a plain request-model parse would answer 422)."""
+    """Read a JSON-object request body.
+
+    Maps a malformed/non-object body to the door's explicit 400 (a plain request-model parse would answer 422).
+    """
     try:
         body = await request.json()
     except (JSONDecodeError, ValueError) as exc:
@@ -75,9 +77,11 @@ async def _json_object(request: Request) -> dict:
 
 
 async def _extract_mcp_config(request: Request) -> dict[str, Any]:
-    """The MCP-config replacement body → the operation's flat ``mcp`` kwarg. The
-    hand-authored 400s (malformed body, missing ``mcp`` list) are preserved here;
-    a malformed ENTRY is validated by the operation (also a 400)."""
+    """The MCP-config replacement body → the operation's flat ``mcp`` kwarg.
+
+    The hand-authored 400s (malformed body, missing ``mcp`` list) are preserved here;
+    a malformed ENTRY is validated by the operation (also a 400).
+    """
     body = await _json_object(request)
     if "mcp" not in body:
         raise BadRequestError("body must carry an 'mcp' list")
@@ -85,9 +89,12 @@ async def _extract_mcp_config(request: Request) -> dict[str, Any]:
 
 
 def _entries_kwargs(body: dict) -> dict[str, Any]:
-    """A shared add-entries body → op kwargs: an ``entries`` list (missing key or non-list
-    → loud 400) plus an optional ``replace`` flag (absent → ``False``; present non-bool →
-    loud 400 — an explicit bool check, never a truthy coercion). Emptiness is the op's check."""
+    """A shared add-entries body → op kwargs.
+
+    An ``entries`` list (missing key or non-list → loud 400) plus an optional ``replace`` flag
+    (absent → ``False``; present non-bool → loud 400 — an explicit bool check, never a truthy
+    coercion). Emptiness is the op's check.
+    """
     entries = body.get("entries")
     if not isinstance(entries, list):
         raise BadRequestError("body must carry an 'entries' list")
@@ -110,8 +117,10 @@ async def _extract_agents_entries(request: Request) -> dict[str, Any]:
 
 
 def _name_list(body: dict, field: str) -> list[str]:
-    """One ``api_tools`` name-list field: absent → ``[]``; present and not a list of
-    strings → loud 400 naming the field."""
+    """One ``api_tools`` name-list field.
+
+    Absent → ``[]``; present and not a list of strings → loud 400 naming the field.
+    """
     value = body.get(field, [])
     if not isinstance(value, list) or not all(isinstance(name, str) for name in value):
         raise BadRequestError(f"'{field}' must be a list of strings")
@@ -119,16 +128,20 @@ def _name_list(body: dict, field: str) -> list[str]:
 
 
 async def _extract_api_tools_lists(request: Request) -> dict[str, Any]:
-    """The api_tools list-edit body → the op's four flat name-list kwargs. Emptiness (all
-    four empty) is the op's check."""
+    """The api_tools list-edit body → the op's four flat name-list kwargs.
+
+    Emptiness (all four empty) is the op's check.
+    """
     body = await _json_object(request)
     fields = ("include_add", "include_remove", "exclude_add", "exclude_remove")
     return {field: _name_list(body, field) for field in fields}
 
 
 async def _optional_targets(request: Request) -> list[str] | None:
-    """The optional ``targets`` fan-out restriction from a POST body, tolerating an
-    absent/empty body (no body → ``targets=None`` → the unchanged single-worker path)."""
+    """The optional ``targets`` fan-out restriction from a POST body, tolerating an absent/empty body.
+
+    No body → ``targets=None`` → the unchanged single-worker path.
+    """
     try:
         body = await request.json()
     except (JSONDecodeError, ValueError):
@@ -139,23 +152,29 @@ async def _optional_targets(request: Request) -> list[str] | None:
 
 
 async def _extract_targets(request: Request) -> dict[str, Any]:
-    """A body carrying only the optional ``targets`` fan-out restriction (reload,
-    reload-failed, deregister); ``title`` is a path param the adapter supplies."""
+    """A body carrying only the optional ``targets`` fan-out restriction (reload, reload-failed, deregister).
+
+    ``title`` is a path param the adapter supplies.
+    """
     return {"targets": await _optional_targets(request)}
 
 
 async def _extract_failed_query(request: Request) -> dict[str, Any]:
-    """The optional ``targets`` fan-out restriction from the query string (a GET
-    carries it as a repeated ``?targets=`` param, never a body); absent → ``None``."""
+    """The optional ``targets`` fan-out restriction from the query string.
+
+    A GET carries it as a repeated ``?targets=`` param, never a body; absent → ``None``.
+    """
     targets = request.query_params.getlist("targets")
     return {"targets": targets or None}
 
 
 async def _extract_secret_env(request: Request) -> dict[str, Any]:
-    """The combined secret-env body → the operation's flat kwargs. Preserves the door's
-    hand-authored 400s (a mistyped field would otherwise answer 422): ``value`` and
-    ``manifest_pointer`` are required; the env KEY is EITHER an explicit ``key`` OR a
-    ``key_hint`` (exactly one — the op enforces the choice and refuses a colliding key)."""
+    """The combined secret-env body → the operation's flat kwargs.
+
+    Preserves the door's hand-authored 400s (a mistyped field would otherwise answer 422): ``value``
+    and ``manifest_pointer`` are required; the env KEY is EITHER an explicit ``key`` OR a
+    ``key_hint`` (exactly one — the op enforces the choice and refuses a colliding key).
+    """
     body = await _json_object(request)
     try:
         model = SetMcpSecretEnv.model_validate(body)
@@ -174,7 +193,8 @@ async def _extract_manifest_replace(request: Request) -> dict[str, Any]:
 
     The body carries the manifest TEXT verbatim (the PRESERVED view — ``!ENV`` markers
     intact); the operation loads and validates it. A body missing ``manifest_text`` (or
-    a non-string one) is a loud 400 rather than the adapter's default 422."""
+    a non-string one) is a loud 400 rather than the adapter's default 422.
+    """
     body = await _json_object(request)
     try:
         model = ManifestReplace.model_validate(body)

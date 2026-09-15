@@ -96,8 +96,9 @@ def upload_resource(
         ),
     ] = None,
 ) -> None:
-    """Upload a resource — exactly one of ``--text``, ``--base64``, or ``--file`` (a
-    path, or ``-`` to read the raw bytes from stdin). An existing id is overwritten.
+    """Upload a resource, overwriting any existing id.
+
+    Provide exactly one of ``--text``, ``--base64``, or ``--file`` (a path, or ``-`` to read the raw bytes from stdin).
 
     Example: ``tai storage upload notes/todo.txt --text 'buy milk'``
     """

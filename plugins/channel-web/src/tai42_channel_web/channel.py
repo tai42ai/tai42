@@ -1,5 +1,6 @@
-"""The web chat channel: ``deliver`` posts one question into a visitor's chat
-transcript, ``notify`` posts one fire-and-forget agent message.
+"""The web chat channel: ``deliver`` posts a question, ``notify`` posts a fire-and-forget agent message.
+
+Both post into a visitor's chat transcript.
 
 Both ends of a web conversation are the SAME anonymous visitor: they send inbound
 messages through the public message door and receive agent output on their own SSE
@@ -74,10 +75,12 @@ _EXTERNAL_FORMAT = "external"
 
 
 def _media_frame_item(item: MediaItem) -> dict[str, str]:
-    """One media item as its transcript-frame shape — ``caption`` and ``filename``
-    omitted when absent, so there is no empty-value key. ``filename`` rides a
-    ``document`` only (the contract refuses it on any other kind), so a reader keys
-    the download label off the document card alone."""
+    """One media item as its transcript-frame shape.
+
+    ``caption`` and ``filename`` omitted when absent, so there is no empty-value key. ``filename`` rides a
+    ``document`` only (the contract refuses it on any other kind), so a reader keys the download label off
+    the document card alone.
+    """
     entry = {"kind": item.kind.value, "url": item.url}
     if item.caption is not None:
         entry["caption"] = item.caption
@@ -94,7 +97,8 @@ def _option_frame_item(option: Option) -> dict[str, str]:
     ``id``, that id rides the submission as opaque enrichment (``params.reply_id``, the
     same convention every channel keeps). A :class:`LinkOption` becomes
     ``{"kind": "link", "label", "url"}`` — a tap OPENS ``url`` and submits nothing.
-    Optional keys are omitted when absent, so there is no empty-value shape."""
+    Optional keys are omitted when absent, so there is no empty-value shape.
+    """
     if isinstance(option, LinkOption):
         return {"kind": "link", "label": option.label, "url": option.url}
     entry = {"kind": "reply", "text": option.text}
@@ -106,22 +110,28 @@ def _option_frame_item(option: Option) -> dict[str, str]:
 
 
 def _reply_frame_item(reply: ReplyOption) -> dict[str, str]:
-    """One sectioned-list row as its frame shape — a :class:`ReplyOption` is the only
-    row a section holds (a link is a button, never a list row), so this narrows
-    :func:`_option_frame_item` to the reply case."""
+    """One sectioned-list row as its frame shape.
+
+    A :class:`ReplyOption` is the only row a section holds (a link is a button, never a list row), so this
+    narrows :func:`_option_frame_item` to the reply case.
+    """
     return _option_frame_item(reply)
 
 
 def _section_frame_item(section: OptionSection) -> dict[str, object]:
-    """One titled section as its frame shape: ``{"title", "rows": [reply, ...]}`` — the
-    grouped reply rows the page renders under a section header."""
+    """One titled section as its frame shape: ``{"title", "rows": [reply, ...]}``.
+
+    The grouped reply rows the page renders under a section header.
+    """
     return {"title": section.title, "rows": [_reply_frame_item(row) for row in section.rows]}
 
 
 def _form_option_frame_item(option: FormOption) -> dict[str, str]:
     """One per-send form option as its transcript-frame shape: ``{"value", "label"?}``.
-    ``label`` is omitted when absent (the widget shows the value in its place), so there
-    is no empty-value key."""
+
+    ``label`` is omitted when absent (the widget shows the value in its place), so there is no
+    empty-value key.
+    """
     entry = {"value": option.value}
     if option.label is not None:
         entry["label"] = option.label
@@ -129,10 +139,12 @@ def _form_option_frame_item(option: FormOption) -> dict[str, str]:
 
 
 def _form_data_frame(data: FormData) -> dict[str, object]:
-    """A form question's per-send enrichment as its transcript-frame shape:
-    ``{"values", "options"}`` — the prefilled values verbatim and each property's per-send
-    option list as ``{"value", "label"?}`` items. The widget prefills the controls from
-    ``values`` and renders ``options`` as the field's choices (labels shown, values posted)."""
+    """A form question's per-send enrichment as its transcript-frame shape: ``{"values", "options"}``.
+
+    The prefilled values verbatim and each property's per-send option list as ``{"value", "label"?}``
+    items. The widget prefills the controls from ``values`` and renders ``options`` as the field's choices
+    (labels shown, values posted).
+    """
     return {
         "values": data.values,
         "options": {
@@ -142,15 +154,19 @@ def _form_data_frame(data: FormData) -> dict[str, object]:
 
 
 def _form_pages_frame(pages: list[FormPage]) -> list[dict[str, object]]:
-    """A form question's step layout as its transcript-frame shape: each page as
-    ``{"title", "fields"}`` in order. The widget renders one step per page."""
+    """A form question's step layout as its transcript-frame shape: each page as ``{"title", "fields"}`` in order.
+
+    The widget renders one step per page.
+    """
     return [{"title": page.title, "fields": list(page.fields)} for page in pages]
 
 
 def _location_frame_item(location: LocationElement) -> dict[str, object]:
-    """A shared geographic point as its frame shape: the coordinates plus any name and
-    address, each omitted when absent. The page renders it as a map-pin element with an
-    OpenStreetMap link built from the coordinates — no external tiles, CSP-safe."""
+    """A shared geographic point as its frame shape: the coordinates plus any name and address.
+
+    Each of name and address is omitted when absent. The page renders it as a map-pin element with an
+    OpenStreetMap link built from the coordinates — no external tiles, CSP-safe.
+    """
     entry: dict[str, object] = {"latitude": location.latitude, "longitude": location.longitude}
     if location.name is not None:
         entry["name"] = location.name
@@ -160,21 +176,20 @@ def _location_frame_item(location: LocationElement) -> dict[str, object]:
 
 
 def _require_recipient(requested: str | None, message: str) -> str:
-    """The caller-supplied address, or raise ``ChannelDeliveryError`` — this channel
-    has no operator default recipient."""
+    """The caller-supplied address, or raise ``ChannelDeliveryError`` — this channel has no default recipient."""
     if requested is None:
         raise ChannelDeliveryError(message)
     return requested
 
 
 def _canonical_identity(value: str) -> str:
-    """The identity trimmed to the bridge's canonical form, so a transcript key here
-    matches the one the doors write.
+    """The identity trimmed to the bridge's canonical form, so a transcript key here matches the doors'.
 
     The same shape the doors enforce: blank, over-long, or carrying the ``:`` that
     separates a composite recipient is refused LOUDLY. Writing one anyway would key a
     transcript the stream door can never be asked for, so the ask would black-hole
-    silently instead of failing."""
+    silently instead of failing.
+    """
     identity = value.strip()
     if not identity or len(identity) > _MAX_IDENTITY_CHARS or ":" in identity:
         raise ChannelDeliveryError(
@@ -190,7 +205,8 @@ async def _release_shielded(interaction_id: str) -> None:
     ``CancelledError`` is a ``BaseException``, so it slips past ``except Exception``,
     and a plain ``await`` in the unwind is cancelled again before it reaches Redis.
     The release runs as its own shielded task instead — the reservation is freed
-    rather than pinning the interaction until its TTL."""
+    rather than pinning the interaction until its TTL.
+    """
     task = asyncio.ensure_future(release_question(interaction_id))
     _pending_releases.add(task)
     task.add_done_callback(_pending_releases.discard)
@@ -198,12 +214,13 @@ async def _release_shielded(interaction_id: str) -> None:
 
 
 def _split_recipient(recipient: str | None) -> tuple[str, str]:
-    """A sender-identity-less web send names its transcript pair as
-    ``"<identity>:<visitor-id>"``; split it into ``(identity, address)`` or refuse
-    loudly. The split takes the LAST colon: a visitor id is minted from the urlsafe
-    alphabet and so is guaranteed ``:``-free. Whatever is left of it must be a usable
-    identity, which ``_canonical_identity`` then enforces — a composite carrying a
-    second colon is refused, not silently split into an unreadable transcript key."""
+    """Split a sender-identity-less web send's ``"<identity>:<visitor-id>"`` recipient into ``(identity, address)``.
+
+    Refuses loudly on a bad shape. The split takes the LAST colon: a visitor id is minted from the urlsafe
+    alphabet and so is guaranteed ``:``-free. Whatever is left of it must be a usable identity, which
+    ``_canonical_identity`` then enforces — a composite carrying a second colon is refused, not silently
+    split into an unreadable transcript key.
+    """
     value = _require_recipient(recipient, _NO_RECIPIENT)
     identity, separator, address = value.rpartition(":")
     if not separator or not identity or not address:
@@ -223,7 +240,8 @@ class WebChannel:
     ``supports_media_notifications`` / ``supports_interactive_notifications`` /
     ``supports_location_notifications`` / ``supports_form_notifications``. It advertises
     NO template capability (``supports_template_notifications`` absent) — a template is a
-    vendor construct with no place on a page this plugin renders itself."""
+    vendor construct with no place on a page this plugin renders itself.
+    """
 
     # The page renders a schema-driven form widget, so the ask_user helper may route
     # a ``form`` delivery here; absent this flag it never would.
@@ -243,8 +261,7 @@ class WebChannel:
     supports_form_notifications: ClassVar[bool] = True
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
-        """Reserve the pending-question record, then append the question to the
-        recipient's chat transcript.
+        """Reserve the pending-question record, then append the question to the recipient's chat transcript.
 
         The deadline is checked BEFORE any reservation or write: a question already
         past its budget is refused loudly for every format. The record is reserved

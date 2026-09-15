@@ -11,8 +11,7 @@ from tai42_contract.interactions.models import AnswerMismatchPolicy
 
 
 class Correlation(BaseModel):
-    """The per-address record a channel keeps while ONE parked ask awaits the
-    participant's next inbound reply.
+    """The per-address record a channel keeps while ONE parked ask awaits a reply.
 
     When ``ask_user`` is delivered on a medium whose reply arrives as a fresh
     inbound message (not a tap on a signed link), the channel stores this record
@@ -52,8 +51,7 @@ class Correlation(BaseModel):
 
 @runtime_checkable
 class CorrelationStore(Protocol):
-    """Storage primitives ONLY for the one-pending-per-address correlation record —
-    no policy.
+    """Storage primitives ONLY for the one-pending-per-address correlation record — no policy.
 
     A channel that delivers ``ask_user`` questions whose replies arrive as fresh
     inbound messages keeps a :class:`Correlation` per waiting address so the

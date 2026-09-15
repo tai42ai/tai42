@@ -32,8 +32,10 @@ from tai42_skeleton.runs.store import get_run_index_store
 
 
 class RunsListQuery(BaseModel):
-    """The runs-index list door's filters + paging. Spec metadata only — the router
-    parses the query at the HTTP edge."""
+    """The runs-index list door's filters + paging.
+
+    Spec metadata only — the router parses the query at the HTTP edge.
+    """
 
     preset: str | None = Field(default=None, description="Filter to one preset name.")
     version: int | None = Field(default=None, description="Filter to one preset version.")
@@ -62,10 +64,13 @@ class RunsListQuery(BaseModel):
 
 
 def _row_view(row: RunRow) -> dict[str, Any]:
-    """The list-row wire view — every enumerable field plus the ``trace_id`` a client
-    deep-links to the observability trace view with (``None`` when the run has no
-    trace), and the ``interactionId`` lifecycle key joining a parked run's row with
-    its resume dispatch's row (``None`` for a plain run)."""
+    """The list-row wire view.
+
+    Every enumerable field plus the ``trace_id`` a client deep-links to the
+    observability trace view with (``None`` when the run has no trace), and the
+    ``interactionId`` lifecycle key joining a parked run's row with its resume
+    dispatch's row (``None`` for a plain run).
+    """
     return {
         "runId": row.run_id,
         "preset": row.preset_name,
@@ -103,7 +108,8 @@ async def list_runs(
 
     Enumerated from the ``run_index`` table, so runs are listable without the
     observability vendor. With the store OFF the honest answer is the empty page.
-    Each item carries ``traceId`` for a deep link to the vendor trace view."""
+    Each item carries ``traceId`` for a deep link to the vendor trace view.
+    """
     if not component_store_configured(SKELETON_COMPONENT):
         return {"items": [], "page": page, "nextPage": None}
 
@@ -132,12 +138,12 @@ async def list_runs(
     response_model=RunsPruneResult,
 )
 async def prune_runs() -> dict:
-    """Delete runs-index rows older than the configured retention window; return the
-    window and the number pruned.
+    """Delete runs-index rows older than the configured retention window; return the window and count pruned.
 
     A no-op (nothing deleted) when the store is OFF or ``TAI_RUNS_INDEX_RETENTION_DAYS``
     is unset — each reported in ``skipped``, mirroring the checkpoint-retention sweep's
-    disabled-retention posture (unset = rows kept forever)."""
+    disabled-retention posture (unset = rows kept forever).
+    """
     if not component_store_configured(SKELETON_COMPONENT):
         return {
             "retention_days": None,

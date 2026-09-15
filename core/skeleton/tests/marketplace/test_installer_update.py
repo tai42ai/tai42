@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 from typing import Any
 
 import pytest
 
-from tai42_skeleton.marketplace import installer as installer_module
+from tai42_skeleton.marketplace import installer_update as installer_update_module
 from tai42_skeleton.marketplace.errors import (
     InstallStateError,
     InstallUnwindError,
@@ -32,7 +33,7 @@ from .test_installer import (
 
 
 async def test_update_happy_replaces_row_in_one_write(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
     new = make_spec(version="2.0.0", provides=_tool_provides("pkg.new"))
     h = Harness(manifest={"tools": [{"title": "pkg.old", "module": "pkg.old"}]})
@@ -48,7 +49,7 @@ async def test_update_happy_replaces_row_in_one_write(monkeypatch: pytest.Monkey
 
 
 async def test_update_same_version_is_state_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     spec = make_spec(version="1.0.0")
     h = Harness()
     h.store.preload(spec, version="1.0.0")
@@ -80,7 +81,7 @@ async def test_update_pipless_fails_after_resolve_for_packaged_spec(monkeypatch:
     def _no_pip() -> None:
         raise PipUnavailableError("no pip")
 
-    monkeypatch.setattr(installer_module, "ensure_pip_available", _no_pip)
+    monkeypatch.setattr(installer_update_module, "ensure_pip_available", _no_pip)
     old = make_spec(version="1.0.0")
     new = make_spec(version="2.0.0")
     h = Harness()
@@ -96,7 +97,7 @@ async def test_update_pipless_fails_after_resolve_for_packaged_spec(monkeypatch:
 async def test_update_unwind_reinstalls_old_github_pin_through_verified_fetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     calls = _fake_verified_fetch(monkeypatch)
     old = make_spec(version="1.0.0")
     new = make_spec(version="2.0.0")
@@ -149,7 +150,7 @@ async def test_update_same_module_rename_does_not_self_collide(monkeypatch: pyte
     # manifest (a version bump that keeps the module path). The pre-flight removes
     # the OLD spec's entries in memory BEFORE the collision check, so the shared
     # module must NOT be read as a self-collision — the update proceeds to pip.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     old = make_spec(version="1.0.0", provides=_tool_provides("pkg.same"))
     new = make_spec(version="2.0.0", provides=_tool_provides("pkg.same"))
     h = Harness(manifest={"tools": [{"title": "pkg.same", "module": "pkg.same"}]})
@@ -168,7 +169,7 @@ async def test_update_genuine_collision_refuses_before_pip(monkeypatch: pytest.M
     # The new spec's module collides with a FOREIGN manifest entry (one that does
     # not belong to the old spec, so removing the old entries does not clear it).
     # That is a real update-side collision: a 409 raised BEFORE any pip call.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
     new = make_spec(version="2.0.0", provides=_tool_provides("pkg.foreign"))
     h = Harness(
@@ -194,7 +195,7 @@ async def test_update_unwind_reload_back_failure_escalates(monkeypatch: pytest.M
     # the unwind's own restore apply (call 1) then fails its reload too. A failed
     # unwind sub-step escalates to InstallUnwindError carrying both the original step
     # error and the unwind error.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
     new = make_spec(version="2.0.0", provides=_tool_provides("pkg.new"))
     h = Harness(manifest={"tools": [{"title": "pkg.old", "module": "pkg.old"}]})
@@ -220,7 +221,7 @@ def _published_row(version: str, contract_range: str = ">=0.1,<1.0") -> dict[str
 async def test_upgrade_all_reports_every_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
     # One batch, four refs, one of each outcome — and the report is COMPLETE:
     # the failed ref never truncates the entries after it.
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     up = make_spec(name="up", package="pkg-up", provides=_tool_provides("pkg.up"))
     current = make_spec(name="current", package="pkg-current", provides=_tool_provides("pkg.current"))
     stuck = make_spec(name="stuck", package="pkg-stuck", provides=_tool_provides("pkg.stuck"))
@@ -259,7 +260,7 @@ async def test_upgrade_all_reports_every_outcome(monkeypatch: pytest.MonkeyPatch
 
 
 async def test_upgrade_all_holds_one_lock_across_the_batch(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     a = make_spec(name="a", package="pkg-a")
     b = make_spec(name="b", package="pkg-b")
     h = Harness()

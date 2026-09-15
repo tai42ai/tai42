@@ -15,7 +15,7 @@ from starlette.requests import Request
 from starlette.types import Receive, Scope, Send
 
 from tai42_skeleton.middleware import body_limit
-from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware, _BodyTooLarge
+from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware, _BodyTooLargeError
 from tai42_skeleton.settings.body_limit import BodyLimitSettings
 
 
@@ -147,14 +147,14 @@ async def test_over_cap_after_response_start_reraises(monkeypatch):
         # Start the response BEFORE reading the (over-cap) body.
         await send({"type": "http.response.start", "status": 200, "headers": []})
         while True:
-            message = await receive()  # eventually raises _BodyTooLarge
+            message = await receive()  # eventually raises _BodyTooLargeError
             if message["type"] == "http.request" and not message.get("more_body", False):
                 break
 
     mw = BodyLimitMiddleware(inner)
     # The stream is already committed, so the over-cap cannot become a 413 — it
     # surfaces loudly instead of a silently truncated response.
-    with pytest.raises(_BodyTooLarge):
+    with pytest.raises(_BodyTooLargeError):
         await _run(mw, _scope(), [(b"x" * 20, False)])
 
 
@@ -186,7 +186,7 @@ async def test_over_cap_413_inside_server_error_middleware(monkeypatch):
     # Production layering: BodyLimitMiddleware runs INSIDE the base app's own
     # Starlette ``ServerErrorMiddleware`` (TaiMCP._base_middleware passes it into the
     # base-app middleware list). Were the cap placed OUTSIDE the error handler, that
-    # handler would catch the raised ``_BodyTooLarge`` and commit a 500 before the
+    # handler would catch the raised ``_BodyTooLargeError`` and commit a 500 before the
     # cap could answer 413. Driving an over-cap body through a real Starlette app —
     # which wraps its middleware list inside ServerErrorMiddleware exactly as the
     # base app does — must still yield 413.
@@ -198,7 +198,7 @@ async def test_over_cap_413_inside_server_error_middleware(monkeypatch):
     _patch_cap(monkeypatch, 10)
 
     async def echo(request: Request) -> JSONResponse:
-        await request.json()  # reads the over-cap body -> _BodyTooLarge
+        await request.json()  # reads the over-cap body -> _BodyTooLargeError
         return JSONResponse({"ok": True})
 
     app = Starlette(

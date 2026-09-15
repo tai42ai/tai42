@@ -1,6 +1,7 @@
-"""Conversation bridge — client-initiated messages routed to an agent turn whose answer is
-durably stored and delivered back. The models and the ``AppConversations`` facet are the
-contract; this package is the host implementation: ``managers`` the routing-row store
+"""Conversation bridge — client messages routed to an agent turn whose answer is durably stored and delivered back.
+
+The models and the ``AppConversations`` facet are the contract; this package is the host
+implementation: ``managers`` the routing-row store
 (keyspace 4), ``cache`` its singleton accessor, ``backup`` the row export/import seam,
 ``ledger`` the channel send progress (keyspace 5), ``settings`` the ``CONVERSATIONS_*``
 config carrying the keyspace helpers and every bound.

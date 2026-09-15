@@ -156,8 +156,10 @@ _MARKER_SHAPES: frozenset[str] = frozenset({Shape.k8s.value, Shape.compose.value
 
 
 class CapabilityReport(BaseModel):
-    """The recycle capability of this deployment, resolved at validate time. Consumed
-    by the profile-apply validator to refuse a recycle-class diff upfront."""
+    """The recycle capability of this deployment, resolved at validate time.
+
+    Consumed by the profile-apply validator to refuse a recycle-class diff upfront.
+    """
 
     shape: Shape
     recycle_supported: bool
@@ -166,9 +168,11 @@ class CapabilityReport(BaseModel):
 
 
 def detect_shape() -> Shape:
-    """Resolve the supervision shape from the ``TAI_SUPERVISED`` marker. Absent =
-    ``bare``; any value other than the three supervised markers raises loudly (a typo
-    must never silently degrade to bare and skip recycle refusal)."""
+    """Resolve the supervision shape from the ``TAI_SUPERVISED`` marker.
+
+    Absent = ``bare``; any value other than the three supervised markers raises loudly (a typo
+    must never silently degrade to bare and skip recycle refusal).
+    """
     marker = os.environ.get(SUPERVISION_MARKER_ENV, "").strip()
     if marker == "":
         return Shape.bare
@@ -181,8 +185,10 @@ def detect_shape() -> Shape:
 
 
 def refused_keys(shape: Shape) -> frozenset[str]:
-    """The keys a recycle diff may not carry on ``shape``: Tier 1 always, plus the
-    shape's Tier-2 pinned list (empty for harness and bare)."""
+    """The keys a recycle diff may not carry on ``shape``.
+
+    Tier 1 always, plus the shape's Tier-2 pinned list (empty for harness and bare).
+    """
     if shape is Shape.k8s:
         return TIER1_REFUSED_KEYS | TIER2_K8S_REFUSED_KEYS
     if shape is Shape.compose:
@@ -191,9 +197,11 @@ def refused_keys(shape: Shape) -> frozenset[str]:
 
 
 def capability_report() -> CapabilityReport:
-    """The recycle capability of this deployment. ``recycle_supported`` is false only
-    on ``bare`` (no supervisor) — a recycle-class diff is then refused wholesale;
-    on the supervised shapes ``refused_keys`` names the upfront-refused keys."""
+    """The recycle capability of this deployment.
+
+    ``recycle_supported`` is false only on ``bare`` (no supervisor) — a recycle-class diff is then refused
+    wholesale; on the supervised shapes ``refused_keys`` names the upfront-refused keys.
+    """
     shape = detect_shape()
     return CapabilityReport(
         shape=shape,
@@ -205,7 +213,9 @@ def capability_report() -> CapabilityReport:
 
 def _replace_diff_keys(stored: Mapping[str, str], proposed: Mapping[str, str]) -> set[str]:
     """The env key NAMES a whole-env replace changes: added, removed, or value-changed.
-    Names only — the caller classifies them; a diff never carries a value off this seam."""
+
+    Names only — the caller classifies them; a diff never carries a value off this seam.
+    """
     added = {key for key in proposed if key not in stored}
     removed = {key for key in stored if key not in proposed}
     changed = {key for key in proposed if key in stored and stored[key] != proposed[key]}
@@ -219,7 +229,8 @@ def _refuse_unrecyclable(diff_keys: set[str], recycle_diff_keys: list[str], repo
     or it reaches the worker bus itself) is refused upfront naming the key: a recycle can
     never make it stick. A recycle-class diff on a BARE (unsupervised) deployment is
     refused wholesale — no supervisor exists to respawn a worker under the new env. Both
-    are loud ``ValueError``s the operations layer maps to a 400. Names only."""
+    are loud ``ValueError``s the operations layer maps to a 400. Names only.
+    """
     pinned = sorted(diff_keys & set(report.refused_keys))
     if pinned:
         raise ValueError(
@@ -236,8 +247,10 @@ def _refuse_unrecyclable(diff_keys: set[str], recycle_diff_keys: list[str], repo
 
 
 def _recycle_step_timeout() -> float:
-    """The per-step recycle budget — the same drain budget a retire uses, so a recycled
-    worker's replacement gets the shutdown-drain window to boot and rejoin the census."""
+    """The per-step recycle budget — the same drain budget a retire uses.
+
+    A recycled worker's replacement gets the shutdown-drain window to boot and rejoin the census.
+    """
     from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
 
     return tool_runs_settings().shutdown_drain_seconds

@@ -71,7 +71,8 @@ class _FieldTargets(NamedTuple):
     (module paths or the distribution name); ``mcp_entry`` carries the built
     ``{title, config}`` dicts; ``descriptor_entry`` carries the dumped provider
     descriptor dicts. Each writer branches on ``mode`` before reading a payload, so
-    the shapes never mix at one site."""
+    the shapes never mix at one site.
+    """
 
     mode: str
     values: list[Any]
@@ -80,26 +81,33 @@ class _FieldTargets(NamedTuple):
 # The item-value derivation the grouping shares between the two payload families:
 # a ``data`` item's whole manifest object, and a non-data item's contributed string.
 def _data_item_payload(item: PluginItem, mode: str) -> dict[str, Any]:
-    """The manifest object a ``data`` item contributes: an ``mcp_entry`` item's
-    ``{title, config}`` wrapper around its transport config, or a
-    ``descriptor_entry`` item's dumped ``provider`` descriptor. The contract
-    guarantees the declarative block the kind names is set."""
+    """The manifest object a ``data`` item contributes.
+
+    An ``mcp_entry`` item's ``{title, config}`` wrapper around its transport config, or a
+    ``descriptor_entry`` item's dumped ``provider`` descriptor. The contract guarantees the
+    declarative block the kind names is set.
+    """
     if mode == "mcp_entry":
-        assert item.mcp is not None
+        if item.mcp is None:
+            raise AssertionError
         return {"title": item.name, "config": item.mcp.model_dump(exclude_none=True)}
-    assert item.provider is not None  # descriptor_entry
+    if item.provider is None:
+        raise AssertionError
     return item.provider.model_dump(mode="json", exclude_none=True)
 
 
 def _string_item_value(item: PluginItem, spec: PluginSpec, mode: str) -> str | None:
-    """The manifest string a non-data item contributes: the plugin's DISTRIBUTION
-    name for a ``package_list`` slot, the module's TOP-LEVEL import package for a
-    ``scalar_module`` slot (never the descriptor's impl submodule, so the loader
-    whitelists every module under the package root), else the item's own module."""
+    """The manifest string a non-data item contributes.
+
+    The plugin's DISTRIBUTION name for a ``package_list`` slot, the module's TOP-LEVEL import
+    package for a ``scalar_module`` slot (never the descriptor's impl submodule, so the loader
+    whitelists every module under the package root), else the item's own module.
+    """
     if mode == "package_list":
         return spec.package
     if mode == "scalar_module":
-        assert item.module is not None
+        if item.module is None:
+            raise AssertionError
         return item.module.partition(".")[0]
     return item.module
 
@@ -148,8 +156,10 @@ def _existing_list(manifest_dict: dict[str, Any], field: str) -> list[Any]:
 
 
 def _ensure_list(manifest_dict: dict[str, Any], field: str) -> list[Any]:
-    """The list-shaped manifest field, replacing an absent or non-list value with a
-    fresh list stored in place so the caller appends into the live manifest."""
+    """The list-shaped manifest field, replacing an absent or non-list value with a fresh list.
+
+    The fresh list is stored in place so the caller appends into the live manifest.
+    """
     entries = manifest_dict.get(field)
     if not isinstance(entries, list):
         entries = []
@@ -309,9 +319,9 @@ _REMOVE_HANDLERS: dict[str, Callable[[dict[str, Any], str, _FieldTargets], bool]
 
 
 def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
-    """Human-readable descriptions of every provides item that cannot be applied
-    cleanly against ``manifest_dict``; an empty list means the spec is safe to
-    apply.
+    """Human-readable descriptions of every provides item that cannot be applied cleanly against ``manifest_dict``.
+
+    An empty list means the spec is safe to apply.
 
     A ``config_row`` item collides when an existing entry already carries that
     module or that title; a ``module_list``/``package_list`` item when the exact
@@ -332,8 +342,7 @@ def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
 
 
 def apply_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> None:
-    """Patch ``manifest_dict`` in place, adding one manifest reference per
-    provides target.
+    """Patch ``manifest_dict`` in place, adding one manifest reference per provides target.
 
     Re-checks :func:`collisions` first — the install pre-flight may have raced a
     foreign manifest edit — and raises :class:`ManifestCollisionError` listing
@@ -348,8 +357,7 @@ def apply_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> None:
 
 
 def remove_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> bool:
-    """Remove every manifest reference the spec's provides created; return
-    whether anything changed.
+    """Remove every manifest reference the spec's provides created; return whether anything changed.
 
     Convergent — an already-removed entry is skipped, so a re-run after a partial
     uninstall completes the removal. ``config_row`` entries are dropped by

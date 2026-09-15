@@ -20,11 +20,13 @@ class _RecordQueryStore(_StoreBase):
     async def list_subjects(
         self, state: str, *, kind: str | None, limit: int, cursor: str | None, conn: AsyncConnection[Any] | None = None
     ) -> list[dict[str, Any]]:
-        """One keyset page of a state's subjects, ordered by the FULL subject identity
-        ``(target_kind, target_name, subject_kind, subject_key)`` (optionally one
-        ``kind``), each row ``{target_kind, target_name, kind, key, updated_at}``, starting
-        strictly after ``cursor`` (the packed identity of the last row seen). With ``conn``
-        the read joins the caller's transaction."""
+        """One keyset page of a state's subjects, ordered by the FULL subject identity.
+
+        Ordered by ``(target_kind, target_name, subject_kind, subject_key)`` (optionally
+        one ``kind``), each row ``{target_kind, target_name, kind, key, updated_at}``,
+        starting strictly after ``cursor`` (the packed identity of the last row seen). With
+        ``conn`` the read joins the caller's transaction.
+        """
         after = ("", "", "", "") if cursor is None else _split_cursor(cursor)
         async with self._read_cursor(conn) as cur:
             if kind is None:
@@ -48,10 +50,12 @@ class _RecordQueryStore(_StoreBase):
     async def search_records(
         self, state: str, containment: dict[str, Any], *, limit: int, cursor: str | None
     ) -> list[dict[str, Any]]:
-        """One keyset page of the subjects whose record data CONTAINS ``containment``
-        (``data @> containment``, the GIN ``jsonb_path_ops`` index serving it), ordered
+        """One keyset page of the subjects whose record data CONTAINS ``containment``.
+
+        Served by ``data @> containment`` over the GIN ``jsonb_path_ops`` index, ordered
         and cursored over the FULL subject identity ``(target_kind, target_name,
-        subject_kind, subject_key)``."""
+        subject_kind, subject_key)``.
+        """
         after = ("", "", "", "") if cursor is None else _split_cursor(cursor)
         async with (
             _pool(_settings()) as pool,
@@ -70,9 +74,11 @@ class _RecordQueryStore(_StoreBase):
     async def writes(
         self, state: str, subject: StateSubject, *, limit: int, cursor: str | None
     ) -> list[dict[str, Any]]:
-        """One keyset page of a subject's write ledger, newest first (by ``id`` DESC),
-        starting strictly before ``cursor`` (the last ``id`` seen). The subject resolves
-        through the alias table so the audit trail follows a fold."""
+        """One keyset page of a subject's write ledger, newest first (by ``id`` DESC).
+
+        Starts strictly before ``cursor`` (the last ``id`` seen). The subject resolves
+        through the alias table so the audit trail follows a fold.
+        """
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,

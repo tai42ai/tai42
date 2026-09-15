@@ -20,15 +20,17 @@ _ENTRY_REFUSED_MESSAGE = "This chat is private. Open it from the link you were g
 
 
 async def _entry_gate_outcome(request: Request, identity: str, entry_code: str | None) -> str | None:
-    """The entry-gate admission ladder for a mint-needing caller on ``identity``: the
-    refusal reason (``missing``/``throttled``/``unknown``) or ``None`` when the route
+    """The entry-gate admission ladder for a mint-needing caller on ``identity``.
+
+    The refusal reason (``missing``/``throttled``/``unknown``) or ``None`` when the route
     is ungated or the code is live.
 
     The throttle is checked BEFORE the code lookup; missing/throttled/unknown all
     resolve to a refusal, so no response ever differs by code validity (no oracle).
     The presented value is never returned or logged. Both the page door and the rotate
     door call this one ladder and map a non-``None`` outcome to their own refusal
-    shape — an HTML page or a JSON envelope."""
+    shape — an HTML page or a JSON envelope.
+    """
     if not await is_gate_enabled(identity):
         return None
     bucket = _client_bucket(request)

@@ -34,9 +34,11 @@ from tai42_skeleton.routers._tool_call import ToolCallRequestError, read_tool_ca
 
 
 async def _extract_run_tool(request: Request) -> dict[str, Any]:
-    """Parse the run-tool body ``{tool_name, arguments}`` at the HTTP edge via the
-    shared tool-call parser, mapping its loud 4xx to a typed error. Yields the
-    operation's flat ``tool_name`` / ``arguments`` kwargs."""
+    """Parse the run-tool body ``{tool_name, arguments}`` at the HTTP edge via the shared parser.
+
+    Maps its loud 4xx to a typed error. Yields the operation's flat ``tool_name``
+    / ``arguments`` kwargs.
+    """
     try:
         tool_name, arguments = await read_tool_call(request)
     except ToolCallRequestError as exc:

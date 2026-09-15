@@ -1,5 +1,4 @@
-"""Roles: the versioned store view, the seeded defaults, the LIVE apply helper, and the
-application's ``AccountsAdminServices`` implementation.
+"""Roles: the versioned store view, the seeded defaults, the LIVE apply helper, and the admin services impl.
 
 A role is an operator-authored, versioned permission set under two layers. Layer 1 is a
 KEPT base-tier jq security ceiling carried on ``condition`` (owner-scoping, the
@@ -117,9 +116,11 @@ VIEWER_JQ = f"({_VIEWER_AUTH_CARVE})"
 
 
 def grantable_feature_tags() -> set[str]:
-    """Every feature-group tag that carries at least one GRANTABLE (``read``/``write``,
-    non-fenced) gated route — the tags a per-tag level can open. A tag whose routes are
-    ALL fenced/secret is admin-only and never appears here (a level can never open it)."""
+    """Every feature-group tag carrying at least one GRANTABLE gated route — the tags a level can open.
+
+    A GRANTABLE route is ``read``/``write`` and non-fenced. A tag whose routes are ALL
+    fenced/secret is admin-only and never appears here (a level can never open it).
+    """
     from tai42_skeleton.app.route_registry import load_all_routes
 
     tags: set[str] = set()
@@ -130,10 +131,12 @@ def grantable_feature_tags() -> set[str]:
 
 
 def _seeded_roles() -> list[dict[str, Any]]:
-    """The default role bodies (``RoleDefinition`` dumps). ``editor``/``viewer`` derive
-    their grant maps from the live registry so a new grantable feature area joins the
-    default reach automatically; the bulk-secret reads are ``action=secret`` (fenced)
-    so they never appear in any grant map."""
+    """The default role bodies (``RoleDefinition`` dumps).
+
+    ``editor``/``viewer`` derive their grant maps from the live registry so a new
+    grantable feature area joins the default reach automatically; the bulk-secret
+    reads are ``action=secret`` (fenced) so they never appear in any grant map.
+    """
     grantable = sorted(grantable_feature_tags())
     return [
         RoleDefinition(
@@ -161,42 +164,55 @@ def _seeded_roles() -> list[dict[str, Any]]:
 
 
 class RoleStoreView:
-    """Typed role view delegating to a generic :class:`VersionedStore` under
-    ``kind="role"``. The body is a :class:`RoleDefinition` dump."""
+    """Typed role view delegating to a generic :class:`VersionedStore` under ``kind="role"``.
+
+    The body is a :class:`RoleDefinition` dump.
+    """
 
     def __init__(self, store: VersionedStore) -> None:
+        """Wrap the generic versioned ``store`` this view reads and writes roles through."""
         self._store = store
 
     async def seed(self, name: str, body: dict[str, Any]) -> bool:
-        """Create the role only if it does not exist (idempotent create-only). Returns
-        ``True`` when a new role was created, ``False`` when one already existed and was
-        left untouched (an operator edit survives a re-seed).
+        """Create the role only if it does not exist (idempotent create-only).
+
+        Returns ``True`` when a new role was created, ``False`` when one already existed
+        and was left untouched (an operator edit survives a re-seed).
 
         Concurrent-boot safe: replicas seeding the same role at once converge on ONE
         active row — the store's create ABSORBS the live-duplicate conflict rather than
         raising a unique violation, so the losing replica takes the ``False`` branch
-        quietly, with no spurious duplicate-key ERROR in the server log."""
+        quietly, with no spurious duplicate-key ERROR in the server log.
+        """
         try:
             await self._store.create(_KIND, name, body)
-            return True
         except DocumentExistsError:
             return False
+        else:
+            return True
 
     async def create(self, name: str, body: dict[str, Any], tx: VersionedStoreTransaction | None = None) -> None:
-        """Create a brand-new role. Raises ``DocumentExistsError`` on a name collision
-        (the caller maps it to a loud 409). Runs within ``tx`` when one is supplied."""
+        """Create a brand-new role.
+
+        Raises ``DocumentExistsError`` on a name collision (the caller maps it to a loud
+        409). Runs within ``tx`` when one is supplied.
+        """
         await self._store.create(_KIND, name, body, tx=tx)
 
     async def update(self, name: str, body: dict[str, Any], tx: VersionedStoreTransaction | None = None) -> None:
         """Persist an edit as a NEW version (versioned history + rollback come free).
+
         Raises ``DocumentNotFoundError`` when the role does not exist (loud 404). Runs
-        within ``tx`` when one is supplied."""
+        within ``tx`` when one is supplied.
+        """
         await self._store.save_version(_KIND, name, body, tx=tx)
 
     async def delete(self, name: str, tx: VersionedStoreTransaction | None = None) -> None:
-        """Hard-delete the active role and its version rows. Raises
-        ``DocumentNotFoundError`` when the role does not exist. Runs within ``tx`` when
-        one is supplied."""
+        """Hard-delete the active role and its version rows.
+
+        Raises ``DocumentNotFoundError`` when the role does not exist. Runs within ``tx``
+        when one is supplied.
+        """
         await self._store.delete(_KIND, name, tx=tx)
 
     async def rename(self, name: str, new_name: str) -> DocumentRecord:
@@ -204,32 +220,42 @@ class RoleStoreView:
         return await self._store.rename(_KIND, name, new_name)
 
     async def list_versions(self, name: str) -> list[DocumentVersion]:
+        """The version history of role ``name``."""
         return await self._store.list_versions(_KIND, name)
 
     async def get_version(
         self, name: str, version: int, tx: VersionedStoreTransaction | None = None
     ) -> DocumentVersion:
-        """The immutable body of one version. Runs within ``tx`` when one is supplied, so a
-        rollback's before/after reads ride the transaction's connection."""
+        """The immutable body of one version.
+
+        Runs within ``tx`` when one is supplied, so a rollback's before/after reads ride
+        the transaction's connection.
+        """
         return await self._store.get_version(_KIND, name, version, tx=tx)
 
     async def rollback(self, name: str, version: int, tx: VersionedStoreTransaction | None = None) -> DocumentRecord:
+        """Restore an earlier ``version`` as a new active version. Runs within ``tx`` when supplied."""
         return await self._store.rollback(_KIND, name, version, tx=tx)
 
     async def get_active_body(
         self, name: str, *, tx: VersionedStoreTransaction | None = None, for_update: bool = False
     ) -> dict[str, Any]:
-        """The active body of role ``name``. Raises ``DocumentNotFoundError`` when the role
-        does not exist. Passed a ``tx`` the read rides that transaction's connection (no
-        second pooled connection while the transaction is open); with ``for_update=True`` it
-        row-locks the active role so a read-modify-write serializes against a concurrent
-        edit — the lock needs the transaction, so ``for_update`` requires ``tx``."""
+        """The active body of role ``name``.
+
+        Raises ``DocumentNotFoundError`` when the role does not exist. Passed a ``tx`` the
+        read rides that transaction's connection (no second pooled connection while the
+        transaction is open); with ``for_update=True`` it row-locks the active role so a
+        read-modify-write serializes against a concurrent edit — the lock needs the
+        transaction, so ``for_update`` requires ``tx``.
+        """
         return await self._store.get_active_body(_KIND, name, tx=tx, for_update=for_update)
 
     async def list_roles(self) -> list[dict[str, Any]]:
-        """Every role's active body as a full ``RoleDefinition``-shaped dict
-        (``{name, description, scopes, condition, base_tier, allow_all, grants}``) — the
-        listing shape the roles route returns."""
+        """Every role's active body as a full ``RoleDefinition``-shaped dict.
+
+        Each dict is ``{name, description, scopes, condition, base_tier, allow_all,
+        grants}`` — the listing shape the roles route returns.
+        """
         records = await self._store.list(_KIND)
         roles: list[dict[str, Any]] = []
         for record in records:
@@ -247,8 +273,10 @@ def role_store() -> RoleStoreView:
 
 
 async def seed_default_roles() -> None:
-    """Seed the default admin/editor/viewer roles, idempotent create-only: an
-    operator-edited role is never overwritten by a re-seed."""
+    """Seed the default admin/editor/viewer roles, idempotent create-only.
+
+    An operator-edited role is never overwritten by a re-seed.
+    """
     store = role_store()
     for body in _seeded_roles():
         await store.seed(body["name"], body)
@@ -271,7 +299,8 @@ async def apply_role(user_id: str, role_name: str) -> None:
     the user has no policy row (the bootstrap owner and every admin-created/invited user
     reach here with no row). On that sentinel this falls through to ``create_policy``, so
     the user is never left on the empty ``AccessPolicy()`` default. Raises ``KeyError``
-    on an unknown role (loud)."""
+    on an unknown role (loud).
+    """
     try:
         body = await role_store().get_active_body(role_name)
     except DocumentNotFoundError as exc:
@@ -325,9 +354,11 @@ class SkeletonAccountsAdminServices:
     Injected onto ``settings.admin`` at ``AuthAdapter`` construction so every
     accounts-provider factory reaches it as ``settings.admin`` (never by importing this
     module). Every method mutates application-owned policy state and bumps the policy
-    version so enforcement follows immediately."""
+    version so enforcement follows immediately.
+    """
 
     async def apply_role(self, user_id: str, role: str) -> None:
+        """Assign role ``role`` to ``user_id``'s enforced policy; see :func:`apply_role`."""
         await apply_role(user_id, role)
 
     async def remove_policy(self, user_id: str) -> None:
@@ -336,7 +367,8 @@ class SkeletonAccountsAdminServices:
         Owned keys are walked from the management/listing home (``policy_data``'s
         ``OWNER_USER_ID_CLAIM``). The user is expected to EXIST: a delete of a missing
         policy row is an invariant breach here (only ``apply_role`` legitimately upserts
-        a missing user), so it raises rather than proceeding silently."""
+        a missing user), so it raises rather than proceeding silently.
+        """
         store = access_control_store()
 
         # Revoke keys this user owns first (before its own policy is gone), reading the
@@ -355,7 +387,8 @@ class SkeletonAccountsAdminServices:
         """Set/clear the disabled marker on ``user_id``'s enforced policy.
 
         The user is expected to EXIST: a missing policy row is an invariant breach and
-        raises (only ``apply_role`` upserts a missing user)."""
+        raises (only ``apply_role`` upserts a missing user).
+        """
         store = access_control_store()
         body = await store.get_policy_body(user_id)
         if body is None:

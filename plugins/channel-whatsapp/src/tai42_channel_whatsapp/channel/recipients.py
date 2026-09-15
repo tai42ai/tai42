@@ -17,18 +17,20 @@ _NO_DEFAULT_RECIPIENT = "no recipient requested and this channel has no default 
 
 
 def _require_recipient(requested: str | None, message: str) -> str:
-    """The caller-supplied recipient, or raise ``ChannelDeliveryError`` — this
-    channel has no operator default recipient."""
+    """The caller-supplied recipient, or raise ``ChannelDeliveryError``.
+
+    This channel has no operator default recipient.
+    """
     if requested is None:
         raise ChannelDeliveryError(message)
     return requested
 
 
 async def _resolve_template_target(settings: WhatsAppSettings, phone_number_id: str, requested: str | None) -> str:
-    """The recipient for a TEMPLATE send: required, and on the allowlist OR a
-    known contact of the send-from ``phone_number_id``, else refused loudly.
+    """The recipient for a TEMPLATE send, refused loudly when it fails the fence.
 
-    A template is the one send Meta delivers cold, so it keeps an operator fence;
+    Required, and on the allowlist OR a known contact of the send-from
+    ``phone_number_id``. A template is the one send Meta delivers cold, so it keeps an operator fence;
     the known-contact lookup keys on the resolved send-from number — a participant is
     "known" to the number they actually messaged.
     """

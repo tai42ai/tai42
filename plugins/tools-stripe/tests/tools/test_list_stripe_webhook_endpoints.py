@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from tai42_tools_stripe._internal.tools.stripe_client import StripeLivemodeMismatch
+from tai42_tools_stripe._internal.tools.stripe_client import StripeLivemodeMismatchError
 from tai42_tools_stripe.tools.list_stripe_webhook_endpoints import list_stripe_webhook_endpoints
 
 
@@ -88,7 +88,7 @@ def test_livemode_mismatch_on_listed_endpoint_raises(stripe_env: Callable[..., N
     stub_server.set_responder(
         lambda _r: (200, {"Content-Type": "application/json"}, _page([_endpoint("we_1", livemode=True)]))
     )
-    with pytest.raises(StripeLivemodeMismatch):
+    with pytest.raises(StripeLivemodeMismatchError):
         _call()
 
 

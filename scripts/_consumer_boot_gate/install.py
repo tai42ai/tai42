@@ -1,5 +1,7 @@
-"""Assembling the boot venv (editable candidate core + identity provider +
-consumers) and classifying a dependency-resolution conflict by the governing bump."""
+"""Assemble the boot venv and classify a dependency-resolution conflict by the governing bump.
+
+The venv holds the editable candidate core + identity provider + consumers.
+"""
 
 from __future__ import annotations
 
@@ -24,10 +26,12 @@ _KIT_EXTRAS = "jq,llm,postgres,redis,langgraph-checkpoint-postgres,uvicorn,curl"
 _NO_SOLUTION_MARKER = "No solution found when resolving dependencies"
 
 
-class _ResolutionConflict(Exception):
-    """The boot venv install failed because uv found no dependency solution: a consumer's
-    requirement range excludes the candidate core. Carries the resolver output so the
-    caller classifies it by the governing bump."""
+class _ResolutionConflictError(Exception):
+    """The boot venv install failed because uv found no dependency solution.
+
+    A consumer's requirement range excludes the candidate core. Carries the resolver output so the caller
+    classifies it by the governing bump.
+    """
 
     def __init__(self, resolver_stderr: str) -> None:
         super().__init__(resolver_stderr)
@@ -35,14 +39,15 @@ class _ResolutionConflict(Exception):
 
 
 def _is_resolution_conflict(install_stderr: str) -> bool:
-    """True when an install failure is uv reporting no dependency solution (a consumer
-    range excluding the candidate), not a network, build or bad-wheel failure."""
+    """True when an install failure is uv reporting no dependency solution.
+
+    A consumer range excluding the candidate, not a network, build or bad-wheel failure.
+    """
     return _NO_SOLUTION_MARKER in install_stderr
 
 
 def _resolver_conclusion(resolver_stderr: str) -> str:
-    """The resolver's own conclusion, from the ``No solution found`` line onward, quoted
-    verbatim in the accepted-break notice."""
+    """The resolver's own conclusion, from the ``No solution found`` line onward, quoted in the notice."""
     idx = resolver_stderr.find(_NO_SOLUTION_MARKER)
     return resolver_stderr[idx:].strip() if idx != -1 else resolver_stderr.strip()
 
@@ -50,11 +55,12 @@ def _resolver_conclusion(resolver_stderr: str) -> str:
 def _install_venv(
     repo_root: Path, core_dirs: list[str], identity_package: str, consumers: list[Consumer], venv: Path
 ) -> Path:
-    """Create the boot venv and install the editable candidate core, the identity
-    provider, and every consumer into it. Returns the venv's ``bin`` dir. A no-solution
-    resolution failure raises :class:`_ResolutionConflict` for the caller to classify by
-    the bump; any other install failure is a hard failure here."""
-    subprocess.run(["uv", "venv", "--python", "3.13", str(venv)], cwd=repo_root, check=True, capture_output=True)
+    """Create the boot venv and install the candidate core, identity provider, and consumers; return its ``bin``.
+
+    A no-solution resolution failure raises :class:`_ResolutionConflictError` for the caller to classify by
+    the bump; any other install failure is a hard failure here.
+    """
+    subprocess.run(["uv", "venv", "--python", "3.13", str(venv)], cwd=repo_root, check=True, capture_output=True)  # noqa: S603, S607 fixed, trusted argv; no shell and no user input; fixed, trusted executable resolved from PATH
     venv_bin = venv / "bin"
     install_args = ["uv", "pip", "install", "--python", str(venv_bin / "python")]
     for core_dir in core_dirs:
@@ -62,11 +68,11 @@ def _install_venv(
         install_args += ["-e", f"{core_dir}{extras}"]
     install_args.append(identity_package)
     install_args += [consumer.install_arg for consumer in consumers]
-    result = subprocess.run(install_args, cwd=repo_root, capture_output=True, text=True)
+    result = subprocess.run(install_args, cwd=repo_root, capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
     if result.returncode != 0:
         stderr = result.stderr.strip()[-800:]
         if _is_resolution_conflict(stderr):
-            raise _ResolutionConflict(stderr)
+            raise _ResolutionConflictError(stderr)
         _fail(f"boot venv install failed: {stderr}")
     return venv_bin
 
@@ -79,18 +85,19 @@ def _reresolve_against_previous_tag(
     consumers: list[Consumer],
     venv: Path,
 ) -> str | None:
-    """Re-resolve the same boot install set against the previous released tag's tree in a
-    throwaway git worktree, to tell a conflict the candidate INTRODUCED from one that
-    predates it. Returns the resolver output when the previous tree ALSO finds no solution
-    (a pre-existing incompatibility); returns ``None`` when it resolves (the candidate
-    introduced the conflict). Any other failure of the re-resolve raises loudly — a
-    pre-existing verdict is only ever reached through the resolver's own no-solution
-    conclusion, never a swallowed error."""
+    """Re-resolve the boot install set against the previous released tag's tree in a throwaway worktree.
+
+    Tells a conflict the candidate INTRODUCED from one that predates it. Returns the resolver output when
+    the previous tree ALSO finds no solution (a pre-existing incompatibility); returns ``None`` when it
+    resolves (the candidate introduced the conflict). Any other failure of the re-resolve raises loudly —
+    a pre-existing verdict is only ever reached through the resolver's own no-solution conclusion, never a
+    swallowed error.
+    """
     parent = Path(tempfile.mkdtemp(prefix="consumer-boot-prev-"))
     worktree = parent / "tree"
     try:
-        subprocess.run(
-            ["git", "worktree", "add", "--detach", str(worktree), previous_tag],
+        subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
+            ["git", "worktree", "add", "--detach", str(worktree), previous_tag],  # noqa: S607 fixed, trusted executable resolved from PATH
             cwd=repo_root,
             check=True,
             capture_output=True,
@@ -102,7 +109,7 @@ def _reresolve_against_previous_tag(
             install_args += ["-e", f"{worktree / core_dir}{extras}"]
         install_args.append(identity_package)
         install_args += [consumer.install_arg for consumer in consumers]
-        result = subprocess.run(install_args, cwd=worktree, capture_output=True, text=True)
+        result = subprocess.run(install_args, cwd=worktree, capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
         if result.returncode == 0:
             return None
         stderr = result.stderr.strip()[-800:]
@@ -113,8 +120,8 @@ def _reresolve_against_previous_tag(
             f"other than a dependency conflict, so the conflict cannot be classified: {stderr}"
         )
     finally:
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree)],
+        subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
+            ["git", "worktree", "remove", "--force", str(worktree)],  # noqa: S607 fixed, trusted executable resolved from PATH
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -137,14 +144,15 @@ def _report_unresolvable_consumers(
     identity_package: str,
     venv: Path,
 ) -> None:
-    """Classify a boot-venv resolution conflict. Under a major bump every supplied consumer
-    is an accepted break (a notice quoting the resolver's conclusion, the gate passes).
-    Under a non-major bump the conflict is a break only if THIS candidate introduced it:
-    the same install set is re-resolved against the previous released tag's tree — if it
-    resolves there the candidate introduced the conflict and the gate fails, and if it also
-    finds no solution the incompatibility predates the candidate (carried from the previous
-    release) and a notice passes it. This is the single accept/fail decision point for an
-    unresolvable install set."""
+    """Classify a boot-venv resolution conflict.
+
+    Under a major bump every supplied consumer is an accepted break (a notice quoting the resolver's
+    conclusion, the gate passes). Under a non-major bump the conflict is a break only if THIS candidate
+    introduced it: the same install set is re-resolved against the previous released tag's tree — if it
+    resolves there the candidate introduced the conflict and the gate fails, and if it also finds no
+    solution the incompatibility predates the candidate (carried from the previous release) and a notice
+    passes it. This is the single accept/fail decision point for an unresolvable install set.
+    """
     if break_is_accepted(bump):
         names = ", ".join(consumer.label for consumer in consumers)
         print(

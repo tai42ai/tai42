@@ -103,7 +103,8 @@ def nested_tool_dispatch(*, chain: bool = False) -> Iterator[None]:
     nested scope on purpose; when the chain declines itself the key is never set, so the
     clear-when-unchained rule still holds for it. Otherwise, and by default, the completion
     binding is CLEARED: no nested driver can address this agent's answer, and its park is refused
-    to the model."""
+    to the model.
+    """
     if chain and get_resume_continuation_tool() == AGENT_RESUME_TOOL_NAME:
         token = set_park_completion(
             CHAINED_PARK_DELIVERY_TOOL_NAME, chained_park_context(new_chained_park_key(), get_park_completion())
@@ -141,7 +142,8 @@ def scope_nested_dispatch[ToolT: BaseTool](tool: ToolT) -> ToolT:
 
     The two callable slots are read defensively: a plain :class:`~langchain_core.tools.BaseTool`
     subclass implements ``_run``/``_arun`` and carries NEITHER attribute, so a direct read would
-    raise rather than take the fallback below."""
+    raise rather than take the fallback below.
+    """
     update: dict[str, Any] = {}
     func = getattr(tool, "func", None)
     coroutine = getattr(tool, "coroutine", None)
@@ -165,10 +167,13 @@ def scope_nested_dispatch[ToolT: BaseTool](tool: ToolT) -> ToolT:
 
 
 def scope_nested_dispatch_all[ToolT: BaseTool](tools: Iterable[ToolT]) -> list[ToolT]:
-    """Every tool in ``tools``, delivery-scoped. Applied wherever an agent's tool list is
-    ASSEMBLED — the last point before the list is handed to a graph — so the rule holds for
-    every agent in the plugin, not only the ones that build their list through
-    :func:`~tai42_agents._internal.resolve_tools.resolve_tools`."""
+    """Every tool in ``tools``, delivery-scoped.
+
+    Applied wherever an agent's tool list is ASSEMBLED — the last point before the
+    list is handed to a graph — so the rule holds for every agent in the plugin,
+    not only the ones that build their list through
+    :func:`~tai42_agents._internal.resolve_tools.resolve_tools`.
+    """
     return [scope_nested_dispatch(tool) for tool in tools]
 
 

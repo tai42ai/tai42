@@ -1,3 +1,5 @@
+"""Bearer-token verification and per-path resource-id resolution for access control."""
+
 import logging
 import re
 from collections.abc import Callable
@@ -28,26 +30,30 @@ DIGIT_PATTERN = re.compile(r"/\d+")
 
 
 def is_always_public_prefix(path: str, settings: AccessControlSettings) -> bool:
-    """Whether the CANONICAL ``path`` is the pre-auth login surface that always
-    resolves public (equal to an always-public prefix or a route beneath it).
+    """Whether the CANONICAL ``path`` is the pre-auth login surface that always resolves public.
 
+    Equal to an always-public prefix or a route beneath it.
     The ONE definition of that family for every edge, so none can drift onto a different
     login surface. A plain function rather than a verifier member, so an edge holding no
-    verifier asks this question instead of hand-rolling a second predicate."""
+    verifier asks this question instead of hand-rolling a second predicate.
+    """
     return any(under_prefix(path, prefix) for prefix in settings.always_public_path_prefixes)
 
 
 def matches_always_public_route_pattern(path: str, settings: AccessControlSettings) -> bool:
-    """Whether the canonical ``path`` full-matches an always-public route pattern (a public
-    surface a fixed prefix cannot reach, e.g. the plugin studio-asset door). Full-match, so
-    a longer path never inherits a shorter pattern's public grant."""
+    """Whether the canonical ``path`` full-matches an always-public route pattern.
+
+    Covers a public surface a fixed prefix cannot reach, e.g. the plugin studio-asset door.
+    Full-match, so a longer path never inherits a shorter pattern's public grant.
+    """
     return any(pattern.fullmatch(path) for pattern in settings.compiled_always_public_route_patterns)
 
 
 def registered_reserved_get_paths() -> frozenset[str]:
-    """The DERIVED SPA-shell reserved set: the canonical path of every CONCRETE,
-    non-``/api``, non-``/mcp`` registered GET route (``/health``, ``/ready``, and any
-    future such route).
+    """The DERIVED SPA-shell reserved set.
+
+    The canonical path of every CONCRETE, non-``/api``, non-``/mcp`` registered GET route
+    (``/health``, ``/ready``, and any future such route).
 
     A path that IS a registered route is not the SPA shell, so the GET fallback must
     skip it — deriving the set from the route registry means a newly registered route
@@ -55,7 +61,8 @@ def registered_reserved_get_paths() -> frozenset[str]:
     paths (``/{spa_path:path}``, ``/universal_webhook/{topic}``) are excluded: they are
     not single concrete public URLs and the fallback matches concrete request paths.
     Mounted transport surfaces are excluded too — the mount serves them behind its own
-    credential gate, so the shell never answers for them."""
+    credential gate, so the shell never answers for them.
+    """
     paths: set[str] = set()
     for meta in load_all_routes():
         if "GET" not in meta.methods or "{" in meta.path:
@@ -76,13 +83,16 @@ _registered_reserved_paths: frozenset[str] | None = None
 
 
 def registered_reserved_get_paths_cached() -> frozenset[str]:
-    """The module-level memo of :func:`registered_reserved_get_paths`, so the SPA-shell
-    fallback decides against the reserved set without re-walking the registry per request.
+    """The module-level memo of :func:`registered_reserved_get_paths`.
+
+    Lets the SPA-shell fallback decide against the reserved set without re-walking the registry
+    per request.
 
     MODULE scope, not per verifier: the HTTP-edge verifier is baked into the ASGI stack at
     ``build_app`` and OUTLIVES an in-place reload, so a per-instance memo would keep
     answering the pre-reload surface and serve a reload-added authed route as the anonymous
-    SPA shell. Dropped by :func:`reset_registered_reserved_paths`."""
+    SPA shell. Dropped by :func:`reset_registered_reserved_paths`.
+    """
     global _registered_reserved_paths
     if _registered_reserved_paths is None:
         _registered_reserved_paths = registered_reserved_get_paths()
@@ -91,23 +101,26 @@ def registered_reserved_get_paths_cached() -> frozenset[str]:
 
 @register_settings_reset
 def reset_registered_reserved_paths() -> None:
-    """Drop the module-level SPA-shell reserved-set memo so it rebuilds against the current
-    registry.
+    """Drop the module-level SPA-shell reserved-set memo so it rebuilds against the current registry.
 
     A settings reset fires at the START of a reload, before the router modules are
     re-imported, so it cannot describe the new surface on its own; this is ALSO registered
-    as a post-reimport reload handler, and both drops are needed."""
+    as a post-reimport reload handler, and both drops are needed.
+    """
     global _registered_reserved_paths
     _registered_reserved_paths = None
 
 
 class AccessControlVerifier(TokenVerifier):
+    """Validate a bearer token through the configured identity providers and resolve the resource ids a path guards."""
+
     def __init__(
         self,
         settings: AccessControlSettings,
         providers: list[IdentityProvider] | None = None,
         provider_factories: Callable[[], list[IdentityProvider]] | None = None,
     ):
+        """Bind ``settings``; resolve providers from injected ``providers`` or lazily via ``provider_factories``."""
         super().__init__()
         self.settings = settings
 
@@ -146,6 +159,7 @@ class AccessControlVerifier(TokenVerifier):
         return self._providers
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        """Return the first provider identity for ``token`` as an ``AccessToken``, or ``None`` if none validates."""
         # Try each configured provider in order: the FIRST to return a non-None
         # AuthIdentity wins; a clean None moves to the next provider; any exception
         # PROPAGATES rather than falling through — an unreachable primary store must
@@ -181,6 +195,7 @@ class AccessControlVerifier(TokenVerifier):
     async def resolve_resource_ids(
         self, path: str, method: str | None = None, *, policy_version: int | None = None
     ) -> list[str]:
+        """Return the scope ids that guard ``path`` (for ``method``), read at ``policy_version`` for cache keying."""
         # Canonicalize ONCE at the top so EVERY tier — the always-public short-circuit,
         # the route-table lookups, the reserved-drop, and the SPA-shell fallback — decides
         # on the SAME path form (percent-decoded once, slash-collapsed, dot-resolved, no
@@ -218,13 +233,15 @@ class AccessControlVerifier(TokenVerifier):
         return list(found_ids)
 
     def _reject_encoded_slash(self, path: str, method: str | None) -> bool:
-        """Fail-closed on an encoded slash that is NOT a raw-path-matched route's key: the
-        ASGI router decodes ``%2F`` to a real ``/`` and matches a DIFFERENT (decoded) path
+        """Fail-closed on an encoded slash that is NOT a raw-path-matched route's key.
+
+        The ASGI router decodes ``%2F`` to a real ``/`` and matches a DIFFERENT (decoded) path
         than this canonical form, so resolving resource ids here would authorize a path the
         router never serves (the ``/api%2Fsecret`` bypass). Only a raw-path-matched route (a
         record ``{key}``) keeps the encoded slash to one segment on the router too. Skipped
         when no method is carried (the tool edge, which pins its own route first). Returns
-        whether to deny."""
+        whether to deny.
+        """
         if method is None or ENCODED_SLASH not in path:
             return False
         # Imported at call time: ``role_gate`` triggers the router-import universe, which
@@ -246,8 +263,10 @@ class AccessControlVerifier(TokenVerifier):
         return False
 
     def _settings_public_tier(self, path: str, method: str | None) -> str | None:
-        """The three store-free public tiers, in precedence order, returning the public
-        resource id or ``None`` to fall through to the route table."""
+        """The three store-free public tiers, in precedence order.
+
+        Returns the public resource id or ``None`` to fall through to the route table.
+        """
         # Always-public prefixes short-circuit BEFORE any route-table read: the
         # pre-auth login surface answers the public resource id unconditionally, so it
         # is reachable on a fresh deployment with no route rows. The always-public and
@@ -325,9 +344,11 @@ class AccessControlVerifier(TokenVerifier):
         return found_ids
 
     def _apply_public_fallbacks(self, path: str, method: str | None, found_ids: set[str]) -> None:
-        """Mutate ``found_ids`` with the reserved-prefix public drop and the two GET/HEAD
-        public fallbacks (acknowledged-public, then the SPA-shell shell), each lowest
-        precedence and deny-wins."""
+        """Mutate ``found_ids`` with the reserved-prefix public drop and the two GET/HEAD public fallbacks.
+
+        The fallbacks are acknowledged-public, then the SPA-shell shell, each lowest precedence and
+        deny-wins.
+        """
         public = self.settings.public_resource_id
 
         # The reserved management prefixes are never public: drop the public marker
@@ -346,13 +367,15 @@ class AccessControlVerifier(TokenVerifier):
             found_ids.add(public)
 
     def _is_acknowledged_public_get(self, path: str, method: str | None) -> bool:
-        """Acknowledged-public tier (GET/HEAD, deny-wins, lowest precedence): a GET/HEAD to
-        a concrete registered non-/api route in ``acknowledged_public_routes`` resolves
-        public, so the app serves /health,/ready by their own route-level declaration
+        """Acknowledged-public tier (GET/HEAD, deny-wins, lowest precedence).
+
+        A GET/HEAD to a concrete registered non-/api route in ``acknowledged_public_routes``
+        resolves public, so the app serves /health,/ready by their own route-level declaration
         without an always-public prefix. HEAD rides with GET (a public GET route must answer
         HEAD probes). The control plane can never enter it: the registered set and the
         acknowledged validation both exclude /api,/mcp, and ``_is_reserved_prefix`` drops
-        any reserved path."""
+        any reserved path.
+        """
         return (
             method in ("GET", "HEAD")
             and path in registered_reserved_get_paths_cached()
@@ -361,10 +384,12 @@ class AccessControlVerifier(TokenVerifier):
         )
 
     def _is_spa_shell_fallback(self, path: str, method: str | None) -> bool:
-        """SPA-shell public fallback (GET-only, last tier): a GET to an UNMAPPED, non-/api,
-        non-/mcp canonical path that is NOT a registered route is served by the SPA catch-all
-        as the dataless index.html shell — treat it as public so a deep-link refresh reaches
-        the shell. It never opens a mutation (GET only) nor the API/control-plane surface.
+        """SPA-shell public fallback (GET-only, last tier).
+
+        A GET to an UNMAPPED, non-/api, non-/mcp canonical path that is NOT a registered route is
+        served by the SPA catch-all as the dataless index.html shell — treat it as public so a
+        deep-link refresh reaches the shell. It never opens a mutation (GET only) nor the
+        API/control-plane surface.
 
         The registered-route check is CONCRETE-only:
         ``registered_reserved_get_paths_cached()`` holds the canonical paths of concrete
@@ -375,7 +400,8 @@ class AccessControlVerifier(TokenVerifier):
         non-/api GET route exists that is neither /api-prefixed (control-plane-excluded) nor
         consciously acknowledged, so no such route can reach this tier. This fallback's
         safety for templated routes rests on that audit; the code deliberately does not build
-        a second (shadow) matcher."""
+        a second (shadow) matcher.
+        """
         return (
             self.settings.spa_shell_public
             and method == "GET"
@@ -394,8 +420,10 @@ class AccessControlVerifier(TokenVerifier):
         )
 
     def _is_reserved_prefix(self, path: str) -> bool:
-        """Whether ``path`` is the access-control management surface that must never
-        resolve public (equal to a reserved prefix or a route beneath it)."""
+        """Whether ``path`` is the access-control management surface that must never resolve public.
+
+        True when ``path`` equals a reserved prefix or is a route beneath it.
+        """
         return any(under_prefix(path, prefix) for prefix in self.settings.reserved_public_pin_prefixes)
 
     async def _current_policy_version(self) -> int:

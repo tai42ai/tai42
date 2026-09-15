@@ -4,11 +4,12 @@
  * success; regenerate reloads behind itself and stays open to show the new link.
  */
 import type { ReactElement } from 'react';
-import type { RoleTemplate, UsersAdminApi } from '@/api';
-import type { RowAction } from '@/row-actions';
+
 import { ActionConfirm } from '@/action-confirm';
-import { RoleDialog } from '@/role-dialog';
+import type { RoleTemplate, UsersAdminApi } from '@/api';
 import { RegenerateInviteDialog } from '@/regenerate-invite-dialog';
+import { RoleDialog } from '@/role-dialog';
+import type { RowAction } from '@/row-actions';
 
 export function UserActionDialogs({
   action,

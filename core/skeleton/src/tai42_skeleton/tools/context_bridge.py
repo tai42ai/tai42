@@ -34,16 +34,18 @@ if TYPE_CHECKING:
 
 
 class PlatformBridgeContext(Context):
-    """A FastMCP Context whose ``elicit`` routes to ``ask_user`` and whose
-    ``sample`` falls back to the platform LLM — for the in-process caller path
-    where no elicitation/sampling-capable client exists. Every other Context
-    capability is inherited unchanged.
+    """A FastMCP Context whose ``elicit`` routes to ``ask_user`` and whose ``sample`` falls back to the platform LLM.
+
+    For the in-process caller path where no elicitation/sampling-capable client
+    exists. Every other Context capability is inherited unchanged.
 
     A fresh context is pushed per in-process invocation (one per ``bridge_context``
     push), so ``_sample_calls`` is naturally invocation-scoped: it bounds how many
-    ``ctx.sample()`` calls one tool invocation may make through the bridge."""
+    ``ctx.sample()`` calls one tool invocation may make through the bridge.
+    """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize the bridge context with an invocation-scoped ``ctx.sample()`` call counter."""
         super().__init__(*args, **kwargs)
         self._sample_calls = 0
 
@@ -55,6 +57,7 @@ class PlatformBridgeContext(Context):
         response_title: str | None = None,
         response_description: str | None = None,
     ) -> Any:
+        """Route an elicitation through the platform's ``ask_user`` channel."""
         return await resolve_elicit(
             message,
             response_type,
@@ -75,6 +78,7 @@ class PlatformBridgeContext(Context):
         mask_error_details: bool | None = None,
         tool_concurrency: int | None = None,
     ) -> SamplingResult[Any]:
+        """Sample the platform LLM, bounded by the per-invocation ``ctx.sample()`` call budget."""
         self._sample_calls += 1
         budget = sampling_settings().max_calls_per_invocation
         if self._sample_calls > budget:
@@ -95,10 +99,12 @@ class PlatformBridgeContext(Context):
 
 @contextmanager
 def bridge_context(fastmcp: FastMCP) -> Iterator[None]:
-    """Push a :class:`PlatformBridgeContext` for an in-process tool invocation so
-    ``ctx.elicit()`` / ``ctx.sample()`` reach the platform's machinery — but ONLY
-    when no FastMCP context is already active. A live request context (a real,
-    possibly capable client) wins and is left untouched."""
+    """Push a :class:`PlatformBridgeContext` for an in-process tool invocation, unless one is already active.
+
+    So ``ctx.elicit()`` / ``ctx.sample()`` reach the platform's machinery — but
+    ONLY when no FastMCP context is already active. A live request context (a
+    real, possibly capable client) wins and is left untouched.
+    """
     try:
         get_context()
         active = True

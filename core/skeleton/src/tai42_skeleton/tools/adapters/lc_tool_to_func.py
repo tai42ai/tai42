@@ -1,3 +1,5 @@
+"""Adapt a LangChain ``BaseTool`` into a plain callable with a synthesized typed signature."""
+
 from collections.abc import Callable
 from inspect import Parameter, Signature
 from typing import Any, cast
@@ -12,6 +14,7 @@ def build_signature(
     input_model: type[BaseModel] | None,
     return_annotation: Any = Any,  # Default to Any; customize if you have output schemas
 ) -> Signature:
+    """Synthesize a function signature from ``input_model``'s fields (or a lone ``input: str`` when None)."""
     if input_model is None:
         params = [Parameter("input", Parameter.POSITIONAL_OR_KEYWORD, annotation=str)]
     else:
@@ -44,6 +47,7 @@ def lc_tool_to_func(
     module: str | None = None,
     output_schema: dict[str, Any] | None = None,  # If you have JSON schema for output
 ) -> Callable:
+    """Wrap a LangChain ``BaseTool`` as a named callable whose signature mirrors the tool's args schema."""
     func_name = makefun_func_name((name or lc_tool.name).lower())
     func_desc = description or lc_tool.description
 

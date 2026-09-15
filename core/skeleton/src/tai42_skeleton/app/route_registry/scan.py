@@ -1,5 +1,7 @@
-"""Import every router module against a spec harness to enumerate the API route
-shape — the offline enumeration universe the CLI spec/parity tools and boot audit read."""
+"""Import every router module against a spec harness to enumerate the API route shape.
+
+This is the offline enumeration universe the CLI spec/parity tools and boot audit read.
+"""
 
 from __future__ import annotations
 
@@ -24,9 +26,11 @@ _pkg = sys.modules["tai42_skeleton.app.route_registry"]
 
 
 class _SpecFastMCP:
-    """A no-op stand-in for FastMCP's ``custom_route`` used only for OFFLINE
-    metadata capture — it returns the handler unchanged, so importing the router
-    modules records their metadata without a booted server."""
+    """A no-op stand-in for FastMCP's ``custom_route``, used only for offline metadata capture.
+
+    It returns the handler unchanged, so importing the router modules records
+    their metadata without a booted server.
+    """
 
     def custom_route(
         self, path: str, methods: list[str], name: str | None, include_in_schema: bool
@@ -35,10 +39,12 @@ class _SpecFastMCP:
 
 
 class _SpecLifecycle:
-    """A no-op stand-in for the app's ``lifecycle`` seam used only for OFFLINE
-    metadata capture — a router module registering a startup/shutdown/reload
-    handler at import time gets the handler back unchanged, so no handler is
-    wired and no server is needed."""
+    """A no-op stand-in for the app's ``lifecycle`` seam, used only for offline metadata capture.
+
+    A router module registering a startup/shutdown/reload handler at import time
+    gets the handler back unchanged, so no handler is wired and no server is
+    needed.
+    """
 
     def on_startup(self, func: Callable[..., object]) -> Callable[..., object]:
         return func
@@ -54,9 +60,11 @@ class _SpecLifecycle:
 
 
 class _SpecApp:
-    """Minimal ``tai42_app`` impl exposing only the ``http`` and ``lifecycle`` seams
-    the router modules touch at import time, so metadata capture needs no database,
-    Redis, or config."""
+    """Minimal ``tai42_app`` impl exposing only the ``http`` and ``lifecycle`` seams touched at import.
+
+    The router modules touch only these seams at import time, so metadata
+    capture needs no database, Redis, or config.
+    """
 
     def __init__(self) -> None:
         from tai42_skeleton.app.http import HttpSurface
@@ -66,27 +74,35 @@ class _SpecApp:
         self.lifecycle = _SpecLifecycle()
 
     def effective_router_modules(self) -> None:
-        """No deployment is served under the spec harness, so the enumeration
-        universe is the whole ``tai42_skeleton.routers`` package — signalled by
-        ``None`` (never a curated started-manifest set)."""
+        """Signal the whole-package enumeration universe with ``None``.
+
+        No deployment is served under the spec harness, so the universe is the
+        whole ``tai42_skeleton.routers`` package, never a curated
+        started-manifest set.
+        """
         return
 
 
 class _RouterUniverseSource(Protocol):
-    """The one method the shared importer asks of the currently-bound app to choose its
-    enumeration universe. The forwarding ``tai42_app`` handle is typed as the assembled
-    facade (which carries only namespace facets), so this Protocol types the flat method
-    the handle forwards to the bound impl — the started ``TaiMCP`` (answers its manifest's
-    effective router set) and the offline ``_SpecApp`` (answers ``None``) both satisfy it."""
+    """The one method the shared importer asks of the currently-bound app to choose its universe.
+
+    The forwarding ``tai42_app`` handle is typed as the assembled facade (which
+    carries only namespace facets), so this Protocol types the flat method the
+    handle forwards to the bound impl — the started ``TaiMCP`` (answers its
+    manifest's effective router set) and the offline ``_SpecApp`` (answers
+    ``None``) both satisfy it.
+    """
 
     def effective_router_modules(self) -> list[str] | None: ...
 
 
 def _started_router_modules() -> list[str] | None:
-    """The EFFECTIVE router set of a started deployment, or ``None`` when none answers one
-    (unbound process, offline spec harness, partially-faked app). The probe must stay a
-    ``hasattr`` on the forwarding handle — a facet probe reads a partially-faked app as
-    unbound."""
+    """The effective router set of a started deployment, or ``None`` when none answers one.
+
+    None covers an unbound process, an offline spec harness, or a partially-faked
+    app. The probe must stay a ``hasattr`` on the forwarding handle — a facet
+    probe reads a partially-faked app as unbound.
+    """
     from tai42_contract.app import tai42_app
 
     if not hasattr(tai42_app, "effective_router_modules"):
@@ -95,8 +111,11 @@ def _started_router_modules() -> list[str] | None:
 
 
 def _import_all_router_modules() -> None:
-    """Import EVERY module under ``tai42_skeleton.routers`` — the whole-package
-    enumeration universe used only offline (CLI spec/parity tools, unbooted tests)."""
+    """Import every module under ``tai42_skeleton.routers``.
+
+    The whole-package enumeration universe, used only offline (CLI spec/parity
+    tools, unbooted tests).
+    """
     import importlib
     import pkgutil
 
@@ -150,10 +169,11 @@ def load_api_routes() -> list[RouteMetadata]:
 
 
 def load_all_routes() -> list[RouteMetadata]:
-    """Every registered route — the whole self-describing HTTP surface, ``/api/*`` and
-    the non-``/api`` operational routes (``/health``, ``/ready``, …) alike.
+    """Return every registered route — the whole self-describing HTTP surface.
 
-    Imports the enumeration universe if needed, then returns its metadata. In a STARTED
+    Covers ``/api/*`` and the non-``/api`` operational routes (``/health``,
+    ``/ready``, …) alike. Imports the enumeration universe if needed, then
+    returns its metadata. In a STARTED
     process that universe is the deployment's effective router set, so this enumerates
     exactly the served surface and never pulls an un-mounted router into the live route
     table; offline it is the whole router package. The access-control resolver derives its
@@ -165,19 +185,22 @@ def load_all_routes() -> list[RouteMetadata]:
 
 
 def route_action_violations() -> list[str]:
-    """Every GATED route whose action-class fails the audit — the boot gate's fail
-    list (empty means clean). A route is an offender when its ``action`` is not one of
-    the four valid classes (allow-by-omission is dead) or, for a grantable
-    ``read``/``write`` route, when the declared class disagrees with the method-derived
-    action. ``fenced``/``secret`` are the explicit admin-only fence classes and are
-    exempt from the method-equals-action rule. Public (``authed=False``) routes are not
-    gated — their action never enforces — so they are not audited here.
+    """Return every gated route whose action-class fails the audit — the boot gate's fail list.
+
+    An empty list means clean. A route is an offender when its ``action`` is not
+    one of the four valid classes (allow-by-omission is dead) or, for a grantable
+    ``read``/``write`` route, when the declared class disagrees with the
+    method-derived action. ``fenced``/``secret`` are the explicit admin-only
+    fence classes and are exempt from the method-equals-action rule. Public
+    (``authed=False``) routes are not gated — their action never enforces — so
+    they are not audited here.
 
     Enumerates through :func:`load_all_routes` so the enumeration universe is imported
     before the audit runs — in a started process that is the deployment's served router
     surface, so the audit judges exactly what the deployment serves; iterating the raw
     registry could pass VACUOUSLY (an empty loop is a silent no-op) had the routers not
-    yet been imported."""
+    yet been imported.
+    """
     violations: list[str] = []
     for meta in load_all_routes():
         if not meta.authed:

@@ -22,8 +22,7 @@ from tai42_kit.net.url_guard import UrlGuardError
 
 
 class _PinningBackend(httpcore.AsyncNetworkBackend):
-    """A network backend that validates every TCP target against the SSRF guard
-    and connects to the exact address it validated.
+    """Validate every TCP target against the SSRF guard and connect to the validated address.
 
     Wrapping the transport's backend closes DNS-rebinding: the host is resolved
     once inside :func:`url_guard.resolve_and_validate`, and the connection is
@@ -66,8 +65,7 @@ class _PinningBackend(httpcore.AsyncNetworkBackend):
 
 
 class _PinningTransport(httpx.AsyncHTTPTransport):
-    """An httpx transport whose connection pool validates and pins every TCP
-    target through :class:`_PinningBackend`."""
+    """An httpx transport whose pool validates and pins every TCP target through :class:`_PinningBackend`."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -140,7 +138,9 @@ async def fetch_url(url: str) -> tuple[bytes, str | None]:
                         buffer.extend(chunk)
                         url_guard.enforce_size(len(buffer))
                     return bytes(buffer), response.headers.get("Content-Type")
-            raise UrlGuardError(f"SSRF guard: exceeded max_redirects={max_redirects} fetching {url!r}.")
+            raise UrlGuardError(  # noqa: TRY301 -- must pass through the except unwrap so it surfaces as the guard's rejection
+                f"SSRF guard: exceeded max_redirects={max_redirects} fetching {url!r}."
+            )
     except Exception as exc:
         guard_error = _unwrap_guard_error(exc)
         if guard_error is not None:

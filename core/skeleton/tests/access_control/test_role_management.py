@@ -783,7 +783,7 @@ async def test_modify_grants_set_upserts_new_and_overwrites_existing(mem, pg, re
     await seed_default_roles()
     a, b = _two_grantable_tags()
     await roles_ops.create_role("ops", "x", "editor", {a: "read"})
-    edited = await roles_ops.modify_role_grants("ops", set={a: "write", b: "read"})
+    edited = await roles_ops.modify_role_grants("ops", upsert={a: "write", b: "read"})
     assert edited["grants"][a] == "write"  # existing tag overwritten (the sanctioned upsert)
     assert edited["grants"][b] == "read"  # new tag added
 
@@ -803,7 +803,7 @@ async def test_modify_grants_set_and_remove_in_one_call(mem, pg, redis_mgmt, mon
     await seed_default_roles()
     a, b = _two_grantable_tags()
     await roles_ops.create_role("ops", "x", "editor", {a: "read"})
-    edited = await roles_ops.modify_role_grants("ops", set={b: "write"}, remove=[a])
+    edited = await roles_ops.modify_role_grants("ops", upsert={b: "write"}, remove=[a])
     assert a not in edited["grants"]
     assert edited["grants"][b] == "write"
 
@@ -821,8 +821,8 @@ async def test_modify_grants_overlapping_tag_400(mem, pg, redis_mgmt, monkeypatc
     await seed_default_roles()
     a, _ = _two_grantable_tags()
     await roles_ops.create_role("ops", "x", "editor", {a: "read"})
-    with pytest.raises(BadRequestError, match="both set and remove"):
-        await roles_ops.modify_role_grants("ops", set={a: "write"}, remove=[a])
+    with pytest.raises(BadRequestError, match="both upsert and remove"):
+        await roles_ops.modify_role_grants("ops", upsert={a: "write"}, remove=[a])
 
 
 async def test_modify_grants_absent_remove_404_names_tags(mem, pg, redis_mgmt, monkeypatch):
@@ -839,7 +839,7 @@ async def test_modify_grants_unknown_role_404(mem, pg, redis_mgmt, monkeypatch):
     await seed_default_roles()
     a, _ = _two_grantable_tags()
     with pytest.raises(NotFoundError, match="unknown role"):
-        await roles_ops.modify_role_grants("nope", set={a: "read"})
+        await roles_ops.modify_role_grants("nope", upsert={a: "read"})
 
 
 async def test_modify_grants_reserved_admin_forbidden(mem, pg, redis_mgmt, monkeypatch):
@@ -847,7 +847,7 @@ async def test_modify_grants_reserved_admin_forbidden(mem, pg, redis_mgmt, monke
     await seed_default_roles()
     a, _ = _two_grantable_tags()
     with pytest.raises(ForbiddenError):
-        await roles_ops.modify_role_grants("admin", set={a: "read"})
+        await roles_ops.modify_role_grants("admin", upsert={a: "read"})
 
 
 async def test_modify_grants_allow_all_forbidden(mem, pg, redis_mgmt, monkeypatch):
@@ -860,7 +860,7 @@ async def test_modify_grants_allow_all_forbidden(mem, pg, redis_mgmt, monkeypatc
         {"name": "super", "description": "x", "scopes": ["*"], "grants": {}, "condition": None, "allow_all": True},
     )
     with pytest.raises(ForbiddenError, match="allow_all"):
-        await roles_ops.modify_role_grants("super", set={a: "read"})
+        await roles_ops.modify_role_grants("super", upsert={a: "read"})
 
 
 async def test_modify_grants_invalid_level_400_via_validate_grants(mem, pg, redis_mgmt, monkeypatch):
@@ -869,7 +869,7 @@ async def test_modify_grants_invalid_level_400_via_validate_grants(mem, pg, redi
     a, _ = _two_grantable_tags()
     await roles_ops.create_role("ops", "x", "editor", {})
     with pytest.raises(BadRequestError, match="grant level"):
-        await roles_ops.modify_role_grants("ops", set={a: "bogus"})
+        await roles_ops.modify_role_grants("ops", upsert={a: "bogus"})
     # The rejected edit never persisted a version beyond the create.
     history = await roles_ops.list_role_versions("ops")
     assert len(history["versions"]) == 1
@@ -894,7 +894,7 @@ async def test_modify_grants_records_edit_audit(mem, pg, redis_mgmt, monkeypatch
     await seed_default_roles()
     a, b = _two_grantable_tags()
     await roles_ops.create_role("ops", "x", "editor", {a: "read"})
-    await roles_ops.modify_role_grants("ops", set={b: "write"}, remove=[a])
+    await roles_ops.modify_role_grants("ops", upsert={b: "write"}, remove=[a])
 
     history = await roles_ops.list_role_versions("ops")
     events = [e["body"] for e in history["audit"]]

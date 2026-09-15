@@ -1,6 +1,7 @@
-"""The platform-side runs index — one enumerable row per run, persisted in the
-skeleton's own Postgres so a deployment can list its runs WITHOUT the observability
-vendor.
+"""The platform-side runs index — one enumerable row per run.
+
+Persisted in the skeleton's own Postgres so a deployment can list its runs WITHOUT the
+observability vendor.
 
 A "run" is one OUTERMOST registered-preset dispatch: the ``run_tool`` chokepoint
 (:mod:`tai42_skeleton.runs.chokepoint`) writes exactly one row per such dispatch,

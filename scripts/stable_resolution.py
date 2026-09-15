@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Fail when a workspace dependency floor is only satisfiable by an upstream
-PRE-RELEASE.
+"""Fail when a workspace dependency floor is only satisfiable by an upstream PRE-RELEASE.
 
-The incident this guards: ``backend-arq`` pinned ``pydantic-core>=2.48.0``; the
-only ``pydantic`` release wiring that core floor was the ``2.14.0b1`` beta. uv's
-default resolution strategy (``if-necessary-or-explicit`` — pre-releases permitted
-when a specifier demands them) locked the beta and stayed green, while
-tai-distribution's stable-only image install did a fresh, pre-release-free resolve
-and hit ResolutionImpossible.
+The failure mode: a plugin pins a dependency floor (e.g. ``pydantic-core>=2.48.0``) that only
+an upstream pre-release satisfies (``pydantic 2.14.0b1``). uv's default resolution strategy
+(``if-necessary-or-explicit`` — pre-releases permitted when a specifier demands them) locks the
+beta and stays green, while a stable-only image install does a fresh, pre-release-free resolve
+and hits ResolutionImpossible.
 
-The guard reproduces the stable-only resolve in tai42 CI:
+The guard reproduces the stable-only resolve:
 
   * ``--upgrade`` so the committed ``uv.lock``'s pins never act as preferences that
     mask the floor (a leftover beta pin would otherwise resolve green);
@@ -41,8 +39,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def resolve(prerelease: str) -> subprocess.CompletedProcess[str]:
     """Fresh, non-mutating workspace resolve under the given pre-release strategy."""
-    return subprocess.run(
-        ["uv", "lock", "--upgrade", "--prerelease", prerelease, "--dry-run"],
+    return subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
+        ["uv", "lock", "--upgrade", "--prerelease", prerelease, "--dry-run"],  # noqa: S607 fixed, trusted executable resolved from PATH
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -51,6 +49,7 @@ def resolve(prerelease: str) -> subprocess.CompletedProcess[str]:
 
 
 def main() -> int:
+    """Run the stable-only resolve and return an exit code (1 on a pre-release-only floor)."""
     strict = resolve("if-necessary")
     if strict.returncode == 0:
         print("stable-resolution: OK — every workspace floor resolves without a pre-release.")
@@ -67,8 +66,8 @@ def main() -> int:
             "satisfiable by a pre-release upstream. The resolve above fails under the "
             "stable-only `if-necessary` strategy but succeeds with `--prerelease=allow`, "
             "so the named package has stable releases none of which satisfy the requested "
-            "range. A stable-only downstream install (e.g. tai-distribution's image) would "
-            "hit ResolutionImpossible on this. Lower the offending floor to a released "
+            "range. A stable-only downstream image install would hit ResolutionImpossible "
+            "on this. Lower the offending floor to a released "
             "stable version.\n"
         )
         return 1

@@ -1,5 +1,4 @@
-"""An importable conformance suite any sandbox provider runs against a live
-instance.
+"""An importable conformance suite any sandbox provider runs against a live instance.
 
 The bar a provider must clear is "map every neutral field onto your runtime, or
 reject what you cannot honor". That bar is only real if it is executable, so it
@@ -60,9 +59,11 @@ class SandboxConformanceConfig:
 
 
 def permissive_policy() -> SandboxPolicy:
-    """The most permissive policy: the egress ceiling wide open, no isolation
-    floor, persistent allowed. The suite binds it so only a PROVIDER inability —
-    never the policy chokepoint — can reject a conformance spec."""
+    """The most permissive policy: egress ceiling wide open, no isolation floor, persistent allowed.
+
+    The suite binds it so only a PROVIDER inability — never the policy chokepoint — can reject
+    a conformance spec.
+    """
     return SandboxPolicy(egress="egress", isolation="none", scrub_transcript=False, durable=True)
 
 
@@ -75,8 +76,10 @@ def _spec(
     env: dict[str, SecretStr] | None = None,
     labels: dict[str, str] | None = None,
 ) -> SandboxSessionSpec:
-    """A conformance spec with ``network`` pinned to ``egress`` — never the model
-    default ``none`` a direct-host provider rejects."""
+    """A conformance spec with ``network`` pinned to ``egress``.
+
+    Never the model default ``none`` a direct-host provider rejects.
+    """
     return SandboxSessionSpec(
         image=config.image,
         workspace_key=workspace_key,
@@ -89,22 +92,27 @@ def _spec(
 
 
 async def check_exec_and_env(sandbox: ManagedSandbox, config: SandboxConformanceConfig) -> None:
-    """A session runs ``exec`` to completion, and a ``spec.env`` variable is
-    visible as the base env of that exec — pinning ``spec.env`` as every exec's
-    credential channel."""
+    """A session runs ``exec`` to completion, with ``spec.env`` visible as that exec's base env.
+
+    This pins ``spec.env`` as every exec's credential channel.
+    """
     session = await sandbox.create_session(_spec(config, env={"CONF_SECRET": SecretStr("conf-value")}))
     try:
         result = await session.exec(["printenv", "CONF_SECRET"], timeout_seconds=30)
-        assert result.exit_code == 0, f"printenv exited {result.exit_code}"
-        assert "conf-value" in result.stdout, "spec.env value was not the exec's base env"
+        if result.exit_code != 0:
+            raise AssertionError(f"printenv exited {result.exit_code}")
+        if "conf-value" not in result.stdout:
+            raise AssertionError("spec.env value was not the exec's base env")
     finally:
         await session.destroy()
 
 
 async def check_interactive_exec(sandbox: ManagedSandbox, config: SandboxConformanceConfig) -> None:
-    """The interactive seam: written stdin is echoed on the output stream, the
-    stream ends with one exit item, ``kill`` after exit is a no-op, and
-    write-after-exit raises a typed :class:`SandboxError`."""
+    """The interactive seam: stdin echo, a single exit item, no-op ``kill``, and typed write-after-exit.
+
+    Written stdin is echoed on the output stream, the stream ends with one exit item, ``kill``
+    after exit is a no-op, and write-after-exit raises a typed :class:`SandboxError`.
+    """
     session = await sandbox.create_session(_spec(config))
     try:
         handle = await session.exec_start(["cat"], timeout_seconds=30)
@@ -120,8 +128,10 @@ async def check_interactive_exec(sandbox: ManagedSandbox, config: SandboxConform
             elif isinstance(item, SandboxStreamExit):
                 exit_code = item.exit_code
 
-        assert exit_code is not None, "the interactive stream carried no exit item"
-        assert b"conf-ping" in bytes(stdout), "written stdin was not echoed on the output stream"
+        if exit_code is None:
+            raise AssertionError("the interactive stream carried no exit item")
+        if b"conf-ping" not in bytes(stdout):
+            raise AssertionError("written stdin was not echoed on the output stream")
 
         await handle.kill()  # idempotent no-op once the exec has exited
 
@@ -136,12 +146,15 @@ async def check_interactive_exec(sandbox: ManagedSandbox, config: SandboxConform
 
 
 async def check_file_transfer(sandbox: ManagedSandbox, config: SandboxConformanceConfig) -> None:
-    """``put_file`` / ``get_file`` round-trip a workspace-relative path, and a miss
-    raises a typed :class:`SandboxError`."""
+    """``put_file`` / ``get_file`` round-trip a workspace-relative path.
+
+    A miss raises a typed :class:`SandboxError`.
+    """
     session = await sandbox.create_session(_spec(config))
     try:
         await session.put_file("note.txt", b"conf-bytes")
-        assert await session.get_file("note.txt") == b"conf-bytes"
+        if await session.get_file("note.txt") != b"conf-bytes":
+            raise AssertionError
 
         try:
             await session.get_file("absent.txt")
@@ -154,34 +167,41 @@ async def check_file_transfer(sandbox: ManagedSandbox, config: SandboxConformanc
 
 
 async def check_workspace_path(sandbox: ManagedSandbox, config: SandboxConformanceConfig) -> None:
-    """``session.workspace_path`` equals ``info().workspace_path``, and a relative
-    ``cwd`` resolves UNDER the workspace root."""
+    """``session.workspace_path`` equals ``info().workspace_path``.
+
+    A relative ``cwd`` resolves UNDER the workspace root.
+    """
     session = await sandbox.create_session(_spec(config))
     try:
         info = await session.info()
-        assert session.workspace_path == info.workspace_path, "workspace_path did not round-trip through info()"
+        if session.workspace_path != info.workspace_path:
+            raise AssertionError("workspace_path did not round-trip through info()")
 
         default_cwd = await session.exec(["pwd"], timeout_seconds=30)
-        assert default_cwd.stdout.strip() == session.workspace_path, "unset cwd did not default to workspace_path"
+        if default_cwd.stdout.strip() != session.workspace_path:
+            raise AssertionError("unset cwd did not default to workspace_path")
 
         await session.put_file("sub/nested.txt", b"nested")
         nested_cwd = await session.exec(["pwd"], cwd="sub", timeout_seconds=30)
-        assert nested_cwd.stdout.strip().startswith(session.workspace_path), (
-            "a relative cwd did not resolve under workspace_path"
-        )
+        if not (nested_cwd.stdout.strip().startswith(session.workspace_path)):
+            raise AssertionError("a relative cwd did not resolve under workspace_path")
     finally:
         await session.destroy()
 
 
 async def check_labels_round_trip(sandbox: ManagedSandbox, config: SandboxConformanceConfig) -> None:
-    """A consumer's labels round-trip exactly through ``info().labels`` — the
-    reserved ``tai42.sandbox`` markers stay on the runtime resource and never leak
-    back to the consumer — and the requested ``image`` is surfaced on ``info()``."""
+    """A consumer's labels round-trip exactly through ``info().labels``.
+
+    The reserved ``tai42.sandbox`` markers stay on the runtime resource and never leak back to
+    the consumer, and the requested ``image`` is surfaced on ``info()``.
+    """
     session = await sandbox.create_session(_spec(config, labels={"team": "conf"}))
     try:
         info = await session.info()
-        assert info.labels == {"team": "conf"}, "consumer labels did not round-trip through info()"
-        assert info.image == config.image, "the requested image was not surfaced on info()"
+        if info.labels != {"team": "conf"}:
+            raise AssertionError("consumer labels did not round-trip through info()")
+        if info.image != config.image:
+            raise AssertionError("the requested image was not surfaced on info()")
     finally:
         await session.destroy()
 
@@ -193,14 +213,14 @@ async def check_touch_extends(sandbox: ManagedSandbox, config: SandboxConformanc
         before = (await session.info()).expires_at
         await session.touch()
         after = (await session.info()).expires_at
-        assert after >= before, "touch did not extend expires_at"
+        if after < before:
+            raise AssertionError("touch did not extend expires_at")
     finally:
         await session.destroy()
 
 
 async def check_persistent_survives_reap(sandbox: ManagedSandbox, config: SandboxConformanceConfig) -> None:
-    """A persistent workspace survives its session's reap; an ephemeral one dies
-    with it."""
+    """A persistent workspace survives its session's reap; an ephemeral one dies with it."""
     persistent_key = "conf-persist"
     first = await sandbox.create_session(_spec(config, workspace_key=persistent_key, durability="persistent"))
     await first.put_file("kept.txt", b"survives")
@@ -208,7 +228,8 @@ async def check_persistent_survives_reap(sandbox: ManagedSandbox, config: Sandbo
 
     second = await sandbox.create_session(_spec(config, workspace_key=persistent_key, durability="persistent"))
     try:
-        assert await second.get_file("kept.txt") == b"survives", "a persistent workspace did not survive reap"
+        if await second.get_file("kept.txt") != b"survives":
+            raise AssertionError("a persistent workspace did not survive reap")
     finally:
         await second.destroy()
 
@@ -229,11 +250,11 @@ async def check_persistent_survives_reap(sandbox: ManagedSandbox, config: Sandbo
 
 
 async def check_reap_and_destroy(sandbox: ManagedSandbox, config: SandboxConformanceConfig) -> None:
-    """A session past its ttl is reaped and gone; ``destroy_session`` is
-    idempotent on an already-gone session."""
+    """A session past its ttl is reaped and gone; ``destroy_session`` is idempotent on an already-gone session."""
     session = await sandbox.create_session(_spec(config, workspace_key="conf-reap"))
     reaped = await _expire_and_reap(sandbox, session.id)
-    assert session.id in reaped, "an expired session was not reaped"
+    if session.id not in reaped:
+        raise AssertionError("an expired session was not reaped")
 
     try:
         await sandbox.get_session(session.id)
@@ -256,8 +277,7 @@ async def check_spec_rejection(sandbox: ManagedSandbox, config: SandboxConforman
 
 
 async def check_exec_timeout(sandbox: ManagedSandbox, config: SandboxConformanceConfig) -> None:
-    """An ``exec`` past its ``timeout_seconds`` is killed and raises
-    :class:`SandboxExecTimeoutError`."""
+    """An ``exec`` past its ``timeout_seconds`` is killed and raises :class:`SandboxExecTimeoutError`."""
     session = await sandbox.create_session(_spec(config))
     try:
         try:
@@ -271,9 +291,11 @@ async def check_exec_timeout(sandbox: ManagedSandbox, config: SandboxConformance
 
 
 async def _expire_and_reap(sandbox: ManagedSandbox, session_id: str) -> list[str]:
-    """Force ``session_id`` past its deadline and reap. Drives the kit's own
-    ledger ``expires_at`` back (uniform across every ``ManagedSandbox`` provider)
-    so the suite need not wait out a wall-clock ttl."""
+    """Force ``session_id`` past its deadline and reap.
+
+    Drives the kit's own ledger ``expires_at`` back (uniform across every ``ManagedSandbox``
+    provider) so the suite need not wait out a wall-clock ttl.
+    """
     record = sandbox._ledger[session_id]
     record.expires_at = record.created_at
     return await sandbox.reap()

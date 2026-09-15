@@ -16,9 +16,11 @@ _EXTRA_PACKAGES = ["typer", "click", "httpx"]
 
 
 def _versions() -> list[dict[str, str]]:
-    """Every installed distribution whose name starts with ``tai42-`` (sorted),
-    followed by the key CLI dependencies. No hard-coded package list — whatever
-    tai42 packages the environment carries are what report."""
+    """Every installed distribution whose name starts with ``tai42-`` (sorted), then key CLI deps.
+
+    No hard-coded package list — whatever tai42 packages the environment carries are what
+    report.
+    """
     tai_packages = sorted({dist.name for dist in distributions() if dist.name.startswith("tai42-")})
     records: list[dict[str, str]] = [{"package": name, "version": package_version(name)} for name in tai_packages]
     for name in _EXTRA_PACKAGES:

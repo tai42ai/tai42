@@ -61,6 +61,8 @@ class PendingQuestionExistsError(ChannelDeliveryError):
 
 @dataclass(frozen=True)
 class PendingQuestion:
+    """The pending question reserved for one ``(phone_number_id, wa_id)`` pair."""
+
     callback_url: str
     timeout_at: datetime
     # A select ask carries its option list and interaction id so an interactive
@@ -80,8 +82,10 @@ class PendingQuestion:
 
 
 def correlation_key(phone_number_id: str, wa_id: str) -> str:
-    """The opaque correlation key for a ``(phone_number_id, wa_id)`` pair — the
-    contract store's ``key``. WhatsApp replies carry no thread, so the pair is the key."""
+    """Return the opaque correlation key for a ``(phone_number_id, wa_id)`` pair — the contract store's ``key``.
+
+    WhatsApp replies carry no thread, so the pair is the key.
+    """
     return f"{phone_number_id}:{wa_id}"
 
 
@@ -186,8 +190,7 @@ def _decode_pending(raw: str | bytes) -> PendingQuestion:
 
 
 async def peek_pending(phone_number_id: str, wa_id: str) -> PendingQuestion | None:
-    """Read the FULL pending record WITHOUT claiming it (``GET``, no ``DEL``);
-    ``None`` when there is none.
+    """Read the FULL pending record WITHOUT claiming it (``GET``, no ``DEL``); ``None`` when there is none.
 
     The adapter-private decode surface: the shared ladder reads only the port fields
     (via :meth:`WhatsAppCorrelationStore.get_correlation`), but the channel needs the
@@ -205,8 +208,7 @@ async def peek_pending(phone_number_id: str, wa_id: str) -> PendingQuestion | No
 
 
 async def bump_rejections(phone_number_id: str, wa_id: str, question: PendingQuestion) -> None:
-    """Record one more door rejection on the STILL-HELD pending record (rejections+1),
-    preserving its remaining budget as the TTL.
+    """Record one more door rejection on the STILL-HELD pending record, preserving its remaining budget as the TTL.
 
     Called after the shared ladder returned RETRY_KEPT for a form ask and the channel
     re-sent a fresh Flow: the ladder kept the reservation, so this is an in-place
@@ -222,9 +224,9 @@ async def bump_rejections(phone_number_id: str, wa_id: str, question: PendingQue
 
 
 class WhatsAppCorrelationStore:
-    """Satisfies the contract :class:`~tai42_contract.channels.CorrelationStore` over
-    the plugin-owned ``channel:whatsapp:pending:{pnid}:{wa_id}`` keys.
+    """Satisfy the contract :class:`~tai42_contract.channels.CorrelationStore` over the plugin-owned pending keys.
 
+    Backed by the ``channel:whatsapp:pending:{pnid}:{wa_id}`` keys.
     The shared inbound-answer ladder uses ONLY this port surface (a non-destructive
     ``get`` peek and an idempotent ``release``). The channel keeps its richer decode
     state — ``options``/``schema``/``question``/``rejections`` — in the SAME stored
@@ -236,8 +238,10 @@ class WhatsAppCorrelationStore:
     """
 
     async def set_correlation(self, key: str, entry: Correlation, *, ttl_seconds: int) -> bool:
-        """Reserve ``key`` for ``entry`` NX with a ``ttl_seconds`` expiry; True when it
-        was free and is now held, False when a question is already pending for the pair."""
+        """Reserve ``key`` for ``entry`` NX with a ``ttl_seconds`` expiry.
+
+        True when it was free and is now held, False when a question is already pending for the pair.
+        """
         value = _encode_pending(
             PendingQuestion(
                 callback_url=entry.callback_url,
@@ -250,8 +254,7 @@ class WhatsAppCorrelationStore:
         return bool(stored)
 
     async def get_correlation(self, key: str) -> Correlation | None:
-        """The pending record's port fields under ``key``, or ``None`` — a
-        non-destructive peek the ladder forwards from."""
+        """Return the pending record's port fields under ``key``, or ``None`` — a non-destructive peek."""
         async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
             raw = await redis.get(_pending_key_from_opaque(key))
         if raw is None:
@@ -294,9 +297,9 @@ async def cache_flow_id(waba_id: str, schema_hash: str, flow_id: str) -> None:
 
 
 async def cache_flow_schema(waba_id: str, schema_hash: str, schema: dict[str, Any]) -> None:
-    """Store an ask-less form's answer schema under ``(waba_id, schema_hash)`` with NO
-    TTL, beside the published-flow id it renders as.
+    """Store an ask-less form's answer schema under ``(waba_id, schema_hash)`` with NO TTL.
 
+    Beside the published-flow id it renders as.
     Durability is load-bearing here, not an optimization: an inbound reply carries
     only the schema HASH (inside its flow token), never the schema, so this entry can
     NOT be repopulated from the reply — a miss is permanent for every form already
@@ -309,10 +312,12 @@ async def cache_flow_schema(waba_id: str, schema_hash: str, schema: dict[str, An
 
 
 async def get_cached_flow_schema(waba_id: str, schema_hash: str) -> dict[str, Any] | None:
-    """The answer schema cached under ``(waba_id, schema_hash)``, or ``None`` — a miss
-    means a reply for that schema cannot be coerced and lands with its raw values
-    (see :func:`cache_flow_schema`). A stored value that is not a JSON object is
-    treated as a miss (never a crash on the webhook path)."""
+    """Return the answer schema cached under ``(waba_id, schema_hash)``, or ``None``.
+
+    A miss means a reply for that schema cannot be coerced and lands with its raw values (see
+    :func:`cache_flow_schema`). A stored value that is not a JSON object is treated as a miss
+    (never a crash on the webhook path).
+    """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         raw = await redis.get(_flow_schema_key(waba_id, schema_hash))
     if raw is None:

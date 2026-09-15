@@ -1,5 +1,4 @@
-"""The delivery executor — sends a produced answer back and drives its record to a terminal
-state, exactly once.
+"""The delivery executor — sends a produced answer back and drives its record terminal, exactly once.
 
 ``door=channel`` chunks the answer through the channel's ``notify`` (:mod:`.delivery_channel`),
 ``door=api`` POSTs it under an HMAC signature or serves a poll-only row (:mod:`.delivery_api`).
@@ -48,16 +47,20 @@ def _sign(secret: str, body: bytes) -> str:
 
 
 def _backoff_seconds(settings: ConversationsSettings, attempt: int) -> float:
-    """Exponential backoff for retry ``attempt`` (1-based): ``base * 2**(attempt-1)``
-    capped at the configured maximum."""
+    """Exponential backoff for retry ``attempt`` (1-based).
+
+    ``base * 2**(attempt-1)`` capped at the configured maximum.
+    """
     raw = settings.delivery_backoff_base_seconds * (2 ** (attempt - 1))
     return min(raw, settings.delivery_backoff_max_seconds)
 
 
 def split_message(text: str, max_chars: int) -> list[str]:
-    """Split ``text`` into ordered chunks of at most ``max_chars``, breaking at the last
-    newline or space in the window when there is one. The concatenation of the chunks is
-    exactly ``text`` — nothing is dropped or reordered."""
+    """Split ``text`` into ordered chunks of at most ``max_chars``.
+
+    Breaks at the last newline or space in the window when there is one. The
+    concatenation of the chunks is exactly ``text`` — nothing is dropped or reordered.
+    """
     if max_chars <= 0:
         raise ValueError(f"max_chars must be positive, got {max_chars}")
     if len(text) <= max_chars:
@@ -86,7 +89,8 @@ async def deliver(message_id: str) -> None:
 
     Takes the atomic claim FIRST, so a record already terminal, gone, or under another
     worker's live lease is left untouched. A record still at intake carries no answer and
-    refuses loudly."""
+    refuses loudly.
+    """
     store = _store()
     token = uuid4().hex
     claimed = await store.claim_delivery(message_id, time.time(), token, store.settings.delivery_claim_lease_seconds)
@@ -137,7 +141,9 @@ async def deliver(message_id: str) -> None:
 
 async def _confirm_after_grace(message_id: str, grace_seconds: float) -> None:
     """Confirm a still-``provisional`` record ``delivered`` once its grace window elapses.
-    The atomic ingest is a no-op on a record a receipt already made terminal."""
+
+    The atomic ingest is a no-op on a record a receipt already made terminal.
+    """
     await asyncio.sleep(grace_seconds)
     await _store().ingest_receipt(message_id, DeliveryReceipt.DELIVERED, time.time())
 
@@ -151,7 +157,8 @@ async def record_delivery_status(channel: str, provider_message_id: str, status:
     Resolves ``provider_message_id`` through the outbound reverse index and applies the
     receipt atomically. Raises when the id maps to no record (unknown or already swept), and
     when it names a record whose send is still in flight — a receipt for one chunk may not
-    terminalise a record whose remaining chunks are still going out."""
+    terminalise a record whose remaining chunks are still going out.
+    """
     store = _store()
     message_id = await store.resolve_outbound(channel, provider_message_id)
     if message_id is None:
@@ -180,9 +187,11 @@ async def record_delivery_status(channel: str, provider_message_id: str, status:
 
 
 async def mark_wait_delivered(message_id: str) -> bool:
-    """Confirm a record ``delivered`` because the API door's sync wait returned its answer;
-    no callback is POSTed. Takes the same atomic claim a background delivery would, so only
-    one of the two paths delivers. Returns ``True`` when this call is that one."""
+    """Confirm a record ``delivered`` because the API door's sync wait returned its answer.
+
+    No callback is POSTed. Takes the same atomic claim a background delivery would, so
+    only one of the two paths delivers. Returns ``True`` when this call is that one.
+    """
     store = _store()
     token = uuid4().hex
     claimed = await store.claim_delivery(message_id, time.time(), token, store.settings.delivery_claim_lease_seconds)
@@ -196,12 +205,13 @@ async def mark_wait_delivered(message_id: str) -> bool:
 
 
 async def redrive_pending() -> None:
-    """Resume every non-terminal record on boot so nothing is stranded: re-deliver a
-    ``pending_delivery`` record through the exactly-once claim, confirm a ``provisional``
-    one past its grace, and reschedule the fallback confirmation for one still inside it.
+    """Resume every non-terminal record on boot so nothing is stranded.
 
-    Only boot can rebuild the in-process grace timers lost with the previous process, so
-    the rescheduling lives here and not in the periodic sweep."""
+    Re-deliver a ``pending_delivery`` record through the exactly-once claim, confirm a
+    ``provisional`` one past its grace, and reschedule the fallback confirmation for
+    one still inside it. Only boot can rebuild the in-process grace timers lost with
+    the previous process, so the rescheduling lives here and not in the periodic sweep.
+    """
     store = _store()
     now = time.time()
     for work in await store.pending_work():
@@ -222,7 +232,8 @@ async def sweep_stalled_deliveries() -> None:
     The exactly-once claim is itself the lease-expiry test, so a re-driven
     ``pending_delivery`` record is only ever a genuinely abandoned one. A ``provisional``
     record past its grace is confirmed here because the in-process fallback confirmation
-    died with the worker that scheduled it."""
+    died with the worker that scheduled it.
+    """
     store = _store()
     now = time.time()
     for work in await store.pending_work():

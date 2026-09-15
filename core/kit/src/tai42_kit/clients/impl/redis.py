@@ -1,3 +1,5 @@
+"""Pooled Redis clients (async and sync) and typed seams over the redis-py async hash commands."""
+
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Mapping
@@ -34,7 +36,8 @@ def _pool_key(**kwargs: Any) -> str:
     ``env_prefix`` travels in the connection kwargs so an unresolved URL can name
     the env var that would set it, but it is not connection identity; dropping it
     here keeps two settings classes that resolve to the same URL on one shared
-    pool rather than splitting it per namespace."""
+    pool rather than splitting it per namespace.
+    """
     identity = {key: value for key, value in kwargs.items() if key != "env_prefix"}
     return json.dumps(identity, sort_keys=True)
 
@@ -58,6 +61,8 @@ def _validate_url(kwargs: dict[str, Any]) -> None:
 
 
 class RedisClient(PooledClient[AsyncRedis]):
+    """A pooled async Redis client keyed on its connection settings."""
+
     @staticmethod
     def _key(**kwargs: Any) -> str:
         return _pool_key(**kwargs)
@@ -77,6 +82,8 @@ class RedisClient(PooledClient[AsyncRedis]):
 
 
 class SyncRedisClient(PooledClient[SyncRedis]):
+    """A pooled sync Redis client keyed on its connection settings."""
+
     @staticmethod
     def _key(**kwargs: Any) -> str:
         return _pool_key(**kwargs)
@@ -133,14 +140,18 @@ def _with_retry(kwargs: dict[str, Any], *, sync: bool = False) -> dict[str, Any]
 
 
 def hgetall(client: AsyncRedis, key: str) -> Awaitable[dict[str, str]]:
-    """``client.hgetall(key)`` pinned to the async client's true awaitable return
-    (decoded-responses shape: a field/value string map, ``{}`` for a missing key)."""
+    """``client.hgetall(key)`` pinned to the async client's true awaitable return.
+
+    Decoded-responses shape: a field/value string map, ``{}`` for a missing key.
+    """
     return cast("Awaitable[dict[str, str]]", client.hgetall(key))
 
 
 def hset_mapping(client: AsyncRedis, key: str, mapping: Mapping[str, str]) -> Awaitable[int]:
-    """``client.hset(key, mapping=mapping)`` pinned to the async client's true
-    awaitable return (the count of newly added fields)."""
+    """``client.hset(key, mapping=mapping)`` pinned to the async client's true awaitable return.
+
+    The count of newly added fields.
+    """
     return cast("Awaitable[int]", client.hset(key, mapping=dict(mapping)))
 
 

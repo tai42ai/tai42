@@ -346,7 +346,7 @@ async def test_threaded_conn_makes_the_record_write_and_the_attach_atomic(
         retention_days=30,
     )
 
-    class _Rollback(Exception):
+    class _RollbackError(Exception):
         pass
 
     async def _write_then_rollback() -> None:
@@ -362,9 +362,9 @@ async def test_threaded_conn_makes_the_record_write_and_the_attach_atomic(
                 conn=conn,
             )
             await store.upsert_attachment(state, state + "_m", ["x"], {}, {}, effective_schema=schema, conn=conn)
-            raise _Rollback
+            raise _RollbackError
 
-    with pytest.raises(_Rollback):
+    with pytest.raises(_RollbackError):
         await _write_then_rollback()
 
     read, _seq = await store.read_record(state, subject)

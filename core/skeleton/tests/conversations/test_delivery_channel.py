@@ -33,7 +33,7 @@ from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 _CHUNK_CHARS = 10
 
 
-class WorkerDied(RuntimeError):
+class WorkerDiedError(RuntimeError):
     """What a channel raises to stand in for the worker vanishing mid-send — not a
     ``ChannelDeliveryError``, so the executor does not turn it into a ``failed`` record."""
 
@@ -69,7 +69,7 @@ class FakeChannel:
             if inspect.isawaitable(watched):
                 await watched
         if self._crash_on is not None and len(self.sends) == self._crash_on:
-            raise WorkerDied("the worker died mid-send")
+            raise WorkerDiedError("the worker died mid-send")
         if self._fail_on is not None and len(self.sends) == self._fail_on:
             raise ChannelDeliveryError("the provider refused the chunk")
         if self._input_fail_on is not None and len(self.sends) == self._input_fail_on:
@@ -191,7 +191,7 @@ class MediaFakeChannel:
     async def notify(self, notification) -> list[str]:
         self.notifications.append(notification)
         if self._crash_on is not None and len(self.notifications) == self._crash_on:
-            raise WorkerDied("the worker died mid-send")
+            raise WorkerDiedError("the worker died mid-send")
         return [f"{self._prefix}-{len(self.notifications)}"]
 
 
@@ -241,7 +241,7 @@ async def test_a_partial_send_resumes_at_the_first_unsent_chunk(monkeypatch, fak
     dying = FakeChannel("w1", crash_on=3)
     _wire_channel(monkeypatch, dying)
     assert await store.claim_delivery("m-part", time.time(), "worker-1", 120) == 1
-    with pytest.raises(WorkerDied):
+    with pytest.raises(WorkerDiedError):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-part"), "worker-1")
     assert dying.sends == ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"]
     assert (await _get(store, "m-part")).delivery_status is DeliveryStatus.PENDING_DELIVERY
@@ -399,7 +399,7 @@ async def test_a_multi_part_send_resumes_at_the_unsent_part(monkeypatch, fake, s
     # cheap side of a loss), and part 0 is never re-sent.
     dying = FakeChannel("w1", crash_on=2)
     _wire_channel(monkeypatch, dying)
-    with pytest.raises(WorkerDied):
+    with pytest.raises(WorkerDiedError):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-presume"), "worker-1")
     assert dying.sends == ["first", "second"]  # part 1 was attempted but not ledgered
     # The ledger names part 0 only, so the resume knows part 1 is where to pick up.
@@ -426,7 +426,7 @@ async def test_a_single_plain_text_answer_is_byte_identical_to_the_old_path(monk
     await store.create_record(_record("m-single", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10
     channel = FakeChannel("w1", crash_on=2)  # crash after the first chunk is ledgered
     _wire_channel(monkeypatch, channel)
-    with pytest.raises(WorkerDied):
+    with pytest.raises(WorkerDiedError):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-single"), "worker-1")
 
     # The first chunk is ledgered under part 0 — the single-part path is the multi-part loop's
@@ -535,7 +535,7 @@ async def test_a_media_only_part_is_not_re_sent_on_resume(monkeypatch, fake, sto
     # Crash on the THIRD send (part 2), after part 0 and the media-only part 1 are ledgered.
     dying = MediaFakeChannel("w1", crash_on=3)
     _wire_channel(monkeypatch, dying)
-    with pytest.raises(WorkerDied):
+    with pytest.raises(WorkerDiedError):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-mresume"), "worker-1")
     assert [n.message for n in dying.notifications] == ["one", "", "three"]
     ledgered = await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-mresume")

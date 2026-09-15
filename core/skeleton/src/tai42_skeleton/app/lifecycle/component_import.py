@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 class ComponentImportMixin(LifecycleState):
+    """Lifecycle mixin that imports the manifest's plugin modules and runs their registration side-effects."""
+
     def _initialize_components(self):
         manifest = self._require_live_manifest()
 
@@ -141,10 +143,12 @@ class ComponentImportMixin(LifecycleState):
     def _import_additive_role(
         self, modules: list[str] | None, kind: str, dist_map: dict[str, list[str]], executed: set[str]
     ) -> set[str]:
-        """Import one additive role group (lifecycle/webhook_verifier/channel/router/
-        middleware/agents), returning the set of modules that quarantined. Each import
-        runs the module's registration side-effect; the registries were reset at the
-        top of start(), so every (re)load re-registers cleanly."""
+        """Import one additive role group, returning the set of modules that quarantined.
+
+        The group is one of lifecycle/webhook_verifier/channel/router/middleware/agents. Each import runs
+        the module's registration side-effect; the registries were reset at the top of start(), so every
+        (re)load re-registers cleanly.
+        """
         quarantined: set[str] = set()
         for module in modules or []:
             if not self._import_additive_plugin(module, kind, dist_map, executed):
@@ -153,8 +157,10 @@ class ComponentImportMixin(LifecycleState):
 
     def _import_core_slots(self, dist_map: dict[str, list[str]], executed: set[str]) -> None:
         """Import the four scalar-slot modules (backend/sandbox/storage/monitoring).
-        Each aborts boot on incompat or import failure rather than quarantining — the
-        server cannot run without its scalar slots."""
+
+        Each aborts boot on incompat or import failure rather than quarantining — the server cannot run
+        without its scalar slots.
+        """
         manifest = self._require_live_manifest()
         self._import_core_plugin(manifest.backend_module, "backend_module", dist_map, executed)
         self._import_core_plugin(manifest.sandbox_module, "sandbox_module", dist_map, executed)
@@ -162,8 +168,10 @@ class ComponentImportMixin(LifecycleState):
         self._import_core_plugin(manifest.monitoring_module, "monitoring_module", dist_map, executed)
 
     def _import_extension_modules(self, dist_map: dict[str, list[str]], executed: set[str]) -> set[str]:
-        """Import the extensions modules, then run the quarantine-aware extension
-        validation, returning the set of quarantined extensions modules."""
+        """Import the extensions modules, returning the set of quarantined extensions modules.
+
+        Runs the quarantine-aware extension validation after the imports.
+        """
         manifest = self._require_live_manifest()
         quarantined_extension_modules: set[str] = set()
         for extension in manifest.extensions_modules or []:
@@ -189,8 +197,10 @@ class ComponentImportMixin(LifecycleState):
         return quarantined_extension_modules
 
     def _import_tool_modules(self, dist_map: dict[str, list[str]], executed: set[str]) -> set[str]:
-        """Import the tools modules, returning the set of quarantined tool modules —
-        their included tool names join the validation ignore set."""
+        """Import the tools modules, returning the set of quarantined tool modules.
+
+        Their included tool names join the validation ignore set.
+        """
         manifest = self._require_live_manifest()
         quarantined_tool_modules: set[str] = set()
         for cfg in manifest.tools:
@@ -199,13 +209,15 @@ class ComponentImportMixin(LifecycleState):
         return quarantined_tool_modules
 
     def _load_manifest_mcps(self) -> None:
-        """Probe and bind the manifest's MCP servers, recording the failed ones, then
-        prune the passive health store to the CONFIGURED titles.
+        """Probe and bind the manifest's MCP servers, recording the failed ones.
+
+        Then prune the passive health store to the CONFIGURED titles.
 
         Health history follows the manifest: a title dropped from config drops its
         history; surviving titles keep continuity across reloads. Fires on every
         epoch build against the CONFIGURED titles (a failed/unavailable title keeps
-        its history), so an empty manifest clears the store."""
+        its history), so an empty manifest clears the store.
+        """
         manifest = self._require_live_manifest()
         if manifest.mcp:
             successes, failures = run_blocking(self._load_mcps)
@@ -223,7 +235,8 @@ class ComponentImportMixin(LifecycleState):
 
         A quarantined tools module's included tool names are legitimately absent
         (the module never imported), so they join the failed-MCP ignore set —
-        otherwise the validation would abort the very boot the quarantine saved."""
+        otherwise the validation would abort the very boot the quarantine saved.
+        """
         manifest = self._require_live_manifest()
         ignore = set(self._missing_tools_ignore())
         for module in quarantined_tool_modules:
@@ -317,16 +330,16 @@ class ComponentImportMixin(LifecycleState):
     def _import_core_plugin(
         self, module: str | None, slot: str, dist_map: dict[str, list[str]], executed_modules: set[str]
     ) -> None:
-        """Import one SCALAR-slot module (backend/storage/monitoring), aborting
-        boot with the typed :class:`CorePluginBootError` on incompat or ANY
-        import failure — the server cannot run without its scalar slots, so a
-        quarantine-and-continue would be a silently crippled server. ``None``
-        (slot unset) is a no-op. The error names the plugin, the versions in
-        play (via the compat reason), and the remedy.
+        """Import one SCALAR-slot module (backend/storage/monitoring), aborting boot on incompat or import failure.
+
+        Aborts with the typed :class:`CorePluginBootError` — the server cannot run without its scalar slots,
+        so a quarantine-and-continue would be a silently crippled server. ``None`` (slot unset) is a no-op.
+        The error names the plugin, the versions in play (via the compat reason), and the remedy.
 
         ``executed_modules`` is the pass's run-once ledger: a slot module a prior
         role loop's walk already executed is not re-imported, and the modules this
-        import runs join the ledger."""
+        import runs join the ledger.
+        """
         if not module:
             return
         if module in executed_modules:
@@ -355,8 +368,7 @@ class ComponentImportMixin(LifecycleState):
         executed_modules.update(reloaded)
 
     def _abort_if_auth_provider_quarantined(self) -> None:
-        """Abort boot when a configured auth provider quarantined — the auth-slot
-        twin of the scalar-slot abort.
+        """Abort boot when a configured auth provider quarantined — the auth-slot twin of the scalar-slot abort.
 
         Identity/accounts providers are ADDITIVE, so a broken one quarantines rather
         than aborting; but a quarantined auth provider leaves the server BOOTED yet
@@ -374,7 +386,8 @@ class ComponentImportMixin(LifecycleState):
         quarantined lifecycle modules with reasons) with no causal claim, and a
         remedy covering both. With the gate off, no unresolved provider, or no
         lifecycle quarantine, boot is untouched; a misconfigured provider name
-        with nothing quarantined is left to the identity-provider startup probe."""
+        with nothing quarantined is left to the identity-provider startup probe.
+        """
         manifest = self._require_live_manifest()
         from tai42_contract.access_control.registry import get_identity_provider_factory_staged
 
@@ -391,9 +404,10 @@ class ComponentImportMixin(LifecycleState):
             # build imported, not the live epoch's registry.
             try:
                 get_identity_provider_factory_staged(name)
-                return True
             except KeyError:
                 return False
+            else:
+                return True
 
         unresolved = [name for name in settings.auth_providers if not _registered(name)]
         lifecycle_modules = set(manifest.lifecycle_modules or [])

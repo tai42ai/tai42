@@ -17,6 +17,7 @@ class SettingsProfileError(Exception):
     __tai_error_kind__ = ErrorKind.UPSTREAM_ERROR
 
     def __init__(self, name: str, message: str):
+        """Build the error for profile ``name`` with a human-facing ``message``."""
         super().__init__(message)
         self.name = name
 
@@ -28,6 +29,7 @@ class SettingsProfileNotFoundError(SettingsProfileError):
     __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, name: str):
+        """Build the not-found error for profile ``name``."""
         super().__init__(name, f"settings profile {name!r} not found")
 
 
@@ -38,6 +40,7 @@ class SettingsProfileExistsError(SettingsProfileError):
     __tai_error_kind__ = ErrorKind.CONFLICT
 
     def __init__(self, name: str):
+        """Build the already-exists error for profile ``name``."""
         super().__init__(name, f"settings profile {name!r} already exists")
 
 
@@ -48,6 +51,7 @@ class SettingsProfileVersionNotFoundError(SettingsProfileError):
     __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, name: str, version: int | None = None):
+        """Build the version-not-found error for profile ``name`` (``version`` when a specific one was asked)."""
         self.version = version
         detail = "" if version is None else f" version {version}"
         super().__init__(name, f"settings profile {name!r} has no{detail} version")

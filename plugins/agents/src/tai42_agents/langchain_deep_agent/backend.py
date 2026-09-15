@@ -321,8 +321,9 @@ class InlineSkillsBackend(BackendProtocol):
     """
 
     def __init__(self, inline_skills: dict[str, str]) -> None:
-        """Store the inline ``name -> SKILL.md content`` map and the delegate
-        :class:`TemplateSkillsBackend`, which serves every name not supplied inline.
+        """Store the inline ``name -> SKILL.md content`` map and the delegate :class:`TemplateSkillsBackend`.
+
+        The delegate serves every name not supplied inline.
         """
         self._inline = dict(inline_skills)
         self._template = TemplateSkillsBackend()

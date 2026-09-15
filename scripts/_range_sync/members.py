@@ -1,5 +1,4 @@
-"""Workspace discovery: the member globs, the member dirs, and the released
-first-party version map every range derives from."""
+"""Workspace discovery: the member globs, member dirs, and first-party version map every range derives from."""
 
 from __future__ import annotations
 
@@ -23,8 +22,7 @@ def _load_toml(path: Path) -> dict:
 
 
 def workspace_globs(root: Path) -> list[str]:
-    """Read the member globs from the root pyproject, falling back to the
-    default if the table is missing."""
+    """Read the member globs from the root pyproject, falling back to the default if the table is missing."""
     try:
         data = _load_toml(root / "pyproject.toml")
         globs = data["tool"]["uv"]["workspace"]["members"]
@@ -36,8 +34,7 @@ def workspace_globs(root: Path) -> list[str]:
 
 
 def discover_members(root: Path) -> list[Path]:
-    """Return member directories (each containing a pyproject.toml), sorted and
-    de-duplicated, discovered from the workspace globs."""
+    """Return member directories (each with a pyproject.toml), sorted and de-duplicated, from the workspace globs."""
     seen: dict[str, Path] = {}
     for pattern in workspace_globs(root):
         for hit in sorted(root.glob(pattern)):
@@ -47,11 +44,12 @@ def discover_members(root: Path) -> list[Path]:
 
 
 def _normalize_name(name: str) -> str:
-    """PEP 503 name normalization: lower-case and collapse any run of ``-``,
-    ``_`` or ``.`` to a single ``-``. Matching on the normalized name means a
-    dependency spelled non-canonically (``tai42_kit``, mixed case) still resolves
-    to its member, so a stale range can never read as 'in sync' merely because of
-    a spelling difference."""
+    """PEP 503 name normalization: lower-case and collapse ``-``/``_``/``.`` runs to a single ``-``.
+
+    Matching on the normalized name means a dependency spelled non-canonically
+    (``tai42_kit``, mixed case) still resolves to its member, so a stale range can
+    never read as 'in sync' merely because of a spelling difference.
+    """
     return re.sub(r"[-_.]+", "-", name.strip().lower())
 
 
@@ -68,12 +66,14 @@ def first_party_versions(members: list[Path]) -> dict[str, str]:
 
 
 def _requirement_strings(pyproject: dict) -> list[str]:
-    """Every requirement string in [project].dependencies and every
-    [project.optional-dependencies] array — the tables scanned as change
-    SOURCES. [tool.uv.sources] and [dependency-groups] are not scanned here.
-    (Application is by locating the full quoted requirement literal in the file
-    text — see ``_replace_quoted`` — so a first-party pin duplicated verbatim in
-    another table is still brought in sync, which is the intended outcome.)"""
+    """Every requirement string in [project].dependencies and the optional-dependencies arrays.
+
+    These are the tables scanned as change SOURCES. [tool.uv.sources] and
+    [dependency-groups] are not scanned here. (Application is by locating the full
+    quoted requirement literal in the file text — see ``_replace_quoted`` — so a
+    first-party pin duplicated verbatim in another table is still brought in sync,
+    which is the intended outcome.).
+    """
     project = pyproject.get("project", {})
     out: list[str] = list(project.get("dependencies", []) or [])
     for extra_deps in (project.get("optional-dependencies", {}) or {}).values():

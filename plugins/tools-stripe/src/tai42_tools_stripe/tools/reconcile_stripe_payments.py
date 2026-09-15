@@ -32,9 +32,10 @@ _sleep = asyncio.sleep
 
 
 def _selected_callback_url(session: dict[str, Any]) -> str | None:
-    """The session's ``tai_callback_url`` when it is a paid session carrying one, else
-    ``None`` (unpaid sessions and paid sessions with no callback url are skipped, not
-    counted)."""
+    """The session's ``tai_callback_url`` when it is a paid session carrying one, else ``None``.
+
+    Unpaid sessions and paid sessions with no callback url are skipped, not counted.
+    """
     if session.get("payment_status") != "paid":
         return None
     metadata = session.get("metadata") or {}
@@ -42,9 +43,10 @@ def _selected_callback_url(session: dict[str, Any]) -> str | None:
 
 
 async def _answer_session(session: dict[str, Any], callback_url: str) -> tuple[str, dict[str, Any] | None]:
-    """Attempt to answer one paid session. Returns an outcome key
-    (``answered``/``already_answered``/``expired``/``rejected``/``failed``) and, for
-    ``failed`` only, the ``{session_id, error}`` record.
+    """Attempt to answer one paid session.
+
+    Returns an outcome key (``answered``/``already_answered``/``expired``/``rejected``/``failed``)
+    and, for ``failed`` only, the ``{session_id, error}`` record.
 
     A per-session verdict (door 404 → ``expired``, door 400 → ``rejected``) is counted,
     never raised. Deployment-wide breakage (door 403, livemode mismatch, SSRF refusal,
@@ -76,8 +78,9 @@ async def _answer_session(session: dict[str, Any], callback_url: str) -> tuple[s
 
 @tai42_app.tools.tool(tags={"stripe", "payments"})
 async def reconcile_stripe_payments(lookback_hours: int = 26) -> dict[str, Any]:
-    """Re-answer every paid Checkout Session in the lookback window that the webhook path may have
-    lost, and return a per-outcome summary.
+    """Re-answer every paid Checkout Session in the lookback window the webhook path may have lost.
+
+    Returns a per-outcome summary.
 
     ``lookback_hours`` is bounded ``1..168`` and raises outside it before touching Stripe: below 1
     is a no-op dressed as a run, above one week walks into the list ceiling. The default 26 covers

@@ -2,18 +2,19 @@
  * Invite a new user: email + role, then a one-time invite link. On success the
  * list reloads behind the dialog so the new pending user is already visible.
  */
-import type { ReactElement } from 'react';
-import { useCallback, useMemo, useState } from 'react';
 import {
   Button,
   Dialog,
+  errorMessage,
   ErrorState,
   Field,
   Select,
   Spinner,
   TextInput,
-  errorMessage,
 } from '@tai42/studio-sdk';
+import type { ReactElement } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+
 import type { InviteResult, RoleTemplate, UsersAdminApi } from '@/api';
 import { InviteResultView } from '@/invite-result-view';
 

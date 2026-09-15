@@ -21,7 +21,8 @@ def not_configured_message(subject: str, env_var: str, default_var: str | None =
 
     ``default_var`` is the field's ``TAI_DEFAULT_*`` alternative, named in the
     message when the field participates in the shared namespace; omit it for a
-    field that only its own env var can set."""
+    field that only its own env var can set.
+    """
     if default_var is None:
         return f"{subject} is not configured: set {env_var}."
     return f"{subject} is not configured: set {env_var} (or {default_var})."
@@ -38,7 +39,8 @@ def require_secret(value: SecretStr | None, subject: str, env_var: str, default_
     """The secret's plaintext, or raise on unset OR empty — fail CLOSED.
 
     A secret that gates a trust boundary must not be satisfiable by an empty
-    value, so both the unset and the empty cases raise."""
+    value, so both the unset and the empty cases raise.
+    """
     secret = require(value, subject, env_var, default_var).get_secret_value()
     if not secret:
         raise ValueError(f"{env_var} is set but empty")

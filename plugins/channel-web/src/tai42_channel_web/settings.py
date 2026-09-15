@@ -18,6 +18,8 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class WebSettings(TaiBaseSettings):
+    """The ``CHANNEL_WEB_`` env settings group for the web channel."""
+
     model_config = SettingsConfigDict(env_prefix="CHANNEL_WEB_")
 
     # Timeout for the loopback answer forward to the interactions callback door.
@@ -86,6 +88,7 @@ class WebSettings(TaiBaseSettings):
 
 @settings_cache
 def web_settings() -> WebSettings:
+    """The cached web channel settings."""
     return WebSettings()
 
 
@@ -97,4 +100,5 @@ class WebRedisSettings(RedisConnectionSettings):
 
 @settings_cache
 def web_redis_settings() -> WebRedisSettings:
+    """The cached web transcript-store Redis settings."""
     return WebRedisSettings()

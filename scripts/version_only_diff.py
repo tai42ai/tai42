@@ -34,15 +34,16 @@ _LOCK_NAME = re.compile(r'^[ +-]name = "([^"]*)"$')
 
 
 def _changed_lines(diff: str) -> list[str]:
-    """The added/removed content lines of a unified diff, minus the ``+++`` /
-    ``---`` file headers."""
+    """The added/removed content lines of a unified diff, minus the ``+++`` / ``---`` file headers."""
     return [line for line in diff.splitlines() if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))]
 
 
 def _lock_is_version_only(diff: str) -> bool:
-    """A lockfile diff is version-only when every changed line is a ``version =``
-    line and each sits in a ``[[package]]`` block whose ``name`` is first-party
-    (``tai42-*``); a third-party pin or any non-version edit fails it."""
+    """A lockfile diff is version-only when every changed line is a ``version =`` line in a first-party block.
+
+    Each must sit in a ``[[package]]`` block whose ``name`` is first-party (``tai42-*``); a third-party pin
+    or any non-version edit fails it.
+    """
     lines = diff.splitlines()
     saw_change = False
     for i, line in enumerate(lines):
@@ -79,24 +80,25 @@ def _path_is_version_only(path: str, diff: str) -> bool:
 
 
 def is_version_only(changed: dict[str, str]) -> bool:
-    """``changed`` maps each changed path to its unified ``git diff`` text; True
-    iff at least one path changed and every changed path is a pure version
-    bump."""
+    """True iff at least one path changed and every changed path is a pure version bump.
+
+    ``changed`` maps each changed path to its unified ``git diff`` text.
+    """
     if not changed:
         return False
     return all(_path_is_version_only(path, diff) for path, diff in changed.items())
 
 
 def _git_diff(rng: str) -> dict[str, str]:
-    names = subprocess.run(
-        ["git", "diff", "--name-only", rng],
+    names = subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
+        ["git", "diff", "--name-only", rng],  # noqa: S607 fixed, trusted executable resolved from PATH
         check=True,
         capture_output=True,
         text=True,
     ).stdout.split()
     return {
-        path: subprocess.run(
-            ["git", "diff", rng, "--", path],
+        path: subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
+            ["git", "diff", rng, "--", path],  # noqa: S607 fixed, trusted executable resolved from PATH
             check=True,
             capture_output=True,
             text=True,
@@ -106,6 +108,7 @@ def _git_diff(rng: str) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Exit 0 when the given git range is a version-only diff, else 1."""
     parser = argparse.ArgumentParser(description="Exit 0 when a git range is a version-only diff, else 1.")
     parser.add_argument("--base", required=True, help="base commit of the range")
     parser.add_argument("--head", required=True, help="head commit of the range")

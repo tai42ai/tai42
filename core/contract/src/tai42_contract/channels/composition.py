@@ -103,9 +103,10 @@ def check_interactive_composition(
     footer: str | None,
     noun: str,
 ) -> None:
-    """The shared cross-field rules every option-carrying message carrier
-    (:class:`ChannelNotification`, :class:`~tai42_contract.conversations.AnswerPart`) enforces, so
-    the two can never drift. ``noun`` names the carrier for the raised messages
+    """The shared cross-field rules every option-carrying message carrier enforces.
+
+    :class:`ChannelNotification` and :class:`~tai42_contract.conversations.AnswerPart` share these,
+    so the two can never drift. ``noun`` names the carrier for the raised messages
     (``"notification"`` / ``"part"``). Rules:
 
     * message is non-blank BY DEFAULT, EXCEPT blank for a CONTENT-ONLY send — a blank message

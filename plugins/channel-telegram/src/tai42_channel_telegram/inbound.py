@@ -36,7 +36,7 @@ from tai42_contract.conversations import (
     validate_entry_params,
 )
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
-from tai42_kit.net.request_body import PayloadTooLarge, read_bounded_body
+from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.client import answer_callback_query, send_chat_action
@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # the aggregate still overflows a bound the whole set is dropped and the turn bridges without
 # it — a participant message is never lost to a params bound.
 
-_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
+_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"  # noqa: S105 constant identifier, not a secret value
 # Bound what an unauthenticated door reads into memory — loud 413, never truncation.
 _MAX_BODY_BYTES = 1 * 1024 * 1024
 
@@ -108,8 +108,10 @@ def _ignored(reason: str) -> JSONResponse:
 
 def _put_param(params: dict[str, str], key: str, value: str | None) -> None:
     """Add ``key`` iff ``value`` is a non-empty string within the contract's per-value cap.
-    An over-cap opaque value is dropped (never truncated — truncation would silently corrupt
-    an opaque token); a debug line records the drop without ever logging the value."""
+
+    An over-cap opaque value is dropped (never truncated — truncation would silently corrupt an
+    opaque token); a debug line records the drop without ever logging the value.
+    """
     if not value:
         return
     if len(value) > ENTRY_PARAM_VALUE_MAX_CHARS:
@@ -119,10 +121,12 @@ def _put_param(params: dict[str, str], key: str, value: str | None) -> None:
 
 
 def _reply_params(option: StoredOption) -> dict[str, str] | None:
-    """The opaque entry-params a bridged tap carries from the tapped option: the author-set
-    ``reply_id`` and a sectioned-row's ``reply_description`` (each bounded, absent when the
-    option carried none). ``None`` when the option carries neither — a select/suggested-reply
-    ask's minted options, say."""
+    """The opaque entry-params a bridged tap carries from the tapped option.
+
+    The author-set ``reply_id`` and a sectioned-row's ``reply_description`` (each bounded, absent
+    when the option carried none). ``None`` when the option carries neither — a
+    select/suggested-reply ask's minted options, say.
+    """
     params: dict[str, str] = {}
     _put_param(params, "reply_id", option.id)
     _put_param(params, "reply_description", option.description)
@@ -130,11 +134,12 @@ def _reply_params(option: StoredOption) -> dict[str, str] | None:
 
 
 def _sanitize_params(params: dict[str, str] | None) -> dict[str, str] | None:
-    """``params`` validated against the contract's transport bounds, or ``None`` when empty or
-    a bound is violated. A violation drops the WHOLE set (which would otherwise 5xx and have
-    Telegram redeliver the same poison update forever) and lets the turn proceed without
-    params — the participant's message is never lost to a params bound; the refusal names the
-    bound/key, never an opaque value."""
+    """``params`` validated against the contract's transport bounds, or ``None`` when empty or violated.
+
+    A violation drops the WHOLE set (which would otherwise 5xx and have Telegram redeliver the same
+    poison update forever) and lets the turn proceed without params — the participant's message is
+    never lost to a params bound; the refusal names the bound/key, never an opaque value.
+    """
     if not params:
         return None
     try:
@@ -146,11 +151,12 @@ def _sanitize_params(params: dict[str, str] | None) -> dict[str, str] | None:
 
 
 def _inbound_locale(update: dict[str, object]) -> str | None:
-    """The participant's BCP 47 locale off a Telegram update — the sender's ``language_code``
-    (the IETF tag Telegram attaches to every ``from``), read off the message or the
-    callback_query. Canonicalized defensively: a malformed value is dropped to ``None``
-    (never a 5xx that would have Telegram redeliver the poison update), so the turn still
-    runs, just without a locale hint."""
+    """The participant's BCP 47 locale off a Telegram update — the sender's ``language_code``.
+
+    The IETF tag Telegram attaches to every ``from``, read off the message or the callback_query.
+    Canonicalized defensively: a malformed value is dropped to ``None`` (never a 5xx that would have
+    Telegram redeliver the poison update), so the turn still runs, just without a locale hint.
+    """
     sender: object = None
     for key in ("message", "callback_query"):
         node = update.get(key)
@@ -170,8 +176,10 @@ def _inbound_locale(update: dict[str, object]) -> str | None:
 
 
 def _is_recipient_chat(chat: dict[str, object], settings: TelegramSettings) -> bool:
-    """Whether ``chat`` is a configured recipient — matched by numeric id or
-    ``@username``. Only these chats may ANSWER an ask_user question."""
+    """Whether ``chat`` is a configured recipient — matched by numeric id or ``@username``.
+
+    Only these chats may ANSWER an ask_user question.
+    """
     recipient_chats = set(settings.allowed_recipients)
     if settings.default_recipient is not None:
         recipient_chats.add(settings.default_recipient)
@@ -373,7 +381,7 @@ def _verify_secret(request: Request, settings: TelegramSettings) -> Response | N
     return None
 
 
-class _UpdateRejected(Exception):
+class _UpdateRejectedError(Exception):
     """A bounded-read or parse failure carrying the webhook response to return."""
 
     def __init__(self, response: Response) -> None:
@@ -384,19 +392,19 @@ class _UpdateRejected(Exception):
 async def _read_update(request: Request) -> dict[str, object]:
     """Read the bounded request body and parse it into an update dict.
 
-    Raises :class:`_UpdateRejected` carrying a 413 (over the byte cap), or a 400
+    Raises :class:`_UpdateRejectedError` carrying a 413 (over the byte cap), or a 400
     (unparseable body, or a body that is not a JSON object).
     """
     try:
         body = await read_bounded_body(request, _MAX_BODY_BYTES)
-    except PayloadTooLarge:
-        raise _UpdateRejected(JSONResponse({"error": "payload too large"}, status_code=413)) from None
+    except RequestBodyTooLargeError:
+        raise _UpdateRejectedError(JSONResponse({"error": "payload too large"}, status_code=413)) from None
     try:
         update = json.loads(body)
     except ValueError:
-        raise _UpdateRejected(JSONResponse({"error": "body must be a JSON object"}, status_code=400)) from None
+        raise _UpdateRejectedError(JSONResponse({"error": "body must be a JSON object"}, status_code=400)) from None
     if not isinstance(update, dict):
-        raise _UpdateRejected(JSONResponse({"error": "body must be a JSON object"}, status_code=400))
+        raise _UpdateRejectedError(JSONResponse({"error": "body must be a JSON object"}, status_code=400))
     return update
 
 
@@ -440,7 +448,7 @@ async def inbound(request: Request) -> Response:
 
     try:
         update = await _read_update(request)
-    except _UpdateRejected as rejected:
+    except _UpdateRejectedError as rejected:
         return rejected.response
 
     # An inline-keyboard button tap arrives as a callback_query, not a message: it

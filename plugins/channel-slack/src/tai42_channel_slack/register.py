@@ -29,5 +29,6 @@ async def _require_bot_user_id() -> None:
 
     The inbound Events API door registered above bridges under this deployment's
     single bot identity, so a missing ``bot_user_id`` cannot be a per-inbound
-    failure — it is a misconfiguration surfaced at boot, naming the env var."""
+    failure — it is a misconfiguration surfaced at boot, naming the env var.
+    """
     require(slack_settings().bot_user_id, "the slack channel", "CHANNEL_SLACK_BOT_USER_ID")

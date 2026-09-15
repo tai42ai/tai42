@@ -26,8 +26,11 @@ def get_interaction_origin() -> str | None:
 
 
 def set_interaction_origin(origin: str | None) -> Token[str | None]:
-    """Bind ``origin`` as the current run's interaction origin; pass the returned
-    token to :func:`reset_interaction_origin` to restore the previous value."""
+    """Bind ``origin`` as the current run's interaction origin.
+
+    Pass the returned token to :func:`reset_interaction_origin` to restore the previous
+    value.
+    """
     return _current_origin.set(origin)
 
 

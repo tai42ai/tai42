@@ -30,8 +30,7 @@ async def validate_condition(
     condition: TemplatedText | None,
     sample_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Fail-closed guard: compile — and optionally sample-evaluate — a jq policy
-    ``condition`` WITHOUT persisting it.
+    """Fail-closed guard: compile — and optionally sample-evaluate — a jq policy ``condition``, unpersisted.
 
     A syntactically broken condition raises at enforcement and DENIES the key (a
     lock-out), so authoring flows validate here before saving. The condition is
@@ -41,7 +40,8 @@ async def validate_condition(
     true, "result": <bool|null>}`` (``result`` is ``null`` when no sample was evaluated).
     An AUTHOR error is a loud ``BadRequestError`` (400); a server-side fault (an
     unconfigured resource manager, a redis/storage outage rendering a stored condition
-    ``id``) is NOT an author error and propagates as a loud 500."""
+    ``id``) is NOT an author error and propagates as a loud 500.
+    """
     # Mirror enforcement's own "was a condition configured?" test exactly (``policy.condition
     # is not None``): a PRESENT condition that renders empty is still configured and denies at
     # enforcement, so it must reach the render-empty lock-out branch below.

@@ -8,7 +8,7 @@ as PRESETS over it; the base itself carries no domain knowledge.
 
 At load it DECLARES its input-schema support through the ``tai42_app`` handle (so a
 preset's ``input_schema`` becomes the exposed tool's input contract, delivered under the
-``input`` arg) and its ``fenced`` registration tier. The ``fenced`` tier is admin-only for
+``payload`` arg) and its ``fenced`` registration tier. The ``fenced`` tier is admin-only for
 BOTH authoring a ``sandbox_exec`` preset AND running the tool: the generic run-time fence
 at the tool-run chokepoint refuses a non-admin on every door, so the base carries no fence
 of its own, and a preset authored over it inherits the fence at run time.
@@ -31,7 +31,7 @@ from tai42_contract.presets import PresetInputSchemaSupport
 from tai42_contract.sandbox import ExecResult, SandboxSessionSpec
 
 # The base-tool argument a preset's validated structured input is delivered under.
-_PAYLOAD_ARG = "input"
+_PAYLOAD_ARG = "payload"
 
 
 @tai42_app.tools.tool(tags={"sandbox"})
@@ -39,7 +39,7 @@ async def sandbox_exec(
     argv: list[str],
     *,
     image: str,
-    input: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
     network: Literal["none", "internal", "egress"] = "egress",
     cpu: float | None = None,
     memory_mb: int | None = None,
@@ -53,7 +53,7 @@ async def sandbox_exec(
     Args:
         argv: The command and its arguments to run to completion.
         image: The exact runnable image reference to run in.
-        input: A structured object delivered to the command as JSON on stdin (a preset's
+        payload: A structured object delivered to the command as JSON on stdin (a preset's
             ``input_schema`` routes its validated object here).
         network: The session network mode; defaults to the OPEN ``egress`` posture. The
             kit create ceiling loudly rejects a value looser than the operator's egress.
@@ -82,7 +82,7 @@ async def sandbox_exec(
         memory_mb=memory_mb,
         ttl_seconds=ttl_seconds,
     )
-    stdin = json.dumps(input).encode() if input is not None else None
+    stdin = json.dumps(payload).encode() if payload is not None else None
     session = await sandbox.create_session(spec)
     try:
         return await session.exec(argv, stdin=stdin, timeout_seconds=timeout_seconds)
@@ -94,7 +94,7 @@ async def sandbox_exec(
 
 # Declare the tool mechanisms at load, through the handle (the write-validator pattern):
 # a preset's ``input_schema`` becomes the exposed tool's input contract (routed into the
-# ``input`` arg), and the ``fenced`` tier admin-fences both authoring a preset over the
+# ``payload`` arg), and the ``fenced`` tier admin-fences both authoring a preset over the
 # tool and running it (enforced generically at the tool-run chokepoint).
 tai42_app.presets.register_input_schema_support("sandbox_exec", PresetInputSchemaSupport(payload_arg=_PAYLOAD_ARG))
 tai42_app.tools.register_tier("sandbox_exec", "fenced")

@@ -1,5 +1,8 @@
-"""The refusal shape every token-free scan stage shares: the error type and the
-bounded excerpt each refusal quotes to locate the offending construct."""
+"""The refusal shape every token-free scan stage shares.
+
+Defines the error type and the bounded excerpt each refusal quotes to locate the offending
+construct.
+"""
 
 from __future__ import annotations
 
@@ -17,8 +20,10 @@ class TokenFreeConditionError(Exception):
 
 
 def _excerpt(condition_text: str, position: int) -> str:
-    """A bounded, readable slice of ``condition_text`` starting at the offending
-    construct — enough to locate it without echoing the whole condition."""
+    """A bounded, readable slice of ``condition_text`` starting at the offending construct.
+
+    Enough to locate the construct without echoing the whole condition.
+    """
     return condition_text[position : position + _EXCERPT_LENGTH]
 
 

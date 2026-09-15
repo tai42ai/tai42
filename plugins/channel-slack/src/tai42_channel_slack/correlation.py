@@ -58,13 +58,16 @@ def remaining_seconds(timeout_at: datetime) -> int:
 
 
 class SlackThreadCorrelationStore:
-    """Satisfies :class:`~tai42_contract.channels.CorrelationStore` over the
-    ``channel:slack:corr:<ts>`` keys — the thread-reply correlation surface."""
+    """Satisfies :class:`~tai42_contract.channels.CorrelationStore` over the ``channel:slack:corr:<ts>`` keys.
+
+    The thread-reply correlation surface.
+    """
 
     async def set_correlation(self, key: str, entry: Correlation, *, ttl_seconds: int) -> bool:
-        """Reserve ``key`` (the thread ``ts``) for ``entry`` NX with a ``ttl_seconds``
-        expiry. A ``ts`` is unique per posted message, so the NX just makes the
-        one-pending guarantee explicit."""
+        """Reserve ``key`` (the thread ``ts``) for ``entry`` NX with a ``ttl_seconds`` expiry.
+
+        A ``ts`` is unique per posted message, so the NX just makes the one-pending guarantee explicit.
+        """
         value = json.dumps(
             {
                 "callback_url": entry.callback_url,
@@ -77,8 +80,7 @@ class SlackThreadCorrelationStore:
         return bool(stored)
 
     async def get_correlation(self, key: str) -> Correlation | None:
-        """The pending question's record under ``key``, or ``None`` — a non-destructive
-        peek the ladder forwards from."""
+        """The pending question's record under ``key``, or ``None`` — a non-destructive peek to forward from."""
         async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
             raw = cast("str | None", await redis.get(_CORR_KEY.format(key=key)))
         if raw is None:
@@ -97,8 +99,9 @@ class SlackThreadCorrelationStore:
 
 
 class SlackFormCorrelationStore:
-    """Satisfies :class:`~tai42_contract.channels.CorrelationStore` over the
-    ``channel:slack:form:<interaction_id>`` keys — the modal-submission surface.
+    """Satisfies :class:`~tai42_contract.channels.CorrelationStore` over the ``channel:slack:form:<id>`` keys.
+
+    The modal-submission surface.
 
     The port projects the rich form record down to the three :class:`Correlation`
     fields the ladder needs (the interaction id IS the key). The channel keeps the rich
@@ -109,6 +112,7 @@ class SlackFormCorrelationStore:
     """
 
     async def set_correlation(self, key: str, entry: Correlation, *, ttl_seconds: int) -> bool:
+        """Reserve ``key`` (the interaction id) for ``entry`` NX with a ``ttl_seconds`` expiry, minimally."""
         value = json.dumps(
             {
                 "callback_url": entry.callback_url,
@@ -122,6 +126,7 @@ class SlackFormCorrelationStore:
         return bool(stored)
 
     async def get_correlation(self, key: str) -> Correlation | None:
+        """The pending form question's :class:`Correlation` under ``key``, or ``None``."""
         record = await get_form_record(key)
         if record is None:
             return None
@@ -132,6 +137,7 @@ class SlackFormCorrelationStore:
         )
 
     async def release_correlation(self, key: str) -> None:
+        """Drop any form reservation under ``key``, idempotently."""
         await delete_form_record(key)
 
 
@@ -191,31 +197,35 @@ async def store_form_record(
 
 
 async def get_form_record(interaction_id: str) -> dict[str, Any] | None:
-    """The pending form's ``{callback_url, schema, question, timeout_at, data?, pages?}``
-    record, or ``None`` when unknown/expired (the button outlived its question). The
-    adapter-private rich read the modal open + submission decode use, distinct from the
-    port's projection."""
+    """The pending form's record, or ``None`` when unknown/expired (the button outlived its question).
+
+    The record is ``{callback_url, schema, question, timeout_at, data?, pages?}``. The adapter-private rich
+    read the modal open + submission decode use, distinct from the port's projection.
+    """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         raw = cast("str | None", await redis.get(_FORM_KEY.format(key=interaction_id)))
     return json.loads(raw) if raw is not None else None
 
 
 async def delete_form_record(interaction_id: str) -> None:
-    """Drop a form record once its submission is terminally settled (forwarded or the
-    ticket is gone)."""
+    """Drop a form record once its submission is terminally settled (forwarded or the ticket is gone)."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.delete(_FORM_KEY.format(key=interaction_id))
 
 
 async def claim_dedupe(event_id: str) -> bool:
-    """Atomically claim ``event_id`` (SET NX EX). ``False`` = already processed or
-    currently in flight — the caller acks the retry without reprocessing."""
+    """Atomically claim ``event_id`` (SET NX EX).
+
+    ``False`` = already processed or currently in flight — the caller acks the retry without reprocessing.
+    """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         return bool(await redis.set(_DEDUPE_KEY.format(event_id=event_id), "1", ex=DEDUPE_TTL_SECONDS, nx=True))
 
 
 async def release_dedupe(event_id: str) -> None:
-    """Release a claim whose processing failed, so Slack's retry reprocesses the event
-    instead of hitting the duplicate ack."""
+    """Release a claim whose processing failed.
+
+    Slack's retry then reprocesses the event instead of hitting the duplicate ack.
+    """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.delete(_DEDUPE_KEY.format(event_id=event_id))

@@ -1,5 +1,7 @@
-"""The lexical token vocabulary the lexer produces and the parser consumes: the token
-kinds, an interpolation span, the token record, and how a token reads in a refusal."""
+"""The lexical token vocabulary the lexer produces and the parser consumes.
+
+The token kinds, an interpolation span, the token record, and how a token reads in a refusal.
+"""
 
 from __future__ import annotations
 
@@ -22,8 +24,10 @@ class _Kind(Enum):
 
 @dataclass(frozen=True)
 class _Interpolation:
-    """A ``\\(...)`` hole in a string literal, as a half-open span of the condition
-    text. Its body is jq CODE and is parsed and analyzed as such."""
+    r"""A ``\\(...)`` hole in a string literal, as a half-open span of the condition text.
+
+    Its body is jq CODE and is parsed and analyzed as such.
+    """
 
     start: int
     end: int

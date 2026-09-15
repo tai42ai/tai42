@@ -43,32 +43,35 @@ def get_run_attribution() -> RunAttribution | None:
 
 
 def preset_attribution_armed() -> bool:
-    """Whether an OUTERMOST registered-preset dispatch already armed the preset
-    attribution scope on this run.
+    """Return whether an OUTERMOST registered-preset dispatch already armed the preset scope on this run.
 
     Read by the runs-index chokepoint to enumerate ONE row per outermost preset
     dispatch: a nested sub-preset dispatch sees this armed (its ancestor set it) and
     writes no second row, exactly as :func:`stamp_preset_attribution` layers no second
-    trace stamp. False at a top-level dispatch, before the stamp arms the guard."""
+    trace stamp. False at a top-level dispatch, before the stamp arms the guard.
+    """
     return _preset_attribution_armed.get()
 
 
 def set_run_attribution(attribution: RunAttribution | None) -> Token[RunAttribution | None]:
-    """Bind ``attribution`` as the current run's attribution; pass the returned token to
-    :func:`reset_run_attribution` to restore the previous value."""
+    """Bind ``attribution`` as the current run's attribution and return a restore token.
+
+    Pass the returned token to :func:`reset_run_attribution` to restore the previous value.
+    """
     return _current_run_attribution.set(attribution)
 
 
 def reset_run_attribution(token: Token[RunAttribution | None]) -> None:
-    """Restore the attribution to the value captured in ``token`` by the matching
-    :func:`set_run_attribution` call."""
+    """Restore the attribution to the value captured in ``token`` by the matching :func:`set_run_attribution` call."""
     _current_run_attribution.reset(token)
 
 
 @contextmanager
 def run_attribution(attribution: RunAttribution) -> Iterator[None]:
-    """Deposit ``attribution`` as the ambient run attribution for the wrapped block,
-    resetting it in a ``finally``. A task created inside the block inherits it on a copy."""
+    """Deposit ``attribution`` as the ambient run attribution for the wrapped block, resetting it in a ``finally``.
+
+    A task created inside the block inherits it on a copy.
+    """
     token = set_run_attribution(attribution)
     try:
         yield
@@ -78,8 +81,7 @@ def run_attribution(attribution: RunAttribution) -> Iterator[None]:
 
 @contextmanager
 def _safe_attribution_scope(writer: MonitoringWriter, attribution: RunAttribution) -> Iterator[None]:
-    """Enter ``attribute_run`` around the drive, but NEVER let a monitoring-writer fault
-    break the run.
+    """Enter ``attribute_run`` around the drive, but NEVER let a monitoring-writer fault break the run.
 
     Observability must not break the operation it observes. A writer that faults — an
     off-contract ``trace_attributes`` signature (a ``TypeError`` at call binding, which
@@ -154,7 +156,8 @@ def stamp_preset_attribution(preset_name: str, version: int) -> Iterator[None]:
     Genuinely fail-safe: the scope is entered through :func:`_safe_attribution_scope`, so
     a monitoring-writer fault is logged loudly and the run continues unattributed rather
     than failing. Only a REGISTERED preset reaches here; a draft/inline run is never
-    stamped (absent = draft, never ``preset-v:draft``)."""
+    stamped (absent = draft, never ``preset-v:draft``).
+    """
     if _preset_attribution_armed.get():
         yield
         return

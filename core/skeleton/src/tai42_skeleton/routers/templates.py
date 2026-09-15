@@ -64,9 +64,11 @@ async def _extract_delete(request: Request) -> dict[str, Any]:
 
 
 def _req_templated_text(body: dict, key: str) -> TemplatedText:
-    """Parse a REQUIRED templated-text JSON object under ``key``, mapping a missing or
-    malformed one (including the type's neither/both-source rule) to a loud ``400``
-    naming the field."""
+    """Parse a REQUIRED templated-text JSON object under ``key``.
+
+    Maps a missing or malformed one (including the type's neither/both-source rule) to a loud
+    ``400`` naming the field.
+    """
     value = body.get(key)
     if not isinstance(value, dict):
         raise BadRequestError(f"{key!r} must be a templated-text JSON object with 'content' or 'id'")

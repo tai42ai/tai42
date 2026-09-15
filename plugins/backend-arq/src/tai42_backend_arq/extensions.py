@@ -33,10 +33,11 @@ from tai42_backend_arq.tasks import ARQ_SCHEDULE_OPTS, ARQ_TASK_OPTS, enqueue_ta
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND)
 def sync_task(func: Callable[..., Any], name: str, description: str) -> Callable[..., Any]:
-    """Branch ``func`` into ``<name>_sync_task``: queue the tool and wait (up to
-    ``task_timeout``) for its result. A failed job re-raises as
-    ``TaskFailedError``; an unserializable success returns its tagged
-    description instead of the value."""
+    """Branch ``func`` into ``<name>_sync_task``: queue the tool and wait for its result.
+
+    Waits up to ``task_timeout``. A failed job re-raises as ``TaskFailedError``; an unserializable
+    success returns its tagged description instead of the value.
+    """
     raw_name = f"{name}_sync_task"
     safe_name = makefun_func_name(raw_name)
     sig = add_signature_params(func, ARQ_TASK_OPTS, exclude_fastmcp_ctx=True)
@@ -69,8 +70,10 @@ def sync_task(func: Callable[..., Any], name: str, description: str) -> Callable
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND)
 def schedule_task(func: Callable[..., Any], name: str, description: str) -> Callable[..., Any]:
-    """Branch ``func`` into a ``<name>_schedule_task`` variant that registers a
-    recurring schedule (interval or crontab) queueing the tool."""
+    """Branch ``func`` into a ``<name>_schedule_task`` variant that registers a recurring schedule.
+
+    The schedule (interval or crontab) queues the tool.
+    """
     raw_name = f"{name}_schedule_task"
     safe_name = makefun_func_name(raw_name)
     new_description = f"Scheduled version of '{name}'. Schedules the task to run later via a background queue."
@@ -127,8 +130,10 @@ def schedule_task(func: Callable[..., Any], name: str, description: str) -> Call
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND)
 def async_task(func: Callable[..., Any], name: str, description: str) -> Callable[..., Any]:
-    """Branch ``func`` into a ``<name>_async_task`` variant that queues the tool
-    and returns immediately with the task id."""
+    """Branch ``func`` into a ``<name>_async_task`` variant that queues the tool and returns at once.
+
+    Returns immediately with the task id.
+    """
     raw_name = f"{name}_async_task"
     safe_name = makefun_func_name(raw_name)
     new_description = f"Async version of '{name}'. Submits the task to a background queue."

@@ -1,3 +1,5 @@
+"""Root-logger setup and an access-log filter that masks query-string values."""
+
 import logging
 from typing import TYPE_CHECKING
 
@@ -11,9 +13,11 @@ _QUERY_VALUE_MASK = "<redacted>"
 
 
 def _mask_query_values(path_with_query: str) -> str:
-    """Return ``path_with_query`` with every query-string VALUE replaced by a fixed mask,
-    keys and structure intact. A request URL carries capability codes and opaque params by
-    design, so no value may reach a log line; a query key is structural and stays."""
+    """Return ``path_with_query`` with every query-string VALUE replaced by a fixed mask, keys and structure intact.
+
+    A request URL carries capability codes and opaque params by design, so no value may reach a log line;
+    a query key is structural and stays.
+    """
     path, sep, query = path_with_query.partition("?")
     if not sep:
         return path_with_query
@@ -31,9 +35,11 @@ class AccessLogQueryMaskingFilter(logging.Filter):
     element is the request path + query — and ignores a rewritten ``record.msg``, so the
     mask is applied by replacing that args element; masking the message alone silently
     no-ops. Non-matching records pass through untouched. Always returns ``True`` — this
-    filter redacts, it never drops."""
+    filter redacts, it never drops.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """Mask the request path in a matching access record and always keep the record."""
         args = record.args
         if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
             record.args = (*args[:2], _mask_query_values(args[2]), *args[3:])

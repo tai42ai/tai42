@@ -49,8 +49,7 @@ except ImportError as exc:
 
 @lru_cache(maxsize=1)
 def _magika_client() -> Magika:
-    """The process-wide Magika client (constructing it loads a model, so it is
-    built once and reused)."""
+    """Return the process-wide Magika client, built once and reused (constructing it loads a model)."""
     return Magika()
 
 
@@ -86,8 +85,7 @@ def detect_mime(data: bytes) -> str | None:
 
 @contextmanager
 def _temp_file(data: bytes, suffix: str) -> Iterator[str]:
-    """Materialize ``data`` to a temp file with ``suffix`` for a path-based loader,
-    removing it on exit."""
+    """Materialize ``data`` to a temp file with ``suffix`` for a path-based loader, removing it on exit."""
     fd, path = tempfile.mkstemp(suffix=suffix)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -99,8 +97,10 @@ def _temp_file(data: bytes, suffix: str) -> Iterator[str]:
 
 
 def _media_subtype(mime: str | None, source: str | None, kind: str) -> str:
-    """The media subtype (``png``, ``wav``, ...) for a ``kind`` (``image``/``audio``)
-    block, from the detected mime with a ``source``-suffix fallback."""
+    """Return the media subtype (``png``, ``wav``, ...) for a ``kind`` block from the detected mime.
+
+    ``kind`` is ``image``/``audio``; falls back to a ``source``-suffix guess.
+    """
     if mime and mime.startswith(f"{kind}/"):
         return mime.split("/", 1)[1]
     if source:
@@ -181,8 +181,10 @@ def _load_audio(data: bytes, mime: str | None, source: str | None) -> MediaBlock
 
 @dataclass(frozen=True)
 class _Handler:
-    """One registry entry: the Magika labels, mime substrings, and extensions it
-    matches, and the loader that turns the bytes into text or a ``MediaBlock``."""
+    """One registry entry: the labels, mime substrings and extensions it matches, plus its loader.
+
+    The loader turns the bytes into text or a ``MediaBlock``.
+    """
 
     labels: tuple[str, ...]
     mime_substrings: tuple[str, ...]

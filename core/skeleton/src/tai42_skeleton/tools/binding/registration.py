@@ -1,5 +1,4 @@
-"""The ``@app.tools.tool`` / ``toolkit`` / ``mcp_tools`` registration decorators
-and the tool-info registry surface."""
+"""The ``@app.tools.tool`` / ``toolkit`` / ``mcp_tools`` registration decorators and the tool-info registry surface."""
 
 import logging
 import sys
@@ -23,8 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class _RegistrationMixin(_BranchBindingMixin):
-    """Registers tools/toolkits/remote-MCP tools onto the live server and exposes the
-    tool-info registry surface."""
+    """Registers tools/toolkits/remote-MCP tools onto the live server and exposes the tool-info registry surface."""
 
     def tool(
         self,
@@ -75,8 +73,10 @@ class _RegistrationMixin(_BranchBindingMixin):
         return decorator
 
     def tool_refs_extractor(self, name: str) -> "ToolRefsExtractor | None":
-        """The declared tool-references extractor a base tool registered under
-        ``name``, or ``None`` when it declared none."""
+        """The declared tool-references extractor a base tool registered under ``name``.
+
+        ``None`` when it declared none.
+        """
         return self._tool_refs_registry.get(name)
 
     def toolkit(self, *args, **kwargs):
@@ -182,8 +182,10 @@ class _RegistrationMixin(_BranchBindingMixin):
         return self._tool_registry.is_branch(name)
 
     def mcp_bound_names(self, title: str) -> frozenset[str]:
-        """The tool names currently bound by the MCP server ``title`` — a read-only
-        snapshot of the per-title bound-tool map (empty for an unknown title)."""
+        """The tool names currently bound by the MCP server ``title``.
+
+        A read-only snapshot of the per-title bound-tool map (empty for an unknown title).
+        """
         return frozenset(self._mcp_bound_tools.get(title, set()))
 
     def available_extensions(self) -> list[dict[str, str]]:

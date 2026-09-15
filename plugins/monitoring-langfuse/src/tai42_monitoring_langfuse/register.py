@@ -15,4 +15,5 @@ from tai42_monitoring_langfuse.factory import build_langfuse_backend
 
 @tai42_app.monitoring.register_monitoring
 def langfuse_monitoring() -> Monitoring:
+    """Build and register the Langfuse monitoring backend."""
     return build_langfuse_backend()

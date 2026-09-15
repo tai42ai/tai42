@@ -37,15 +37,18 @@ from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError
 
 class _TemplateMixin(_StatesServiceBase):
     async def _resolve_template_body(self, name: str, body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-        """Resolve a stored template body's fragment ``schema`` — the ``TemplatedText | dict``
-        union — to the plain fragment dict :func:`validate_template` and every composition work
-        on, returning ``(body_with_resolved_schema, was_by_id)``.
+        """Resolve a stored template body's fragment ``schema`` to the plain fragment dict callers work on.
+
+        The ``TemplatedText | dict`` union becomes the plain fragment dict
+        :func:`validate_template` and every composition work on, returning
+        ``(body_with_resolved_schema, was_by_id)``.
 
         An inline dict fragment is used as-is (``was_by_id`` False). A by-id (or inline
         templated) fragment is rendered and parsed to its schema (``was_by_id`` True); an
         unfetchable id, or a body that does not render to a JSON object, raises loudly naming the
         template. The stored body keeps the union — only this in-memory copy carries the resolved
-        fragment."""
+        fragment.
+        """
         typed = _SCHEMA_BODY_ADAPTER.validate_python(body.get("schema", {}))
         if not isinstance(typed, TemplatedText):
             return body, False
@@ -53,10 +56,12 @@ class _TemplateMixin(_StatesServiceBase):
         return {**body, "schema": fragment}, True
 
     async def _validated_template(self, row: dict[str, Any]) -> StateTemplate:
-        """Validate a template row into a :class:`StateTemplate`, its fragment ``schema`` union
-        resolved first. An inline-fragment template is memoized on ``(name, updated_at)`` — an
-        unchanged row is served from a bounded LRU; a by-id fragment is resolved and validated
-        FRESH each time (never memoized), so it always tracks the stored resource it names."""
+        """Validate a template row into a :class:`StateTemplate`, its fragment ``schema`` union resolved first.
+
+        An inline-fragment template is memoized on ``(name, updated_at)`` — an unchanged
+        row is served from a bounded LRU; a by-id fragment is resolved and validated FRESH
+        each time (never memoized), so it always tracks the stored resource it names.
+        """
         resolved_body, by_id = await self._resolve_template_body(row["name"], row["body"])
         if by_id:
             return validate_template(resolved_body)
@@ -77,10 +82,13 @@ class _TemplateMixin(_StatesServiceBase):
         return [StateTemplateDocument.model_validate(row["body"]) for row in await self._store.list_templates()]
 
     async def list_templates_catalog(self) -> list[dict[str, Any]]:
-        """The template-catalog projection the ``GET /api/state-templates`` list serves: each
-        stored document plus ``attached_to`` (the number of states the template is attached on)
-        and ``shipped_default`` (true when the template carries a seed ``shipped_hash`` — an
-        unedited shipped default). The attach counts are one query over every template."""
+        """The template-catalog projection the ``GET /api/state-templates`` list serves.
+
+        Each stored document plus ``attached_to`` (the number of states the template is
+        attached on) and ``shipped_default`` (true when the template carries a seed
+        ``shipped_hash`` — an unedited shipped default). The attach counts are one query
+        over every template.
+        """
         self._ensure_available()
         counts = await self._store.attached_template_counts()
         catalog: list[dict[str, Any]] = []
@@ -101,10 +109,13 @@ class _TemplateMixin(_StatesServiceBase):
 
     @staticmethod
     async def _compile_by_id_declarations_check(template: StateTemplate) -> None:
-        """Render and compile a by-id declarations ``check`` at the save door — the point that
-        can fetch the stored resource an inline compile in :func:`validate_template` cannot.
-        An unfetchable id fails the save loudly, naming the field and the id; a rendered jq
-        that does not compile is the same loud template error validate raises for inline jq."""
+        """Render and compile a by-id declarations ``check`` at the save door.
+
+        The save door is the point that can fetch the stored resource an inline compile in
+        :func:`validate_template` cannot. An unfetchable id fails the save loudly, naming
+        the field and the id; a rendered jq that does not compile is the same loud template
+        error validate raises for inline jq.
+        """
         if template.declarations is None:
             return
         check = template.declarations.check
@@ -127,9 +138,12 @@ class _TemplateMixin(_StatesServiceBase):
     async def _render_program_body_at_save(
         self, template: StateTemplate, program_name: str, text: TemplatedText
     ) -> str:
-        """Render one ``template_jq`` program body at the save door — the point that can fetch a
-        stored resource an inline compile in :func:`validate_template` cannot. An unfetchable id
-        fails the save loudly naming the program and the id."""
+        """Render one ``template_jq`` program body at the save door.
+
+        The save door is the point that can fetch a stored resource an inline compile in
+        :func:`validate_template` cannot. An unfetchable id fails the save loudly naming
+        the program and the id.
+        """
         try:
             return await tai42_app.storage.resource_manager.render_templated_text(text)
         except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
@@ -139,12 +153,14 @@ class _TemplateMixin(_StatesServiceBase):
             ) from exc
 
     async def _compile_by_id_template_jq(self, template: StateTemplate) -> None:
-        """Render and compile a by-id ``template_jq`` program at the save door. When a program
-        body is by-id, every program is rendered (the sibling prelude needs each input body) and
-        compiled over the full prelude; an unfetchable id fails the save loudly naming the program
-        and the id, and a rendered jq that does not compile is the same loud template error
-        validate raises for inline jq. An all-inline section is already compiled by
-        :func:`validate_template`, so this is a no-op for it."""
+        """Render and compile a by-id ``template_jq`` program at the save door.
+
+        When a program body is by-id, every program is rendered (the sibling prelude needs
+        each input body) and compiled over the full prelude; an unfetchable id fails the
+        save loudly naming the program and the id, and a rendered jq that does not compile
+        is the same loud template error validate raises for inline jq. An all-inline
+        section is already compiled by :func:`validate_template`, so this is a no-op for it.
+        """
         programs = template.template_jq
         if not programs or all(p.jq.content is not None for p in programs.values()):
             return
@@ -161,11 +177,14 @@ class _TemplateMixin(_StatesServiceBase):
                 ) from exc
 
     async def _compile_by_id_reconcile(self, template: StateTemplate) -> None:
-        """Render and compile a by-id ``reconcile`` program at the save door — the point that can
-        fetch a stored resource an inline compile in :func:`validate_template` cannot. An
-        unfetchable id fails the save loudly naming the program and the id; a rendered jq that does
-        not compile is the same loud template error validate raises for inline jq. An inline program
-        is already compiled by :func:`validate_template`."""
+        """Render and compile a by-id ``reconcile`` program at the save door.
+
+        The save door is the point that can fetch a stored resource an inline compile in
+        :func:`validate_template` cannot. An unfetchable id fails the save loudly naming
+        the program and the id; a rendered jq that does not compile is the same loud
+        template error validate raises for inline jq. An inline program is already compiled
+        by :func:`validate_template`.
+        """
         if template.reconcile is None:
             return
         for label, text in (
@@ -190,9 +209,12 @@ class _TemplateMixin(_StatesServiceBase):
                 ) from exc
 
     async def put_template(self, doc: StateTemplateDocument, *, replace: bool) -> StateTemplateDocument:
-        """Store a template document, running every registered attach validator over each live
-        attach before the write (a raise leaves the stored document untouched); overwriting
-        an existing name without ``replace`` raises :class:`TemplateExistsError`."""
+        """Store a template document, validating every live attach before the write.
+
+        Runs every registered attach validator over each live attach before the write (a
+        raise leaves the stored document untouched); overwriting an existing name without
+        ``replace`` raises :class:`TemplateExistsError`.
+        """
         self._ensure_available()
         # ``exclude_none`` drops an unset ``declarations`` (None) so the deep validator
         # sees the same absent-key shape ``to_document`` emits, never a null section.

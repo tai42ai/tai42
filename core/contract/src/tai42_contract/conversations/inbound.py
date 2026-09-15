@@ -14,14 +14,15 @@ from tai42_contract.locale import normalize_optional_locale
 
 
 class BlankInboundTextError(ValueError):
-    """The channel door was handed a blank/whitespace-only message body — nothing to run
-    a turn on. Raised by ``AppConversations.accept``; a channel adapter catches it and
-    drops the inbound (log + ack), exactly as it drops an unrouted one."""
+    """The channel door was handed a blank/whitespace-only message body — nothing to run a turn on.
+
+    Raised by ``AppConversations.accept``; a channel adapter catches it and
+    drops the inbound (log + ack), exactly as it drops an unrouted one.
+    """
 
 
 class ConversationMessage(BaseModel):
-    """The client-facing inbound body of the authed API door
-    ``POST /api/conversations/{route_name}/messages``.
+    """The client-facing inbound body of the authed API door ``POST /api/conversations/{route_name}/messages``.
 
     ``external_user_id`` is the caller's handle for the end user: it becomes the
     ``client_address`` the answer is delivered against and the conversation's thread

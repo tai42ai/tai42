@@ -1,3 +1,5 @@
+"""Helpers for adapting MCP tools into LangChain ``StructuredTool`` instances."""
+
 import mcp
 from fastmcp.client import Client
 from langchain_core.tools import StructuredTool
@@ -6,15 +8,13 @@ from tai42_kit.clients.settings import mcp_client_settings
 
 
 async def mcp_tools_to_lc_tools(client: Client, tools_names: list[str] | None = None) -> list[StructuredTool]:
-    """
-    Convert tools from the MCP client to LC tools.
+    """Convert tools from the MCP client to LC tools.
 
     If `tools_names` is provided, only tools with matching names are included,
     and every requested name must exist on the server — a requested-but-absent
     name raises ``ValueError`` (naming the missing tools) rather than being
     silently dropped. If `tools_names` is None or empty, all tools are returned.
     """
-
     name_filter = set(tools_names) if tools_names else None
     tools = await client.list_tools()
 
@@ -31,6 +31,7 @@ async def mcp_tools_to_lc_tools(client: Client, tools_names: list[str] | None = 
 
 
 def mcp_tool_to_lc_tool(client: Client, mcp_tool: mcp.types.Tool) -> StructuredTool:
+    """Adapt one MCP tool into a LangChain ``StructuredTool``; a name over 64 characters raises ``ValueError``."""
     # Names map 1:1 to the filter key and the LLM tool-name limit; raise on an
     # over-length name rather than silently truncating it (which would desync the
     # registered name from the filter key).

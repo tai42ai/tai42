@@ -16,9 +16,9 @@ from tai42_contract.template import TemplatedText
 
 
 async def render_templated_text(text: TemplatedText, locale: str | None = None) -> str:
-    """Return ``text`` rendered with its own ``kwargs``: the stored resource it names by
-    ``id``, or its inline ``content``.
+    """Return ``text`` rendered with its own ``kwargs``.
 
+    The source is the stored resource it names by ``id``, or its inline ``content``.
     ``locale`` selects the stored resource's locale variant and reaches the render as its
     language. A missing resource, or a template the engine cannot render, raises out of
     the manager.
@@ -27,17 +27,18 @@ async def render_templated_text(text: TemplatedText, locale: str | None = None) 
 
 
 class SchemaBodyError(ValueError):
-    """A :class:`~tai42_contract.template.TemplatedText` authored schema body could not be
-    resolved to a JSON-object schema — its stored resource could not be rendered, its
-    rendered text was not valid JSON, or that JSON was not an object. The message names the
-    field so the failure is never a silent empty schema or an accepted raw text."""
+    """An authored schema body could not be resolved to a JSON-object schema.
+
+    Raised for a :class:`~tai42_contract.template.TemplatedText` body whose stored resource could
+    not be rendered, whose rendered text was not valid JSON, or whose JSON was not an object. The
+    message names the field so the failure is never a silent empty schema or an accepted raw text.
+    """
 
 
 async def resolve_schema_body(
     field: str, value: TemplatedText | dict[str, Any] | None, *, locale: str | None = None
 ) -> dict[str, Any] | None:
-    """Resolve an authored JSON-Schema body — the ``TemplatedText | dict`` union — to the
-    plain schema ``dict`` its consumer validates and uses.
+    """Resolve an authored JSON-Schema body — the ``TemplatedText | dict`` union — to a plain schema ``dict``.
 
     An inline ``dict`` is the schema document itself, returned unchanged (no stringification,
     no behaviour change for an inline author). A :class:`~tai42_contract.template.TemplatedText`

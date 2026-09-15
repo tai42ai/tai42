@@ -1,5 +1,4 @@
-"""Facet adapters mapping the concrete app across the facade's
-``tai42_contract.app`` sub-protocols.
+"""Facet adapters mapping the concrete app across the facade's ``tai42_contract.app`` sub-protocols.
 
 Each facet is a thin view bound to the owning :class:`~tai42_skeleton.app.server.TaiMCP`;
 it forwards to the feature's impl collaborator (``ToolBinding``, ``AgentBinding``,

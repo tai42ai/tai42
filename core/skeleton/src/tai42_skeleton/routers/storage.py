@@ -1,6 +1,6 @@
-"""HTTP surface for the storage MANAGEMENT operations — ``/api/storage/resources*``
-and ``/api/storage/dirs*`` (all AUTHED).
+"""HTTP surface for the storage MANAGEMENT operations — ``/api/storage/resources*`` and ``/api/storage/dirs*``.
 
+All routes are AUTHED.
 AUTHED thin adapters over operations in ``tai42_skeleton.operations.storage`` — a thin
 skin over the registered :class:`~tai42_contract.storage.Storage` provider (the app's
 content store). Storage is dead by default (the skeleton ships no provider); a
@@ -56,8 +56,10 @@ def _error(message: str, status_code: int) -> JSONResponse:
 
 
 async def _extract_upload(request: Request) -> dict:
-    """Parse the upload body at the HTTP edge, preserving the door's hand-authored
-    malformed-body ``400`` messages; the operation validates the field shapes."""
+    """Parse the upload body at the HTTP edge, preserving the door's hand-authored malformed-body ``400``.
+
+    The operation validates the field shapes.
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -133,7 +135,8 @@ async def download_resource(request: Request) -> Response:
 
     A content server (raw bytes + a Content-Disposition attachment header, not the
     ``{"data": ...}`` envelope), so it stays a native handler rather than an
-    operation adapter."""
+    operation adapter.
+    """
     resource_id = request.path_params["resource_id"]
     if _is_unsafe_path(resource_id):
         return _error(f"resource id {resource_id!r} {_UNSAFE_ID_MESSAGE}", 400)

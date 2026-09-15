@@ -1,5 +1,8 @@
-"""Thread and person forget doors — the absolute, idempotent teardown of a thread's checkpoint,
-answer records and indexes (route-keyed or linked-person aggregate), and the whole-person erase."""
+"""Thread and person forget doors.
+
+The absolute, idempotent teardown of a thread's checkpoint, answer records and indexes
+(route-keyed or linked-person aggregate), and the whole-person erase.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +28,9 @@ _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
 async def _thread_delete_routes(thread_id: str, route_name: str) -> list[str]:
-    """The route indexes ``thread_id`` is forgotten across. A route-keyed thread lives under
+    """The route indexes ``thread_id`` is forgotten across.
+
+    A route-keyed thread lives under
     its one ``route_name`` and its id MUST carry that route's ``bridge:{route_name}:`` prefix
     — a route slug carries no ``:``, so the prefix is unambiguous; the check is the sole guard
     stopping a delete on one route from reaching another route's thread memory by id, and a
@@ -34,7 +39,8 @@ async def _thread_delete_routes(thread_id: str, route_name: str) -> list[str]:
     them (else a loud 404), so the delete reaches only a thread the person actually holds and
     every route index carrying it is reclaimed (else a member strands under one). Caller
     authority is the door's grantable write action — the same grant that creates a route —
-    never derived here."""
+    never derived here.
+    """
     if not thread_id.startswith(PERSON_THREAD_PREFIX):
         prefix = f"{BRIDGE_THREAD_PREFIX}{route_name}:"
         if not thread_id.startswith(prefix):
@@ -49,10 +55,12 @@ async def _thread_delete_routes(thread_id: str, route_name: str) -> list[str]:
 
 
 async def _delete_thread_checkpoint(thread_id: str) -> None:
-    """Delete ``thread_id``'s agent checkpoint on the configured provider — the run's actual
-    memory, reached the way the retention sweep reaches it. Every provider's saver must expose
-    ``adelete_thread``; one that does not is a loud 501, never a silent skip that would leave
-    the forgotten thread's memory behind."""
+    """Delete ``thread_id``'s agent checkpoint on the configured provider.
+
+    The run's actual memory, reached the way the retention sweep reaches it. Every provider's saver
+    must expose ``adelete_thread``; one that does not is a loud 501, never a silent skip that would
+    leave the forgotten thread's memory behind.
+    """
     from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
     from tai42_kit.llm.settings import llm_provider_settings
 
@@ -77,10 +85,11 @@ async def _delete_thread_checkpoint(thread_id: str) -> None:
     response_model=ThreadDeleteResult,
 )
 async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[str, Any]:
-    """Forget ONE conversation thread: its agent checkpoint, its answer records and its thread
-    indexes, so a later message on the same address starts a memory the deleted turns never
-    touched. A LINKED person's aggregated ``bridge:@person:{id}`` thread is forgotten across
-    every route index it spans.
+    """Forget ONE conversation thread: its agent checkpoint, its answer records and its thread indexes.
+
+    A later message on the same address starts a memory the deleted turns never touched. A LINKED
+    person's aggregated ``bridge:@person:{id}`` thread is forgotten across every route index it
+    spans.
 
     Forgetting is ABSOLUTE: a valid id on its own route always succeeds, even when nothing is
     stored. An aged-out thread whose answer records already expired under the retention TTL,
@@ -116,7 +125,8 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
 
     Returns ``{"removed", "route_name", "thread_id"}``, where ``removed`` counts the answer
     records this call deleted (0 when a prior run already cleared them, when their rows had
-    expired under the retention TTL, or when the id was never stored)."""
+    expired under the retention TTL, or when the id was never stored).
+    """
     _validate_route_name(route_name)
     if not thread_id.strip():
         raise BadRequestError("thread_id must be a non-blank thread identifier")
@@ -160,7 +170,7 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
     response_model=PersonDeleteResult,
 )
 async def delete_conversation_person(person_id: str) -> dict[str, Any]:
-    """Erase a LINKED person ENTIRELY, forgetting every store that names it:
+    """Erase a LINKED person ENTIRELY, forgetting every store that names it.
 
     - the person's aggregated ``bridge:@person:{person_id}`` thread — its agent checkpoint,
       and across EVERY route the person wrote under its answer records, per-thread transcript
@@ -184,7 +194,8 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
 
     Returns ``{"person_id", "removed", "erased"}``, where ``removed`` counts the answer records
     this call deleted across the person's routes and ``erased`` says whether THIS call removed
-    the person row."""
+    the person row.
+    """
     if not person_id.strip():
         raise BadRequestError("person_id must be a non-blank person identifier")
     _require_backend()

@@ -27,8 +27,11 @@ if TYPE_CHECKING:
 
 @dataclass
 class OperationMetadata:
-    """One operation's declared metadata — the single source the route, the CLI,
-    the OpenAPI spec, the MCP tool, and the authorization check all derive from."""
+    """One operation's declared metadata.
+
+    The single source the route, the CLI, the OpenAPI spec, the MCP tool, and the authorization check all
+    derive from.
+    """
 
     name: str
     func: Callable[..., Awaitable[object]]
@@ -80,6 +83,7 @@ class OperationRegistry:
     """
 
     def __init__(self) -> None:
+        """Initialize the empty committed and staged operation generations."""
         # ``_operations`` is the COMMITTED generation the request path (authz/dispatch)
         # resolves against; ``_pending`` is the generation an epoch build stages into,
         # promoted to committed in ONE reference assignment (atomic under the GIL) only
@@ -94,6 +98,7 @@ class OperationRegistry:
         return self._pending if self._pending is not None else self._operations
 
     def register(self, metadata: OperationMetadata) -> None:
+        """Register ``metadata``, raising when its name is already registered."""
         target = self._write_target()
         existing = target.get(metadata.name)
         if existing is not None and existing is not metadata:
@@ -104,12 +109,14 @@ class OperationRegistry:
         target[metadata.name] = metadata
 
     def get(self, name: str) -> OperationMetadata:
+        """Return the committed operation registered under ``name``, raising ``KeyError`` when absent."""
         try:
             return self._operations[name]
         except KeyError:
             raise KeyError(f"Operation {name!r} is not registered.") from None
 
     def has(self, name: str) -> bool:
+        """Whether an operation is registered under ``name`` in the committed generation."""
         return name in self._operations
 
     def all(self) -> list[OperationMetadata]:
@@ -117,41 +124,52 @@ class OperationRegistry:
         return [self._operations[name] for name in sorted(self._operations)]
 
     def names(self) -> frozenset[str]:
+        """The names of every committed operation."""
         return frozenset(self._operations)
 
     def all_staged(self) -> list[OperationMetadata]:
-        """Every operation in the STAGED generation if a build is staging, else the
-        committed one — the build's own view (the projection reads this so it projects
-        the generation being assembled, not the live one)."""
+        """Every operation in the STAGED generation if a build is staging, else the committed one.
+
+        The build's own view (the projection reads this so it projects the generation being assembled, not
+        the live one).
+        """
         target = self._write_target()
         return [target[name] for name in sorted(target)]
 
     def names_staged(self) -> frozenset[str]:
-        """The names in the STAGED generation if a build is staging, else committed —
-        the build's own view (the projection's include/exclude validation)."""
+        """The names in the STAGED generation if a build is staging, else committed.
+
+        The build's own view (the projection's include/exclude validation).
+        """
         return frozenset(self._write_target())
 
     def clear(self) -> None:
-        """Drop every registration from the write target (the staged generation while a
-        build is staging, else the committed surface). Kept for tests; the epoch build
-        opens an empty staged generation via :meth:`begin_staging` rather than clearing."""
+        """Drop every registration from the write target.
+
+        The write target is the staged generation while a build is staging, else the committed surface.
+        Kept for tests; the epoch build opens an empty staged generation via :meth:`begin_staging` rather
+        than clearing.
+        """
         self._write_target().clear()
 
     def begin_staging(self) -> None:
-        """Open a fresh staged generation the epoch build populates, leaving the
-        committed surface serving the live generation untouched."""
+        """Open a fresh staged generation the epoch build populates.
+
+        Leaves the committed surface serving the live generation untouched.
+        """
         self._pending = {}
 
     def commit_staging(self) -> None:
-        """Promote the staged generation to committed in one reference assignment
-        (atomic under the GIL). A no-op if no build staged."""
+        """Promote the staged generation to committed in one reference assignment (atomic under the GIL).
+
+        A no-op if no build staged.
+        """
         if self._pending is not None:
             self._operations = self._pending
             self._pending = None
 
     def abort_staging(self) -> None:
-        """Drop the staged generation on a failed build — the committed surface never
-        saw any of its registrations."""
+        """Drop the staged generation on a failed build — the committed surface never saw its registrations."""
         self._pending = None
 
     @contextmanager
@@ -173,8 +191,7 @@ class OperationRegistry:
 
     @property
     def settled(self) -> bool:
-        """Whether this registry's contents are an ANSWER: no rebuild is in flight AND
-        it is non-empty.
+        """Whether this registry's contents are an ANSWER: no rebuild is in flight AND it is non-empty.
 
         Emptiness alone is decisive: a started app always holds this package's leaf
         operations, so an empty registry is only ever the cleared half of a rebuild (or

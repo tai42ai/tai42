@@ -181,11 +181,13 @@ with warnings.catch_warnings():
             return self
 
         def is_plain_text(self) -> bool:
-            """Whether this part carries nothing beyond its ``message`` — the case a
-            single-message answer degenerates to (``parts`` then adds nothing over the joined
-            ``answer`` and is dropped). A part carrying media, a location, a template, options,
-            sections, a header, a footer or a schema is NOT plain text — it adds what the joined
-            ``answer`` cannot carry."""
+            """Whether this part carries nothing beyond its ``message``.
+
+            This is the case a single-message answer degenerates to (``parts`` then adds nothing
+            over the joined ``answer`` and is dropped). A part carrying media, a location, a
+            template, options, sections, a header, a footer or a schema is NOT plain text — it
+            adds what the joined ``answer`` cannot carry.
+            """
             return (
                 self.media is None
                 and self.location is None
@@ -199,18 +201,23 @@ with warnings.catch_warnings():
 
 
 def joined_answer_text(parts: Sequence[AnswerPart]) -> str:
-    """The whole-text form of an ordered ``parts`` list: the NON-BLANK part messages joined
-    with a blank line — the single string every legacy reader (api-door callbacks, sync waits,
-    transcripts) consumes. A MEDIA-ONLY part (blank message) contributes NOTHING to the text,
-    so an all-media answer joins to the empty string; the media itself rides ``parts``, which a
-    parts-aware consumer delivers. The one definition both the wire :class:`ConversationAnswer`
-    and the host record share, so the joined text can never diverge between them."""
+    """The whole-text form of an ordered ``parts`` list.
+
+    The NON-BLANK part messages joined with a blank line — the single string every legacy reader
+    (api-door callbacks, sync waits, transcripts) consumes. A MEDIA-ONLY part (blank message)
+    contributes NOTHING to the text, so an all-media answer joins to the empty string; the media
+    itself rides ``parts``, which a parts-aware consumer delivers. The one definition both the wire
+    :class:`ConversationAnswer` and the host record share, so the joined text can never diverge
+    between them.
+    """
     return "\n\n".join(part.message for part in parts if part.message.strip())
 
 
 class ConversationAnswer(BaseModel):
-    """The outcome of one conversation turn — the body POSTed (HMAC-signed) to a
-    ``door=api`` row's ``callback_url`` AND the bounded sync-wait payload.
+    r"""The outcome of one conversation turn.
+
+    The body POSTed (HMAC-signed) to a ``door=api`` row's ``callback_url`` AND the bounded
+    sync-wait payload.
 
     ``message_id`` correlates it to the ``202``/``200`` the door returned. On
     ``status="error"`` the ``answer`` is generic client-safe text, never an internal
@@ -239,10 +246,12 @@ class ConversationAnswer(BaseModel):
 
     @model_validator(mode="after")
     def _answer_matches_status(self) -> ConversationAnswer:
-        """``answered``/``error`` carry answer text (a string, possibly EMPTY for an all-media
-        answer whose ``parts`` carry the content); ``silent`` carries none. A blank ``answer`` is
-        admissible on ``answered``/``error`` ONLY when ``parts`` is present — otherwise there is
-        nothing to deliver."""
+        """``answered``/``error`` carry answer text; ``silent`` carries none.
+
+        The text is a string, possibly EMPTY for an all-media answer whose ``parts`` carry the
+        content. A blank ``answer`` is admissible on ``answered``/``error`` ONLY when ``parts`` is
+        present — otherwise there is nothing to deliver.
+        """
         if self.status == "silent":
             if self.answer is not None:
                 raise ValueError("a silent answer carries no answer text")
@@ -255,12 +264,14 @@ class ConversationAnswer(BaseModel):
 
     @model_validator(mode="after")
     def _parts_mirror_the_answer(self) -> ConversationAnswer:
-        """A present ``parts`` list is non-empty, rides an ``answered``/``error`` outcome
-        (never ``silent``), and its NON-BLANK part MESSAGE texts join with ``"\n\n"`` to exactly
-        ``answer`` (a media-only part contributes nothing) — so the joined text a legacy consumer
-        reads and the ordered parts a parts-aware consumer delivers can never disagree. Each
-        part's own shape (message-or-media, media/options/template exclusivity) is enforced by
-        :class:`AnswerPart`."""
+        r"""A present ``parts`` list mirrors ``answer`` exactly and rides an ``answered``/``error`` outcome.
+
+        The list is non-empty, never ``silent``, and its NON-BLANK part MESSAGE texts join with
+        ``"\n\n"`` to exactly ``answer`` (a media-only part contributes nothing) — so the joined
+        text a legacy consumer reads and the ordered parts a parts-aware consumer delivers can
+        never disagree. Each part's own shape (message-or-media, media/options/template
+        exclusivity) is enforced by :class:`AnswerPart`.
+        """
         if self.parts is None:
             return self
         if not self.parts:

@@ -1,5 +1,7 @@
-"""Enforces a branch extension's input-schema rule by kind (wrapper preserves,
-transformer declares its own)."""
+"""Enforces a branch extension's input-schema rule by kind.
+
+A wrapper preserves the schema; a transformer declares its own.
+"""
 
 import inspect
 from collections.abc import Callable
@@ -19,12 +21,13 @@ def _enforce_extension_schema(
     curr_func: Callable[..., Any],
     tool: str,
 ) -> None:
-    """Enforce the branch's input-schema rule by kind PROPERTY, never by
-    member identity. WRAPPER (``preserves_schema``) must present the layer's
-    input schema unchanged; TRANSFORMER (``declares_schema``) must present
-    its own concrete schema; BACKEND (neither) has no schema rule — its
-    single-strategy cardinality is enforced by ``ExtensionRegistry.validate``,
-    and there is no in-place path to guard (every kind branches)."""
+    """Enforce the branch's input-schema rule by kind PROPERTY, never by member identity.
+
+    WRAPPER (``preserves_schema``) must present the layer's input schema unchanged; TRANSFORMER
+    (``declares_schema``) must present its own concrete schema; BACKEND (neither) has no schema
+    rule — its single-strategy cardinality is enforced by ``ExtensionRegistry.validate``, and
+    there is no in-place path to guard (every kind branches).
+    """
     if kind.preserves_schema:
         _enforce_wrapper_schema(extension, extension_func, prev_func, curr_func, tool)
     elif kind.declares_schema:

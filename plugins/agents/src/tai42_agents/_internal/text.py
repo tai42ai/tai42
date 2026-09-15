@@ -10,9 +10,11 @@ from typing import Any
 
 
 def text_of(message: Any) -> str:
-    """The plain text of a message whose ``content`` is either a string or a list
-    of content blocks (newer LangChain providers). Non-text blocks (image_url,
-    tool_use, thinking, …) are skipped."""
+    """The plain text of a message whose ``content`` is a string or a list of content blocks.
+
+    Content blocks are the shape newer LangChain providers use; non-text blocks (image_url,
+    tool_use, thinking, …) are skipped.
+    """
     content = getattr(message, "content", "")
     if isinstance(content, str):
         return content

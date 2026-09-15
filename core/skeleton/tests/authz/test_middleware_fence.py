@@ -35,7 +35,7 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.authz.middleware import AuthzMiddleware
 from tai42_skeleton.authz.resolver import resolve_dispatch
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.operations.errors import PermissionDenied
+from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
@@ -141,7 +141,7 @@ async def _dispatch_as(user_id: str, scopes: tuple[str, ...], tool: str, argumen
 
 
 async def _denied_as(user_id: str, scopes: tuple[str, ...], tool: str, arguments: dict | None = None) -> ToolError:
-    """Dispatch and assert the deny is a ``PermissionDenied``-backed ``ToolError`` raised
+    """Dispatch and assert the deny is a ``PermissionDeniedError``-backed ``ToolError`` raised
     BEFORE ``call_next``; returns it for inspection."""
     dispatcher = _Dispatcher()
     reset = _bind_caller(user_id, scopes)
@@ -150,7 +150,7 @@ async def _denied_as(user_id: str, scopes: tuple[str, ...], tool: str, arguments
             await dispatcher.dispatch(tool, arguments)
     finally:
         reset()
-    assert isinstance(excinfo.value.__cause__, PermissionDenied), excinfo.value.__cause__
+    assert isinstance(excinfo.value.__cause__, PermissionDeniedError), excinfo.value.__cause__
     assert dispatcher.reached == 0, f"{tool} reached call_next on a deny"
     return excinfo.value
 

@@ -1,3 +1,5 @@
+"""Pooled ``httpx`` client for app-owned outbound HTTP."""
+
 import httpx
 
 from tai42_kit.clients.base import PooledClient, reject_unknown_connection_kwargs

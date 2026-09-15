@@ -1,5 +1,4 @@
-"""The attach lifecycle, subject validation, effective-schema composition, and attach-value
-validation.
+"""The attach lifecycle, subject validation, effective-schema composition, and attach-value validation.
 
 Attaching or re-declaring a template validates its path/parameters/declarations, runs every
 registered attach validator over the composed effective schema, and recomposes the state's
@@ -36,11 +35,13 @@ from tai42_skeleton.states.templates import StateTemplate, compose_effective_sch
 
 class _AttachmentMixin(_StatesServiceBase):
     async def validate_subject(self, decl: StateDeclaration, subject: StateSubject) -> None:
-        """Refuse a subject that a state's declaration does not admit: an undeclared
-        kind, or — for kind ``person`` — an unknown person or a person whose target does
+        """Refuse a subject that a state's declaration does not admit.
+
+        An undeclared kind, or — for kind ``person`` — an unknown person or a person whose target does
         not match the subject's. The ``ConversationPersonStore`` is constructed LAZILY and
         ONLY on the ``person`` branch (its constructor raises 501 without the redis
-        conversations backend), so no state of another kind is gated on redis."""
+        conversations backend), so no state of another kind is gated on redis.
+        """
         if subject.kind not in decl.subject_kinds:
             raise SubjectRefusedError(
                 f"subject kind {subject.kind!r} is not declared by state {decl.name!r} "
@@ -85,15 +86,17 @@ class _AttachmentMixin(_StatesServiceBase):
         ]
 
     async def attach(self, state: str, template_name: str, body: AttachBody, *, skip_reconcilers: bool = False) -> None:
-        """Attach a template on a state: validate path/parameters/declarations (+ check), run
-        every registered attach validator over the composed effective schema, run every
-        registered reconciler, then store the resolved parameters and the recomposed
-        effective schema in one transaction (nothing derived is materialized). The
-        reconcilers and the attach write share ONE transaction, so a reconciler's record
-        writes commit with the attach or roll back together with a refusal. ``body.options``
-        is a per-operation directive passed to the reconcilers, never stored.
+        """Attach a template on a state.
+
+        Validate path/parameters/declarations (+ check), run every registered attach validator
+        over the composed effective schema, run every registered reconciler, then store the
+        resolved parameters and the recomposed effective schema in one transaction (nothing
+        derived is materialized). The reconcilers and the attach write share ONE transaction, so
+        a reconciler's record writes commit with the attach or roll back together with a refusal.
+        ``body.options`` is a per-operation directive passed to the reconcilers, never stored.
         ``skip_reconcilers`` (backup restore only) runs the validators but not the
-        reconcilers — a restored attachment is a snapshot, not a re-attach."""
+        reconcilers — a restored attachment is a snapshot, not a re-attach.
+        """
         self._ensure_available()
         path = list(body.path)
         parameters = dict(body.parameters or {})
@@ -147,11 +150,13 @@ class _AttachmentMixin(_StatesServiceBase):
         options: dict[str, Any] | None = None,
         skip_reconcilers: bool = False,
     ) -> None:
-        """Rewrite an attachment's declarations, re-running every registered attach validator and
-        reconciler and recomposing the effective schema before the write. The reconcilers
+        """Rewrite an attachment's declarations, recomposing the effective schema before the write.
+
+        Re-runs every registered attach validator and reconciler before the write. The reconcilers
         and the write share ONE transaction. ``options`` is a per-operation directive
         passed to the reconcilers, never stored. ``skip_reconcilers`` (backup restore only)
-        runs the validators but not the reconcilers."""
+        runs the validators but not the reconcilers.
+        """
         self._ensure_available()
         declarations = dict(declarations or {})
         options = dict(options or {})
@@ -199,19 +204,23 @@ class _AttachmentMixin(_StatesServiceBase):
         await self._store.delete_attachment(state, template_name, effective_schema=effective)
 
     async def effective_schema_for(self, state: str) -> dict[str, Any]:
-        """The stored effective schema (base + every attachment's fragment) for a declared
-        state — the schema every document validation reads."""
+        """The stored effective schema (base + every attachment's fragment) for a declared state.
+
+        The schema every document validation reads.
+        """
         self._ensure_available()
         return (await self._require_declaration(state))["effective_schema"]
 
     async def served_declaration(self, name: str) -> dict[str, Any]:
-        """The full served declaration read: ``schema`` (base), ``effective_schema``,
-        ``subject_kinds``, ``default_subject_kind``, ``retention_days`` (``None`` when the
-        state keeps records forever), ``attachments[]``, ``regimes[]`` (the absolute regime paths
-        every attachment declares) and ``updated_at`` (the ISO timestamp of the last write) — the
-        one read a consumer's bind-time checks and the Studio's fields view consume. Carries
-        the same fields the list read dumps, so an edit form round-trips a declaration
-        (``retention_days`` included) without dropping any."""
+        """The full served declaration read.
+
+        ``schema`` (base), ``effective_schema``, ``subject_kinds``, ``default_subject_kind``,
+        ``retention_days`` (``None`` when the state keeps records forever), ``attachments[]``,
+        ``regimes[]`` (the absolute regime paths every attachment declares) and ``updated_at`` (the
+        ISO timestamp of the last write) — the one read a consumer's bind-time checks and the
+        Studio's fields view consume. Carries the same fields the list read dumps, so an edit form
+        round-trips a declaration (``retention_days`` included) without dropping any.
+        """
         self._ensure_available()
         decl = await self._require_declaration(name)
         attachments = await self._load_state_attachments(name)
@@ -236,8 +245,7 @@ class _AttachmentMixin(_StatesServiceBase):
         }
 
     def regime_for_path(self, template: StateTemplate, relative_path: list[Any]) -> str:
-        """The regime governing ``relative_path`` in ``template`` — exposed for a consumer's
-        bind-time single-writer check."""
+        """The regime governing ``relative_path`` in ``template`` — for a consumer's bind-time single-writer check."""
         return regime_for(template, relative_path)
 
     async def _require_declaration(self, state: str) -> dict[str, Any]:
@@ -259,8 +267,9 @@ class _AttachmentMixin(_StatesServiceBase):
         self, state: str, *, override: dict[str, StateTemplate] | None = None
     ) -> list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]]:
         """Every attachment on the state as ``(template, path, parameters, declarations)``.
-        ``override`` supplies a not-yet-stored template body (a template replace composes
-        against the candidate)."""
+
+        ``override`` supplies a not-yet-stored template body (a template replace composes against the candidate).
+        """
         override = override or {}
         out: list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]] = []
         for row in await self._store.list_attachments_for_state(state):
@@ -272,7 +281,8 @@ class _AttachmentMixin(_StatesServiceBase):
         """The effective schema for ``base_schema`` over the state's CURRENT attachments.
 
         ``base_schema`` is the ``TemplatedText | dict`` union (a by-id base resolves to its
-        schema); composition is over the resolved schema."""
+        schema); composition is over the resolved schema.
+        """
         resolved_base = await _resolve_state_schema(f"state {state!r} schema", base_schema)
         attachments = await self._load_state_attachments(state)
         return compose_effective_schema(resolved_base, [(m, p, pa) for m, p, pa, _d in attachments])
@@ -281,10 +291,12 @@ class _AttachmentMixin(_StatesServiceBase):
     def _compose_regimes(
         attachments: list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]],
     ) -> list[dict[str, Any]]:
-        """The absolute write-regime rules over already-loaded ``attachments``: each attached
-        template's regime paths prefixed by the attach path. The ONE composition every
+        """The absolute write-regime rules over already-loaded ``attachments``.
+
+        Each attached template's regime paths prefixed by the attach path. The ONE composition every
         declaration read (``get_declaration``/``list_declarations``) and
-        ``served_declaration`` share, so a served regime is identical across doors."""
+        ``served_declaration`` share, so a served regime is identical across doors.
+        """
         regimes: list[dict[str, Any]] = []
         for template, base_path, _params, _decls in attachments:
             regimes.extend({"path": [*base_path, *rule.path], "regime": rule.regime} for rule in template.regimes)
@@ -301,30 +313,34 @@ class _AttachmentMixin(_StatesServiceBase):
 
     @staticmethod
     def _effective_parameters(template: StateTemplate, parameters: dict[str, Any]) -> dict[str, Any]:
-        """The parameter map an attach PERSISTS: the template's defaults overlaid by the
-        client's supplied values."""
+        """The parameter map an attach PERSISTS: the template's defaults overlaid by the client's supplied values."""
         return {**template.defaults(), **dict(parameters or {})}
 
     async def _validate_attach_values(
         self, template: StateTemplate, parameters: dict[str, Any], declarations: dict[str, Any]
     ) -> None:
-        """Validate an attach's effective parameter values against each parameter's schema
-        (every no-default parameter supplied) and its declarations against the template's
-        declarations schema and optional ``check`` predicate. Loud on the first failure.
+        """Validate an attach's effective parameter values and declarations, loud on the first failure.
+
+        Each parameter value is checked against its parameter's schema (every no-default parameter
+        supplied) and the declarations against the template's declarations schema and optional
+        ``check`` predicate.
 
         The ``check`` runs over the declarations with the attach's EFFECTIVE parameters
         (template defaults overlaid by supplied values — the map the runtime sees) bound as
         the named jq variable ``$parameters``, so a check may constrain a declaration
         against a parameter (e.g. against a parameter-declared enum) at the earliest point
-        both are known."""
+        both are known.
+        """
         effective = self._effective_parameters(template, parameters)
         _validate_effective_parameters(template, effective)
         await _validate_attach_declarations(template, declarations, effective)
 
 
 def _validate_effective_parameters(template: StateTemplate, effective: dict[str, Any]) -> None:
-    """Each effective parameter value against its parameter schema, and every no-default
-    parameter supplied. Loud on the first failure."""
+    """Each effective parameter value against its parameter schema, and every no-default parameter supplied.
+
+    Loud on the first failure.
+    """
     for name, value in effective.items():
         param = template.parameters.get(name)
         if param is None:
@@ -343,9 +359,10 @@ def _validate_effective_parameters(template: StateTemplate, effective: dict[str,
 async def _validate_attach_declarations(
     template: StateTemplate, declarations: dict[str, Any], effective: dict[str, Any]
 ) -> None:
-    """The attach's declarations against the template's declarations schema and its optional
-    ``check`` predicate (binding the effective parameters as ``$parameters``). Loud on the
-    first failure."""
+    """The attach's declarations against the template's declarations schema and its optional ``check`` predicate.
+
+    The ``check`` binds the effective parameters as ``$parameters``. Loud on the first failure.
+    """
     if template.declarations is None:
         if declarations:
             raise TemplateValidationError(

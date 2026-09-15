@@ -1,5 +1,8 @@
-"""The per-epoch serving surface — a fresh FastMCP plus its feature collaborators —
-and the recording of its MCP transport surfaces into the route registry."""
+"""The per-epoch serving surface and its MCP transport-surface recording.
+
+A fresh FastMCP plus its feature collaborators, and the recording of its MCP transport surfaces
+into the route registry.
+"""
 
 from typing import TYPE_CHECKING, Any
 
@@ -46,8 +49,9 @@ if TYPE_CHECKING:
 
 
 def record_streamable_http_surface(path: str, *, stateless: bool) -> None:
-    """Record the streamable-http transport endpoint as a mounted, credential-gated
-    surface, so the registry describes it instead of leaving its GETs to the Studio SPA
+    """Record the streamable-http transport endpoint as a mounted, credential-gated surface.
+
+    The registry describes it instead of leaving its GETs to the Studio SPA
     catch-all (which matches every path and would charge MCP traffic to the public root
     family and audit it unauthenticated).
 
@@ -55,7 +59,8 @@ def record_streamable_http_surface(path: str, *, stateless: bool) -> None:
     notifications from — so its GETs genuinely do fall through to the catch-all and stay
     a public door. Statelessness alone decides the method set; naming the three methods
     the protocol uses only under-claims anything else the endpoint answers, which stays
-    the catch-all's."""
+    the catch-all's.
+    """
     methods = ["POST", "DELETE"] if stateless else ["GET", "POST", "DELETE"]
     route_registry.record_mounted(
         path=path,
@@ -66,10 +71,12 @@ def record_streamable_http_surface(path: str, *, stateless: bool) -> None:
 
 
 def record_sse_surface(sse_path: str, message_path: str) -> None:
-    """Record the SSE transport's two surfaces as mounted, credential-gated ones (see
-    :func:`record_streamable_http_surface`): the ``GET`` event stream, and the message
+    """Record the SSE transport's two surfaces as mounted, credential-gated ones.
+
+    See :func:`record_streamable_http_surface`: the ``GET`` event stream, and the message
     endpoint, which is a Starlette ``Mount`` and therefore serves everything BENEATH its
-    prefix — the client posts to ``<prefix>/?session_id=...`` — never the bare prefix."""
+    prefix — the client posts to ``<prefix>/?session_id=...`` — never the bare prefix.
+    """
     route_registry.record_mounted(
         path=sse_path,
         methods=["GET"],
@@ -85,8 +92,7 @@ def record_sse_surface(sse_path: str, message_path: str) -> None:
 
 
 class ServingCore:
-    """The per-epoch serving surface: a FRESH FastMCP server plus the feature
-    collaborators registered onto it.
+    """The per-epoch serving surface: a FRESH FastMCP server plus the feature collaborators registered onto it.
 
     A settings-profile apply builds a NEW ``ServingCore`` off to the side under the
     proposed env and — only on a successful build — makes it the live epoch's core;
@@ -109,6 +115,7 @@ class ServingCore:
         auth: TokenVerifier | None,
         kwargs: dict[str, Any],
     ) -> None:
+        """Build a fresh FastMCP (``auth`` read per epoch) and the per-feature collaborators bound to ``app``."""
         # ``on_duplicate="error"`` (server-wide) makes a duplicate registration raise
         # instead of warn-then-replace: every legitimate rebind removes the name
         # first, so an in-boot duplicate is always a genuine collision. Auth is read
