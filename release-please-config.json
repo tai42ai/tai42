@@ -14,66 +14,22 @@
           "path": "src/tai42_contract/schemas/contract-schema.json",
           "jsonpath": "$.contract_version"
         }
-      ],
-      "release-as": "12.0.0",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "core/kit": {
       "package-name": "tai42-kit",
       "component": "tai42-kit",
-      "skip-changelog": true,
-      "release-as": "5.0.0",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
-      ]
+      "skip-changelog": true
     },
     "core/cli": {
       "package-name": "tai42-cli",
       "component": "tai42-cli",
-      "skip-changelog": true,
-      "release-as": "8.0.0",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
-      ]
+      "skip-changelog": true
     },
     "core/skeleton": {
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
-      "skip-changelog": true,
-      "release-as": "16.0.0",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
-      ]
+      "skip-changelog": true
     },
     "plugins/accounts-oidc": {
       "package-name": "tai42-accounts-oidc",
@@ -89,17 +45,6 @@
           "type": "yaml",
           "path": "src/tai42_accounts_oidc/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "1.2.8",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -118,17 +63,6 @@
           "path": "src/tai42_accounts_postgres/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "2.4.9",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/agents": {
@@ -145,17 +79,6 @@
           "type": "yaml",
           "path": "src/tai42_agents/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "6.0.5",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -174,17 +97,6 @@
           "path": "src/tai42_backend_arq/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "3.0.4",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/backend-celery": {
@@ -201,17 +113,6 @@
           "type": "yaml",
           "path": "src/tai42_backend_celery/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "3.0.4",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -230,17 +131,6 @@
           "path": "src/tai42_backend_rq/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "3.0.5",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/channel-slack": {
@@ -257,17 +147,6 @@
           "type": "yaml",
           "path": "src/tai42_channel_slack/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "3.3.7",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -286,17 +165,6 @@
           "path": "src/tai42_channel_telegram/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "3.4.7",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/channel-twilio": {
@@ -313,17 +181,6 @@
           "type": "yaml",
           "path": "src/tai42_channel_twilio/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "4.0.6",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -342,17 +199,6 @@
           "path": "src/tai42_channel_web/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "5.0.7",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/channel-whatsapp": {
@@ -369,17 +215,6 @@
           "type": "yaml",
           "path": "src/tai42_channel_whatsapp/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "4.0.7",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -450,17 +285,6 @@
           "path": "src/tai42_identity_oidc/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "1.1.9",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/identity-redis": {
@@ -477,17 +301,6 @@
           "type": "yaml",
           "path": "src/tai42_identity_redis/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "1.2.9",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -506,17 +319,6 @@
           "path": "src/tai42_monitoring_langfuse/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "3.0.0",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/sandbox-docker": {
@@ -533,17 +335,6 @@
           "type": "yaml",
           "path": "src/tai42_sandbox_docker/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "1.2.3",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -562,17 +353,6 @@
           "path": "src/tai42_sandbox_local/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "1.1.10",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/storage-github": {
@@ -589,17 +369,6 @@
           "type": "yaml",
           "path": "src/tai42_storage_github/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "1.1.10",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -618,17 +387,6 @@
           "path": "src/tai42_storage_local/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "1.1.10",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/storage-s3": {
@@ -645,17 +403,6 @@
           "type": "yaml",
           "path": "src/tai42_storage_s3/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "1.1.11",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -674,17 +421,6 @@
           "path": "src/tai42_toolbox/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "3.0.5",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/tools-github": {
@@ -701,17 +437,6 @@
           "type": "yaml",
           "path": "src/tai42_tools_github/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "1.0.20",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -730,17 +455,6 @@
           "path": "src/tai42_tools_stripe/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "1.1.10",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/tools-twilio": {
@@ -757,17 +471,6 @@
           "type": "yaml",
           "path": "src/tai42_tools_twilio/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "1.0.19",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -786,17 +489,6 @@
           "path": "src/tai42_tools_whatsapp/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "1.1.9",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "plugins/webhook-verifier-github": {
@@ -813,17 +505,6 @@
           "type": "yaml",
           "path": "src/tai42_webhook_verifier_github/tai-plugin.yml",
           "jsonpath": "$.version"
-        }
-      ],
-      "release-as": "1.2.7",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
         }
       ]
     },
@@ -842,34 +523,12 @@
           "path": "src/tai42_webhook_verifier_stripe/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "1.2.7",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
       ]
     },
     "e2e": {
       "package-name": "tai42-e2e",
       "component": "tai42-e2e",
-      "skip-changelog": true,
-      "release-as": "11.0.0",
-      "changelog-sections": [
-        {
-          "type": "refactor",
-          "section": "Code Refactoring"
-        },
-        {
-          "type": "ci",
-          "section": "Continuous Integration"
-        }
-      ]
+      "skip-changelog": true
     }
   }
 }
