@@ -15,7 +15,7 @@
           "jsonpath": "$.contract_version"
         }
       ],
-      "release-as": "11.0.1",
+      "release-as": "12.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -31,7 +31,7 @@
       "package-name": "tai42-kit",
       "component": "tai42-kit",
       "skip-changelog": true,
-      "release-as": "4.0.4",
+      "release-as": "5.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -47,7 +47,7 @@
       "package-name": "tai42-cli",
       "component": "tai42-cli",
       "skip-changelog": true,
-      "release-as": "7.0.4",
+      "release-as": "8.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -63,7 +63,7 @@
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
       "skip-changelog": true,
-      "release-as": "15.0.2",
+      "release-as": "16.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -90,7 +90,8 @@
           "path": "src/tai42_accounts_oidc/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.2.8"
     },
     "plugins/accounts-postgres": {
       "package-name": "tai42-accounts-postgres",
@@ -108,7 +109,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "2.4.8",
+      "release-as": "2.4.9",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -136,7 +137,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "6.0.4",
+      "release-as": "6.0.5",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -163,7 +164,8 @@
           "path": "src/tai42_backend_arq/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "3.0.4"
     },
     "plugins/backend-celery": {
       "package-name": "tai42-backend-celery",
@@ -180,7 +182,8 @@
           "path": "src/tai42_backend_celery/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "3.0.4"
     },
     "plugins/backend-rq": {
       "package-name": "tai42-backend-rq",
@@ -198,7 +201,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.0.4",
+      "release-as": "3.0.5",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -226,7 +229,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.3.6",
+      "release-as": "3.3.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -254,7 +257,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.4.6",
+      "release-as": "3.4.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -281,7 +284,8 @@
           "path": "src/tai42_channel_twilio/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "4.0.6"
     },
     "plugins/channel-web": {
       "package-name": "tai42-channel-web",
@@ -299,7 +303,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "5.0.6",
+      "release-as": "5.0.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -327,7 +331,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "4.0.6",
+      "release-as": "4.0.7",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -406,7 +410,8 @@
           "path": "src/tai42_identity_oidc/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.1.9"
     },
     "plugins/identity-redis": {
       "package-name": "tai42-identity-redis",
@@ -423,7 +428,8 @@
           "path": "src/tai42_identity_redis/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.2.9"
     },
     "plugins/monitoring-langfuse": {
       "package-name": "tai42-monitoring-langfuse",
@@ -441,7 +447,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "2.2.9",
+      "release-as": "3.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -469,7 +475,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.2.2",
+      "release-as": "1.2.3",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -497,7 +503,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.9",
+      "release-as": "1.1.10",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -524,7 +530,8 @@
           "path": "src/tai42_storage_github/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.1.10"
     },
     "plugins/storage-local": {
       "package-name": "tai42-storage-local",
@@ -541,7 +548,8 @@
           "path": "src/tai42_storage_local/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.1.10"
     },
     "plugins/storage-s3": {
       "package-name": "tai42-storage-s3",
@@ -559,7 +567,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.10",
+      "release-as": "1.1.11",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -587,7 +595,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "3.0.4",
+      "release-as": "3.0.5",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -615,7 +623,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.0.19",
+      "release-as": "1.0.20",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -643,7 +651,7 @@
           "jsonpath": "$.version"
         }
       ],
-      "release-as": "1.1.9",
+      "release-as": "1.1.10",
       "changelog-sections": [
         {
           "type": "refactor",
@@ -670,7 +678,8 @@
           "path": "src/tai42_tools_twilio/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.0.19"
     },
     "plugins/tools-whatsapp": {
       "package-name": "tai42-tools-whatsapp",
@@ -687,7 +696,8 @@
           "path": "src/tai42_tools_whatsapp/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.1.9"
     },
     "plugins/webhook-verifier-github": {
       "package-name": "tai42-webhook-verifier-github",
@@ -704,7 +714,8 @@
           "path": "src/tai42_webhook_verifier_github/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.2.7"
     },
     "plugins/webhook-verifier-stripe": {
       "package-name": "tai42-webhook-verifier-stripe",
@@ -721,13 +732,14 @@
           "path": "src/tai42_webhook_verifier_stripe/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "release-as": "1.2.7"
     },
     "e2e": {
       "package-name": "tai42-e2e",
       "component": "tai42-e2e",
       "skip-changelog": true,
-      "release-as": "10.1.2",
+      "release-as": "11.0.0",
       "changelog-sections": [
         {
           "type": "refactor",
