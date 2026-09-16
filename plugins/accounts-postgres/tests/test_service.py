@@ -1,13 +1,12 @@
-"""Shared plumbing: the settings holder, minting, compensation, bootstrap token."""
+"""Shared plumbing: the settings holder, token/id minting, and session helpers."""
 
 from __future__ import annotations
 
 import pytest
 
 from tai42_accounts_postgres import service
-from tai42_accounts_postgres.settings import accounts_settings
 
-from .conftest import FakeAdminServices, FakeProviderSettings, FakeRedis, make_redis_ctx, record_provider_settings
+from .conftest import FakeProviderSettings, record_provider_settings
 
 # -- settings holder ------------------------------------------------------------
 
@@ -46,110 +45,3 @@ async def test_mint_session_writes_and_returns_raw(monkeypatch, sessions_store):
     raw = await service.mint_session("usr-1")
     assert raw.startswith("tai-sess-")
     assert service.token_hash(raw) in sessions_store.rows
-
-
-# -- apply_role compensation ----------------------------------------------------
-
-
-async def test_apply_role_compensated_success():
-    admin = FakeAdminServices()
-    record_provider_settings(FakeProviderSettings(admin=admin))
-    cleaned = False
-
-    async def cleanup() -> None:
-        nonlocal cleaned
-        cleaned = True
-
-    await service.apply_role_compensated("usr-1", "admin", cleanup)
-    assert ("apply_role", "usr-1", "admin") in admin.calls
-    assert cleaned is False
-
-
-async def test_apply_role_compensated_failure_cleans_and_reraises():
-    admin = FakeAdminServices(fail_apply_role=True)
-    record_provider_settings(FakeProviderSettings(admin=admin))
-    cleaned = False
-
-    async def cleanup() -> None:
-        nonlocal cleaned
-        cleaned = True
-
-    with pytest.raises(RuntimeError, match="apply_role boom"):
-        await service.apply_role_compensated("usr-1", "admin", cleanup)
-    assert cleaned is True
-
-
-async def test_apply_role_compensated_cleanup_failure_preserves_both():
-    admin = FakeAdminServices(fail_apply_role=True)
-    record_provider_settings(FakeProviderSettings(admin=admin))
-
-    async def cleanup() -> None:
-        raise RuntimeError("cleanup boom")
-
-    with pytest.raises(RuntimeError, match="residual accounts_users row 'usr-1'") as exc:
-        await service.apply_role_compensated("usr-1", "admin", cleanup)
-    # The original apply error is the cause; the cleanup failure is the context —
-    # neither is discarded.
-    assert isinstance(exc.value.__cause__, RuntimeError)
-    assert "apply_role boom" in str(exc.value.__cause__)
-    assert "cleanup boom" in str(exc.value.__context__)
-
-
-# -- bootstrap token ------------------------------------------------------------
-
-
-async def test_ensure_bootstrap_token_writes_and_logs_when_gated(monkeypatch, caplog):
-    fake = FakeRedis()
-    monkeypatch.setattr(service, "client_ctx", make_redis_ctx(fake))
-    with caplog.at_level("INFO"):
-        await service.ensure_bootstrap_token(object())
-    stored = await fake.get(service.bootstrap_token_redis_key())
-    assert stored is not None
-    assert "first-owner bootstrap token" in caplog.text
-
-
-async def test_ensure_bootstrap_token_noop_when_open(monkeypatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
-    accounts_settings.cache_clear()
-    fake = FakeRedis()
-    monkeypatch.setattr(service, "client_ctx", make_redis_ctx(fake))
-    await service.ensure_bootstrap_token(object())
-    assert await fake.get(service.bootstrap_token_redis_key()) is None
-
-
-async def test_ensure_bootstrap_token_noop_when_operator_token_set(monkeypatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_TOKEN", "op-token")
-    accounts_settings.cache_clear()
-    fake = FakeRedis()
-    monkeypatch.setattr(service, "client_ctx", make_redis_ctx(fake))
-    await service.ensure_bootstrap_token(object())
-    assert await fake.get(service.bootstrap_token_redis_key()) is None
-
-
-async def test_ensure_bootstrap_token_only_winner_logs(monkeypatch, caplog):
-    fake = FakeRedis()
-    await fake.set(service.bootstrap_token_redis_key(), "already-set")
-    monkeypatch.setattr(service, "client_ctx", make_redis_ctx(fake))
-    with caplog.at_level("INFO"):
-        await service.ensure_bootstrap_token(object())
-    assert "first-owner bootstrap token" not in caplog.text
-
-
-async def test_resolve_bootstrap_token_operator_wins(monkeypatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_TOKEN", "op-token")
-    accounts_settings.cache_clear()
-    monkeypatch.setattr(service, "client_ctx", make_redis_ctx(FakeRedis()))
-    assert await service.resolve_bootstrap_token(object()) == "op-token"
-
-
-async def test_resolve_bootstrap_token_reads_shared_value(monkeypatch):
-    fake = FakeRedis()
-    await fake.set(service.bootstrap_token_redis_key(), "shared-token")
-    monkeypatch.setattr(service, "client_ctx", make_redis_ctx(fake))
-    assert await service.resolve_bootstrap_token(object()) == "shared-token"
-
-
-async def test_resolve_bootstrap_token_absent_raises_fail_closed(monkeypatch):
-    monkeypatch.setattr(service, "client_ctx", make_redis_ctx(FakeRedis()))
-    with pytest.raises(RuntimeError, match="invariant breach"):
-        await service.resolve_bootstrap_token(object())

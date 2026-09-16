@@ -1,11 +1,9 @@
 """Shared plumbing for the provider and both route modules.
 
-Three concerns: resolving the CURRENT epoch's provider settings (``.admin`` /
+Two concerns: resolving the CURRENT epoch's provider settings (``.admin`` /
 ``.redis``) from the live provider instance the epoch recorded — no module holder, so
-a failed epoch build never leaks; token/id minting and email normalization
-(tokens are distinctly prefixed, stored only as SHA-256); and the first-owner
-bootstrap token (fixed once at startup via SET NX, read per request — never generated
-per call).
+a failed epoch build never leaks; and token/id minting and email normalization
+(tokens are distinctly prefixed, stored only as SHA-256).
 """
 
 from __future__ import annotations
@@ -13,12 +11,9 @@ from __future__ import annotations
 import logging
 import math
 import secrets
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
-from tai42_kit.clients import RedisConnectionSettings, client_ctx
-from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.db import component_store_settings
 from tai42_kit.utils.data.string_util import hash_api_key
 
@@ -128,88 +123,8 @@ def invite_login_path(raw_invite_token: str) -> str:
     return f"/login?invite={raw_invite_token}"
 
 
-async def apply_role_compensated(user_id: str, role: str, cleanup: Callable[[], Awaitable[None]]) -> None:
-    """Apply a role template through the injected services, compensating on failure.
-
-    If ``apply_role`` raises after the user row was written, run ``cleanup`` before
-    propagating so the operation stays re-runnable. If the cleanup itself fails,
-    both errors are preserved and the message names the residual row for manual
-    deletion — the stuck state is never reached silently.
-    """
-    admin = provider_settings().admin
-    try:
-        await admin.apply_role(user_id, role)
-    except Exception as apply_exc:
-        try:
-            await cleanup()
-        except Exception:
-            raise RuntimeError(
-                f"apply_role for {user_id!r} failed and the compensating cleanup also failed; "
-                f"a residual accounts_users row {user_id!r} remains — delete it manually"
-            ) from apply_exc
-        raise
-
-
 def too_many_attempts_message(retry_after: int) -> str:
     """The informative 429 body text, surfaced verbatim in the throttled response."""
     minutes = max(1, math.ceil(retry_after / 60))
     unit = "minute" if minutes == 1 else "minutes"
     return f"Too many attempts — try again in {minutes} {unit}"
-
-
-# -- bootstrap token (secure-by-default gate) -----------------------------------
-
-
-def _redis(redis_settings: Any) -> RedisConnectionSettings:
-    # Bridge the contract's ``Any`` redis to kit's nominal settings type.
-    return cast("RedisConnectionSettings", redis_settings)
-
-
-def bootstrap_token_redis_key() -> str:
-    """The per-deployment-namespaced key the shared auto-token lives under."""
-    return f"{accounts_settings().key_prefix}:acc:bootstrap:token"
-
-
-async def ensure_bootstrap_token(redis_settings: Any) -> None:
-    """Fix the shared auto-token once at startup (no-op when no token is needed).
-
-    Each process attempts ``SET key <fresh> NX``; the winner fixes the effective
-    token and is the only process that logs it. Generated once at boot, never per
-    request.
-    """
-    settings = accounts_settings()
-    if settings.bootstrap_open or settings.bootstrap_token is not None:
-        return
-    key = bootstrap_token_redis_key()
-    candidate = secrets.token_urlsafe(32)
-    async with client_ctx(RedisClient, _redis(redis_settings)) as r:
-        won = await r.set(key, candidate, nx=True)
-    if won:
-        logger.info(
-            "first-owner bootstrap token: %s — paste it into the owner-creation form; "
-            "only someone who can read this log can create the admin owner",
-            candidate,
-        )
-
-
-async def resolve_bootstrap_token(redis_settings: Any) -> str:
-    """The effective bootstrap token when the gate is active — read, never generated.
-
-    An operator-set token is returned directly; otherwise the shared auto-token is
-    read from Redis. Its absence while the gate is active RAISES rather than
-    silently opening the front door.
-    """
-    settings = accounts_settings()
-    if settings.bootstrap_token is not None:
-        return settings.bootstrap_token.get_secret_value()
-    key = bootstrap_token_redis_key()
-    async with client_ctx(RedisClient, _redis(redis_settings)) as r:
-        stored = await r.get(key)
-    if not stored:
-        raise RuntimeError(
-            "bootstrap token invariant breach: the auto-generated first-owner token is absent "
-            "from Redis while the gate is active (Redis may have been flushed, or this instance "
-            "restarted mid-life); restart the deployment to regenerate it"
-        )
-    # decode_responses yields a str; decode defensively against redis-py's ResponseT.
-    return stored.decode() if isinstance(stored, bytes) else stored

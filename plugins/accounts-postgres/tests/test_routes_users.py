@@ -56,9 +56,13 @@ async def test_create_user_returns_login_path_once(wire):
     data = response_json(resp)["data"]
     assert data["invite_token"].startswith("tai-inv-")
     assert data["login_path"] == f"/login?invite={data['invite_token']}"
-    assert ("apply_role", data["user_id"], "viewer") in wire.admin.calls
-    # The email was normalized before storage.
+    # The human principal is created through the injected seam (row + role), keyed on
+    # the normalized email as its display name; created_by is the (unset) admin caller.
+    assert ("create_principal", data["user_id"], "human", "new@x.y", None, "viewer") in wire.admin.calls
+    # The login row is NULL-password (a pending invite) and mirrors the role.
     assert wire.users.rows[data["user_id"]]["email"] == "new@x.y"
+    assert wire.users.rows[data["user_id"]]["password_hash"] is None
+    assert wire.users.rows[data["user_id"]]["role"] == "viewer"
 
 
 async def test_create_user_email_taken_409(wire):

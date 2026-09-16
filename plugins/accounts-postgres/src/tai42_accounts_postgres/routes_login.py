@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import math
-import secrets
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, ValidationError
@@ -59,14 +58,6 @@ class PasswordLoginBody(BaseModel):
 
     email: str
     password: str
-
-
-class BootstrapBody(BaseModel):
-    """First-owner creation for ``POST /api/login/bootstrap``."""
-
-    email: str
-    password: str
-    bootstrap_token: str | None = None
 
 
 class InviteAcceptBody(BaseModel):
@@ -182,63 +173,6 @@ async def login_password(request: Request) -> Response:
     await _limiter().clear(email)
     raw = await service.mint_session(user["user_id"])
     return _session_response(raw, user["user_id"])
-
-
-@tai42_app.http.custom_route(
-    "/bootstrap",
-    methods=["POST"],
-    summary="Create the first owner account",
-    tags=["login"],
-    request_model=BootstrapBody,
-    response_model=SessionResponse,
-)
-async def login_bootstrap(request: Request) -> Response:
-    """Create the first owner under the secure-by-default gate.
-
-    The gate is ON by default via an auto-generated token; ``bootstrap_open``
-    disables it (local/dev only). A mismatched/absent token returns a generic 403,
-    throttled per IP. On a passing gate the owner row is inserted under an advisory
-    lock, its role applied with partial-failure compensation, then a session minted.
-    """
-    body, error = await _parse(request, BootstrapBody)
-    if error is not None:
-        return error
-    if body is None:
-        raise AssertionError
-
-    too_short = _password_too_short(body.password)
-    if too_short is not None:
-        return _error(too_short, 422)
-
-    email = service.normalize_email(body.email)
-    ip = _client_ip(request)
-    settings = accounts_settings()
-
-    if not settings.bootstrap_open:
-        effective = await service.resolve_bootstrap_token(service.provider_settings().redis)
-        presented = body.bootstrap_token or ""
-        if not secrets.compare_digest(presented, effective):
-            logger.warning("accounts: bootstrap token mismatch/absent from ip=%s", ip)
-            # Throttle the gate brute force per IP (no account exists yet).
-            try:
-                await _limiter().record_failure(None, ip)
-            except RateLimitedError as exc:
-                return _throttled_response(exc)
-            return _error("Forbidden", 403)
-
-    password_hash = await hash_password_async(body.password)
-    row = await service.users_store().create_owner_if_first(
-        service.new_user_id(), email, password_hash, service.ADMIN_ROLE
-    )
-    if row is None:
-        return _error("Already initialized", 409)
-
-    owner_id = row["user_id"]
-    await service.apply_role_compensated(
-        owner_id, service.ADMIN_ROLE, cleanup=lambda: service.users_store().delete(owner_id)
-    )
-    raw = await service.mint_session(owner_id)
-    return _session_response(raw, owner_id)
 
 
 @tai42_app.http.custom_route(

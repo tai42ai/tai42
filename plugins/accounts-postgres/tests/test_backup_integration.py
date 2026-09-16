@@ -21,8 +21,8 @@ pytestmark = pytest.mark.integration
 
 async def test_export_import_roundtrip_and_skip_only(accounts_db: PostgresConnectionSettings) -> None:
     users = UsersStore(accounts_db)
-    await users.create("usr-alice", "alice@a-42.example", "admin", password_hash="argon2$alice")
-    await users.create("usr-bob", "bob@a-42.example", "member")  # a pending invite: null hash
+    await users.create_login("usr-alice", "alice@a-42.example", "admin", password_hash="argon2$alice")
+    await users.create_login("usr-bob", "bob@a-42.example", "member")  # a pending invite: null hash
     original = await users.get_by_user_id("usr-alice")
     assert original is not None
 
@@ -33,7 +33,7 @@ async def test_export_import_roundtrip_and_skip_only(accounts_db: PostgresConnec
     # Wipe the roster (a fresh restore target) and import it back.
     await users.delete("usr-alice")
     await users.delete("usr-bob")
-    assert await users.count() == 0
+    assert len(await users.list()) == 0
 
     report = await import_accounts(payload)
     assert report["created"] == 2
@@ -60,7 +60,7 @@ async def test_export_import_roundtrip_and_skip_only(accounts_db: PostgresConnec
 async def test_import_email_collision_is_contained_per_user(accounts_db: PostgresConnectionSettings) -> None:
     users = UsersStore(accounts_db)
     # An existing user already holds the email a payload row (with a different user_id) claims.
-    await users.create("usr-existing", "shared@a-42.example", "admin", password_hash="argon2$existing")
+    await users.create_login("usr-existing", "shared@a-42.example", "admin", password_hash="argon2$existing")
     payload = {
         "version": 1,
         "users": [

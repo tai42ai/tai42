@@ -16,30 +16,47 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 from psycopg.rows import dict_row
+from tai42_contract.accounts.errors import LoginConflictError
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 
 if TYPE_CHECKING:
     from tai42_kit.clients import PostgresConnectionSettings
 
-# Bounded id-collision retry: a small cap that then RAISES, never an unbounded loop.
-_MAX_ID_ATTEMPTS = 3
-
-# Fixed advisory-lock key serializing the count-then-mutate operations that must
-# not interleave (bootstrap owner insert, last-admin guard). ASCII "ACCOUS".
+# Fixed advisory-lock key serializing the count-then-mutate last-admin guard so two
+# guarded removals cannot both pass. ASCII "ACCOUS".
 _ACCOUNTS_ADVISORY_LOCK = 0x414343_4F5553
 
 _EMAIL_UNIQUE = "accounts_users_email_unique"
 _USER_ID_UNIQUE = "accounts_users_user_id_unique"
 
 
-class EmailTakenError(Exception):
-    """An account with this (normalized) email already exists."""
+class EmailTakenError(LoginConflictError):
+    """An account with this (normalized) email already exists.
+
+    A :class:`~tai42_contract.accounts.errors.LoginConflictError` so a platform
+    caller (the setup door) maps it to a conflict without importing this
+    provider-private type.
+    """
 
     def __init__(self, email: str) -> None:
         """Record the ``email`` that was already registered."""
         super().__init__(f"email already registered: {email!r}")
         self.email = email
+
+
+class LoginExistsError(LoginConflictError):
+    """A login (``accounts_users`` row) already exists for this principal ``user_id``.
+
+    A :class:`~tai42_contract.accounts.errors.LoginConflictError` so a platform
+    caller (the setup door) maps it to a conflict without importing this
+    provider-private type.
+    """
+
+    def __init__(self, user_id: str) -> None:
+        """Record the ``user_id`` whose login already exists."""
+        super().__init__(f"a login already exists for principal {user_id!r}")
+        self.user_id = user_id
 
 
 def new_user_id() -> str:
@@ -54,66 +71,33 @@ class UsersStore:
         """Bind the store to the Postgres connection ``settings``."""
         self._settings = settings
 
-    async def create(self, user_id: str, email: str, role: str, password_hash: str | None = None) -> str:
-        """Insert a user, returning the id actually written.
+    async def create_login(self, user_id: str, email: str, role: str, password_hash: str | None = None) -> None:
+        """Insert the login row for the EXISTING principal ``user_id``.
 
-        An email-unique violation raises :class:`EmailTakenError`. A user_id-unique
-        violation regenerates the id and retries up to ``_MAX_ID_ATTEMPTS`` times,
-        then raises.
+        A ``user_id``-unique violation raises :class:`LoginExistsError` (a login
+        already exists for that principal); an email-unique violation raises
+        :class:`EmailTakenError`. The principal owns ``user_id``, so a collision is
+        an invariant breach surfaced loudly, never silently regenerated. ``role`` is
+        the plugin's own copy of the principal's role, keyed on by the last-admin
+        guard and echoed in the session claims.
         """
-        attempt_id = user_id
-        for _ in range(_MAX_ID_ATTEMPTS):
-            try:
-                async with (
-                    client_ctx(PostgresClient, self._settings) as pool,
-                    pool.connection() as conn,
-                    conn.cursor() as cur,
-                ):
-                    await cur.execute(
-                        "INSERT INTO accounts_users (user_id, email, password_hash, role) VALUES (%s, %s, %s, %s)",
-                        (attempt_id, email, password_hash, role),
-                    )
-            except psycopg.errors.UniqueViolation as exc:
-                constraint = exc.diag.constraint_name
-                if constraint == _EMAIL_UNIQUE:
-                    raise EmailTakenError(email) from exc
-                if constraint == _USER_ID_UNIQUE:
-                    attempt_id = new_user_id()
-                    continue
-                raise
-            else:
-                return attempt_id
-        raise RuntimeError(
-            f"could not generate a unique user_id after {_MAX_ID_ATTEMPTS} attempts (constraint {_USER_ID_UNIQUE})"
-        )
-
-    async def create_owner_if_first(
-        self, user_id: str, email: str, password_hash: str, role: str
-    ) -> dict[str, Any] | None:
-        """Insert the first owner under an advisory lock, or return ``None``.
-
-        One transaction: take the advisory xact lock, count users, and insert only
-        when the count is zero. Returns the inserted row, or ``None`` when users
-        already exist.
-        """
-        async with (
-            client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
-            conn.transaction(),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
-            await cur.execute("SELECT pg_advisory_xact_lock(%s)", (_ACCOUNTS_ADVISORY_LOCK,))
-            await cur.execute("SELECT count(*) AS n FROM accounts_users")
-            row = await cur.fetchone()
-            if row is None or row["n"] != 0:
-                return None
-            await cur.execute(
-                "INSERT INTO accounts_users (user_id, email, password_hash, role) "
-                "VALUES (%s, %s, %s, %s) "
-                "RETURNING user_id, email, role, disabled, created_at",
-                (user_id, email, password_hash, role),
-            )
-            return await cur.fetchone()
+        try:
+            async with (
+                client_ctx(PostgresClient, self._settings) as pool,
+                pool.connection() as conn,
+                conn.cursor() as cur,
+            ):
+                await cur.execute(
+                    "INSERT INTO accounts_users (user_id, email, password_hash, role) VALUES (%s, %s, %s, %s)",
+                    (user_id, email, password_hash, role),
+                )
+        except psycopg.errors.UniqueViolation as exc:
+            constraint = exc.diag.constraint_name
+            if constraint == _EMAIL_UNIQUE:
+                raise EmailTakenError(email) from exc
+            if constraint == _USER_ID_UNIQUE:
+                raise LoginExistsError(user_id) from exc
+            raise
 
     async def get_by_email(self, email: str) -> dict[str, Any] | None:
         """The user row for ``email``, or ``None`` when none exists."""
@@ -193,17 +177,6 @@ class UsersStore:
             conn.cursor() as cur,
         ):
             await cur.execute("DELETE FROM accounts_users WHERE user_id = %s", (user_id,))
-
-    async def count(self) -> int:
-        """The total number of users."""
-        async with (
-            client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
-            await cur.execute("SELECT count(*) AS n FROM accounts_users")
-            row = await cur.fetchone()
-            return 0 if row is None else int(row["n"])
 
     async def count_other_enabled_admins(self, user_id: str) -> int:
         """Enabled admins OTHER than ``user_id`` — the last-admin guard's input.

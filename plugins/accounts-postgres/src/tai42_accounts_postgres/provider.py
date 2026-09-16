@@ -1,20 +1,24 @@
-"""``PostgresAccountsProvider`` — session-token validation, login methods, bootstrap.
+"""``PostgresAccountsProvider`` — session-token validation, login methods, login attachment.
 
-Storage is the plugin's own Postgres schema; login throttling and the shared
-bootstrap token live in the injected Redis. Registered at import.
+Storage is the plugin's own Postgres schema; login throttling lives in the injected
+Redis. Registered at import. As a :class:`LoginAttachingProvider` it can attach the
+owner's login for the platform setup door.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from tai42_contract.access_control.identity import AuthIdentity, ReadinessTarget
 from tai42_contract.accounts import (
-    AccountsProvider,
     FormField,
     FormMethod,
+    LoginAttachError,
+    LoginAttachingProvider,
+    LoginAttachment,
+    LoginCredential,
     LoginMethod,
     register_accounts_provider,
 )
@@ -24,6 +28,7 @@ from tai42_kit.db import component_store_settings
 
 from tai42_accounts_postgres import service
 from tai42_accounts_postgres.db import COMPONENT, assert_accounts_schema_applied
+from tai42_accounts_postgres.hashing import hash_password_async
 from tai42_accounts_postgres.settings import accounts_settings
 
 if TYPE_CHECKING:
@@ -36,19 +41,8 @@ logger = logging.getLogger(__name__)
 _TOUCH_THROTTLE_SECONDS = 60
 
 
-def _open_window_warning() -> str:
-    # The bootstrap door's path resolves through the login router's mount base (captured
-    # at its import), so the warning names the real door even under an operator remap.
-    from tai42_accounts_postgres.routes_login import submit_path
-
-    return (
-        f"first-owner bootstrap is OPEN — anyone who can reach {submit_path('/bootstrap')} can seize the admin "
-        "owner; unset TAI_ACCOUNTS_BOOTSTRAP_OPEN to gate it"
-    )
-
-
-class PostgresAccountsProvider(AccountsProvider):
-    """Validate sessions, declare login methods, and own the bootstrap gate."""
+class PostgresAccountsProvider(LoginAttachingProvider):
+    """Validate sessions, declare login methods, and attach the owner's login at setup."""
 
     def __init__(self, settings: AccountsProviderSettings) -> None:
         """Bind the injected ``settings`` (Postgres + Redis connection) to this provider instance."""
@@ -106,21 +100,11 @@ class PostgresAccountsProvider(AccountsProvider):
         )
 
     def login_methods(self) -> list[LoginMethod]:
-        """The login methods the sign-in UI renders: password sign-in, first-owner bootstrap, and invite."""
-        # Static config-derived metadata. The bootstrap form declares a
-        # bootstrap_token field unless the gate is explicitly opened. Submit paths
-        # resolve through the login router's mount base (captured at its import) so an
-        # operator remap of the route base moves them too.
+        """The login methods the sign-in UI renders: password sign-in and invite acceptance."""
+        # Static config-derived metadata. Submit paths resolve through the login
+        # router's mount base (captured at its import) so an operator remap of the
+        # route base moves them too.
         from tai42_accounts_postgres.routes_login import submit_path
-
-        settings = accounts_settings()
-
-        bootstrap_fields = [
-            FormField(name="email", label="Email", autocomplete="email"),
-            FormField(name="password", label="Password", secret=True, autocomplete="new-password"),
-        ]
-        if not settings.bootstrap_open:
-            bootstrap_fields.append(FormField(name="bootstrap_token", label="Bootstrap token", secret=True))
 
         return [
             FormMethod(
@@ -132,13 +116,6 @@ class PostgresAccountsProvider(AccountsProvider):
                     FormField(name="password", label="Password", secret=True, autocomplete="current-password"),
                 ],
                 submit_path=submit_path("/password"),
-            ),
-            FormMethod(
-                id="bootstrap",
-                title="Create the first owner",
-                purpose="bootstrap",
-                fields=bootstrap_fields,
-                submit_path=submit_path("/bootstrap"),
             ),
             FormMethod(
                 id="invite",
@@ -157,10 +134,54 @@ class PostgresAccountsProvider(AccountsProvider):
             ),
         ]
 
-    async def needs_bootstrap(self) -> bool:
-        """Whether no user exists yet, so the first-owner bootstrap screen should show."""
-        # Live count so the owner screen disappears the moment the owner exists.
-        return await service.users_store().count() == 0
+    async def has_login(self, user_id: str) -> bool:
+        """Whether an ``accounts_users`` login row exists for principal ``user_id``.
+
+        The principals door reads this to route a disable/delete: a human whose
+        password login lives here is managed through this provider's users door,
+        not the principals door. A store error propagates (fail closed).
+        """
+        return await service.users_store().get_by_user_id(user_id) is not None
+
+    async def attach_login(self, user_id: str, *, credential: LoginCredential) -> LoginAttachment:
+        """Attach the owner's interactive login to the EXISTING principal ``user_id``.
+
+        Called by the platform setup door once the owner principal is created. A
+        :class:`PasswordCredential` sets the password now and returns ``attached=True``;
+        an :class:`InviteCredential` leaves the password unset and returns the one-time
+        invite link on the attachment. Either way the ``accounts_users`` login row is
+        created for the owner, whose role mirrors the owner's admin principal. A too-short
+        password raises :class:`~tai42_contract.accounts.errors.LoginAttachError`; a login
+        already existing for the principal or a taken email raises
+        :class:`~tai42_contract.accounts.errors.LoginConflictError` (through the store's
+        :class:`LoginExistsError`/:class:`EmailTakenError`) — the setup door surfaces the
+        failure and stays retriable.
+        """
+        email = service.normalize_email(credential.email)
+        store = service.users_store()
+        if credential.kind == "password":
+            if len(credential.password) < service.PASSWORD_MIN_LENGTH:
+                raise LoginAttachError(f"password must be at least {service.PASSWORD_MIN_LENGTH} characters")
+            password_hash = await hash_password_async(credential.password)
+            await store.create_login(user_id, email, service.ADMIN_ROLE, password_hash)
+            return LoginAttachment(attached=True)
+
+        # An invite credential: create the password-less login row, then mint the
+        # one-time invite. If the invite mint fails, drop the just-created row so the
+        # owner attach stays re-runnable rather than leaving a login with no way in.
+        await store.create_login(user_id, email, service.ADMIN_ROLE)
+        try:
+            raw_invite = service.new_invite_token()
+            expires_at = datetime.now(UTC) + timedelta(seconds=accounts_settings().invite_ttl_seconds)
+            await service.invites_store().create(service.token_hash(raw_invite), user_id, expires_at)
+        except Exception:
+            await store.delete(user_id)
+            raise
+        return LoginAttachment(
+            attached=False,
+            invite_token=raw_invite,
+            login_path=service.invite_login_path(raw_invite),
+        )
 
     async def revoke_session(self, token: str) -> bool:
         """Delete the session for ``token``; returns ``False`` when the token is not ours to revoke."""
@@ -170,18 +191,8 @@ class PostgresAccountsProvider(AccountsProvider):
         return await service.sessions_store().delete(service.token_hash(token))
 
     async def healthcheck(self) -> None:
-        """Boot-time gate: assert the schema chain is applied and apply the once-per-deployment token fix."""
-        # Runs once at boot: the schema-chain gate and the once-per-deployment
-        # bootstrap-token fix.
+        """Boot-time gate: assert the plugin's schema chain is fully applied."""
         await assert_accounts_schema_applied()
-
-        settings = accounts_settings()
-        if settings.bootstrap_open:
-            # The only ungated config: warn loudly every boot while no owner exists.
-            if await self.needs_bootstrap():
-                logger.warning(_open_window_warning())
-        else:
-            await service.ensure_bootstrap_token(self.settings.redis)
 
     def readiness_targets(self) -> tuple[ReadinessTarget, ReadinessTarget]:
         """The provider's backing stores probed by the readiness check: its Postgres and the injected Redis."""

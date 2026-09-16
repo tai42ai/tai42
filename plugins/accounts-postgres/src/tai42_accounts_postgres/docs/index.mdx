@@ -1,6 +1,6 @@
 ---
 title: "Postgres accounts"
-description: "Wire the Postgres accounts provider, bind its database, run migrations, bootstrap the first admin, and invite the team."
+description: "Wire the Postgres accounts provider, bind its database, run migrations, and invite the team."
 ---
 
 Provides human logins on Postgres — an email and password, a session, and a role —
@@ -56,8 +56,8 @@ TAI_DATABASE_ACCOUNTS_PG_PASSWORD=...
 The provider is on when its bound database is configured — a non-empty password — and
 cleanly off otherwise. Pool sizes and timeouts are tuned on the database itself
 (`TAI_DATABASE_<NAME>_PG_*`), not a variable of this package's own. Sessions live in
-Postgres; login backoff and the bootstrap token live in Redis, which arrives from the
-access-control configuration.
+Postgres; login backoff lives in Redis, which arrives from the access-control
+configuration.
 
 ### Run the migrations
 
@@ -90,23 +90,14 @@ migrate`.
 
 ## login
 
-The public `/api/login/*` routes. The first owner is created through `POST
-/api/login/bootstrap`, and the Studio's login screen offers it while no user exists.
-The call is gated by a bootstrap token:
+The public `/api/login/*` routes: `POST /api/login/password` verifies an email and
+password and mints a session, and `POST /api/login/invite/accept` sets a first password
+from an invite. Passwords are at least ten characters.
 
-```bash
-TAI_ACCOUNTS_BOOTSTRAP_TOKEN=a-secret-you-choose
-```
-
-Set the token yourself, or leave it unset and let the server mint one at startup — it
-is generated once, stored in Redis, and logged by the process that wins the race, so
-read it from that process's logs. The call creates the owner with the `admin` role and
-refuses with a conflict once any user exists. Passwords are at least ten characters.
-
-<Warning>
-`TAI_ACCOUNTS_BOOTSTRAP_OPEN=true` disables the token gate entirely. It exists for
-local development. Never set it on a reachable deployment.
-</Warning>
+The first owner is not created here. The platform's one-step setup door creates the
+owner principal and, when this provider is configured, attaches the owner's login
+through it — a password set now, or an invite link the owner follows later to set one.
+The provider implements that attachment seam and owns no separate first-owner route.
 
 ## users
 

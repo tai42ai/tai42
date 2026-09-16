@@ -2,10 +2,9 @@
 
 Three fakes stand in for the plugin's I/O: ``ScriptedPg`` (a psycopg-shaped seam
 recording SQL and replaying fetches, so ``stores.py`` runs without a live DB),
-``FakeRedis`` (the rate limiter / bootstrap token operations), and the in-memory
-``Fake*Store`` / ``FakeAdminServices`` for the provider and route tests. The
-``tai42_app`` handle is bound to a no-op fake at import so the route decorators
-register cleanly under test.
+``FakeRedis`` (the rate limiter operations), and the in-memory ``Fake*Store`` /
+``FakeAdminServices`` for the provider and route tests. The ``tai42_app`` handle is
+bound to a no-op fake at import so the route decorators register cleanly under test.
 """
 
 from __future__ import annotations
@@ -185,7 +184,7 @@ def make_pg_ctx(pg: ScriptedPg):
     return _ctx
 
 
-# -- a redis seam for the rate limiter + bootstrap token ------------------------
+# -- a redis seam for the rate limiter -----------------------------------------
 
 
 class FakeRedis:
@@ -293,7 +292,6 @@ class _FakeAdminGuard:
 class FakeUsersStore:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
-        self.owner_lock_hook: Any = None
         # Fires once on guarded-txn "lock acquire" to simulate a concurrent removal
         # committing before this one re-counts.
         self.admin_guard_hook: Any = None
@@ -305,11 +303,13 @@ class FakeUsersStore:
             hook(self)
         yield _FakeAdminGuard(self)
 
-    async def create(self, user_id: str, email: str, role: str, password_hash: str | None = None) -> str:
+    async def create_login(self, user_id: str, email: str, role: str, password_hash: str | None = None) -> None:
+        from tai42_accounts_postgres.stores import EmailTakenError, LoginExistsError
+
         if any(r["email"] == email for r in self.rows.values()):
-            from tai42_accounts_postgres.stores import EmailTakenError
-
             raise EmailTakenError(email)
+        if user_id in self.rows:
+            raise LoginExistsError(user_id)
         self.rows[user_id] = {
             "user_id": user_id,
             "email": email,
@@ -318,25 +318,6 @@ class FakeUsersStore:
             "disabled": False,
             "created_at": _now(),
         }
-        return user_id
-
-    async def create_owner_if_first(
-        self, user_id: str, email: str, password_hash: str, role: str
-    ) -> dict[str, Any] | None:
-        if self.owner_lock_hook is not None:
-            hook, self.owner_lock_hook = self.owner_lock_hook, None
-            hook(self)
-        if self.rows:
-            return None
-        self.rows[user_id] = {
-            "user_id": user_id,
-            "email": email,
-            "password_hash": password_hash,
-            "role": role,
-            "disabled": False,
-            "created_at": _now(),
-        }
-        return dict(self.rows[user_id])
 
     async def get_by_email(self, email: str) -> dict[str, Any] | None:
         for row in self.rows.values():
@@ -372,9 +353,6 @@ class FakeUsersStore:
 
     async def delete(self, user_id: str) -> None:
         self.rows.pop(user_id, None)
-
-    async def count(self) -> int:
-        return len(self.rows)
 
     async def count_other_enabled_admins(self, user_id: str) -> int:
         return sum(1 for uid, r in self.rows.items() if uid != user_id and r["role"] == "admin" and not r["disabled"])
@@ -446,15 +424,33 @@ class FakeInvitesStore:
 
 @dataclass
 class FakeAdminServices:
-    """Records the injected policy-service calls; can be told to fail apply_role.
+    """Records the injected policy-service calls; can be told to fail role application.
 
-    ``known_roles`` mirrors the real ``apply_role``: a role name outside it raises
-    ``KeyError`` before writing any policy. ``None`` accepts every name.
+    ``known_roles`` mirrors the real role application: a role name outside it raises
+    ``KeyError`` before writing any policy. ``None`` accepts every name. Both
+    ``create_principal`` (which creates the principal AND applies its role) and the
+    standalone ``apply_role`` honour ``known_roles`` / ``fail_apply_role`` so a role
+    failure is exercised the same way through either seam.
     """
 
-    calls: list[tuple[str, ...]] = field(default_factory=list)
+    calls: list[tuple[Any, ...]] = field(default_factory=list)
     fail_apply_role: bool = False
     known_roles: set[str] | None = None
+
+    async def create_principal(
+        self,
+        user_id: str,
+        *,
+        kind: str,
+        display_name: str,
+        created_by: str | None,
+        role: str,
+    ) -> None:
+        self.calls.append(("create_principal", user_id, kind, display_name, created_by, role))
+        if self.known_roles is not None and role not in self.known_roles:
+            raise KeyError(f"unknown role: {role!r}")
+        if self.fail_apply_role:
+            raise RuntimeError("apply_role boom")
 
     async def apply_role(self, user_id: str, role: str) -> None:
         self.calls.append(("apply_role", user_id, role))
@@ -636,7 +632,7 @@ async def accounts_db(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Postgres
     live Postgres. Without the opt-in the requesting test SKIPS VISIBLY with a clear reason
     (never a silent skip). The plugin's own shipped migration chain is applied through the
     kit runner; the account tables are truncated on entry and exit so each test owns an
-    empty roster (the advisory-locked bootstrap counts on it).
+    empty roster.
     """
     if os.environ.get(_ACCOUNTS_REAL_PG_ENV) not in ("1", "true", "True"):
         pytest.skip(

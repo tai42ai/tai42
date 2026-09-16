@@ -41,5 +41,3 @@ def test_defaults_are_the_provisional_values():
     assert s.session_idle_seconds == 86400
     assert s.session_absolute_seconds == 2592000
     assert s.invite_ttl_seconds == 259200
-    assert s.bootstrap_open is False
-    assert s.bootstrap_token is None

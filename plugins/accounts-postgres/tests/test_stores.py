@@ -1,8 +1,8 @@
 """The Postgres seam's control flow against a scripted psycopg cursor.
 
-Exercises the SQL-issuing paths in ``stores.py`` (id-collision retry,
-constraint-name split, advisory-locked bootstrap insert, atomic invite consume)
-without a live database. Real SQL correctness is proven by the e2e leg.
+Exercises the SQL-issuing paths in ``stores.py`` (the login-row insert and its
+constraint-name split, the last-admin count, atomic invite consume) without a live
+database. Real SQL correctness is proven by the e2e leg.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from tai42_accounts_postgres import stores
 from tai42_accounts_postgres.stores import (
     EmailTakenError,
     InvitesStore,
+    LoginExistsError,
     SessionsStore,
     UsersStore,
     new_user_id,
@@ -36,57 +37,51 @@ def test_new_user_id_is_prefixed():
     assert new_user_id().startswith("usr-")
 
 
-async def test_create_inserts_and_returns_id(monkeypatch):
+async def test_create_login_inserts(monkeypatch):
     pg = ScriptedPg()
     _pg(monkeypatch, pg)
-    result = await UsersStore(_settings()).create("usr-1", "a@b.c", "admin")
-    assert result == "usr-1"
+    await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin")
     assert any("INSERT INTO accounts_users" in sql for sql, _ in pg.executed)
 
 
-async def test_create_email_taken_raises_typed(monkeypatch):
+async def test_create_login_writes_email_role_and_hash(monkeypatch):
+    pg = ScriptedPg()
+    _pg(monkeypatch, pg)
+    await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin", "argon2$x")
+    _sql, params = next((s, p) for s, p in pg.executed if "INSERT INTO accounts_users" in s)
+    # Column order is (user_id, email, password_hash, role).
+    assert params == ("usr-1", "a@b.c", "argon2$x", "admin")
+
+
+async def test_create_login_null_password_when_unset(monkeypatch):
+    pg = ScriptedPg()
+    _pg(monkeypatch, pg)
+    await UsersStore(_settings()).create_login("usr-1", "a@b.c", "viewer")
+    _sql, params = next((s, p) for s, p in pg.executed if "INSERT INTO accounts_users" in s)
+    assert params == ("usr-1", "a@b.c", None, "viewer")
+
+
+async def test_create_login_email_taken_raises_typed(monkeypatch):
     pg = ScriptedPg(errors=[FakeUniqueViolation("accounts_users_email_unique")])
     _pg(monkeypatch, pg)
     with pytest.raises(EmailTakenError):
-        await UsersStore(_settings()).create("usr-1", "a@b.c", "admin")
+        await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin")
 
 
-async def test_create_user_id_collision_regenerates_then_succeeds(monkeypatch):
-    pg = ScriptedPg(errors=[FakeUniqueViolation("accounts_users_user_id_unique"), None])
+async def test_create_login_user_id_collision_raises_login_exists(monkeypatch):
+    # The principal owns the id, so a collision is a loud invariant breach — never a
+    # silent regeneration.
+    pg = ScriptedPg(errors=[FakeUniqueViolation("accounts_users_user_id_unique")])
     _pg(monkeypatch, pg)
-    result = await UsersStore(_settings()).create("usr-seed", "a@b.c", "admin")
-    # The second attempt used a freshly generated id, not the colliding seed.
-    assert result != "usr-seed"
-    assert len([sql for sql, _ in pg.executed if "INSERT INTO accounts_users" in sql]) == 2
+    with pytest.raises(LoginExistsError):
+        await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin")
 
 
-async def test_create_user_id_collision_exhausts_and_raises(monkeypatch):
-    pg = ScriptedPg(errors=[FakeUniqueViolation("accounts_users_user_id_unique")] * 3)
-    _pg(monkeypatch, pg)
-    with pytest.raises(RuntimeError, match="accounts_users_user_id_unique"):
-        await UsersStore(_settings()).create("usr-seed", "a@b.c", "admin")
-
-
-async def test_create_unexpected_unique_reraises(monkeypatch):
+async def test_create_login_unexpected_unique_reraises(monkeypatch):
     pg = ScriptedPg(errors=[FakeUniqueViolation("some_other_constraint")])
     _pg(monkeypatch, pg)
     with pytest.raises(FakeUniqueViolation):
-        await UsersStore(_settings()).create("usr-1", "a@b.c", "admin")
-
-
-async def test_create_owner_if_first_inserts_when_empty(monkeypatch):
-    row = {"user_id": "usr-1", "email": "o@x", "role": "admin", "disabled": False, "created_at": future(0)}
-    pg = ScriptedPg(fetches=[{"n": 0}, row])
-    _pg(monkeypatch, pg)
-    result = await UsersStore(_settings()).create_owner_if_first("usr-1", "o@x", "hash", "admin")
-    assert result == row
-    assert any("pg_advisory_xact_lock" in sql for sql, _ in pg.executed)
-
-
-async def test_create_owner_if_first_returns_none_when_users_exist(monkeypatch):
-    pg = ScriptedPg(fetches=[{"n": 1}])
-    _pg(monkeypatch, pg)
-    assert await UsersStore(_settings()).create_owner_if_first("usr-1", "o@x", "hash", "admin") is None
+        await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin")
 
 
 async def test_get_by_email_and_user_id(monkeypatch):
@@ -126,13 +121,12 @@ async def test_mutations_execute(monkeypatch):
     assert kinds == ["UPDATE", "UPDATE", "UPDATE", "DELETE"]
 
 
-async def test_count_and_admin_count(monkeypatch):
-    pg = ScriptedPg(fetches=[{"n": 3}, {"n": 0}, None])
+async def test_admin_count(monkeypatch):
+    pg = ScriptedPg(fetches=[{"n": 2}, None])
     _pg(monkeypatch, pg)
     store = UsersStore(_settings())
-    assert await store.count() == 3
-    assert await store.count_other_enabled_admins("usr-1") == 0
-    assert await store.count() == 0  # None row -> 0
+    assert await store.count_other_enabled_admins("usr-1") == 2
+    assert await store.count_other_enabled_admins("usr-2") == 0  # None row -> 0
 
 
 async def test_admin_guard_txn_locks_counts_and_mutates(monkeypatch):

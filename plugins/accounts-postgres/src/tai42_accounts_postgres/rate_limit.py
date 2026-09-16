@@ -54,8 +54,8 @@ class RateLimiter:
         """Count a failed attempt and raise :class:`RateLimitedError` if over-limit.
 
         The per-IP dimension always applies; the per-account dimension applies only
-        when ``email`` is given (password login). The token-gated routes (bootstrap,
-        invite accept) have no account and pass ``email=None``, throttling per IP.
+        when ``email`` is given (password login). A route with no account behind the
+        attempt (invite accept) passes ``email=None``, throttling per IP only.
 
         A Redis failure propagates (fail closed).
         """

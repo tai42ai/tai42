@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from tai42_contract.access_control.identity import AuthIdentity
 from tai42_contract.access_control.registry import get_identity_provider_factory
-from tai42_contract.accounts import FormMethod
+from tai42_contract.accounts import FormMethod, InviteCredential, PasswordCredential
+from tai42_contract.accounts.errors import LoginAttachError
 from tai42_contract.accounts.registry import get_accounts_provider_factory
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
@@ -17,6 +16,7 @@ from tai42_accounts_postgres import service
 from tai42_accounts_postgres.db import SchemaOutOfDateError
 from tai42_accounts_postgres.provider import PostgresAccountsProvider
 from tai42_accounts_postgres.settings import accounts_settings
+from tai42_accounts_postgres.stores import EmailTakenError, LoginExistsError
 
 from .conftest import FakeProviderSettings, future, past
 
@@ -127,21 +127,95 @@ async def test_validate_token_store_error_raises(monkeypatch, sessions_store):
         await _provider().validate_token("tai-sess-x")
 
 
-# -- needs_bootstrap ------------------------------------------------------------
+# -- attach_login ---------------------------------------------------------------
 
 
-async def test_needs_bootstrap_tracks_count(monkeypatch, users_store):
-    monkeypatch.setattr(service, "users_store", lambda: users_store)
-    assert await _provider().needs_bootstrap() is True
-    users_store.rows["usr-1"] = {
-        "user_id": "usr-1",
-        "email": "a",
-        "password_hash": None,
+async def test_attach_login_password_sets_login(wire):
+    result = await _provider().attach_login(
+        "usr-owner", credential=PasswordCredential(email="Owner@X.Y", password="owner-password")
+    )
+    assert result.attached is True
+    assert result.invite_token is None
+    assert result.login_path is None
+    row = wire.users.rows["usr-owner"]
+    assert row["email"] == "owner@x.y"  # normalized before storage
+    assert row["password_hash"] is not None
+    assert row["role"] == "admin"  # the owner's admin role, mirrored on the login row
+
+
+async def test_attach_login_invite_mints_link(wire):
+    result = await _provider().attach_login("usr-owner", credential=InviteCredential(email="owner@x.y"))
+    assert result.attached is False
+    token = result.invite_token
+    assert token is not None
+    assert token.startswith("tai-inv-")
+    assert result.login_path == f"/login?invite={token}"
+    row = wire.users.rows["usr-owner"]
+    assert row["password_hash"] is None  # password set later, on invite accept
+    assert row["role"] == "admin"
+    assert service.token_hash(token) in wire.invites.rows
+
+
+async def test_attach_login_existing_login_raises(wire):
+    wire.users.rows["usr-owner"] = {
+        "user_id": "usr-owner",
+        "email": "other@x.y",
+        "password_hash": "h",
         "role": "admin",
         "disabled": False,
         "created_at": future(0),
     }
-    assert await _provider().needs_bootstrap() is False
+    with pytest.raises(LoginExistsError):
+        await _provider().attach_login(
+            "usr-owner", credential=PasswordCredential(email="new@x.y", password="owner-password")
+        )
+
+
+async def test_attach_login_email_taken_raises(wire):
+    wire.users.rows["usr-other"] = {
+        "user_id": "usr-other",
+        "email": "taken@x.y",
+        "password_hash": "h",
+        "role": "viewer",
+        "disabled": False,
+        "created_at": future(0),
+    }
+    with pytest.raises(EmailTakenError):
+        await _provider().attach_login(
+            "usr-owner", credential=PasswordCredential(email="taken@x.y", password="owner-password")
+        )
+
+
+async def test_attach_login_password_too_short_raises(wire):
+    with pytest.raises(LoginAttachError, match="at least 10"):
+        await _provider().attach_login("usr-owner", credential=PasswordCredential(email="owner@x.y", password="short"))
+    # Nothing was written — the length guard runs before the login row is created.
+    assert wire.users.rows == {}
+
+
+async def test_attach_login_invite_mint_failure_rolls_back_login(wire, monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("invite boom")
+
+    monkeypatch.setattr(wire.invites, "create", boom)
+    with pytest.raises(RuntimeError, match="invite boom"):
+        await _provider().attach_login("usr-owner", credential=InviteCredential(email="owner@x.y"))
+    # The just-created login row was dropped, so the owner attach stays re-runnable.
+    assert wire.users.rows == {}
+
+
+# -- has_login ------------------------------------------------------------------
+
+
+async def test_has_login_true_after_attach(wire):
+    await _provider().attach_login(
+        "usr-owner", credential=PasswordCredential(email="owner@x.y", password="owner-password")
+    )
+    assert await _provider().has_login("usr-owner") is True
+
+
+async def test_has_login_false_when_no_row(wire):
+    assert await _provider().has_login("nobody") is False
 
 
 # -- revoke_session -------------------------------------------------------------
@@ -169,13 +243,12 @@ async def test_revoke_session_store_error_raises(monkeypatch, sessions_store):
 # -- login_methods --------------------------------------------------------------
 
 
-def test_login_methods_declares_three_with_bootstrap_token_field():
+def test_login_methods_declares_password_and_invite():
     methods = [m for m in _provider().login_methods() if isinstance(m, FormMethod)]
     by_purpose = {m.purpose: m for m in methods}
-    assert set(by_purpose) == {"login", "bootstrap", "invite"}
+    assert set(by_purpose) == {"login", "invite"}
     assert by_purpose["login"].submit_path == "/api/login/password"
-    field_names = {f.name for f in by_purpose["bootstrap"].fields}
-    assert "bootstrap_token" in field_names
+    assert by_purpose["invite"].submit_path == "/api/login/invite/accept"
 
 
 def test_login_methods_submit_path_follows_remapped_mount_base(monkeypatch):
@@ -187,19 +260,7 @@ def test_login_methods_submit_path_follows_remapped_mount_base(monkeypatch):
     methods = [m for m in _provider().login_methods() if isinstance(m, FormMethod)]
     by_purpose = {m.purpose: m for m in methods}
     assert by_purpose["login"].submit_path == "/api/sign-in/password"
-    assert by_purpose["bootstrap"].submit_path == "/api/sign-in/bootstrap"
     assert by_purpose["invite"].submit_path == "/api/sign-in/invite/accept"
-
-
-def test_login_methods_omits_token_field_when_open(monkeypatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
-    accounts_settings.cache_clear()
-    methods = [m for m in _provider().login_methods() if isinstance(m, FormMethod)]
-    bootstrap = next(m for m in methods if m.purpose == "bootstrap")
-    assert "bootstrap_token" not in {f.name for f in bootstrap.fields}
-
-
-# -- readiness_targets ----------------------------------------------------------
 
 
 # -- healthcheck ----------------------------------------------------------------
@@ -220,42 +281,11 @@ async def test_healthcheck_refuses_on_out_of_date_schema(monkeypatch):
         await _provider().healthcheck()
 
 
-async def test_healthcheck_gated_fixes_bootstrap_token(monkeypatch):
+async def test_healthcheck_passes_when_schema_applied(monkeypatch):
+    # A fully-applied schema chain lets boot proceed: the healthcheck is exactly the
+    # schema gate now.
     monkeypatch.setattr(provider_module, "assert_accounts_schema_applied", _gate_ok)
-    called: list[Any] = []
-
-    async def record(redis_settings):
-        called.append(redis_settings)
-
-    monkeypatch.setattr(service, "ensure_bootstrap_token", record)
-    redis = object()
-    await _provider(redis=redis).healthcheck()
-    assert called == [redis]
-
-
-async def test_healthcheck_open_window_warns(monkeypatch, users_store, caplog):
-    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
-    accounts_settings.cache_clear()
-    monkeypatch.setattr(provider_module, "assert_accounts_schema_applied", _gate_ok)
-    monkeypatch.setattr(service, "users_store", lambda: users_store)  # empty -> needs bootstrap
-    with caplog.at_level("WARNING"):
-        await _provider().healthcheck()
-    assert "first-owner bootstrap is OPEN" in caplog.text
-    # The warning names the real bootstrap door, resolved through the login mount.
-    assert "/api/login/bootstrap" in caplog.text
-
-
-async def test_healthcheck_open_window_warning_follows_remapped_mount_base(monkeypatch, users_store, caplog):
-    from tai42_accounts_postgres import routes_login
-
-    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
-    accounts_settings.cache_clear()
-    monkeypatch.setattr(routes_login, "_MOUNT_BASE", "/api/sign-in")
-    monkeypatch.setattr(provider_module, "assert_accounts_schema_applied", _gate_ok)
-    monkeypatch.setattr(service, "users_store", lambda: users_store)  # empty -> needs bootstrap
-    with caplog.at_level("WARNING"):
-        await _provider().healthcheck()
-    assert "/api/sign-in/bootstrap" in caplog.text
+    await _provider().healthcheck()
 
 
 def test_readiness_targets_names_both_stores():

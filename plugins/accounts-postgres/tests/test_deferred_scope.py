@@ -1,6 +1,6 @@
 """Boundary between what the unit suite proves and what the e2e leg owns.
 
-Proven here against the fakes: the provider, login, bootstrap, invite, and
+Proven here against the fakes: the provider, login, login-attachment, invite, and
 users-route matrices, the single registration landing in both registries, the
 packaged migration chain, and the boot-time schema gate's rendering/wiring. NOT
 unit-provable, owned by the e2e leg against a live Postgres: real SQL correctness

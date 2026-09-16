@@ -43,10 +43,6 @@ provides:
           methods:
             - POST
           public: true
-        - path: /bootstrap
-          methods:
-            - POST
-          public: true
         - path: /invite/accept
           methods:
             - POST

@@ -49,8 +49,8 @@ migration chain:
 - `accounts_invites` — one pending invite per user: the SHA-256 hash of the
   `tai-inv-…` token, its TTL, and its single-use consumption marker.
 
-Rate-limit counters and the shared bootstrap token live in Redis (reached through
-the injected `settings.redis`), namespaced per deployment.
+Rate-limit counters live in Redis (reached through the injected `settings.redis`),
+namespaced per deployment.
 
 The plugin NEVER touches the skeleton's `access_control_policies` /
 `access_control_routes` tables or any `ac:*` Redis key directly — all policy and
@@ -64,7 +64,6 @@ Public (`/api/login/*`, always-public prefix):
 | Route | Does |
 |---|---|
 | `POST /api/login/password` | Verify email + password, mint a session. Failures-only throttling; uniform 401; argon2 verify on every attempt (503 load-shed under a hash flood). |
-| `POST /api/login/bootstrap` | Create the first owner behind the secure-by-default gate. |
 | `POST /api/login/invite/accept` | Consume an invite, set the first password, mint a session. |
 
 Authed (`/api/auth/users*`, reserved prefix, admin-fenced by the seeded role
@@ -100,24 +99,17 @@ binding (the plugin never reads skeleton config):
 | `TAI_ACCOUNTS_LOGIN_IP_WINDOW_SECONDS` | `900` | Per-IP fixed window. |
 | `TAI_ACCOUNTS_LOGIN_HASH_CONCURRENCY` | `2 × CPU count` | Max concurrent argon2 verifies (load-shed above). |
 | `TAI_ACCOUNTS_LOGIN_HASH_WAIT_SECONDS` | `2.0` | Wait before a login sheds with 503 under hash saturation. |
-| `TAI_ACCOUNTS_BOOTSTRAP_TOKEN` | (unset) | Operator-supplied first-owner token; overrides the auto-token. |
-| `TAI_ACCOUNTS_BOOTSTRAP_OPEN` | `false` | Local/dev opt-out that DISABLES the gate (never the default). |
 | `TAI_ACCOUNTS_REDIS_KEY_PREFIX` | = `pg_db` | Per-deployment Redis namespace (derived from `pg_db` when unset). |
 
-**First-owner bootstrap gate (secure by default).** With neither
-`TAI_ACCOUNTS_BOOTSTRAP_TOKEN` nor `TAI_ACCOUNTS_BOOTSTRAP_OPEN` set, the gate is
-ON and the effective token is auto-generated ONCE at startup and printed to the
-server log. It is shared across all processes through Redis (`SET NX`): the first
-worker or replica to start wins the write and logs it; every other process reads
-the same value — so the default gate is deterministic under BOTH multiple uvicorn
-workers AND multiple replicas, with no explicit token. An explicit
-`TAI_ACCOUNTS_BOOTSTRAP_TOKEN` still overrides it. `TAI_ACCOUNTS_BOOTSTRAP_OPEN=true`
-is the only ungated configuration and logs a loud open-window warning every boot
-while no owner exists.
+**First owner.** The first owner is created by the platform's one-step setup door,
+not by this plugin. That door creates the owner principal and, when this provider is
+configured, attaches the owner's login through it (a password set now, or an invite
+link the owner follows later). The provider implements the login-attachment seam and
+ships no first-owner route of its own.
 
 > **Shared Redis / shared `pg_db`:** two deployments that share one Redis AND one
 > `pg_db` must set distinct `TAI_ACCOUNTS_REDIS_KEY_PREFIX` values, or they will
-> cross-read each other's rate-limit counters and bootstrap token.
+> cross-read each other's rate-limit counters.
 
 > **Proxies:** the per-IP throttle reads the direct peer — there is no
 > `X-Forwarded-For` parsing. A deployment behind a shared proxy must throttle at
@@ -180,9 +172,9 @@ ACCESS_CONTROL_AUTH_PROVIDERS=["accounts-postgres","redis"]
   with a 503 under a hash flood. Redis being down fails the throttle CLOSED.
 - **No-email invites:** the plugin returns an origin-relative `login_path` for the
   admin to hand over; it never sends email and never fabricates an absolute URL.
-- **Secure-by-default bootstrap:** the first-owner gate is ON by default via an
-  auto-generated one-time token (shared across processes through Redis), compared
-  constant-time; the only open configuration is explicit and logs a loud warning.
+- **Owner login attached at setup:** the platform setup door owns first-owner
+  creation; this provider only attaches the owner's login (password or invite) to the
+  already-created owner principal, never creating a second owner.
 
 Invite and session tokens are **shown once** — the create/regenerate response is
 the only place the raw invite link or session token appears.

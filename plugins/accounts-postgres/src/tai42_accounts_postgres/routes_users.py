@@ -171,11 +171,13 @@ async def list_users(request: Request) -> Response:
     action="write",
 )
 async def create_user(request: Request) -> Response:
-    """Create an account with a NULL password and a one-time invite.
+    """Create a human principal with a NULL-password login and a one-time invite.
 
-    Order: insert the user, apply its role, then mint the invite. If ``apply_role``
-    fails after the row was written, the compensating cleanup deletes the row (and
-    any invite) so creation stays re-runnable — never a policy-less zombie user.
+    Order: create the principal (its row and role) through the injected admin
+    services, create its password-less login row, then mint the invite. A failure
+    after the principal exists compensates — any invite and the login row are dropped
+    and the principal removed — so creation stays re-runnable and never leaves a
+    policy-less or login-less zombie.
     """
     body, error = await _parse(request, CreateUserBody)
     if error is not None:
@@ -184,29 +186,45 @@ async def create_user(request: Request) -> Response:
         raise AssertionError
 
     email = service.normalize_email(body.email)
-    store = service.users_store()
-    try:
-        created_id = await store.create(service.new_user_id(), email, body.role, password_hash=None)
-    except EmailTakenError:
-        return _error("email already registered", 409)
-
-    async def _cleanup() -> None:
-        await service.invites_store().delete_for_user(created_id)
-        await service.users_store().delete(created_id)
+    admin = service.provider_settings().admin
+    user_id = service.new_user_id()
 
     try:
-        await service.apply_role_compensated(created_id, body.role, cleanup=_cleanup)
+        await admin.create_principal(
+            user_id,
+            kind="human",
+            display_name=email,
+            created_by=get_current_user_id(),
+            role=body.role,
+        )
     except KeyError:
-        # Unknown role name; cleanup already removed the half-created row → clean 400.
+        # Unknown role name; create_principal wrote nothing → clean 400.
         return _error(f"unknown role: {body.role!r}", 400)
 
-    raw_invite = service.new_invite_token()
-    expires_at = _now() + timedelta(seconds=accounts_settings().invite_ttl_seconds)
-    await service.invites_store().create(service.token_hash(raw_invite), created_id, expires_at)
+    async def _cleanup() -> None:
+        await service.invites_store().delete_for_user(user_id)
+        await service.users_store().delete(user_id)
+        # remove_policy deletes the principal row and its policy (and revokes owned keys).
+        await admin.remove_policy(user_id)
+
+    try:
+        await service.users_store().create_login(user_id, email, body.role, password_hash=None)
+    except EmailTakenError:
+        await _cleanup()
+        return _error("email already registered", 409)
+
+    try:
+        raw_invite = service.new_invite_token()
+        expires_at = _now() + timedelta(seconds=accounts_settings().invite_ttl_seconds)
+        await service.invites_store().create(service.token_hash(raw_invite), user_id, expires_at)
+    except Exception:
+        await _cleanup()
+        raise
+
     return JSONResponse(
         {
             "data": {
-                "user_id": created_id,
+                "user_id": user_id,
                 "invite_token": raw_invite,
                 "login_path": service.invite_login_path(raw_invite),
             }

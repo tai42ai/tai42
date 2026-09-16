@@ -1,7 +1,7 @@
 """A REAL Postgres exercise of the account stores: the constraint-name split on a
-live unique violation, the advisory-locked bootstrap and last-admin guard under two
-concurrent callers, opportunistic session-expiry sweeping, session revocation, and
-atomic single-use/TTL invite consumption.
+live unique violation, the advisory-locked last-admin guard under two concurrent
+callers, opportunistic session-expiry sweeping, session revocation, and atomic
+single-use/TTL invite consumption.
 
 These need real Postgres semantics (named unique constraints, ``pg_advisory_xact_lock``
 serialization, ``now()``) that the scripted ``FakeCursor`` in :mod:`tests.conftest` can
@@ -20,6 +20,7 @@ from tai42_kit.clients import PostgresConnectionSettings
 from tai42_accounts_postgres.stores import (
     EmailTakenError,
     InvitesStore,
+    LoginExistsError,
     SessionsStore,
     UsersStore,
     new_user_id,
@@ -40,9 +41,30 @@ def _past(seconds: int = 3600) -> datetime:
     return _now() - timedelta(seconds=seconds)
 
 
+async def _make_user(store: UsersStore, email: str, role: str, password_hash: str | None = None) -> str:
+    """Create a login row for a fresh principal id and return that id."""
+    uid = new_user_id()
+    await store.create_login(uid, email, role, password_hash)
+    return uid
+
+
+async def test_provider_has_login_tracks_the_row(accounts_db: PostgresConnectionSettings) -> None:
+    # ``has_login`` is the ownership signal the principals door reads: True once a login row
+    # exists for the principal, False otherwise. Exercised over real Postgres through the
+    # provider's own ``service.users_store()`` seam (resolved to the live DB by accounts_db).
+    from tai42_accounts_postgres.provider import PostgresAccountsProvider
+
+    from .conftest import FakeProviderSettings
+
+    provider = PostgresAccountsProvider(FakeProviderSettings())
+    assert await provider.has_login("usr-nobody") is False
+    uid = await _make_user(UsersStore(accounts_db), "haslogin@a-42.example", "admin", password_hash="argon2$x")
+    assert await provider.has_login(uid) is True
+
+
 async def test_create_read_and_list(accounts_db: PostgresConnectionSettings) -> None:
     store = UsersStore(accounts_db)
-    uid = await store.create(new_user_id(), "alice@a-42.example", "admin", password_hash="argon2$alice")
+    uid = await _make_user(store, "alice@a-42.example", "admin", password_hash="argon2$alice")
 
     by_email = await store.get_by_email("alice@a-42.example")
     assert by_email is not None
@@ -61,45 +83,30 @@ async def test_create_read_and_list(accounts_db: PostgresConnectionSettings) -> 
 async def test_duplicate_email_maps_to_email_taken(accounts_db: PostgresConnectionSettings) -> None:
     # The live ``accounts_users_email_unique`` violation must reach the split by name.
     store = UsersStore(accounts_db)
-    await store.create(new_user_id(), "alice@a-42.example", "admin")
+    await _make_user(store, "alice@a-42.example", "admin")
     with pytest.raises(EmailTakenError):
-        await store.create(new_user_id(), "alice@a-42.example", "member")
-    assert await store.count() == 1
+        await _make_user(store, "alice@a-42.example", "member")
+    assert len(await store.list()) == 1
 
 
-async def test_user_id_collision_regenerates_then_succeeds(accounts_db: PostgresConnectionSettings) -> None:
-    # A real ``accounts_users_user_id_unique`` violation (same id, distinct email) must
-    # regenerate the id and land the row, not surface as an email conflict.
+async def test_user_id_collision_raises_login_exists(accounts_db: PostgresConnectionSettings) -> None:
+    # A real ``accounts_users_user_id_unique`` violation (same id, distinct email) is a
+    # loud invariant breach: the principal owns the id, so a second login for it raises
+    # rather than landing a divergent row.
     store = UsersStore(accounts_db)
-    taken = await store.create("usr-fixed", "alice@a-42.example", "admin")
-    assert taken == "usr-fixed"
-    regenerated = await store.create("usr-fixed", "bob@a-42.example", "member")
-    assert regenerated != "usr-fixed"
-    assert await store.get_by_user_id(regenerated) is not None
-    assert await store.count() == 2
-
-
-async def test_create_owner_if_first_serializes_two_callers(accounts_db: PostgresConnectionSettings) -> None:
-    # Two concurrent bootstrap callers on an empty roster: the advisory xact lock
-    # serializes count-then-insert so EXACTLY ONE owner is created. Without the lock
-    # both would count zero and insert, leaving two owners.
-    store = UsersStore(accounts_db)
-    results = await asyncio.gather(
-        store.create_owner_if_first(new_user_id(), "alice@a-42.example", "hash-a", "admin"),
-        store.create_owner_if_first(new_user_id(), "bob@a-42.example", "hash-b", "admin"),
-    )
-    inserted = [row for row in results if row is not None]
-    assert len(inserted) == 1
-    assert await store.count() == 1
+    await store.create_login("usr-fixed", "alice@a-42.example", "admin")
+    with pytest.raises(LoginExistsError):
+        await store.create_login("usr-fixed", "bob@a-42.example", "member")
+    assert len(await store.list()) == 1
 
 
 async def test_count_other_enabled_admins_excludes_self_and_disabled(
     accounts_db: PostgresConnectionSettings,
 ) -> None:
     store = UsersStore(accounts_db)
-    alice = await store.create(new_user_id(), "alice@a-42.example", "admin")
-    bob = await store.create(new_user_id(), "bob@a-42.example", "admin")
-    await store.create(new_user_id(), "carol@a-42.example", "member")
+    alice = await _make_user(store, "alice@a-42.example", "admin")
+    bob = await _make_user(store, "bob@a-42.example", "admin")
+    await _make_user(store, "carol@a-42.example", "member")
     assert await store.count_other_enabled_admins(alice) == 1  # only bob, another enabled admin
     await store.set_disabled(bob, True)
     assert await store.count_other_enabled_admins(alice) == 0  # bob no longer counts
@@ -110,8 +117,8 @@ async def test_admin_guard_serializes_last_admin_removal(accounts_db: PostgresCo
     # forces the re-read/count/mutate to run one at a time against committed state, so
     # exactly one passes and an enabled admin always survives.
     store = UsersStore(accounts_db)
-    alice = await store.create(new_user_id(), "alice@a-42.example", "admin")
-    bob = await store.create(new_user_id(), "bob@a-42.example", "admin")
+    alice = await _make_user(store, "alice@a-42.example", "admin")
+    bob = await _make_user(store, "bob@a-42.example", "admin")
 
     async def demote(target: str) -> bool:
         async with store.admin_guard_txn() as guard:
@@ -130,7 +137,7 @@ async def test_admin_guard_serializes_last_admin_removal(accounts_db: PostgresCo
 async def test_session_lifecycle_and_absolute_sweep(accounts_db: PostgresConnectionSettings) -> None:
     users = UsersStore(accounts_db)
     sessions = SessionsStore(accounts_db)
-    uid = await users.create(new_user_id(), "alice@a-42.example", "admin", password_hash="argon2$alice")
+    uid = await _make_user(users, "alice@a-42.example", "admin", password_hash="argon2$alice")
 
     # An absolute-expired session, then a live mint whose opportunistic sweep reaps it.
     await sessions.create("sess-expired", uid, _past())
@@ -155,7 +162,7 @@ async def test_session_lifecycle_and_absolute_sweep(accounts_db: PostgresConnect
 async def test_session_revocation_keeps_presented_token(accounts_db: PostgresConnectionSettings) -> None:
     users = UsersStore(accounts_db)
     sessions = SessionsStore(accounts_db)
-    uid = await users.create(new_user_id(), "alice@a-42.example", "admin")
+    uid = await _make_user(users, "alice@a-42.example", "admin")
     await sessions.create("keep", uid, _future())
     await sessions.create("drop", uid, _future())
 
@@ -170,7 +177,7 @@ async def test_session_revocation_keeps_presented_token(accounts_db: PostgresCon
 async def test_invite_consume_is_single_use(accounts_db: PostgresConnectionSettings) -> None:
     users = UsersStore(accounts_db)
     invites = InvitesStore(accounts_db)
-    uid = await users.create(new_user_id(), "alice@a-42.example", "member")
+    uid = await _make_user(users, "alice@a-42.example", "member")
     await invites.create("inv-1", uid, _future())
     assert await invites.consume("inv-1", _now()) == uid
     assert await invites.consume("inv-1", _now()) is None  # a replay finds no live row
@@ -179,7 +186,7 @@ async def test_invite_consume_is_single_use(accounts_db: PostgresConnectionSetti
 async def test_invite_expired_is_not_consumable(accounts_db: PostgresConnectionSettings) -> None:
     users = UsersStore(accounts_db)
     invites = InvitesStore(accounts_db)
-    uid = await users.create(new_user_id(), "alice@a-42.example", "member")
+    uid = await _make_user(users, "alice@a-42.example", "member")
     await invites.create("inv-ttl", uid, _future(3600))
     # A ``now`` past the invite's expiry: the TTL guard in the UPDATE predicate rejects it.
     assert await invites.consume("inv-ttl", _future(7200)) is None
@@ -188,7 +195,7 @@ async def test_invite_expired_is_not_consumable(accounts_db: PostgresConnectionS
 async def test_invite_create_replaces_prior_for_user(accounts_db: PostgresConnectionSettings) -> None:
     users = UsersStore(accounts_db)
     invites = InvitesStore(accounts_db)
-    uid = await users.create(new_user_id(), "alice@a-42.example", "member")
+    uid = await _make_user(users, "alice@a-42.example", "member")
     await invites.create("inv-old", uid, _future())
     await invites.create("inv-new", uid, _future())  # one live invite per user
     assert await invites.consume("inv-old", _now()) is None

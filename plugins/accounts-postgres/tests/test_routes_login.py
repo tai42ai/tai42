@@ -15,7 +15,6 @@ from .conftest import FakeRedis, build_request, future, response_json
 def redis_fake(monkeypatch):
     fake = FakeRedis()
     monkeypatch.setattr(rate_limit, "client_ctx", lambda cls, s=None, **k: _ctx(fake))
-    monkeypatch.setattr(service, "client_ctx", lambda cls, s=None, **k: _ctx(fake))
     return fake
 
 
@@ -149,108 +148,6 @@ async def test_invalid_json_400(wire, redis_fake):
 async def test_invalid_body_422(wire, redis_fake):
     resp = await routes_login.login_password(build_request({"email": "a@b.c"}))
     assert resp.status_code == 422
-
-
-# -- bootstrap ------------------------------------------------------------------
-
-
-async def test_bootstrap_success_gated_default(wire, redis_fake):
-    await redis_fake.set(service.bootstrap_token_redis_key(), "secret-token")
-    resp = await routes_login.login_bootstrap(
-        build_request({"email": "owner@x.y", "password": "owner-password", "bootstrap_token": "secret-token"})
-    )
-    assert resp.status_code == 200
-    assert response_json(resp)["data"]["token"].startswith("tai-sess-")
-    assert ("apply_role", response_json(resp)["data"]["user_id"], "admin") in wire.admin.calls
-
-
-async def test_bootstrap_wrong_token_403(wire, redis_fake):
-    await redis_fake.set(service.bootstrap_token_redis_key(), "secret-token")
-    resp = await routes_login.login_bootstrap(
-        build_request({"email": "owner@x.y", "password": "owner-password", "bootstrap_token": "nope"})
-    )
-    assert resp.status_code == 403
-    assert response_json(resp) == {"error": "Forbidden"}
-
-
-async def test_bootstrap_token_mismatch_logs_source_ip(wire, redis_fake, caplog):
-    await redis_fake.set(service.bootstrap_token_redis_key(), "secret-token")
-    with caplog.at_level("WARNING"):
-        resp = await routes_login.login_bootstrap(
-            build_request({"email": "owner@x.y", "password": "owner-password", "bootstrap_token": "nope"})
-        )
-    assert resp.status_code == 403
-    # The mismatch is a security signal, logged with the source ip.
-    assert "bootstrap token mismatch" in caplog.text
-    assert "198.51.100.7" in caplog.text
-
-
-async def test_bootstrap_wrong_token_ip_throttle_429(wire, redis_fake):
-    await redis_fake.set(service.bootstrap_token_redis_key(), "secret-token")
-    await redis_fake.set(_ip_key(), "30")  # per-IP window already at the limit
-    resp = await routes_login.login_bootstrap(
-        build_request({"email": "owner@x.y", "password": "owner-password", "bootstrap_token": "nope"})
-    )
-    assert resp.status_code == 429
-    assert "Retry-After" in resp.headers
-
-
-async def test_bootstrap_owner_race_yields_one_owner(wire, redis_fake, monkeypatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
-    accounts_settings.cache_clear()
-
-    # A concurrent bootstrap wins the advisory-locked owner insert first: by the
-    # time this request takes the lock an owner exists, so it 409s — exactly one owner.
-    def _other_creates_owner(store) -> None:
-        store.rows["other-owner"] = {
-            "user_id": "other-owner",
-            "email": "first@x.y",
-            "password_hash": "h",
-            "role": "admin",
-            "disabled": False,
-            "created_at": future(0),
-        }
-
-    wire.users.owner_lock_hook = _other_creates_owner
-    resp = await routes_login.login_bootstrap(build_request({"email": "owner@x.y", "password": "owner-password"}))
-    assert resp.status_code == 409
-    assert response_json(resp) == {"error": "Already initialized"}
-    assert len(wire.users.rows) == 1
-
-
-async def test_bootstrap_already_initialized_409(wire, redis_fake, monkeypatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
-    accounts_settings.cache_clear()
-    wire.users.rows["existing"] = {
-        "user_id": "existing",
-        "email": "e",
-        "password_hash": "h",
-        "role": "admin",
-        "disabled": False,
-        "created_at": future(0),
-    }
-    resp = await routes_login.login_bootstrap(build_request({"email": "owner@x.y", "password": "owner-password"}))
-    assert resp.status_code == 409
-    assert response_json(resp) == {"error": "Already initialized"}
-
-
-async def test_bootstrap_apply_role_failure_compensates(wire, redis_fake, monkeypatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
-    accounts_settings.cache_clear()
-    wire.admin.fail_apply_role = True
-    with pytest.raises(RuntimeError, match="apply_role boom"):
-        await routes_login.login_bootstrap(build_request({"email": "owner@x.y", "password": "owner-password"}))
-    # The just-created owner row was deleted, so bootstrap stays re-runnable.
-    assert wire.users.rows == {}
-
-
-async def test_bootstrap_password_too_short_422(wire, redis_fake):
-    await redis_fake.set(service.bootstrap_token_redis_key(), "secret-token")
-    resp = await routes_login.login_bootstrap(
-        build_request({"email": "owner@x.y", "password": "short", "bootstrap_token": "secret-token"})
-    )
-    assert resp.status_code == 422
-    assert "at least 10" in response_json(resp)["error"]
 
 
 # -- invite accept --------------------------------------------------------------

@@ -1,8 +1,8 @@
 """Plugin behavior config — the ``TAI_ACCOUNTS_*`` env namespace.
 
 ``AccountsSettings`` (``TAI_ACCOUNTS_*``) carries the session/invite lifetimes,
-login-throttle knobs, argon2 concurrency bound, the bootstrap gate, and the Redis
-key namespace. The plugin's Postgres connection is not configured here — it
+login-throttle knobs, argon2 concurrency bound, and the Redis key namespace. The
+plugin's Postgres connection is not configured here — it
 resolves through the central database registry from the component's binding
 (``TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES``). Redis likewise comes through the
 injected ``settings.redis``.
@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 
-from pydantic import Field, SecretStr
+from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.db import component_store_settings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
@@ -59,12 +59,6 @@ class AccountsSettings(TaiBaseSettings):
     # Cap on concurrent off-loop argon2 verifies; over-cap requests shed with a 503.
     login_hash_concurrency: int = Field(default_factory=_default_hash_concurrency)
     login_hash_wait_seconds: float = 2.0
-
-    # Bootstrap gate. Secure-by-default: with neither field set the gate is ON with an
-    # auto-generated token shared via Redis. ``bootstrap_open`` is the only ungated
-    # config (a local/dev opt-out), never the default.
-    bootstrap_token: SecretStr | None = None
-    bootstrap_open: bool = False
 
     # Per-deployment namespace prefixed onto every plugin Redis key so a shared Redis
     # cannot cross-read. Unset, ``key_prefix`` derives it from the bound database's
