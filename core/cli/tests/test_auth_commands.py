@@ -35,6 +35,27 @@ def test_auth_whoami_happy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "u1" in result.output
 
 
+def test_auth_whoami_renders_the_principal(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/auth/me"
+        return data_response(
+            {
+                "user_id": "svc-1",
+                "owner_user_id": None,
+                "admin": False,
+                "scopes": ["read"],
+                "routes": [],
+                "route_patterns": [],
+                "principal": {"user_id": "svc-1", "kind": "service", "display_name": "CI runner"},
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["auth", "whoami"])
+    assert result.exit_code == 0, result.output
+    # The projection's principal mapping renders (its display name is visible in the table).
+    assert "CI runner" in result.output
+
+
 def test_auth_whoami_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return data_response({"user_id": "u1", "admin": True, "scopes": ["*"]})

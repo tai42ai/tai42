@@ -7,7 +7,6 @@ by ``create`` — capture it then.
 
 from __future__ import annotations
 
-import sys
 from typing import Annotated
 
 import typer
@@ -19,6 +18,7 @@ from tai42_cli.commands._common import (
     emit_result,
     load_json_object_arg,
     parse_json_object,
+    reject_double_stdin,
     seg,
 )
 
@@ -43,15 +43,6 @@ _POLICY_DATA_FILE_HELP = (
 )
 
 
-def _reject_double_stdin(condition_file: str | None, policy_data_file: str | None) -> None:
-    """Stdin drains on the first read, so only one file option may be ``-`` per call."""
-    if condition_file == "-" and policy_data_file == "-":
-        raise typer.BadParameter(
-            "only one option may read from stdin ('-')",
-            param_hint="--condition-file/--policy-data-file",
-        )
-
-
 @app.command("list")
 @covers(("GET", "/api/auth/tokens-payload"))
 def list_keys(ctx: typer.Context) -> None:
@@ -71,6 +62,12 @@ def create_key(
     ctx: typer.Context,
     user: Annotated[str, typer.Option("--user", help="The key's user id.")],
     description: Annotated[str, typer.Option("--description", help="Human description (required identity field).")],
+    for_principal: Annotated[
+        str | None,
+        typer.Option(
+            "--for", help="The principal that owns the key (admin only); omitted = the caller's own principal."
+        ),
+    ] = None,
     scope: Annotated[list[str] | None, typer.Option("--scope", help="A scope to grant (repeatable).")] = None,
     condition: Annotated[str | None, typer.Option("--condition", help=_CONDITION_HELP)] = None,
     condition_file: Annotated[str | None, typer.Option("--condition-file", help=_CONDITION_FILE_HELP)] = None,
@@ -85,7 +82,9 @@ def create_key(
     """
     ctx_obj = app_context(ctx)
     body: dict = {"user_id": user, "description": description, "scopes": list(scope or [])}
-    _reject_double_stdin(condition_file, policy_data_file)
+    if for_principal is not None:
+        body["owner_user_id"] = for_principal
+    reject_double_stdin(condition_file, policy_data_file, param_hint="--condition-file/--policy-data-file")
     condition_obj = load_json_object_arg(
         condition, condition_file, param_hint="--condition", file_param_hint="--condition-file"
     )
@@ -98,41 +97,6 @@ def create_key(
         body["policy_data"] = policy_data_obj
     with ctx_obj.client() as client:
         data = client.post("/api/auth/api-keys", json=body)
-    emit_result(ctx_obj, data)
-
-
-@app.command("bootstrap")
-@covers(("POST", "/api/keys/bootstrap"))
-def bootstrap_key(
-    ctx: typer.Context,
-    user: Annotated[str, typer.Option("--user", help="The first admin key's user id.")],
-    description: Annotated[str, typer.Option("--description", help="Human description (required identity field).")],
-    token: Annotated[
-        str,
-        typer.Option(
-            "--token",
-            help="The boot-time bootstrap token (printed in the server log at startup), or '-' to read it from "
-            "stdin instead of putting the secret on the command line (a value on argv leaks via ps and shell "
-            "history).",
-        ),
-    ],
-) -> None:
-    """Mint the FIRST admin API key on a fresh deployment — runs WITHOUT a credential.
-
-    Access control ON with no key yet has no authenticated door to mint the first key;
-    this is the one-shot public door. Gated by the boot-time bootstrap token; refused
-    once any key exists. The raw ``sk-…`` value is printed ONCE — capture it now.
-
-    Example: ``tai keys bootstrap --user alice --description 'root key' --token -``
-    """
-    ctx_obj = app_context(ctx)
-    if token == "-":  # noqa: S105 constant identifier, not a secret value
-        token = sys.stdin.readline().strip()
-    body = {"user_id": user, "description": description, "bootstrap_token": token}
-    # The caller has no key yet — the whole point — so the mint runs over the
-    # no-credential client path; a stale/wrong credential is never sent to the public door.
-    with ctx_obj.client(anonymous=True) as client:
-        data = client.post("/api/keys/bootstrap", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -173,7 +137,7 @@ def edit_key(
         updates["scopes"] = list(scope)
     if clear_condition and (condition is not None or condition_file is not None):
         raise typer.BadParameter("pass either --condition/--condition-file or --clear-condition, not both")
-    _reject_double_stdin(condition_file, policy_data_file)
+    reject_double_stdin(condition_file, policy_data_file, param_hint="--condition-file/--policy-data-file")
     condition_obj = load_json_object_arg(
         condition, condition_file, param_hint="--condition", file_param_hint="--condition-file"
     )

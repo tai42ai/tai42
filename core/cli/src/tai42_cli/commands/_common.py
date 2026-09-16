@@ -317,6 +317,39 @@ def load_json_object_arg(
     return None
 
 
+def read_secret_arg(
+    inline: str | None,
+    file: str | None,
+    *,
+    param_hint: str,
+    file_param_hint: str,
+) -> str | None:
+    """Resolve a plain secret string from an inline value OR a file/stdin (``-``) source.
+
+    Reading the value from a file keeps a secret off the command line (a value on
+    argv leaks via ``ps`` and shell history); a ``-`` path reads it from stdin,
+    stripped. Giving both sources is a usage error; giving neither returns ``None``.
+    """
+    if inline is not None and file is not None:
+        raise typer.BadParameter(f"give only one of {param_hint} or {file_param_hint}", param_hint=file_param_hint)
+    if inline is not None:
+        return inline
+    if file is not None:
+        return read_file_or_stdin(file, param_hint=file_param_hint).strip()
+    return None
+
+
+def reject_double_stdin(first: str | None, second: str | None, *, param_hint: str) -> None:
+    """Reject two option values that both read stdin (``-``) — stdin drains on the first read.
+
+    Two options each set to ``-`` would each try to consume stdin, but the first read drains
+    it, so the second would see nothing; naming both is a usage error rather than a silent
+    empty value.
+    """
+    if first == "-" and second == "-":
+        raise typer.BadParameter("only one option may read from stdin ('-')", param_hint=param_hint)
+
+
 def emit_records(
     ctx_obj: AppContext,
     data: Any,

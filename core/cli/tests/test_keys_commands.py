@@ -130,38 +130,52 @@ def test_keys_claim_link_omits_ttl_when_flag_absent(monkeypatch: pytest.MonkeyPa
     assert "/login#claim=clm-xyz" in result.output
 
 
-def test_keys_bootstrap_posts_first_admin_credential_free(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_keys_create_for_sends_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/api/keys/bootstrap"
-        # The mint runs credential-free — the caller has no key yet — so no auth header
-        # or api-key header rides the request.
-        assert request.headers.get("authorization") is None
-        assert request.headers.get("x-api-key") is None
-        body = json.loads(request.content)
-        assert body == {"user_id": "alice", "description": "root key", "bootstrap_token": "tok-from-stdin"}
-        return data_response({"token": "sk-secret", "user_id": "alice"})
+        assert request.url.path == "/api/auth/api-keys"
+        assert json.loads(request.content)["owner_user_id"] == "svc-1"
+        return data_response("sk-secret")
 
     result = run_cli(
         monkeypatch,
         handler,
-        ["keys", "bootstrap", "--user", "alice", "--description", "root key", "--token", "-"],
-        stdin="tok-from-stdin\n",
+        ["keys", "create", "--user", "alice", "--description", "ci", "--for", "svc-1"],
     )
     assert result.exit_code == 0, result.output
-    assert "sk-secret" in result.output
+
+
+def test_keys_create_omits_owner_when_for_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/auth/api-keys"
+        assert "owner_user_id" not in json.loads(request.content)
+        return data_response("sk-secret")
+
+    result = run_cli(monkeypatch, handler, ["keys", "create", "--user", "alice", "--description", "ci"])
+    assert result.exit_code == 0, result.output
 
 
 def test_keys_list_renders_identity_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
         assert request.url.path == "/api/auth/tokens-payload"
-        return data_response([{"user_id": "alice", "description": "ci", "scopes": ["read"]}])
+        return data_response(
+            [
+                {
+                    "user_id": "alice",
+                    "description": "ci",
+                    "scopes": ["read"],
+                    "principal": {"user_id": "svc-1", "kind": "service", "display_name": "CI runner"},
+                }
+            ]
+        )
 
     result = run_cli(monkeypatch, handler, ["keys", "list"])
     assert result.exit_code == 0, result.output
     assert "alice" in result.output
     assert "read" in result.output
+    # The generated columns surface the owning principal (kind + display name).
+    assert "principal" in result.output
+    assert "service" in result.output
 
 
 def test_keys_list_renders_the_orphaned_state(monkeypatch: pytest.MonkeyPatch) -> None:
