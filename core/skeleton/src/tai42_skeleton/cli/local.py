@@ -19,7 +19,7 @@ import typer
 from typer.main import get_command
 
 from tai42_skeleton.cli import backend, mcp_app, metrics, offline
-from tai42_skeleton.cli.native import catalog, db, doctor, openapi
+from tai42_skeleton.cli.native import catalog, db, doctor, openapi, setup_recover
 
 
 def _attach_offline(root: click.Group, parent_name: str, fn: Callable[..., None], name: str) -> None:
@@ -45,6 +45,12 @@ def _attach_offline(root: click.Group, parent_name: str, fn: Callable[..., None]
 def register(group: click.Group) -> None:
     """Mount the server's local and runtime commands onto the ``tai`` root group."""
     from tai42_cli.app import inject_json_flag, mount_launcher
+    from tai42_cli.commands.setup import register_recovery
+
+    # ``tai setup --recover`` is a host-side action: the cli's ``setup`` command holds the
+    # flag and its user-facing shaping, and the server package fills the handler that reads
+    # the deployment and re-mints the owner's key.
+    register_recovery(setup_recover.recover)
 
     # Local Typer commands: compile them together, give every leaf the trailing
     # ``--json`` form, then move each onto the root group.
