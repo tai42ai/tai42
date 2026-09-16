@@ -1,6 +1,6 @@
 {
   "name": "tai42_accounts_postgres",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "api_version": 1,
   "entry": "tai42-accounts-postgres-DXpQeB9V.js",
   "integrity": {
