@@ -4,10 +4,11 @@ Two doors fanning out over the accounts-provider registry:
 
 - ``GET /api/login/methods`` — PUBLIC (the always-public ``/api/login`` prefix makes
   it reachable pre-auth with no route rows). Aggregates every registered accounts
-  provider's declared ``LoginMethod`` metadata plus a bootstrap flag, so a generic
-  login screen can render without knowing which providers are installed. An empty
-  registry answers ``{"methods": [], "bootstrap": false}`` — the Studio's
-  key-paste-only signal.
+  provider's declared ``LoginMethod`` metadata plus ``needs_setup`` (whether the
+  deployment is still uninitialized) and ``setup_login`` (what the setup door can attach,
+  or ``null``), so a generic login screen can render without knowing which providers are
+  installed. An empty registry answers ``{"methods": [], "needs_setup": <bool>,
+  "setup_login": null}`` — the Studio's key-paste-only signal.
 - ``POST /api/login/claim`` — PUBLIC (same always-public prefix). Burns a one-time
   claim token and returns the raw API key it carried — the QR-onboarding exchange leg.
 - ``POST /api/auth/logout`` — the single AUTHED logout dispatcher (logout is

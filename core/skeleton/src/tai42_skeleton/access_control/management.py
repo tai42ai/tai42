@@ -279,6 +279,24 @@ async def get_policy_body(user_id: str) -> dict[str, Any] | None:
     return await access_control_store().get_policy_body(user_id)
 
 
+# -- principals (delegated reads) --------------------------------------------
+
+
+async def list_principals() -> list[dict[str, Any]]:
+    """Every principal row, ordered by creation."""
+    return await access_control_store().list_principals()
+
+
+async def get_principal(user_id: str) -> dict[str, Any] | None:
+    """The principal row for ``user_id``, or ``None`` when none exists."""
+    return await access_control_store().get_principal(user_id)
+
+
+async def any_principal_exists() -> bool:
+    """Whether ANY principal exists — the ``needs_setup`` / setup-door 409 predicate."""
+    return await access_control_store().any_principal_exists()
+
+
 async def restore_policy_body(user_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
     """Write a prior policy ``body`` back as the enforced policy — the store side of a version rollback.
 
@@ -297,7 +315,8 @@ async def add_user_api_key(
     scopes: list[str],
     policy_data: dict[str, Any] | None = None,
     condition: TemplatedText | None = None,
-    owner_user_id: str | None = None,
+    *,
+    owner_user_id: str,
 ) -> tuple[str, dict[str, Any], str]:
     """Provision a new key for ``user_id`` and return ``(raw_sk_key, committed_body, key_fingerprint)``.
 
@@ -311,17 +330,18 @@ async def add_user_api_key(
     non-reusable identity a hook binding resolves against at fire, so a revoke+remint of
     the same ``user_id`` leaves an old binding resolving to nothing.
 
-    When ``owner_user_id`` is given the key is an OWNED key: the owner claim is
-    DUAL-HOMED at this single mint — the provider persists it on the identity record
-    (the ENFORCEMENT source, arriving on every request) and it is also written into the
-    committed ``policy_data`` under ``OWNER_USER_ID_CLAIM`` (the MANAGEMENT/listing
-    source, readable from the store the tokens-payload merge already performs). Both
-    homes are written only by this mint path; ``None`` mints an ownerless machine key.
+    ``owner_user_id`` is REQUIRED: every api key belongs to a principal. The owner must be
+    an EXISTING, ENABLED principal (a loud ``ValueError`` naming the state otherwise). The
+    owner claim is DUAL-HOMED at this single mint — the provider persists it on the identity
+    record (the ENFORCEMENT source, arriving on every request) and it is also written into
+    the committed ``policy_data`` under ``OWNER_USER_ID_CLAIM`` (the MANAGEMENT/listing
+    source, readable from the store the tokens-payload merge already performs). Both homes
+    are written only by this mint path.
 
     ORCHESTRATES the backends in a FAIL-CLOSED order. Raises ``ValueError`` if the
-    user id is already provisioned or if any requested scope does not exist (has no
-    url mapping) — both checked BEFORE any write, so a user error never leaves a
-    half-provisioned key. Then:
+    user id is already provisioned, if the owner is not an enabled principal, or if any
+    requested scope does not exist (has no url mapping) — all checked BEFORE any write, so
+    a user error never leaves a half-provisioned key. Then:
 
     1. the provider's ``provision`` writes the identity/key record FIRST — the key
        authenticates but GRANTS NOTHING until the policy below exists;
@@ -337,6 +357,17 @@ async def add_user_api_key(
     """
     provider = _identity_provider()
     store = access_control_store()
+
+    # The owner MUST be an existing, enabled principal — every api key belongs to one.
+    # Checked with no side effect, so an ownerless/disabled/unknown owner raises before
+    # the provider mints anything.
+    if not owner_user_id:
+        raise ValueError("owner_user_id is required: every api key belongs to a principal")
+    owner_principal = await store.get_principal(owner_user_id)
+    if owner_principal is None:
+        raise ValueError(f"owner principal {owner_user_id!r} does not exist; a key must belong to a principal")
+    if owner_principal["disabled"]:
+        raise ValueError(f"owner principal {owner_user_id!r} is disabled; cannot mint a key for it")
 
     # Pre-checks with NO side effect, so a duplicate user or an unknown scope raises
     # before the provider mints anything (never a half-provisioned key). An orphaned
@@ -366,13 +397,14 @@ async def add_user_api_key(
     raw_key = await provider.provision(user_id, description, owner_user_id=owner_user_id)
 
     # Fresh per-mint fingerprint: the immutable identity a hook binding resolves against
-    # at fire, so a binding to a previous mint of this user_id fails closed.
+    # at fire, so a binding to a previous mint of this user_id fails closed. The owner
+    # claim is always the second home the management/listing surface reads.
     key_fingerprint = uuid4().hex
-    policy_data = {**(policy_data or {}), KEY_FINGERPRINT_CLAIM: key_fingerprint}
-
-    # Second owner home: the policy_data copy the management/listing surface reads.
-    if owner_user_id is not None:
-        policy_data = {**policy_data, OWNER_USER_ID_CLAIM: owner_user_id}
+    policy_data = {
+        **(policy_data or {}),
+        KEY_FINGERPRINT_CLAIM: key_fingerprint,
+        OWNER_USER_ID_CLAIM: owner_user_id,
+    }
 
     try:
         # 2. Policy row. The live-context hash needs no seed — it is created by the
@@ -467,6 +499,11 @@ async def remint_orphaned_api_key(user_id: str, description: str) -> str:
     store = access_control_store()
     body = await store.get_policy_body(user_id)
     owner_user_id = ((body or {}).get("policy_data") or {}).get(OWNER_USER_ID_CLAIM)
+    if not owner_user_id:
+        # A minted policy row with no owner claim is an ownerless key row: it has no
+        # principal to re-home onto. The clean break re-initializes, never a silent
+        # ownerless re-mint.
+        raise ValueError(f"user id {user_id!r} has an ownerless key row (no owner claim); re-initialize the deployment")
     raw_key = await provider.provision(user_id, description, owner_user_id=owner_user_id)
     logger.info("access_control: re-minted identity for orphaned api key policy user_id=%s", user_id)
     return raw_key

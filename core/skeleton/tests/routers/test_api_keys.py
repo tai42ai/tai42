@@ -27,7 +27,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 from starlette.testclient import TestClient
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.template import TemplatedText
 from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
@@ -99,6 +99,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Fakes:
     the live provider/policy readers, so a key written by a route resolves back
     through the real enforcement code."""
     pg = FakeAccessControlPg()
+    # The admin caller every mint defaults its owner to (see ``_admin_caller``) is a
+    # principal — every api key belongs to one.
+    pg.add_principal("test-admin", kind="human", display_name="Test Admin")
     redis = FakeRedis(strings={}, hashes={})
     rctx = make_client_ctx(redis)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
@@ -207,7 +210,7 @@ async def test_create_forwards_policy_data_and_condition_into_stored_policy(stor
     fingerprint = _body(resp)["data"]["key_fingerprint"]
     assert store.pg.policy_body("u1") == {
         "scopes": ["scope-a"],
-        "policy_data": {"limit": 7, KEY_FINGERPRINT_CLAIM: fingerprint},
+        "policy_data": {"limit": 7, KEY_FINGERPRINT_CLAIM: fingerprint, OWNER_USER_ID_CLAIM: "test-admin"},
         "condition": {"content": ".context.used < .policy.limit", "kwargs": {"tier": "pro"}},
     }
 
@@ -346,7 +349,7 @@ async def test_edit_description_only_preserves_policy_and_condition(store: _Fake
     # The description-only edit preserves policy_data (including the immutable fingerprint).
     assert store.pg.policy_body("u1") == {
         "scopes": ["scope-a"],
-        "policy_data": {"limit": 7, KEY_FINGERPRINT_CLAIM: fingerprint},
+        "policy_data": {"limit": 7, KEY_FINGERPRINT_CLAIM: fingerprint, OWNER_USER_ID_CLAIM: "test-admin"},
         "condition": {"content": ".context.used < .policy.limit", "kwargs": {"tier": "pro"}},
     }
 
@@ -372,7 +375,7 @@ async def test_edit_scopes_only_preserves_policy_and_condition(store: _Fakes) ->
     assert resp.status_code == 200
     policy = store.pg.policy_body("u1")
     assert policy["scopes"] == ["scope-b"]
-    assert policy["policy_data"] == {"limit": 7, KEY_FINGERPRINT_CLAIM: minted_fp}
+    assert policy["policy_data"] == {"limit": 7, KEY_FINGERPRINT_CLAIM: minted_fp, OWNER_USER_ID_CLAIM: "test-admin"}
     assert policy["condition"] == _cond_doc("c")
 
 
@@ -415,7 +418,7 @@ async def test_edit_explicit_null_clears_policy_and_condition(store: _Fakes) -> 
     policy = store.pg.policy_body("u1")
     # An explicit clear drops the caller's policy_data but never the server-owned
     # fingerprint: an edit is not a remint, so a bound hook keeps resolving.
-    assert policy["policy_data"] == {KEY_FINGERPRINT_CLAIM: minted_fp}
+    assert policy["policy_data"] == {KEY_FINGERPRINT_CLAIM: minted_fp, OWNER_USER_ID_CLAIM: "test-admin"}
     assert policy["condition"] is None
 
 
@@ -438,7 +441,7 @@ async def test_edit_condition_only_leaves_policy_data_untouched(store: _Fakes) -
     assert resp.status_code == 200
     policy = store.pg.policy_body("u1")
     assert policy["condition"] == _cond_doc("x")
-    assert policy["policy_data"] == {"limit": 7, KEY_FINGERPRINT_CLAIM: minted_fp}
+    assert policy["policy_data"] == {"limit": 7, KEY_FINGERPRINT_CLAIM: minted_fp, OWNER_USER_ID_CLAIM: "test-admin"}
 
 
 async def test_edit_unknown_user_is_404(store: _Fakes) -> None:
@@ -1339,6 +1342,7 @@ async def test_get_me_gate_on_wraps_projection(store: _Fakes, monkeypatch: pytes
         return ProjectionResult(
             user_id=user_id,
             owner_user_id=None,
+            principal=None,
             admin=False,
             scopes=list(effective_scopes),
             routes=[],

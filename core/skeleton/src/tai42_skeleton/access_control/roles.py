@@ -348,6 +348,99 @@ async def apply_role(user_id: str, role_name: str) -> None:
     await ac_policy_store().write(user_id, committed)
 
 
+async def create_principal(
+    user_id: str,
+    *,
+    kind: str,
+    display_name: str,
+    created_by: str | None,
+    role: str,
+) -> dict[str, Any]:
+    """Create a principal row and apply its role, with compensation on role failure.
+
+    Writes the principal row FIRST (the store rejects a duplicate ``user_id`` with a loud
+    ``ValueError``), then applies the role template onto the principal's enforced policy.
+    If :func:`apply_role` fails (an unknown role, a store fault) the principal row is
+    deleted and the error re-raised, so a failed create never strands a role-less
+    principal. Returns the created principal row.
+    """
+    store = access_control_store()
+    principal = await store.create_principal(user_id, kind, display_name, created_by)
+    try:
+        await apply_role(user_id, role)
+    except Exception:
+        # Compensation: the role never landed, so the principal row must not survive.
+        await store.delete_principal(user_id)
+        raise
+    return principal
+
+
+async def refresh_enforcement_after_disabled(user_id: str, committed: dict[str, Any]) -> None:
+    """Bump the policy version and write the committed body into the enforcement cache.
+
+    The post-commit half of a disabled flip, shared by the guarded principals door and the
+    accounts-services wrapper: once the advisory-locked transaction has committed both homes,
+    enforcement is refreshed so the new disabled state takes effect on the next request.
+    """
+    await management.bump_policy_version()
+    await ac_policy_store().write(user_id, committed)
+
+
+async def revoke_owned_keys_and_bump(user_id: str) -> None:
+    """Revoke every api key ``user_id`` owns, then bump the policy version.
+
+    The post-commit half of a principal delete, shared by the guarded principals door and the
+    accounts-services wrapper. Owned keys are walked from the management/listing home
+    (``policy_data``'s ``OWNER_USER_ID_CLAIM``); each revoke touches the identity provider
+    (Redis) and so cannot join the guarded delete transaction. Running it AFTER that
+    transaction commits keeps the last-admin count and the row delete atomic (a refusal rolls
+    back with nothing revoked): the owned-key policy rows carry their own fingerprint and
+    owner claim, so the listing still finds them once the principal's own unfingerprinted row
+    is gone, and a revoke of an already-orphaned key is idempotent.
+    """
+    for entry in await management.get_all_existing_tokens_payload():
+        owner = (entry.get("policy_data") or {}).get(OWNER_USER_ID_CLAIM)
+        if owner == user_id:
+            await management.revoke_api_key(entry["user_id"])
+    await management.bump_policy_version()
+
+
+async def set_principal_disabled(user_id: str, disabled: bool) -> None:
+    """Flip a principal's disabled state under the advisory-locked guard, then refresh enforcement.
+
+    A thin wrapper over :meth:`~tai42_skeleton.access_control.principals_mixin.PrincipalsStoreMixin.principal_guard_txn`
+    with NO last-admin check: the accounts users door that reaches this (through the accounts
+    admin services, for a login-owning human) runs its own last-admin guard on its
+    ``accounts_users`` table. The guard writes both the authoritative
+    ``access_control_principals.disabled`` column and its ``policy_data['disabled']``
+    projection in one transaction; enforcement is refreshed after it commits. Raises
+    ``KeyError`` when the principal (or its policy row) is absent.
+    """
+    async with access_control_store().principal_guard_txn() as guard:
+        committed = await guard.set_disabled(user_id, disabled)
+    await refresh_enforcement_after_disabled(user_id, committed)
+
+
+async def delete_principal(user_id: str) -> None:
+    """Delete a principal's policy row and principal row under the advisory-locked guard, then revoke owned keys.
+
+    A thin wrapper over :meth:`~tai42_skeleton.access_control.principals_mixin.PrincipalsStoreMixin.principal_guard_txn`
+    with NO last-admin check: the accounts users door that reaches this (through the accounts
+    admin services, for a login-owning human) runs its own last-admin guard on its
+    ``accounts_users`` table. The guard deletes both rows in one transaction; owned keys are
+    revoked AFTER it commits (see :func:`revoke_owned_keys_and_bump`). The principal is
+    expected to EXIST: a missing policy row or principal row is an invariant breach and raises
+    ``KeyError`` (loud) rather than proceeding silently.
+    """
+    async with access_control_store().principal_guard_txn() as guard:
+        policy_existed, principal_existed = await guard.delete(user_id)
+        if not policy_existed:
+            raise KeyError(f"cannot remove policy for unknown principal: {user_id!r}")
+        if not principal_existed:
+            raise KeyError(f"cannot remove unknown principal: {user_id!r}")
+    await revoke_owned_keys_and_bump(user_id)
+
+
 class SkeletonAccountsAdminServices:
     """The application's implementation of the ``AccountsAdminServices`` Protocol.
 
@@ -357,51 +450,26 @@ class SkeletonAccountsAdminServices:
     version so enforcement follows immediately.
     """
 
+    async def create_principal(
+        self,
+        user_id: str,
+        *,
+        kind: str,
+        display_name: str,
+        created_by: str | None,
+        role: str,
+    ) -> None:
+        """Create the principal row and apply its role; see :func:`create_principal`."""
+        await create_principal(user_id, kind=kind, display_name=display_name, created_by=created_by, role=role)
+
     async def apply_role(self, user_id: str, role: str) -> None:
         """Assign role ``role`` to ``user_id``'s enforced policy; see :func:`apply_role`."""
         await apply_role(user_id, role)
 
     async def remove_policy(self, user_id: str) -> None:
-        """Delete ``user_id``'s enforced policy and revoke every key it owned.
-
-        Owned keys are walked from the management/listing home (``policy_data``'s
-        ``OWNER_USER_ID_CLAIM``). The user is expected to EXIST: a delete of a missing
-        policy row is an invariant breach here (only ``apply_role`` legitimately upserts
-        a missing user), so it raises rather than proceeding silently.
-        """
-        store = access_control_store()
-
-        # Revoke keys this user owns first (before its own policy is gone), reading the
-        # owner claim from the management/listing home. The enumeration is empty on a
-        # validator-only deployment (no key-minting provider, so no api-keys to own).
-        for entry in await management.get_all_existing_tokens_payload():
-            owner = (entry.get("policy_data") or {}).get(OWNER_USER_ID_CLAIM)
-            if owner == user_id:
-                await management.revoke_api_key(entry["user_id"])
-
-        if not await store.delete_policy(user_id):
-            raise KeyError(f"cannot remove policy for unknown user: {user_id!r}")
-        await management.bump_policy_version()
+        """Delete a principal's policy AND principal row and revoke every key it owned; see :func:`delete_principal`."""
+        await delete_principal(user_id)
 
     async def set_user_disabled(self, user_id: str, disabled: bool) -> None:
-        """Set/clear the disabled marker on ``user_id``'s enforced policy.
-
-        The user is expected to EXIST: a missing policy row is an invariant breach and
-        raises (only ``apply_role`` upserts a missing user).
-        """
-        store = access_control_store()
-        body = await store.get_policy_body(user_id)
-        if body is None:
-            raise KeyError(f"cannot set disabled marker for unknown user: {user_id!r}")
-
-        policy_data = dict(body.get("policy_data") or {})
-        if disabled:
-            policy_data["disabled"] = True
-        else:
-            policy_data.pop("disabled", None)
-
-        committed = await store.update_policy_fields(user_id, {"policy_data": policy_data})
-        if committed is None:
-            raise KeyError(f"cannot set disabled marker for unknown user: {user_id!r}")
-        await management.bump_policy_version()
-        await ac_policy_store().write(user_id, committed)
+        """Set/clear the disabled marker on ``user_id``'s principal; see :func:`set_principal_disabled`."""
+        await set_principal_disabled(user_id, disabled)

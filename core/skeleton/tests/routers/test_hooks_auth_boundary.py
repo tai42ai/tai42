@@ -182,7 +182,14 @@ def credentialed_client(monkeypatch, bound_app):
     # The identity record the redis provider resolves the presented key to, plus the
     # policy row and the route rows the enforcement reads.
     fake = FakeRedis(
-        hashes={f"{ac_settings.key_prefix}{hash_api_key(_VALID_KEY)}": {"user_id": "u1", "description": "d"}}
+        hashes={
+            f"{ac_settings.key_prefix}{hash_api_key(_VALID_KEY)}": {
+                "user_id": "u1",
+                "description": "d",
+                # Every api key belongs to a principal, so the record carries the owner claim.
+                "owner_user_id": "owner1",
+            }
+        }
     )
     pg = FakeAccessControlPg()
     pg.add_route("hooks-api", "hooks-api-protected")
@@ -191,6 +198,8 @@ def credentialed_client(monkeypatch, bound_app):
     # A non-admin holding the management doors' own resource scope, so any refusal is
     # the route's action class rather than the scope layer.
     pg.add_policy("u1", scopes=["hooks", "hooks-api-protected"])
+    # The owner principal's ["*"] policy caps nothing (the key stays non-admin, scoped).
+    pg.add_policy("owner1", scopes=["*"])
 
     ctx = make_client_ctx(fake)
     monkeypatch.setattr(verifier_module, "client_ctx", ctx)

@@ -106,9 +106,6 @@ class _FakeAccountsProvider(AccountsProvider):
     def login_methods(self) -> list[LoginMethod]:
         return []
 
-    async def needs_bootstrap(self) -> bool:
-        return False
-
     async def revoke_session(self, token: str) -> bool:
         return False
 

@@ -39,6 +39,16 @@ async def list_tokens_payload() -> list[dict[str, Any]]:
     payload = await management.get_all_existing_tokens_payload()
     if not caller.is_admin:
         payload = [p for p in payload if owner_of(p.get("policy_data")) == caller.caller_id]
+    # Attach each key's PRINCIPAL (its owner) so the listing shows who a key belongs to.
+    principals = {p["user_id"]: p for p in await management.list_principals()}
+    for row in payload:
+        owner = owner_of(row.get("policy_data"))
+        principal = principals.get(owner) if owner is not None else None
+        row["principal"] = (
+            {"user_id": principal["user_id"], "kind": principal["kind"], "display_name": principal["display_name"]}
+            if principal is not None
+            else None
+        )
     return payload
 
 
@@ -68,16 +78,28 @@ async def create_api_key(
     if not _pkg.access_control_settings().enable:
         raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     caller = await _pkg.resolve_caller()
-    # An owned key cannot mint keys — ownership is exactly one level deep.
-    if caller.owner_claim is not None:
-        raise ForbiddenError("an owned API key may not mint API keys")
+    # Every key belongs to a principal; the ownerless option is gone. Ownership is exactly
+    # one level deep — a key cannot mint keys for other principals unless its principal is
+    # admin.
     if not caller.is_admin:
-        # Non-admin: force self-ownership (reject an explicit different owner, never
-        # silently overwrite) and cap the grant to the caller's own scopes.
+        # A non-admin owned key is a LEAF credential (not a principal), so it cannot mint
+        # at all; a non-admin principal may mint only keys owned by ITSELF, capped to its
+        # own scopes.
+        if caller.owner_claim is not None:
+            raise ForbiddenError("an owned API key may not mint API keys")
         if owner_user_id is not None and owner_user_id != caller.caller_id:
             raise ForbiddenError("a non-admin caller may only create keys owned by itself")
         owner_user_id = caller.caller_id
         ownership._check_scope_subset(caller, scopes)
+    elif owner_user_id is None:
+        # Admin: default to the admin's OWN principal (the owner behind an admin key, else
+        # the admin session's own id); an admin may also name a service principal.
+        owner_user_id = caller.owner_claim or caller.caller_id
+
+    if owner_user_id is None:
+        # Unreachable with the gate on: ``resolve_caller`` binds a caller id (it raises
+        # otherwise), so the owner resolves to a real id. A defensive loud guard.
+        raise ForbiddenError("the acting principal could not be resolved for the mint's owner")
 
     try:
         raw_key, committed_body, key_fingerprint = await management.add_user_api_key(

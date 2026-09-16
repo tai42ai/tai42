@@ -67,9 +67,10 @@ async def resolve_caller() -> Caller:
     while the dispatch runs as another.
 
     ``owner_claim`` comes from the principal's OWN stored policy_data, never the
-    request-scope claims var. ``is_admin`` iff the caller holds a condition-free ``"*"``
-    policy AND is not itself an owned key — role-holders carry ``["*"]`` plus a jq
-    condition, and an editor-minted condition-free owned key would otherwise read as admin.
+    request-scope claims var. ``is_admin`` is computed on the EFFECTIVE (owner-attenuated)
+    policy: full effective scopes AND no condition on the key or its owner — role-holders
+    carry ``["*"]`` plus a jq condition, and an editor-minted condition-free owned key
+    inherits its owner's jq base and so is denied admin.
 
     Gate OFF ⇒ admin (nothing to classify; the surfaces are already open). Gate ON with NO
     principal bound is an invariant breach: RAISE the typed 500 rather than escalate
@@ -90,12 +91,16 @@ async def resolve_caller() -> Caller:
         )
         raise OperationFailedError("access_control: internal authority-resolution failure")
 
-    policy = await PolicyEnforcer(settings).get_policy(caller_id)
+    enforcer = PolicyEnforcer(settings)
+    policy = await enforcer.get_policy(caller_id)
     owner_claim = owner_of(policy.policy_data)
+    # The owner's CURRENT policy caps the caller for the admin verdict; a top-level
+    # principal has no owner claim and so no owner policy.
+    owner_policy = await enforcer.get_policy(owner_claim) if owner_claim is not None else None
     return Caller(
         caller_id=caller_id,
         policy=policy,
-        is_admin=is_admin_policy(policy, owner_claim),
+        is_admin=is_admin_policy(policy, owner_policy),
         owner_claim=owner_claim,
     )
 

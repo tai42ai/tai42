@@ -1,8 +1,9 @@
 """Login/logout operations fanning out over the accounts-provider registry.
 
 - ``login_methods`` aggregates every registered accounts provider's declared
-  ``LoginMethod`` metadata plus a bootstrap flag, so a generic login screen can
-  render without knowing which providers are installed.
+  ``LoginMethod`` metadata plus the platform ``needs_setup`` fact and what the
+  setup door can attach, so a generic login screen can render without knowing
+  which providers are installed.
 - ``logout`` revokes the caller's session by fanning ``revoke_session`` out over
   every presented credential candidate and every registered accounts provider;
   the first ``True`` wins, and no match is a loud 404 (:class:`NotFoundError`).
@@ -12,9 +13,9 @@
 
 Both operations fan out over the CURRENT epoch's live accounts-provider instances —
 the ones the epoch build eagerly instantiated and recorded — rather than
-re-instantiating a provider per call. ``needs_bootstrap`` still reads live so the
-create-owner screen disappears the moment the owner exists. Provider errors propagate
-(loud, never a silently empty methods list or a silent logout no-op).
+re-instantiating a provider per call. ``needs_setup`` reads live so the setup screen
+disappears the moment the owner exists. Provider errors propagate (loud, never a
+silently empty methods list or a silent logout no-op).
 """
 
 from __future__ import annotations
@@ -23,8 +24,10 @@ import logging
 
 from pydantic import BaseModel, Field
 from tai42_contract.access_control import get_current_user_id
-from tai42_contract.accounts import AccountsProvider
+from tai42_contract.accounts import AccountsProvider, LoginAttachingProvider
+from tai42_contract.accounts.models import InviteCredential, PasswordCredential
 
+from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.claim_links import ClaimLinkError
 from tai42_skeleton.access_control.claim_links import exchange_claim_token as _exchange_claim_token
 from tai42_skeleton.operations import NotFoundError, operation
@@ -56,24 +59,34 @@ class ClaimExchange(BaseModel):
     token: str = Field(min_length=1)
 
 
+# The login credential kinds the setup door can attach — the closed
+# :data:`~tai42_contract.accounts.models.LoginCredential` union, named here so the
+# ``setup_login.kinds`` the client reads never drifts from the union the door accepts.
+_SETUP_LOGIN_KINDS = [PasswordCredential.model_fields["kind"].default, InviteCredential.model_fields["kind"].default]
+
+
 @operation(summary="List available login methods", tags=["login"], response_model=LoginMethodsListing)
 async def login_methods() -> dict:
-    """Aggregate every registered accounts provider's login methods + bootstrap flag.
+    """Aggregate every registered accounts provider's login methods + the setup state.
 
     ``authed=False`` is OpenAPI truth-telling only; runtime public-ness comes from the
     always-public ``/api/login`` prefix. Each method is serialized with
     ``model_dump(exclude_none=True)`` so a ``None``-valued optional (icon/autocomplete)
     is OMITTED, never ``null`` (the Studio's zod schemas accept absent but reject
-    ``null``). No active provider yields ``{"methods": [], "bootstrap": false}``.
-    Provider errors propagate (loud, never a silently empty methods list).
+    ``null``). ``needs_setup`` is the one platform fact "no principal exists"; ``setup_login``
+    names what the setup door can attach (``kinds`` from a configured login-attaching
+    provider, ``null`` when none). Provider errors propagate (loud, never a silently empty
+    methods list).
     """
     methods: list[dict] = []
-    bootstrap = False
+    has_login_attaching = False
     for provider in _active_accounts_providers():
         methods.extend(method.model_dump(exclude_none=True) for method in provider.login_methods())
-        if await provider.needs_bootstrap():
-            bootstrap = True
-    return {"methods": methods, "bootstrap": bootstrap}
+        if isinstance(provider, LoginAttachingProvider):
+            has_login_attaching = True
+    needs_setup = not await management.any_principal_exists()
+    setup_login = {"kinds": list(_SETUP_LOGIN_KINDS)} if has_login_attaching else None
+    return {"methods": methods, "needs_setup": needs_setup, "setup_login": setup_login}
 
 
 @operation(

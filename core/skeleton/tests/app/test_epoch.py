@@ -601,6 +601,16 @@ async def test_retire_closes_the_previous_generations_serving_lifespan() -> None
 
 
 async def test_sweep_hook_registered_and_returns_zero_after_clean_cycle() -> None:
+    # The boot app bound at import (under process epoch 0) permanently holds an
+    # epoch-0 AccessControlSettings through its AuthAdapter/verifier/backend/policy
+    # singletons — legitimate live holders of the boot generation. Advance past epoch
+    # 0 so the generation this cycle retires is a fresh one no permanent singleton
+    # pins; the test then asserts THIS build/swap cycle leaves no stale holder,
+    # independent of process history (a split worker may run it with the epoch still
+    # at boot).
+    from tai42_kit.clients.base import advance_client_epoch
+
+    advance_client_epoch()
     _install_boot("boot-app")
 
     # The retire's settings reset sweeps the retired generation through the

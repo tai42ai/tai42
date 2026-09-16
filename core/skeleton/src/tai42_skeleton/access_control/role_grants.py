@@ -23,7 +23,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from async_lru import alru_cache
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import AccessPolicy, RoleDefinition
 from tai42_contract.versioning.errors import DocumentNotFoundError
 from tai42_kit.settings import register_settings_reset
@@ -99,10 +98,11 @@ async def role_level_decision_for_route(
 
     The term is intersected with the base-tier jq and the owner second-pass at the enforcement site.
 
-    * A ``fenced``/``secret`` route is decided FIRST and against the CALLER's OWN policy:
-      fence-exemption is a PRINCIPAL property and an owned key is never the admin
-      principal, so an admin-OWNED key is still a hard-fence DENY and an owner cannot
-      delegate fence access by minting a broad owned key. The fence is never grantable.
+    * A ``fenced``/``secret`` route is decided FIRST on the EFFECTIVE (owner-attenuated)
+      admin verdict: an admin principal's own key is admin because the owner is, while a
+      non-admin owner's broad owned key inherits the owner's jq base and is denied — so a
+      non-admin can never delegate fence access by minting a broad owned key. The fence is
+      never grantable.
     * On a grantable route the GOVERNING role is the OWNER's for an owned key (keys
       inherit the owner's role grant map — no per-key grant), else the caller's own
       policy. An ``allow_all``/admin governing role skips the pass entirely (admin is
@@ -115,16 +115,18 @@ async def role_level_decision_for_route(
     Returns ``(allowed, cause)``; ``cause`` names the internal denial reason on a deny.
     """
     if meta.action in ("fenced", "secret"):
-        # Keyed on the CALLER's OWN admin verdict, never the owner's: fence-exemption
-        # cannot be inherited through the owner channel that carries a grant.
-        caller_owner = policy.policy_data.get(OWNER_USER_ID_CLAIM)
-        if is_admin_policy(policy, caller_owner):
+        # Fence-exemption follows the EFFECTIVE (owner-attenuated) admin verdict: an admin
+        # principal's own key is admin because the owner is, while a non-admin owner's broad
+        # owned key inherits the owner's jq base and is denied — so a non-admin can never
+        # delegate fence access by minting a condition-free ``["*"]`` owned key.
+        if is_admin_policy(policy, owner_policy):
             return True, None
         return False, DenialCause.HARD_FENCE
 
+    # On a grantable route the GOVERNING role is the OWNER's for an owned key, else the
+    # caller's own — always a TOP-LEVEL principal, so it carries no owner policy of its own.
     governing = owner_policy if owner_policy is not None else policy
-    governing_owner = governing.policy_data.get(OWNER_USER_ID_CLAIM)
-    if is_admin_policy(governing, governing_owner):
+    if is_admin_policy(governing, None):
         return True, None
 
     from tai42_skeleton.access_control.roles import ROLE_POINTER_KEY

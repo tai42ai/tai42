@@ -180,7 +180,18 @@ class AccessControlVerifier(TokenVerifier):
             # attenuation can never be driven by a non-mint provider — the enforced
             # guarantee, independent of any per-plugin strip.
             claims = identity.claims
-            if not isinstance(provider, ApiKeyIdentityProvider) and OWNER_USER_ID_CLAIM in claims:
+            if isinstance(provider, ApiKeyIdentityProvider):
+                # Every api key belongs to a principal, so a mint-provider identity that
+                # carries no owner claim is an ownerless key record — an invariant breach.
+                # Fail closed: log loudly and treat the credential as unresolved (a deny,
+                # never a 500 on the request path, never a silent ownerless admission).
+                if OWNER_USER_ID_CLAIM not in claims:
+                    logger.error(
+                        "access_control: api key %s carries no owner claim — ownerless key record; denying",
+                        identity.user_id,
+                    )
+                    continue
+            elif OWNER_USER_ID_CLAIM in claims:
                 claims = {k: v for k, v in claims.items() if k != OWNER_USER_ID_CLAIM}
 
             # Return the pure identity token; scopes are injected later by PolicyEnforcer.

@@ -108,8 +108,16 @@ def client(monkeypatch, bound_app) -> TestClient:
     ac_settings = AccessControlSettings(path_patterns={_MESSAGES_PATTERN: _TEMPLATE})
     redis = FakeRedis(
         hashes={
-            f"{ac_settings.key_prefix}{hash_api_key(_SENDER_KEY)}": {"user_id": "sender", "description": "d"},
-            f"{ac_settings.key_prefix}{hash_api_key(_STRANGER_KEY)}": {"user_id": "stranger", "description": "d"},
+            f"{ac_settings.key_prefix}{hash_api_key(_SENDER_KEY)}": {
+                "user_id": "sender",
+                "description": "d",
+                "owner_user_id": "owner1",
+            },
+            f"{ac_settings.key_prefix}{hash_api_key(_STRANGER_KEY)}": {
+                "user_id": "stranger",
+                "description": "d",
+                "owner_user_id": "owner1",
+            },
         }
     )
     pg = FakeAccessControlPg()
@@ -118,6 +126,8 @@ def client(monkeypatch, bound_app) -> TestClient:
     # separates them is the door's decision, not authentication.
     pg.add_policy("sender", scopes=[_SCOPE])
     pg.add_policy("stranger", scopes=["unrelated"])
+    # The owner principal every key belongs to (["*"] caps nothing).
+    pg.add_policy("owner1", scopes=["*"])
 
     ctx = make_client_ctx(redis)
     monkeypatch.setattr(verifier_module, "client_ctx", ctx)
@@ -222,14 +232,24 @@ def event_client(monkeypatch, bound_app) -> TestClient:
     ac_settings = AccessControlSettings(path_patterns={_EVENTS_PATTERN: _TEMPLATE})
     redis = FakeRedis(
         hashes={
-            f"{ac_settings.key_prefix}{hash_api_key(_SENDER_KEY)}": {"user_id": "sender", "description": "d"},
-            f"{ac_settings.key_prefix}{hash_api_key(_STRANGER_KEY)}": {"user_id": "stranger", "description": "d"},
+            f"{ac_settings.key_prefix}{hash_api_key(_SENDER_KEY)}": {
+                "user_id": "sender",
+                "description": "d",
+                "owner_user_id": "owner1",
+            },
+            f"{ac_settings.key_prefix}{hash_api_key(_STRANGER_KEY)}": {
+                "user_id": "stranger",
+                "description": "d",
+                "owner_user_id": "owner1",
+            },
         }
     )
     pg = FakeAccessControlPg()
     pg.add_route(_TEMPLATE, _SCOPE)
     pg.add_policy("sender", scopes=[_SCOPE])
     pg.add_policy("stranger", scopes=["unrelated"])
+    # The owner principal every key belongs to (["*"] caps nothing).
+    pg.add_policy("owner1", scopes=["*"])
 
     ctx = make_client_ctx(redis)
     monkeypatch.setattr(verifier_module, "client_ctx", ctx)

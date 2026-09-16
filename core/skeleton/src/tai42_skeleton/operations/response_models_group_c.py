@@ -235,16 +235,30 @@ class PendingInteractionListing(BaseModel):
 # --- Login ------------------------------------------------------------------
 
 
+class SetupLogin(BaseModel):
+    """What the setup door can attach as the owner's interactive login.
+
+    ``kinds`` are the login-credential kinds a configured login-attaching provider accepts
+    (e.g. ``["password", "invite"]``); the client decides from this whether to show the
+    owner-login fields.
+    """
+
+    kinds: list[str]
+
+
 class LoginMethodsListing(BaseModel):
     """The aggregated login surface.
 
-    Each method is dumped ``exclude_none`` so an unset optional
-    (icon/autocomplete) is OMITTED, never ``null``; ``bootstrap`` is true while a
-    create-owner screen is still needed.
+    Each method is dumped ``exclude_none`` so an unset optional (icon/autocomplete) is
+    OMITTED, never ``null``. ``needs_setup`` is the one platform fact "no principal exists"
+    (the login screen renders the setup entry instead of sign-in forms while true).
+    ``setup_login`` names what the setup door can attach, or ``null`` when no login-attaching
+    provider is configured.
     """
 
     methods: list[LoginMethod]
-    bootstrap: bool
+    needs_setup: bool
+    setup_login: SetupLogin | None = None
 
 
 class ClaimExchangeResult(BaseModel):

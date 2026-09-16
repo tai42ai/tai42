@@ -179,10 +179,10 @@ async def resolve_execution_key_secret_capability(execution_key: str) -> bool:
     reads ``True``. Gate off -> ``True``: every principal is then the synthetic admin,
     with no fence to fail closed on.
 
-    Gate on -> :func:`~tai42_skeleton.access_control.user.is_admin_policy` of the key's
-    live policy (a condition-free ``"*"`` policy that is not an owned key), read against
-    ``policy.policy_data``'s stored owner — the SAME admin discriminator the HTTP auth
-    backend stamps, so a fire and an authenticated request classify a key identically.
+    Gate on -> :func:`~tai42_skeleton.access_control.user.is_admin_policy` on the key's
+    EFFECTIVE (owner-attenuated) policy, read at the same version as the owner's — the SAME
+    admin discriminator the HTTP auth backend stamps, so a fire and an authenticated
+    request classify a key identically.
     """
     settings = access_control_settings()
     if not settings.enable:
@@ -190,7 +190,9 @@ async def resolve_execution_key_secret_capability(execution_key: str) -> bool:
     enforcer = PolicyEnforcer(settings)
     version = await enforcer.current_policy_version()
     policy = await enforcer.get_policy_at(execution_key, version)
-    return is_admin_policy(policy, policy.policy_data.get(OWNER_USER_ID_CLAIM))
+    owner = policy.policy_data.get(OWNER_USER_ID_CLAIM)
+    owner_policy = await enforcer.get_policy_at(owner, version) if owner is not None else None
+    return is_admin_policy(policy, owner_policy)
 
 
 @asynccontextmanager

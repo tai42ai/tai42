@@ -258,6 +258,27 @@ CREATE TABLE IF NOT EXISTS access_control_policies (
 -- cache and reads a single row by `user_id` only on a miss).
 
 -- ------------------------------------------------------------
+-- access_control_principals — one row per PRINCIPAL: the unit of identity and
+-- authority every credential belongs to. `kind` is `human` (authenticates through
+-- an accounts provider) or `service` (holds keys only, never logs in). `created_by`
+-- is the principal id that created this one, or NULL for the owner the setup door
+-- mints. `disabled` is the AUTHORITATIVE off-switch; its enforcement projection is
+-- `access_control_policies.policy_data->'disabled'` on the principal's own policy
+-- row, written in the same transaction by the single disabled writer. A principals
+-- row exists for the owner, for every human, and for every service principal; an
+-- api key's own policy row is a CREDENTIAL of the principal named by its owner
+-- claim and never gets a principals row.
+CREATE TABLE IF NOT EXISTS access_control_principals (
+    user_id      TEXT         NOT NULL,
+    kind         TEXT         NOT NULL CHECK (kind IN ('human', 'service')),
+    display_name TEXT         NOT NULL,
+    created_by   TEXT,
+    disabled     BOOLEAN      NOT NULL DEFAULT FALSE,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id)
+);
+
+-- ------------------------------------------------------------
 -- access_control_routes — one row per mapped `url`, giving the `scope_id` a
 -- request path resolves to. The public marker (`settings.public_resource_id`) is
 -- an ORDINARY `scope_id` value, not a glob key: a public route stores that marker

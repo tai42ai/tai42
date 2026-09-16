@@ -74,32 +74,29 @@ class AccessControlSettings(TaiBaseSettings):
     key_prefix: str = "ac:key:"
     context_prefix: str = "ac:context:"
 
-    # First-key bootstrap gate. Secure-by-default: with neither field set the gate is
-    # ON with an auto-generated token fixed once at startup via SET NX on
-    # ``bootstrap_token_key`` (shared across workers, logged once by the winner) so the
-    # ``/api/keys/bootstrap`` door can mint the first admin key on a fresh deployment
-    # while access control is enabled and no key exists yet. An operator-set
-    # ``bootstrap_token`` replaces the auto-token; ``bootstrap_open`` is the only ungated
-    # config (a local/dev opt-out that mints without a token), never the default.
-    bootstrap_token: SecretStr | None = None
-    bootstrap_open: bool = False
-    bootstrap_token_key: str = "ac:bootstrap:token"  # noqa: S105 constant identifier, not a secret value
+    # Setup-door gate keys on the AC Redis. The setup token itself and its dev-open
+    # opt-out live on the separate ``SetupSettings`` (env ``TAI_SETUP_TOKEN`` /
+    # ``TAI_SETUP_OPEN``); these are the shared coordination keys the gate uses. The
+    # auto-token is fixed once at startup via SET NX on ``setup_token_key`` (shared across
+    # workers, logged once by the winner) so ``POST /api/setup`` can initialize a fresh
+    # deployment while access control is enabled and no principal exists yet.
+    setup_token_key: str = "ac:setup:token"  # noqa: S105 constant identifier, not a secret value
 
-    # The mint mutex: the existence-check-and-mint of the first key runs under this
-    # single AC-Redis lock, so two concurrent bootstraps can never both mint. The TTL
-    # is a crash-safety ceiling (a dead holder's lock auto-expires), never the normal
-    # release path (the door deletes its own lock on completion).
-    bootstrap_lock_key: str = "ac:bootstrap:lock"
-    bootstrap_lock_ttl_seconds: int = 10
+    # The mint mutex: the existence-check-and-owner-mint runs under this single AC-Redis
+    # lock, so two concurrent setups can never both initialize. The TTL is a crash-safety
+    # ceiling (a dead holder's lock auto-expires), never the normal release path (the door
+    # deletes its own lock on completion).
+    setup_lock_key: str = "ac:setup:lock"
+    setup_lock_ttl_seconds: int = 10
 
     # Per-IP brute-force backoff on wrong-token attempts (failures-only, same posture as
     # the redeem/login throttles): a run of wrong tokens from one IP escalates a capped
     # backoff lock; while locked, attempts are refused WITHOUT comparing the token, and a
     # correct token clears the counter. Redis-backed so it holds across workers.
-    bootstrap_throttle_fail_prefix: str = "ac:bootstrap:fail:"
-    bootstrap_throttle_lock_prefix: str = "ac:bootstrap:throttle:"
-    bootstrap_throttle_threshold: int = 5
-    bootstrap_throttle_cap_seconds: int = 900
+    setup_throttle_fail_prefix: str = "ac:setup:fail:"
+    setup_throttle_lock_prefix: str = "ac:setup:throttle:"
+    setup_throttle_threshold: int = 5
+    setup_throttle_cap_seconds: int = 900
 
     # The claim-link store prefix: a one-time claim record lives at
     # ``ac:claim:<sha256(token)>`` as a TTL-bound Redis STRING holding the raw key it
@@ -348,3 +345,25 @@ class AccessControlSettings(TaiBaseSettings):
 def access_control_settings() -> AccessControlSettings:
     """Return the cached access-control settings."""
     return AccessControlSettings()
+
+
+class SetupSettings(TaiBaseSettings):
+    """The setup-door token gate, read from the ``TAI_SETUP_`` env prefix.
+
+    Secure-by-default: with neither field set the gate is ON with an auto-generated token
+    fixed once at startup (SET NX on the AC Redis, logged once) so ``POST /api/setup`` can
+    initialize a fresh deployment. An operator-set ``TAI_SETUP_TOKEN`` replaces the
+    auto-token; ``TAI_SETUP_OPEN`` is the only ungated config (a local/dev opt-out that
+    initializes without a token), never the default.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="TAI_SETUP_")
+
+    token: SecretStr | None = None
+    open: bool = False
+
+
+@settings_cache
+def setup_settings() -> SetupSettings:
+    """Return the cached setup-door settings."""
+    return SetupSettings()

@@ -22,6 +22,7 @@ import fnmatch
 import os
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -475,6 +476,25 @@ def _unwrap(value: Any) -> Any:
     return value.obj if isinstance(value, Json) else value
 
 
+# The column list every principal SELECT shares (get by id, list); the branch keys on the
+# WHERE/ORDER BY tail.
+_PRINCIPAL_SELECT = (
+    "SELECT user_id, kind, display_name, created_by, disabled, created_at FROM access_control_principals"
+)
+
+
+def _principal_tuple(row: dict) -> tuple:
+    """A principal row as the ``_PRINCIPAL_COLUMNS`` tuple the store reads."""
+    return (
+        row["user_id"],
+        row["kind"],
+        row["display_name"],
+        row["created_by"],
+        row["disabled"],
+        row["created_at"],
+    )
+
+
 class _PolicyUserViolation(UniqueViolation):
     """A UniqueViolation carrying the ``user_id`` unique-constraint name, as psycopg
     reports a duplicate policy row (``diag`` is a read-only property, so — like
@@ -488,15 +508,19 @@ class _PgTxn:
 
     def __init__(self, pg: FakeAccessControlPg) -> None:
         self._pg = pg
-        self._snapshot: tuple[list[dict], list[dict]] | None = None
+        self._snapshot: tuple[list[dict], list[dict], list[dict]] | None = None
 
     async def __aenter__(self) -> _PgTxn:
-        self._snapshot = (copy.deepcopy(self._pg.policies), copy.deepcopy(self._pg.routes))
+        self._snapshot = (
+            copy.deepcopy(self._pg.policies),
+            copy.deepcopy(self._pg.routes),
+            copy.deepcopy(self._pg.principals),
+        )
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         if exc_type is not None and self._snapshot is not None:
-            self._pg.policies, self._pg.routes = self._snapshot
+            self._pg.policies, self._pg.routes, self._pg.principals = self._snapshot
         return False
 
 
@@ -644,6 +668,65 @@ class _PgCursor:
                     p["condition"],
                 )
             )
+        elif norm.startswith("SELECT pg_advisory_xact_lock"):
+            # A no-op in the single-threaded fake — it cannot model advisory locks.
+            self._one = (None,)
+        elif norm.startswith("SELECT count(*) FROM access_control_principals"):
+            self._one = (len(pg.principals),)
+        elif norm.startswith("SELECT p.scopes, p.policy_data, p.condition FROM access_control_principals pr JOIN"):
+            (user_id,) = params
+            enabled = {pr["user_id"] for pr in pg.principals if not pr["disabled"] and pr["user_id"] != user_id}
+            self._all = [
+                (list(p["scopes"]), p["policy_data"], p["condition"]) for p in pg.policies if p["user_id"] in enabled
+            ]
+        elif norm.startswith("INSERT INTO access_control_principals"):
+            # The full form carries created_by; the first-principal form hardcodes NULL.
+            if "NULL)" in norm:
+                user_id, kind, display_name = params
+                created_by = None
+            else:
+                user_id, kind, display_name, created_by = params
+            if any(pr["user_id"] == user_id for pr in pg.principals):
+                raise UniqueViolation(f"duplicate principal {user_id!r}")
+            row = {
+                "user_id": user_id,
+                "kind": kind,
+                "display_name": display_name,
+                "created_by": created_by,
+                "disabled": False,
+                "created_at": datetime.now(UTC),
+            }
+            pg.principals.append(row)
+            self._one = _principal_tuple(row)
+        elif norm.startswith(_PRINCIPAL_SELECT) and "WHERE user_id" in norm:
+            (user_id,) = params
+            pr = next((pr for pr in pg.principals if pr["user_id"] == user_id), None)
+            self._one = _principal_tuple(pr) if pr is not None else None
+        elif norm.startswith(_PRINCIPAL_SELECT) and "ORDER BY" in norm:
+            ordered = sorted(pg.principals, key=lambda pr: (pr["created_at"], pr["user_id"]))
+            self._all = [_principal_tuple(pr) for pr in ordered]
+        elif norm.startswith("SELECT 1 FROM access_control_principals LIMIT 1"):
+            self._one = (1,) if pg.principals else None
+        elif norm.startswith("UPDATE access_control_principals SET display_name"):
+            display_name, user_id = params
+            pr = next((pr for pr in pg.principals if pr["user_id"] == user_id), None)
+            if pr is not None:
+                pr["display_name"] = display_name
+                self.rowcount = 1
+                self._one = _principal_tuple(pr)
+            else:
+                self._one = None
+        elif norm.startswith("UPDATE access_control_principals SET disabled"):
+            disabled, user_id = params
+            pr = next((pr for pr in pg.principals if pr["user_id"] == user_id), None)
+            if pr is not None:
+                pr["disabled"] = disabled
+                self.rowcount = 1
+        elif norm.startswith("DELETE FROM access_control_principals WHERE user_id"):
+            (user_id,) = params
+            before = len(pg.principals)
+            pg.principals = [pr for pr in pg.principals if pr["user_id"] != user_id]
+            self.rowcount = before - len(pg.principals)
         else:
             raise AssertionError(f"unhandled SQL in fake pg: {norm!r}")
 
@@ -677,6 +760,7 @@ class FakeAccessControlPg:
     def __init__(self) -> None:
         self.policies: list[dict] = []
         self.routes: list[dict] = []
+        self.principals: list[dict] = []
         self.executed: list[str] = []
         self.fault: tuple[str, Exception] | None = None
         self._policy_seq = 0
@@ -720,6 +804,29 @@ class FakeAccessControlPg:
         if p is None:
             return None
         return {k: p[k] for k in ("scopes", "policy_data", "condition")}
+
+    def add_principal(
+        self,
+        user_id: str,
+        *,
+        kind: str = "human",
+        display_name: str = "",
+        created_by: str | None = None,
+        disabled: bool = False,
+    ) -> None:
+        self.principals.append(
+            {
+                "user_id": user_id,
+                "kind": kind,
+                "display_name": display_name or user_id,
+                "created_by": created_by,
+                "disabled": disabled,
+                "created_at": datetime.now(UTC),
+            }
+        )
+
+    def principal(self, user_id: str) -> Any:
+        return next((pr for pr in self.principals if pr["user_id"] == user_id), None)
 
     def route(self, url: str) -> Any:
         return next((r for r in self.routes if r["url"] == url), None)

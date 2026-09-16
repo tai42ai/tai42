@@ -20,6 +20,7 @@ from tai42_contract.conversations import ConversationRouteCreate, TargetConversa
 from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.models import DocumentVersion
 
+from tai42_skeleton.access_control.projection import PrincipalRef
 from tai42_skeleton.conversations.models import ConversationRecord
 
 # ---------------------------------------------------------------------------
@@ -79,8 +80,10 @@ class TokenPayloadRow(BaseModel):
     """A provisioned key's identity merged with its enforced policy — NEVER key material.
 
     The policy fields are present only when the key carries a stored policy row; the owner claim, when set,
-    rides inside ``policy_data``. ``orphaned`` is ``True`` for a policy row minted as an api key whose identity
-    record is gone (a partial-restore state): it authenticates nothing until re-minted from the backup.
+    rides inside ``policy_data``. ``principal`` is the key's OWNER principal (kind + display name), ``null``
+    only for a key whose principal row is absent (an orphaned restore state). ``orphaned`` is ``True`` for a
+    policy row minted as an api key whose identity record is gone (a partial-restore state): it authenticates
+    nothing until re-minted from the backup.
     """
 
     user_id: str
@@ -88,6 +91,7 @@ class TokenPayloadRow(BaseModel):
     scopes: list[str] | None = None
     policy_data: dict[str, Any] | None = None
     condition: TemplatedText | None = None
+    principal: PrincipalRef | None = None
     orphaned: bool = False
 
 

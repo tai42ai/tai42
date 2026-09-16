@@ -348,8 +348,9 @@ async def test_access_control_roundtrip_mints_new_keys(monkeypatch):
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(source_pg))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(source_redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(source_redis))
+    source_pg.add_principal("owner1")
     await management.add_url_to_scope("scope-a", "/api/x")
-    await management.add_user_api_key("user1", "first key", ["scope-a"])
+    await management.add_user_api_key("user1", "first key", ["scope-a"], owner_user_id="owner1")
 
     _install(monkeypatch)
     doc = _json(await export_backup(_post_req({"sections": ["access_control"]})))
@@ -1179,7 +1180,8 @@ async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
     # Provision a genuine live key: both storage homes populated.
-    await management.add_user_api_key("u1", "d", [])
+    pg.add_principal("owner1")
+    await management.add_user_api_key("u1", "d", [], owner_user_id="owner1")
     fingerprint = pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM]
     _install(monkeypatch)
 
@@ -1224,7 +1226,8 @@ async def test_import_access_control_existing_token_not_reminted_under_overwrite
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
     # Provision a genuine live key: both storage homes populated.
-    await management.add_user_api_key("u1", "d", [])
+    pg.add_principal("owner1")
+    await management.add_user_api_key("u1", "d", [], owner_user_id="owner1")
     fingerprint = pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM]
     _install(monkeypatch)
 

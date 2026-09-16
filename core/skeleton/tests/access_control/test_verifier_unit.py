@@ -168,6 +168,20 @@ async def test_owner_claim_kept_for_mint_provider():
     assert token.claims[OWNER_USER_ID_CLAIM] == "owner-1"
 
 
+async def test_mint_provider_identity_with_no_owner_claim_is_denied(caplog):
+    # Every api key belongs to a principal: a mint-provider identity with NO owner claim is
+    # an ownerless key record — an invariant breach. The verifier fails closed (the
+    # credential reads as unresolved → the caller falls through to a deny), loudly logged,
+    # never a silent ownerless admission.
+    import logging
+
+    provider = _MintProvider(AuthIdentity(user_id="k1", claims={"email": "a@b"}))
+    v = AccessControlVerifier(AccessControlSettings(), providers=[provider])
+    with caplog.at_level(logging.ERROR):
+        assert await v.verify_token("raw") is None
+    assert "no owner claim" in caplog.text
+
+
 async def test_always_public_path_short_circuits_without_store_query(monkeypatch):
     # An always-public path returns exactly [public] and NEVER queries the store or
     # the version counter — proven by wiring both to raise on any access.

@@ -18,7 +18,7 @@ from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
 from tai42_skeleton.access_control.role_gate import DenialCause
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings
-from tai42_skeleton.access_control.user import TaiUser, is_admin_policy
+from tai42_skeleton.access_control.user import TaiUser, effective_scopes, is_admin_policy
 from tai42_skeleton.access_control.verifier import AccessControlVerifier, is_always_public_prefix
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, reload_gate
 
@@ -65,22 +65,6 @@ def extract_credential_candidates(conn) -> list[str]:
         candidates.append(api_key)
 
     return candidates
-
-
-def effective_scopes(key_scopes: list[str], owner_scopes: list[str]) -> list[str]:
-    """The scopes an owned key actually carries: its own scopes ∩ the owner's CURRENT scopes.
-
-    ``"*"`` behaves as "everything" on BOTH sides (``"*" ∩ X = X``). Three explicit cases: a ``"*"`` owner
-    caps nothing (the key keeps its scopes); a ``"*"`` KEY under a scoped owner collapses to the owner's
-    scopes (a plain membership filter would wrongly yield ``[]`` here); otherwise a plain intersection
-    preserving the key's order.
-    """
-    if "*" in owner_scopes:
-        return list(key_scopes)
-    if "*" in key_scopes:
-        return list(owner_scopes)
-    owner_set = set(owner_scopes)
-    return [scope for scope in key_scopes if scope in owner_set]
 
 
 class AuthorizationError(AuthenticationError):
@@ -239,15 +223,15 @@ class AccessControlAuthBackend(AuthenticationBackend):
         )
 
         # 6. Finalize with the effective scopes, stamping the admin discriminator so the
-        # resource guard can admit a super-admin to a not-yet-configured route. The owner
-        # is read from the STORED ``policy.policy_data`` (the management dual-home), NOT
-        # the request token claim — the contract ``is_admin_policy`` and its other callers
-        # (the projection, key management) all share, so the guard's admin verdict is
-        # byte-identical to theirs and an owned condition-free ``["*"]`` key fails CLOSED.
+        # resource guard can admit a super-admin to a not-yet-configured route. Admin is
+        # computed on the EFFECTIVE (owner-attenuated) policy — the key's scopes capped by
+        # the owner's and both conditions ``None`` — the SAME predicate the projection,
+        # key management, and the fence exemption share, so the guard's verdict is
+        # byte-identical and an owned condition-free ``["*"]`` key fails CLOSED (it inherits
+        # its owner's jq base through the owner's condition).
         access_token.scopes = authorized.resolved_scopes
-        stored_owner = authorized.policy.policy_data.get(OWNER_USER_ID_CLAIM)
         return AuthCredentials(scopes=authorized.resolved_scopes), TaiUser(
-            access_token, is_admin=is_admin_policy(authorized.policy, stored_owner)
+            access_token, is_admin=is_admin_policy(authorized.policy, authorized.owner_policy)
         )
 
     async def _resolve_authorized_policy(self, access_token, user_id: str) -> _AuthorizedPolicy:

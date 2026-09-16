@@ -299,9 +299,27 @@ def test_an_admin_key_fire_reads_secret_capable(ac_env, bound_app) -> None:
     asyncio.run(run())
 
 
-def test_an_owned_condition_free_star_key_fire_is_not_admin_capable(ac_env, bound_app) -> None:
-    # An OWNED condition-free ``"*"`` key is NOT the admin discriminator (an editor-minted
-    # you-plus escalation), so its fire reads False even though its raw scopes are ``"*"``.
+def test_an_owned_key_of_a_conditioned_owner_fire_is_not_admin_capable(ac_env, bound_app) -> None:
+    # A condition-free ``"*"`` key owned by a CONDITIONED (editor) owner inherits the
+    # owner's jq base through the owner-condition conjunct — NOT admin, so its fire reads
+    # False even though its raw scopes are ``"*"`` (the you-plus escalation stays closed).
+    ac_env.add_policy(
+        "k-owned",
+        scopes=["*"],
+        policy_data={OWNER_USER_ID_CLAIM: "alice", KEY_FINGERPRINT_CLAIM: "fp-k-owned"},
+    )
+    ac_env.add_policy("alice", scopes=["*"], condition={"content": '.request.method == "GET"'})
+
+    async def run() -> None:
+        async with bind_execution_identity("k-owned", bound_fingerprint="fp-k-owned"):
+            assert caller_may_read_secrets() is False
+
+    asyncio.run(run())
+
+
+def test_an_owned_key_of_an_admin_owner_fire_is_admin_capable(ac_env, bound_app) -> None:
+    # A condition-free ``"*"`` key owned by an ADMIN owner is admin because the owner is:
+    # its fire reads the secret capability.
     ac_env.add_policy(
         "k-owned",
         scopes=["*"],
@@ -311,7 +329,7 @@ def test_an_owned_condition_free_star_key_fire_is_not_admin_capable(ac_env, boun
 
     async def run() -> None:
         async with bind_execution_identity("k-owned", bound_fingerprint="fp-k-owned"):
-            assert caller_may_read_secrets() is False
+            assert caller_may_read_secrets() is True
 
     asyncio.run(run())
 

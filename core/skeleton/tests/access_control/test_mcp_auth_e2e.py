@@ -60,12 +60,15 @@ def _client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # an absent context hash reads as the empty live view via ``HGETALL``.
     fake = FakeRedis(
         hashes={
-            identity_key: {"user_id": "u1", "description": "d"},
+            # Every api key belongs to a principal, so the record carries the owner claim.
+            identity_key: {"user_id": "u1", "description": "d", "owner_user_id": "owner1"},
         },
     )
     pg = FakeAccessControlPg()
     pg.add_route("/mcp", _MCP_SCOPE)
     pg.add_policy("u1", scopes=[_MCP_SCOPE])
+    # The owner principal's policy caps the key at request time (a ["*"] owner caps nothing).
+    pg.add_policy("owner1", scopes=["*"])
     ctx = make_client_ctx(fake)
     monkeypatch.setattr(verifier_module, "client_ctx", ctx)
     monkeypatch.setattr(policy_module, "client_ctx", ctx)

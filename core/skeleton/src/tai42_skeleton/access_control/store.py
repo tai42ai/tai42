@@ -40,11 +40,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
 from tai42_kit.db import component_store_settings
 
+from tai42_skeleton.access_control.principals_mixin import PrincipalsStoreMixin
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.db import SKELETON_COMPONENT
 
@@ -65,6 +66,23 @@ def _normalize_url(url: str) -> str:
     return url
 
 
+# The server-owned, immutable ``policy_data`` anchors a client may never write or strip:
+# the per-mint key fingerprint (a binding's identity) and the owner claim (a key belongs
+# to a principal for its whole life). An edit or rollback drops any incoming value and
+# carries the stored one forward; a row that was never minted carries neither.
+_SERVER_OWNED_POLICY_CLAIMS = (KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM)
+
+
+def _carry_server_owned_claims(new_policy_data: dict[str, Any], stored_policy_data: dict[str, Any]) -> dict[str, Any]:
+    """Drop any client-supplied server-owned claim and carry the stored value forward."""
+    for claim in _SERVER_OWNED_POLICY_CLAIMS:
+        new_policy_data.pop(claim, None)
+        stored = stored_policy_data.get(claim)
+        if stored is not None:
+            new_policy_data[claim] = stored
+    return new_policy_data
+
+
 def _policy_body(row: tuple[Any, ...]) -> dict[str, Any]:
     """Assemble the canonical policy body from a ``_POLICY_COLUMNS`` row.
 
@@ -79,8 +97,8 @@ def _policy_body(row: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
-class PostgresAccessControlStore:
-    """Postgres implementation of the access-control policy store."""
+class PostgresAccessControlStore(PrincipalsStoreMixin):
+    """Postgres implementation of the access-control policy store (policies, routes, principals)."""
 
     def _settings(self) -> AccessControlSettings:
         return access_control_settings()
@@ -489,16 +507,13 @@ class PostgresAccessControlStore:
                 if "scopes" in updates:
                     body["scopes"] = updates["scopes"]
                 if "policy_data" in updates:
-                    new_policy_data = dict(updates["policy_data"] or {})
-                    # The per-mint key fingerprint is server-owned and immutable, and an
-                    # edit rewrites policy_data wholesale: drop any incoming value and
-                    # carry the stored one forward, so a client can never write the anchor
-                    # and a hook bound to an edited (not reminted) key keeps resolving. A
-                    # row that was never minted has no fingerprint and stays without one.
-                    new_policy_data.pop(KEY_FINGERPRINT_CLAIM, None)
-                    stored_fingerprint = body["policy_data"].get(KEY_FINGERPRINT_CLAIM)
-                    if stored_fingerprint is not None:
-                        new_policy_data[KEY_FINGERPRINT_CLAIM] = stored_fingerprint
+                    # An edit rewrites policy_data wholesale, but the server-owned anchors
+                    # (the per-mint fingerprint and the owner claim) are immutable: a client
+                    # can never write or strip them, and a hook bound to an edited (not
+                    # reminted) key keeps resolving. A never-minted row carries neither.
+                    new_policy_data = _carry_server_owned_claims(
+                        dict(updates["policy_data"] or {}), body["policy_data"]
+                    )
                     body["policy_data"] = new_policy_data
                 if "condition" in updates:
                     body["condition"] = updates["condition"]
@@ -515,11 +530,12 @@ class PostgresAccessControlStore:
         must restore verbatim even if a scope's route was removed afterwards (such a
         scope is inert at enforcement).
 
-        The per-mint key fingerprint is the ONE field a rollback does NOT restore: it is
-        the live key's identity, not policy content. The live-stored value is forced onto
-        the restored ``policy_data``, since restoring a historical body's old fingerprint
-        verbatim would revive a hook bound to a revoked key. A never-minted row has none
-        to preserve. Committed in one transaction.
+        The server-owned anchors — the per-mint key fingerprint and the owner claim — are
+        the fields a rollback does NOT restore from history: they are the live key's
+        identity and ownership, not policy content. The live-stored values are forced onto
+        the restored ``policy_data`` (restoring a historical fingerprint would revive a hook
+        bound to a revoked key; the owner is immutable for the key's whole life). A
+        never-minted row has neither to preserve. Committed in one transaction.
         """
         resolved = {
             "scopes": list(body.get("scopes") or []),
@@ -538,11 +554,7 @@ class PostgresAccessControlStore:
                 row = await cur.fetchone()
                 if row is None:
                     return None
-                stored_fingerprint = _policy_body(row)["policy_data"].get(KEY_FINGERPRINT_CLAIM)
-                if stored_fingerprint is not None:
-                    resolved["policy_data"][KEY_FINGERPRINT_CLAIM] = stored_fingerprint
-                else:
-                    resolved["policy_data"].pop(KEY_FINGERPRINT_CLAIM, None)
+                _carry_server_owned_claims(resolved["policy_data"], _policy_body(row)["policy_data"])
                 await self._write_policy_body(cur, user_id, resolved)
             return resolved
 

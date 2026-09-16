@@ -238,7 +238,7 @@ def _offline_run_index_store(monkeypatch: pytest.MonkeyPatch) -> None:
 class _ProbeRedis:
     """A plain-Redis stand-in: ``HGETALL`` on the probe key answers ``{}``, so the
     identity provider's ``healthcheck()`` passes without a real Redis; ``SET NX`` reports
-    a win so the first-key bootstrap-token fix passes too."""
+    a win so the setup auto-token fix passes too."""
 
     async def hgetall(self, key: str) -> dict[str, str]:
         return {}
@@ -300,12 +300,12 @@ def _identity_probe_offline(monkeypatch: pytest.MonkeyPatch) -> None:
         yield _ProbeRedis()
 
     monkeypatch.setattr(redis_provider, "client_ctx", fake_client_ctx)
-    # The first-key bootstrap-token fix (``ensure_bootstrap_token``) runs on the same
-    # AC-enabled boot and opens the AC Redis through its OWN ``client_ctx`` for the SET NX;
-    # point that seam at the same fake so an offline boot fixes the token without a real Redis.
-    import tai42_skeleton.access_control.bootstrap as bootstrap
+    # The setup-token fix (``ensure_setup_token``) runs on the same AC-enabled boot and
+    # opens the AC Redis through its OWN ``client_ctx`` for the SET NX; point that seam at
+    # the same fake so an offline boot fixes the token without a real Redis.
+    import tai42_skeleton.access_control.setup_gate as setup_gate
 
-    monkeypatch.setattr(bootstrap, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(setup_gate, "client_ctx", fake_client_ctx)
 
 
 @pytest.fixture

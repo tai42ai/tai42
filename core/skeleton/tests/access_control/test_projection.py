@@ -182,16 +182,41 @@ async def test_editor_projects_me_and_non_auth_but_not_admin_area(env: _Env):
 async def test_owned_key_projects_intersection_and_respects_owner_condition(env: _Env):
     # A ["*"] key owned by a scoped owner that fences to a single path: the projection
     # shows the attenuated intersection AND the owner second-pass denial.
+    env.pg.add_principal("owner1", kind="human", display_name="Owner One")
     env.pg.add_policy("key1", scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     env.pg.add_policy("owner1", scopes=["tools", "other"], condition={"content": '.request.path == "/api/tools"'})
     env.pg.add_route("/api/tools", "tools")
     env.pg.add_route("/api/other", "other")
     env.routes(("/api/tools", ["GET"]), ("/api/other", ["GET"]))
     result = await build_projection("key1", ["tools", "other"], {OWNER_USER_ID_CLAIM: "owner1"})
-    assert result.admin is False  # an owned key is never admin
+    assert result.admin is False  # a key of a conditioned owner is never admin
     assert result.owner_user_id == "owner1"
+    # The key's principal is its owner.
+    assert result.principal is not None
+    assert result.principal.user_id == "owner1"
+    assert result.principal.display_name == "Owner One"
     # /api/other is scope-covered but the owner condition denies it.
     assert {r.path for r in result.routes} == {"/api/tools"}
+
+
+async def test_projection_principal_of_a_session_is_the_human(env: _Env):
+    # A session / top-level principal carries no owner claim, so ITS OWN id names the
+    # principal — the human behind the session.
+    env.pg.add_principal("human1", kind="human", display_name="Human One")
+    env.pg.add_policy("human1", scopes=["*"])
+    result = await build_projection("human1", ["*"], {})
+    assert result.principal is not None
+    assert result.principal.user_id == "human1"
+    assert result.principal.kind == "human"
+
+
+async def test_projection_key_with_no_principal_row_is_an_invariant_error(env: _Env):
+    # An api key naming an owner principal that has no principal row is an ownerless
+    # credential — a loud invariant breach, never a null principal.
+    env.pg.add_policy("key1", scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "ghost-owner"})
+    env.pg.add_policy("ghost-owner", scopes=["*"])
+    with pytest.raises(RuntimeError, match="ownerless credential"):
+        await build_projection("key1", ["*"], {OWNER_USER_ID_CLAIM: "ghost-owner"})
 
 
 # -- sub-MCP / tools / agents ------------------------------------------------
@@ -414,6 +439,7 @@ async def test_projection_equals_gate_across_identity_matrix(env: _Env):
     # admin (the total branch), and an owned key whose OWNER carries a path-fencing
     # condition (the two-pass owner branch).
     settings = access_control_settings()
+    env.pg.add_principal("owner1", kind="human", display_name="Owner One")
     env.pg.add_policy("editor1", scopes=["*"], condition={"content": EDITOR_JQ})
     env.pg.add_policy("admin1", scopes=["*"])
     env.pg.add_policy("key1", scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})

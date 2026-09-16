@@ -59,8 +59,10 @@ class _FakeProvider(ApiKeyIdentityProvider):
 
 
 def _identity(user_id: str, owner: str | None = None) -> AuthIdentity:
-    claims = {OWNER_USER_ID_CLAIM: owner} if owner is not None else {}
-    return AuthIdentity(user_id=user_id, claims=claims)
+    # Every api key belongs to a principal, so every identity carries an owner claim; a
+    # principal's own key is owned by itself, so ``owner`` defaults to ``user_id``.
+    resolved_owner = owner if owner is not None else user_id
+    return AuthIdentity(user_id=user_id, claims={OWNER_USER_ID_CLAIM: resolved_owner})
 
 
 @pytest.fixture

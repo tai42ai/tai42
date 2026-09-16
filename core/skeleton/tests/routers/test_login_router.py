@@ -17,11 +17,12 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity
 from tai42_contract.accounts import registry as accounts_registry
-from tai42_contract.accounts.models import FormField, FormMethod, LoginMethod
-from tai42_contract.accounts.provider import AccountsProvider
+from tai42_contract.accounts.models import FormField, FormMethod, LoginAttachment, LoginCredential, LoginMethod
+from tai42_contract.accounts.provider import AccountsProvider, LoginAttachingProvider
 
 import tai42_skeleton.routers.api_keys as api_keys_router
 import tai42_skeleton.routers.login as login_router
+from tai42_skeleton.access_control import management as management_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -34,14 +35,12 @@ class _FakeAccounts(AccountsProvider):
         self,
         *,
         methods: list[LoginMethod],
-        bootstrap: bool = False,
-        bootstrap_raises: bool = False,
+        methods_raise: bool = False,
         revocable: set[str] | None = None,
         revoke_raises: bool = False,
     ) -> None:
         self._methods = methods
-        self._bootstrap = bootstrap
-        self._bootstrap_raises = bootstrap_raises
+        self._methods_raise = methods_raise
         self._revocable = revocable or set()
         self._revoke_raises = revoke_raises
         self.revoke_calls: list[str] = []
@@ -50,18 +49,44 @@ class _FakeAccounts(AccountsProvider):
         return None
 
     def login_methods(self) -> list[LoginMethod]:
+        if self._methods_raise:
+            raise RuntimeError("methods failed")
         return self._methods
-
-    async def needs_bootstrap(self) -> bool:
-        if self._bootstrap_raises:
-            raise RuntimeError("bootstrap failed")
-        return self._bootstrap
 
     async def revoke_session(self, token: str) -> bool:
         self.revoke_calls.append(token)
         if self._revoke_raises:
             raise RuntimeError("provider down")
         return token in self._revocable
+
+
+class _FakeLoginAttaching(LoginAttachingProvider):
+    """An accounts provider that can attach an interactive login (so ``setup_login`` is non-null)."""
+
+    def login_methods(self) -> list[LoginMethod]:
+        return []
+
+    async def validate_token(self, token: str) -> AuthIdentity | None:  # pragma: no cover - unused
+        return None
+
+    async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
+        return False
+
+    async def has_login(self, user_id: str) -> bool:  # pragma: no cover - unused
+        return False
+
+    async def attach_login(self, user_id: str, *, credential: LoginCredential) -> LoginAttachment:  # pragma: no cover
+        return LoginAttachment(attached=True)
+
+
+@pytest.fixture(autouse=True)
+def _no_principals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the login surface to needs_setup=True; a test wanting a principal overrides it."""
+
+    async def _none() -> bool:
+        return False
+
+    monkeypatch.setattr(management_module, "any_principal_exists", _none)
 
 
 def _request(headers: dict[str, str] | None = None) -> Request:
@@ -105,22 +130,43 @@ def _register(name: str, provider) -> None:
 async def test_methods_empty_registry():
     resp = await login_router.login_methods(_request())
 
-    assert json.loads(bytes(resp.body)) == {"data": {"methods": [], "bootstrap": False}}
+    # No principal exists → needs_setup; no login-attaching provider → setup_login null.
+    assert json.loads(bytes(resp.body)) == {"data": {"methods": [], "needs_setup": True, "setup_login": None}}
 
 
-async def test_methods_concatenated_and_bootstrap_or_ed():
-    _register("a", _FakeAccounts(methods=[_form_method("m1")], bootstrap=False))
-    _register("b", _FakeAccounts(methods=[_form_method("m2")], bootstrap=True))
+async def test_methods_concatenated_and_needs_setup_from_principals():
+    _register("a", _FakeAccounts(methods=[_form_method("m1")]))
+    _register("b", _FakeAccounts(methods=[_form_method("m2")]))
     resp = await login_router.login_methods(_request())
 
     data = json.loads(bytes(resp.body))["data"]
     assert [m["id"] for m in data["methods"]] == ["m1", "m2"]
-    assert data["bootstrap"] is True
+    # needs_setup is the platform "no principal exists" fact, not a per-provider flag.
+    assert data["needs_setup"] is True
+    # No login-attaching provider is registered → the setup door can attach nothing.
+    assert data["setup_login"] is None
+
+
+async def test_methods_needs_setup_false_when_a_principal_exists(monkeypatch):
+    async def _one() -> bool:
+        return True
+
+    monkeypatch.setattr(management_module, "any_principal_exists", _one)
+    _register("a", _FakeAccounts(methods=[_form_method("m1")]))
+    resp = await login_router.login_methods(_request())
+    assert json.loads(bytes(resp.body))["data"]["needs_setup"] is False
+
+
+async def test_methods_setup_login_reports_a_login_attaching_provider():
+    _register("a", _FakeLoginAttaching())
+    resp = await login_router.login_methods(_request())
+    data = json.loads(bytes(resp.body))["data"]
+    assert data["setup_login"] == {"kinds": ["password", "invite"]}
 
 
 async def test_methods_provider_error_propagates():
-    _register("a", _FakeAccounts(methods=[], bootstrap_raises=True))
-    with pytest.raises(RuntimeError, match="bootstrap failed"):
+    _register("a", _FakeAccounts(methods=[], methods_raise=True))
+    with pytest.raises(RuntimeError, match="methods failed"):
         await login_router.login_methods(_request())
 
 
@@ -199,7 +245,7 @@ def test_public_methods_reachable_while_protected_still_401(monkeypatch):
     # Always-public: reachable with no credential (empty accounts registry).
     ok = client.get("/api/login/methods")
     assert ok.status_code == 200
-    assert ok.json() == {"data": {"methods": [], "bootstrap": False}}
+    assert ok.json() == {"data": {"methods": [], "needs_setup": True, "setup_login": None}}
     # A reserved /api/auth route is still never public.
     assert client.get("/api/auth/scopes").status_code in (401, 403)
 
@@ -215,7 +261,8 @@ class _ClaimProvider(ApiKeyIdentityProvider):
         self._valid = set(valid)
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
-        return AuthIdentity(user_id="u1", claims={}) if token in self._valid else None
+        # Every api key belongs to a principal, so the record carries the owner claim.
+        return AuthIdentity(user_id="u1", claims={"owner_user_id": "owner1"}) if token in self._valid else None
 
     async def provision(self, user_id, description, *, owner_user_id=None):  # pragma: no cover - unused
         raise NotImplementedError

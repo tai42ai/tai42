@@ -361,11 +361,24 @@ async def test_owned_key_inherits_owner_role(mem, pg, redis_mgmt, monkeypatch):
     assert cause is DenialCause.HARD_FENCE
 
 
-async def test_owned_key_of_admin_owner_is_hard_fenced(mem, pg, redis_mgmt, monkeypatch):
+async def test_owned_key_of_admin_owner_is_fence_exempt(mem, pg, redis_mgmt, monkeypatch):
     await seed_default_roles()
-    # The fence keys on the CALLER's own admin verdict, and an owner-claim-bearing policy is
-    # never the admin principal: an admin cannot delegate fence access via an owned key.
+    # The fence exemption follows the EFFECTIVE (owner-attenuated) admin verdict: an admin
+    # owner's own condition-free ["*"] key is admin because the owner is, so it is
+    # fence-exempt.
     owner = AccessPolicy(scopes=["*"], policy_data={})
+    key = AccessPolicy(scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
+    allowed, cause = await role_level_decision(key, owner, "/api/marketplace/install", "POST", 1)
+    assert allowed is True
+    assert cause is None
+
+
+async def test_owned_wildcard_key_of_conditioned_owner_is_hard_fenced(mem, pg, redis_mgmt, monkeypatch):
+    await seed_default_roles()
+    # A condition-free ["*"] key owned by a CONDITIONED (non-admin) owner inherits the
+    # owner's jq base through the owner-condition conjunct — NOT admin, so a non-admin can
+    # never delegate fence access by minting a broad owned key (the you-plus escalation).
+    owner = AccessPolicy(scopes=["*"], condition=TemplatedText(content='.request.method == "GET"'), policy_data={})
     key = AccessPolicy(scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     allowed, cause = await role_level_decision(key, owner, "/api/marketplace/install", "POST", 1)
     assert allowed is False

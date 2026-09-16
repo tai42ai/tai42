@@ -5,7 +5,7 @@ manifest that loads no management tool modules and enables projection, then
 asserts the projected surface end-to-end:
 
 1. the projected tool surface is exactly the expected op surface — the 166
-   default-projected ops (213 total - 43 tier-2 default-excluded - 4 tier-1
+   default-projected ops (219 total - 47 tier-2 default-excluded - 4 tier-1
    hardcode-blocked);
 2. ``destructiveHint`` is present on destructive ops (a DELETE, a mutating POST)
    and absent on reads (a GET);
@@ -131,7 +131,7 @@ def test_projected_surface_is_the_expected_op_count():
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
             # The registered surface decomposes by projection tier (each asserted below):
-            # 213 total = 4 tier-1 (hardcode-blocked from projection) + 43 tier-2
+            # 219 total = 4 tier-1 (hardcode-blocked from projection) + 47 tier-2
             # (default-excluded, includable) + 166 tier-0 (default-projected). A destructive
             # tier-0 op is still default-projected under ``expose_destructive`` — a data write
             # or purge (``delete_*``, ``erase_*``, ``prune_runs``, ``prune_state_retention``)
@@ -141,7 +141,7 @@ def test_projected_surface_is_the_expected_op_count():
             # doors (module + state ``list``/``get``/``put``/``delete``, the record CRUD plus
             # ``search``/``fold``/``apply`` doors, the mount/subjects/consumers/stats
             # reads, and ``prune_state_retention``) are all tier-0 CRUD over the states service.
-            assert total == 215, total
+            assert total == 219, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -155,19 +155,21 @@ def test_projected_surface_is_the_expected_op_count():
             # create_conversation_route and apply_profile (the env-replace + fleet-recycle
             # door), plus the granular-config authority ops update_api_tools and
             # modify_role_grants (authority_changing) and modify_api_key_scopes (tier-2 by the
-            # ``/api/auth/`` route prefix, like the sibling api-key ops) plus bootstrap_admin_key
-            # (authority_changing — the public first-key mint door, off /api/auth, that must never
-            # project) — plus ``reencrypt_connector_tokens`` (the connector-token KEK-rotation convergence
-            # sweep, authority_changing) — 43 in all. ``get_me`` is tier-1 hardcode-blocked, not tier-2.
+            # ``/api/auth/`` route prefix, like the sibling api-key ops) plus setup_deployment
+            # (authority_changing — the public deployment-initialize door, off /api/auth, that
+            # must never project) — plus ``reencrypt_connector_tokens`` (the connector-token
+            # KEK-rotation convergence sweep, authority_changing) plus the four principals doors
+            # (all under /api/auth/principals*) — 47 in all. ``get_me`` is tier-1 hardcode-blocked, not tier-2.
             assert set(tier2) == {
                 "add_scope_url",
                 "apply_profile",
-                "bootstrap_admin_key",
                 "create_api_key",
                 "create_claim_link",
                 "create_conversation_route",
+                "create_principal",
                 "create_role",
                 "create_trigger_link",
+                "delete_principal",
                 "delete_role",
                 "delete_scope",
                 "delete_topic_verifier",
@@ -177,6 +179,7 @@ def test_projected_surface_is_the_expected_op_count():
                 "get_capabilities",
                 "import_backup",
                 "list_policy_versions",
+                "list_principals",
                 "list_public_routes",
                 "list_role_versions",
                 "list_roles",
@@ -197,10 +200,12 @@ def test_projected_surface_is_the_expected_op_count():
                 "revoke_api_key",
                 "set_topic_verifier",
                 "rollback_policy",
+                "setup_deployment",
                 "rollback_role",
                 "unpin_public_route",
                 "update_api_tools",
                 "update_manifest",
+                "update_principal",
                 "update_role",
                 "validate_condition",
             }, tier2

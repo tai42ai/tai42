@@ -65,6 +65,8 @@ def pg(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
     """The policy store over a fake Postgres, wired through the store module's seam."""
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     fake = FakeAccessControlPg()
+    # The owner principal every minted/re-minted key in this suite belongs to.
+    fake.add_principal("owner-1", kind="human", display_name="Owner One")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(fake))
     return fake
 
@@ -79,8 +81,15 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> _SpyProvider:
     return spy
 
 
-def _token(user_id: str, description: str = "restored") -> dict:
-    return {"user_id": user_id, "description": description, "scopes": [], "policy_data": None, "condition": None}
+def _token(user_id: str, description: str = "restored", owner: str = "owner-1") -> dict:
+    # Every api key belongs to a principal, so an exported token carries its owner claim.
+    return {
+        "user_id": user_id,
+        "description": description,
+        "scopes": [],
+        "policy_data": {OWNER_USER_ID_CLAIM: owner},
+        "condition": None,
+    }
 
 
 async def test_import_re_mints_an_orphan_and_leaves_its_policy_unchanged(
@@ -104,7 +113,7 @@ async def test_import_re_mints_an_orphan_and_leaves_its_policy_unchanged(
 
 
 async def test_import_skips_a_live_key(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
-    await management.add_user_api_key("live", "live-desc", [])
+    await management.add_user_api_key("live", "live-desc", [], owner_user_id="owner-1")
     report = await sections._import_access_control({"tokens": [_token("live")]})
     # Policy AND identity present: left in place, never re-minted.
     assert report["skipped_existing"] == 1
@@ -130,3 +139,110 @@ async def test_import_mints_an_absent_token(pg: FakeAccessControlPg, provider: _
     assert report["skipped_existing"] == 0
     assert report["new_api_keys"] == [{"user_id": "fresh", "description": "restored", "api_key": "sk-fresh"}]
     assert provider.identities["fresh"] == "restored"
+
+
+# -- principals travel with the section --------------------------------------
+
+
+async def test_export_carries_principals_with_their_policy(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
+    pg.add_policy("owner-1", scopes=["*"])
+    doc = await sections._export_access_control()
+    assert len(doc["principals"]) == 1
+    exported = doc["principals"][0]
+    assert exported["user_id"] == "owner-1"
+    assert exported["kind"] == "human"
+    assert exported["display_name"] == "Owner One"
+    assert exported["created_by"] is None
+    assert exported["disabled"] is False
+    assert exported["policy"]["scopes"] == ["*"]
+
+
+async def test_import_restores_principals_before_tokens(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
+    # A fresh principal (owner-2) and a key owned by it: the principal is created FIRST so
+    # the token's owner-required mint finds it provisioned.
+    payload = {
+        "principals": [
+            {
+                "user_id": "owner-2",
+                "kind": "service",
+                "display_name": "Owner Two",
+                "created_by": "owner-1",
+                "disabled": False,
+                "created_at": None,
+                "policy": {"scopes": ["*"], "policy_data": {}, "condition": None},
+            }
+        ],
+        "tokens": [_token("k1", owner="owner-2")],
+    }
+    report = await sections._import_access_control(payload)
+    created = pg.principal("owner-2")
+    assert created is not None
+    assert created["kind"] == "service"
+    assert created["created_by"] == "owner-1"
+    # The token minted, owned by the just-restored principal.
+    assert provider.identities["k1"] == "restored"
+    assert any(row["user_id"] == "k1" for row in report["new_api_keys"])
+
+
+async def test_import_existing_principal_is_a_clean_skip(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
+    # owner-1 already exists (seeded): a restore never overwrites the identity.
+    payload = {
+        "principals": [
+            {
+                "user_id": "owner-1",
+                "kind": "human",
+                "display_name": "Renamed",
+                "created_by": None,
+                "disabled": False,
+                "created_at": None,
+                "policy": {"scopes": ["*"], "policy_data": {}, "condition": None},
+            }
+        ],
+        "tokens": [],
+    }
+    report = await sections._import_access_control(payload)
+    assert report["skipped_existing"] == 1
+    assert pg.principal("owner-1")["display_name"] == "Owner One"  # untouched
+
+
+async def test_import_principal_keeps_a_surviving_policy_row(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
+    # A Redis-only loss recovered from Postgres: the principal row is gone but its policy
+    # row survives. The restore creates the principal row and KEEPS the live policy (the
+    # Postgres rows are the source of truth), never raising on the existing policy.
+    pg.add_policy("owner-3", scopes=["read"], policy_data={"kept": True})
+    payload = {
+        "principals": [
+            {
+                "user_id": "owner-3",
+                "kind": "service",
+                "display_name": "Owner Three",
+                "created_by": "owner-1",
+                "disabled": False,
+                "created_at": None,
+                "policy": {"scopes": ["*"], "policy_data": {"exported": True}, "condition": None},
+            }
+        ],
+        "tokens": [],
+    }
+    report = await sections._import_access_control(payload)
+    assert report["created"] == 1
+    assert report["errors"] == []
+    created = pg.principal("owner-3")
+    assert created is not None
+    assert created["kind"] == "service"
+    # The live policy row is untouched — the exported body did NOT overwrite it.
+    assert pg.policy_body("owner-3")["scopes"] == ["read"]
+    assert pg.policy_body("owner-3")["policy_data"] == {"kept": True}
+
+
+async def test_import_ownerless_token_is_a_loud_per_token_error(
+    pg: FakeAccessControlPg, provider: _SpyProvider
+) -> None:
+    # A minted token with no owner claim is an ownerless key row: a loud per-token error,
+    # never re-minted ownerless.
+    payload = {"tokens": [{"user_id": "k1", "description": "d", "scopes": [], "policy_data": {}, "condition": None}]}
+    report = await sections._import_access_control(payload)
+    assert report["created"] == 0
+    assert report["skipped"] == 1
+    assert any("no owner claim" in err for err in report["errors"])
+    assert "k1" not in provider.identities

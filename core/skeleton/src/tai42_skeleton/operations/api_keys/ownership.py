@@ -47,12 +47,12 @@ async def _authorize_key_edit(caller: Caller, user_id: str, updates: dict[str, A
         if "scopes" in updates:
             _check_scope_subset(caller, updates["scopes"])
     if "policy_data" in updates:
-        # Echo-tolerant immutability: an unchanged owner claim is accepted (Studio
-        # echoes policy_data back verbatim), but a CHANGED, newly-introduced, or
-        # absent/cleared owner claim is rejected — ownership never changes post-mint
-        # (re-mint instead), and a silent strip would orphan the owner's visibility.
+        # The owner claim is a server-owned anchor the store carries forward on every edit,
+        # so an absent/cleared owner is harmless (the stored one is preserved). A client
+        # trying to CHANGE it to a different principal is a loud reject — ownership never
+        # changes post-mint (re-mint instead).
         new_owner = owner_of(updates["policy_data"])
-        if new_owner != stored_owner:
+        if new_owner is not None and new_owner != stored_owner:
             raise ForbiddenError("the owner of an API key is immutable; re-mint to change ownership")
 
 

@@ -344,6 +344,7 @@ def test_claim_link_ttl_at_ceiling_is_accepted():
 
 
 def test_is_admin_policy_true_for_condition_free_wildcard():
+    # A top-level condition-free ["*"] principal (no owner) is admin.
     assert is_admin_policy(AccessPolicy(scopes=["*"]), None) is True
 
 
@@ -355,9 +356,25 @@ def test_is_admin_policy_false_for_conditioned_wildcard():
     assert is_admin_policy(AccessPolicy(scopes=["*"], condition=TemplatedText(id="tmpl")), None) is False
 
 
-def test_is_admin_policy_false_for_owned_wildcard_key():
-    # A condition-free ["*"] key owned by someone is NOT admin (the you-plus escalation).
-    assert is_admin_policy(AccessPolicy(scopes=["*"]), "owner-1") is False
+def test_is_admin_policy_owned_key_of_admin_owner_is_admin():
+    # The owner's own key: a condition-free ["*"] key under a condition-free ["*"] owner is
+    # admin because the owner is.
+    admin_owner = AccessPolicy(scopes=["*"])
+    assert is_admin_policy(AccessPolicy(scopes=["*"]), admin_owner) is True
+
+
+def test_is_admin_policy_owned_key_of_conditioned_owner_is_not_admin():
+    # A condition-free ["*"] key owned by a CONDITIONED (editor) owner inherits the owner's
+    # jq base through the owner-condition conjunct — NOT admin (the you-plus escalation).
+    editor_owner = AccessPolicy(scopes=["*"], condition=TemplatedText(content='.request.method == "GET"'))
+    assert is_admin_policy(AccessPolicy(scopes=["*"]), editor_owner) is False
+
+
+def test_is_admin_policy_owned_key_attenuated_below_wildcard_is_not_admin():
+    # A scoped owner attenuates a ["*"] key below full scopes, so the EFFECTIVE scopes are
+    # not ["*"] and it is not admin.
+    scoped_owner = AccessPolicy(scopes=["read"])
+    assert is_admin_policy(AccessPolicy(scopes=["*"]), scoped_owner) is False
 
 
 def test_is_admin_policy_false_for_scoped_policy():

@@ -482,40 +482,48 @@ async def test_services_apply_role_bumps_version(mem, pg: FakeAccessControlPg, r
 
 
 async def test_services_set_user_disabled_flips_marker(mem, pg: FakeAccessControlPg, redis_mgmt):
+    # The single writer flips BOTH homes: the authoritative principals column and the
+    # policy_data['disabled'] enforcement projection.
+    pg.add_principal("bob")
     pg.add_policy("bob", scopes=["a"])
     services = SkeletonAccountsAdminServices()
     await services.set_user_disabled("bob", True)
     assert pg.policy_body("bob")["policy_data"]["disabled"] is True
+    assert pg.principal("bob")["disabled"] is True
     await services.set_user_disabled("bob", False)
     assert "disabled" not in pg.policy_body("bob")["policy_data"]
+    assert pg.principal("bob")["disabled"] is False
 
 
 async def test_services_set_user_disabled_unknown_user_raises(mem, pg: FakeAccessControlPg, redis_mgmt):
     services = SkeletonAccountsAdminServices()
-    with pytest.raises(KeyError, match="unknown user"):
+    with pytest.raises(KeyError, match="unknown principal"):
         await services.set_user_disabled("ghost", True)
 
 
 async def test_services_remove_policy_revokes_owned_keys(mem, pg: FakeAccessControlPg, provider, redis_mgmt):
-    # Bob owns an api key; removing Bob's policy revokes the owned key.
-    await management.add_user_api_key("bob", "bob-user", [])
+    # Bob is a principal that owns an api key; removing Bob revokes the owned key and
+    # deletes both his policy row and his principal row.
+    pg.add_principal("bob")
+    await access_control_store().create_policy("bob", [])
     await management.add_user_api_key("bob-key", "machine", [], owner_user_id="bob")
     services = SkeletonAccountsAdminServices()
     await services.remove_policy("bob")
     assert "bob-key" not in provider.identities  # owned key revoked
     assert pg.policy("bob") is None
+    assert pg.principal("bob") is None
 
 
 async def test_services_remove_policy_unknown_user_raises(mem, pg: FakeAccessControlPg, provider, redis_mgmt):
     services = SkeletonAccountsAdminServices()
-    with pytest.raises(KeyError, match="unknown user"):
+    with pytest.raises(KeyError, match="unknown principal"):
         await services.remove_policy("ghost")
 
 
 async def test_services_remove_policy_validator_only_deployment(mem, pg: FakeAccessControlPg, redis_mgmt, monkeypatch):
     # On a validator-only deployment (no mint-capable provider) there are no api-keys to
     # own, so remove_policy skips the owned-key walk (which requires a mint provider)
-    # and still deletes the user's enforced policy instead of raising.
+    # and still deletes the principal's enforced policy and row instead of raising.
     class _Validator(IdentityProvider):
         async def validate_token(self, token: str) -> AuthIdentity | None:
             return None
@@ -524,10 +532,12 @@ async def test_services_remove_policy_validator_only_deployment(mem, pg: FakeAcc
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["accounts"]')
     reset_all_settings()
     try:
+        pg.add_principal("bob")
         await access_control_store().create_policy("bob", [])
         services = SkeletonAccountsAdminServices()
         await services.remove_policy("bob")
         assert pg.policy("bob") is None
+        assert pg.principal("bob") is None
     finally:
         registry._REGISTRY.pop("accounts", None)
         reset_all_settings()

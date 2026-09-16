@@ -11,22 +11,45 @@ from tai42_contract.access_control.models import AccessPolicy
 from tai42_skeleton.access_control.request_scopes import get_request_identity_claims
 
 
-def is_admin_policy(policy: AccessPolicy, owner_claim: str | None) -> bool:
-    """Whether ``policy`` is the ADMIN discriminator: a condition-free ``"*"`` policy, not an owned key.
+def effective_scopes(key_scopes: list[str], owner_scopes: list[str]) -> list[str]:
+    """The scopes an owned key actually carries: its own scopes ∩ the owner's CURRENT scopes.
 
-    This is the single spelling of "admin" every consumer shares (the key-management ownership
-    rules and the capability projection).
-
-    Admin iff the policy grants ``"*"`` with NO jq condition (inline or stored) AND
-    carries no owner claim. Role-holders carry ``["*"]`` scopes plus a jq condition, so
-    a scopes-only test would classify every editor/viewer as admin; a condition-bearing
-    caller is never admin; and the owner-claim conjunct denies admin to an owned key (an
-    editor-minted condition-free ``["*"]`` key would otherwise read as admin from its raw
-    stored policy — a you-plus escalation). ``owner_claim`` is the owner drawn from the
-    caller's STORED ``policy.policy_data`` (the management dual-home), NEVER a request
-    claim, so the classification is byte-identical wherever it is used.
+    ``"*"`` behaves as "everything" on BOTH sides (``"*" ∩ X = X``). Three explicit cases: a ``"*"`` owner
+    caps nothing (the key keeps its scopes); a ``"*"`` KEY under a scoped owner collapses to the owner's
+    scopes (a plain membership filter would wrongly yield ``[]`` here); otherwise a plain intersection
+    preserving the key's order.
     """
-    return "*" in policy.scopes and policy.condition is None and owner_claim is None
+    if "*" in owner_scopes:
+        return list(key_scopes)
+    if "*" in key_scopes:
+        return list(owner_scopes)
+    owner_set = set(owner_scopes)
+    return [scope for scope in key_scopes if scope in owner_set]
+
+
+def is_admin_policy(policy: AccessPolicy, owner_policy: AccessPolicy | None) -> bool:
+    """Whether the caller is ADMIN, computed on its EFFECTIVE (owner-attenuated) policy.
+
+    This is the single spelling of "admin" every consumer shares (the key-management
+    ownership rules, the capability projection, the fence exemption).
+
+    Admin iff the EFFECTIVE scopes grant ``"*"`` AND the key's own condition is ``None``
+    AND the owner's condition (when there is an owner) is ``None``. Attenuation combines
+    only SCOPES, so a condition on EITHER side is enforced separately and must be absent
+    for admin. Role-holders carry ``["*"]`` scopes plus a jq condition, so a scopes-only
+    test would classify every editor/viewer as admin; and an editor-minted condition-free
+    ``["*"]`` owned key is denied admin because it inherits its owner's jq base through the
+    owner's condition (the you-plus escalation this conjunct closes). The owner's OWN key
+    is admin because the owner is: both conditions are ``None`` and the effective scopes are
+    ``"*"``. ``owner_policy`` is the owner's CURRENT stored policy (``None`` for a top-level
+    principal), so the classification is byte-identical wherever it is used.
+    """
+    owner_scopes = owner_policy.scopes if owner_policy is not None else ["*"]
+    return (
+        "*" in effective_scopes(policy.scopes, owner_scopes)
+        and policy.condition is None
+        and (owner_policy is None or owner_policy.condition is None)
+    )
 
 
 class TaiUser(AuthenticatedUser):
@@ -90,8 +113,8 @@ def _acting_principal() -> tuple[str | None, Mapping[str, Any] | None]:
 def restricted_identity() -> str | None:
     """The identity a RESTRICTED caller is isolated to — its OWN id — or ``None`` when unrestricted.
 
-    ``None`` covers the unrestricted caller (admin, editor/viewer role-holder, ownerless machine
-    key) and the unauthenticated / gate-off cases where no caller is bound.
+    ``None`` covers the unrestricted caller (admin, editor/viewer role-holder, a top-level
+    principal) and the unauthenticated / gate-off cases where no caller is bound.
 
     A caller is restricted iff its claims carry ``OWNER_USER_ID_CLAIM`` — an owned key
     acting on behalf of its owner. Being owned is what CONFINES the caller, but the
@@ -147,8 +170,8 @@ def clamp_write_audience(audience: str | None) -> str | None:
     loud :class:`CrossIdentityAudienceError` (a cross-identity inject/exfil attempt
     through another identity's slice) — an AUTHORIZATION denial the write doors map to
     a ``403``, mirroring the read-side answer door, NOT the blank-audience
-    ``ValueError``/400. An UNRESTRICTED caller (admin / system / ownerless execution
-    key / no bound principal at all) is returned unchanged — it may address any
+    ``ValueError``/400. An UNRESTRICTED caller (admin / system / a top-level principal's
+    execution key / no bound principal at all) is returned unchanged — it may address any
     identity, or broadcast with ``audience is None``.
 
     Returns the audience the door must persist. A door runs its own blank-audience

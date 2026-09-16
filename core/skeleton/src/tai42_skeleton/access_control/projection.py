@@ -67,6 +67,7 @@ from tai42_skeleton.access_control.policy import PolicyEnforcer
 from tai42_skeleton.access_control.projection_pattern_sampling import _sample_path_for_pattern
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
+from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.access_control.user import is_admin_policy
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
 from tai42_skeleton.app.route_registry import RouteMetadata, load_api_routes
@@ -114,11 +115,20 @@ class SubMcpEntry(BaseModel):
     transport: str
 
 
+class PrincipalRef(BaseModel):
+    """The principal a credential belongs to: the owner of a key, or the human of a session."""
+
+    user_id: str
+    kind: str
+    display_name: str
+
+
 class ProjectionResult(BaseModel):
     """The caller's derived capability projection — every field derived, never stored."""
 
     user_id: str
     owner_user_id: str | None
+    principal: PrincipalRef | None
     admin: bool
     scopes: list[str]
     routes: list[RouteEntry]
@@ -409,11 +419,14 @@ async def _build_uncached(
     verifier = AccessControlVerifier(settings, providers=[])
 
     policy = await enforcer.get_policy(user_id)
-    stored_owner = policy.policy_data.get(OWNER_USER_ID_CLAIM)
-    admin = is_admin_policy(policy, stored_owner)
+    # The owner is drawn from the STORED policy_data (the management dual-home) for BOTH
+    # the admin verdict and the owner-attenuation pass, so the projection classifies the
+    # caller byte-identically to the gate.
+    owner_claim = policy.policy_data.get(OWNER_USER_ID_CLAIM)
+    owner_policy = await enforcer.get_policy(owner_claim) if owner_claim is not None else None
+    admin = is_admin_policy(policy, owner_policy)
 
-    owner_from_claims = claims.get(OWNER_USER_ID_CLAIM)
-    owner_policy = await enforcer.get_policy(owner_from_claims) if owner_from_claims is not None else None
+    principal = await _resolve_principal(user_id, owner_claim)
 
     # One point-in-time live-context read for every jq pass in this build.
     live_ctx = await enforcer.get_live_context(user_id)
@@ -430,7 +443,8 @@ async def _build_uncached(
 
     return ProjectionResult(
         user_id=user_id,
-        owner_user_id=owner_from_claims,
+        owner_user_id=owner_claim,
+        principal=principal,
         admin=admin,
         scopes=effective_scopes,
         routes=routes,
@@ -440,6 +454,29 @@ async def _build_uncached(
         agents=agents,
         mintable=_mintable(),
     )
+
+
+async def _resolve_principal(user_id: str, owner_claim: str | None) -> PrincipalRef | None:
+    """The principal the caller's credential belongs to.
+
+    A KEY (``owner_claim`` set) belongs to its OWNER principal; its absence is an invariant
+    breach (every key belongs to a principal), raised loudly. A SESSION / top-level
+    principal (no owner claim) IS the human — its own ``user_id`` names the principal;
+    ``None`` only when no principal row exists for it.
+    """
+    store = access_control_store()
+    if owner_claim is not None:
+        row = await store.get_principal(owner_claim)
+        if row is None:
+            raise RuntimeError(
+                f"access_control: api key {user_id!r} names owner principal {owner_claim!r} "
+                "that has no principal row — ownerless credential; identity invariant broken"
+            )
+        return PrincipalRef(user_id=row["user_id"], kind=row["kind"], display_name=row["display_name"])
+    row = await store.get_principal(user_id)
+    if row is None:
+        return None
+    return PrincipalRef(user_id=row["user_id"], kind=row["kind"], display_name=row["display_name"])
 
 
 async def _build_admits(
@@ -630,6 +667,7 @@ def synthetic_full_projection() -> ProjectionResult:
     return ProjectionResult(
         user_id=NO_AUTH_USER_ID,
         owner_user_id=None,
+        principal=None,
         admin=True,
         scopes=["*"],
         routes=[],

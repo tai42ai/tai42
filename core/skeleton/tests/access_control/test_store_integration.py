@@ -71,6 +71,7 @@ async def _wipe(token: str) -> None:
     url / scope_id / user_id — so a shared database stays isolated and a re-run starts clean."""
     await _exec("DELETE FROM access_control_routes WHERE url LIKE %s OR scope_id LIKE %s", (f"%{token}%", f"%{token}%"))
     await _exec("DELETE FROM access_control_policies WHERE user_id LIKE %s", (f"%{token}%",))
+    await _exec("DELETE FROM access_control_principals WHERE user_id LIKE %s", (f"%{token}%",))
 
 
 async def test_policy_user_id_unique_constraint_is_the_authority(store: tuple[PostgresAccessControlStore, str]) -> None:
@@ -244,3 +245,206 @@ async def test_settings_public_marker_excluded_by_real_filter(store: tuple[Postg
     assert f"/{token}/open" not in scopes
     assert mappings[f"/{token}/open"] == public
     assert f"/{token}/open" in await s.get_public_route_pins()
+
+
+# -- principals (real Postgres) ----------------------------------------------
+
+
+async def test_principal_crud_round_trips(store: tuple[PostgresAccessControlStore, str]) -> None:
+    s, token = store
+    uid = f"{token}-p1"
+    created = await s.create_principal(uid, "service", "A Service", f"{token}-admin")
+    assert created["user_id"] == uid
+    assert created["kind"] == "service"
+    assert created["display_name"] == "A Service"
+    assert created["created_by"] == f"{token}-admin"
+    assert created["disabled"] is False
+    assert created["created_at"] is not None
+
+    got = await s.get_principal(uid)
+    assert got is not None
+    assert got["user_id"] == uid
+    assert any(p["user_id"] == uid for p in await s.list_principals())
+    assert await s.any_principal_exists() is True
+
+    renamed = await s.update_principal_display_name(uid, "Renamed")
+    assert renamed is not None
+    assert renamed["display_name"] == "Renamed"
+
+    assert await s.delete_principal(uid) is True
+    assert await s.get_principal(uid) is None
+    assert await s.delete_principal(uid) is False
+
+
+async def test_create_principal_duplicate_raises_valueerror(store: tuple[PostgresAccessControlStore, str]) -> None:
+    s, token = store
+    uid = f"{token}-dup"
+    await s.create_principal(uid, "human", "X", None)
+    # The durable PRIMARY KEY (user_id) rejects a racing second create as the authority.
+    with pytest.raises(ValueError, match="already exists"):
+        await s.create_principal(uid, "human", "X", None)
+
+
+async def test_create_first_principal_inserts_only_when_empty(store: tuple[PostgresAccessControlStore, str]) -> None:
+    s, token = store
+    # The count-then-insert under the advisory lock keys on an EMPTY principals table; this
+    # test owns the integration DB, so it clears the table to exercise the first-owner mint.
+    await _exec("DELETE FROM access_control_principals")
+    owner = f"{token}-owner"
+    first = await s.create_first_principal(owner, "human", "Owner")
+    assert first is not None
+    assert first["user_id"] == owner
+    assert first["created_by"] is None
+    # A second attempt finds a principal already present and returns None (the door's 409).
+    assert await s.create_first_principal(f"{token}-owner2", "human", "Owner2") is None
+
+
+async def test_set_principal_disabled_writes_both_homes(store: tuple[PostgresAccessControlStore, str]) -> None:
+    s, token = store
+    uid = f"{token}-dis"
+    await s.create_principal(uid, "human", "D", None)
+    await s.create_policy(uid, ["*"])
+    committed = await s.set_principal_disabled(uid, True)
+    # The single writer moves BOTH homes in one transaction.
+    assert committed["policy_data"]["disabled"] is True
+    principal = await s.get_principal(uid)
+    policy = await s.get_policy_body(uid)
+    assert principal is not None
+    assert policy is not None
+    assert principal["disabled"] is True
+    assert policy["policy_data"]["disabled"] is True
+    await s.set_principal_disabled(uid, False)
+    principal = await s.get_principal(uid)
+    policy = await s.get_policy_body(uid)
+    assert principal is not None
+    assert policy is not None
+    assert principal["disabled"] is False
+    assert "disabled" not in policy["policy_data"]
+
+
+async def test_set_principal_disabled_unknown_principal_raises(store: tuple[PostgresAccessControlStore, str]) -> None:
+    s, token = store
+    with pytest.raises(KeyError, match="unknown principal"):
+        await s.set_principal_disabled(f"{token}-ghost", True)
+
+
+async def _add_principal_with_policy(s: PostgresAccessControlStore, uid: str, *, admin: bool, disabled: bool) -> None:
+    """Create a principal and its own policy row: admin ⇒ condition-free ``['*']``."""
+    await s.create_principal(uid, "service", uid, None)
+    await _exec(
+        "INSERT INTO access_control_policies (user_id, scopes, policy_data, condition) "
+        "VALUES (%s, '{*}', '{}', %s::jsonb)",
+        (uid, None if admin else '{"content": "true"}'),
+    )
+    if disabled:
+        await s.set_principal_disabled(uid, True)
+
+
+async def _guarded_last_admin_delete(s: PostgresAccessControlStore, user_id: str) -> str:
+    """Mirror the principals door's guarded delete: refuse the last enabled admin, else delete.
+
+    Returns ``"deleted"``, ``"refused"`` (last enabled admin), or ``"gone"`` (row vanished
+    under the race). The re-read, the last-admin count, and the delete all run on the guard's
+    advisory-locked cursor — the exact atomic sequence the door composes."""
+    async with s.principal_guard_txn() as guard:
+        locked = await guard.read(user_id)
+        if locked is None:
+            return "gone"
+        if (
+            not locked["disabled"]
+            and await guard.target_is_enabled_admin(user_id)
+            and await guard.count_other_enabled_admins(user_id) == 0
+        ):
+            return "refused"
+        await guard.delete(user_id)
+        return "deleted"
+
+
+async def _guarded_last_admin_disable(s: PostgresAccessControlStore, user_id: str) -> str:
+    """Mirror the principals door's guarded disable: refuse the last enabled admin, else disable."""
+    async with s.principal_guard_txn() as guard:
+        locked = await guard.read(user_id)
+        if locked is None:
+            return "gone"
+        if (
+            not locked["disabled"]
+            and await guard.target_is_enabled_admin(user_id)
+            and await guard.count_other_enabled_admins(user_id) == 0
+        ):
+            return "refused"
+        await guard.set_disabled(user_id, True)
+        return "disabled"
+
+
+async def test_guard_counts_only_enabled_admins(store: tuple[PostgresAccessControlStore, str]) -> None:
+    s, token = store
+    a1, a2 = f"{token}-a1", f"{token}-a2"
+    editor, off = f"{token}-editor", f"{token}-off"
+    await _add_principal_with_policy(s, a1, admin=True, disabled=False)
+    await _add_principal_with_policy(s, a2, admin=True, disabled=False)
+    await _add_principal_with_policy(s, editor, admin=False, disabled=False)  # ['*'] under a condition — not admin
+    await _add_principal_with_policy(s, off, admin=True, disabled=True)  # admin but disabled
+    # From a1's view exactly one OTHER enabled admin (a2) counts; the conditioned editor and
+    # the disabled admin are excluded by the shared predicate and the enabled filter.
+    async with s.principal_guard_txn() as guard:
+        assert await guard.count_other_enabled_admins(a1) == 1
+    # Delete a2 and a1 becomes the last enabled admin.
+    await s.delete_principal(a2)
+    async with s.principal_guard_txn() as guard:
+        assert await guard.count_other_enabled_admins(a1) == 0
+
+
+async def test_concurrent_delete_principal_one_wins(store: tuple[PostgresAccessControlStore, str]) -> None:
+    s, token = store
+    uid = f"{token}-dup"
+    await s.create_principal(uid, "service", "Dup", None)
+    # Two racing deletes of the SAME principal: the row's own delete rowcount is the
+    # authority, so exactly one reports True and the other False — a loud, consistent
+    # outcome, never a double success.
+    first, second = await asyncio.gather(s.delete_principal(uid), s.delete_principal(uid))
+    assert {first, second} == {True, False}
+    assert await s.get_principal(uid) is None
+
+
+async def test_concurrent_guarded_delete_of_two_last_admins_one_refused(
+    store: tuple[PostgresAccessControlStore, str],
+) -> None:
+    """Two concurrent guarded deletes of the two DIFFERENT last enabled admins: the advisory
+    lock serializes them, so the first commits and the second re-counts committed state and is
+    refused — never both, which would strand the deployment with zero enabled admins. This is
+    the race the non-atomic count-then-delete lost: each isolated delete sees one other admin
+    and passes, so without the shared-lock guard both would commit."""
+    s, token = store
+    a1, a2 = f"{token}-a1", f"{token}-a2"
+    await _add_principal_with_policy(s, a1, admin=True, disabled=False)
+    await _add_principal_with_policy(s, a2, admin=True, disabled=False)
+    r1, r2 = await asyncio.gather(_guarded_last_admin_delete(s, a1), _guarded_last_admin_delete(s, a2))
+    assert {r1, r2} == {"deleted", "refused"}
+    survivors = [p for p in await s.list_principals() if p["user_id"] in (a1, a2)]
+    assert len(survivors) == 1
+    survivor = survivors[0]
+    assert survivor["disabled"] is False
+    # The survivor is still an enabled admin — the invariant the guard protects holds.
+    async with s.principal_guard_txn() as guard:
+        assert await guard.target_is_enabled_admin(survivor["user_id"]) is True
+
+
+async def test_concurrent_guarded_disable_of_two_last_admins_one_refused(
+    store: tuple[PostgresAccessControlStore, str],
+) -> None:
+    """The disable mirror of the delete race: two concurrent guarded disables of the two
+    DIFFERENT last enabled admins serialize on the advisory lock, so exactly one is disabled
+    and the other refused — one enabled admin always remains."""
+    s, token = store
+    a1, a2 = f"{token}-a1", f"{token}-a2"
+    await _add_principal_with_policy(s, a1, admin=True, disabled=False)
+    await _add_principal_with_policy(s, a2, admin=True, disabled=False)
+    r1, r2 = await asyncio.gather(_guarded_last_admin_disable(s, a1), _guarded_last_admin_disable(s, a2))
+    assert {r1, r2} == {"disabled", "refused"}
+    enabled_admins = []
+    for uid in (a1, a2):
+        principal = await s.get_principal(uid)
+        assert principal is not None
+        if not principal["disabled"]:
+            enabled_admins.append(uid)
+    assert len(enabled_admins) == 1
