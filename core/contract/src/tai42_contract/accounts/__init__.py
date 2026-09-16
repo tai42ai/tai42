@@ -8,11 +8,25 @@ and renders the declared ``LoginMethod`` metadata.
 
 from __future__ import annotations
 
-from tai42_contract.accounts.models import ButtonMethod, FormField, FormMethod, LoginMethod
+from tai42_contract.accounts.errors import (
+    LoginAttachError,
+    LoginConflictError,
+)
+from tai42_contract.accounts.models import (
+    ButtonMethod,
+    FormField,
+    FormMethod,
+    InviteCredential,
+    LoginAttachment,
+    LoginCredential,
+    LoginMethod,
+    PasswordCredential,
+)
 from tai42_contract.accounts.provider import (
     AccountsAdminServices,
     AccountsProvider,
     AccountsProviderSettings,
+    LoginAttachingProvider,
 )
 from tai42_contract.accounts.registry import (
     abort_staging,
@@ -32,7 +46,14 @@ __all__ = [
     "ButtonMethod",
     "FormField",
     "FormMethod",
+    "InviteCredential",
+    "LoginAttachError",
+    "LoginAttachingProvider",
+    "LoginAttachment",
+    "LoginConflictError",
+    "LoginCredential",
     "LoginMethod",
+    "PasswordCredential",
     "abort_staging",
     "begin_staging",
     "commit_staging",

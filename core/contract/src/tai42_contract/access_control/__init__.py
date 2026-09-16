@@ -22,6 +22,7 @@ from tai42_contract.access_control.models import (
     AccessPolicy,
     IdentityRecord,
     JqAuthContext,
+    Principal,
     RoleDefinition,
 )
 from tai42_contract.access_control.policy import PolicyEnforcer
@@ -43,6 +44,7 @@ __all__ = [
     "IdentityRecord",
     "JqAuthContext",
     "PolicyEnforcer",
+    "Principal",
     "RoleDefinition",
     "Verifier",
     "caller_may_read_secrets",

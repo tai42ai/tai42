@@ -63,11 +63,10 @@ class FormMethod(BaseModel):
     shape: Literal["form"] = "form"
     id: str = Field(min_length=1, description="Stable method id, unique within the provider.")
     title: str = Field(min_length=1)
-    purpose: Literal["login", "bootstrap", "invite"] = Field(
+    purpose: Literal["login", "invite"] = Field(
         default="login",
         description=(
-            'What the form is FOR: "login" renders always; "bootstrap" is the owner-creation '
-            'form (shown when the deployment reports bootstrap); "invite" is the set-your-password '
+            'What the form is FOR: "login" renders always; "invite" is the set-your-password '
             "form (shown when the login URL carries an invite token)."
         ),
     )
@@ -101,9 +100,51 @@ LoginMethod = Annotated[FormMethod | ButtonMethod, Field(discriminator="shape")]
 """The closed union of renderable login-method shapes."""
 
 
+class PasswordCredential(BaseModel):
+    """A login credential that sets the principal's password now."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["password"] = "password"
+    email: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+
+class InviteCredential(BaseModel):
+    """A login credential that mints a one-time invite link instead of setting a password now."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["invite"] = "invite"
+    email: str = Field(min_length=1)
+
+
+LoginCredential = Annotated[PasswordCredential | InviteCredential, Field(discriminator="kind")]
+"""The closed union of login credentials a provider can attach to a principal."""
+
+
+class LoginAttachment(BaseModel):
+    """The outcome of attaching a login to a principal.
+
+    ``attached`` is whether an interactive login was attached. ``invite_token``
+    and ``login_path`` are set only for an invite credential — the one-time link
+    the operator follows to set the password later.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    attached: bool
+    invite_token: str | None = None
+    login_path: str | None = None
+
+
 __all__ = [
     "ButtonMethod",
     "FormField",
     "FormMethod",
+    "InviteCredential",
+    "LoginAttachment",
+    "LoginCredential",
     "LoginMethod",
+    "PasswordCredential",
 ]

@@ -9,7 +9,18 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider
-from tai42_contract.accounts.models import ButtonMethod, FormField, FormMethod, LoginMethod
+from tai42_contract.accounts.models import (
+    ButtonMethod,
+    FormField,
+    FormMethod,
+    InviteCredential,
+    LoginAttachment,
+    LoginCredential,
+    LoginMethod,
+    PasswordCredential,
+)
+
+_credential: TypeAdapter[PasswordCredential | InviteCredential] = TypeAdapter(LoginCredential)
 
 _login_method: TypeAdapter[FormMethod | ButtonMethod] = TypeAdapter(LoginMethod)
 
@@ -89,7 +100,7 @@ def test_purpose_defaults_to_login():
     assert method.purpose == "login"
 
 
-@pytest.mark.parametrize("purpose", ["login", "bootstrap", "invite"])
+@pytest.mark.parametrize("purpose", ["login", "invite"])
 def test_purpose_accepts_the_closed_enum(purpose: str):
     method = FormMethod(
         id="password",
@@ -187,13 +198,47 @@ def test_form_field_defaults():
     assert field.autocomplete is None
 
 
+# -- Login credentials ---------------------------------------------------------
+
+
+def test_password_credential_kind_and_yields_from_the_union():
+    credential = _credential.validate_python({"kind": "password", "email": "a@x.test", "password": "pw"})
+    assert isinstance(credential, PasswordCredential)
+    assert credential.kind == "password"
+
+
+def test_invite_credential_kind_and_yields_from_the_union():
+    credential = _credential.validate_python({"kind": "invite", "email": "a@x.test"})
+    assert isinstance(credential, InviteCredential)
+    assert credential.kind == "invite"
+
+
+def test_credential_unknown_kind_fails_validation():
+    with pytest.raises(ValidationError):
+        _credential.validate_python({"kind": "magic", "email": "a@x.test"})
+
+
+def test_password_credential_requires_email_and_password():
+    with pytest.raises(ValidationError):
+        PasswordCredential(email="a@x.test", password="")  # empty password
+    with pytest.raises(ValidationError):
+        InviteCredential(email="")  # empty email
+
+
+def test_login_attachment_defaults():
+    attachment = LoginAttachment(attached=False)
+    assert attachment.invite_token is None
+    assert attachment.login_path is None
+
+
 # -- provision signature lock --------------------------------------------------
 
 
-def test_provision_has_keyword_only_owner_user_id_defaulting_none():
+def test_provision_owner_user_id_is_keyword_only_and_required():
     param = inspect.signature(ApiKeyIdentityProvider.provision).parameters["owner_user_id"]
     assert param.kind is inspect.Parameter.KEYWORD_ONLY
-    assert param.default is None
+    assert param.default is inspect.Parameter.empty
+    assert param.annotation == "str"
 
 
 # -- OWNER_USER_ID_CLAIM contract lock -----------------------------------------

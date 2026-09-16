@@ -25,6 +25,7 @@ from tai42_contract.errors import (
     register_error_kind,
 )
 from tai42_contract.manifest import Manifest
+from tai42_contract.setup import SetupRequest, SetupResult
 from tai42_contract.storage import Storage
 from tai42_contract.tools import ToolInfo
 
@@ -40,6 +41,8 @@ __all__ = [
     "ErrorKind",
     "Manifest",
     "RouteAction",
+    "SetupRequest",
+    "SetupResult",
     "Storage",
     "TaiApp",
     "ToolInfo",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -35,12 +36,49 @@ _ACCESS_CONDITION_ANNOTATION: dict[str, Any] = {
 
 
 class IdentityRecord(BaseModel):
-    """Schema for data stored at 'ac:key:{hash}'. Represents purely WHO the user is."""
+    """Schema for data stored at 'ac:key:{hash}'. Represents purely WHO the user is.
+
+    ``owner_user_id`` names the principal the key belongs to and is REQUIRED:
+    every api key belongs to a principal, so a stored api-key record always
+    carries it. Other fields (email, org_id, description, …) ride as identity
+    claims.
+    """
 
     user_id: str
+    owner_user_id: str
 
     # Extra fields (email, org_id, etc.) are treated as identity claims
     model_config = ConfigDict(extra="allow")
+
+
+class Principal(BaseModel):
+    """A principal: the unit of identity and authority every credential belongs to.
+
+    ``user_id`` is the id the access-control policy row is keyed by. ``kind`` is
+    ``human`` (authenticates through an accounts provider) or ``service`` (holds
+    keys only, never logs in interactively). ``display_name`` is the operator-
+    facing label. ``created_by`` is the principal id that created this one, or
+    ``None`` for the owner the setup door mints. ``disabled`` turns off every
+    credential the principal owns. ``created_at`` is timezone-aware (UTC).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    kind: Literal["human", "service"]
+    display_name: str
+    created_by: str | None = None
+    disabled: bool = False
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _ensure_tz_aware(cls, value: datetime) -> datetime:
+        # A naive created_at compared against an aware now() raises TypeError at
+        # use time; reject it here and normalize to UTC.
+        if value.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware (UTC)")
+        return value.astimezone(UTC)
 
 
 class AccessPolicy(ConditionMixin):

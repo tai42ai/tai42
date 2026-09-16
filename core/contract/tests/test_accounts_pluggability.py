@@ -19,11 +19,20 @@ from tai42_contract.access_control.registry import (
     register_identity_provider,
 )
 from tai42_contract.access_control.registry import reset_registry as reset_identity_registry
-from tai42_contract.accounts.models import FormField, FormMethod, LoginMethod
+from tai42_contract.accounts.models import (
+    FormField,
+    FormMethod,
+    InviteCredential,
+    LoginAttachment,
+    LoginCredential,
+    LoginMethod,
+    PasswordCredential,
+)
 from tai42_contract.accounts.provider import (
     AccountsAdminServices,
     AccountsProvider,
     AccountsProviderSettings,
+    LoginAttachingProvider,
 )
 from tai42_contract.accounts.registry import (
     get_accounts_provider_factory,
@@ -60,9 +69,6 @@ class _FakeAccounts(AccountsProvider):
                 submit_path="/api/login/password",
             )
         ]
-
-    async def needs_bootstrap(self) -> bool:
-        return False
 
     async def revoke_session(self, token: str) -> bool:
         return token == "tai-sess-ok"
@@ -180,20 +186,6 @@ class _MissingLoginMethods(AccountsProvider):
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return None
 
-    async def needs_bootstrap(self) -> bool:
-        return False
-
-    async def revoke_session(self, token: str) -> bool:
-        return False
-
-
-class _MissingNeedsBootstrap(AccountsProvider):
-    async def validate_token(self, token: str) -> AuthIdentity | None:
-        return None
-
-    def login_methods(self) -> list[LoginMethod]:
-        return []
-
     async def revoke_session(self, token: str) -> bool:
         return False
 
@@ -205,16 +197,10 @@ class _MissingRevokeSession(AccountsProvider):
     def login_methods(self) -> list[LoginMethod]:
         return []
 
-    async def needs_bootstrap(self) -> bool:
-        return False
-
 
 class _MissingValidateToken(AccountsProvider):
     def login_methods(self) -> list[LoginMethod]:
         return []
-
-    async def needs_bootstrap(self) -> bool:
-        return False
 
     async def revoke_session(self, token: str) -> bool:
         return False
@@ -224,7 +210,6 @@ class _MissingValidateToken(AccountsProvider):
     "cls",
     [
         _MissingLoginMethods,
-        _MissingNeedsBootstrap,
         _MissingRevokeSession,
         _MissingValidateToken,
     ],
@@ -237,10 +222,9 @@ def test_subclass_missing_any_abstract_method_cannot_instantiate(cls: type[Accou
 def test_full_subclass_instantiates_and_inherits_concrete_members():
     async def run() -> None:
         provider = _FakeAccounts()
-        # The three abstract members answer.
+        # The abstract members answer.
         methods = provider.login_methods()
         assert len(methods) == 1
-        assert await provider.needs_bootstrap() is False
         assert await provider.revoke_session("tai-sess-ok") is True
         assert await provider.revoke_session("foreign") is False
         assert await provider.validate_token("tai-sess-ok") == AuthIdentity(user_id="u1", claims={})
@@ -252,10 +236,93 @@ def test_full_subclass_instantiates_and_inherits_concrete_members():
     asyncio.run(run())
 
 
+# -- LoginAttachingProvider ABC ------------------------------------------------
+
+
+class _FakeLoginAttaching(_FakeAccounts, LoginAttachingProvider):
+    def __init__(self, settings: object | None = None) -> None:
+        super().__init__(settings)
+        self.logins: set[str] = set()
+
+    async def has_login(self, user_id: str) -> bool:
+        return user_id in self.logins
+
+    async def attach_login(self, user_id: str, *, credential: LoginCredential) -> LoginAttachment:
+        self.logins.add(user_id)
+        if credential.kind == "invite":
+            return LoginAttachment(attached=True, invite_token="inv-1", login_path="/api/login/accept")
+        return LoginAttachment(attached=True)
+
+
+def test_login_attaching_provider_is_an_accounts_provider():
+    # The mix-in is an AccountsProvider, so it flows through the same registry and
+    # enforcement seam; a plain accounts provider is NOT a LoginAttachingProvider.
+    provider = _FakeLoginAttaching()
+    assert isinstance(provider, AccountsProvider)
+    assert isinstance(provider, LoginAttachingProvider)
+    assert not isinstance(_FakeAccounts(), LoginAttachingProvider)
+
+
+def test_attach_login_is_abstract_until_implemented():
+    class _NoAttach(_FakeAccounts, LoginAttachingProvider):
+        async def has_login(self, user_id: str) -> bool:
+            return False
+
+    assert "attach_login" in LoginAttachingProvider.__abstractmethods__
+    with pytest.raises(TypeError):
+        _NoAttach()  # pyright: ignore[reportAbstractUsage]
+
+
+def test_has_login_is_abstract_until_implemented():
+    class _NoHasLogin(_FakeAccounts, LoginAttachingProvider):
+        async def attach_login(self, user_id: str, *, credential: LoginCredential) -> LoginAttachment:
+            return LoginAttachment(attached=True)
+
+    assert "has_login" in LoginAttachingProvider.__abstractmethods__
+    with pytest.raises(TypeError):
+        _NoHasLogin()  # pyright: ignore[reportAbstractUsage]
+
+
+def test_has_login_answers_whether_the_provider_holds_a_login():
+    async def run() -> None:
+        provider = _FakeLoginAttaching()
+        assert await provider.has_login("owner-1") is False
+        await provider.attach_login("owner-1", credential=PasswordCredential(email="a@x.test", password="pw"))
+        assert await provider.has_login("owner-1") is True
+        assert await provider.has_login("someone-else") is False
+
+    asyncio.run(run())
+
+
+def test_attach_login_returns_the_attachment():
+    async def run() -> None:
+        provider = _FakeLoginAttaching()
+        password = await provider.attach_login(
+            "owner-1", credential=PasswordCredential(email="a@x.test", password="pw")
+        )
+        assert password == LoginAttachment(attached=True)
+        invite = await provider.attach_login("owner-1", credential=InviteCredential(email="a@x.test"))
+        assert invite.invite_token == "inv-1"
+        assert invite.login_path == "/api/login/accept"
+
+    asyncio.run(run())
+
+
 # -- Protocols -----------------------------------------------------------------
 
 
 class _StandInAdmin:
+    async def create_principal(
+        self,
+        user_id: str,
+        *,
+        kind: str,
+        display_name: str,
+        created_by: str | None,
+        role: str,
+    ) -> None:
+        return None
+
     async def apply_role(self, user_id: str, role: str) -> None:
         return None
 

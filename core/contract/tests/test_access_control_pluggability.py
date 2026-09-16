@@ -136,7 +136,7 @@ class _FullApiKeyProvider(ApiKeyIdentityProvider):
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return AuthIdentity(user_id="u", claims={}) if token in self._store.values() else None
 
-    async def provision(self, user_id: str, description: str, *, owner_user_id: str | None = None) -> str:
+    async def provision(self, user_id: str, description: str, *, owner_user_id: str) -> str:
         self._store[user_id] = description
         return f"raw-key-for-{user_id}"
 
@@ -158,7 +158,7 @@ class _PartialApiKeyProvider(ApiKeyIdentityProvider):
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return None
 
-    async def provision(self, user_id: str, description: str, *, owner_user_id: str | None = None) -> str:
+    async def provision(self, user_id: str, description: str, *, owner_user_id: str) -> str:
         return "k"
 
     async def revoke(self, user_id: str) -> bool:
@@ -168,7 +168,7 @@ class _PartialApiKeyProvider(ApiKeyIdentityProvider):
 def test_full_subclass_implements_every_method():
     async def run() -> None:
         provider = _FullApiKeyProvider()
-        raw = await provider.provision("alice", "laptop")
+        raw = await provider.provision("alice", "laptop", owner_user_id="owner-1")
         assert raw == "raw-key-for-alice"
         assert await provider.list_identities() == [("alice", "laptop")]
         assert await provider.update_description("alice", "phone") is True

@@ -37,9 +37,10 @@ class ReadinessTarget(NamedTuple):
 OWNER_USER_ID_CLAIM = "owner_user_id"
 """Identity-record claim naming the account that owns an API key.
 
-Written by ``ApiKeyIdentityProvider.provision`` implementations when an
-owner is given; read by the application's per-request attenuation. A record
-without this claim is an ownerless machine key.
+Written by every ``ApiKeyIdentityProvider.provision`` implementation and read
+by the application's per-request attenuation. Every api key belongs to a
+principal, so every api-key identity record carries this claim; a record
+without it is an invariant breach the application surfaces loudly at read.
 
 Authoritative ONLY from the mint path (``ApiKeyIdentityProvider.provision``).
 The application's verifier ENFORCES this: it strips this claim from the
@@ -108,10 +109,10 @@ class ApiKeyIdentityProvider(IdentityProvider):
     """
 
     @abstractmethod
-    async def provision(self, user_id: str, description: str, *, owner_user_id: str | None = None) -> str:
+    async def provision(self, user_id: str, description: str, *, owner_user_id: str) -> str:
         """Write the key->identity record in the provider's OWN storage and return the RAW key.
 
-        The identity record — key hash -> ``{user_id, description}``
+        The identity record — key hash -> ``{user_id, owner_user_id, description}``
         plus the reverse user -> hash lookup — is owned by the provider. Async
         because provider storage (e.g. Redis) is reached over an async client.
 
@@ -124,11 +125,11 @@ class ApiKeyIdentityProvider(IdentityProvider):
         orchestrating layer relies on this atomic guard, so a cross-backend
         pre-check is not a substitute.
 
-        When ``owner_user_id`` is given, the implementation MUST persist it on the
-        identity record under :data:`OWNER_USER_ID_CLAIM` so it surfaces in
-        ``AuthIdentity.claims`` on every subsequent ``validate_token``. ``None``
-        mints an ownerless machine key; whether a caller is ALLOWED to mint
-        ownerless keys is application policy, not provider logic.
+        ``owner_user_id`` is REQUIRED: every api key belongs to a principal, so the
+        implementation MUST persist it on the identity record under
+        :data:`OWNER_USER_ID_CLAIM` so it surfaces in ``AuthIdentity.claims`` on
+        every subsequent ``validate_token``. A ``None`` or empty owner is a
+        ``ValueError`` raised BEFORE any write.
         """
         ...
 
