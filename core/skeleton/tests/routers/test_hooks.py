@@ -388,6 +388,10 @@ def registry():
     app = build_app()
     tai42_app.bind(app)
     reg = app._webhook_verifier_registry
+    # The registry lives on the process app singleton, and importing a builtin verifier
+    # module (e.g. shared_secret) registers onto it as a side effect. Reset at BOTH ends so
+    # the test sees exactly the verifiers it registers, independent of any prior import.
+    reg.reset()
     try:
         yield reg
     finally:

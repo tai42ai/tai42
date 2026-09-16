@@ -12,7 +12,11 @@ every door.
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
+
 import pytest
+from starlette.requests import Request
 from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider
 from tai42_contract.access_control.models import AccessPolicy
@@ -20,9 +24,17 @@ from tai42_contract.access_control.models import AccessPolicy
 import tai42_skeleton.versioning as versioning_module
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.roles import seed_default_roles
-from tai42_skeleton.operations import BadRequestError, ConflictError, ForbiddenError, NotFoundError
+from tai42_skeleton.app.route_registry import _SpecApp
+from tai42_skeleton.operations import (
+    BadRequestError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    register_operation_route,
+)
 from tai42_skeleton.operations import principals as principals_ops
 from tai42_skeleton.operations._authority import Caller
+from tai42_skeleton.operations.decorator import operation_metadata_of
 
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx
 from .test_policy_store import _MemStore
@@ -127,10 +139,10 @@ async def test_create_principal_creates_row_and_applies_role(
 ) -> None:
     await _seed_roles(pg)
     row = await principals_ops.create_principal(user_id="svc", kind="service", display_name="A Service", role="editor")
-    assert row["user_id"] == "svc"
-    assert row["kind"] == "service"
-    assert row["display_name"] == "A Service"
-    assert row["created_by"] == "admin1"  # the admin who created it
+    assert row.user_id == "svc"
+    assert row.kind == "service"
+    assert row.display_name == "A Service"
+    assert row.created_by == "admin1"  # the admin who created it
     assert pg.principal("svc") is not None
     # The role landed on the principal's own policy row.
     assert pg.policy("svc") is not None
@@ -141,8 +153,8 @@ async def test_create_principal_mints_an_id_when_absent(
 ) -> None:
     await _seed_roles(pg)
     row = await principals_ops.create_principal(user_id=None, kind="human", display_name="H", role="viewer")
-    assert row["user_id"].startswith("usr-")
-    assert pg.principal(row["user_id"]) is not None
+    assert row.user_id.startswith("usr-")
+    assert pg.principal(row.user_id) is not None
 
 
 async def test_create_duplicate_principal_is_409(
@@ -170,7 +182,7 @@ async def test_list_principals(
     pg.add_principal("a", display_name="A")
     pg.add_principal("b", display_name="B")
     rows = await principals_ops.list_principals()
-    assert {r["user_id"] for r in rows} == {"a", "b"}
+    assert {r.user_id for r in rows.root} == {"a", "b"}
 
 
 async def test_update_display_name(
@@ -179,7 +191,7 @@ async def test_update_display_name(
     pg.add_principal("a", display_name="Old")
     pg.add_policy("a", scopes=["read"])
     row = await principals_ops.update_principal(user_id="a", display_name="New")
-    assert row["display_name"] == "New"
+    assert row.display_name == "New"
 
 
 async def test_update_disabled_flips_both_homes(
@@ -192,7 +204,7 @@ async def test_update_disabled_flips_both_homes(
     pg.add_principal("co", kind="service", display_name="Co")
     pg.add_policy("co", scopes=["*"])
     row = await principals_ops.update_principal(user_id="a", disabled=True)
-    assert row["disabled"] is True
+    assert row.disabled is True
     # The enforcement projection on the policy row moves with the authoritative column.
     assert pg.policy_body("a")["policy_data"]["disabled"] is True
     await principals_ops.update_principal(user_id="a", disabled=False)
@@ -240,7 +252,7 @@ async def test_update_disabled_on_an_oidc_human_flips_both_homes(
     pg.add_principal("co", kind="service", display_name="Co")
     pg.add_policy("co", scopes=["*"])
     row = await principals_ops.update_principal(user_id="oidc:idp:sub", disabled=True)
-    assert row["disabled"] is True
+    assert row.disabled is True
     assert pg.principal("oidc:idp:sub")["disabled"] is True
     assert pg.policy_body("oidc:idp:sub")["policy_data"]["disabled"] is True
 
@@ -254,7 +266,7 @@ async def test_update_human_display_name_is_allowed(
     pg.add_policy("h", scopes=["*"])
     login_provider.add("h")
     row = await principals_ops.update_principal(user_id="h", display_name="New")
-    assert row["display_name"] == "New"
+    assert row.display_name == "New"
 
 
 async def test_delete_login_owned_principal_is_409(
@@ -399,3 +411,79 @@ async def test_principals_doors_are_admin_only(
 ) -> None:
     with pytest.raises(ForbiddenError, match="administrators"):
         await call()
+
+
+def _http_request(method: str, path: str, *, body: dict | None = None, path_params: dict | None = None) -> Request:
+    """A minimal ASGI request carrying an optional JSON body, for driving a route handler."""
+    payload = json.dumps(body or {}).encode()
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": payload, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "path_params": path_params or {},
+    }
+    return Request(scope, receive)
+
+
+async def test_principals_routes_serialize_created_at_over_http(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis_mgmt: FakeRedis, admin_caller
+) -> None:
+    """The list/create/update routes answer 200 with a JSON-native ISO ``created_at``.
+
+    Driven through the route adapter — the seam that JSON-encodes the response body — so the
+    principal's timezone-aware ``created_at`` reaches the wire as an ISO-8601 string, which
+    the JSON encoder cannot do for a raw ``datetime``.
+    """
+    await _seed_roles(pg)
+    pg.add_principal("seed", kind="service", display_name="Seed")
+    pg.add_policy("seed", scopes=["read"])
+
+    list_handler = register_operation_route(
+        _SpecApp(),
+        operation_metadata_of(principals_ops.list_principals),
+        path="/api/auth/principals",
+        method="GET",
+        action="secret",
+    )
+    create_handler = register_operation_route(
+        _SpecApp(),
+        operation_metadata_of(principals_ops.create_principal),
+        path="/api/auth/principals",
+        method="POST",
+        action="fenced",
+    )
+    update_handler = register_operation_route(
+        _SpecApp(),
+        operation_metadata_of(principals_ops.update_principal),
+        path="/api/auth/principals/{user_id}",
+        method="PUT",
+        action="fenced",
+    )
+
+    list_resp = await list_handler(_http_request("GET", "/api/auth/principals"))
+    assert list_resp.status_code == 200
+    listed = json.loads(bytes(list_resp.body))["data"]
+    assert datetime.fromisoformat(listed[0]["created_at"]).tzinfo is not None
+
+    create_resp = await create_handler(
+        _http_request("POST", "/api/auth/principals", body={"kind": "service", "display_name": "Svc", "role": "editor"})
+    )
+    assert create_resp.status_code == 200
+    created = json.loads(bytes(create_resp.body))["data"]
+    assert datetime.fromisoformat(created["created_at"]).tzinfo is not None
+
+    update_resp = await update_handler(
+        _http_request(
+            "PUT", "/api/auth/principals/seed", body={"display_name": "Renamed"}, path_params={"user_id": "seed"}
+        )
+    )
+    assert update_resp.status_code == 200
+    updated = json.loads(bytes(update_resp.body))["data"]
+    assert updated["display_name"] == "Renamed"
+    assert datetime.fromisoformat(updated["created_at"]).tzinfo is not None

@@ -114,11 +114,11 @@ async def _refuse_if_last_admin(guard: Any, user_id: str, target_disabled: bool)
 
 
 @operation(summary="List principals", tags=["access-control"], errors=[ForbiddenError], response_model=PrincipalListing)
-async def list_principals() -> list[dict[str, Any]]:
+async def list_principals() -> PrincipalListing:
     """Every principal (admin only)."""
     caller = await resolve_caller()
     require_admin(caller)
-    return await management.list_principals()
+    return PrincipalListing.model_validate(await management.list_principals())
 
 
 @operation(
@@ -129,7 +129,7 @@ async def list_principals() -> list[dict[str, Any]]:
     request_model=PrincipalCreate,
     response_model=Principal,
 )
-async def create_principal(user_id: str | None, kind: str, display_name: str, role: str) -> dict[str, Any]:
+async def create_principal(user_id: str | None, kind: str, display_name: str, role: str) -> Principal:
     """Create a ``human`` or ``service`` principal and apply its role (admin only).
 
     The door mints a ``user_id`` when absent. A duplicate id is a 409; an unknown role is a
@@ -139,13 +139,14 @@ async def create_principal(user_id: str | None, kind: str, display_name: str, ro
     require_admin(caller)
     resolved_id = user_id or f"usr-{token_urlsafe(8)}"
     try:
-        return await roles.create_principal(
+        created = await roles.create_principal(
             resolved_id, kind=kind, display_name=display_name, created_by=caller.caller_id, role=role
         )
     except ValueError as exc:
         raise ConflictError(str(exc)) from exc
     except KeyError as exc:
         raise BadRequestError(f"unknown role: {role!r}") from exc
+    return Principal.model_validate(created)
 
 
 @operation(
@@ -156,9 +157,7 @@ async def create_principal(user_id: str | None, kind: str, display_name: str, ro
     request_model=PrincipalUpdate,
     response_model=Principal,
 )
-async def update_principal(
-    user_id: str, display_name: str | None = None, disabled: bool | None = None
-) -> dict[str, Any]:
+async def update_principal(user_id: str, display_name: str | None = None, disabled: bool | None = None) -> Principal:
     """Update a principal's display name and/or disabled state (admin only).
 
     Both fields are omit-means-keep. A ``disabled`` change is refused (409) when a
@@ -191,7 +190,7 @@ async def update_principal(
     updated = await store.get_principal(user_id)
     if updated is None:
         raise NotFoundError(f"principal not found: {user_id!r}")
-    return updated
+    return Principal.model_validate(updated)
 
 
 @operation(
