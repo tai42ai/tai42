@@ -20,6 +20,7 @@ from typing import LiteralString
 
 import pytest
 from psycopg.errors import UniqueViolation
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
@@ -80,7 +81,27 @@ async def test_policy_user_id_unique_constraint_is_the_authority(store: tuple[Po
     # real constraint raises, not an in-process pre-check.
     with pytest.raises(UniqueViolation):
         await s.create_policy(user, [])
-    assert await s.policy_exists(user) is True
+    assert await s.get_policy_body(user) is not None
+
+
+async def test_list_minted_policies_selects_only_fingerprinted_rows(
+    store: tuple[PostgresAccessControlStore, str],
+) -> None:
+    s, token = store
+    minted = f"{token}-minted"
+    account = f"{token}-account"
+    null_fp = f"{token}-null-fp"
+    # A minted key carries a NON-NULL fingerprint value in its JSONB policy_data; a
+    # role-assigned account row does not, and a JSON ``null`` under the claim is not a key
+    # either. ``policy_data ->> claim IS NOT NULL`` (text extraction; a JSON null yields SQL
+    # NULL) must select only the minted row — proven against real Postgres, no fake.
+    await s.create_policy(minted, [], {KEY_FINGERPRINT_CLAIM: "fp-1"})
+    await s.create_policy(account, [], {ROLE_POINTER_KEY: "reader"})
+    await s.create_policy(null_fp, [], {KEY_FINGERPRINT_CLAIM: None})
+
+    got = {uid: body for uid, body in await s.list_minted_policies() if uid in (minted, account, null_fp)}
+    assert set(got) == {minted}
+    assert got[minted]["policy_data"] == {KEY_FINGERPRINT_CLAIM: "fp-1"}
 
 
 async def test_route_url_unique_upsert_repoints_in_place(store: tuple[PostgresAccessControlStore, str]) -> None:

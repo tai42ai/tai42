@@ -29,8 +29,10 @@ silent orphan, and every step is ordered so a plain retry finishes the job.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
@@ -44,9 +46,23 @@ from tai42_skeleton.access_control.settings import AccessControlSettings, access
 from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.utils.redis_typing import awaited
 
+logger = logging.getLogger(__name__)
+
 # Identities that are infrastructure, not provisioned end-user keys, and so are
 # omitted from the enumerated tokens payload.
 _RESERVED_USER_IDS = frozenset({"__root__"})
+
+
+def _is_minted_policy(body: Mapping[str, Any]) -> bool:
+    """Whether a policy ``body`` was minted as an api key.
+
+    The single marker is a NON-NULL :data:`KEY_FINGERPRINT_CLAIM` value in
+    ``policy_data``: every mint stamps it and every edit/rollback carries it, while a
+    role-assigned account row never has one. A JSON ``null`` under the claim does not
+    count as minted — the value must be present and non-null, matching the store's
+    ``list_minted_policies`` selection.
+    """
+    return (body.get("policy_data") or {}).get(KEY_FINGERPRINT_CLAIM) is not None
 
 
 class _Unset(Enum):
@@ -141,9 +157,16 @@ async def get_all_existing_tokens_payload() -> list[dict[str, Any]]:
 
     The identities (``user_id``/``description``) come from the active provider's
     ``list_identities`` enumeration (it owns the identity records); each is merged
-    with its policy read from the PG store. Infrastructure identities (falsy or
-    reserved ``user_id``) are skipped; policy fields win on merge. Key material is
-    never included — only the stored ``user_id``/``description`` plus policy fields.
+    with its policy read from the PG store and carries ``orphaned: False``.
+    Infrastructure identities (falsy or reserved ``user_id``, e.g. ``__root__``) are
+    skipped; policy fields win on merge. Key material is never included — only the
+    stored ``user_id``/``description`` plus policy fields.
+
+    A minted policy row (one carrying the key fingerprint) whose identity record is
+    gone is an ORPHAN: it is appended with ``orphaned: True`` and an empty
+    ``description`` (its only home was the lost identity record), so an operator sees
+    a partial-restore state rather than a silently missing key. A never-minted
+    role-assigned account row (no fingerprint) is not enumerated here.
 
     Ownership rides the policy merge: the mint path dual-homes the owner claim into
     ``policy_data`` under ``OWNER_USER_ID_CLAIM`` (its management/listing home), so an
@@ -161,16 +184,51 @@ async def get_all_existing_tokens_payload() -> list[dict[str, Any]]:
     provider = _identity_provider()
     store = access_control_store()
     identities = await provider.list_identities()
+    seen: set[str] = set()
     payload: list[dict[str, Any]] = []
     for user_id, description in identities:
         if not user_id or user_id in _RESERVED_USER_IDS:
             continue
+        seen.add(user_id)
         merged: dict[str, Any] = {"user_id": user_id, "description": description}
         policy = await store.get_policy_body(user_id)
         if policy:
             merged.update(policy)
+        merged["orphaned"] = False
         payload.append(merged)
+    # Minted policy rows with no matching identity record are orphans (their principal
+    # is gone): surfaced flagged, description-less, reserved ids excluded.
+    for user_id, policy in await store.list_minted_policies():
+        if user_id in seen or user_id in _RESERVED_USER_IDS:
+            continue
+        payload.append({"user_id": user_id, "description": "", **policy, "orphaned": True})
     return payload
+
+
+async def api_key_state(user_id: str) -> Literal["absent", "live", "orphaned", "account"]:
+    """The provisioning state of ``user_id`` across the policy store and identity provider.
+
+    - ``absent`` — no policy row;
+    - ``live`` — a policy row AND a live identity record;
+    - ``orphaned`` — a policy row minted as an api key (it carries the key fingerprint)
+      whose identity record is gone;
+    - ``account`` — a policy row with no fingerprint and no identity record (a
+      role-assigned account user, never minted as an api key).
+
+    The classification the import and mint paths read to choose skip / re-mint / mint:
+    one policy read plus (only when a row exists) one provider enumeration. Revoke uses
+    its own identity-first read instead, so a half-finished revoke stays retriable.
+    """
+    store = access_control_store()
+    body = await store.get_policy_body(user_id)
+    if body is None:
+        return "absent"
+    provider = _identity_provider()
+    if await _has_identity_record(provider, user_id):
+        return "live"
+    if _is_minted_policy(body):
+        return "orphaned"
+    return "account"
 
 
 # -- scope / route mutations (delegated to the PG store) ---------------------
@@ -281,8 +339,16 @@ async def add_user_api_key(
     store = access_control_store()
 
     # Pre-checks with NO side effect, so a duplicate user or an unknown scope raises
-    # before the provider mints anything (never a half-provisioned key).
-    if await store.policy_exists(user_id):
+    # before the provider mints anything (never a half-provisioned key). An orphaned
+    # policy row is refused with its own recovery text — a fresh mint never silently
+    # adopts a stale policy.
+    state = await api_key_state(user_id)
+    if state == "orphaned":
+        raise ValueError(
+            f"user id {user_id!r} has an orphaned policy row (its identity record is gone); "
+            "re-import the access_control backup to re-mint it, or revoke it first"
+        )
+    if state in ("live", "account"):
         raise ValueError(
             f"user id {user_id!r} is already in use; to replace its key, revoke the key for "
             "that user id, then re-import"
@@ -364,13 +430,46 @@ async def edit_user_payload(
 
     # Description edit → the provider (its single home). Only a supplied description
     # reaches the provider; ``update_description`` returning ``False`` for a user
-    # whose policy we just wrote means the identity record is missing while the
-    # policy exists — a genuine inconsistency, so raise loudly rather than silently.
+    # whose policy we just wrote means the row is orphaned (its identity record is
+    # gone), whose only home was that description, so raise loudly rather than silently.
     if not isinstance(description, _Unset) and not await provider.update_description(user_id, description):
         raise RuntimeError(
-            f"identity record for user {user_id!r} is missing while its policy exists — cannot update the description"
+            f"user id {user_id!r} has an orphaned policy row (its identity record is gone) while its policy "
+            "exists — cannot update the description; re-import the access_control backup to re-mint it, or revoke it"
         )
     return policy
+
+
+async def remint_orphaned_api_key(user_id: str, description: str) -> str:
+    """Re-mint the identity record for an orphaned key onto its surviving policy row; return the raw key.
+
+    An orphan is a policy row minted as an api key whose identity record is gone
+    (:func:`api_key_state` reads ``orphaned``) — the partial-restore state where the
+    Postgres policy survived a Redis flush. This mints a FRESH identity record for the
+    SAME ``user_id`` through the provider, re-homing the owner claim from the policy
+    row's management home (``policy_data[OWNER_USER_ID_CLAIM]``) onto the identity
+    record, its ENFORCEMENT home, so the restored key carries its original ownership.
+
+    The policy row is NOT touched: its scopes, condition, key fingerprint and owner
+    claim stay, so a hook binding keyed on the fingerprint keeps resolving after the
+    restore. Returns the raw ``sk-…`` key (surfaced to the caller once).
+
+    Raises ``ValueError`` when ``user_id`` is not in the ``orphaned`` state — never a
+    silent re-mint over a live key or an account row.
+    """
+    state = await api_key_state(user_id)
+    if state != "orphaned":
+        raise ValueError(
+            f"user id {user_id!r} is not an orphaned api key policy (state {state!r}); re-mint applies only "
+            "to a policy row minted as an api key whose identity record is gone"
+        )
+    provider = _identity_provider()
+    store = access_control_store()
+    body = await store.get_policy_body(user_id)
+    owner_user_id = ((body or {}).get("policy_data") or {}).get(OWNER_USER_ID_CLAIM)
+    raw_key = await provider.provision(user_id, description, owner_user_id=owner_user_id)
+    logger.info("access_control: re-minted identity for orphaned api key policy user_id=%s", user_id)
+    return raw_key
 
 
 async def _has_identity_record(provider: ApiKeyIdentityProvider, user_id: str) -> bool:
@@ -383,49 +482,62 @@ async def _has_identity_record(provider: ApiKeyIdentityProvider, user_id: str) -
     return any(uid == user_id for uid, _description in await provider.list_identities())
 
 
-async def revoke_api_key(user_id: str) -> bool:
-    """Delete a provisioned key and all of its records.
+async def _clear_policy_records(user_id: str) -> None:
+    """Delete the PG policy row, bump the policy version, and delete the live-context hash.
 
-    Returns ``False`` if ``user_id`` has no identity record.
-
-    That record is the single existence signal of a MINTED key; a policy row alone is NOT
-    one — role assignment provisions policy rows for account users this surface must never
-    delete.
-
-    FAIL-CLOSED step ORDER, every step retriable:
-
-    1. read existence from the provider BEFORE deleting anything, so a half-finished
-       revoke still has the evidence a plain retry needs;
-    2. the PG policy row FIRST — it is the whole authority a bound background execution
-       runs on, so the fire dies even if a later step fails;
-    3. bump the policy version IMMEDIATELY behind that delete, inside this call: the
-       enforcer's cache is keyed ``(user_id, version)``, so until the bump lands a warm
-       slot serves the key's pre-delete scopes and condition for the cache ttl;
-    4. delete the live-context hash ``ac:context:{user_id}`` — an orphan would hand a
-       future remint of the same ``user_id`` the dead key's usage/quota counters;
-    5. the provider's ``revoke`` LAST, destroying step 1's existence evidence only once
-       every other record is gone, so no fault strands a step behind a retry answering
-       ``False``.
-
-    A failure in steps 2-5 RAISES loudly rather than leaving a silent orphan. The residue
-    is a key that verifies while holding no policy, which the authentication backend
-    refuses outright; repeating the call clears it.
+    The FAIL-CLOSED order revoke depends on: the PG policy row FIRST (the whole authority a
+    bound background execution runs on, so the fire dies even if a later step fails); the
+    policy-version bump IMMEDIATELY behind it (the enforcer's cache is keyed
+    ``(user_id, version)``, so a warm slot serves the deleted key's scopes until the bump
+    lands); then the live-context hash ``ac:context:{user_id}`` (a residue would hand a
+    future remint of the same ``user_id`` the dead key's usage/quota counters). A failure in
+    any step RAISES loudly; every step is retriable.
     """
     s = _settings()
-    provider = _identity_provider()
     store = access_control_store()
-
-    if not await _has_identity_record(provider, user_id):
-        # Never minted under this id: a clean False the route maps to a 404. Any policy
-        # row it holds belongs to another provisioning surface.
-        return False
-
     await store.delete_policy(user_id)
     await bump_policy_version()
     async with client_ctx(RedisClient, s.redis) as r:
         await awaited(r.delete(_context_key(s, user_id)))
-    # A concurrent revoke that won the race reached the same outcome, so still report True.
-    await provider.revoke(user_id)
+
+
+async def revoke_api_key(user_id: str) -> bool:
+    """Delete a provisioned key and all of its records; clear an orphaned policy row.
+
+    Returns ``True`` for a LIVE key (an identity record exists) and for an ORPHANED policy
+    row (a row minted as an api key — it carries the key fingerprint — whose identity record
+    is already gone). Returns ``False`` for an unknown id and for a role-assigned ACCOUNT
+    row (no fingerprint, no identity record) this surface must never delete.
+
+    The existence signal is the PROVIDER's identity record, read BEFORE deleting anything and
+    destroyed LAST: so a half-finished revoke of a live key still has the evidence a plain
+    retry needs (the policy row is deleted first, but the surviving identity record keeps the
+    retry on the live path). Only when no identity record exists does the policy row's
+    fingerprint decide the orphan-vs-account branch.
+
+    The record teardown (:func:`_clear_policy_records`) runs fail-closed; for a live key the
+    provider's ``revoke`` runs LAST, once every other record is gone. An orphaned row has no
+    identity record, so that final step is skipped. A failure mid-teardown RAISES loudly; the
+    residue (a key that verifies while holding no policy) is refused by the auth backend and a
+    repeat call clears it.
+    """
+    provider = _identity_provider()
+    store = access_control_store()
+
+    if await _has_identity_record(provider, user_id):
+        await _clear_policy_records(user_id)
+        # A concurrent revoke that won the race reached the same outcome, so still report True.
+        await provider.revoke(user_id)
+        logger.info("access_control: revoked api key for user_id=%s", user_id)
+        return True
+
+    # No identity record: an orphaned MINTED policy row (it carries the key fingerprint) is
+    # cleared here; a role-assigned account row and an unknown id are left untouched (False).
+    body = await store.get_policy_body(user_id)
+    if body is None or not _is_minted_policy(body):
+        return False
+    await _clear_policy_records(user_id)
+    logger.info("access_control: revoked orphaned api key policy for user_id=%s (no identity record)", user_id)
     return True
 
 

@@ -450,13 +450,13 @@ async def test_edit_rejects_unknown_scope(pg: FakeAccessControlPg, provider: _Sp
         await management.edit_user_payload("u1", scopes=["ghost"])
 
 
-async def test_edit_missing_identity_while_policy_exists_raises(
+async def test_edit_missing_identity_while_a_policy_row_exists_raises(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
-    # A policy row with no matching identity record is a genuine inconsistency: a
-    # supplied description that the provider cannot find raises loudly.
+    # A policy row with no matching identity record is orphaned: a supplied description
+    # that the provider cannot find raises loudly, naming the orphaned state.
     pg.add_policy("u1", scopes=[])
-    with pytest.raises(RuntimeError, match="identity record for user"):
+    with pytest.raises(RuntimeError, match="orphaned policy row"):
         await management.edit_user_payload("u1", description="x")
 
 
@@ -476,6 +476,7 @@ async def test_tokens_payload_merges_identity_and_policy(
             "scopes": ["scope-a"],
             "policy_data": {KEY_FINGERPRINT_CLAIM: fingerprint},
             "condition": None,
+            "orphaned": False,
         }
     ]
 
@@ -498,6 +499,102 @@ async def test_tokens_payload_empty_on_validator_only_deployment(pg: FakeAccessC
         assert await management.get_all_existing_tokens_payload() == []
     finally:
         reset_all_settings()
+
+
+# -- orphaned policy rows (partial-restore state) ----------------------------
+
+
+async def test_tokens_payload_flags_orphaned_minted_rows(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
+) -> None:
+    # A live key (identity + minted policy), an orphan (minted policy, no identity),
+    # and an account row (no fingerprint, no identity — never a key).
+    await management.add_user_api_key("live", "live-desc", [])
+    pg.add_policy("orphan", scopes=["s"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-x"})
+    pg.add_policy("account", scopes=["hooks"])
+
+    by_id = {row["user_id"]: row for row in await management.get_all_existing_tokens_payload()}
+    # A live key carries orphaned=False; the orphan is surfaced flagged and description-less
+    # with its policy intact; the account row is not enumerated at all.
+    assert by_id["live"]["orphaned"] is False
+    assert by_id["orphan"]["orphaned"] is True
+    assert by_id["orphan"]["description"] == ""
+    assert by_id["orphan"]["scopes"] == ["s"]
+    assert by_id["orphan"]["policy_data"] == {KEY_FINGERPRINT_CLAIM: "fp-x"}
+    assert "account" not in by_id
+
+
+async def test_api_key_state_reads_the_four_states(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
+) -> None:
+    assert await management.api_key_state("nobody") == "absent"
+    await management.add_user_api_key("live", "d", [])
+    assert await management.api_key_state("live") == "live"
+    pg.add_policy("orphan", scopes=[], policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+    assert await management.api_key_state("orphan") == "orphaned"
+    pg.add_policy("account", scopes=["hooks"])
+    assert await management.api_key_state("account") == "account"
+
+
+async def test_null_fingerprint_value_is_an_account_row_not_a_minted_one(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
+) -> None:
+    # A JSON null under the fingerprint claim is NOT a minted key: the marker is a
+    # non-null value. The row is an account row — never listed as a token, and its state
+    # is ``account``, not ``orphaned``.
+    pg.add_policy("null-fp", scopes=["s"], policy_data={KEY_FINGERPRINT_CLAIM: None})
+    assert [row["user_id"] for row in await management.get_all_existing_tokens_payload()] == []
+    assert await management.api_key_state("null-fp") == "account"
+
+
+async def test_revoke_clears_an_orphan_without_calling_the_provider(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
+) -> None:
+    pg.add_policy("orphan", scopes=[], policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+    redis._hashes[_ctx_key("orphan")] = {"used": "3"}
+    # An orphan has no identity record to revoke: the policy row and context hash are
+    # cleared, True is returned, and the provider is never called.
+    assert await management.revoke_api_key("orphan") is True
+    assert pg.policy("orphan") is None
+    assert _ctx_key("orphan") not in redis._hashes
+    assert provider.revoke_calls == []
+
+
+async def test_mint_on_an_orphaned_id_raises_naming_the_orphan_case(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
+) -> None:
+    pg.add_policy("orphan", scopes=[], policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+    with pytest.raises(ValueError, match="orphaned policy row"):
+        await management.add_user_api_key("orphan", "d", [])
+    # No auto-heal: the provider mints nothing on a plain mint over an orphan.
+    assert provider.provision_calls == []
+
+
+async def test_remint_orphan_rehomes_the_owner_and_leaves_the_policy_byte_equal(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
+) -> None:
+    owner = "owner-1"
+    policy_data = {KEY_FINGERPRINT_CLAIM: "fp-1", OWNER_USER_ID_CLAIM: owner}
+    body_before = {"scopes": ["s"], "policy_data": policy_data, "condition": None}
+    pg.add_policy("orphan", scopes=["s"], policy_data=dict(policy_data))
+
+    raw = await management.remint_orphaned_api_key("orphan", "restored")
+    assert raw == "sk-orphan"
+    # A fresh identity record exists, carrying the owner claim re-homed from the policy.
+    assert provider.identities["orphan"] == "restored"
+    assert provider.provision_owners["orphan"] == owner
+    # The policy row is untouched: scopes, condition, fingerprint and owner all byte-equal.
+    assert pg.policy_body("orphan") == body_before
+
+
+async def test_remint_refuses_a_non_orphaned_state(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
+) -> None:
+    await management.add_user_api_key("live", "d", [])
+    with pytest.raises(ValueError, match="not an orphaned"):
+        await management.remint_orphaned_api_key("live", "x")
+    # No second provision on the refusal (only the original live mint).
+    assert provider.provision_calls == ["live"]
 
 
 # -- version bump ------------------------------------------------------------

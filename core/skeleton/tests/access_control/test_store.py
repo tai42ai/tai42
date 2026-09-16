@@ -263,12 +263,6 @@ async def test_get_policy_body_unknown_user_is_none(pg: FakeAccessControlPg) -> 
     assert await STORE().get_policy_body("missing") is None
 
 
-async def test_policy_exists(pg: FakeAccessControlPg) -> None:
-    pg.add_policy("u1")
-    assert await STORE().policy_exists("u1") is True
-    assert await STORE().policy_exists("u2") is False
-
-
 async def test_create_policy_writes_row(pg: FakeAccessControlPg) -> None:
     pg.add_route("/s", "s")  # the granted scope must have a live route
     body = await STORE().create_policy("u1", ["s"], {"k": 1}, {"content": ".c", "id": None, "kwargs": {"a": 2}})
@@ -291,14 +285,14 @@ async def test_create_policy_rejects_unrouted_scope(pg: FakeAccessControlPg) -> 
     # lock-and-validate rejects it (mirroring the edit path) and writes no row.
     with pytest.raises(ValueError, match="does not exist"):
         await STORE().create_policy("u1", ["ghost"])
-    assert await STORE().policy_exists("u1") is False
+    assert await STORE().get_policy_body("u1") is None
 
 
 async def test_wildcard_scope_exempt_from_route_validation(pg: FakeAccessControlPg) -> None:
     # The universal ``"*"`` is the read-side wildcard, not a concrete route scope, so
     # it is exempt from route validation on both the create and update write paths.
     await STORE().create_policy("u1", ["*"])
-    assert await STORE().policy_exists("u1") is True
+    assert await STORE().get_policy_body("u1") is not None
     assert await STORE().update_policy_fields("u1", {"scopes": ["*"]}) is not None
 
 
@@ -307,7 +301,7 @@ async def test_wildcard_mixed_with_unrouted_scope_still_raises(pg: FakeAccessCon
     # concrete scope alongside the wildcard is rejected and no row is written.
     with pytest.raises(ValueError, match="does not exist"):
         await STORE().create_policy("u1", ["*", "ghost"])
-    assert await STORE().policy_exists("u1") is False
+    assert await STORE().get_policy_body("u1") is None
 
 
 async def test_delete_policy(pg: FakeAccessControlPg) -> None:
@@ -405,7 +399,7 @@ async def test_oidc_subject_round_trips(pg: FakeAccessControlPg, user_id: str) -
     # ``:``/``@``/unicode works natively — no charset guard rejects it.
     pg.add_route("/s", "s")  # the granted scope must have a live route
     await STORE().create_policy(user_id, ["s"])
-    assert await STORE().policy_exists(user_id) is True
+    assert await STORE().get_policy_body(user_id) is not None
     body = await STORE().get_policy_body(user_id)
     assert body is not None
     assert body["scopes"] == ["s"]

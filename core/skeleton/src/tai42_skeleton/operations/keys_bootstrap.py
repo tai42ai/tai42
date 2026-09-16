@@ -97,9 +97,20 @@ async def bootstrap_admin_key(
 
     try:
         async with bootstrap_mint_lock():
-            if await management.get_all_existing_tokens_payload():
+            # Gate on LIVE keys only: an orphaned policy row (its identity record gone)
+            # authenticates nothing, so counting it would lock the operator out of the
+            # sole recovery door in exactly the partial-restore state this serves. The
+            # texts stay generic (no oracle for the orphan state).
+            if any(not row["orphaned"] for row in await management.get_all_existing_tokens_payload()):
                 raise ConflictError("Already initialized")
-            raw_key, _body, _fingerprint = await management.add_user_api_key(user_id, description, ["*"])
+            try:
+                raw_key, _body, _fingerprint = await management.add_user_api_key(user_id, description, ["*"])
+            except ValueError as exc:
+                # The requested id already carries an orphaned policy row (its identity
+                # record is gone), so the mint refuses it rather than adopt a stale policy.
+                # Surface it as this door's 409 with the mint's own recovery text — never a
+                # bare 500 escaping the operation.
+                raise ConflictError(str(exc)) from exc
     except BootstrapContendedError as exc:
         raise ConflictError("Already initialized") from exc
 

@@ -164,6 +164,24 @@ def test_keys_list_renders_identity_columns(monkeypatch: pytest.MonkeyPatch) -> 
     assert "read" in result.output
 
 
+def test_keys_list_renders_the_orphaned_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/auth/tokens-payload"
+        return data_response(
+            [
+                {"user_id": "alice", "description": "ci", "scopes": ["read"], "orphaned": False},
+                {"user_id": "ghost", "description": "", "scopes": ["*"], "orphaned": True},
+            ]
+        )
+
+    result = run_cli(monkeypatch, handler, ["keys", "list"])
+    assert result.exit_code == 0, result.output
+    # The orphaned column is rendered in the table (header + the flagged row's value).
+    assert "orphaned" in result.output
+    assert "ghost" in result.output
+    assert "true" in result.output
+
+
 def test_keys_create_includes_all_optional_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)

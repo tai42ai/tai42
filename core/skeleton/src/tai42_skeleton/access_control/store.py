@@ -397,15 +397,28 @@ class PostgresAccessControlStore:
             row = await cur.fetchone()
         return int(row[0]) if row is not None else 0
 
-    async def policy_exists(self, user_id: str) -> bool:
-        """Whether ``user_id`` has a policy row — the mint duplicate-user pre-check."""
+    async def list_minted_policies(self) -> list[tuple[str, dict[str, Any]]]:
+        """Every policy row minted as an api key, as ``(user_id, body)`` ordered by ``user_id``.
+
+        A row minted as an api key carries a non-null key fingerprint in ``policy_data``;
+        a role-assigned account row (no fingerprint) is excluded. ``policy_data ->> %s``
+        extracts the claim as text, so a missing key AND a JSON ``null`` value both yield
+        SQL ``NULL`` and fall outside ``IS NOT NULL`` — the same value-not-null test the
+        management surface applies. The listing diffs this against the live identity
+        records to flag orphans; reserved ids are filtered by the management surface, not here.
+        """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
-            await cur.execute("SELECT 1 FROM access_control_policies WHERE user_id = %s", (user_id,))
-            return await cur.fetchone() is not None
+            await cur.execute(
+                f"SELECT user_id, {_POLICY_COLUMNS} FROM access_control_policies "  # noqa: S608 query built from constant, code-defined identifiers, not user input
+                "WHERE policy_data ->> %s IS NOT NULL ORDER BY user_id",
+                (KEY_FINGERPRINT_CLAIM,),
+            )
+            rows = await cur.fetchall()
+        return [(row[0], _policy_body(row[1:])) for row in rows]
 
     async def create_policy(
         self,

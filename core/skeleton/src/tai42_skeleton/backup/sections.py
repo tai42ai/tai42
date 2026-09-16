@@ -138,8 +138,10 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
             report["created"] += 1
 
     # API-key hashes are one-way: a restore mints BRAND-NEW keys and surfaces each
-    # plaintext in ``new_api_keys``. Tokens are skip-only under EVERY mode (never
-    # overwritten), so an existing user id is a clean ``skipped_existing``, not an error.
+    # plaintext in ``new_api_keys``. A user id with a live key or an account row is a
+    # clean ``skipped_existing`` (never overwritten); a user id with no policy row is
+    # minted fresh; an orphaned policy row (its identity record gone) is re-minted onto
+    # the surviving policy.
     for token in payload.get("tokens") or []:
         user_id = token.get("user_id")
         if not isinstance(user_id, str) or not user_id:
@@ -147,24 +149,34 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
             report["errors"].append(f"token with missing or empty user_id: {user_id!r}")
             report["skipped"] += 1
             continue
-        if await management.get_policy_body(user_id) is not None:
-            # Already provisioned: leave the live key in place (revoke then re-import to replace).
+        description = token.get("description", "")
+        state = await management.api_key_state(user_id)
+        if state in ("live", "account"):
+            # Policy present and its principal exists — a live key, or a role-assigned
+            # account row that is never overwritten with a key: leave it in place (revoke
+            # then re-import to replace a live key).
             report["skipped_existing"] += 1
             continue
-        description = token.get("description", "")
-        stored_condition = token.get("condition")
         try:
-            # The stored condition is the templated-text document ``model_dump`` wrote;
-            # parse it back through the contract so a malformed one raises here (a loud
-            # per-token rejection), never restores as a silently dropped condition.
-            condition = TemplatedText.model_validate(stored_condition) if stored_condition is not None else None
-            api_key, _committed_body, _fingerprint = await management.add_user_api_key(
-                user_id,
-                description,
-                token.get("scopes") or [],
-                token.get("policy_data"),
-                condition,
-            )
+            if state == "orphaned":
+                # The policy row survives but its identity record is gone: re-mint a fresh
+                # identity onto it, keeping the policy (scopes, condition, fingerprint,
+                # owner) intact so bound hooks keep resolving.
+                api_key = await management.remint_orphaned_api_key(user_id, description)
+            else:
+                # ``absent``: mint a brand-new key for this user_id. The stored condition is
+                # the templated-text document ``model_dump`` wrote; parse it back through the
+                # contract so a malformed one raises here (a loud per-token rejection),
+                # never restores as a silently dropped condition.
+                stored_condition = token.get("condition")
+                condition = TemplatedText.model_validate(stored_condition) if stored_condition is not None else None
+                api_key, _committed_body, _fingerprint = await management.add_user_api_key(
+                    user_id,
+                    description,
+                    token.get("scopes") or [],
+                    token.get("policy_data"),
+                    condition,
+                )
         except ValueError as exc:
             # Per-token failure (collided id, absent scope, bad condition) surfaced loudly; the rest still restore.
             report["errors"].append(f"token {user_id!r}: {exc}")

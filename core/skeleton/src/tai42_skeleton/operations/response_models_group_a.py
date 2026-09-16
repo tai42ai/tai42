@@ -79,7 +79,8 @@ class TokenPayloadRow(BaseModel):
     """A provisioned key's identity merged with its enforced policy — NEVER key material.
 
     The policy fields are present only when the key carries a stored policy row; the owner claim, when set,
-    rides inside ``policy_data``.
+    rides inside ``policy_data``. ``orphaned`` is ``True`` for a policy row minted as an api key whose identity
+    record is gone (a partial-restore state): it authenticates nothing until re-minted from the backup.
     """
 
     user_id: str
@@ -87,6 +88,7 @@ class TokenPayloadRow(BaseModel):
     scopes: list[str] | None = None
     policy_data: dict[str, Any] | None = None
     condition: TemplatedText | None = None
+    orphaned: bool = False
 
 
 class TokenPayloadList(RootModel[list[TokenPayloadRow]]):

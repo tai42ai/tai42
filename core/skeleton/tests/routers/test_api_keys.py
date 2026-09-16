@@ -43,12 +43,6 @@ from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.operations import api_keys as operations_api_keys
 from tai42_skeleton.routers import api_keys
 
-# Registered for its import side effect: the route-table probe (test_probe_request_app_is_route_bearing)
-# needs every router's custom routes present on the built app, and a custom route registers only when
-# its module is imported. Importing here (after the conftest binds ``tai42_app``) makes that probe
-# deterministic in isolation instead of relying on another test module's collection order.
-from tai42_skeleton.routers import hooks as _hooks  # noqa: F401
-
 from ..access_control.conftest import (
     FakeAccessControlPg,
     FakeRedis,
@@ -1166,36 +1160,43 @@ async def test_probe_request_app_is_route_bearing(monkeypatch: pytest.MonkeyPatc
     # PROBE: at runtime, ``request.app`` inside a handler is the route-bearing Starlette
     # app, so ``request.app.routes`` is the live table ``list_routes`` reads. Starlette
     # sets ``scope["app"]`` to this app and ``HttpSurface.finalize``'s pure-ASGI
-    # middleware wrappers do not replace it. The ``api_keys`` and ``hooks`` routers are
-    # imported at module top, so their custom routes are registered regardless of run
-    # order (this check is deterministic in isolation, not reliant on sibling collection).
+    # middleware wrappers do not replace it.
+    #
+    # Boot the process app under a full default manifest and probe INSIDE the context: the
+    # route table hangs off the live epoch's serving core, which each ``app_context`` builds
+    # fresh from that manifest's effective router set. A sibling test that last booted the
+    # singleton under a curated ``default_routers="none"`` manifest leaves only the core
+    # tier on the serving core, so reading the ambient singleton would see a route table
+    # missing the default routers; a fresh default boot here makes the surface deterministic.
     from starlette.routing import Mount
 
-    from tai42_skeleton.app.instance import build_app
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
 
-    star = build_app().http_app()
-    routing_app = getattr(star, "mcp_lifespan_app", star)
-    paths = {getattr(route, "path", None) for route in routing_app.routes}
-    assert {"/api/auth/routes", "/api/auth/public-routes", "/api/hooks/verifiers"} <= paths
-    assert any(isinstance(route, Mount) for route in routing_app.routes)
-
-    # Drive ``list_routes`` against that real route-bearing app: the endpoint reads
-    # ``request.app.routes``, so the catalog it returns IS the live table — proving it
-    # reads the right object (the custom routes present, the sub-MCP Mount excluded),
-    # not a hand-built stand-in like the other list_routes tests.
     async def _mappings() -> dict[str, str]:
         return {}
 
     monkeypatch.setattr(management, "get_all_route_mappings", _mappings)
-    catalog = _body(await api_keys.list_routes(cast(Request, SimpleNamespace(app=routing_app))))["data"]
-    catalog_paths = {entry["path"] for entry in catalog}
-    assert {"/api/auth/routes", "/api/auth/public-routes", "/api/hooks/verifiers"} <= catalog_paths
-    assert "/app" not in catalog_paths
-    # The transport route the same build MOUNTED is in the table, so it is catalogued —
-    # but it joins no metadata: no grant can open a mount, so the Roles page must not be
-    # offered tags or an action-class for it.
-    transport = next(entry for entry in catalog if entry["path"] == "/mcp")
-    assert (transport["tags"], transport["summary"], transport["action"]) == ([], "", None)
+    async with app.app_context(Manifest.model_validate({})):
+        star = app.http_app()
+        routing_app = getattr(star, "mcp_lifespan_app", star)
+        paths = {getattr(route, "path", None) for route in routing_app.routes}
+        assert {"/api/auth/routes", "/api/auth/public-routes", "/api/hooks/verifiers"} <= paths
+        assert any(isinstance(route, Mount) for route in routing_app.routes)
+
+        # Drive ``list_routes`` against that real route-bearing app: the endpoint reads
+        # ``request.app.routes``, so the catalog it returns IS the live table — proving it
+        # reads the right object (the custom routes present, the sub-MCP Mount excluded),
+        # not a hand-built stand-in like the other list_routes tests.
+        catalog = _body(await api_keys.list_routes(cast(Request, SimpleNamespace(app=routing_app))))["data"]
+        catalog_paths = {entry["path"] for entry in catalog}
+        assert {"/api/auth/routes", "/api/auth/public-routes", "/api/hooks/verifiers"} <= catalog_paths
+        assert "/app" not in catalog_paths
+        # The transport route the same build MOUNTED is in the table, so it is catalogued —
+        # but it joins no metadata: no grant can open a mount, so the Roles page must not be
+        # offered tags or an action-class for it.
+        transport = next(entry for entry in catalog if entry["path"] == "/mcp")
+        assert (transport["tags"], transport["summary"], transport["action"]) == ([], "", None)
 
 
 # -- public route pins (/api/auth/public-routes) -----------------------------

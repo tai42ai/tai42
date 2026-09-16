@@ -13,10 +13,11 @@ import logging
 
 import pytest
 from pydantic import SecretStr
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM, registry
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, registry
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider
 
 from tai42_skeleton.access_control import bootstrap as bootstrap_mod
+from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.operations import ConflictError, ForbiddenError, NotSupportedError
 from tai42_skeleton.operations.keys_bootstrap import bootstrap_admin_key
@@ -103,6 +104,48 @@ async def test_bootstrap_refused_once_a_key_exists(
         await bootstrap_admin_key("second", "another", _TOKEN)
     # No second identity minted.
     assert list(provider.identities) == ["root"]
+
+
+async def test_bootstrap_opens_when_only_orphaned_policies_remain(
+    pg: FakeAccessControlPg, provider: _SpyProvider, bootstrap_redis: FakeRedis, operator_token: None
+) -> None:
+    # The partial-restore state: a minted policy row survives with NO identity record.
+    # It is visible to the listing (flagged orphaned) yet must NOT close the sole recovery
+    # door — an orphaned key authenticates nothing.
+    pg.add_policy("survivor", scopes=["*"], policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+    listing = await management.get_all_existing_tokens_payload()
+    assert [(row["user_id"], row["orphaned"]) for row in listing] == [("survivor", True)]
+
+    result = await bootstrap_admin_key("root", "root key", _TOKEN)
+    assert result == {"token": "sk-root", "user_id": "root"}
+
+
+async def test_bootstrap_refused_when_a_live_key_exists_beside_orphans(
+    pg: FakeAccessControlPg, provider: _SpyProvider, bootstrap_redis: FakeRedis, operator_token: None
+) -> None:
+    # One LIVE key closes the door even when orphaned rows also survive: the gate counts
+    # live keys only, and a live key means the deployment is initialized.
+    await bootstrap_admin_key("root", "root key", _TOKEN)
+    pg.add_policy("orphan", scopes=["*"], policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+
+    with pytest.raises(ConflictError, match="Already initialized"):
+        await bootstrap_admin_key("second", "another", _TOKEN)
+    assert list(provider.identities) == ["root"]
+
+
+async def test_bootstrap_on_an_orphaned_id_refuses_with_409(
+    pg: FakeAccessControlPg, provider: _SpyProvider, bootstrap_redis: FakeRedis, operator_token: None
+) -> None:
+    # Only orphans remain, so the door opens; but the requested id IS the orphan. The mint
+    # refuses to adopt the stale policy (ValueError) and the door surfaces that as its own
+    # 409 naming the orphaned row — never a bare 500 escaping the operation.
+    pg.add_policy("root", scopes=["*"], policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
+
+    with pytest.raises(ConflictError, match="orphaned policy row"):
+        await bootstrap_admin_key("root", "root key", _TOKEN)
+    # Nothing minted: the stale policy row is untouched and no identity record is written.
+    assert provider.identities == {}
+    assert pg.policy("root")["policy_data"] == {KEY_FINGERPRINT_CLAIM: "fp"}
 
 
 async def test_mint_lock_is_mutually_exclusive(bootstrap_redis: FakeRedis) -> None:

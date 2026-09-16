@@ -1162,19 +1162,25 @@ async def test_import_access_control_scope_failure_is_per_token_skip(monkeypatch
 
 
 async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
-    # Tokens are structurally skip-only: a user id already provisioned is a CLEAN skip
+    # A live key (identity record AND policy row present) is a CLEAN skip
     # (``skipped_existing``), never a re-mint and never an error — the live key stands.
+    from tai42_identity_redis import redis_api_key_provider as provider_module
+
     from tai42_skeleton.access_control import management
     from tai42_skeleton.access_control import store as store_module
 
     from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
     pg = FakeAccessControlPg()
-    pg.add_policy("u1", [], policy_data={KEY_FINGERPRINT_CLAIM: "fp-live"})
+    redis = FakeRedis()
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis()))
+    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
+    # Provision a genuine live key: both storage homes populated.
+    await management.add_user_api_key("u1", "d", [])
+    fingerprint = pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM]
     _install(monkeypatch)
 
     document = {
@@ -1195,25 +1201,31 @@ async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
     assert report["created"] == 0
     assert report["errors"] == []
     assert report["new_api_keys"] == []
-    # The pre-existing key's fingerprint is untouched — nothing was re-minted.
-    assert pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM] == "fp-live"
+    # The live key's fingerprint is untouched — nothing was re-minted.
+    assert pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM] == fingerprint
 
 
 async def test_import_access_control_existing_token_not_reminted_under_overwrite(monkeypatch):
-    # Tokens are skip-only under EVERY mode: even with mode "overwrite" an already
+    # A live key is skip-only under EVERY mode: even with mode "overwrite" an already
     # provisioned user id is a CLEAN skip, never a re-mint. Unlike the scope/route/hook
     # branches, the token branch does not consult mode — the live key stands.
+    from tai42_identity_redis import redis_api_key_provider as provider_module
+
     from tai42_skeleton.access_control import management
     from tai42_skeleton.access_control import store as store_module
 
     from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
     pg = FakeAccessControlPg()
-    pg.add_policy("u1", [], policy_data={KEY_FINGERPRINT_CLAIM: "fp-live"})
+    redis = FakeRedis()
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis()))
+    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
+    # Provision a genuine live key: both storage homes populated.
+    await management.add_user_api_key("u1", "d", [])
+    fingerprint = pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM]
     _install(monkeypatch)
 
     document = {
@@ -1236,7 +1248,7 @@ async def test_import_access_control_existing_token_not_reminted_under_overwrite
     assert report["errors"] == []
     assert report["new_api_keys"] == []
     # Overwrite mode does NOT re-mint the token: the live key's fingerprint is unchanged.
-    assert pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM] == "fp-live"
+    assert pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM] == fingerprint
 
 
 async def test_versioned_documents_section_round_trips_through_router(monkeypatch):
