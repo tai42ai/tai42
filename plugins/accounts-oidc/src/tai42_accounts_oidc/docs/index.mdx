@@ -54,9 +54,11 @@ PKCE with `S256`, and OIDC presets additionally send a nonce.
 
 <Warning>
 Signing in does not create an account. A successful sign-in resolves to the user id
-`oidc:{provider}:{subject}`, and until a policy exists for that id every protected
-route denies the request. Provision the policy first, then invite the person to sign
-in.
+`oidc:{provider}:{subject}`, and until a principal exists for that id every protected
+route denies the request. Provision the subject as a human principal first, then
+invite the person to sign in. This provider holds no login for the subject, so an
+OIDC-provisioned principal is later disabled or deleted through the admin principals
+door itself, not through an accounts provider's users door.
 </Warning>
 
 ## login

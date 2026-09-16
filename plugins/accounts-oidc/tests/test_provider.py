@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from tai42_contract.access_control.identity import AuthIdentity
 from tai42_contract.access_control.registry import get_identity_provider_factory
-from tai42_contract.accounts import get_accounts_provider_factory
+from tai42_contract.accounts import LoginAttachingProvider, get_accounts_provider_factory
 from tai42_kit.net.jwt import JwksFetchError
 
 from tai42_accounts_oidc import provider as provider_mod
@@ -116,9 +116,15 @@ async def test_revoke_foreign_token_returns_false(make_provider: Any) -> None:
     assert fake.store == {}
 
 
-async def test_needs_bootstrap_is_false(make_provider: Any) -> None:
+# -- login attachment ------------------------------------------------------------
+
+
+def test_is_not_a_login_attaching_provider(make_provider: Any) -> None:
+    # Login lives at the external issuer, so this provider cannot attach an
+    # interactive credential to a principal: the setup and invite flows
+    # isinstance-check for LoginAttachingProvider and report login not attached.
     instance, _ = make_provider([_GOOGLE])
-    assert await instance.needs_bootstrap() is False
+    assert not isinstance(instance, LoginAttachingProvider)
 
 
 # -- login methods --------------------------------------------------------------

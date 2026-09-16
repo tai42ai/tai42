@@ -131,10 +131,15 @@ by the numeric `id` claim; user ids resolve as `oidc:github:{id}`.
 
 A caller authenticated through provider `{name}` resolves to the user id
 `oidc:{name}:{claim}`. **There is no auto-provisioning.** An issuer-authenticated
-subject with no pre-provisioned policy resolves to the empty access policy — every
-protected route denies. Operators grant access by creating a policy per expected
-subject id through the existing policy routes. This is the only v1 behavior; the
-plugin ships no default-role or auto-policy path.
+subject with no principal resolves to the empty access policy — every protected
+route denies. An admin grants access by provisioning the subject id as a human
+principal through the admin principals route, which creates the principal and
+applies its role. The plugin ships no default-role or auto-policy path.
+
+Because this provider holds no login for the subject (the credential lives at the
+issuer), an OIDC-provisioned human principal is disabled or deleted through the admin
+principals door itself — `PUT`/`DELETE /api/auth/principals/{user_id}` — not through any
+accounts provider's users door.
 
 The session record — and therefore the identity's claims — holds ONLY plugin-minted
 fields (`user_id`, `created_at`, `absolute_deadline`); the issuer's JWT claims are
@@ -166,7 +171,7 @@ logins.
 Requires **Python 3.13+**, any plain Redis, and reachable OIDC issuers. An
 unreachable issuer or Redis is caught loudly by `healthcheck()` at startup rather
 than failing per-request. Chaining two different JWT-issuer providers against
-distinct issuers is out of scope for v1.
+distinct issuers is not supported: only a single JWT-issuer provider is configured.
 
 ## Install
 

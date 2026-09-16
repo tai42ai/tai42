@@ -268,11 +268,6 @@ class OidcAccountsProvider(AccountsProvider):
             for runtime in self._runtimes.values()
         ]
 
-    async def needs_bootstrap(self) -> bool:
-        """Whether a first-owner bootstrap is needed — never, since accounts live at the issuer."""
-        # Accounts live at the issuer — no first-owner concept here.
-        return False
-
     async def revoke_session(self, token: str) -> bool:
         """Revoke ``token``'s session; returns ``True`` when one was deleted, ``False`` when not ours."""
         if not token.startswith(SESSION_TOKEN_PREFIX):
