@@ -31,7 +31,9 @@ from tai42_skeleton.access_control.backend import (
 )
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_identity_claims,
+    reset_request_is_admin,
     set_request_identity_claims,
+    set_request_is_admin,
 )
 from tai42_skeleton.access_control.settings import (
     AccessControlSettings,
@@ -405,6 +407,22 @@ def test_restricted_identity_and_request_identity_for_owned_key():
         assert restricted_identity() == "key-1"
         assert request_identity() == ("key-1", "key-1")
     finally:
+        reset_request_user_id(uid_token)
+        reset_request_identity_claims(claims_token)
+
+
+def test_restricted_identity_none_for_admin_owned_key():
+    # Identity-first stamps an owner claim on the owner's OWN admin key, but the guard binds
+    # the backend's admin verdict and an admin is never restricted: it keeps the full view
+    # even though its claims carry an owner reference.
+    claims_token = set_request_identity_claims({OWNER_USER_ID_CLAIM: "root"})
+    uid_token = set_request_user_id("k-admin")
+    admin_token = set_request_is_admin(True)
+    try:
+        assert restricted_identity() is None
+        assert request_identity() == ("k-admin", None)
+    finally:
+        reset_request_is_admin(admin_token)
         reset_request_user_id(uid_token)
         reset_request_identity_claims(claims_token)
 

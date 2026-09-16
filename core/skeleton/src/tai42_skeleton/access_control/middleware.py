@@ -18,8 +18,10 @@ from tai42_skeleton.access_control.path_canon import MalformedPathError, request
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_effective_scopes,
     reset_request_identity_claims,
+    reset_request_is_admin,
     set_request_effective_scopes,
     set_request_identity_claims,
+    set_request_is_admin,
 )
 from tai42_skeleton.access_control.role_gate import refusal_route
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
@@ -278,6 +280,7 @@ class ResourceGuardMiddleware:
         context_token = None
         scopes_token = None
         claims_token = None
+        is_admin_token = None
         secret_capability_token = None
         if user.is_authenticated:
             user_id = user.token.client_id
@@ -291,6 +294,12 @@ class ResourceGuardMiddleware:
             # the SAME identity the backend does: the ``.identity.*`` a policy condition
             # references, and the owner reference that drives the owner second-pass enforce.
             claims_token = set_request_identity_claims(user.token.claims)
+            # Carry the backend's admin verdict for the isolation seam, bound as a set with
+            # the claims: under identity-first every api key carries an owner claim, so the
+            # owner's own ADMIN key would otherwise be confined to its slice. The isolation
+            # rule reads this rather than the secret-read capability so the two stay
+            # decoupled, both deriving from the one admin discriminator on the user.
+            is_admin_token = set_request_is_admin(bool(getattr(user, "is_admin", False)))
             # Carry whether the caller clears the ``action=secret`` admin fence, computed
             # once by the auth backend as the admin discriminator and stamped on the user.
             # A plugin gates a host-secret-exposing primitive on it so that primitive's
@@ -307,6 +316,8 @@ class ResourceGuardMiddleware:
                 reset_request_effective_scopes(scopes_token)
             if claims_token is not None:
                 reset_request_identity_claims(claims_token)
+            if is_admin_token is not None:
+                reset_request_is_admin(is_admin_token)
             if secret_capability_token is not None:
                 reset_request_secret_capability(secret_capability_token)
 

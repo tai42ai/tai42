@@ -23,7 +23,8 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.policy import PolicyEnforcer
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz.check import check
-from tai42_skeleton.authz.execution import assert_execution_key_evaluable, bind_execution_identity
+from tai42_skeleton.authz.execution import bind_execution_identity
+from tai42_skeleton.authz.execution_evaluability import assert_execution_key_evaluable
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.authz.token_free import TokenFreeConditionError
 from tai42_skeleton.operations import OperationRegistry, operation

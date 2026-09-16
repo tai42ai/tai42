@@ -30,10 +30,13 @@ from typing import Any
 __all__ = [
     "get_request_effective_scopes",
     "get_request_identity_claims",
+    "get_request_is_admin",
     "reset_request_effective_scopes",
     "reset_request_identity_claims",
+    "reset_request_is_admin",
     "set_request_effective_scopes",
     "set_request_identity_claims",
+    "set_request_is_admin",
 ]
 
 _current_effective_scopes: ContextVar[tuple[str, ...] | None] = ContextVar(
@@ -42,6 +45,7 @@ _current_effective_scopes: ContextVar[tuple[str, ...] | None] = ContextVar(
 _current_identity_claims: ContextVar[Mapping[str, Any] | None] = ContextVar(
     "tai42_current_identity_claims", default=None
 )
+_current_is_admin: ContextVar[bool] = ContextVar("tai42_current_is_admin", default=False)
 
 
 def get_request_effective_scopes() -> tuple[str, ...] | None:
@@ -97,3 +101,35 @@ def reset_request_identity_claims(token: Token[Mapping[str, Any] | None]) -> Non
     ``token`` is the one returned by the matching :func:`set_request_identity_claims` call.
     """
     _current_identity_claims.reset(token)
+
+
+def get_request_is_admin() -> bool:
+    """Whether the current caller is ADMIN — the isolation seam's copy of the backend verdict.
+
+    The auth backend's ``is_admin_policy`` verdict on the caller's owner-attenuated policy,
+    bound once per authenticated request by the guard middleware paired with the identity
+    claims. An admin is never confined to an isolation slice. Defaults to ``False``
+    (fail-closed): no caller bound, an anonymous request, or code outside a bound request is
+    never admin. Distinct from the secret-read capability so the isolation rule and the
+    ``action=secret`` fence read their own named fact and never silently couple, though both
+    derive from the one backend admin discriminator.
+    """
+    return _current_is_admin.get()
+
+
+def set_request_is_admin(is_admin: bool) -> Token[bool]:
+    """Bind whether the current caller is admin and return the reset token.
+
+    The guard middleware calls this once per authenticated request, paired with
+    :func:`set_request_identity_claims`; pass the returned token to
+    :func:`reset_request_is_admin` to restore the previous value.
+    """
+    return _current_is_admin.set(is_admin)
+
+
+def reset_request_is_admin(token: Token[bool]) -> None:
+    """Restore the admin verdict to the value captured in ``token``.
+
+    ``token`` is the one returned by the matching :func:`set_request_is_admin` call.
+    """
+    _current_is_admin.reset(token)

@@ -112,9 +112,10 @@ async def create_claim_link(
 
     The submitted key is resolved through the gate's verifier chain: an unresolvable key
     is a 400 (never a dead QR). The resolved identity must satisfy the ownership rule
-    — (a) the caller is admin, (b) the resolved key was minted by the caller (its owner
-    claim is the caller), or (c) the resolved identity IS the caller (its own key) —
-    else a 403. (An authenticated caller CAN thus distinguish a live key from garbage
+    — (a) the caller is admin (any key), (b) the resolved key is owned by the caller's
+    own principal (its owner claim is the caller's principal — the owner behind an owned
+    caller key, else the caller itself), or (c) the resolved identity IS the caller's own
+    key — else a 403. (An authenticated caller CAN thus distinguish a live key from garbage
     here; this adds no capability the ``/api/auth/me`` carve-out does not already grant a
     caller holding a candidate key. The uniform-404 no-oracle rule is the EXCHANGE
     surface's, not creation's.)
@@ -137,15 +138,13 @@ async def create_claim_link(
     resolved_user_id = access_token.client_id
     resolved_owner = access_token.claims.get(OWNER_USER_ID_CLAIM)
     is_own_key = resolved_user_id == caller_id
-    is_key_the_caller_minted = resolved_owner is not None and resolved_owner == caller_id
+    # The caller acts as a principal: an owned caller key acts as its OWNER principal, a
+    # top-level caller key as itself. Ownership stays one level deep, so a non-admin may
+    # share a key only when its own principal owns it (an ownerless target never matches).
+    caller_principal = caller_owner_claim or caller_id
+    is_owned_by_caller_principal = resolved_owner is not None and resolved_owner == caller_principal
 
-    # An OWNED caller (its own credential carries an owner claim) can neither mint keys
-    # nor be admin, so it may ONLY move its own credential between its own devices —
-    # case (c). State that confinement explicitly rather than leaning on the cases being
-    # structurally unreachable for it.
-    if caller_owner_claim is not None and not is_own_key:
-        raise ClaimLinkError(403, _OWNERSHIP_MESSAGE)
-    if not (caller_is_admin or is_key_the_caller_minted or is_own_key):
+    if not (caller_is_admin or is_own_key or is_owned_by_caller_principal):
         raise ClaimLinkError(403, _OWNERSHIP_MESSAGE)
 
     record = json.dumps({"api_key": api_key, "user_id": resolved_user_id, "created_by": caller_id})

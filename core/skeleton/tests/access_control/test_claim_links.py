@@ -14,7 +14,7 @@ import logging
 
 import pytest
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM, registry
-from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity
+from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
 from tai42_kit.utils.data.string_util import hash_api_key
 
 from tai42_skeleton.access_control import claim_links
@@ -76,9 +76,15 @@ def redis(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
 def provider() -> _FakeProvider:
     prov = _FakeProvider(
         {
-            "sk-alice": _identity("alice"),  # alice's own key
+            "sk-alice": _identity("alice"),  # alice's own key (top-level principal)
             "sk-dev": _identity("dev1", owner="alice"),  # a key alice minted (owned by alice)
             "sk-bob": _identity("bob"),  # someone else's key
+            # Identity-first: a caller is a KEY owned by a principal. ``sk-k1`` and
+            # ``sk-k2`` are two keys owned by the same principal ``pete``; ``sk-orphan``
+            # is an ownerless key (no owner claim at all).
+            "sk-k1": _identity("k1", owner="pete"),
+            "sk-k2": _identity("k2", owner="pete"),
+            "sk-orphan": AuthIdentity(user_id="orphan", claims={}),
         }
     )
     registry._REGISTRY["redis"] = lambda _settings: prov
@@ -140,6 +146,20 @@ async def test_admin_may_claim_link_any_key(redis: FakeRedis, provider: _FakePro
     assert (await exchange_claim_token(result["token"]))["user_id"] == "bob"
 
 
+async def test_admin_key_owned_by_a_principal_may_claim_link_any_key(redis: FakeRedis, provider: _FakeProvider) -> None:
+    # Case (a): under identity-first the admin caller is itself a KEY carrying an owner
+    # claim (its own principal). Admin authority is unconditional — it may link a key
+    # owned by an unrelated principal, not only its own.
+    result = await create_claim_link(
+        api_key="sk-bob",
+        caller_id="studio-root",
+        caller_is_admin=True,
+        caller_owner_claim="studio-owner",
+        ttl_seconds=None,
+    )
+    assert (await exchange_claim_token(result["token"]))["user_id"] == "bob"
+
+
 async def test_non_admin_may_claim_link_own_key(redis: FakeRedis, provider: _FakeProvider) -> None:
     # Case (c): the resolved identity IS the caller.
     result = await create_claim_link(
@@ -148,12 +168,34 @@ async def test_non_admin_may_claim_link_own_key(redis: FakeRedis, provider: _Fak
     assert (await exchange_claim_token(result["token"]))["user_id"] == "alice"
 
 
-async def test_non_admin_may_claim_link_a_key_it_minted(redis: FakeRedis, provider: _FakeProvider) -> None:
-    # Case (b): the resolved key's owner claim is the caller.
+async def test_non_admin_principal_may_claim_link_a_key_it_owns(redis: FakeRedis, provider: _FakeProvider) -> None:
+    # Case (b): a top-level (ownerless) non-admin principal ``alice`` may link a key owned
+    # by its own principal — itself.
     result = await create_claim_link(
         api_key="sk-dev", caller_id="alice", caller_is_admin=False, caller_owner_claim=None, ttl_seconds=None
     )
     assert (await exchange_claim_token(result["token"]))["user_id"] == "dev1"
+
+
+async def test_non_admin_owned_caller_may_claim_link_its_own_key(redis: FakeRedis, provider: _FakeProvider) -> None:
+    # Case (c) for an OWNED caller: caller key ``k1`` (owned by principal ``pete``) links
+    # itself.
+    result = await create_claim_link(
+        api_key="sk-k1", caller_id="k1", caller_is_admin=False, caller_owner_claim="pete", ttl_seconds=None
+    )
+    assert (await exchange_claim_token(result["token"]))["user_id"] == "k1"
+
+
+async def test_non_admin_owned_caller_may_claim_link_a_sibling_of_its_principal(
+    redis: FakeRedis, provider: _FakeProvider
+) -> None:
+    # Case (b) for an OWNED caller: caller key ``k1`` links ``k2``, a sibling key owned by
+    # the SAME principal ``pete``. Ownership one level deep allows a principal to move any
+    # of its own keys between devices.
+    result = await create_claim_link(
+        api_key="sk-k2", caller_id="k1", caller_is_admin=False, caller_owner_claim="pete", ttl_seconds=None
+    )
+    assert (await exchange_claim_token(result["token"]))["user_id"] == "k2"
 
 
 async def test_non_admin_may_not_claim_link_someone_elses_key(redis: FakeRedis, provider: _FakeProvider) -> None:
@@ -164,20 +206,53 @@ async def test_non_admin_may_not_claim_link_someone_elses_key(redis: FakeRedis, 
     assert exc.value.status == 403
 
 
-async def test_owned_caller_may_claim_link_only_its_own_key(redis: FakeRedis, provider: _FakeProvider) -> None:
-    # An owned caller (its own credential carries an owner claim) may do case (c) only.
-    result = await create_claim_link(
-        api_key="sk-alice", caller_id="alice", caller_is_admin=False, caller_owner_claim="root", ttl_seconds=None
-    )
-    assert (await exchange_claim_token(result["token"]))["user_id"] == "alice"
-
-    # Even a key whose owner claim equals the caller (case (b)) is refused for an owned
-    # caller — it can never have minted a key, so this can only be someone else's device.
+async def test_non_admin_owned_caller_may_not_claim_link_another_principals_key(
+    redis: FakeRedis, provider: _FakeProvider
+) -> None:
+    # Owned caller ``k1`` (principal ``pete``) targets ``sk-bob``, owned by principal
+    # ``bob`` — neither its own key nor owned by its principal, so a 403.
     with pytest.raises(ClaimLinkError) as exc:
         await create_claim_link(
-            api_key="sk-dev", caller_id="alice", caller_is_admin=False, caller_owner_claim="root", ttl_seconds=None
+            api_key="sk-bob", caller_id="k1", caller_is_admin=False, caller_owner_claim="pete", ttl_seconds=None
         )
     assert exc.value.status == 403
+
+
+async def test_ownerless_api_key_record_never_resolves(redis: FakeRedis, provider: _FakeProvider) -> None:
+    # Identity-first invariant: an api-key (mint-provider) record carrying NO owner claim
+    # is fail-closed by the verifier itself, so the target never reaches the ownership
+    # rule — a submitted ownerless key is an unresolvable 400, not a 403. A resolved
+    # api-key target therefore always carries an owner.
+    with pytest.raises(ClaimLinkError) as exc:
+        await create_claim_link(
+            api_key="sk-orphan", caller_id="admin", caller_is_admin=True, caller_owner_claim=None, ttl_seconds=None
+        )
+    assert exc.value.status == 400
+    assert exc.value.message == "not a valid API key"
+
+
+async def test_non_admin_may_not_claim_link_a_non_mint_identity(redis: FakeRedis) -> None:
+    # The only resolved target with ``resolved_owner is None`` is a NON-mint provider
+    # identity (an accounts session / external issuer), whose owner claim the verifier
+    # strips. It is neither the caller's own key nor owned by the caller's principal — the
+    # ``None`` owner never counts as "owned by my principal" — so a non-admin caller is a
+    # 403 while admin authority (case (a)) still covers it.
+    class _External(IdentityProvider):
+        async def validate_token(self, token: str) -> AuthIdentity | None:
+            return AuthIdentity(user_id="ext-user", claims={}) if token == "sk-ext" else None
+
+    registry._REGISTRY["redis"] = lambda _settings: _External()
+
+    with pytest.raises(ClaimLinkError) as exc:
+        await create_claim_link(
+            api_key="sk-ext", caller_id="alice", caller_is_admin=False, caller_owner_claim=None, ttl_seconds=None
+        )
+    assert exc.value.status == 403
+
+    result = await create_claim_link(
+        api_key="sk-ext", caller_id="admin", caller_is_admin=True, caller_owner_claim=None, ttl_seconds=None
+    )
+    assert (await exchange_claim_token(result["token"]))["user_id"] == "ext-user"
 
 
 # -- invalid key + ttl ceiling -----------------------------------------------

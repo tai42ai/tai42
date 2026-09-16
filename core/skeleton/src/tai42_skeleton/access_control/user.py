@@ -8,7 +8,7 @@ from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM, get_current_user_id
 from tai42_contract.access_control.models import AccessPolicy
 
-from tai42_skeleton.access_control.request_scopes import get_request_identity_claims
+from tai42_skeleton.access_control.request_scopes import get_request_identity_claims, get_request_is_admin
 
 
 def effective_scopes(key_scopes: list[str], owner_scopes: list[str]) -> list[str]:
@@ -87,14 +87,20 @@ class TaiUser(AuthenticatedUser):
         return self.token.client_id
 
 
-def _acting_principal() -> tuple[str | None, Mapping[str, Any] | None]:
-    """``(own id, claims)`` of the principal ACTING at the current dispatch.
+def _acting_principal() -> tuple[str | None, Mapping[str, Any] | None, bool]:
+    """``(own id, claims, is_admin)`` of the principal ACTING at the current dispatch.
 
     A bound execution identity takes PRECEDENCE, never a fallback: a fire dispatched as a
     Starlette ``BackgroundTask`` runs inside the triggering request's contextvar context,
     so the request-scope vars are still that caller's and must not be consulted while a
-    fire is bound. Outside a fire the pair is the request-scope caller; both halves are
-    ``None`` when none is bound.
+    fire is bound. Under a fire all three facts come from the bound identity; outside one
+    they are the request-scope caller's. ``own``/``claims`` are ``None`` and ``is_admin``
+    ``False`` when none is bound.
+
+    ``is_admin`` is the auth backend's admin verdict, computed once when it bound the
+    caller: it rides on the execution identity (built at fire-open) and, in the request
+    scope, is the admin fact the guard middleware stamps alongside the claims — read here,
+    never re-derived from policies.
 
     The same rule :func:`~tai42_skeleton.operations._authority.resolve_caller` applies, so
     isolation and the pass-role gate never key on different principals.
@@ -106,31 +112,38 @@ def _acting_principal() -> tuple[str | None, Mapping[str, Any] | None]:
 
     identity = get_execution_identity()
     if identity is not None:
-        return identity.user_id, identity.claims
-    return get_current_user_id(), get_request_identity_claims()
+        return identity.user_id, identity.claims, identity.is_admin
+    return get_current_user_id(), get_request_identity_claims(), get_request_is_admin()
 
 
 def restricted_identity() -> str | None:
     """The identity a RESTRICTED caller is isolated to — its OWN id — or ``None`` when unrestricted.
 
-    ``None`` covers the unrestricted caller (admin, editor/viewer role-holder, a top-level
-    principal) and the unauthenticated / gate-off cases where no caller is bound.
+    An ADMIN caller is NEVER restricted: under identity-first every api key carries an owner
+    claim, so the owner's own ADMIN key would otherwise be confined to its slice. Admin is
+    the enforcement's own verdict (:func:`is_admin_policy` on the owner-attenuated effective
+    policy), read off :func:`_acting_principal` — so it holds for both a request-scope caller
+    and a fire-bound execution identity, and it is never re-derived from policies here.
 
-    A caller is restricted iff its claims carry ``OWNER_USER_ID_CLAIM`` — an owned key
-    acting on behalf of its owner. Being owned is what CONFINES the caller, but the
-    identity it is confined to is its OWN id (its ``user_id`` / token ``client_id``),
-    NOT its owner's: each owned key is its own island. A restricted caller sees and
-    touches ONLY the tool runs, interactions, and notifications belonging to (addressed
-    to) its OWN key identity — never its owner's, never a sibling owned key's. This
-    helper is the one definition of "restricted" the whole codebase shares.
+    A NON-admin caller is restricted iff its claims carry ``OWNER_USER_ID_CLAIM`` — a
+    non-admin owned key acting on behalf of its owner. Being an owned key is what CONFINES
+    it, but the identity it is confined to is its OWN id (its ``user_id`` / token
+    ``client_id``), NOT its owner's: each owned key is its own island. A restricted caller
+    sees and touches ONLY the tool runs, interactions, and notifications belonging to
+    (addressed to) its OWN key identity — never its owner's, never a sibling owned key's.
 
-    Both the deciding claims and the confining id come from :func:`_acting_principal`, so
-    a fire is isolated to the key it is authorized as rather than to whoever triggered it,
-    and no Starlette ``Request`` is needed — the flat-argument operation doors can enforce
-    isolation without one. With the gate off no claims are bound, so the result is
-    ``None``.
+    ``None`` therefore covers the admin caller, a session / top-level principal (no owner
+    claim), and the unauthenticated / gate-off cases where no caller is bound. This helper
+    is the one definition of "restricted" the whole codebase shares.
+
+    The deciding facts come from :func:`_acting_principal`, so a fire is isolated to the key
+    it is authorized as rather than to whoever triggered it, and no Starlette ``Request`` is
+    needed — the flat-argument operation doors can enforce isolation without one. With the
+    gate off no claims are bound, so the result is ``None``.
     """
-    own, claims = _acting_principal()
+    own, claims, is_admin = _acting_principal()
+    if is_admin:
+        return None
     if claims is None or claims.get(OWNER_USER_ID_CLAIM) is None:
         return None
     if own is None:

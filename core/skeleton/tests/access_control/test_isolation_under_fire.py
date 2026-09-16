@@ -63,6 +63,12 @@ def _ownerless_key(key: str = "k-fire") -> CallerIdentity:
     return CallerIdentity(user_id=key, effective_scopes=("notifications",), claims={})
 
 
+def _admin_owned_key(key: str = "k-admin", owner: str = "root") -> CallerIdentity:
+    # An owner's OWN admin key: identity-first stamps an owner claim on it, yet the backend
+    # classified it admin, so it is never confined to its slice.
+    return CallerIdentity(user_id=key, effective_scopes=("*",), claims={OWNER_USER_ID_CLAIM: owner}, is_admin=True)
+
+
 # -- a fire is isolated to the key it runs as ---------------------------------
 
 
@@ -80,9 +86,28 @@ def test_ownerless_execution_key_is_unrestricted_and_attributed_to_itself() -> N
         assert request_identity() == ("k-fire", None)
 
 
+def test_admin_owned_key_fire_is_unrestricted_despite_its_owner_claim() -> None:
+    # Identity-first stamps an owner claim on the owner's OWN admin key, but an admin is
+    # never restricted, so it keeps the full view and may address anyone.
+    with _fire(_admin_owned_key()):
+        assert restricted_identity() is None
+        assert request_identity() == ("k-admin", None)
+        assert clamp_write_audience(None) is None
+        assert clamp_write_audience("victim") == "victim"
+
+
+def test_admin_owned_key_fire_stays_unrestricted_under_a_restricted_triggering_caller() -> None:
+    # Precedence AND the admin rule together: a restricted ringer's inherited context must
+    # not confine the admin fire, and its owner claim must not either.
+    with _triggering_caller("k-bob", owner="bob"), _fire(_admin_owned_key()):
+        assert restricted_identity() is None
+        assert request_identity() == ("k-admin", None)
+
+
 def test_gate_off_execution_identity_is_unrestricted() -> None:
-    # With the gate off the identity carries the key alone, so there is nothing to restrict.
-    with _fire(CallerIdentity(user_id="k-fire")):
+    # With the gate off the identity carries the key alone as the synthetic admin, so there
+    # is nothing to restrict.
+    with _fire(CallerIdentity(user_id="k-fire", is_admin=True)):
         assert restricted_identity() is None
         assert request_identity() == ("k-fire", None)
 

@@ -88,8 +88,9 @@ def test_access_control_disabled_yields_the_bare_key(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
     identity = asyncio.run(build_execution_identity("k-fire", bound_fingerprint="fp-k-fire"))
-    # No policy store to read: the identity names the key and every decision against it allows.
-    assert identity == CallerIdentity(user_id="k-fire")
+    # No policy store to read: the identity names the key, is the synthetic admin (nothing
+    # to restrict, secret fence open), and every decision against it allows.
+    assert identity == CallerIdentity(user_id="k-fire", is_admin=True)
 
 
 # -- the key that cannot carry authority at all -------------------------------

@@ -14,8 +14,8 @@ class TokenFreeConditionError(Exception):
 
     Raised by :func:`~tai42_skeleton.authz.token_free.assert_token_free_evaluable`
     naming the offending construct and where it sits, and by
-    :func:`~tai42_skeleton.authz.execution.assert_execution_key_evaluable` when a
-    condition does not render at all.
+    :func:`~tai42_skeleton.authz.execution_evaluability.assert_execution_key_evaluable`
+    when a condition does not render at all.
     """
 
 

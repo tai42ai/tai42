@@ -20,12 +20,8 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.user import is_admin_policy
-from tai42_skeleton.authz.execution import (
-    ExecutionConditionError,
-    ExecutionKeyAuthorityError,
-    assert_execution_key_evaluable,
-    assert_key_carries_authority,
-)
+from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, assert_key_carries_authority
+from tai42_skeleton.authz.execution_evaluability import ExecutionConditionError, assert_execution_key_evaluable
 from tai42_skeleton.authz.execution_identity import get_execution_identity
 from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError, NotFoundError, OperationFailedError
 

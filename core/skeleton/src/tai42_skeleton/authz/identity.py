@@ -20,6 +20,7 @@ from tai42_contract.access_control.context import get_current_user_id
 from tai42_skeleton.access_control.request_scopes import (
     get_request_effective_scopes,
     get_request_identity_claims,
+    get_request_is_admin,
 )
 
 
@@ -49,6 +50,14 @@ class CallerIdentity:
     stored ``policy_data`` — the owner reference alone, or ``{}`` when ownerless.
     ``None`` means no caller was bound (read as an empty identity) or a gate-off fire.
 
+    ``is_admin`` is the auth backend's admin verdict for this caller
+    (:func:`~tai42_skeleton.access_control.user.is_admin_policy` on the owner-attenuated
+    effective policy) — the SAME discriminator the HTTP edge stamps on the request-scope
+    principal. It rides here alongside the claims so the isolation seam can read the verdict
+    for a fire without re-deriving it from policies. Computed server-side (never a client
+    claim), so it cannot be forged, and it is not projected to any client-facing surface.
+    ``False`` when the caller is not admin or no principal is bound.
+
     ``execution_key_fingerprint`` is set ONLY on a fire's synthetic identity: the per-mint
     key identity the firing record captured at bind, carried so a capability dispatch's
     mid-turn liveness re-read asserts the SAME equality. NEVER a jq-context claim, so it
@@ -59,6 +68,7 @@ class CallerIdentity:
     is_internal: bool = False
     effective_scopes: tuple[str, ...] | None = None
     claims: Mapping[str, Any] | None = None
+    is_admin: bool = False
     execution_key_fingerprint: str | None = None
 
 
@@ -74,12 +84,13 @@ def resolve_caller_identity() -> CallerIdentity:
 
     ``user_id`` is ``None`` when no caller is bound — an unauthenticated external
     dispatch, which the authorization check denies while access control is enabled.
-    ``effective_scopes`` is the owner-attenuated scope set the HTTP edge decided and
-    ``claims`` the caller's verified token claims, both bound as a set with the
-    caller id on every authenticated request.
+    ``effective_scopes`` is the owner-attenuated scope set the HTTP edge decided,
+    ``claims`` the caller's verified token claims, and ``is_admin`` the backend's admin
+    verdict — all bound as a set with the caller id on every authenticated request.
     """
     return CallerIdentity(
         user_id=get_current_user_id(),
         effective_scopes=get_request_effective_scopes(),
         claims=get_request_identity_claims(),
+        is_admin=get_request_is_admin(),
     )

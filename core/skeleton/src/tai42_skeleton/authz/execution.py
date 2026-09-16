@@ -8,9 +8,9 @@ the key or its owner lands on the very next fire with nothing to invalidate.
   analogue of the HTTP auth backend's policy stage, with the owner taken from the key's
   stored ``policy_data`` rather than a token claim.
 * :func:`bind_execution_identity` — the ONE set/``finally``-reset of the contextvar.
-* :func:`assert_execution_key_evaluable` — the key-level token-free-evaluable rule every
-  surface storing a record that names an execution key runs before the write;
-  :class:`ExecutionKeyScan` runs it over a batch, reading each distinct key once.
+* :class:`ExecutionKeyScan` — batches the record-level bind gate (authority plus the
+  token-free-evaluable rule of :mod:`tai42_skeleton.authz.execution_evaluability`) over a
+  batch of records, reading each distinct key once.
 * :func:`authorize_execution_tool_call` — the per-call decision at the dispatch seam.
 
 Granularity mirrors the MCP edge: an OPERATION tool takes the full per-call decision
@@ -24,7 +24,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from jinja2 import TemplateError
 from tai42_contract.access_control import (
     KEY_FINGERPRINT_CLAIM,
     OWNER_USER_ID_CLAIM,
@@ -32,7 +31,6 @@ from tai42_contract.access_control import (
     set_request_secret_capability,
 )
 from tai42_contract.access_control.models import AccessPolicy
-from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
@@ -40,12 +38,11 @@ from tai42_skeleton.access_control.role_gate import resolve_route_meta
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.user import is_admin_policy
 from tai42_skeleton.authz.check import _authorize_pinned_route, check
+from tai42_skeleton.authz.execution_evaluability import ExecutionConditionError, assert_execution_key_evaluable
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.authz.resolver import resolve_dispatch
-from tai42_skeleton.authz.token_free import TokenFreeConditionError, assert_token_free_evaluable
 from tai42_skeleton.operations.errors import PermissionDeniedError
-from tai42_skeleton.template import TemplateNotFoundError
 
 if TYPE_CHECKING:
     from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -69,13 +66,21 @@ async def build_execution_identity(execution_key: str, *, bound_fingerprint: str
     """
     settings = access_control_settings()
     if not settings.enable:
-        return CallerIdentity(user_id=execution_key)
+        # Gate off: every principal is the synthetic admin, so nothing is restricted and
+        # the secret fence is open — the same value the gate-off request edge binds.
+        return CallerIdentity(user_id=execution_key, is_admin=True)
 
     owner = await assert_key_carries_authority(
         PolicyEnforcer(settings), execution_key, bound_fingerprint=bound_fingerprint
     )
     claims = {} if owner is None else {OWNER_USER_ID_CLAIM: owner}
-    return CallerIdentity(user_id=execution_key, claims=claims, execution_key_fingerprint=bound_fingerprint)
+    # The admin verdict for the KEY the fire runs AS, read live from its own (owner-capped)
+    # grants — the SAME discriminator the HTTP edge stamps. It rides on the identity so the
+    # isolation seam and the secret fence read one verdict rather than each re-deriving it.
+    is_admin = await resolve_execution_key_secret_capability(execution_key)
+    return CallerIdentity(
+        user_id=execution_key, claims=claims, is_admin=is_admin, execution_key_fingerprint=bound_fingerprint
+    )
 
 
 class ExecutionKeyAuthorityError(PermissionDeniedError):
@@ -222,9 +227,7 @@ async def bind_execution_identity(execution_key: str, *, bound_fingerprint: str)
     """
     identity = await build_execution_identity(execution_key, bound_fingerprint=bound_fingerprint)
     token = set_execution_identity(identity)
-    secret_capability_token = set_request_secret_capability(
-        await resolve_execution_key_secret_capability(execution_key)
-    )
+    secret_capability_token = set_request_secret_capability(identity.is_admin)
     try:
         yield identity
     finally:
@@ -269,80 +272,6 @@ async def rebuild_execution_identity(execution_key: str) -> CallerIdentity | Non
         return await build_execution_identity(execution_key, bound_fingerprint=fingerprint)
     except PermissionDeniedError:
         return None
-
-
-class ExecutionConditionError(TokenFreeConditionError):
-    """A named principal's stored policy condition cannot be evaluated by a tokenless background execution.
-
-    The one refusal type :func:`assert_execution_key_evaluable` and
-    :class:`ExecutionKeyScan` raise. The message quotes a bounded excerpt of the
-    RAW jq condition, which is store-secret; ``principal`` is a separate field so
-    a door answering an untrusted caller can log the
-    diagnostic and answer with the principal alone.
-    """
-
-    def __init__(self, message: str, *, principal: str) -> None:
-        """Build the refusal with ``message`` and the offending ``principal``."""
-        super().__init__(message)
-        self.principal = principal
-
-
-async def _assert_condition_evaluable(policy: AccessPolicy, *, principal: str) -> None:
-    """Assert that ``policy``'s condition, rendered, can be evaluated by a tokenless background execution.
-
-    Rendered with the identical render enforcement runs, since that text — not the stored
-    template reference — is what a fire evaluates. A render failure is a loud refusal,
-    NEVER read as "no condition": it would hide the very identity references being scanned
-    for. Only author-fixable failures become :class:`ExecutionConditionError`; an
-    infrastructure fault propagates as itself.
-    """
-    if policy.condition is None:
-        # Nothing configured, so nothing to scan. A PRESENT-but-empty condition is NOT this
-        # case — it is configured and still goes through the render.
-        return
-    try:
-        condition = await tai42_app.storage.resource_manager.render_templated_text(policy.condition)
-    except (ValueError, TemplateError, TemplateNotFoundError) as exc:
-        raise ExecutionConditionError(
-            f"the policy condition of {principal!r} does not render ({exc}), so it cannot be shown evaluable "
-            "for a background execution; repair the condition before binding this execution key",
-            principal=principal,
-        ) from exc
-    if not condition:
-        return
-    try:
-        assert_token_free_evaluable(condition)
-    except TokenFreeConditionError as exc:
-        raise ExecutionConditionError(
-            f"the policy condition of {principal!r} is unusable at a fire: {exc}", principal=principal
-        ) from exc
-
-
-async def assert_execution_key_evaluable(enforcer: PolicyEnforcer, execution_key: str) -> None:
-    """Assert that a record naming ``execution_key`` can actually fire under it.
-
-    A fire presents no credential, so its jq context carries only the identity claim
-    readable from the store. The key's condition — and, when the key is owned, its
-    OWNER's condition, which is enforced as a second pass — must not depend on any
-    other one. Raises :class:`ExecutionConditionError` naming the offending reference —
-    and the principal it belongs to — otherwise; each write surface maps that to its own
-    typed refusal.
-
-    Both conditions are read through the CALLER's ``enforcer`` against ONE already-read
-    store version, so the pair answers from a single cache generation.
-
-    Early rejection only — the authoritative assertion runs at the fire, on the text
-    rendered then. Callers must already have established that access control is enabled;
-    this does not check.
-    """
-    version = await enforcer.current_policy_version()
-    policy = await enforcer.get_policy_at(execution_key, version)
-    await _assert_condition_evaluable(policy, principal=execution_key)
-
-    owner = policy.policy_data.get(OWNER_USER_ID_CLAIM)
-    if owner is not None:
-        owner_policy = await enforcer.get_policy_at(owner, version)
-        await _assert_condition_evaluable(owner_policy, principal=owner)
 
 
 class ExecutionKeyScan:
