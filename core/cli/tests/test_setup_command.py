@@ -9,7 +9,7 @@ import pytest
 
 from tai42_cli.commands import setup as setup_cmd
 
-from .remote_harness import data_response, error_response, run_cli
+from .remote_harness import data_response, error_response, run_cli, visible
 
 _RESULT = {
     "owner_user_id": "usr-owner",
@@ -136,7 +136,7 @@ def test_setup_password_when_no_login_provider_is_rejected(monkeypatch: pytest.M
         ["setup", "--token", "tok", "--display-name", "Owner", "--password", "pw", "--email", "o@example.com"],
     )
     assert result.exit_code != 0
-    assert "no accounts provider that can attach a login" in result.output
+    assert "no accounts provider that can attach a login" in visible(result.output)
     assert "posted" not in seen
 
 
@@ -207,7 +207,7 @@ def test_setup_password_unsupported_kind_is_rejected(monkeypatch: pytest.MonkeyP
         ["setup", "--token", "tok", "--display-name", "Owner", "--password", "pw", "--email", "o@example.com"],
     )
     assert result.exit_code != 0
-    assert "does not accept a password" in result.output
+    assert "does not accept a password" in visible(result.output)
     assert "posted" not in seen
 
 
@@ -397,7 +397,7 @@ def test_recover_unregistered_reports_the_missing_server_package(monkeypatch: py
     monkeypatch.setattr(setup_cmd, "_recovery", None)
     result = run_cli(monkeypatch, _no_http, ["setup", "--recover", "--token", "tok"])
     assert result.exit_code != 0
-    assert "needs the server package" in result.output
+    assert "needs the server package" in visible(result.output)
 
 
 def test_recover_registered_calls_handler_with_resolved_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
