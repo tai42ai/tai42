@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from tai42_e2e.accounts_flow import invite_accept_login
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
@@ -38,7 +39,6 @@ async def test_dual_role_accounts_boots_and_reloads_without_quarantine(
     accounts_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
     stack = accounts_stack
-    token = stack.config.env["TAI_ACCOUNTS_BOOTSTRAP_TOKEN"]
     admin = stack.api(port=stack.port_a)  # seeded root sk- key
     public_a = ApiClient(f"http://{stack.host}:{stack.port_a}")
 
@@ -47,23 +47,21 @@ async def test_dual_role_accounts_boots_and_reloads_without_quarantine(
     await _assert_no_quarantine(stack, stack.port_a)
     await _assert_no_quarantine(stack, stack.port_b)
 
-    # routes_login serves: bootstrap the first owner, then a real password round-trip mints
-    # a session — the login family is mounted under /api/login, not stranded by quarantine.
-    owner_email = f"{uniq('owner')}@e2e.test"
-    await public_a.post(
-        "/api/login/bootstrap",
-        json={"email": owner_email, "password": _PASSWORD, "bootstrap_token": token},
-        retry_on_reloading=True,
+    # routes_users + routes_login serve: the seeded owner holds the setup door shut, so a new
+    # admin comes in through invite/accept/login — the accept mints the first session and the
+    # password round-trip another, proving both route families are mounted (/api/auth,
+    # /api/login) and not stranded by quarantine.
+    user_email = f"{uniq('user')}@e2e.test"
+    _user_id, session = await invite_accept_login(
+        admin, public_a, email=user_email, role="admin", password=_PASSWORD, retry_on_reloading=True
     )
-    login = await public_a.post("/api/login/password", json={"email": owner_email, "password": _PASSWORD})
-    session = login["token"]
-    assert session.startswith("tai-sess-"), f"login must mint a session token: {session[:12]!r}"
 
-    # routes_users serves: the owner session reads the authed user list under /api/auth, so
-    # the session minted by routes_login authorizes a read on the sibling routes_users mount.
+    # routes_users serves: the invited admin's session reads the authed user list under
+    # /api/auth on the OTHER replica, so the session minted by routes_login authorizes a read
+    # on the sibling routes_users mount cross-worker.
     owner_client = stack.api(port=stack.port_b).with_token(session)
     listed = await owner_client.get("/api/auth/users")
-    assert any(u["email"] == owner_email for u in listed["users"]), listed
+    assert any(u["email"] == user_email for u in listed["users"]), listed
 
     # A fleet reload re-imports every manifest module under its binding on every worker: the
     # dual-role distribution must re-fire each route submodule once and stay off quarantine.
@@ -81,9 +79,9 @@ async def test_dual_role_accounts_boots_and_reloads_without_quarantine(
     # Both route families still serve after the reload: a fresh password login and an authed
     # users read both succeed against the re-imported route table.
     relogin = await public_a.post(
-        "/api/login/password", json={"email": owner_email, "password": _PASSWORD}, retry_on_reloading=True
+        "/api/login/password", json={"email": user_email, "password": _PASSWORD}, retry_on_reloading=True
     )
     reread = (
         await stack.api(port=stack.port_b).with_token(relogin["token"]).get("/api/auth/users", retry_on_reloading=True)
     )
-    assert any(u["email"] == owner_email for u in reread["users"]), reread
+    assert any(u["email"] == user_email for u in reread["users"]), reread

@@ -364,10 +364,12 @@ HARNESS_API = {
         "connect_infra",
         "allocate_resources",
         "release_resources",
+    ],
+    "tai42_e2e.seeding": [
+        "seed_owner_and_key",
         "seed_bootstrap_key",
         "seed_route_rows",
         "seed_studio_auth",
-        "seed_root_identity",
     ],
     "tai42_e2e.settings": ["HarnessSettings"],
     "tai42_e2e.variants": [

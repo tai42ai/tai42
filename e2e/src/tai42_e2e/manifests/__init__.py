@@ -9,11 +9,13 @@ from tai42_e2e.manifests.agents import (
     build_agents_stack,
 )
 from tai42_e2e.manifests.auth import (
-    _KEYS_BOOTSTRAP_TOKEN,
+    _SETUP_TOKEN,
+    build_accounts_fresh_stack,
     build_accounts_stack,
     build_auth_stack,
-    build_keys_bootstrap_stack,
     build_oidc_stack,
+    build_owned_keys_stack,
+    build_setup_stack,
 )
 from tai42_e2e.manifests.bridge import (
     BRIDGE_MAX_CONCURRENT_TURNS,
@@ -102,7 +104,7 @@ from tai42_e2e.manifests.sandbox import (
 from tai42_e2e.manifests.scheduling import build_schedule_stack
 from tai42_e2e.manifests.seams import build_seams_seed_off_stack, build_seams_seed_stack, build_seams_stack
 from tai42_e2e.manifests.stripe import _STRIPE_TEST_SECRET_KEY, build_stripe_stack
-from tai42_e2e.manifests.studio import build_studio_stack
+from tai42_e2e.manifests.studio import build_studio_setup_stack, build_studio_stack
 from tai42_e2e.manifests.tool_entries import (
     _CORE_ROUTERS,
     _EXTENSION_MODULES,
@@ -155,8 +157,8 @@ __all__ = [
     "_CORE_ROUTERS",
     "_DEEP_AGENT_ENTRY",
     "_EXTENSION_MODULES",
-    "_KEYS_BOOTSTRAP_TOKEN",
     "_PROJECTED_API_TOOLS",
+    "_SETUP_TOKEN",
     "_STRIPE_TEST_SECRET_KEY",
     "_base_env",
     "_builtin_entries",
@@ -165,6 +167,7 @@ __all__ = [
     "_probe_tools_entry",
     "_redis_feature_env",
     "_toolbox_tools_entry",
+    "build_accounts_fresh_stack",
     "build_accounts_stack",
     "build_agent_async_park_stack",
     "build_agent_route_park_stack",
@@ -183,7 +186,6 @@ __all__ = [
     "build_default_router_stack",
     "build_embed_stack",
     "build_extensions_stack",
-    "build_keys_bootstrap_stack",
     "build_marketplace_authz_stack",
     "build_marketplace_connectors_stack",
     "build_marketplace_prefix_stack",
@@ -193,6 +195,7 @@ __all__ = [
     "build_monitoring_stack",
     "build_off_stack",
     "build_oidc_stack",
+    "build_owned_keys_stack",
     "build_postgres_mcp_stack",
     "build_projection_authz_stack",
     "build_projection_stack",
@@ -208,8 +211,10 @@ __all__ = [
     "build_seams_seed_off_stack",
     "build_seams_seed_stack",
     "build_seams_stack",
+    "build_setup_stack",
     "build_shipped_connectors_stack",
     "build_stripe_stack",
+    "build_studio_setup_stack",
     "build_studio_stack",
     "postgres_mcp_tool_name",
     "resilience_mcp_tool_name",

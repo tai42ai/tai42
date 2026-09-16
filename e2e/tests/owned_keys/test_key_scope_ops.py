@@ -16,7 +16,7 @@ from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
-from ._owned_support import mint_owner
+from ._owned_support import mint_admin_key
 
 
 async def _register_scope(root: ApiClient, scope_id: str) -> None:
@@ -25,8 +25,8 @@ async def _register_scope(root: ApiClient, scope_id: str) -> None:
     await root.post("/api/auth/scopes", json={"scope_id": scope_id, "url": f"/e2e/{scope_id}"})
 
 
-async def test_key_scopes_add_remove(auth_stack: TaiStack, uniq: Callable[[str], str]) -> None:
-    root = auth_stack.api(port=auth_stack.port_a)
+async def test_key_scopes_add_remove(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
+    root = owned_keys_stack.api(port=owned_keys_stack.port_a)
 
     first = uniq("scope")
     second = uniq("scope")
@@ -34,7 +34,7 @@ async def test_key_scopes_add_remove(auth_stack: TaiStack, uniq: Callable[[str],
     for scope in (first, second, third):
         await _register_scope(root, scope)
 
-    user_id, raw = await mint_owner(root, uniq, scopes=[first, second])
+    user_id, raw = await mint_admin_key(root, uniq, scopes=[first, second])
     key = root.with_token(raw)
 
     # Add the third scope: the response carries the new set (stored order, addition

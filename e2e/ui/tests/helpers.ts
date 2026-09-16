@@ -64,12 +64,21 @@ export function uniq(prefix = 'e2e'): string {
 }
 
 /**
- * The pinned first-owner bootstrap token. MUST match
- * ``tai42_e2e.manifests._ACCOUNTS_BOOTSTRAP_TOKEN`` (the value the studio stack sets
- * as ``TAI_ACCOUNTS_BOOTSTRAP_TOKEN``), so the login spec can create the owner
- * through the gated bootstrap form deterministically.
+ * The pinned setup token. MUST equal ``tai42_e2e.manifests._SETUP_TOKEN`` (the value every
+ * accounts-enabled studio stack sets as ``TAI_SETUP_TOKEN``), so the login spec drives the
+ * gated ``POST /api/setup`` initialize path deterministically.
  */
-export const BOOTSTRAP_TOKEN = 'e2e-accounts-bootstrap-token';
+export const SETUP_TOKEN = 'e2e-setup-token';
+
+/**
+ * The pinned app port + origin of the UNSEEDED accounts-enabled studio stack the login spec's
+ * ``needs_setup`` flow runs against. The studio runner boots it alongside the seeded stack the
+ * API-key-paste specs share (one runner process, two ports). The default MUST match the
+ * ``TAI_E2E_UI_SETUP_PORT`` the ``webServer`` env in ``playwright.config.ts`` forwards to the
+ * runner (its ``ui_setup_port``).
+ */
+export const SETUP_PORT = Number(process.env.TAI_E2E_UI_SETUP_PORT ?? 8780);
+export const SETUP_URL = `http://127.0.0.1:${String(SETUP_PORT)}`;
 
 /** The app's auth header (Bearer or X-Api-Key are both accepted; the app uses X-Api-Key). */
 export function apiHeaders(key: string = API_KEY): Record<string, string> {
@@ -329,18 +338,18 @@ export async function loginViaUi(page: Page, key: string = API_KEY): Promise<voi
 }
 
 /**
- * Mint an API key through the live mint door and return its raw `sk-` token. `by`
- * is the minting credential (defaults to the pinned root key): minting through the
- * root `*` key yields a top-level key that can itself mint, while minting through a
- * non-admin key forces self-ownership so the child is an OWNED key that can mint
- * nothing — the owner→owned chain the owned-key journey arranges over the API.
+ * Mint an API key through the live mint door (as the pinned root admin) and return its
+ * raw `sk-` token. Every key belongs to a principal, so a key minted with an explicit
+ * scope set and no `owner_user_id` is owned by the admin's own principal — a SCOPED,
+ * non-admin OWNED key (it can mint nothing and is confined to its own isolation slice),
+ * the shape the owned-key journey arranges over the API.
  */
 export async function mintKey(
   request: APIRequestContext,
-  opts: { userId: string; scopes: string[]; description?: string; by?: string },
+  opts: { userId: string; scopes: string[]; description?: string },
 ): Promise<string> {
   const res = await request.post('/api/auth/api-keys', {
-    headers: apiHeaders(opts.by ?? API_KEY),
+    headers: apiHeaders(),
     data: { user_id: opts.userId, description: opts.description ?? 'e2e owned-journey key', scopes: opts.scopes },
   });
   expect(res.status(), await res.text()).toBe(200);
@@ -348,21 +357,42 @@ export async function mintKey(
 }
 
 /**
- * Mint a one-time claim link that carries `apiKey` to a browser via the URL
- * fragment. `by` is the authed creator (defaults to root, which may link any key);
- * returns the `{ token, claim_path }` the login screen exchanges at `/login#claim=`.
+ * Mint a one-time claim link that carries `apiKey` to a browser via the URL fragment,
+ * created as the pinned root admin (an admin may link any key). Returns the
+ * `{ token, claim_path }` the login screen exchanges at `/login#claim=`.
  */
 export async function createClaimLink(
   request: APIRequestContext,
   apiKey: string,
-  by: string = API_KEY,
 ): Promise<{ token: string; claim_path: string }> {
   const res = await request.post('/api/auth/claim-links', {
-    headers: apiHeaders(by),
+    headers: apiHeaders(),
     data: { api_key: apiKey },
   });
   expect(res.status(), await res.text()).toBe(200);
   return ((await res.json()) as { data: { token: string; claim_path: string } }).data;
+}
+
+/**
+ * Provision an UNRESTRICTED operator and return its `tai-sess-` session token. The operator
+ * is a top-level ADMIN HUMAN — an admin invite, accepted with a password, then logged in
+ * for a session — which carries no owner claim, so the isolation gates give it the full
+ * cross-identity view. The seeded admin root key is unrestricted too: admin is never
+ * confined to an isolation slice.
+ */
+export async function provisionAdminSession(request: APIRequestContext): Promise<string> {
+  const email = `${uniq('operator')}@e2e.test`;
+  const password = `${uniq('Pw')}-Aa1`;
+  const invite = await request.post('/api/auth/users', { headers: apiHeaders(), data: { email, role: 'admin' } });
+  expect(invite.status(), await invite.text()).toBe(200);
+  const inviteToken = ((await invite.json()) as { data: { invite_token: string } }).data.invite_token;
+  const accepted = await request.post('/api/login/invite/accept', {
+    data: { invite_token: inviteToken, password, password_confirm: password },
+  });
+  expect(accepted.status(), await accepted.text()).toBe(200);
+  const login = await request.post('/api/login/password', { data: { email, password } });
+  expect(login.status(), await login.text()).toBe(200);
+  return ((await login.json()) as { data: { token: string } }).data.token;
 }
 
 /**

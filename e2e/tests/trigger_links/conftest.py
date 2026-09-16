@@ -35,8 +35,8 @@ import redis
 
 from tai42_e2e import Infra, StackConfig, StackResources, diagnostics
 from tai42_e2e.booting import allocate_and_build
-from tai42_e2e.harness import seed_bootstrap_key, seed_route_rows
 from tai42_e2e.manifests import build_accounts_stack
+from tai42_e2e.seeding import seed_bootstrap_key, seed_route_rows
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import Variants
 

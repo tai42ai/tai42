@@ -9,7 +9,7 @@
  * browser owns.
  */
 import { expect, test, type Page } from '@playwright/test';
-import { API_KEY, createClaimLink, mintKey, uniq } from './helpers';
+import { createClaimLink, mintKey, uniq } from './helpers';
 
 /** The login screen's own reaction to a failed one-time exchange: a loud inline
  * error, the key-paste fallback expanded, no navigation off `/login`, and no trace

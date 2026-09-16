@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from tai42_e2e.accounts_flow import invite_accept_login
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
@@ -31,36 +32,28 @@ async def _register_star_scope(admin: ApiClient, uniq: Callable[[str], str]) -> 
     await admin.post("/api/auth/scopes", json={"scope_id": "*", "url": f"/{uniq('star')}"})
 
 
-async def _invited_session(stack: TaiStack, admin: ApiClient, uniq: Callable[[str], str], role: str) -> str:
-    """Create a ``role`` user through the admin surface and accept its invite,
-    returning a live session token for that non-admin account."""
+async def _invited_session(stack: TaiStack, admin: ApiClient, uniq: Callable[[str], str], role: str) -> tuple[str, str]:
+    """Provision a ``role`` user through the admin surface and log it in, returning
+    ``(user_id, session_token)`` for that non-admin account."""
     email = f"{uniq('user')}@e2e.test"
-    invite = await admin.post("/api/auth/users", json={"email": email, "role": role})
-    accepted = await _unauth(stack, stack.port_a).post(
-        "/api/login/invite/accept",
-        json={"invite_token": invite["invite_token"], "password": _PASSWORD, "password_confirm": _PASSWORD},
-    )
-    return accepted["token"]
+    return await invite_accept_login(admin, _unauth(stack, stack.port_a), email=email, role=role, password=_PASSWORD)
 
 
 async def test_non_admin_mint_is_capped_to_own_scopes(accounts_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     stack = accounts_stack
     admin = stack.api(port=stack.port_a)  # seeded root sk- key (unconditional "*" admin)
 
-    # Admin mints an OWNERLESS machine key with a LIMITED scope set — the headless
-    # path (no owner) stays alive, and its non-"*" scopes make it a non-admin minter.
-    machine_raw = (
-        await admin.post(
-            "/api/auth/api-keys",
-            json={"user_id": uniq("machine"), "description": "limited machine key", "scopes": [_SCOPE]},
-        )
-    )["api_key"]
-    assert machine_raw.startswith("sk-"), machine_raw
-    machine = stack.api(port=stack.port_b).with_token(machine_raw)
+    # The ONLY from-below minter is a non-admin HUMAN session — an api key may not mint keys
+    # at all. An editor session's OWN policy row is narrowed by the admin to a LIMITED scope
+    # set through the policy-edit door (the attenuation authority), so a self-owned mint is
+    # subset-checked against exactly those scopes.
+    editor_id, editor_session = await _invited_session(stack, admin, uniq, role="editor")
+    await admin.put(f"/api/auth/api-keys/{editor_id}", json={"scopes": [_SCOPE]})
+    editor = stack.api(port=stack.port_a).with_token(editor_session)
 
-    # ⊆ own: a sub-key with the same limited scope is granted.
+    # ⊆ own: a self-owned key with the same limited scope is granted.
     sub_raw = (
-        await machine.post(
+        await editor.post(
             "/api/auth/api-keys",
             json={"user_id": uniq("sub"), "description": "attenuated sub key", "scopes": [_SCOPE]},
         )
@@ -75,20 +68,22 @@ async def test_non_admin_mint_is_capped_to_own_scopes(accounts_stack: TaiStack, 
     # regression; a registered-but-unheld scope makes this assertion load-bearing.
     excess_scope = uniq("unheld")
     await admin.post("/api/auth/scopes", json={"scope_id": excess_scope, "url": f"/{uniq('u')}"})
-    excess = await machine.request_raw(
+    excess = await editor.request_raw(
         "POST",
         "/api/auth/api-keys",
         json={"user_id": uniq("sub"), "description": "over-broad", "scopes": [excess_scope]},
     )
     assert excess.status_code == 400, f"a superset mint must 400: {excess.status_code} {excess.text}"
+    assert "requested scopes exceed your own" in excess.text, excess.text
     assert excess_scope in excess.text, f"the 400 must name the offending scope: {excess.text}"
 
-    # Admin is unrestricted: it may mint an ownerless "*" key with no attenuation.
+    # Admin is unrestricted: it may mint an admin-owned "*" key with no attenuation (a mint
+    # with no named owner defaults to the admin's own principal).
     await _register_star_scope(admin, uniq)
     admin_raw = (
         await admin.post(
             "/api/auth/api-keys",
-            json={"user_id": uniq("adminkey"), "description": "ownerless star key", "scopes": ["*"]},
+            json={"user_id": uniq("adminkey"), "description": "admin-owned star key", "scopes": ["*"]},
         )
     )["api_key"]
     assert admin_raw.startswith("sk-"), admin_raw
@@ -117,7 +112,7 @@ async def test_editor_star_key_is_non_admin_on_the_key_surface(
     # An editor session mints a condition-free ["*"] key owned by itself. Its ["*"]
     # scope does NOT make it admin — the owner claim classifies it non-admin.
     await _register_star_scope(admin, uniq)
-    editor_session = await _invited_session(stack, admin, uniq, role="editor")
+    _editor_id, editor_session = await _invited_session(stack, admin, uniq, role="editor")
     editor = stack.api(port=stack.port_a).with_token(editor_session)
     star_key_raw = (
         await editor.post(

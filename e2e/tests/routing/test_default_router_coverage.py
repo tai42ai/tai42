@@ -56,10 +56,6 @@ STUDIO_ROUTE_ANCHORS: dict[str, tuple[str, str, dict | None]] = {
     # interaction is ever looked up, so this proves the route is mounted without a
     # seeded interaction.
     "tai42_skeleton.routers.interactions": ("POST", "/api/interactions/e2e-probe/answer", {}),
-    # An empty body is rejected at the HTTP edge (422) — the request model requires
-    # user_id/description — before the token check or any key lookup, so this proves the
-    # public first-key bootstrap door is mounted without minting anything.
-    "tai42_skeleton.routers.keys_bootstrap": ("POST", "/api/keys/bootstrap", {}),
     "tai42_skeleton.routers.login": ("GET", "/api/login/methods", None),
     "tai42_skeleton.routers.manifest": ("GET", "/api/manifest", None),
     "tai42_skeleton.routers.marketplace": ("GET", "/api/marketplace/installed", None),
@@ -70,6 +66,9 @@ STUDIO_ROUTE_ANCHORS: dict[str, tuple[str, str, dict | None]] = {
     "tai42_skeleton.routers.notifications": ("GET", "/api/notifications", None),
     "tai42_skeleton.routers.observability": ("GET", "/api/observability/runs", None),
     "tai42_skeleton.routers.presets": ("GET", "/api/presets", None),
+    # The principal listing is authed: on this bare stack (gate off) it answers 200,
+    # proving the door is mounted.
+    "tai42_skeleton.routers.principals": ("GET", "/api/auth/principals", None),
     "tai42_skeleton.routers.resources": ("POST", "/api/resources/get", {}),
     # The runs-index list door is an unconditional collection GET: with no run-index
     # store configured on the bare stack it answers an empty page (200), proving the
@@ -77,6 +76,10 @@ STUDIO_ROUTE_ANCHORS: dict[str, tuple[str, str, dict | None]] = {
     "tai42_skeleton.routers.runs": ("GET", "/api/runs", None),
     "tai42_skeleton.routers.sandbox": ("GET", "/api/sandbox", None),
     "tai42_skeleton.routers.schedules": ("GET", "/api/schedules", None),
+    # An empty body is rejected at the HTTP edge (422) — the request model requires
+    # owner_display_name — before the token check or any initialize work, so this proves the
+    # public setup door is mounted without initializing anything.
+    "tai42_skeleton.routers.setup": ("POST", "/api/setup", {}),
     "tai42_skeleton.routers.states": ("GET", "/api/states", None),
     "tai42_skeleton.routers.storage": ("GET", "/api/storage", None),
     "tai42_skeleton.routers.sub_mcp": ("GET", "/api/sub-mcp", None),

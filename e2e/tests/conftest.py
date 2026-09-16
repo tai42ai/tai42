@@ -21,17 +21,12 @@ from psycopg import sql
 from tai42_e2e import Infra, StackResources, diagnostics
 from tai42_e2e.booting import allocate_and_build, boot_stack
 from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio, FakeWhatsApp
-from tai42_e2e.harness import (
-    seed_admin_bypass_authz,
-    seed_bridge_authz,
-    seed_projection_authz,
-    seed_stripe_authz,
-)
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import (
     POSTGRES_MCP_PROBE_ROW_NAME,
     POSTGRES_MCP_PROBE_SCHEMA,
     POSTGRES_MCP_PROBE_TABLE,
+    build_accounts_fresh_stack,
     build_accounts_stack,
     build_agent_async_park_stack,
     build_agent_route_park_stack,
@@ -50,11 +45,11 @@ from tai42_e2e.manifests import (
     build_default_router_stack,
     build_embed_stack,
     build_extensions_stack,
-    build_keys_bootstrap_stack,
     build_minimal_stack,
     build_monitoring_stack,
     build_off_stack,
     build_oidc_stack,
+    build_owned_keys_stack,
     build_postgres_mcp_stack,
     build_projection_authz_stack,
     build_projection_stack,
@@ -66,12 +61,19 @@ from tai42_e2e.manifests import (
     build_sandbox_stack,
     build_schedule_stack,
     build_seams_stack,
+    build_setup_stack,
     build_shipped_connectors_stack,
     build_stripe_stack,
 )
 from tai42_e2e.oidc_idp import OAuthIdp
 from tai42_e2e.pytest_plugin import gated_collect_ignore
 from tai42_e2e.recording_proxy import RecordingConnectProxy, TargetServer
+from tai42_e2e.seeding import (
+    seed_admin_bypass_authz,
+    seed_bridge_authz,
+    seed_projection_authz,
+    seed_stripe_authz,
+)
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.stripe_stub import FakeStripe
@@ -280,11 +282,32 @@ def auth_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterat
 
 
 @pytest.fixture(scope="module")
-def keys_bootstrap_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+def setup_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
     """Access control ON with the redis provider and NO seeded key (``seed_auth=False``)
-    — the fresh install where the public ``/api/keys/bootstrap`` door mints the first
-    admin key behind the pinned bootstrap token."""
-    yield from _boot(infra, tmp_path_factory.mktemp("keys-bootstrap"), build_keys_bootstrap_stack, seed_auth=False)
+    — the fresh install where the public ``/api/setup`` door initializes the deployment
+    behind the pinned setup token."""
+    yield from _boot(infra, tmp_path_factory.mktemp("setup"), build_setup_stack, seed_auth=False)
+
+
+@pytest.fixture
+def fresh_setup_stack(fresh_stack) -> TaiStack:
+    """A function-scoped, un-initialized setup stack for the setup-door lifecycle specs.
+
+    The setup door is ONE-SHOT (409 once a principal exists) and its per-IP throttle keys
+    on the shared loopback peer, so a scenario that initializes or floods the gate needs a
+    pristine deployment of its OWN — a module-scoped stack would leak that state to the next
+    spec (and the split matrix gives no ordering guarantee). Each call builds a fresh
+    ``build_setup_stack`` torn down at test end."""
+    return fresh_stack(build_setup_stack)
+
+
+@pytest.fixture(scope="module")
+def owned_keys_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """The auth stack plus the Postgres accounts provider — the owned-key suite's own
+    deployment. Seeded with the ``e2e-owner`` admin principal and its ``e2e-root`` key
+    (``seed_auth=True``); the accounts provider adds the human-session mint path the
+    suite provisions owners through, alongside the identity provider that answers keys."""
+    yield from _boot(infra, tmp_path_factory.mktemp("owned-keys"), build_owned_keys_stack, seed_auth=True)
 
 
 @pytest.fixture(scope="module")
@@ -294,6 +317,14 @@ def accounts_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> It
     ``tai-sess-`` sessions and ``sk-`` keys against one deployment. Seeded with a
     root key like ``auth_stack``."""
     yield from _boot(infra, tmp_path_factory.mktemp("accounts"), build_accounts_stack, seed_auth=True)
+
+
+@pytest.fixture(scope="module")
+def accounts_fresh_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """A one-worker, busless accounts stack with NO seeded owner (``seed_auth=False``) — the
+    fresh install the setup door initializes, so a spec proves setup + password/invite login
+    on a real fresh accounts deployment. ``needs_setup`` is true until the owner is created."""
+    yield from _boot(infra, tmp_path_factory.mktemp("accounts-fresh"), build_accounts_fresh_stack, seed_auth=False)
 
 
 @pytest.fixture(scope="module")

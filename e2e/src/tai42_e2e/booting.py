@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from tai42_e2e import diagnostics
-from tai42_e2e.harness import allocate_resources, release_resources, seed_bootstrap_key
+from tai42_e2e.harness import allocate_resources, release_resources
+from tai42_e2e.seeding import seed_bootstrap_key
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.topology import Infra, StackConfig, StackResources
 from tai42_e2e.variants import Variants

@@ -1,5 +1,5 @@
-"""One-time claim links (the QR-onboarding carrier): creation rules on the authed
-door, and the public exchange leg's once-only burn, uniform-404 no-oracle, reachable-
+"""One-time claim links (the QR-onboarding carrier): the creation-door ownership rule,
+and the public exchange leg's once-only burn, uniform-404 no-oracle, reachable-
 unauthenticated, revoked-key-dead, and expiry behaviours. The exchange misses must be
 byte-identical so the public surface leaks no oracle distinguishing invalid from used."""
 
@@ -12,7 +12,7 @@ from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
-from ._owned_support import mint_owned, mint_owner
+from ._owned_support import SCOPE, mint_owned, provision_owner
 
 # The single uniform exchange-miss message the handler answers for EVERY miss
 # (unknown / used / revoked-key / expired). Asserting the body carries it — not
@@ -27,17 +27,17 @@ def _no_auth(stack: TaiStack) -> ApiClient:
 
 
 async def test_claim_link_exchanges_once_and_returns_a_working_key(
-    auth_stack: TaiStack, uniq: Callable[[str], str]
+    owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
-    root = auth_stack.api(port=auth_stack.port_a)
-    _owner_id, owner_raw = await mint_owner(root, uniq)
-    owner = root.with_token(owner_raw)
+    root = owned_keys_stack.api(port=owned_keys_stack.port_a)
+    _owner_id, session = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
+    owner = root.with_token(session)
     owned_id, owned_raw = await mint_owned(owner, uniq)
 
     link = await owner.post("/api/auth/claim-links", json={"api_key": owned_raw})
     assert link["claim_path"] == f"/login#claim={link['token']}"
 
-    exchange = _no_auth(auth_stack)
+    exchange = _no_auth(owned_keys_stack)
     first = await exchange.request_raw("POST", "/api/login/claim", json={"token": link["token"]})
     assert first.status_code == 200, first.text
     payload = first.json()["data"]
@@ -55,12 +55,12 @@ async def test_claim_link_exchanges_once_and_returns_a_working_key(
     assert second.status_code == 404
 
 
-async def test_exchange_misses_are_byte_identical(auth_stack: TaiStack, uniq: Callable[[str], str]) -> None:
-    root = auth_stack.api(port=auth_stack.port_a)
-    _owner_id, owner_raw = await mint_owner(root, uniq)
-    owner = root.with_token(owner_raw)
+async def test_exchange_misses_are_byte_identical(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
+    root = owned_keys_stack.api(port=owned_keys_stack.port_a)
+    _owner_id, session = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
+    owner = root.with_token(session)
     _owned_id, owned_raw = await mint_owned(owner, uniq)
-    exchange = _no_auth(auth_stack)
+    exchange = _no_auth(owned_keys_stack)
 
     # An invalid (never-issued) token — the shared baseline every other miss must match.
     invalid = await exchange.request_raw("POST", "/api/login/claim", json={"token": f"clm-{uniq('nope')}"})
@@ -101,10 +101,14 @@ async def test_exchange_misses_are_byte_identical(auth_stack: TaiStack, uniq: Ca
     assert expired.content == invalid.content
 
 
-async def test_public_exchange_is_reachable_unauthenticated(auth_stack: TaiStack, uniq: Callable[[str], str]) -> None:
+async def test_public_exchange_is_reachable_unauthenticated(
+    owned_keys_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
     # No Authorization header at all: the always-public login namespace must let the
     # request REACH the handler (a 404 miss), never bounce it at the gate (401/403).
-    response = await _no_auth(auth_stack).request_raw("POST", "/api/login/claim", json={"token": f"clm-{uniq('x')}"})
+    response = await _no_auth(owned_keys_stack).request_raw(
+        "POST", "/api/login/claim", json={"token": f"clm-{uniq('x')}"}
+    )
     assert response.status_code == 404
     # A bare 404 is also what a not-mounted route answers; assert the body carries the
     # HANDLER's uniform claim-miss envelope, proving the public route is genuinely
@@ -112,38 +116,54 @@ async def test_public_exchange_is_reachable_unauthenticated(auth_stack: TaiStack
     assert response.json() == {"error": _CLAIM_MISS_MESSAGE}
 
 
-async def test_claim_link_creation_rules(auth_stack: TaiStack, uniq: Callable[[str], str]) -> None:
-    root = auth_stack.api(port=auth_stack.port_a)
-    _owner_a_id, owner_a_raw = await mint_owner(root, uniq)
-    owner_a = root.with_token(owner_a_raw)
+async def test_claim_link_creation_rules(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
+    root = owned_keys_stack.api(port=owned_keys_stack.port_a)
+    _owner_a_id, session_a = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
+    owner_a = root.with_token(session_a)
     _owned_a_id, owned_a_raw = await mint_owned(owner_a, uniq)
+    owned_a = root.with_token(owned_a_raw)
+    _sibling_id, sibling_raw = await mint_owned(owner_a, uniq)
 
-    _owner_b_id, owner_b_raw = await mint_owner(root, uniq)
-    owner_b = root.with_token(owner_b_raw)
+    _owner_b_id, session_b = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
+    owner_b = root.with_token(session_b)
 
     # An unresolvable key → 400 naming it invalid.
     invalid = await owner_a.request_raw("POST", "/api/auth/claim-links", json={"api_key": f"sk-{uniq('nope')}"})
     assert invalid.status_code == 400
     assert "not a valid" in invalid.text.lower()
 
-    # A different owner may not link owner A's owned key (not admin, did not mint it,
-    # not its own key) → 403.
+    # A different owner may not link owner A's owned key (not admin, its principal does
+    # not own the key, not its own key) → 403.
     foreign = await owner_b.request_raw("POST", "/api/auth/claim-links", json={"api_key": owned_a_raw})
     assert foreign.status_code == 403
 
-    # Owner A may link its OWN key.
-    own = await owner_a.post("/api/auth/claim-links", json={"api_key": owner_a_raw})
-    assert own["token"]
+    # The OWNED key may link ITSELF (its own credential).
+    self_link = await owned_a.request_raw("POST", "/api/auth/claim-links", json={"api_key": owned_a_raw})
+    assert self_link.status_code == 200, self_link.text
 
-    # Owner A may link a key it minted.
+    # The OWNED key may link a SIBLING owned by the SAME principal — its principal owns it.
+    sibling = await owned_a.request_raw("POST", "/api/auth/claim-links", json={"api_key": sibling_raw})
+    assert sibling.status_code == 200, sibling.text
+
+    # Owner A's session may link a key it minted from below (owned by its own principal).
     minted = await owner_a.post("/api/auth/claim-links", json={"api_key": owned_a_raw})
     assert minted["token"]
 
+    # The admin root may link a key owned by ANOTHER principal.
+    by_admin = await root.request_raw("POST", "/api/auth/claim-links", json={"api_key": owned_a_raw})
+    assert by_admin.status_code == 200, by_admin.text
 
-async def test_revoked_key_claim_link_is_dead(auth_stack: TaiStack, uniq: Callable[[str], str]) -> None:
-    root = auth_stack.api(port=auth_stack.port_a)
-    _owner_id, owner_raw = await mint_owner(root, uniq)
-    owner = root.with_token(owner_raw)
+    # A session token as the TARGET resolves to a non-mint identity whose owner claim the
+    # verifier strips, so a non-admin caller may never share it → 403 (neither its own key
+    # nor owned by its principal).
+    session_target = await owner_b.request_raw("POST", "/api/auth/claim-links", json={"api_key": session_a})
+    assert session_target.status_code == 403, session_target.text
+
+
+async def test_revoked_key_claim_link_is_dead(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
+    root = owned_keys_stack.api(port=owned_keys_stack.port_a)
+    _owner_id, session = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
+    owner = root.with_token(session)
     owned_id, owned_raw = await mint_owned(owner, uniq)
 
     link = await owner.post("/api/auth/claim-links", json={"api_key": owned_raw})
@@ -151,16 +171,16 @@ async def test_revoked_key_claim_link_is_dead(auth_stack: TaiStack, uniq: Callab
     # and must refuse to hand out a revoked credential (the same uniform 404).
     await root.delete(f"/api/auth/api-keys/{owned_id}")
 
-    response = await _no_auth(auth_stack).request_raw("POST", "/api/login/claim", json={"token": link["token"]})
+    response = await _no_auth(owned_keys_stack).request_raw("POST", "/api/login/claim", json={"token": link["token"]})
     assert response.status_code == 404
 
 
-async def test_claim_link_expires(auth_stack: TaiStack, uniq: Callable[[str], str]) -> None:
-    root = auth_stack.api(port=auth_stack.port_a)
-    _owner_id, owner_raw = await mint_owner(root, uniq)
-    owner = root.with_token(owner_raw)
+async def test_claim_link_expires(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
+    root = owned_keys_stack.api(port=owned_keys_stack.port_a)
+    _owner_id, session = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
+    owner = root.with_token(session)
     _owned_id, owned_raw = await mint_owned(owner, uniq)
-    exchange = _no_auth(auth_stack)
+    exchange = _no_auth(owned_keys_stack)
     ttl_seconds = 2
 
     # (a) BORN-ALIVE sentinel: a FRESH short-TTL link exchanges IMMEDIATELY (200). This

@@ -5,8 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from tai42_e2e.harness import STUDIO_PATH_PATTERNS
-from tai42_e2e.manifests.auth import _ACCOUNTS_BOOTSTRAP_TOKEN
+from tai42_e2e.manifests.auth import _SETUP_TOKEN
 from tai42_e2e.manifests.channels import _web_channel_env
 from tai42_e2e.manifests.connectors import (
     _FIXTURE_IDP_BASE_FALLBACK,
@@ -20,6 +19,7 @@ from tai42_e2e.manifests.tool_entries import (
     _probe_tools_entry,
     _toolbox_tools_entry,
 )
+from tai42_e2e.seeding import STUDIO_PATH_PATTERNS
 from tai42_e2e.topology import StackConfig, StackResources, Topology
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     The accounts + redis key providers coexist so the login screen renders its password
     form and keeps the key-paste fallback; ``studio_plugins`` carries the accounts plugin
     so its users-admin page mounts into the Studio shell (its API routers alone mount no
-    page). The first-owner bootstrap gate is pinned to ``_ACCOUNTS_BOOTSTRAP_TOKEN``.
+    page). The setup door's gate is pinned to ``_SETUP_TOKEN``.
 
     TRAP: ``/api/login``'s public-ness comes from the code-side
     ``always_public_path_prefixes`` default, not a route row or ``ACCESS_CONTROL_PATH_PATTERNS``.
@@ -111,11 +111,11 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     # accounts_* tables share this stack's database, the template carrying both
     # schemas — bind to the ``default`` database _base_env already declares; no
     # per-store PG env here.
-    # First-owner bootstrap gate, pinned to a known value (see ``_ACCOUNTS_BOOTSTRAP_TOKEN``).
-    env["TAI_ACCOUNTS_BOOTSTRAP_TOKEN"] = _ACCOUNTS_BOOTSTRAP_TOKEN
+    # The setup door's gate, pinned to a known value (see ``_SETUP_TOKEN``).
+    env["TAI_SETUP_TOKEN"] = _SETUP_TOKEN
     # Tier one of the route mapping: request-path regex -> route template. Tier two
     # (template -> resource id) is seeded into the PG route store by
-    # ``harness.seed_studio_auth`` before boot.
+    # ``seeding.seed_studio_auth`` before boot.
     env["ACCESS_CONTROL_PATH_PATTERNS"] = json.dumps(STUDIO_PATH_PATTERNS)
     env["STUDIO_DIST_PATH"] = res.studio_dist_path
     # Lift the ``root`` rate-limit family for the browser leg. Every SPA request — the
@@ -187,4 +187,62 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         # The ask_user callback base the web channel's answer door forwards to must be this
         # stack's own reachable origin (single app port, known only at boot).
         app_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
+    )
+
+
+def build_studio_setup_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The built Studio over an UNSEEDED accounts-enabled deployment — the fresh install
+    the setup door serves, for the login spec's ``needs_setup=true`` flow.
+
+    Serves the real Studio dist through the whole default router set (``"all"``) — the same
+    ``/api`` surface the shell drives — with the Postgres accounts provider (password login +
+    ``needs_setup`` observability) beside the redis key provider (the key-paste fallback), the
+    setup door behind the pinned ``TAI_SETUP_TOKEN``, and the two-tier route map the ``studio``
+    resource resolves through.
+
+    BUSLESS by construction so it boots with NO credential: an owner cannot be seeded without
+    flipping ``needs_setup`` false, so the authed MCP readiness drain — which needs an admin
+    key — can never run here. One worker, no task backend, no metrics keeps ``needs_bus`` false,
+    so readiness is HTTP ``/health`` alone (as ``build_accounts_fresh_stack``). It carries no
+    backend, agents, channels, connectors, or backend-branch probe tools — the login flow runs
+    none of them, and each would demand the bus the busless stack does not run. The runner seeds
+    only the route table (no owner, no key); the setup door initializes the deployment live, and
+    the same stack serves the post-setup ``needs_setup=false`` sign-in."""
+    if res.studio_dist_path is None:
+        raise RuntimeError("build_studio_setup_stack requires resources.studio_dist_path (the built Studio dist)")
+    manifest = {
+        "default_routers": "all",
+        "lifecycle_modules": [variants.identity.lifecycle_module, "tai42_accounts_postgres"],
+        # The "all" set already mounts every core + feature router (incl. the SPA catch-all);
+        # the accounts plugin's own login + users routes are the only extras.
+        "routers_modules": [
+            "tai42_accounts_postgres.routes_login",
+            "tai42_accounts_postgres.routes_users",
+        ],
+        "extensions_modules": _EXTENSION_MODULES,
+        "storage_module": variants.storage.module,
+        "tools": [*_builtin_entries()],
+        "studio_plugins": ["tai42_accounts_postgres"],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "notify_user", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    env["ACCESS_CONTROL_ENABLE"] = "true"
+    env["ACCESS_CONTROL_AUTH_PROVIDERS"] = json.dumps(["accounts-postgres", variants.identity.name])
+    env["TAI_SETUP_TOKEN"] = _SETUP_TOKEN
+    env["ACCESS_CONTROL_PATH_PATTERNS"] = json.dumps(STUDIO_PATH_PATTERNS)
+    env["STUDIO_DIST_PATH"] = res.studio_dist_path
+    # Lift the ``root`` rate-limit family for the browser leg (every SPA asset charges it), as
+    # ``build_studio_stack`` does: the serial suite's page loads burst past the default ceiling.
+    env["TAI_RATE_LIMIT_FAMILIES__ROOT__LIMIT"] = "100000"
+    env["TAI_RATE_LIMIT_FAMILIES__ROOT__BURST"] = "100000"
+    return StackConfig(
+        name="studio-setup",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=True,
     )

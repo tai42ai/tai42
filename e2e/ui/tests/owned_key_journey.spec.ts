@@ -2,8 +2,8 @@
  * The scoped-owned-key onboarding journey end to end. The pytest twin proves
  * projection ⊆ gate, claim-link lifecycle, and per-identity isolation over the API
  * (`tests/owned_keys/`); the browser never drove the owner→QR→scoped-Studio path.
- * Here the API ARRANGES (mint an owner, have it mint a
- * scoped OWNED key, mint a one-time claim link, and fire an `ask_user` addressed to
+ * Here the API ARRANGES (the admin root mints a
+ * scoped OWNED key, mints a one-time claim link, and fires an `ask_user` addressed to
  * that owned identity), and the browser exercises exactly what only a browser can:
  * the `#claim=` login leg, the capability-scoped shell (a scoped nav + the
  * RouteCapabilityBoundary "not available" panel on an uncovered route), the scoped
@@ -21,12 +21,12 @@
  */
 import { expect, test } from '@playwright/test';
 import {
-  API_KEY,
   apiHeaders,
   armInboxResynced,
   awaitToolRun,
   createClaimLink,
   mintKey,
+  provisionAdminSession,
   runToolAsync,
   seedCredential,
   submitToolRun,
@@ -59,10 +59,11 @@ test('owner → scoped owned key → QR-claim login → scoped shell, inbox answ
   });
   expect(gate.status(), await gate.text()).toBe(200);
 
-  const ownerId = uniq('owner');
-  const ownerKey = await mintKey(request, { userId: ownerId, scopes: ['studio'] });
+  // The admin root mints the SCOPED owned key directly (no `owner_user_id`, so it belongs
+  // to the admin's own principal): a non-admin OWNED key confined to its own slice — the
+  // by-admin mint path, since every key is now a leaf that cannot itself mint.
   const ownedId = uniq('owned');
-  const ownedKey = await mintKey(request, { userId: ownedId, scopes: ['studio'], by: ownerKey });
+  const ownedKey = await mintKey(request, { userId: ownedId, scopes: ['studio'] });
 
   // The scoped owned identity can EXECUTE an allowed tool on the real stack — through
   // the GRANTABLE background run door (`/api/tool-runs`), the path a non-admin operator
@@ -153,12 +154,15 @@ test('owner → scoped owned key → QR-claim login → scoped shell, inbox answ
   const card = page.getByTestId('interaction-card').filter({ hasText: question });
   await expect(card).toBeVisible();
 
-  // The unrestricted operator (a second, seeded root context) sees the same pending
-  // question and, once answered, watches it flip — the answered frame reaches root's
-  // open stream even though the interaction is addressed to the owned identity.
+  // The unrestricted operator sees the same pending question and, once answered, watches
+  // it flip — the answered frame reaches the operator's open stream even though the
+  // interaction is addressed to the owned identity. The operator is a top-level admin
+  // SESSION: it carries no owner claim, so it gets the full cross-identity view. The seeded
+  // admin root key is unrestricted too — admin is never confined to a slice.
+  const operatorSession = await provisionAdminSession(request);
   const rootContext = await browser.newContext();
   const rootPage = await rootContext.newPage();
-  await seedCredential(rootPage, API_KEY);
+  await seedCredential(rootPage, operatorSession);
   const rootResynced = armInboxResynced(rootPage);
   await rootPage.goto('/interactions');
   const rootCard = rootPage.getByTestId('interaction-card').filter({ hasText: question });

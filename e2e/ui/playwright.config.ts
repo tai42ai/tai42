@@ -8,6 +8,7 @@ import {
   MP_ADMIN_TOKEN,
   MP_PORT,
   MP_WEB_PORT,
+  SETUP_PORT,
   UI_PORT,
 } from "./tests/helpers";
 
@@ -64,6 +65,11 @@ export default defineConfig({
   // each sets its own per-test viewport/theme and runs chromium-only, so the two
   // widening browsers `testIgnore` them rather than laying out the whole 320-1920
   // ladder — and re-running the axe pass — three times over.
+  // `login.spec.ts` drives its OWN stack (the unseeded setup stack on SETUP_URL, via a
+  // file-level `test.use({ baseURL })`) and pins itself to chromium (its setup flow mutates
+  // that stack once, so a second engine would find the deployment already initialized). It is
+  // NOT a `testIgnore` here so the CI `--project=chromium` run — which addresses these
+  // projects by engine name — still runs it; the spec's own `test.skip` gates the engine.
   projects: [
     {
       name: "chromium",
@@ -95,6 +101,14 @@ export default defineConfig({
       },
     },
   ],
+  // One runner process boots BOTH live stacks: the SEEDED studio stack the API-key-paste
+  // specs share (on `baseURL`, 8770) and the UNSEEDED accounts-enabled studio stack the login
+  // spec drives its `needs_setup` flow against (on SETUP_URL, 8780). The two cannot be one
+  // stack — the key-paste specs need a pre-seeded pinned key (an owner exists, `needs_setup`
+  // false) while the login spec needs no owner (`needs_setup` true) — and they must share ONE
+  // process: the harness's Redis-DB allocator tracks its in-use set in memory, so two runner
+  // processes would collide on the shared server. The runner brings the setup stack up before
+  // the seeded one, so both are ready by the time Playwright sees this `url` respond.
   webServer: {
     // Invoke the console script DIRECTLY from the project venv rather than through
     // `uv run`: `uv run` is a supervisor that exits as soon as it forwards the
@@ -139,6 +153,8 @@ export default defineConfig({
       TAI_E2E_UI_MP_PORT: String(MP_PORT),
       TAI_E2E_UI_MP_WEB_PORT: String(MP_WEB_PORT),
       TAI_E2E_UI_MP_ADMIN_TOKEN: MP_ADMIN_TOKEN,
+      // The login spec's unseeded setup stack rides on this second port in the same runner.
+      TAI_E2E_UI_SETUP_PORT: String(SETUP_PORT),
     },
   },
 });

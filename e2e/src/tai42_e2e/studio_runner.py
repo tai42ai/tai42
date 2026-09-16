@@ -7,8 +7,15 @@ multi-worker skeleton with access control ON) on a KNOWN app port so
 SIGTERM/SIGINT and runs the harness's leak-checked teardown. It reuses the one
 shared boot/seed/allocation implementation in :mod:`tai42_e2e.harness`.
 
+For the OSS profile it ALSO boots the unseeded accounts-enabled studio stack the
+login spec's ``needs_setup`` flow drives (``build_studio_setup_stack``) on a second
+pinned port, in this SAME process so both stacks share one Redis-DB allocator.
+Brought up before the seeded stack, so both are ready by the time Playwright sees
+the seeded ``webServer.url`` respond.
+
 Env knobs (``TAI_E2E_`` space, all with test-only defaults):
   ``TAI_E2E_UI_PORT``          the pinned Studio app port / browser origin (8770)
+  ``TAI_E2E_UI_SETUP_PORT``    the pinned unseeded setup-stack app port (8780)
   ``TAI_E2E_UI_LLM_PORT``      the pinned scripted-LLM control port (8771)
   ``TAI_E2E_UI_API_KEY``       the seeded root key Playwright pastes at /login
   ``TAI_E2E_STUDIO_DIST_PATH`` the built Studio dist (defaults to the sibling
@@ -55,9 +62,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from tai42_e2e import ports
 from tai42_e2e.catalog_seed import seed_epsilon_listing, seed_fixture_catalog
 from tai42_e2e.fixture_catalog import forge_fixture_artifacts
-from tai42_e2e.harness import allocate_resources, connect_infra, release_resources, seed_studio_auth
+from tai42_e2e.harness import allocate_resources, connect_infra, release_resources
 from tai42_e2e.llmstub import LlmStub
-from tai42_e2e.manifests import build_studio_stack
+from tai42_e2e.manifests import build_studio_setup_stack, build_studio_stack
 from tai42_e2e.marketplace import (
     MarketplaceService,
     declared_routes_dispatch_failure,
@@ -66,6 +73,7 @@ from tai42_e2e.marketplace import (
 from tai42_e2e.oidc_idp import OAuthIdp
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.procs import ProcessHandle
+from tai42_e2e.seeding import seed_studio_auth, seed_studio_routes
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.topology import Infra, StackConfig, StackResources
@@ -88,6 +96,11 @@ class StudioRunnerSettings(BaseSettings):
     # wildcard scope, which a real deployment never does.
     ui_api_key: str = "sk-e2e-ui-DO-NOT-USE-IN-PRODUCTION-000"
     studio_dist_path: str | None = None
+    # The pinned app port of the UNSEEDED accounts-enabled studio stack the runner boots
+    # ALONGSIDE the seeded one (in the same process, on this second port) for the login spec's
+    # ``needs_setup`` flow. The login spec's ``baseURL`` override in ``playwright.config.ts``
+    # MUST match it. Only booted for the OSS profile (unset ``TAI_E2E_STUDIO_STACK``).
+    ui_setup_port: int = 8780
     # An external stack builder ``<module>:<callable>`` to boot instead of the OSS
     # ``build_studio_stack``; the callable takes ``(resources, variants)`` and returns
     # a ``StackConfig``. Lets a product outside this repo drive the runner with its own
@@ -539,6 +552,41 @@ def _boot_studio_stack(
         stack.teardown()
 
 
+def _start_setup_stack(runner: StudioRunnerSettings, infra: Infra, dist: Path, root: Path) -> TaiStack:
+    """Boot the UNSEEDED accounts-enabled studio stack the login spec's ``needs_setup`` flow
+    drives on its OWN app port, and return it running — the caller blocks and tears it down.
+
+    Booted in the SAME process as the seeded studio stack so the two share one Redis-DB
+    allocator (two runner processes each keep an in-memory in-use set and would collide on the
+    shared server). No owner or key is seeded (a principal would flip ``needs_setup`` false),
+    so the stack is busless and only its route table is seeded — readiness's ``/health`` probe
+    and the public ``/login`` + ``/api/setup`` doors then answer while ``needs_setup`` stays
+    true. The setup door initializes the deployment live; the same stack serves the post-setup
+    sign-in. No ancillary services are needed (the login flow drives neither the LLM nor
+    connectors)."""
+    resources = allocate_resources(infra, root, studio_dist_path=str(dist))
+    try:
+        config = build_studio_setup_stack(resources, infra.variants)
+    except BaseException:
+        release_resources(infra, resources)
+        raise
+    stack = TaiStack(config, infra, resources, root, app_port=runner.ui_setup_port)
+    try:
+        # The route table pins /health, the public SPA/asset templates and studio_authed
+        # before boot: readiness's /health probe is denied under access control until the
+        # route table pins it public, so the seed must land before the processes answer.
+        seed_studio_routes(resources)
+        stack.boot()
+    except BaseException:
+        stack.teardown()
+        raise
+    print(
+        f"tai42-e2e-studio-stack (setup) ready at http://{stack.host}:{stack.port_a} (unseeded — needs_setup=true)",
+        flush=True,
+    )
+    return stack
+
+
 def _teardown_ancillary(mp_bundle: _MarketplaceBundle | None, idp: OAuthIdp, stub: LlmStub, infra: Infra) -> None:
     """Tear down every ancillary surface even if one raises, aggregating the
     failures so none is hidden. The marketplace bundle goes first (the stack is
@@ -562,13 +610,18 @@ def main() -> None:
     runner = StudioRunnerSettings()
     dist = _resolve_dist_path(runner)
     # TAI_E2E_STUDIO_STACK selects an external stack profile over the OSS one; unset
-    # boots build_studio_stack.
+    # boots build_studio_stack. The unseeded login (setup) stack is an OSS surface, so it
+    # rides alongside only the OSS profile — an external product drives its own login testing.
     build_stack = _resolve_stack_builder(runner)
+    with_setup_stack = runner.studio_stack is None
 
     # Free the fixed browser / LLM-stub / IdP ports before booting: a prior hard-killed run
     # can leave a session-leader bound on the exact ports this stack claims. Under the
-    # marketplace gate the registry + public-site ports are pinned too, so reap them the same.
+    # marketplace gate the registry + public-site ports are pinned too, so reap them the same;
+    # the login (setup) stack's own port is reaped when it rides along.
     pinned_ports = [runner.ui_port, runner.ui_llm_port, runner.ui_idp_port]
+    if with_setup_stack:
+        pinned_ports.append(runner.ui_setup_port)
     if settings.marketplace:
         pinned_ports += [runner.ui_mp_port, runner.ui_mp_web_port]
     _free_pinned_ports(pinned_ports)
@@ -582,14 +635,27 @@ def main() -> None:
     # Only booted under the opt-in gate; when off, this stays None and the studio
     # stack is wired exactly as it is today (marketplace_url/package_index_url unset).
     mp_bundle: _MarketplaceBundle | None = None
+    # The login spec's unseeded studio stack, booted alongside the seeded one on its own port
+    # (the two share this process's one Redis-DB allocator). Torn down in the outer finally.
+    setup_stack: TaiStack | None = None
     try:
         # Boot the registry + public site BEFORE allocating the stack's resources,
         # so the stack can be wired at them. Torn down in the outer finally, after
         # the stack (whose advisories poll targets the registry).
         if settings.marketplace:
             mp_bundle = _start_marketplace(infra, root, runner)
+        # Boot the unseeded setup stack BEFORE the seeded stack: Playwright gates the whole
+        # suite on the seeded stack's URL, and the login spec needs the setup stack up by
+        # the time any test runs — bringing it up first guarantees both are ready together.
+        if with_setup_stack:
+            setup_stack = _start_setup_stack(runner, infra, dist, root)
+        # Boots the seeded stack, installs the signal handler, and BLOCKS until shutdown, then
+        # tears the seeded stack down; the setup stack is torn down in the finally after it
+        # returns.
         _boot_studio_stack(runner, infra, stub, idp, dist, build_stack, root, mp_bundle)
     finally:
+        if setup_stack is not None:
+            setup_stack.teardown()
         _teardown_ancillary(mp_bundle, idp, stub, infra)
 
 
