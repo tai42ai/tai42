@@ -1,10 +1,12 @@
 """Behavior of ``RedisApiKeyProvider`` against the faked redis seam.
 
-Token validation (RAISES on backend error, ``None`` on unknown token,
-``AuthIdentity`` on a stored identity) plus the provisioning surface (provision
-writes the identity record hash + reverse lookup and returns a raw key; revoke
+Token validation (RAISES on backend error, ``None`` on unknown token, RAISES on a
+resolved record with no owner claim, ``AuthIdentity`` on a stored identity) plus
+the provisioning surface (provision requires an owner, always writes the owner
+claim, and returns a raw key; a None/empty owner raises before any write; revoke
 deletes both; update_description rewrites the stored description; list_identities
-enumerates; healthcheck raises loudly when the record store is broken).
+enumerates and refuses a claim-less record; healthcheck raises loudly when the
+record store is broken).
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from tai42_kit.utils.data.string_util import hash_api_key
 from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.redis_api_key_provider import (
     DuplicateIdentityError,
+    OwnerlessIdentityError,
     RedisApiKeyProvider,
 )
 
@@ -59,11 +62,24 @@ def test_module_registers_redis_provider():
 
 async def test_validate_token_returns_identity_on_hit(monkeypatch):
     key = f"{_KEY_PREFIX}{hash_api_key('sk-token')}"
-    fake = FakeRedis(hashes={key: {"user_id": "u9", "description": "d", "email": "x@y"}})
+    fake = FakeRedis(
+        hashes={key: {"user_id": "u9", OWNER_USER_ID_CLAIM: "owner-9", "description": "d", "email": "x@y"}}
+    )
     identity = await _provider(fake, monkeypatch).validate_token("sk-token")
     assert isinstance(identity, AuthIdentity)
     assert identity.user_id == "u9"
-    assert identity.claims == {"user_id": "u9", "description": "d", "email": "x@y"}
+    assert identity.claims == {"user_id": "u9", OWNER_USER_ID_CLAIM: "owner-9", "description": "d", "email": "x@y"}
+
+
+async def test_validate_token_record_without_owner_claim_refused_loudly(monkeypatch):
+    """A resolved record carrying a user_id but no owner claim is an invariant breach:
+    validation refuses it loudly (RAISES), never resolving it as a valid identity —
+    every api key belongs to a principal. The application catches the raise into a
+    fail-closed deny."""
+    key = f"{_KEY_PREFIX}{hash_api_key('sk-token')}"
+    fake = FakeRedis(hashes={key: {"user_id": "u9", "description": "d"}})
+    with pytest.raises(OwnerlessIdentityError, match="no owner claim"):
+        await _provider(fake, monkeypatch).validate_token("sk-token")
 
 
 async def test_validate_token_miss_returns_none(monkeypatch):
@@ -91,12 +107,16 @@ async def test_provision_writes_record_and_reverse_lookup_and_returns_raw_key(mo
     fake = FakeRedis()
     provider = _provider(fake, monkeypatch)
 
-    raw_key = await provider.provision("u1", "my key")
+    raw_key = await provider.provision("u1", "my key", owner_user_id="owner-1")
 
     assert raw_key.startswith("sk-")
     hashed = hash_api_key(raw_key)
-    # Identity record written as a hash under ac:key:{hash}.
-    assert fake._hashes[f"{_KEY_PREFIX}{hashed}"] == {"user_id": "u1", "description": "my key"}
+    # Identity record written as a hash under ac:key:{hash}, carrying the owner claim.
+    assert fake._hashes[f"{_KEY_PREFIX}{hashed}"] == {
+        "user_id": "u1",
+        "description": "my key",
+        OWNER_USER_ID_CLAIM: "owner-1",
+    }
     # Reverse user_id -> hash lookup written under ac:management:key:{user_id}.
     assert fake._strings[f"{_REVERSE_PREFIX}u1"] == hashed
     # The raw key round-trips back to the stored identity.
@@ -125,31 +145,32 @@ async def test_provision_with_owner_stores_owner_claim(monkeypatch):
     assert identity.claims[OWNER_USER_ID_CLAIM] == "owner-7"
 
 
-async def test_provision_without_owner_omits_owner_claim(monkeypatch):
-    """An ownerless key omits the owner claim entirely — the field is absent from
-    the stored hash, never present with a ``None`` value."""
+@pytest.mark.parametrize("owner", ["", None])
+async def test_provision_empty_owner_raises_before_any_write(monkeypatch, owner):
+    """Every api key belongs to a principal: a None or empty owner is a ``ValueError``
+    raised BEFORE any write, so no partial record or reverse lookup is created."""
     fake = FakeRedis()
     provider = _provider(fake, monkeypatch)
 
-    raw_key = await provider.provision("u1", "my key")
+    with pytest.raises(ValueError, match="owner_user_id is required"):
+        await provider.provision("u1", "my key", owner_user_id=owner)
 
-    hashed = hash_api_key(raw_key)
-    record = fake._hashes[f"{_KEY_PREFIX}{hashed}"]
-    assert OWNER_USER_ID_CLAIM not in record
-    assert record == {"user_id": "u1", "description": "my key"}
+    # Nothing was written: not the identity record, not the reverse lookup.
+    assert fake._hashes == {}
+    assert fake._strings == {}
 
 
 async def test_provision_duplicate_user_raises_and_leaves_first_record(monkeypatch):
     fake = FakeRedis()
     provider = _provider(fake, monkeypatch)
 
-    first_raw = await provider.provision("u1", "first")
+    first_raw = await provider.provision("u1", "first", owner_user_id="owner-1")
     first_hash = hash_api_key(first_raw)
 
     # A second provision for the same user is rejected atomically — it never writes a
     # second identity record that would be unreachable through the reverse lookup.
     with pytest.raises(DuplicateIdentityError):
-        await provider.provision("u1", "second")
+        await provider.provision("u1", "second", owner_user_id="owner-1")
 
     assert fake._strings[f"{_REVERSE_PREFIX}u1"] == first_hash
     assert [k for k in fake._hashes if k.startswith(_KEY_PREFIX)] == [f"{_KEY_PREFIX}{first_hash}"]
@@ -167,7 +188,7 @@ async def test_provision_concurrent_write_aborts_exec_then_raises(monkeypatch):
 
     fake.on_first_exec = concurrent
     with pytest.raises(DuplicateIdentityError):
-        await provider.provision("u1", "desc")
+        await provider.provision("u1", "desc", owner_user_id="owner-1")
 
     # Only the concurrent writer's reverse lookup survives; no orphan identity record
     # was written by the aborted provision.
@@ -181,7 +202,7 @@ async def test_provision_concurrent_write_aborts_exec_then_raises(monkeypatch):
 async def test_revoke_deletes_record_and_reverse_lookup(monkeypatch):
     fake = FakeRedis()
     provider = _provider(fake, monkeypatch)
-    raw_key = await provider.provision("u1", "d")
+    raw_key = await provider.provision("u1", "d", owner_user_id="owner-1")
     hashed = hash_api_key(raw_key)
 
     assert await provider.revoke("u1") is True
@@ -201,13 +222,13 @@ async def test_revoke_unknown_user_returns_false(monkeypatch):
 async def test_update_description_rewrites_stored_description(monkeypatch):
     fake = FakeRedis()
     provider = _provider(fake, monkeypatch)
-    raw_key = await provider.provision("u1", "old")
+    raw_key = await provider.provision("u1", "old", owner_user_id="owner-1")
     hashed = hash_api_key(raw_key)
 
     assert await provider.update_description("u1", "new") is True
     record = fake._hashes[f"{_KEY_PREFIX}{hashed}"]
-    # Only ``description`` is overwritten; ``user_id`` is left untouched.
-    assert record == {"user_id": "u1", "description": "new"}
+    # Only ``description`` is overwritten; ``user_id`` and the owner claim are left untouched.
+    assert record == {"user_id": "u1", "description": "new", OWNER_USER_ID_CLAIM: "owner-1"}
 
 
 async def test_update_description_unknown_user_returns_false(monkeypatch):
@@ -221,14 +242,25 @@ async def test_update_description_dangling_reverse_lookup_returns_false(monkeypa
     assert await _provider(fake, monkeypatch).update_description("u1", "x") is False
 
 
+async def test_update_description_record_without_owner_claim_raises(monkeypatch):
+    """A present record carrying no owner claim is an invariant breach: editing its
+    description refuses loudly rather than rewriting corrupt storage in place."""
+    fake = FakeRedis(
+        strings={f"{_REVERSE_PREFIX}u1": "h1"},
+        hashes={f"{_KEY_PREFIX}h1": {"user_id": "u1", "description": "old"}},
+    )
+    with pytest.raises(OwnerlessIdentityError, match="no owner claim"):
+        await _provider(fake, monkeypatch).update_description("u1", "new")
+
+
 # -- list_identities ---------------------------------------------------------
 
 
 async def test_list_identities_enumerates_stored_records(monkeypatch):
     fake = FakeRedis(
         hashes={
-            f"{_KEY_PREFIX}h1": {"user_id": "u1", "description": "one"},
-            f"{_KEY_PREFIX}h2": {"user_id": "u2", "description": "two"},
+            f"{_KEY_PREFIX}h1": {"user_id": "u1", OWNER_USER_ID_CLAIM: "owner-1", "description": "one"},
+            f"{_KEY_PREFIX}h2": {"user_id": "u2", OWNER_USER_ID_CLAIM: "owner-2", "description": "two"},
             # A record missing a user_id is skipped, not enumerated.
             f"{_KEY_PREFIX}h3": {"description": "orphan"},
             # An empty record (a key deleted between SCAN and read) is skipped too.
@@ -237,6 +269,20 @@ async def test_list_identities_enumerates_stored_records(monkeypatch):
     )
     identities = await _provider(fake, monkeypatch).list_identities()
     assert sorted(identities) == [("u1", "one"), ("u2", "two")]
+
+
+async def test_list_identities_record_without_owner_claim_raises(monkeypatch):
+    """An enumerated record carrying a user_id but no owner claim is an invariant
+    breach: the enumeration refuses it loudly rather than silently omitting it (which
+    would misread as an orphaned key)."""
+    fake = FakeRedis(
+        hashes={
+            f"{_KEY_PREFIX}h1": {"user_id": "u1", OWNER_USER_ID_CLAIM: "owner-1", "description": "one"},
+            f"{_KEY_PREFIX}h2": {"user_id": "u2", "description": "two"},
+        }
+    )
+    with pytest.raises(OwnerlessIdentityError, match="no owner claim"):
+        await _provider(fake, monkeypatch).list_identities()
 
 
 # -- healthcheck -------------------------------------------------------------

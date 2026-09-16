@@ -35,8 +35,9 @@ doc home, and the documentation site covers the platform-level story:
 The provider owns the whole api-key **identity record** in its own plain-Redis
 storage:
 
-- `ac:key:{sha256(raw)}` — a Redis hash `{"user_id", "description"}` (the
-  identity a raw key resolves to).
+- `ac:key:{sha256(raw)}` — a Redis hash `{"user_id", "owner_user_id",
+  "description"}` (the identity a raw key resolves to). Every api key belongs to a
+  principal, so every record carries the `owner_user_id` owner claim.
 - `ac:management:key:{user_id}` — the `user_id -> hash` reverse lookup, so a user
   id resolves to its stored hash for revoke/edit without a scan.
 
@@ -48,11 +49,11 @@ The provider implements `tai42_contract.access_control.identity.ApiKeyIdentityPr
 
 | Method | Does |
 |---|---|
-| `validate_token(token)` | Reads `ac:key:{hash}` and returns the `AuthIdentity`, or `None` for an unknown token. A backend error fails closed by **raising**. |
-| `provision(user_id, description, *, owner_user_id=None)` | Mints a raw `sk-…` key, writes the identity record + reverse lookup in one transaction, and returns the **raw** key (surfaced once). When `owner_user_id` is given, it is stored in the identity record as the owner claim, so `validate_token` surfaces it for per-request attenuation. |
+| `validate_token(token)` | Reads `ac:key:{hash}` and returns the `AuthIdentity`, or `None` for an unknown token. A backend error fails closed by **raising**; a resolved record carrying no owner claim is an invariant breach and is refused loudly (fail-closed), never resolved. |
+| `provision(user_id, description, *, owner_user_id)` | Mints a raw `sk-…` key, writes the identity record + reverse lookup in one transaction, and returns the **raw** key (surfaced once). `owner_user_id` is **required** — every api key belongs to a principal — and is stored on the record as the owner claim, so `validate_token` surfaces it for per-request attenuation. A `None`/empty owner is a `ValueError` raised before any write. |
 | `revoke(user_id)` | Deletes the identity record + reverse lookup; `False` if the user is unknown. |
-| `update_description(user_id, description)` | Rewrites the record's `description`; `False` if the user is unknown. |
-| `list_identities()` | SCANs `ac:key:*` and returns every stored `(user_id, description)`. |
+| `update_description(user_id, description)` | Rewrites the record's `description`; `False` if the user is unknown. A present record carrying no owner claim is refused loudly. |
+| `list_identities()` | SCANs `ac:key:*` and returns every stored `(user_id, description)`; an enumerated record carrying no owner claim is an invariant breach and is refused loudly. |
 | `healthcheck()` | Probes the provider's OWN Redis storage; raises loudly if the record store is unreachable or broken. |
 
 ## Requirements
