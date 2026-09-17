@@ -368,6 +368,164 @@ def test_conversations_create_omits_locale_when_unset(monkeypatch: pytest.Monkey
     assert result.exit_code == 0, result.output
 
 
+def test_conversations_create_packs_full_overlap_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["overlap"] == {"running": "cancel", "deliver": "all", "settle_seconds": 5}
+        return data_response({"created": True})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "channel",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "svc",
+            "--channel",
+            "twilio",
+            "--identity",
+            "+15550001111",
+            "--overlap-running",
+            "cancel",
+            "--overlap-deliver",
+            "all",
+            "--overlap-settle-seconds",
+            "5",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_conversations_create_packs_only_given_overlap_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["overlap"] == {"deliver": "all"}
+        return data_response({"created": True})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "channel",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "svc",
+            "--channel",
+            "twilio",
+            "--identity",
+            "+15550001111",
+            "--overlap-deliver",
+            "all",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_conversations_create_omits_overlap_when_no_knob_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "overlap" not in body
+        return data_response({"created": True})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "channel",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "svc",
+            "--channel",
+            "twilio",
+            "--identity",
+            "+15550001111",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_conversations_create_forwards_a_server_overlap_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The cross-field rule and the bounds are the server's; a 400 surfaces loudly like any create error.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return error_response('settle_seconds > 0 requires deliver="all" or running="cancel"', 400)
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "channel",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "svc",
+            "--channel",
+            "twilio",
+            "--identity",
+            "+15550001111",
+            "--overlap-settle-seconds",
+            "5",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "settle_seconds" in visible(result.output)
+
+
+def test_conversations_create_help_lists_the_overlap_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - --help exits before any call
+        raise AssertionError("--help must not reach the server")
+
+    result = run_cli(monkeypatch, handler, ["conversations", "create", "--help"])
+    assert result.exit_code == 0, result.output
+    text = visible(result.output)
+    assert "--overlap-running" in text
+    assert "--overlap-deliver" in text
+    assert "--overlap-settle-seconds" in text
+
+
+def test_conversations_list_renders_the_overlap_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/conversations"
+        return data_response(
+            {"items": [{"route_name": "chat", "overlap": {"running": "cancel", "deliver": "all", "settle_seconds": 5}}]}
+        )
+
+    result = run_cli(monkeypatch, handler, ["conversations", "list"])
+    assert result.exit_code == 0, result.output
+    assert "overlap" in result.output.splitlines()[0]
+    assert '"running": "cancel"' in result.output
+
+
+def test_conversations_failed_renders_the_successor_id_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/conversations/messages/failed"
+        return data_response({"items": [{"message_id": "m1", "answer_status": "superseded", "successor_id": "m2"}]})
+
+    result = run_cli(monkeypatch, handler, ["conversations", "failed"])
+    assert result.exit_code == 0, result.output
+    assert "successor_id" in result.output.splitlines()[0]
+    assert "m2" in result.output
+
+
 def test_conversations_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"

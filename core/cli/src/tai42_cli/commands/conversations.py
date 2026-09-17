@@ -12,6 +12,7 @@ import typer
 
 from tai42_cli.commands._common import (
     app_context,
+    compact,
     covers,
     emit_records,
     emit_result,
@@ -112,6 +113,38 @@ def create_route(
             help="Default BCP 47 locale for templated reply parts when a turn states none; unset means no default.",
         ),
     ] = None,
+    overlap_running: Annotated[
+        str | None,
+        typer.Option(
+            "--overlap-running",
+            help=(
+                "When a newer participant message arrives while a turn is running on the same thread: "
+                "'continue' leaves it running (one turn per message), 'cancel' cancels it cooperatively in "
+                "favour of the newer message; unset uses the server default ('continue')."
+            ),
+        ),
+    ] = None,
+    overlap_deliver: Annotated[
+        str | None,
+        typer.Option(
+            "--overlap-deliver",
+            help=(
+                "What a turn carries: 'one' exactly one message per turn, 'all' every message accepted since "
+                "the last turn started, in order, as one turn; unset uses the server default ('one')."
+            ),
+        ),
+    ] = None,
+    overlap_settle_seconds: Annotated[
+        int | None,
+        typer.Option(
+            "--overlap-settle-seconds",
+            help=(
+                "Seconds a turn waits after its lead message is accepted before it starts, so a burst inside "
+                "the window rides one turn (0..30); a value above 0 requires --overlap-deliver all or "
+                "--overlap-running cancel. Unset uses the server default (0, no window)."
+            ),
+        ),
+    ] = None,
 ) -> None:
     r"""Create or replace a conversation route.
 
@@ -150,6 +183,13 @@ def create_route(
         body["error_reply_text"] = error_reply_text
     if locale is not None:
         body["locale"] = locale
+    # Pack only the overlap keys the operator gave, so the server applies its own policy default
+    # to every unspecified knob; omit the object entirely when none is given.
+    overlap = compact(
+        {"running": overlap_running, "deliver": overlap_deliver, "settle_seconds": overlap_settle_seconds}
+    )
+    if overlap:
+        body["overlap"] = overlap
     with ctx_obj.client() as client:
         data = client.post(f"/api/conversations/{seg(route_name)}", json=body)
     emit_result(ctx_obj, data)
