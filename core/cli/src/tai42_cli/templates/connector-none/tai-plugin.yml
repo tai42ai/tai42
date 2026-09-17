@@ -8,7 +8,7 @@ icon: https://example.invalid/icon.png
 license: Apache-2.0
 homepage: https://example.invalid
 repository: https://example.invalid
-contract: '>=13.0,<14'
+contract: '>=13.1,<14'
 categories: [connectors]
 tags: [connector]
 permissions: {network: false, subprocess: false, filesystem: false}
