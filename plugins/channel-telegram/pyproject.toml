@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract — Channel, ChannelDelivery, ChannelDeliveryError,
     # and the tai42_app handle the plugin registers through.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=13.0,<14",
+    "tai42-contract>=13.1,<14",
     # HttpxClient + RedisClient (redis extra) + TaiBaseSettings + the settings
     # cache registry + RedisConnectionSettings.
     "tai42-kit[redis]>=5.0,<6",
