@@ -28,9 +28,9 @@ dependencies = [
     # own ranges predate the current fleet, so the published harness stays resolvable
     # even where a member floor still admits an older patch.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=13.1,<14",
+    "tai42-contract>=13.2,<14",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=5.0,<6",
-    "tai42-skeleton[toolbox,files]>=17.1,<18",
+    "tai42-skeleton[toolbox,files]>=17.2,<18",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=3.0,<4",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
