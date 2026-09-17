@@ -133,6 +133,22 @@ async def test_interactive_exec_timeout_kills_flooding_process(sandbox: LocalSan
         await session.destroy()
 
 
+# -- teardown reaps a live interactive exec --------------------------------------
+
+
+async def test_session_destroy_reaps_live_interactive_exec(sandbox: LocalSandbox) -> None:
+    """Destroying a session with a still-running interactive exec KILLS AND REAPS its
+    child: the process ``returncode`` is set after teardown, so no child is left
+    unreaped with an open asyncio transport (which would surface as a ResourceWarning
+    on garbage collection)."""
+    session = await sandbox.create_session(_spec())
+    handle = await session.exec_start(["sleep", "30"], timeout_seconds=30)
+    assert isinstance(handle, LocalSandboxExecHandle)
+    assert handle._proc.returncode is None, "the child should be live before teardown"
+    await session.destroy()
+    assert handle._proc.returncode is not None, "the killed child was not reaped (returncode still None)"
+
+
 # -- write_stdin broken pipe -----------------------------------------------------
 
 

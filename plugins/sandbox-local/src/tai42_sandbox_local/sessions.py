@@ -125,8 +125,15 @@ class LocalSandboxExecHandle(SandboxExecHandle):
         return self._output_iter
 
     async def kill(self) -> None:
-        """Kill the exec's whole process group; a no-op once it has exited (idempotent)."""
+        """Kill the exec's whole process group and REAP it; idempotent once it has exited.
+
+        The ``wait`` is what reaps: it sets the process ``returncode`` and closes the
+        asyncio transport, so no child outlives the handle as an unreaped process with an
+        open transport. Idempotent — ``wait`` on an already-exited process returns its
+        cached code at once.
+        """
         _kill_process_group(self._proc)
+        await self._proc.wait()
 
     async def _drain_stream(
         self,
@@ -183,8 +190,6 @@ class LocalSandboxExecHandle(SandboxExecHandle):
     async def _timeout(self, driver: asyncio.Future[None]) -> None:
         """Kill the process group and raise the timeout error carrying LENGTHS only."""
         await self.kill()
-        with contextlib.suppress(ProcessLookupError):
-            await self._proc.wait()
         driver.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await driver
