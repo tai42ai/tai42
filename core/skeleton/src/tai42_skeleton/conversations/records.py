@@ -1,4 +1,4 @@
-"""The answer/record store — keyspaces 1, 2, 3, 6, 7 and 8 of the conversation bridge.
+"""The answer/record store — keyspaces 1, 2, 3, 6, 7, 8 and 9 of the conversation bridge.
 
 All transient runtime state (NOT a backup section) and all Redis-backed:
 
@@ -22,6 +22,9 @@ All transient runtime state (NOT a backup section) and all Redis-backed:
 8. Per-route thread index: ``conversations:route_threads:{route_name}`` → the route's
    ``thread_id``s scored by the moment each was last active, so the monitoring listing
    reads the newest first.
+9. Owed first-contact greeting: ``conversations:overlap:greeting:{thread_id}`` → the rendered
+   greeting a thread still owes, parked when it is minted and burned by the first turn that
+   delivers a reply, so a greeting whose minting turn was superseded rides the successor turn.
 
 Indexes 7 and 8 name rows that expire under the retention TTL. Reclaiming those members is
 :meth:`ConversationRecordStore.prune_expired_terminal_indexes`'s job ALONE: a read logs the
@@ -50,6 +53,7 @@ from tai42_kit.clients import client_ctx as client_ctx
 
 from tai42_skeleton.conversations.record_dedupe import RecordDedupeMixin
 from tai42_skeleton.conversations.record_delivery_state import RecordDeliveryMixin
+from tai42_skeleton.conversations.record_greeting import RecordGreetingMixin
 from tai42_skeleton.conversations.record_index import RecordIndexMixin
 from tai42_skeleton.conversations.record_pages import PendingWork, ThreadPage, ThreadSummary, TranscriptPage
 from tai42_skeleton.conversations.record_prune import PRUNE_START, PruneCursor, RecordPruneMixin
@@ -96,8 +100,9 @@ class ConversationRecordStore(
     RecordIndexMixin,
     RecordQueryMixin,
     RecordPruneMixin,
+    RecordGreetingMixin,
 ):
-    """The Redis-backed answer/record store (keyspaces 1, 2, 3, 6, 7 and 8), one persistence concern per mixin.
+    """The Redis-backed answer/record store (keyspaces 1, 2, 3, 6, 7, 8 and 9), one persistence concern per mixin.
 
     Construction refuses with a loud 501 without the redis conversations backend — nothing here may be
     persisted to state that vanishes with the process.

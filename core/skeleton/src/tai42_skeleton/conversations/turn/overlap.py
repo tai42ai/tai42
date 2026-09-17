@@ -183,7 +183,8 @@ async def supersede_lead(lead: ConversationRecord, successor_id: str) -> Convers
 def turn_text(route: ConversationRoute, batch: Batch, lead_text: str) -> str:
     r"""The whole text this turn runs on.
 
-    Under ``deliver="one"`` it is the lead's own rendered text, byte-identical to today. Under
+    Under ``deliver="one"`` it is the lead's own rendered text, one turn per message with the
+    payload unchanged. Under
     ``deliver="all"`` it is the superseded texts then the batch texts, in acceptance order,
     joined with a blank line — so an agent target, a manual-mode append and a no-``payload_expr``
     tool all see the whole turn with no new seam.
@@ -210,11 +211,10 @@ async def set_cancel_marker(record: ConversationRecord) -> None:
 
     ``<prefix>:overlap:cancel:{thread_id}`` = ``{message_id, created_at}``, TTL the thread lease.
     Set unconditionally (the watcher decides relevance by comparing to its batch), so a running
-    turn learns of every newer message. A worker with no conversations Redis writes nothing.
+    turn learns of every newer message. The record store refuses to construct without the
+    conversations Redis, so a worker with no backend never reaches here — it fails loudly at accept.
     """
     settings = accessors._store().settings
-    if settings.in_memory:
-        return
     key = settings.overlap_cancel_key(record.thread_id)
     value = json.dumps({"message_id": record.message_id, "created_at": record.created_at})
     async with client_ctx(RedisClient, settings.redis) as r:
@@ -252,13 +252,11 @@ async def cancel_watch(route: ConversationRoute, batch: Batch) -> AsyncIterator[
     and cancels the owner task; the owner translates that self-cancel into
     :class:`TurnSupersededError`. A cancel from anywhere else (a lost thread lease, a shutdown)
     passes through untouched. Cross-worker by construction: the marker lives in the shared Redis
-    and the watcher runs in the holder, so there is no local fast path — one mechanism. A worker
-    with no conversations Redis has no marker and the body runs unwatched.
+    and the watcher runs in the holder, so there is no local fast path — one mechanism. The record
+    store refuses to construct without the conversations Redis, so a watched turn always has a
+    backing store — a worker with no backend fails loudly at accept, never reaches here.
     """
     settings = accessors._store().settings
-    if settings.in_memory:
-        yield
-        return
     owner = asyncio.current_task()
     if owner is None:
         raise RuntimeError("cancel_watch must run inside a task to be able to cancel it")
@@ -284,9 +282,11 @@ async def cancel_watch(route: ConversationRoute, batch: Batch) -> AsyncIterator[
             try:
                 await watcher
             except asyncio.CancelledError:
-                # Only the watcher's own cancellation is swallowed here; a cancel delivered to the
-                # owner in this window (a real shutdown, or a supersede that raced a completing
-                # turn) leaves ``cancelling() > 0`` and is re-raised after cleanup, never absorbed.
+                # Only the watcher's own cancellation is swallowed here. A supersede cancel is
+                # translated at the body's own await (above) and the outcome is persisted OUTSIDE
+                # this context, so a supersede can never reach teardown with the owner still
+                # cancelling; a cancel that does (a real shutdown, a lost lease) leaves
+                # ``cancelling() > 0`` and is re-raised after cleanup, never absorbed.
                 if owner.cancelling() > 0:
                     pending_owner_cancel = True
         if pending_owner_cancel:

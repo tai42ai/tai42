@@ -70,27 +70,57 @@ async def _greeting_and_code(multichannel: _Multichannel) -> tuple[str | None, _
     return template.format(), None
 
 
-def _with_greeting(outcome: _ToolOutcome, greeting: str | None) -> _ToolOutcome:
-    r"""Prepend a due greeting as its own LEADING message.
+def _with_greeting(outcome: _SilentOutcome | _ResolvedOutcome, greeting: str) -> _ResolvedOutcome:
+    r"""Prepend ``greeting`` to a DELIVERING outcome as its own LEADING message.
 
-    A greeting is a message of its own, so it becomes the first ordered part ahead of
-    the turn's parts; a silent outcome due a greeting becomes an answered greeting-only
-    reply — a greeting, once due, is never silently dropped; an error outcome keeps the
-    greeting ahead of its client-safe text. The joined answer for a single-part outcome
-    renders as ``f"{greeting}\n\n{answer}"``.
+    A greeting is a message of its own, so it becomes the first ordered part ahead of the turn's
+    parts; a silent outcome becomes an answered greeting-only reply, an error outcome keeps the
+    greeting ahead of its client-safe text. The joined answer for a single-part outcome renders as
+    ``f"{greeting}\n\n{answer}"``. A superseded outcome delivers nothing and never reaches here —
+    :func:`_deliver_with_owed_greeting` leaves its greeting owed for the successor.
     """
-    if greeting is None:
-        return outcome
-    if isinstance(outcome, _SupersededOutcome):
-        # A yielded turn delivers nothing, so there is no reply for the greeting to lead; it
-        # passes through as ``superseded``. A greeting due on a superseded first-contact turn
-        # rides no reply — the newer message it yielded to carries the conversation on.
-        return outcome
     if isinstance(outcome, _SilentOutcome):
         return _ResolvedOutcome(answer_status="answered", parts=[_text_part(greeting)], error=None)
     return _ResolvedOutcome(
         answer_status=outcome.answer_status, parts=[_text_part(greeting), *outcome.parts], error=outcome.error
     )
+
+
+async def _mint_and_owe_greeting(multichannel: _Multichannel, thread_id: str) -> _MintedCode | None:
+    """Mint this first-contact turn's greeting, park it as owed on the thread, and return its pair code.
+
+    Called once, when the turn's person was created (first contact). The rendered greeting is parked
+    in the owed-greeting keyspace BEFORE the turn runs, so a supersede or cancel that reaches the
+    turn before it delivers leaves the greeting standing for the successor turn to consume. The
+    minted ``{pairing_code}`` (if any) is RETURNED so a same-turn ``/link`` presents that SAME live
+    code rather than minting a second one; a template with no placeholder mints and returns no code.
+    """
+    greeting, minted = await _greeting_and_code(multichannel)
+    if greeting is not None:
+        await accessors._store().record_owed_greeting(thread_id, greeting)
+    return minted
+
+
+async def _deliver_with_owed_greeting(thread_id: str, outcome: _ToolOutcome) -> tuple[_ToolOutcome, str | None]:
+    """Prepend the thread's owed first-contact greeting to a DELIVERING ``outcome``.
+
+    Returns ``(outcome, thread_id_to_burn)``: the (possibly greeting-prepended) outcome, and the
+    thread whose owed greeting the caller must BURN once this record's guarded persist succeeds
+    (``None`` when nothing is owed or the outcome delivers nothing).
+
+    A greeting, once due, is never dropped. A superseded outcome delivers nothing, so the owed
+    greeting stays parked and the first successor turn that delivers prepends it. Any other outcome
+    delivers a reply (a silent outcome due a greeting becomes an answered greeting-only reply), so it
+    READs the owed greeting (no delete) and prepends it, naming the thread for the caller to burn
+    AFTER the persist — a turn whose persist loses its intake guard never burns, leaving the greeting
+    owed for the successor. A turn with none owed reads ``None`` and is left unchanged.
+    """
+    if isinstance(outcome, _SupersededOutcome):
+        return outcome, None
+    greeting = await accessors._store().read_owed_greeting(thread_id)
+    if greeting is None:
+        return outcome, None
+    return _with_greeting(outcome, greeting), thread_id
 
 
 async def _run_pairing_turn(

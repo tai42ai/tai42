@@ -136,7 +136,8 @@ async def _record(message_id: str) -> ConversationRecord:
 
 
 async def test_continue_one_runs_each_message_as_its_own_turn(env, monkeypatch):
-    # The default: three messages, three answered turns, byte-identical to today.
+    # The default: three messages, three answered turns, one turn per message with the payload
+    # unchanged.
     agent = EchoAgent()
     _wire(monkeypatch, FakeManager(_agent_route(OverlapPolicy())), FakeChannel())
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
@@ -564,8 +565,12 @@ async def test_the_api_door_posts_a_merged_marker_to_the_callback(env, monkeypat
 # -- manual mode appends the whole batch --------------------------------------
 
 
-async def test_manual_mode_appends_every_message_of_the_batch(env, monkeypatch):
+async def test_manual_mode_appends_the_whole_turn_under_cancel_all(env, monkeypatch):
+    # Manual mode appends the WHOLE turn — the superseded texts then the batch texts, the exact
+    # sequence overlap.turn_text computes — as ONE user message, so a cancelled/superseded message
+    # is never lost to the thread's memory.
     from tai42_skeleton.conversations import mode as mode_module
+    from tai42_skeleton.conversations.turn import target as target_module
 
     appended: list[list[dict]] = []
 
@@ -574,24 +579,37 @@ async def test_manual_mode_appends_every_message_of_the_batch(env, monkeypatch):
             appended.append(list(messages))
 
     agent = _Memo()
-    _wire(monkeypatch, FakeManager(_agent_route(OverlapPolicy(deliver="all", settle_seconds=1))), FakeChannel())
+    route = _agent_route(OverlapPolicy(running="cancel", deliver="all"))
+    _wire(monkeypatch, FakeManager(route), FakeChannel())
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     thread_id = f"bridge:line:{_ADDR}"
     await mode_module.ConversationModeStore(ConversationsSettings()).set_mode(thread_id, "manual")
 
-    await _accept("one", "P1")
-    await asyncio.sleep(0.2)
-    await _accept("two", "P2")
-    await _accept("three", "P3")
-    await _settle(timeout=6.0)
+    # A cancel+all batch: message 2 leads, message 3 is merged, message 1 rides ``superseded``.
+    def _rec(mid: str, created: float, text: str) -> ConversationRecord:
+        record = record_module._new_record(
+            route=route,
+            message_id=mid,
+            thread_id=thread_id,
+            client_address=_ADDR,
+            caller_principal=None,
+            provider_message_id=f"PID-{mid}",
+            inbound_text=text,
+            delivery_status=DeliveryStatus.ACCEPTED,
+        )
+        return record.model_copy(update={"created_at": created, "updated_at": created})
 
-    assert appended == [
-        [
-            {"role": "user", "content": "one"},
-            {"role": "user", "content": "two"},
-            {"role": "user", "content": "three"},
-        ]
-    ]
+    lead = _rec("m2", 2.0, "two")
+    follower = _rec("m3", 3.0, "three")
+    superseded = _rec("m1", 1.0, "one")
+    await _store().create_record(lead, intake_token="tok")
+    batch = overlap_module.Batch(lead=lead, members=[lead, follower], superseded=[superseded])
+    whole = overlap_module.turn_text(route, batch, lead.inbound_text)
+
+    completed = await target_module._complete_turn(route=route, intake=lead, text=whole, batch=batch)
+
+    assert completed.delivery_status is DeliveryStatus.SILENT  # manual suppresses the reply
+    assert appended == [[{"role": "user", "content": "one\n\ntwo\n\nthree"}]]
 
 
 # -- the ambient turn ref + the yielded tool ----------------------------------
@@ -764,3 +782,61 @@ async def test_a_channel_overlap_terminal_spawns_no_delivery(env, monkeypatch, s
     await task
     schedule_module._spawn_delivery_on_success(task, "m9")
     assert spawned == []  # a channel merged/superseded record is terminal; nothing is delivered
+
+
+# -- the record store refuses without a backend; the outcome writes outside the cancel watch ---
+
+
+async def test_a_missing_conversations_backend_refuses_the_cancel_marker_loudly(monkeypatch):
+    # The record store refuses to construct without the conversations Redis, so the overlap
+    # machinery has no silent in-memory no-op branch: a missing backend is the store's loud 501,
+    # never a quiet continue.
+    from tai42_skeleton.conversations.records import ConversationRecordStore
+    from tai42_skeleton.operations.errors import NotSupportedError
+
+    monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
+    settings = ConversationsSettings()
+    assert settings.in_memory
+    with pytest.raises(NotSupportedError):
+        ConversationRecordStore(settings)
+
+    record = _msg_record("m1", 1.0, "one")
+    with pytest.raises(NotSupportedError):
+        await overlap_module.set_cancel_marker(record)
+
+
+async def test_a_cancel_route_persists_the_outcome_outside_the_cancel_watch(env, monkeypatch):
+    # The outcome write happens AFTER the cancel watch has torn down, so a watcher cancel can never
+    # land between the write and the teardown and orphan an answered record to the stalled-delivery
+    # sweep. The ordering is the guarantee.
+    from tai42_skeleton.conversations.turn import target as target_module
+
+    order: list[str] = []
+    real_watch = overlap_module.cancel_watch
+    real_persist = target_module._persist_completed
+
+    @asynccontextmanager
+    async def _recording_watch(route, batch):
+        async with real_watch(route, batch):
+            yield
+        order.append("watch-exit")
+
+    async def _recording_persist(completed, message_id, *, owed_greeting_thread_id=None):
+        order.append("persist")
+        return await real_persist(completed, message_id, owed_greeting_thread_id=owed_greeting_thread_id)
+
+    monkeypatch.setattr(overlap_module, "cancel_watch", _recording_watch)
+    monkeypatch.setattr(target_module, "_persist_completed", _recording_persist)
+
+    agent = EchoAgent()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_agent_route(OverlapPolicy(running="cancel"))), channel)
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
+
+    mid = await _accept("hi", "P1")
+    await _settle(timeout=6.0)
+
+    assert order == ["watch-exit", "persist"]  # the outcome is written after the watch tears down
+    record = await _record(mid)
+    assert record.answer == "echo: hi"
+    assert [n.message for n in channel.sends] == ["echo: hi"]  # delivery spawned, not orphaned

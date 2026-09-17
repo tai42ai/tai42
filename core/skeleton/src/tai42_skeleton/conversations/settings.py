@@ -369,6 +369,18 @@ class ConversationsSettings(TaiBaseSettings):
         _require_key_segment("thread_id", thread_id)
         return f"{self.prefix}:overlap:cancel:{thread_id}"
 
+    def owed_greeting_key(self, thread_id: str) -> str:
+        """Per-thread owed first-contact greeting key → the rendered greeting text a turn still owes.
+
+        Written when a first-contact greeting is minted for a turn and consumed by the first
+        delivering MESSAGE turn on the thread (an event turn carries no greeting and leaves it owed),
+        so a greeting whose minting turn was superseded or cancelled before it delivered rides the
+        successor turn instead of being dropped. The ``thread_id`` carries ``:`` of its own and so
+        sits LAST.
+        """
+        _require_key_segment("thread_id", thread_id)
+        return f"{self.prefix}:overlap:greeting:{thread_id}"
+
     @property
     def route_key_prefix(self) -> str:
         """The route-row key prefix shared by every stored route (``<prefix>:route:``)."""

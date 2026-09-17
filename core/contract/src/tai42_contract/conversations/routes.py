@@ -163,8 +163,8 @@ class ConversationRouteCreate(BaseModel):
     # route default.
     locale: str | None = None
     # How this route treats a running turn and the newer participant messages that overlap it
-    # (learn/cancel/carry). The default policy (continue/one/no window) leaves every path
-    # byte-identical to a route with no overlap handling.
+    # (learn/cancel/carry). The default policy (continue/one/no window) runs one turn per
+    # message and leaves the payload unchanged.
     overlap: OverlapPolicy = OverlapPolicy()
 
     @field_validator("route_name")

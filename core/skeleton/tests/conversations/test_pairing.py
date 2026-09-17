@@ -11,7 +11,13 @@ from contextlib import asynccontextmanager
 import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
-from tai42_contract.conversations import ConversationRoute, ConversationTargetKind, TargetConversationConfig
+from tai42_contract.conversations import (
+    ConversationRoute,
+    ConversationTargetKind,
+    OverlapPolicy,
+    TargetConversationConfig,
+    TurnSupersededError,
+)
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.string_util import hash_api_key
 
@@ -28,6 +34,7 @@ from tai42_skeleton.conversations import redeem_throttle as throttle_module
 from tai42_skeleton.conversations import target_config as target_config_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations import turn as turn_module
+from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.pair_codes import ConversationPairCodeStore, MintingConversation
 from tai42_skeleton.conversations.persons import ConversationPersonStore, PairingTarget
 from tai42_skeleton.conversations.records import ConversationRecordStore
@@ -36,6 +43,7 @@ from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
 from tai42_skeleton.conversations.turn import intake as intake_module
 from tai42_skeleton.conversations.turn import outcome as outcome_module
+from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import pairing as pairing_module
 from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
@@ -154,6 +162,7 @@ def env(monkeypatch):
         target_config_module,
         throttle_module,
         thread_lease_module,
+        overlap_module,
     ):
         monkeypatch.setattr(module, "client_ctx", ctx)
 
@@ -795,3 +804,304 @@ async def test_greeting_due_first_contact_with_an_error_outcome_keeps_the_greeti
     assert record is not None
     assert record.answer_status == "error"
     assert record.answer == f"Welcome!\n\n{outcome_module._ERROR_ANSWER_TEXT}"
+
+
+# -------------------------------------------------- first-contact greeting carry
+#
+# A first-contact greeting is minted the moment the person is created, but the turn that mints it
+# can be superseded (a cooperative yield) or cancelled (the overlap watcher) before it delivers.
+# The rendered greeting is parked as owed on the thread and burned by the first turn that delivers
+# a reply, so a greeting once due is never dropped. accept is also the inbound-answer bridge arm's
+# seam, so the accept-driven cases below cover the channel and bridge doors together.
+
+_OUR = "+15550001111"
+_ADDR = "+2000"
+
+
+async def _poll_until(predicate, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if await predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not met within the timeout")
+
+
+class _YieldingTool:
+    """A tool that yields (raises TurnSupersededError) on its first call and replies after."""
+
+    def __init__(self, reply: str = "ok") -> None:
+        self.calls = 0
+        self._reply = reply
+
+    def __call__(self, kwargs: dict) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise TurnSupersededError("newer-1")
+        return self._reply
+
+
+class _BlockingAssistant(Agent):
+    """An agent registered as ``assistant`` that blocks until released — so the overlap watcher can
+    cancel its first turn while a newer message is accepted."""
+
+    tool_name = "assistant"
+    ToolInput = _EchoInput
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        self.entered.set()
+        await self.release.wait()
+        return f"echo: {rendered_user_message(user_message)}"
+
+
+def _cancel_agent_route(route_name: str = "line-a", our_identity: str = _OUR) -> ConversationRoute:
+    return _channel_route(route_name=route_name, our_identity=our_identity).model_copy(
+        update={"overlap": OverlapPolicy(running="cancel")}
+    )
+
+
+def _tool_api_route(route_name: str = "chat") -> ConversationRoute:
+    return ConversationRoute(
+        route_name=route_name,
+        door="api",
+        target_kind="tool",
+        target_name="pinger",
+        execution_key="svc",
+        callback_url="https://cb.example/x",
+        callback_secret="sec-1",
+        execution_key_fingerprint="fp-1",
+    )
+
+
+async def test_a_greeting_carries_to_the_successor_when_the_first_turn_yields(env, monkeypatch):
+    # The channel/bridge door: a first-contact turn yields before it delivers, so its owed greeting
+    # rides the next turn that delivers instead of being dropped.
+    _seed_config(env, target_kind="tool", target_name="pinger", greeting_template="Welcome!")
+    _wire(monkeypatch, FakeManager(_tool_route()), FakeChannel())
+    _wire_tool(monkeypatch, _YieldingTool())
+
+    first = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")
+    await _settle()
+    r1 = await _store().get_record(first)
+    assert r1 is not None
+    assert r1.delivery_status is DeliveryStatus.SUPERSEDED  # yielded: the greeting was not delivered
+
+    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    await _settle()
+    assert (await _answer_of(second)) == "Welcome!\n\nok"
+
+
+async def test_a_greeting_carries_to_the_successor_when_the_first_turn_is_cancelled(env, monkeypatch):
+    # The overlap watcher cancels a first-contact turn in favour of a newer message; the owed
+    # greeting rides the surviving successor turn.
+    monkeypatch.setenv("CONVERSATIONS_OVERLAP_CANCEL_POLL_SECONDS", "0.02")
+    caps_module._CAPS_CACHE.clear()
+    _seed_config(env, greeting_template="Welcome!")
+    agent = _BlockingAssistant()
+    _wire(monkeypatch, FakeManager(_cancel_agent_route()), FakeChannel(), agent=agent)
+
+    first = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "one", "PID-1")
+    await asyncio.wait_for(agent.entered.wait(), 2)  # the first turn is running (and blocking)
+    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "two", "PID-2")
+    await _poll_until(lambda: _record_status(first, DeliveryStatus.SUPERSEDED))
+    agent.release.set()  # let the surviving second turn deliver
+    await _settle()
+
+    r1 = await _store().get_record(first)
+    assert r1 is not None
+    assert r1.delivery_status is DeliveryStatus.SUPERSEDED
+    # The greeting rode the successor turn, not the cancelled first one.
+    assert (await _answer_of(second)) == "Welcome!\n\necho: two"
+
+
+async def _record_status(message_id: str, status: DeliveryStatus) -> bool:
+    record = await _store().get_record(message_id)
+    return record is not None and record.delivery_status is status
+
+
+async def test_a_greeting_carries_to_the_successor_on_the_api_door(env, monkeypatch):
+    # The api door owes and carries a first-contact greeting the same way: a yielded first turn
+    # leaves it owed, the next delivering turn prepends it.
+    _seed_config(env, target_kind="tool", target_name="pinger", greeting_template="Welcome!")
+    _wire(monkeypatch, FakeManager(_tool_api_route()))
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+    _wire_tool(monkeypatch, _YieldingTool())
+
+    first = await turn_module.submit_api_message("chat", "user-7", "hi", "alice", 5)
+    await _settle()
+    r1 = await _store().get_record(first.message_id)
+    assert r1 is not None
+    assert r1.answer_status == "superseded"  # yielded: the greeting was not delivered
+
+    second = await turn_module.submit_api_message("chat", "user-7", "again", "alice", 5)
+    await _settle()
+    r2 = await _store().get_record(second.message_id)
+    assert r2 is not None
+    assert r2.answer == "Welcome!\n\nok"
+
+
+async def test_the_owed_greeting_is_consumed_exactly_once(env, monkeypatch):
+    # Only the FIRST delivering successor prepends the greeting; a later turn finds none owed.
+    _seed_config(env, target_kind="tool", target_name="pinger", greeting_template="Welcome!")
+    _wire(monkeypatch, FakeManager(_tool_route()), FakeChannel())
+    _wire_tool(monkeypatch, _YieldingTool())
+
+    await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")  # yields, owes the greeting
+    await _settle()
+    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    await _settle()
+    third = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "more", "PID-3")
+    await _settle()
+
+    assert (await _answer_of(second)) == "Welcome!\n\nok"  # consumed here
+    assert (await _answer_of(third)) == "ok"  # nothing left owed
+
+
+async def test_no_greeting_is_owed_when_none_is_due(env, monkeypatch):
+    # A first-contact turn on a target with NO greeting template owes nothing, so a yielded first
+    # turn leaves the successor with a plain reply — no phantom prefix.
+    _seed_config(env, target_kind="tool", target_name="pinger", greeting_template=None)
+    _wire(monkeypatch, FakeManager(_tool_route()), FakeChannel())
+    _wire_tool(monkeypatch, _YieldingTool())
+
+    await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")  # yields, owes nothing
+    await _settle()
+    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    await _settle()
+    assert (await _answer_of(second)) == "ok"
+    # No owed-greeting key was ever written for the thread.
+    assert ConversationsSettings().owed_greeting_key("bridge:tool-line:+2000") not in env._strings
+
+
+async def test_the_owed_greeting_is_read_from_the_shared_store_cross_worker(env, monkeypatch):
+    # The owed greeting lives in the shared record redis, so a greeting a SIBLING worker parked
+    # (written directly here) is consumed by this worker's next delivering turn — the cross-worker
+    # carry.
+    _seed_config(env, greeting_template="Welcome!")
+    agent = EchoAgent()
+    _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=agent)
+
+    # A first-contact turn delivers and consumes its own greeting; the person now exists.
+    await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")
+    await _settle()
+
+    # A sibling worker's superseded first-contact turn parked an owed greeting on the thread.
+    thread_id = "bridge:line-a:+2000"
+    env._strings[ConversationsSettings().owed_greeting_key(thread_id)] = "Carried!"
+
+    # This worker's next turn (past first contact) reads and burns it from the shared store.
+    nxt = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    await _settle()
+    assert (await _answer_of(nxt)) == "Carried!\n\necho: again"
+    assert ConversationsSettings().owed_greeting_key(thread_id) not in env._strings  # burned once
+
+
+async def test_a_lost_persist_guard_leaves_the_greeting_owed_for_the_successor(env, monkeypatch):
+    # A first-contact turn's outcome delivers the greeting, but a re-drive resolved its record first
+    # (its intake lease lapsed and the sweep adopted it). The guarded persist then loses and raises,
+    # and because the greeting was only READ — never burned — it stays owed and rides the next
+    # delivering turn instead of being dropped.
+    from tai42_skeleton.conversations.turn import target as target_module
+
+    _seed_config(env, greeting_template="Welcome!")
+    _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=EchoAgent())
+
+    raised: list[RuntimeError] = []
+    real_persist = target_module._persist_completed
+    resolved_elsewhere = {"done": False}
+
+    async def _resolve_elsewhere_then_persist(completed, message_id, *, owed_greeting_thread_id=None):
+        # The first turn that would deliver a greeting: move its record out of intake first, exactly
+        # as a re-drive that resolved it would, so this worker's guarded write loses.
+        if owed_greeting_thread_id is not None and not resolved_elsewhere["done"]:
+            resolved_elsewhere["done"] = True
+            env._hashes[ConversationsSettings().record_key(message_id)]["delivery_status"] = "pending_delivery"
+        try:
+            return await real_persist(completed, message_id, owed_greeting_thread_id=owed_greeting_thread_id)
+        except RuntimeError as exc:
+            raised.append(exc)
+            raise
+
+    monkeypatch.setattr(target_module, "_persist_completed", _resolve_elsewhere_then_persist)
+
+    thread_id = "bridge:line-a:+2000"
+    await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")  # first contact; owes "Welcome!"
+    await _settle()
+
+    assert len(raised) == 1  # the persist lost its guard and raised loudly
+    assert "no longer at intake" in str(raised[0])
+    # The greeting was read, never burned, so it is still owed on the thread.
+    assert env._strings[ConversationsSettings().owed_greeting_key(thread_id)] == "Welcome!"
+
+    # The next delivering turn prepends and burns it — a greeting once due is never dropped.
+    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    await _settle()
+    assert (await _answer_of(second)) == "Welcome!\n\necho: again"
+    assert ConversationsSettings().owed_greeting_key(thread_id) not in env._strings
+
+
+async def test_the_owed_greeting_is_burned_after_the_persist(env, monkeypatch):
+    # Order is the guarantee: the burn (DEL) runs only AFTER the record's guarded persist, so a
+    # persist that loses its guard never reaches the burn and the greeting stays owed.
+    _seed_config(env, greeting_template="Welcome!")
+    _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=EchoAgent())
+
+    thread_id = "bridge:line-a:+2000"
+    order: list[str] = []
+    real_complete = ConversationRecordStore.complete_turn
+    real_burn = ConversationRecordStore.burn_owed_greeting
+
+    async def _recording_complete(self, completed):
+        order.append("complete_turn")
+        return await real_complete(self, completed)
+
+    async def _recording_burn(self, tid):
+        order.append("burn_owed_greeting")
+        return await real_burn(self, tid)
+
+    monkeypatch.setattr(ConversationRecordStore, "complete_turn", _recording_complete)
+    monkeypatch.setattr(ConversationRecordStore, "burn_owed_greeting", _recording_burn)
+
+    first = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")  # first contact; delivers greeting
+    await _settle()
+
+    assert order == ["complete_turn", "burn_owed_greeting"]  # burned after the persist, not before
+    assert (await _answer_of(first)) == "Welcome!\n\necho: hi"
+    assert ConversationsSettings().owed_greeting_key(thread_id) not in env._strings
+
+
+async def test_a_carried_greeting_code_is_still_live_and_redeemable(env, monkeypatch):
+    # A first-contact greeting that carries a {pairing_code} is minted on a turn that yields before it
+    # delivers. The successor turn delivers the greeting with the SAME rendered code, and that code is
+    # still live: another conversation redeems it and the two link.
+    _seed_config(env, target_kind="tool", target_name="pinger", greeting_template="Pair with {pairing_code}")
+    route_a = _tool_route(route_name="line-a", our_identity="+15550001111")
+    route_b = _tool_route(route_name="line-b", our_identity="+15550009999")
+    _wire(monkeypatch, FakeManager(route_a, route_b), FakeChannel())
+    _wire_tool(monkeypatch, _YieldingTool())
+
+    # addrA's first-contact turn yields, leaving the code-bearing greeting owed on the thread.
+    await turn_module.accept("twilio", "+15550001111", "+1000", "+1000", "hi", "PID-1")
+    await _settle()
+    # The successor turn delivers the greeting, carrying the SAME rendered code.
+    second = await turn_module.accept("twilio", "+15550001111", "+1000", "+1000", "again", "PID-2")
+    await _settle()
+    answer = await _answer_of(second)
+    assert answer.startswith("Pair with LINK-")
+    match = _CODE_RE.search(answer)
+    assert match is not None, answer
+    code = match.group(0)
+
+    # The carried code is still live: addrB redeems it and the two conversations link.
+    redeem_mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-B")
+    await _settle()
+    assert "linked" in (await _answer_of(redeem_mid)).lower()
+    person = await _person_store().get_person(
+        _TOOL_TARGET, door="channel", channel="twilio", our_identity="+15550009999", address="+2000"
+    )
+    assert person is not None
+    assert {a.address for a in person.addresses} == {"+1000", "+2000"}

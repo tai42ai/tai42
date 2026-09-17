@@ -247,7 +247,7 @@ async def create_conversation_route(
     is stored canonicalized. ``None`` declares no route default (bare/English).
     An ``overlap`` policy governs how a running turn treats the newer participant messages that
     overlap it (learn/cancel/carry); ``None`` stores the default policy (continue/one/no window),
-    which leaves every path byte-identical to a route with no overlap handling.
+    which runs one turn per message and leaves the payload unchanged.
     Returns ``{"created", "route_name", "route", "callback_secret"}``.
     """
     # Validate the whole body shape at the operation, not the edge: the MCP tool and a

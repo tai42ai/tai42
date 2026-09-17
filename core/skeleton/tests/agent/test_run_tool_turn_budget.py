@@ -356,3 +356,19 @@ def test_turn_budget_middleware_instantiation_warns_it_is_not_registered():
     # live edge budget is DispatchScopeMiddleware's); instantiation warns.
     with pytest.warns(DeprecationWarning, match="not registered by the platform"):
         TurnBudgetMiddleware()
+
+
+async def test_turn_superseded_signal_passes_through_the_turn_budget(set_turn_timeout):
+    # asyncio.timeout converts only the CancelledError it raises on expiry; a TurnSupersededError
+    # (a BaseException) raised inside the armed budget window passes through unchanged, so a
+    # yielding tool's hand-over is never masked as a turn timeout.
+    from tai42_contract.conversations import TurnSupersededError
+
+    set_turn_timeout("30")
+
+    async def _yield_inside() -> None:
+        async with turn_budget():
+            raise TurnSupersededError("newer-1")
+
+    with pytest.raises(TurnSupersededError):
+        await _yield_inside()

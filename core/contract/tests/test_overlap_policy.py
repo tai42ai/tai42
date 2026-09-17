@@ -99,7 +99,8 @@ def test_window_allowed_when_cancelling():
 
 
 def test_no_window_under_continue_one_is_fine():
-    # The default combination with no window is the byte-identical-to-today policy.
+    # The default combination with no window runs one turn per message and leaves the payload
+    # unchanged.
     assert OverlapPolicy(running="continue", deliver="one", settle_seconds=0).settle_seconds == 0
 
 
@@ -173,9 +174,25 @@ def test_supersede_error_message_names_the_successor():
     assert "m-123" in str(err)
 
 
-def test_supersede_error_is_an_exception():
+def test_supersede_error_derives_from_base_exception_not_exception():
+    # The hand-over signal must slip past every ``except Exception`` between a yielding body and
+    # the arms that resolve the turn, so it derives from BaseException and is NOT an Exception —
+    # the same discipline asyncio.CancelledError follows.
+    assert issubclass(TurnSupersededError, BaseException)
+    assert not issubclass(TurnSupersededError, Exception)
+
+
+def test_supersede_error_is_not_caught_by_except_exception():
+    # Behavioural proof: an ``except Exception`` arm lets the signal through untouched, so only
+    # the two by-name arms in the skeleton resolve the hand-over.
+    def _guarded_by_except_exception() -> None:
+        try:
+            raise TurnSupersededError("m-9")
+        except Exception:
+            pytest.fail("except Exception must not catch the supersede signal")
+
     with pytest.raises(TurnSupersededError) as caught:
-        raise TurnSupersededError("m-9")
+        _guarded_by_except_exception()
     assert caught.value.successor_id == "m-9"
 
 

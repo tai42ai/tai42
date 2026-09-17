@@ -18,15 +18,15 @@ class OverlapPolicy(BaseModel):
     window:
 
     * ``running`` — what happens to the turn in flight when a newer message is accepted:
-      ``continue`` leaves it running (one turn per message, today's behaviour), ``cancel``
-      cancels it cooperatively in favour of the newer message.
+      ``continue`` leaves it running (one turn per message), ``cancel`` cancels it cooperatively
+      in favour of the newer message.
     * ``deliver`` — what a turn carries: ``one`` exactly one message per turn, ``all`` every
       message accepted since the last turn started, in order, as one turn.
     * ``settle_seconds`` — a turn starts no earlier than this many seconds after its lead
       message was accepted, so a burst inside the window rides in one turn. ``0`` disables it.
 
-    The default (``continue``/``one``/``0``) leaves every path byte-identical to a route with no
-    overlap handling. Frozen.
+    The default policy (``continue``/``one``/``0``) runs one turn per message and leaves the
+    payload unchanged. Frozen.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -59,13 +59,19 @@ class OverlapPolicy(BaseModel):
         return self
 
 
-class TurnSupersededError(Exception):
+class TurnSupersededError(BaseException):
     """A running turn hands over to a newer message: resolve it ``superseded``, no reply, no delivery.
 
     Raised by the platform when its cancel watcher translates the owner task's cancellation, and
     by a target that yields cooperatively (a body that reads the pending seam and stops before an
     irreversible step). ``successor_id`` is the ``message_id`` of the turn that takes this turn's
     place; the platform stamps it onto the superseded record.
+
+    Derives from :class:`BaseException`, not :class:`Exception`, so that no ``except Exception``
+    between the yielding body and the two arms that resolve the turn (the tool-turn arm and the
+    scheduled-task arm) can swallow the hand-over and mistake it for a turn error or feed it to a
+    retry loop — the same discipline :class:`asyncio.CancelledError` follows. Only the two arms,
+    which catch it by name, resolve it.
     """
 
     def __init__(self, successor_id: str) -> None:

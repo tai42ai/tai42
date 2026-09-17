@@ -67,12 +67,34 @@ async def _schedule_turn(
                 # An earlier decision merged or superseded this record; no turn runs and its
                 # already-written outcome (a channel terminal, or an API marker to deliver) stands.
                 return await _settled_record(intake)
-
-            async def _target() -> ConversationRecord:
+            whole_text = overlap.turn_text(route, batch, text)
+            try:
+                if route.overlap.running == "cancel" and overlap.is_message_turn(intake):
+                    async with overlap.cancel_watch(route, batch):
+                        completed, owed_greeting_thread_id = await target._resolve_turn_record(
+                            route=route,
+                            intake=intake,
+                            text=whole_text,
+                            batch=batch,
+                            multichannel=multichannel,
+                            params=params,
+                            form=form,
+                            attachments=attachments,
+                            location=location,
+                        )
+                    # Persist OUTSIDE the cancel watch (the context has exited): the outcome write
+                    # is never inside the cancellable region, so a supersede — translated at the
+                    # body's own await above — can never orphan an answered record between the write
+                    # and the watcher's teardown. The owed greeting is burned INSIDE the persist,
+                    # only after its guarded write lands, so a cancel that supersedes this turn at the
+                    # read above leaves the greeting owed for the successor.
+                    return await target._persist_completed(
+                        completed, intake.message_id, owed_greeting_thread_id=owed_greeting_thread_id
+                    )
                 return await target._complete_turn(
                     route=route,
                     intake=intake,
-                    text=overlap.turn_text(route, batch, text),
+                    text=whole_text,
                     batch=batch,
                     multichannel=multichannel,
                     params=params,
@@ -80,12 +102,6 @@ async def _schedule_turn(
                     attachments=attachments,
                     location=location,
                 )
-
-            try:
-                if route.overlap.running == "cancel" and overlap.is_message_turn(intake):
-                    async with overlap.cancel_watch(route, batch):
-                        return await _target()
-                return await _target()
             except TurnSupersededError as exc:
                 # The turn yielded (a cooperative tool, or the cancel watcher): resolve the lead
                 # ``superseded`` in favour of the newer message and deliver nothing.

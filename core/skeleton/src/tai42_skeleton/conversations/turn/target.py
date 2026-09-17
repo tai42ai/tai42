@@ -75,7 +75,7 @@ async def _target_outcome(
     )
     try:
         if await effective_mode(route, intake.thread_id) == "manual":
-            return await _manual_target_outcome(route, intake, batch)
+            return await _manual_target_outcome(route, intake, text)
         attribution = _conversation_attribution(route, intake, person)
         context = _conversation_state_context(route, intake, person, actor=attribution.user_id)
         with run_attribution(attribution), state_context(context):
@@ -98,15 +98,17 @@ async def _target_outcome(
         reset_conversation_turn(turn_token)
 
 
-async def _manual_target_outcome(route: ConversationRoute, intake: ConversationRecord, batch: Batch) -> _ToolOutcome:
+async def _manual_target_outcome(route: ConversationRoute, intake: ConversationRecord, text: str) -> _ToolOutcome:
     """The target turn SUPPRESSED for a manual-mode thread — no agent run, no tool dispatch.
 
     An agent target that HOLDS thread memory (implements ``append_thread_messages``) has the
     inbound appended to its checkpoint as a ``user`` message, so a later agent turn (once the
     thread returns to ``agent`` mode) reads it as prior context; a memoryless agent target
     (leaves the ABC default), an unregistered agent and a tool target have no thread memory to
-    feed, so nothing is appended. Under ``deliver="all"`` every message the batch carries is
-    appended in acceptance order, so no message is lost to memory. Either way the turn produces
+    feed, so nothing is appended. ``text`` is the WHOLE turn ``overlap.turn_text`` already computed
+    — under ``deliver="all"`` the superseded texts then the batch texts, in acceptance order — so
+    the whole turn is appended as one user message and no message, including a superseded one, is
+    lost to memory. Either way the turn produces
     no reply: the outcome is silent
     (terminal on the channel door, a delivered marker on the api door). An append that FAILS on
     a memory-holding target is a loud client-safe ``error`` outcome, never a silent skip that
@@ -122,7 +124,7 @@ async def _manual_target_outcome(route: ConversationRoute, intake: ConversationR
             try:
                 await agent.append_thread_messages(
                     thread_id=intake.thread_id,
-                    messages=[{"role": "user", "content": member.inbound_text} for member in batch.members],
+                    messages=[{"role": "user", "content": text}],
                 )
             except Exception as exc:
                 logger.exception(
@@ -165,15 +167,23 @@ async def _resolve_turn_record(
     form: dict[str, Any] | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
-) -> ConversationRecord:
+) -> tuple[ConversationRecord, str | None]:
     """Run the route's target (or a pairing turn) and build the completed record the transition persists.
+
+    Returns ``(record, owed_greeting_thread_id)``: the completed record, and the thread whose owed
+    first-contact greeting :func:`_persist_completed` must BURN once this record's guarded persist
+    succeeds (``None`` when the turn carries no owed greeting to burn). Both callers — the plain
+    :func:`_complete_turn` and ``schedule._run``'s cancel split — thread that value through to the
+    persist, so the greeting is burned only after the record durably lands.
 
     With ``multichannel`` off this is byte-identical to the target turn.
     With it on, the canonical per-accept order runs at the HEAD of this scheduled
     execution — AFTER the door's terminal admission write: ``ensure_provisional`` (the sole
     person WRITE, keying the first-contact greeting and the redeem's own side) → classify
-    → dispatch to the pairing turn or the target — and a due first-contact greeting is
-    PREPENDED into the answer before it is persisted. ``params`` and ``form`` reach only a
+    → dispatch to the pairing turn or the target — and a due first-contact greeting is parked
+    as owed the moment its person is created and prepended by the first turn on the thread that
+    delivers a reply, so a greeting whose turn is superseded or cancelled before it delivers rides
+    the successor turn instead of being dropped. ``params`` and ``form`` reach only a
     tool target's payload; a pairing turn ignores them. ``classify`` runs on the rendered
     TEXT (the commands match only the whole trimmed message, so a form's label:value lines
     can never classify as a command).
@@ -185,20 +195,23 @@ async def _resolve_turn_record(
     """
     if intake.inbound_kind == "event":
         person = await _resolve_event_person(route, intake, multichannel)
-        return _outcome_record(intake, await _target_outcome(route, intake, text, batch, person, params, form))
+        return _outcome_record(intake, await _target_outcome(route, intake, text, batch, person, params, form)), None
 
     if multichannel is None:
-        return _outcome_record(
-            intake,
-            await _target_outcome(
-                route, intake, text, batch, params=params, form=form, attachments=attachments, location=location
+        return (
+            _outcome_record(
+                intake,
+                await _target_outcome(
+                    route, intake, text, batch, params=params, form=form, attachments=attachments, location=location
+                ),
             ),
+            None,
         )
 
     person, created = await accessors._person_store().ensure_provisional(
         multichannel.target, multichannel.address_row(), locale=intake.inbound_locale
     )
-    greeting, greeting_code = await pairing._greeting_and_code(multichannel) if created else (None, None)
+    greeting_code = await pairing._mint_and_owe_greeting(multichannel, intake.thread_id) if created else None
     action = classify(text)
     if isinstance(action, Passthrough):
         outcome = await _target_outcome(route, intake, text, batch, person, params, form, attachments, location)
@@ -207,7 +220,8 @@ async def _resolve_turn_record(
         # ``/link`` reuses it rather than minting a SECOND code that rotation would delete,
         # leaving the greeting carrying a now-dead code (a Redeem/Unlink ignore it).
         outcome = await pairing._run_pairing_turn(multichannel, person, action, greeting_code, route)
-    return _outcome_record(intake, pairing._with_greeting(outcome, greeting))
+    outcome, owed_greeting_thread_id = await pairing._deliver_with_owed_greeting(intake.thread_id, outcome)
+    return _outcome_record(intake, outcome), owed_greeting_thread_id
 
 
 async def _complete_turn(
@@ -224,14 +238,13 @@ async def _complete_turn(
 ) -> ConversationRecord:
     """Run the turn and move its intake record to its outcome (persist before send).
 
-    Delivery is the caller's to spawn. A produced answer goes to ``pending_delivery``; a
-    silent tool turn goes straight to terminal ``silent`` with nothing to deliver; a turn the
-    target yielded (:class:`_SupersededOutcome`) goes to its door's ``superseded`` outcome. The
-    transition is guarded on the record still being at intake, so a turn finishing after a
-    re-drive resolved its record raises rather than overwriting the outcome the client was
-    given.
+    The run (:func:`_resolve_turn_record`) and the persist (:func:`_persist_completed`) as one
+    call — the seam a plain (non-cancel) scheduled turn drives. A ``running="cancel"`` turn splits
+    the two so the outcome write happens OUTSIDE the cancel watcher (see ``schedule._run``), and a
+    supersede can never orphan an answered record between the write and the watcher's teardown.
+    Delivery is the caller's to spawn.
     """
-    completed = await _resolve_turn_record(
+    completed, owed_greeting_thread_id = await _resolve_turn_record(
         route=route,
         intake=intake,
         text=text,
@@ -242,13 +255,34 @@ async def _complete_turn(
         attachments=attachments,
         location=location,
     )
+    return await _persist_completed(completed, intake.message_id, owed_greeting_thread_id=owed_greeting_thread_id)
+
+
+async def _persist_completed(
+    completed: ConversationRecord, message_id: str, *, owed_greeting_thread_id: str | None = None
+) -> ConversationRecord:
+    """Move a completed turn's record to its outcome, guarded on it still being at intake.
+
+    A produced answer goes to ``pending_delivery``; a silent tool turn goes straight to terminal
+    ``silent`` with nothing to deliver; a turn the target yielded (:class:`_SupersededOutcome`)
+    goes to its door's ``superseded`` outcome (a channel-door yielded turn moves straight to its
+    terminal ``superseded`` state; the API-door split sits at ``pending_delivery`` and takes the
+    ``complete_turn`` branch). The transition is guarded on the record still being at intake, so a
+    turn finishing after a re-drive resolved its record raises rather than overwriting the outcome
+    the client was given.
+
+    ``owed_greeting_thread_id`` (set by :func:`_resolve_turn_record` when this record delivers a
+    first-contact greeting) names the thread whose owed greeting is BURNED — but only after the
+    guarded persist SUCCEEDED. A persist that lost the guard raises before the burn, so the greeting
+    stays owed and rides the successor turn; a worker that dies between the persist and the burn
+    leaves it owed too, so the next delivering turn re-delivers it once (the crash-window trade for
+    never dropping it).
+    """
     store = accessors._store()
     if completed.delivery_status is DeliveryStatus.SILENT:
         outcome = await store.complete_silent(completed)
         verb = "complete_silent"
     elif completed.delivery_status is DeliveryStatus.SUPERSEDED:
-        # A channel-door yielded turn moves straight to its terminal ``superseded`` state; the
-        # API-door split sits at ``pending_delivery`` and takes the ``complete_turn`` branch below.
         outcome = await store.supersede_record(completed)
         verb = "supersede_record"
     else:
@@ -256,8 +290,10 @@ async def _complete_turn(
         verb = "complete_turn"
     if outcome != 1:
         raise RuntimeError(
-            f"conversations: record {intake.message_id} is no longer at intake "
+            f"conversations: record {message_id} is no longer at intake "
             f"({verb} answered {outcome}); its outcome was resolved elsewhere and this turn's "
             "outcome is discarded"
         )
+    if owed_greeting_thread_id is not None:
+        await store.burn_owed_greeting(owed_greeting_thread_id)
     return completed

@@ -204,6 +204,20 @@ async def test_cancellation_propagates_unretried(sleeps):
     assert sleeps == []
 
 
+async def test_turn_superseded_signal_propagates_unretried(sleeps):
+    # A tool that yields its turn raises TurnSupersededError, a BaseException — so it slips past
+    # the retry loop's ``except Exception`` untouched and is never retried, exactly as
+    # asyncio.CancelledError is. Only the by-name arms in the turn engine resolve it.
+    from tai42_contract.conversations import TurnSupersededError
+
+    attempt, calls = _failing(1, lambda: TurnSupersededError("newer-1"))
+
+    with pytest.raises(TurnSupersededError):
+        await dispatch_with_retry("fetch", _policy(), attempt)
+    assert calls["n"] == 1
+    assert sleeps == []
+
+
 # -- attempts cap, backoff, retry_after ---------------------------------------
 
 
