@@ -130,6 +130,7 @@ class BridgeHarness:
         channel: str,
         our_identity: str,
         initial_mode: str | None = None,
+        overlap: dict[str, Any] | None = None,
         token: str | None = None,
         expect: int = 200,
     ) -> Any:
@@ -145,6 +146,10 @@ class BridgeHarness:
         # ``manual``-from-the-start route names it here.
         if initial_mode is not None:
             body["initial_mode"] = initial_mode
+        # Omitted leaves the route on the default (continue/one/no window) overlap policy; an
+        # overlap leg names the ``{running, deliver, settle_seconds}`` knobs it drives here.
+        if overlap is not None:
+            body["overlap"] = overlap
         return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def create_tool_channel_route(
@@ -157,6 +162,7 @@ class BridgeHarness:
         our_identity: str,
         payload_expr: str | None = None,
         reply_expr: str | None = None,
+        overlap: dict[str, Any] | None = None,
         token: str | None = None,
         expect: int = 200,
     ) -> Any:
@@ -172,6 +178,8 @@ class BridgeHarness:
             body["payload_expr"] = {"content": payload_expr}
         if reply_expr is not None:
             body["reply_expr"] = {"content": reply_expr}
+        if overlap is not None:
+            body["overlap"] = overlap
         return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def create_api_route(
@@ -181,20 +189,20 @@ class BridgeHarness:
         agent: str,
         execution_key: str,
         callback_url: str,
+        overlap: dict[str, Any] | None = None,
         token: str | None = None,
         expect: int = 200,
     ) -> Any:
-        return await self.api(token=token).post(
-            f"/api/conversations/{route_name}",
-            json={
-                "door": "api",
-                "target_kind": "agent",
-                "target_name": agent,
-                "execution_key": execution_key,
-                "callback_url": callback_url,
-            },
-            expect=expect,
-        )
+        body: dict[str, Any] = {
+            "door": "api",
+            "target_kind": "agent",
+            "target_name": agent,
+            "execution_key": execution_key,
+            "callback_url": callback_url,
+        }
+        if overlap is not None:
+            body["overlap"] = overlap
+        return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def create_tool_api_route(
         self,
@@ -205,6 +213,7 @@ class BridgeHarness:
         callback_url: str,
         payload_expr: str | None = None,
         reply_expr: str | None = None,
+        overlap: dict[str, Any] | None = None,
         token: str | None = None,
         expect: int = 200,
     ) -> Any:
@@ -219,6 +228,8 @@ class BridgeHarness:
             body["payload_expr"] = {"content": payload_expr}
         if reply_expr is not None:
             body["reply_expr"] = {"content": reply_expr}
+        if overlap is not None:
+            body["overlap"] = overlap
         return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def set_target_config(
@@ -438,6 +449,24 @@ async def wait_probe_record(bridge: BridgeHarness, key: str, *, deadline: float 
         return [json.loads(raw) for raw in records] if records else None
 
     return await wait_for_async(probe, deadline=deadline, message=f"no e2e_record side effect under {key!r} recorded")
+
+
+async def wait_probe_entries(bridge: BridgeHarness, key: str, count: int, *, deadline: float = 30.0) -> list[dict]:
+    """Wait until at least ``count`` ``e2e_record`` entries appear under ``key`` and return the
+    decoded entries, oldest first — the per-turn payloads an overlap probe RPUSHes in turn order.
+
+    Unlike :func:`wait_probe_record` (which returns at the first entry), this waits for a KNOWN
+    number of turns to have recorded, so a spec reading turn 2's payload never races turn 1's
+    lone entry."""
+
+    async def probe() -> list[dict] | None:
+        records = bridge.stack.records(key)
+        entries = [json.loads(raw) for raw in records]
+        return entries if len(entries) >= count else None
+
+    entries = await wait_for_async(probe, deadline=deadline, message=f"fewer than {count} probe entries under {key!r}")
+    assert len(entries) == count, f"expected exactly {count} probe entries under {key!r}, saw {len(entries)}"
+    return entries
 
 
 async def wait_record_key_for_value(bridge: BridgeHarness, needle: str, *, deadline: float = 12.0) -> str:
