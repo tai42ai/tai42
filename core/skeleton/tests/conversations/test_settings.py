@@ -122,6 +122,33 @@ def test_bounds_reject_non_positive(monkeypatch):
         ConversationsSettings()
 
 
+def test_the_overlap_cancel_poll_default_and_key():
+    s = ConversationsSettings()
+    assert s.overlap_cancel_poll_seconds == 0.5
+    # The marker sits under its own segment; the ``:``-bearing thread id sits LAST.
+    assert s.overlap_cancel_key("bridge:line:+1555") == "conversations:overlap:cancel:bridge:line:+1555"
+
+
+def test_a_blank_overlap_cancel_thread_id_is_refused():
+    import pytest
+
+    s = ConversationsSettings()
+    with pytest.raises(ValueError, match="thread_id must be a non-blank string"):
+        s.overlap_cancel_key("  ")
+
+
+def test_an_overlap_cancel_poll_at_or_above_the_thread_lease_is_refused(monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+
+    # A poll interval as long as the lease could let the cancel marker expire before the next
+    # read, so a running turn that should have been cancelled runs on — refused at startup.
+    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_SECONDS", "10")
+    monkeypatch.setenv("CONVERSATIONS_OVERLAP_CANCEL_POLL_SECONDS", "10")
+    with pytest.raises(ValidationError, match="must be below"):
+        ConversationsSettings()
+
+
 def test_a_non_positive_split_cap_is_refused_at_startup(monkeypatch):
     import pytest
     from pydantic import ValidationError

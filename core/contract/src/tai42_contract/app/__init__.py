@@ -41,6 +41,7 @@ from .facets import (
     AppVersioning,
     AppWebhookVerifiers,
     DeclaredRouteMetadata,
+    PendingMessage,
     RouteAction,
 )
 from .handle import tai42_app as _tai_app_handle
@@ -213,6 +214,7 @@ __all__ = [
     "AppVersioning",
     "AppWebhookVerifiers",
     "DeclaredRouteMetadata",
+    "PendingMessage",
     "RouteAction",
     "TaiApp",
     "tai42_app",

@@ -14,13 +14,13 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ConversationRoute, TurnSupersededError
 from tai42_contract.interactions import LocationElement, MediaItem
 
 from tai42_skeleton.conversations.caps import TurnCaps
 from tai42_skeleton.conversations.delivery import spawn_delivery
-from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
-from tai42_skeleton.conversations.turn import accessors, redrive, target
+from tai42_skeleton.conversations.models import OVERLAP_DELIVERY_STATUSES, ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.turn import accessors, overlap, redrive, target
 from tai42_skeleton.conversations.turn.routing import _Multichannel
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
@@ -29,7 +29,7 @@ logger = logging.getLogger("tai42_skeleton.conversations.turn")
 _TURN_TASKS: set[asyncio.Task] = set()
 
 
-def _schedule_turn(
+async def _schedule_turn(
     caps: TurnCaps,
     *,
     route: ConversationRoute,
@@ -47,23 +47,49 @@ def _schedule_turn(
 
     Returns the task whose result is the completed :class:`ConversationRecord`.
 
+    The seam EVERY door schedules a turn through, so the overlap-cancel marker is set here, at
+    accept time (never inside the queued task, which a running turn's watcher would never see):
+    on a ``running="cancel"`` route, every participant message accept refreshes the thread's
+    marker so a turn already in flight learns a newer message is waiting. Set unconditionally —
+    the watcher decides relevance.
+
     The intake lease is refreshed OUTSIDE the caps, so a turn queued behind the FIFO reads
     as live too. ``caps`` MUST be the instance the caller reserved on, or the reservation is
     released on a different instance and the slot leaks.
     """
+    if route.overlap.running == "cancel" and overlap.is_message_turn(intake):
+        await overlap.set_cancel_marker(intake)
 
     async def _run() -> ConversationRecord:
         async with _intake_lease_held(intake.message_id, intake_token), caps.run_reserved(intake.thread_id):
-            return await target._complete_turn(
-                route=route,
-                intake=intake,
-                text=text,
-                multichannel=multichannel,
-                params=params,
-                form=form,
-                attachments=attachments,
-                location=location,
-            )
+            batch = await overlap.resolve_batch(route, intake)
+            if batch is None:
+                # An earlier decision merged or superseded this record; no turn runs and its
+                # already-written outcome (a channel terminal, or an API marker to deliver) stands.
+                return await _settled_record(intake)
+
+            async def _target() -> ConversationRecord:
+                return await target._complete_turn(
+                    route=route,
+                    intake=intake,
+                    text=overlap.turn_text(route, batch, text),
+                    batch=batch,
+                    multichannel=multichannel,
+                    params=params,
+                    form=form,
+                    attachments=attachments,
+                    location=location,
+                )
+
+            try:
+                if route.overlap.running == "cancel" and overlap.is_message_turn(intake):
+                    async with overlap.cancel_watch(route, batch):
+                        return await _target()
+                return await _target()
+            except TurnSupersededError as exc:
+                # The turn yielded (a cooperative tool, or the cancel watcher): resolve the lead
+                # ``superseded`` in favour of the newer message and deliver nothing.
+                return await overlap.supersede_lead(batch.lead, exc.successor_id)
 
     task = asyncio.create_task(_run())
     _TURN_TASKS.add(task)
@@ -72,6 +98,23 @@ def _schedule_turn(
     else:
         task.add_done_callback(_TURN_TASKS.discard)
     return task
+
+
+async def _settled_record(intake: ConversationRecord) -> ConversationRecord:
+    """The current record for a lead whose turn did not run — re-read after an earlier decision.
+
+    A merged/superseded follower has left ``accepted``; its record (a channel terminal, or an
+    API-door ``pending_delivery`` marker) is returned so the completion callback delivers or
+    skips it by its own delivery status. A record gone entirely is logged loudly.
+    """
+    settled = await accessors._store().get_record(intake.message_id)
+    if settled is None:
+        logger.warning(
+            "conversations: overlap lead %s left intake and its record is gone; no turn ran and nothing is delivered",
+            intake.message_id,
+        )
+        return intake
+    return settled
 
 
 @contextlib.asynccontextmanager
@@ -134,9 +177,11 @@ def _spawn_delivery_on_success(task: asyncio.Task[ConversationRecord], message_i
         )
         _spawn_intake_resolution(message_id)
         return
-    if task.result().delivery_status is DeliveryStatus.SILENT:
-        # A channel-door silent turn is terminal already; nothing is ever delivered. An
-        # api-door silent turn sits at pending_delivery and is delivered like an answer.
+    status = task.result().delivery_status
+    if status is DeliveryStatus.SILENT or status in OVERLAP_DELIVERY_STATUSES:
+        # A channel-door silent/merged/superseded turn is terminal already; nothing is ever
+        # delivered. The api-door equivalents sit at pending_delivery and are delivered like an
+        # answer (a silent or overlap marker), so they fall through to the spawn below.
         return
     spawn_delivery(message_id)
 

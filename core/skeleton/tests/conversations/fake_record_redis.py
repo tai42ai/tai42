@@ -84,6 +84,18 @@ class FakeRecordRedis:
     async def zrevrange(self, key: str, start: int, end: int, withscores: bool = False) -> list:
         return self._window(list(reversed(self._ordered(key))), key, start, end, withscores)
 
+    @staticmethod
+    def _score_bound(value: str | float) -> tuple[float, bool]:
+        """Parse a redis score-range bound into ``(number, inclusive)``.
+
+        A leading ``(`` is an EXCLUSIVE bound, ``+inf``/``-inf`` are the open ends; everything else
+        is inclusive — exactly the ``ZRANGEBYSCORE`` min/max grammar the store relies on.
+        """
+        text = str(value)
+        if text.startswith("("):
+            return float(text[1:]), False
+        return float(text), True
+
     async def zrangebyscore(
         self,
         key: str,
@@ -92,8 +104,15 @@ class FakeRecordRedis:
         start: int | None = None,
         num: int | None = None,
     ) -> list[str]:
-        low, high = float(minimum), float(maximum)
-        matched = [m for m in self._ordered(key) if low <= self._zsets[key][m] <= high]
+        low, low_inclusive = self._score_bound(minimum)
+        high, high_inclusive = self._score_bound(maximum)
+
+        def _in_range(score: float) -> bool:
+            above = score >= low if low_inclusive else score > low
+            below = score <= high if high_inclusive else score < high
+            return above and below
+
+        matched = [m for m in self._ordered(key) if _in_range(self._zsets[key][m])]
         if start is None and num is None:
             return matched
         offset = start or 0
@@ -462,6 +481,23 @@ class FakeRecordRedis:
                 return 0
             h.update(  # type: ignore[union-attr]
                 data=argv[0], delivery_status="silent", updated_at=argv[1], intake_claim="", claim=""
+            )
+            self.ttl_ms[key] = int(argv[2])
+            self._reindex(threaded, argv[3], argv[4])
+            if self._zsets.get(thread_keys[0]):
+                self._zsets.setdefault(thread_keys[1], {})[argv[5]] = float(argv[1])
+            return 1
+        if "conversations:record:merge" in script or "conversations:record:supersede" in script:
+            # The channel-door overlap terminals share the ``complete_silent`` shape, differing
+            # only in the status literal they stamp; both apply the retention TTL and re-stamp a
+            # live thread. The record's content (ARGV[1]) already carries the successor_id.
+            terminal = "merged" if "conversations:record:merge" in script else "superseded"
+            if status is None:
+                return -1
+            if status != "accepted":
+                return 0
+            h.update(  # type: ignore[union-attr]
+                data=argv[0], delivery_status=terminal, updated_at=argv[1], intake_claim="", claim=""
             )
             self.ttl_ms[key] = int(argv[2])
             self._reindex(threaded, argv[3], argv[4])

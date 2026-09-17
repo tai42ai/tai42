@@ -35,6 +35,10 @@ async def slow_tool(seconds: float = 0.0) -> str:
 
 nested_inner_completed = False
 nested_inner_saw_armed: bool | None = None
+# Set the instant the inner tool reaches its sleep, after it has recorded the armed guard,
+# so a test can hold the outer window's deadline frozen until the inner tool is provably
+# parked and only then release it — the cancellation then lands on the inner sleep.
+nested_inner_parked = asyncio.Event()
 
 
 @tai42_app.tools.tool
@@ -42,11 +46,13 @@ async def nested_inner(seconds: float = 0.0) -> str:
     """A tool reached through the shared seam from ``nested_outer``. Records whether the
     turn budget was ALREADY armed at entry (the re-entrancy guard, so it opens no window
     of its own) and whether it completed; an outer window cancelling it mid-sleep leaves
-    the completion flag False."""
+    the completion flag False. Signal ``nested_inner_parked`` on reaching the sleep so the
+    outer window's cancellation is delivered while parked, not mid-dispatch."""
     global nested_inner_completed, nested_inner_saw_armed
     from tai42_skeleton.tools.turn_budget import _turn_budget_armed
 
     nested_inner_saw_armed = _turn_budget_armed.get()
+    nested_inner_parked.set()
     await asyncio.sleep(seconds)
     nested_inner_completed = True
     return "inner-done"
@@ -60,15 +66,21 @@ async def nested_outer(seconds: float = 0.0) -> str:
 
 
 parked_question_completed = False
+# Set the instant the tool reaches its parked answer wait, so a test can hold the turn
+# budget deadline frozen until the park is provably held and only then release it — the
+# cancellation then lands inside the wait, not in the dispatch that precedes it.
+parked_question_parked = asyncio.Event()
 
 
 @tai42_app.tools.tool
 async def parked_question_tool(seconds: float = 0.0) -> str:
     """Block ``seconds`` with a question parked; on the turn-budget cancellation stamp the
     pending ``(interaction_id, question)`` on the CancelledError exactly as the ``ask_user``
-    answer wait does, so the expiry error names what the turn was killed waiting on. A run
-    cancelled on expiry leaves the completion flag False."""
+    answer wait does, so the expiry error names what the turn was killed waiting on. Signal
+    ``parked_question_parked`` on reaching the wait so the cancellation is delivered while
+    parked, not mid-dispatch. A run cancelled on expiry leaves the completion flag False."""
     global parked_question_completed
+    parked_question_parked.set()
     try:
         await asyncio.sleep(seconds)
     except asyncio.CancelledError as exc:
@@ -79,15 +91,19 @@ async def parked_question_tool(seconds: float = 0.0) -> str:
 
 
 parked_sensitive_completed = False
+# Set the instant the tool reaches its parked SENSITIVE answer wait (the redaction case).
+parked_sensitive_parked = asyncio.Event()
 
 
 @tai42_app.tools.tool
 async def parked_sensitive_question_tool(seconds: float = 0.0) -> str:
     """Block ``seconds`` with a SENSITIVE question parked; on the turn-budget cancellation
     stamp the pending question with ``sensitive=True`` exactly as the ``ask_user`` answer
-    wait does for a credential prompt, so the expiry error redacts the question text. A run
-    cancelled on expiry leaves the completion flag False."""
+    wait does for a credential prompt, so the expiry error redacts the question text. Signal
+    ``parked_sensitive_parked`` on reaching the wait so the cancellation is delivered while
+    parked, not mid-dispatch. A run cancelled on expiry leaves the completion flag False."""
     global parked_sensitive_completed
+    parked_sensitive_parked.set()
     try:
         await asyncio.sleep(seconds)
     except asyncio.CancelledError as exc:

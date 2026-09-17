@@ -14,7 +14,7 @@ from tai42_contract.conversations import AnswerPart, AnswerStatus, ConversationR
 from tai42_contract.interactions import LocationElement, MediaItem
 
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
-from tai42_skeleton.conversations.turn.outcome import _SilentOutcome, _ToolOutcome
+from tai42_skeleton.conversations.turn.outcome import _SilentOutcome, _SupersededOutcome, _ToolOutcome
 
 
 def _new_record(
@@ -174,13 +174,60 @@ def _with_api_silent(intake: ConversationRecord, note: str | None = None) -> Con
     )
 
 
+def _overlap_record(
+    intake: ConversationRecord,
+    successor_id: str,
+    *,
+    channel_status: DeliveryStatus,
+    api_answer_status: AnswerStatus,
+) -> ConversationRecord:
+    """``intake`` resolved to a ``merged``/``superseded`` overlap outcome, per door.
+
+    The channel door records the outcome in its terminal delivery status (``merged``/
+    ``superseded``, no answer_status), nothing ever sent; the API door sits the record at
+    ``pending_delivery`` carrying the matching ``answer_status`` and successor, delivered as a
+    marker exactly as a ``silent`` outcome is (the ``silent`` split). Either way the record names
+    its successor turn and carries no answer.
+    """
+    if intake.door == "channel":
+        overlay = {"answer_status": None, "delivery_status": channel_status}
+    else:
+        overlay = {"answer_status": api_answer_status, "delivery_status": DeliveryStatus.PENDING_DELIVERY}
+    return ConversationRecord.model_validate(
+        intake.model_dump()
+        | overlay
+        | {
+            "answer": None,
+            "answer_parts": None,
+            "error": None,
+            "successor_id": successor_id,
+            "updated_at": time.time(),
+        }
+    )
+
+
+def _merged_record(intake: ConversationRecord, successor_id: str) -> ConversationRecord:
+    """``intake`` resolved to ``merged`` — its text was carried into the turn ``successor_id`` names."""
+    return _overlap_record(intake, successor_id, channel_status=DeliveryStatus.MERGED, api_answer_status="merged")
+
+
+def _superseded_record(intake: ConversationRecord, successor_id: str) -> ConversationRecord:
+    """``intake`` resolved to ``superseded`` — dropped in favour of the turn ``successor_id`` names."""
+    return _overlap_record(
+        intake, successor_id, channel_status=DeliveryStatus.SUPERSEDED, api_answer_status="superseded"
+    )
+
+
 def _outcome_record(intake: ConversationRecord, outcome: _ToolOutcome) -> ConversationRecord:
     """Build the completed record from a resolved outcome.
 
     An answer goes to ``pending_delivery``; a silent outcome is terminal
     ``silent`` on the channel door and a deliverable ``silent`` marker on the api
-    door.
+    door; a yielded outcome is ``superseded`` (a terminal on the channel door, a
+    marker on the api door) naming its successor.
     """
+    if isinstance(outcome, _SupersededOutcome):
+        return _superseded_record(intake, outcome.successor_id)
     if isinstance(outcome, _SilentOutcome):
         if intake.door == "channel":
             return _with_channel_silent(intake, outcome.note)

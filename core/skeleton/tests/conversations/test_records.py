@@ -70,6 +70,197 @@ def test_conversation_record_silent_rejects_answer_text():
         _record(answer_status="silent", answer="leaked")
 
 
+# -- the successor_id / overlap-outcome model rule ----------------------------
+
+
+def _channel_merged(
+    message_id: str = "m1", *, status: DeliveryStatus = DeliveryStatus.MERGED, successor_id: str | None = "lead"
+) -> ConversationRecord:
+    """A channel-door overlap terminal: the outcome rides ``delivery_status``, ``answer_status`` is None."""
+    return _record(
+        message_id,
+        delivery_status=status,
+        answer_status=None,
+        answer=None,
+        successor_id=successor_id,
+    )
+
+
+def _api_merged(
+    message_id: str = "m1", *, answer_status: str = "merged", successor_id: str | None = "lead"
+) -> ConversationRecord:
+    """An API-door overlap outcome: it rides ``pending_delivery`` carrying the ``answer_status`` marker."""
+    return _record(
+        message_id,
+        door="api",
+        delivery_status=DeliveryStatus.PENDING_DELIVERY,
+        answer_status=answer_status,
+        answer=None,
+        successor_id=successor_id,
+    )
+
+
+@pytest.mark.parametrize("status", [DeliveryStatus.MERGED, DeliveryStatus.SUPERSEDED])
+def test_a_channel_overlap_terminal_carries_a_successor_and_no_answer_status(status):
+    record = _channel_merged(status=status, successor_id="the-lead")
+    assert record.delivery_status is status
+    # The outcome lives in the delivery status; answer_status is None, the channel-silent split.
+    assert record.answer_status is None
+    assert record.successor_id == "the-lead"
+
+
+@pytest.mark.parametrize("answer_status", ["merged", "superseded"])
+def test_an_api_overlap_marker_rides_pending_delivery_with_its_successor(answer_status):
+    record = _api_merged(answer_status=answer_status, successor_id="the-lead")
+    assert record.delivery_status is DeliveryStatus.PENDING_DELIVERY
+    assert record.answer_status == answer_status
+    assert record.successor_id == "the-lead"
+    # The api marker delivers as a ConversationAnswer that carries the successor pointer.
+    answer = record.answer_payload()
+    assert answer.status == answer_status
+    assert answer.successor_id == "the-lead"
+    assert answer.answer is None
+
+
+@pytest.mark.parametrize("status", [DeliveryStatus.MERGED, DeliveryStatus.SUPERSEDED])
+def test_a_channel_overlap_terminal_requires_a_non_blank_successor(status):
+    from pydantic import ValidationError
+
+    for missing in (None, "  "):
+        with pytest.raises(ValidationError, match="names its successor turn in a non-blank successor_id"):
+            _channel_merged(status=status, successor_id=missing)
+
+
+@pytest.mark.parametrize("answer_status", ["merged", "superseded"])
+def test_an_api_overlap_marker_requires_a_non_blank_successor(answer_status):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="names its successor turn in a non-blank successor_id"):
+        _api_merged(answer_status=answer_status, successor_id=None)
+
+
+def test_a_non_overlap_record_forbids_a_successor():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="only a merged/superseded record carries a successor_id"):
+        _record(answer_status="answered", answer="hi", successor_id="nope")
+    with pytest.raises(ValidationError, match="only a merged/superseded record carries a successor_id"):
+        _record(answer_status="silent", answer=None, successor_id="nope")
+
+
+# -- the guarded channel-door overlap transitions -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "transition"),
+    [(DeliveryStatus.MERGED, "merge_record"), (DeliveryStatus.SUPERSEDED, "supersede_record")],
+)
+async def test_an_overlap_terminal_transitions_only_from_intake(monkeypatch, status, transition):
+    fake = FakeRecordRedis()
+    fake.seed_route("line")
+    store = _store(monkeypatch, fake)
+    await store.create_record(_intake("m1"), intake_token="worker-1")
+
+    terminal = _channel_merged("m1", status=status, successor_id="lead")
+    assert await getattr(store, transition)(terminal) == 1
+    record = await store.get_record("m1")
+    assert record is not None
+    assert record.delivery_status is status
+    assert record.successor_id == "lead"
+    assert record.answer_status is None
+    # A racing re-drive or a second decision finds the record already gone from intake.
+    assert await getattr(store, transition)(terminal) == 0
+
+
+@pytest.mark.parametrize("transition", ["merge_record", "supersede_record"])
+async def test_an_overlap_terminal_reports_a_missing_record(monkeypatch, transition):
+    store = _store(monkeypatch, FakeRecordRedis())
+    status = DeliveryStatus.MERGED if transition == "merge_record" else DeliveryStatus.SUPERSEDED
+    assert await getattr(store, transition)(_channel_merged("gone", status=status)) == -1
+
+
+async def test_merge_record_refuses_a_record_in_the_wrong_state(monkeypatch):
+    store = _store(monkeypatch, FakeRecordRedis())
+    with pytest.raises(ValueError, match="merged write expects a merged record"):
+        await store.merge_record(_channel_merged("m1", status=DeliveryStatus.SUPERSEDED))
+    with pytest.raises(ValueError, match="superseded write expects a superseded record"):
+        await store.supersede_record(_channel_merged("m1", status=DeliveryStatus.MERGED))
+
+
+# -- accepted_after: the thread read the overlap gather and the pending seam share
+
+_THREAD = "bridge:line:t"
+
+
+def _thread_intake(message_id: str, created_at: float, **over) -> ConversationRecord:
+    """An ``accepted`` participant message on the shared test thread, created at ``created_at``."""
+    return _intake(message_id, thread_id=_THREAD, created_at=created_at, **over)
+
+
+async def test_accepted_after_returns_later_accepted_messages_in_order(monkeypatch):
+    fake = FakeRecordRedis()
+    fake.seed_route("line")
+    store = _store(monkeypatch, fake)
+    await store.create_record(_thread_intake("lead", 100.0), intake_token="w")
+    await store.create_record(_thread_intake("f1", 101.0), intake_token="w")
+    await store.create_record(_thread_intake("f2", 102.0), intake_token="w")
+
+    followers = await store.accepted_after("line", _THREAD, 100.0)
+    assert [record.message_id for record in followers] == ["f1", "f2"]
+    # The boundary is EXCLUSIVE: the lead at exactly ``created_at`` is never its own follower.
+    assert "lead" not in {record.message_id for record in followers}
+
+
+async def test_accepted_after_skips_a_follower_that_left_accepted(monkeypatch):
+    fake = FakeRecordRedis()
+    fake.seed_route("line")
+    store = _store(monkeypatch, fake)
+    await store.create_record(_thread_intake("lead", 100.0), intake_token="w")
+    await store.create_record(_thread_intake("f1", 101.0), intake_token="w")
+    await store.create_record(_thread_intake("f2", 102.0), intake_token="w")
+    # f1's turn completed — it has left intake, so it is no longer pending.
+    assert await store.complete_turn(_record("f1", thread_id=_THREAD, created_at=101.0, answer="done")) == 1
+
+    assert [record.message_id for record in await store.accepted_after("line", _THREAD, 100.0)] == ["f2"]
+
+
+async def test_accepted_after_excludes_events_and_honours_the_kind_and_origin(monkeypatch):
+    fake = FakeRecordRedis()
+    fake.seed_route("line")
+    store = _store(monkeypatch, fake)
+    await store.create_record(_thread_intake("lead", 100.0), intake_token="w")
+    await store.create_record(_thread_intake("msg", 101.0), intake_token="w")
+    await store.create_record(
+        _thread_intake("evt", 102.0, inbound_kind="event", inbound_event={"kind": "x"}, inbound_text=""),
+        intake_token="w",
+    )
+
+    # An event turn is never a merge/pending candidate — the message read excludes it by kind.
+    assert [r.message_id for r in await store.accepted_after("line", _THREAD, 100.0)] == ["msg"]
+    # The event is exactly what the event-kind read returns.
+    assert [r.message_id for r in await store.accepted_after("line", _THREAD, 100.0, kind="event")] == ["evt"]
+    # Every accepted record is a client turn, so the operator-origin read is empty.
+    assert await store.accepted_after("line", _THREAD, 100.0, origin="operator") == []
+
+
+async def test_accepted_after_is_bounded_by_the_thread_fifo_depth(monkeypatch):
+    monkeypatch.setenv("CONVERSATIONS_THREAD_QUEUE_DEPTH", "3")
+    fake = FakeRecordRedis()
+    fake.seed_route("line")
+    store = _store(monkeypatch, fake)
+    for index in range(6):
+        await store.create_record(_thread_intake(f"f{index}", 100.0 + index), intake_token="w")
+
+    followers = await store.accepted_after("line", _THREAD, 100.0)
+    # At most ``thread_queue_depth`` rows are read back, oldest-of-the-window first.
+    assert [record.message_id for record in followers] == ["f1", "f2", "f3"]
+
+
+async def test_accepted_after_of_an_unknown_thread_is_empty(monkeypatch):
+    store = _store(monkeypatch, FakeRecordRedis())
+    assert await store.accepted_after("line", "bridge:line:missing", 0.0) == []
+
+
 def test_in_memory_backend_refuses(monkeypatch):
     monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
     from tai42_skeleton.operations.errors import NotSupportedError

@@ -88,6 +88,39 @@
       "title": "MediaKind",
       "type": "string"
     },
+    "OverlapPolicy": {
+      "description": "How a route treats a running turn and the newer participant messages that overlap it.\n\nGoverns participant MESSAGE turns on one thread only (``origin=\"client\"``,\n``inbound_kind=\"message\"``); an event turn always runs as its own turn. Two knobs and a\nwindow:\n\n* ``running`` — what happens to the turn in flight when a newer message is accepted:\n  ``continue`` leaves it running (one turn per message, today's behaviour), ``cancel``\n  cancels it cooperatively in favour of the newer message.\n* ``deliver`` — what a turn carries: ``one`` exactly one message per turn, ``all`` every\n  message accepted since the last turn started, in order, as one turn.\n* ``settle_seconds`` — a turn starts no earlier than this many seconds after its lead\n  message was accepted, so a burst inside the window rides in one turn. ``0`` disables it.\n\nThe default (``continue``/``one``/``0``) leaves every path byte-identical to a route with no\noverlap handling. Frozen.",
+      "properties": {
+        "deliver": {
+          "default": "one",
+          "enum": [
+            "one",
+            "all"
+          ],
+          "title": "Deliver",
+          "type": "string"
+        },
+        "running": {
+          "default": "continue",
+          "enum": [
+            "continue",
+            "cancel"
+          ],
+          "title": "Running",
+          "type": "string"
+        },
+        "settle_seconds": {
+          "default": 0,
+          "description": "Seconds a turn waits after its lead message was accepted before it starts, so a burst inside the window rides one turn; 0 disables the window.",
+          "maximum": 30,
+          "minimum": 0,
+          "title": "Settle Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "OverlapPolicy",
+      "type": "object"
+    },
     "PresetSeedToolMeta": {
       "description": "The optional display metadata a :class:`PresetSeed` seeds onto its preset's tool_meta.\n\nEach field is applied only where the preset's tool_meta leaves it absent — a seed never overwrites\nan operator-set display value.\n\n``display_name`` is the human tool title; ``tags`` label it in listings;\n``folder_path`` is a ``/``-style path the applier resolves into the tool_meta\nfolder tree (creating missing segments), never a raw stored string.",
       "properties": {
@@ -901,6 +934,14 @@
           "default": null,
           "title": "Our Identity"
         },
+        "overlap": {
+          "$ref": "#/$defs/OverlapPolicy",
+          "default": {
+            "deliver": "one",
+            "running": "continue",
+            "settle_seconds": 0
+          }
+        },
         "payload_expr": {
           "anyOf": [
             {
@@ -957,6 +998,14 @@
               {
                 "gloss": "a geographic point the participant shared, present only when the inbound carried one",
                 "name": "location"
+              },
+              {
+                "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/attachments/location when that message carried them)",
+                "name": "messages"
+              },
+              {
+                "gloss": "overlap deliver=all: messages dropped in favour of this turn, in the same shape; present only when non-empty",
+                "name": "superseded"
               },
               {
                 "gloss": "the turn ids: {id, inbound: {id, kind, source}}",
@@ -1119,6 +1168,14 @@
           "default": null,
           "title": "Our Identity"
         },
+        "overlap": {
+          "$ref": "#/$defs/OverlapPolicy",
+          "default": {
+            "deliver": "one",
+            "running": "continue",
+            "settle_seconds": 0
+          }
+        },
         "payload_expr": {
           "anyOf": [
             {
@@ -1175,6 +1232,14 @@
               {
                 "gloss": "a geographic point the participant shared, present only when the inbound carried one",
                 "name": "location"
+              },
+              {
+                "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/attachments/location when that message carried them)",
+                "name": "messages"
+              },
+              {
+                "gloss": "overlap deliver=all: messages dropped in favour of this turn, in the same shape; present only when non-empty",
+                "name": "superseded"
               },
               {
                 "gloss": "the turn ids: {id, inbound: {id, kind, source}}",

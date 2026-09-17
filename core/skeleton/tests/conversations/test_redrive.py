@@ -333,7 +333,7 @@ async def test_a_turn_task_that_dies_resolves_its_own_record_without_waiting_for
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
-    async def _die(*, route, intake, text):
+    async def _die(**kwargs):
         raise RuntimeError("the record store went away mid-turn")
 
     monkeypatch.setattr(target_module, "_complete_turn", _die)
@@ -472,3 +472,38 @@ async def test_redrive_discards_a_stranded_event_record_whose_claim_belongs_else
 
     assert await store.get_record("loser-event") is None  # discarded, not delivered
     assert channel.sends == []
+
+
+@pytest.mark.parametrize("transition", ["merge_record", "supersede_record"])
+async def test_an_overlap_terminal_record_is_never_redriven_or_stranded(env, monkeypatch, transition):
+    # A merged/superseded record has LEFT ``accepted``, so the intake re-drive (which adopts only
+    # lapsed ``accepted`` records) never sees it as stranded, never re-runs its turn and never
+    # fails it — the overlap outcome stands, and nothing is sent.
+    agent = EchoAgent()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
+    store = _store()
+    await _create_stranded_intake(store, env, "stranded")
+    status = DeliveryStatus.MERGED if transition == "merge_record" else DeliveryStatus.SUPERSEDED
+    accepted = await store.get_record("stranded")
+    assert accepted is not None
+    terminal = ConversationRecord.model_validate(
+        accepted.model_dump()
+        | {"delivery_status": status.value, "answer_status": None, "answer": None, "successor_id": "lead"}
+    )
+    assert await getattr(store, transition)(terminal) == 1
+
+    await turn_module.redrive_accepted()
+    await _settle()
+
+    record = await store.get_record("stranded")
+    assert record is not None
+    assert record.delivery_status is status
+    assert record.successor_id == "lead"
+    assert record.answer_status is None
+    assert agent.calls == []
+    assert channel.sends == []
+    # Neither scan the re-drive and the delivery sweep read ever names it.
+    assert await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED})) == []
+    assert [work.message_id for work in await store.pending_work()] == []

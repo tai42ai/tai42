@@ -18,6 +18,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 if TYPE_CHECKING:
     from tai42_skeleton.conversations.delivery import record_delivery_status, redrive_pending
     from tai42_skeleton.conversations.delivery_sweep import start_delivery_sweep, stop_delivery_sweep
+    from tai42_skeleton.conversations.pending import pending_messages
     from tai42_skeleton.conversations.turn.api_door import submit_api_message
     from tai42_skeleton.conversations.turn.event_door import submit_event
     from tai42_skeleton.conversations.turn.intake import accept
@@ -30,6 +31,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "submit_api_message": ("turn.api_door", "submit_api_message"),
     "submit_event": ("turn.event_door", "submit_event"),
     "record_delivery_status": ("delivery", "record_delivery_status"),
+    "pending_messages": ("pending", "pending_messages"),
     "redrive_pending": ("delivery", "redrive_pending"),
     "redrive_accepted": ("turn.redrive", "redrive_accepted"),
     "start_delivery_sweep": ("delivery_sweep", "start_delivery_sweep"),
@@ -51,6 +53,7 @@ __all__ = [
     "ConversationsSettings",
     "accept",
     "get_conversations_manager",
+    "pending_messages",
     "record_delivery_status",
     "redrive_accepted",
     "redrive_pending",

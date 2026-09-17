@@ -1,7 +1,7 @@
 """Shared response models for the ``/api/*`` success surface.
 
 The pydantic-only contract layer is the home for response shapes more than one
-package (skeleton operations, premium plugins, the flows engine) declares on a
+package (skeleton operations, plugins) declares on a
 route, so a model shared across the seam lives here and is imported by full
 submodule path (``from tai42_contract.app.responses import ...``). Each model
 DESCRIBES the payload a route returns today, wrapped by the caller in the

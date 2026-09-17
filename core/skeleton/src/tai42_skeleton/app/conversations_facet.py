@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from tai42_contract.conversations import ConversationTargetKind, DeliveryReceipt, TargetBindValidator
 
 if TYPE_CHECKING:
+    from tai42_contract.app import PendingMessage
     from tai42_contract.interactions.models import LocationElement, MediaItem
 
     from tai42_skeleton.app.server import TaiMCP
@@ -59,6 +60,10 @@ class ConversationsFacet:
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:
         """Record a provider's terminal delivery status for an outbound message."""
         await self._app._conversation_record_delivery_status(channel, provider_message_id, status)
+
+    async def pending_messages(self, thread_id: str, *, after: str) -> list[PendingMessage]:
+        """The thread's participant messages accepted after ``after`` and not yet carried into a turn."""
+        return await self._app._conversation_pending_messages(thread_id, after=after)
 
     def register_target_validator(self, target_kind: ConversationTargetKind, validator: TargetBindValidator) -> None:
         """Register a bind ``validator`` for ``target_kind``."""

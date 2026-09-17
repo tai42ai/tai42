@@ -232,7 +232,7 @@ async def _accept_for_turn(
         await store.delete_record(intake)
         return owner
 
-    _schedule_turn(
+    await _schedule_turn(
         caps,
         route=route,
         intake=intake,

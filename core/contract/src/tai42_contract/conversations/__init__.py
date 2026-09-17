@@ -30,6 +30,7 @@ from tai42_contract.conversations.inbound_form import (
     validate_bounded_object,
     validate_inbound_form,
 )
+from tai42_contract.conversations.overlap import OverlapPolicy, TurnSupersededError
 from tai42_contract.conversations.persons import Person, PersonAddress
 from tai42_contract.conversations.receipts import DeliveryReceipt
 from tai42_contract.conversations.routes import (
@@ -48,6 +49,12 @@ from tai42_contract.conversations.targets import (
     NotLinkedError,
     PairCodeInvalidError,
     TargetConversationConfig,
+)
+from tai42_contract.conversations.turn_ref import (
+    ConversationTurnRef,
+    current_conversation_turn,
+    reset_conversation_turn,
+    set_conversation_turn,
 )
 from tai42_contract.entry_params import (
     ENTRY_PARAM_KEY_RE,
@@ -81,16 +88,22 @@ __all__ = [
     "ConversationRoute",
     "ConversationRouteCreate",
     "ConversationTargetKind",
+    "ConversationTurnRef",
     "CrossTargetMergeError",
     "DeliveryReceipt",
     "MultichannelDisabledError",
     "NotLinkedError",
+    "OverlapPolicy",
     "PairCodeInvalidError",
     "Person",
     "PersonAddress",
     "TargetBindValidator",
     "TargetConversationConfig",
+    "TurnSupersededError",
+    "current_conversation_turn",
     "joined_answer_text",
+    "reset_conversation_turn",
+    "set_conversation_turn",
     "validate_bounded_object",
     "validate_entry_params",
     "validate_inbound_form",

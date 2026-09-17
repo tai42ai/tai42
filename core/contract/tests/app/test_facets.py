@@ -84,8 +84,9 @@ EXPECTED_FACADE = {
     "names",
     "handle_inbound_answer",
     "record_send_receipt",
-    # conversations (3)
+    # conversations (4)
     "accept",
+    "pending_messages",
     "record_delivery_status",
     "register_target_validator",
     # monitoring (2)
@@ -253,11 +254,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 118 (sub-protocol, member) pairs over 114 distinct names — ``store`` is exposed
+    # 119 (sub-protocol, member) pairs over 115 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 114, f"union={len(union)}"
-    assert total == 118 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 115, f"union={len(union)}"
+    assert total == 119 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_four_namespaces():
@@ -490,6 +491,9 @@ def test_app_conversations_is_runtime_checkable_and_shaped():
         async def record_delivery_status(self, channel: str, provider_message_id: str, status: object) -> None:
             return None
 
+        async def pending_messages(self, thread_id: str, *, after: str) -> list[object]:
+            return []
+
         def register_target_validator(self, target_kind: object, validator: object) -> None:
             return None
 
@@ -528,3 +532,7 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
         "provider_message_id",
         "status",
     ]
+    assert inspect.iscoroutinefunction(AppConversations.pending_messages)
+    pending_sig = inspect.signature(AppConversations.pending_messages)
+    assert list(pending_sig.parameters) == ["self", "thread_id", "after"]
+    assert pending_sig.parameters["after"].kind is inspect.Parameter.KEYWORD_ONLY

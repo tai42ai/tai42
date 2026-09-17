@@ -7,6 +7,7 @@ surfaced LOUDLY as truncated.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from redis.asyncio import Redis as AsyncRedis
 from tai42_kit.clients.impl.redis import RedisClient
@@ -32,6 +33,42 @@ class RecordQueryMixin(RecordStoreBase):
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             score = await awaited(r.zscore(self.settings.route_threads_key(route_name), thread_id))
         return score is not None
+
+    async def accepted_after(
+        self,
+        route_name: str,
+        thread_id: str,
+        created_at: float,
+        *,
+        kind: Literal["message", "event"] = "message",
+        origin: Literal["client", "operator"] = "client",
+    ) -> list[ConversationRecord]:
+        """The thread's still-``accepted`` records accepted strictly after ``created_at``, in acceptance order.
+
+        Reads the thread's transcript index (keyspace 7, scored by ``created_at``) for members with a
+        greater score, loads each row, and keeps the ones still at ``accepted`` whose ``inbound_kind``
+        and ``origin`` match — the participant ``message`` records the overlap decision gathers and the
+        pending seam projects, bounded by the thread's FIFO depth (``thread_queue_depth``). An event turn
+        is excluded by ``kind``; a record that has already left ``accepted`` (a follower an earlier
+        decision merged or superseded, or one whose turn completed) is not returned. A member whose row
+        is gone or unparseable is logged and skipped by the shared loader.
+        """
+        thread_key = self.settings.thread_index_key(route_name, thread_id)
+        records: list[ConversationRecord] = []
+        async with _records.client_ctx(RedisClient, self.settings.redis) as r:
+            members = await awaited(
+                r.zrangebyscore(thread_key, f"({created_at}", "+inf", start=0, num=self.settings.thread_queue_depth)
+            )
+            for member in members:
+                record = await self._load_searched_record(r, _member(member))
+                if (
+                    record is not None
+                    and record.delivery_status is DeliveryStatus.ACCEPTED
+                    and record.inbound_kind == kind
+                    and record.origin == origin
+                ):
+                    records.append(record)
+        return records
 
     async def latest_thread_record(self, route_name: str, thread_id: str) -> ConversationRecord | None:
         """The newest readable record of a thread, read through its transcript index (newest first, keyspace 7).

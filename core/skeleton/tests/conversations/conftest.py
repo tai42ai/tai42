@@ -39,6 +39,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
 from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
+from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 from tai42_skeleton.operations import conversations as ops
@@ -600,6 +601,8 @@ def env(monkeypatch):
     monkeypatch.setattr(target_config_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(mode_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(thread_lease_module, "client_ctx", make_record_client_ctx(fake))
+    # The overlap-cancel marker read/write shares the record redis (its own client_ctx seam).
+    monkeypatch.setattr(overlap_module, "client_ctx", make_record_client_ctx(fake))
     # Stub the execution-identity authorization seam so the bridge is tested in isolation.
     # ``bind_execution_identity`` is read at call time by both the agent and tool turn modules.
     monkeypatch.setattr(agent_turn_module, "bind_execution_identity", _fake_bind)

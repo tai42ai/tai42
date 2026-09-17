@@ -160,6 +160,48 @@ async def test_complete_turn_reports_a_missing_record(store):
     assert await store.complete_turn(_record("gone")) == -1
 
 
+# -- the guarded overlap terminals (conversations:record:merge / :supersede) --
+
+
+def _overlap(message_id: str, status: DeliveryStatus, *, successor_id: str = "lead") -> ConversationRecord:
+    """A channel-door overlap terminal: the outcome rides ``delivery_status``, ``answer_status`` is None."""
+    return ConversationRecord.model_validate(
+        _record(message_id).model_dump()
+        | {"delivery_status": status.value, "answer_status": None, "answer": None, "successor_id": successor_id}
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "transition"),
+    [(DeliveryStatus.MERGED, "merge_record"), (DeliveryStatus.SUPERSEDED, "supersede_record")],
+)
+async def test_an_overlap_terminal_transitions_from_intake_and_stamps_its_successor(
+    store, lua_redis, status, transition
+):
+    await store.create_record(_record("m1", status=DeliveryStatus.ACCEPTED), intake_token="worker-1")
+    terminal = _overlap("m1", status, successor_id="lead")
+
+    assert await getattr(store, transition)(terminal) == 1
+    record = await store.get_record("m1")
+    assert record.delivery_status is status
+    assert record.successor_id == "lead"
+    assert record.answer_status is None
+    # It is terminal, so it carries the retention TTL and never sends (the intake lease is released).
+    assert 0 < await lua_redis.ttl(_key("m1")) <= ConversationsSettings().answer_retention_ttl_seconds
+    assert await lua_redis.hget(_key("m1"), "intake_claim") == ""
+    assert await _indexed_under(lua_redis, "m1") == [status.value]
+    # A second decision or a re-drive finds the record already gone from intake.
+    assert await getattr(store, transition)(terminal) == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "transition"),
+    [(DeliveryStatus.MERGED, "merge_record"), (DeliveryStatus.SUPERSEDED, "supersede_record")],
+)
+async def test_an_overlap_terminal_reports_a_missing_record(store, status, transition):
+    assert await getattr(store, transition)(_overlap("gone", status)) == -1
+
+
 # -- the leased intake claim (conversations:record:intake_claim) ---------------
 
 

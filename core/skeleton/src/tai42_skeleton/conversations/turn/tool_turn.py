@@ -8,10 +8,10 @@ reply (or to a silent/error outcome).
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import AnswerPart, ConversationRoute, Person
+from tai42_contract.conversations import AnswerPart, ConversationRoute, Person, TurnSupersededError
 from tai42_contract.interactions import (
     LocationElement,
     MediaItem,
@@ -30,10 +30,12 @@ from tai42_skeleton.conversations.turn.context import _turn_block
 from tai42_skeleton.conversations.turn.outcome import (
     _ResolvedOutcome,
     _SilentOutcome,
+    _SupersededOutcome,
     _text_part,
     _tool_error,
     _ToolOutcome,
 )
+from tai42_skeleton.conversations.turn.overlap import is_message_turn
 from tai42_skeleton.conversations.turn.tool_result import (
     _failed_result_detail,
     _interrupt_result_detail,
@@ -42,7 +44,30 @@ from tai42_skeleton.conversations.turn.tool_result import (
 )
 from tai42_skeleton.operations.errors import PermissionDeniedError
 
+if TYPE_CHECKING:
+    from tai42_skeleton.conversations.turn.overlap import Batch
+
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
+
+
+def _overlap_message_entries(records: list[ConversationRecord]) -> list[dict[str, object]]:
+    """The ``{id, text, accepted_at}`` payload entries for a batch's records, media/form when carried.
+
+    Each record contributes its id, verbatim inbound text and acceptance moment, plus its
+    ``form`` / ``attachments`` / ``location`` when it carried them — the shape the ``messages``
+    and ``superseded`` payload keys share under ``deliver="all"``.
+    """
+    entries: list[dict[str, object]] = []
+    for r in records:
+        entry: dict[str, object] = {"id": r.message_id, "text": r.inbound_text, "accepted_at": r.created_at}
+        if r.inbound_form is not None:
+            entry["form"] = r.inbound_form
+        if r.inbound_attachments is not None:
+            entry["attachments"] = [a.model_dump(mode="json") for a in r.inbound_attachments]
+        if r.inbound_location is not None:
+            entry["location"] = r.inbound_location.model_dump(mode="json")
+        entries.append(entry)
+    return entries
 
 
 def _tool_payload(
@@ -52,6 +77,7 @@ def _tool_payload(
     thread_id: str,
     *,
     record: ConversationRecord,
+    batch: Batch,
     person: Person | None,
     params: dict[str, str] | None,
     form: dict[str, Any] | None,
@@ -63,7 +89,10 @@ def _tool_payload(
     Carries the message/sender/event/person/params/form/attachments/location
     fields plus the generic ``turn`` block. An event turn nulls
     ``message``/``sender`` and carries its structured ``event``; the person and
-    the optional structured fields ride only when present.
+    the optional structured fields ride only when present. Under ``deliver="all"``
+    (a message turn only) the payload gains ``messages`` — the batch in order — and,
+    when non-empty, ``superseded``; ``message`` is then the turn's whole text and the
+    lead's own top-level ``form``/``attachments``/``location`` stay the lead's.
     """
     payload: dict[str, object] = {
         "message": text,
@@ -92,6 +121,12 @@ def _tool_payload(
         payload["attachments"] = [a.model_dump(mode="json") for a in attachments]
     if location is not None:
         payload["location"] = location.model_dump(mode="json")
+    if route.overlap.deliver == "all" and is_message_turn(record):
+        # The whole turn: the ordered batch, and the superseded records it carries when non-empty.
+        # An event turn is never batched, so it never grows these keys.
+        payload["messages"] = _overlap_message_entries(batch.members)
+        if batch.superseded:
+            payload["superseded"] = _overlap_message_entries(batch.superseded)
     return payload
 
 
@@ -216,6 +251,7 @@ async def _run_tool_turn(
     location: LocationElement | None = None,
     *,
     record: ConversationRecord,
+    batch: Batch,
 ) -> _ToolOutcome:
     """Dispatch one tool turn as the route's execution key and return its resolved outcome.
 
@@ -266,6 +302,7 @@ async def _run_tool_turn(
         client_address,
         thread_id,
         record=record,
+        batch=batch,
         person=person,
         params=params,
         form=form,
@@ -293,6 +330,11 @@ async def _run_tool_turn(
     route_state_binding = target_config.state_binding if target_config is not None else None
     try:
         result = await _dispatch_tool(route, kwargs, thread_id, route_state_binding=route_state_binding)
+    except TurnSupersededError as exc:
+        # The tool read the pending seam and yielded to a newer message: resolve the turn
+        # ``superseded`` exactly as the cancel watcher does — no reply, no error reply, no
+        # delivery. Caught BEFORE the generic arm so a yield is never mistaken for a turn error.
+        return _SupersededOutcome(exc.successor_id)
     except PermissionDeniedError as exc:
         return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:

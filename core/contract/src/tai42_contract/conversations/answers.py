@@ -31,7 +31,17 @@ from tai42_contract.interactions.models import (
 
 #: A turn's outcome kind. ``answered``/``error`` carry answer text (``error`` is generic
 #: client-safe text only); ``silent`` is a deliberate no-reply and carries NO answer text.
-AnswerStatus = Literal["answered", "error", "silent"]
+#: ``merged`` (this message's text was carried into a later turn) and ``superseded`` (this
+#: message was dropped in favour of a later turn) are answerless too and each name that turn
+#: through ``successor_id``.
+AnswerStatus = Literal["answered", "error", "silent", "merged", "superseded"]
+
+#: Outcomes that carry no ``answer`` text and no ``parts``: a deliberate no-reply (``silent``) or
+#: a message handed to a later turn (``merged``/``superseded``).
+ANSWERLESS_ANSWER_STATUSES: frozenset[AnswerStatus] = frozenset({"silent", "merged", "superseded"})
+
+#: Outcomes that name the turn that took this message's place through a required ``successor_id``.
+SUCCESSOR_ANSWER_STATUSES: frozenset[AnswerStatus] = frozenset({"merged", "superseded"})
 
 
 with warnings.catch_warnings():
@@ -233,7 +243,13 @@ class ConversationAnswer(BaseModel):
     ``parts=None`` (the joined ``answer`` says everything); a richer or multi-message answer
     carries the parts. An ALL-MEDIA answer (every part media-only) joins to the EMPTY string, so
     on ``answered``/``error`` a blank ``answer`` is admissible ONLY when ``parts`` carry the
-    content — the media rides ``parts``. Frozen.
+    content — the media rides ``parts``.
+
+    ``status="merged"`` / ``status="superseded"`` are ANSWERLESS overlap outcomes (no ``answer``,
+    no ``parts``) that carry a ``successor_id``: the ``message_id`` of the turn that took this
+    message's place — the turn that carried this message's text (``merged``) or the newer turn it
+    was dropped in favour of (``superseded``). ``successor_id`` is set EXACTLY on those two
+    outcomes and ``None`` on every other. Frozen.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -243,18 +259,21 @@ class ConversationAnswer(BaseModel):
     status: AnswerStatus
     answer: str | None = None
     parts: list[AnswerPart] | None = None
+    # The message_id of the turn that took this message's place; set EXACTLY on
+    # ``merged``/``superseded`` (validated non-blank there) and ``None`` on every other outcome.
+    successor_id: str | None = None
 
     @model_validator(mode="after")
     def _answer_matches_status(self) -> ConversationAnswer:
-        """``answered``/``error`` carry answer text; ``silent`` carries none.
+        """``answered``/``error`` carry answer text; ``silent``/``merged``/``superseded`` carry none.
 
         The text is a string, possibly EMPTY for an all-media answer whose ``parts`` carry the
         content. A blank ``answer`` is admissible on ``answered``/``error`` ONLY when ``parts`` is
         present — otherwise there is nothing to deliver.
         """
-        if self.status == "silent":
+        if self.status in ANSWERLESS_ANSWER_STATUSES:
             if self.answer is not None:
-                raise ValueError("a silent answer carries no answer text")
+                raise ValueError(f"a {self.status} answer carries no answer text")
             return self
         if self.answer is None:
             raise ValueError("an answered/error answer carries answer text (empty only for an all-media answer)")
@@ -276,8 +295,23 @@ class ConversationAnswer(BaseModel):
             return self
         if not self.parts:
             raise ValueError("parts must be a non-empty list when present")
-        if self.status == "silent":
-            raise ValueError("a silent answer carries no parts")
+        if self.status in ANSWERLESS_ANSWER_STATUSES:
+            raise ValueError(f"a {self.status} answer carries no parts")
         if joined_answer_text(self.parts) != (self.answer or ""):
             raise ValueError("answer must equal the non-blank part messages joined with a blank line")
+        return self
+
+    @model_validator(mode="after")
+    def _successor_matches_status(self) -> ConversationAnswer:
+        """``merged``/``superseded`` name the turn that took this message's place; no other status does.
+
+        ``successor_id`` is that turn's ``message_id`` — set (non-blank) EXACTLY on
+        ``merged``/``superseded`` and ``None`` on every other outcome, so the pointer never dangles
+        on an answered/error/silent turn nor goes missing where it must resolve the replacement.
+        """
+        if self.status in SUCCESSOR_ANSWER_STATUSES:
+            if self.successor_id is None or not self.successor_id.strip():
+                raise ValueError(f"a {self.status} answer requires a non-blank successor_id")
+        elif self.successor_id is not None:
+            raise ValueError(f"a {self.status} answer carries no successor_id")
         return self

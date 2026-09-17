@@ -6,9 +6,15 @@ Builds the completed record the transition persists.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from tai42_contract.conversations import ConversationRoute, Person
+from tai42_contract.conversations import (
+    ConversationRoute,
+    ConversationTurnRef,
+    Person,
+    reset_conversation_turn,
+    set_conversation_turn,
+)
 from tai42_contract.interactions import LocationElement, MediaItem
 
 from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
@@ -23,6 +29,9 @@ from tai42_skeleton.conversations.turn.routing import _Multichannel
 from tai42_skeleton.states.context import state_context
 from tai42_skeleton.tools.attribution import run_attribution
 
+if TYPE_CHECKING:
+    from tai42_skeleton.conversations.turn.overlap import Batch
+
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
 
@@ -30,6 +39,7 @@ async def _target_outcome(
     route: ConversationRoute,
     intake: ConversationRecord,
     text: str,
+    batch: Batch,
     person: Person | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
@@ -54,36 +64,50 @@ async def _target_outcome(
     trace with this conversation's identity. tai42 stays flow-agnostic: it deposits only
     generic dimensions (a person-or-address user, the resolved thread as session, the
     route as a tag, the channel/our_identity as metadata) and interprets none of them.
+
+    The ambient :class:`ConversationTurnRef` is deposited around this whole seam — the manual,
+    tool and agent branches alike — so any code running inside the turn, at any depth
+    (contextvars propagate into the engine's fan-out), can learn which turn it serves and read
+    the pending seam with the turn's lead ``message_id``.
     """
-    if await effective_mode(route, intake.thread_id) == "manual":
-        return await _manual_target_outcome(route, intake, text)
-    attribution = _conversation_attribution(route, intake, person)
-    context = _conversation_state_context(route, intake, person, actor=attribution.user_id)
-    with run_attribution(attribution), state_context(context):
-        if route.target_kind == "tool":
-            return await tool_turn._run_tool_turn(
-                route,
-                text,
-                intake.thread_id,
-                intake.client_address,
-                person,
-                params,
-                form,
-                attachments,
-                location,
-                record=intake,
-            )
-        return await agent_turn._run_agent_turn(route, text, intake.thread_id, intake.client_address)
+    turn_token = set_conversation_turn(
+        ConversationTurnRef(thread_id=intake.thread_id, message_id=batch.lead.message_id, route_name=route.route_name)
+    )
+    try:
+        if await effective_mode(route, intake.thread_id) == "manual":
+            return await _manual_target_outcome(route, intake, batch)
+        attribution = _conversation_attribution(route, intake, person)
+        context = _conversation_state_context(route, intake, person, actor=attribution.user_id)
+        with run_attribution(attribution), state_context(context):
+            if route.target_kind == "tool":
+                return await tool_turn._run_tool_turn(
+                    route,
+                    text,
+                    intake.thread_id,
+                    intake.client_address,
+                    person,
+                    params,
+                    form,
+                    attachments,
+                    location,
+                    record=intake,
+                    batch=batch,
+                )
+            return await agent_turn._run_agent_turn(route, text, intake.thread_id, intake.client_address)
+    finally:
+        reset_conversation_turn(turn_token)
 
 
-async def _manual_target_outcome(route: ConversationRoute, intake: ConversationRecord, text: str) -> _ToolOutcome:
+async def _manual_target_outcome(route: ConversationRoute, intake: ConversationRecord, batch: Batch) -> _ToolOutcome:
     """The target turn SUPPRESSED for a manual-mode thread — no agent run, no tool dispatch.
 
     An agent target that HOLDS thread memory (implements ``append_thread_messages``) has the
     inbound appended to its checkpoint as a ``user`` message, so a later agent turn (once the
     thread returns to ``agent`` mode) reads it as prior context; a memoryless agent target
     (leaves the ABC default), an unregistered agent and a tool target have no thread memory to
-    feed, so nothing is appended. Either way the turn produces no reply: the outcome is silent
+    feed, so nothing is appended. Under ``deliver="all"`` every message the batch carries is
+    appended in acceptance order, so no message is lost to memory. Either way the turn produces
+    no reply: the outcome is silent
     (terminal on the channel door, a delivered marker on the api door). An append that FAILS on
     a memory-holding target is a loud client-safe ``error`` outcome, never a silent skip that
     would drop the inbound out of the thread's memory unremarked. A turn that dies after the
@@ -97,7 +121,8 @@ async def _manual_target_outcome(route: ConversationRoute, intake: ConversationR
         if agent is not None and supports_thread_append(agent):
             try:
                 await agent.append_thread_messages(
-                    thread_id=intake.thread_id, messages=[{"role": "user", "content": text}]
+                    thread_id=intake.thread_id,
+                    messages=[{"role": "user", "content": member.inbound_text} for member in batch.members],
                 )
             except Exception as exc:
                 logger.exception(
@@ -134,6 +159,7 @@ async def _resolve_turn_record(
     route: ConversationRoute,
     intake: ConversationRecord,
     text: str,
+    batch: Batch,
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
@@ -159,13 +185,13 @@ async def _resolve_turn_record(
     """
     if intake.inbound_kind == "event":
         person = await _resolve_event_person(route, intake, multichannel)
-        return _outcome_record(intake, await _target_outcome(route, intake, text, person, params, form))
+        return _outcome_record(intake, await _target_outcome(route, intake, text, batch, person, params, form))
 
     if multichannel is None:
         return _outcome_record(
             intake,
             await _target_outcome(
-                route, intake, text, params=params, form=form, attachments=attachments, location=location
+                route, intake, text, batch, params=params, form=form, attachments=attachments, location=location
             ),
         )
 
@@ -175,7 +201,7 @@ async def _resolve_turn_record(
     greeting, greeting_code = await pairing._greeting_and_code(multichannel) if created else (None, None)
     action = classify(text)
     if isinstance(action, Passthrough):
-        outcome = await _target_outcome(route, intake, text, person, params, form, attachments, location)
+        outcome = await _target_outcome(route, intake, text, batch, person, params, form, attachments, location)
     else:
         # ``greeting_code`` is the greeting's already-minted code, if any: a first-contact
         # ``/link`` reuses it rather than minting a SECOND code that rotation would delete,
@@ -189,6 +215,7 @@ async def _complete_turn(
     route: ConversationRoute,
     intake: ConversationRecord,
     text: str,
+    batch: Batch,
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
@@ -198,7 +225,8 @@ async def _complete_turn(
     """Run the turn and move its intake record to its outcome (persist before send).
 
     Delivery is the caller's to spawn. A produced answer goes to ``pending_delivery``; a
-    silent tool turn goes straight to terminal ``silent`` with nothing to deliver. The
+    silent tool turn goes straight to terminal ``silent`` with nothing to deliver; a turn the
+    target yielded (:class:`_SupersededOutcome`) goes to its door's ``superseded`` outcome. The
     transition is guarded on the record still being at intake, so a turn finishing after a
     re-drive resolved its record raises rather than overwriting the outcome the client was
     given.
@@ -207,17 +235,24 @@ async def _complete_turn(
         route=route,
         intake=intake,
         text=text,
+        batch=batch,
         multichannel=multichannel,
         params=params,
         form=form,
         attachments=attachments,
         location=location,
     )
+    store = accessors._store()
     if completed.delivery_status is DeliveryStatus.SILENT:
-        outcome = await accessors._store().complete_silent(completed)
+        outcome = await store.complete_silent(completed)
         verb = "complete_silent"
+    elif completed.delivery_status is DeliveryStatus.SUPERSEDED:
+        # A channel-door yielded turn moves straight to its terminal ``superseded`` state; the
+        # API-door split sits at ``pending_delivery`` and takes the ``complete_turn`` branch below.
+        outcome = await store.supersede_record(completed)
+        verb = "supersede_record"
     else:
-        outcome = await accessors._store().complete_turn(completed)
+        outcome = await store.complete_turn(completed)
         verb = "complete_turn"
     if outcome != 1:
         raise RuntimeError(

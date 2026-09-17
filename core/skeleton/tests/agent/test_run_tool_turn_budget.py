@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 import pytest
@@ -15,6 +16,69 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware, _turn_budget_armed, turn_budget
 
 from .conftest import _budget_flag, _fixture_flag, _plain_tools_manifest
+
+# -- deterministic budget expiry against a parked tool ------------------------
+# The turn budget arms an ``asyncio.timeout`` the moment a dispatch reaches the shared
+# seam, and its deadline runs on the event loop's own clock. A test that asserts the
+# expiry landed while the tool was parked on a point (a question, the inner sleep) needs
+# the cancellation to be delivered THERE, not in the dispatch that precedes the park —
+# but against a real wall clock a loaded host can cross a few-millisecond deadline while
+# the task is still in dispatch, delivering the cancellation outside the parked wait.
+# These tests take the loop clock under control: freeze it before the dispatch arms the
+# budget, let the fixture tool run to its park and signal it, then advance the clock past
+# the deadline once — firing the timer with the task provably suspended at the park.
+
+
+class _ManualClock:
+    """A loop-time source that can be frozen and advanced by hand.
+
+    Delegates to the real loop clock until :meth:`freeze` pins it, after which it reports
+    ``frozen + offset`` and moves only when :meth:`advance` is called. An armed
+    ``asyncio.timeout`` deadline computed while pinned therefore cannot elapse until the
+    test advances past it deliberately.
+    """
+
+    def __init__(self, real: Callable[[], float]) -> None:
+        self._real = real
+        self._frozen: float | None = None
+        self._offset = 0.0
+
+    def __call__(self) -> float:
+        base = self._frozen if self._frozen is not None else self._real()
+        return base + self._offset
+
+    def freeze(self) -> None:
+        self._frozen = self._real()
+
+    def advance(self, seconds: float) -> None:
+        self._offset += seconds
+
+
+async def _expire_while_parked(coro: Awaitable[Any], parked: asyncio.Event) -> TurnTimeoutError:
+    """Run ``coro`` under a frozen loop clock, release the budget deadline once ``parked``
+    is set, and return the ``TurnTimeoutError`` the expiry raises.
+
+    Freezing before the dispatch arms the budget holds its deadline no matter how long the
+    dispatch takes; the fixture tool sets ``parked`` on reaching its wait, and a single
+    advance past the deadline then cancels the turn with the task suspended at that wait.
+    """
+    loop = asyncio.get_running_loop()
+    clock = _ManualClock(loop.time)
+    saved_time = loop.time
+    loop.time = clock  # type: ignore[method-assign]
+    try:
+        clock.freeze()
+        task = asyncio.ensure_future(coro)
+        await parked.wait()
+        # Past every armed deadline (0.05s / 0.1s) yet well short of the tool's 5s sleep,
+        # so only the budget timer fires and the task is cancelled at its parked wait.
+        clock.advance(1.0)
+        with pytest.raises(TurnTimeoutError) as excinfo:
+            await task
+        return excinfo.value
+    finally:
+        loop.time = saved_time  # type: ignore[method-assign]
+
 
 # -- the turn budget ----------------------------------------------------------
 
@@ -129,9 +193,9 @@ def test_turn_timeout_names_the_parked_question_on_expiry(set_turn_timeout):
 
     async def run() -> None:
         async with app.app_context(_plain_tools_manifest("parked_question_tool")):
-            with pytest.raises(TurnTimeoutError) as excinfo:
-                await app.tools.run_tool("parked_question_tool", {"seconds": 5})
-            message = str(excinfo.value)
+            parked = _budget_flag("parked_question_parked")
+            error = await _expire_while_parked(app.tools.run_tool("parked_question_tool", {"seconds": 5}), parked)
+            message = str(error)
             assert "turn exceeded the 0.05s turn timeout" in message
             assert "waiting on an unanswered question" in message
             assert "iid-1" in message
@@ -148,9 +212,11 @@ def test_turn_timeout_redacts_a_sensitive_parked_question(set_turn_timeout):
 
     async def run() -> None:
         async with app.app_context(_plain_tools_manifest("parked_sensitive_question_tool")):
-            with pytest.raises(TurnTimeoutError) as excinfo:
-                await app.tools.run_tool("parked_sensitive_question_tool", {"seconds": 5})
-            message = str(excinfo.value)
+            parked = _budget_flag("parked_sensitive_parked")
+            error = await _expire_while_parked(
+                app.tools.run_tool("parked_sensitive_question_tool", {"seconds": 5}), parked
+            )
+            message = str(error)
             assert "turn exceeded the 0.05s turn timeout" in message
             assert "waiting on an unanswered question" in message
             assert "iid-9" in message
@@ -196,8 +262,9 @@ def test_nested_dispatch_bounded_by_outer_window_no_rearm(set_turn_timeout):
 
     async def run() -> None:
         async with app.app_context(_plain_tools_manifest("nested_outer", "nested_inner")):
-            with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.1s turn timeout"):
-                await app.tools.run_tool("nested_outer", {"seconds": 5})
+            parked = _budget_flag("nested_inner_parked")
+            error = await _expire_while_parked(app.tools.run_tool("nested_outer", {"seconds": 5}), parked)
+            assert "turn exceeded the 0.1s turn timeout" in str(error)
 
     asyncio.run(run())
     # The inner tool observed the budget already armed (the guard), so it opened no

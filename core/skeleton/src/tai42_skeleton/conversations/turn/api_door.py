@@ -122,7 +122,7 @@ async def submit_api_message(
         caps.release_thread_slot(thread_id)
         raise
 
-    task = _schedule_turn(
+    task = await _schedule_turn(
         caps,
         route=route,
         intake=intake,

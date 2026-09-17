@@ -29,11 +29,16 @@ class DeliveryStatus(StrEnum):
 
     ``accepted`` is pre-turn intake and carries no answer; ``pending_delivery`` is
     persisted-but-unsent (what a re-drive resumes); ``provisional`` is sent and awaiting an
-    out-of-band receipt or grace expiry; ``delivered``/``failed``/``shed``/``silent`` are
-    terminal and are the only states carrying the retention TTL. ``shed`` ran no turn and
-    never sends; ``silent`` ran a tool turn whose reply mapped to nothing and so, by
-    design, sends nothing; ``delivered`` on an api record without a callback means the
-    answer is readable at the message door and nothing was sent.
+    out-of-band receipt or grace expiry; ``delivered``/``failed``/``shed``/``silent``/
+    ``merged``/``superseded`` are terminal and are the only states carrying the retention
+    TTL. ``shed`` ran no turn and never sends; ``silent`` ran a tool turn whose reply mapped
+    to nothing and so, by design, sends nothing; ``delivered`` on an api record without a
+    callback means the answer is readable at the message door and nothing was sent. ``merged``
+    and ``superseded`` are the channel-door terminal states of an overlap outcome — a message
+    whose text was carried into a later turn (``merged``) or dropped in favour of one
+    (``superseded``); each names that turn through ``successor_id`` and, like ``silent``, never
+    sends. On the API door an overlap outcome rides ``pending_delivery`` carrying the matching
+    ``answer_status`` until its marker is delivered, the ``silent`` split.
     """
 
     ACCEPTED = "accepted"
@@ -43,15 +48,43 @@ class DeliveryStatus(StrEnum):
     FAILED = "failed"
     SHED = "shed"
     SILENT = "silent"
+    MERGED = "merged"
+    SUPERSEDED = "superseded"
 
 
 #: The states nothing drives further; the retention TTL is applied on reaching one.
 TERMINAL_STATUSES = frozenset(
-    {DeliveryStatus.DELIVERED, DeliveryStatus.FAILED, DeliveryStatus.SHED, DeliveryStatus.SILENT}
+    {
+        DeliveryStatus.DELIVERED,
+        DeliveryStatus.FAILED,
+        DeliveryStatus.SHED,
+        DeliveryStatus.SILENT,
+        DeliveryStatus.MERGED,
+        DeliveryStatus.SUPERSEDED,
+    }
 )
 
-#: The states carrying no produced answer; every other state carries one.
-ANSWERLESS_STATUSES = frozenset({DeliveryStatus.ACCEPTED, DeliveryStatus.SHED, DeliveryStatus.SILENT})
+#: The states carrying no produced answer; every other state carries one. A channel-door
+#: ``merged``/``superseded`` record carries the outcome in its delivery status alone, so its
+#: ``answer_status`` is ``None`` here exactly as a channel-door ``silent`` record's is.
+ANSWERLESS_STATUSES = frozenset(
+    {
+        DeliveryStatus.ACCEPTED,
+        DeliveryStatus.SHED,
+        DeliveryStatus.SILENT,
+        DeliveryStatus.MERGED,
+        DeliveryStatus.SUPERSEDED,
+    }
+)
+
+#: The channel-door terminal states of an overlap outcome — the delivery statuses that name a
+#: successor turn. The API door instead carries the outcome in ``answer_status`` at
+#: ``pending_delivery`` (the ``silent`` split), so the successor rule reads both.
+OVERLAP_DELIVERY_STATUSES = frozenset({DeliveryStatus.MERGED, DeliveryStatus.SUPERSEDED})
+
+#: The answer-outcome statuses that name a successor turn, mirroring the contract's overlap
+#: outcomes; both carry no answer text and require a ``successor_id``.
+SUCCESSOR_ANSWER_STATUSES: frozenset[AnswerStatus] = frozenset({"merged", "superseded"})
 
 
 class ConversationRecord(BaseModel):
@@ -143,6 +176,11 @@ class ConversationRecord(BaseModel):
     # body all keep reading ``answer``.
     answer_parts: list[AnswerPart] | None = None
     error: str | None = None
+    # The message_id of the turn that took this record's place: set (non-blank) EXACTLY on a
+    # ``merged``/``superseded`` overlap outcome — the channel-door terminal ``merged``/
+    # ``superseded`` states or the API-door ``merged``/``superseded`` ``answer_status`` — and
+    # ``None`` on every other outcome, mirroring :attr:`ConversationAnswer.successor_id`.
+    successor_id: str | None = None
 
     delivery_status: DeliveryStatus = DeliveryStatus.PENDING_DELIVERY
     # Provider-assigned ids of this record's sends, correlated by out-of-band receipts.
@@ -212,6 +250,27 @@ class ConversationRecord(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _successor_matches_outcome(self) -> ConversationRecord:
+        """A ``merged``/``superseded`` record names the turn that took its place; no other record does.
+
+        ``successor_id`` is that turn's ``message_id`` — set (non-blank) EXACTLY on an overlap
+        outcome and ``None`` on every other, so the pointer never dangles on an ordinary turn nor
+        goes missing where it must resolve the replacement. The outcome shows as the terminal
+        ``merged``/``superseded`` delivery status on the channel door and as the
+        ``merged``/``superseded`` ``answer_status`` at ``pending_delivery`` on the API door (the
+        ``silent`` split), so both forms are recognised here.
+        """
+        overlap_outcome = (
+            self.delivery_status in OVERLAP_DELIVERY_STATUSES or self.answer_status in SUCCESSOR_ANSWER_STATUSES
+        )
+        if overlap_outcome:
+            if self.successor_id is None or not self.successor_id.strip():
+                raise ValueError("a merged/superseded record names its successor turn in a non-blank successor_id")
+        elif self.successor_id is not None:
+            raise ValueError("only a merged/superseded record carries a successor_id")
+        return self
+
+    @model_validator(mode="after")
     def _origin_matches_fields(self) -> ConversationRecord:
         """A ``client`` record answers a non-blank inbound; an ``operator`` record carries none.
 
@@ -263,7 +322,8 @@ class ConversationRecord(BaseModel):
         """The :class:`ConversationAnswer` this record delivers.
 
         The one shape both the signed callback body and the sync-wait payload
-        carry. A ``silent`` outcome carries no answer text. Raises on a record
+        carry. A ``silent``/``merged``/``superseded`` outcome carries no answer text; a
+        ``merged``/``superseded`` one names its successor turn. Raises on a record
         with no turn outcome at all.
         """
         if self.answer_status is None:
@@ -276,6 +336,7 @@ class ConversationRecord(BaseModel):
             status=self.answer_status,
             answer=self.answer,
             parts=self.answer_parts,
+            successor_id=self.successor_id,
         )
 
     def view(self) -> dict[str, object]:
@@ -317,6 +378,7 @@ class ConversationRecord(BaseModel):
                 "answer_status",
                 "answer",
                 "answer_parts",
+                "successor_id",
                 "delivery_status",
                 "created_at",
                 "updated_at",
@@ -324,4 +386,11 @@ class ConversationRecord(BaseModel):
         )
 
 
-__all__ = ["ANSWERLESS_STATUSES", "TERMINAL_STATUSES", "ConversationRecord", "DeliveryStatus"]
+__all__ = [
+    "ANSWERLESS_STATUSES",
+    "OVERLAP_DELIVERY_STATUSES",
+    "SUCCESSOR_ANSWER_STATUSES",
+    "TERMINAL_STATUSES",
+    "ConversationRecord",
+    "DeliveryStatus",
+]

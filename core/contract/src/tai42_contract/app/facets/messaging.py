@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from tai42_contract.channels import Channel, CorrelationStore, InboundAnswerResult, InboundBridge
 from tai42_contract.conversations import ConversationTargetKind, DeliveryReceipt, TargetBindValidator
 from tai42_contract.interactions.asker import AskUser
@@ -160,6 +162,22 @@ class AppChannels(Protocol):
         ...
 
 
+class PendingMessage(BaseModel):
+    """One participant message accepted on a thread but not yet carried into a turn.
+
+    The projection :meth:`AppConversations.pending_messages` returns, so a body running inside a
+    turn can learn a newer message is waiting and stop before an irreversible step. ``message_id``
+    is the accepted record's id, ``text`` its verbatim inbound text, ``accepted_at`` the epoch
+    seconds it was accepted at (the thread index's own score). Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    message_id: str = Field(min_length=1)
+    text: str
+    accepted_at: float
+
+
 @runtime_checkable
 class AppConversations(Protocol):
     """The conversation bridge's entry surface for medium adapters.
@@ -241,6 +259,22 @@ class AppConversations(Protocol):
         to the answer record through the outbound-id reverse index. ``FAILED`` marks the
         record failed; ``DELIVERED`` confirms a ``provisional`` record. Raises when the
         id resolves to no record.
+        """
+        ...
+
+    async def pending_messages(self, thread_id: str, *, after: str) -> list[PendingMessage]:
+        """The thread's participant messages accepted after ``after`` and not yet carried into a turn.
+
+        The ``accepted`` records with ``origin="client"`` and ``inbound_kind="message"`` on
+        ``thread_id`` whose acceptance follows the ``after`` message, in acceptance order, each a
+        :class:`PendingMessage`. Read-only and in-process (it reads the same thread index the turn
+        engine batches over), bounded by the thread's FIFO depth.
+
+        A body running inside a turn asks this — with ``after`` the turn's own lead ``message_id`` —
+        to learn whether a newer message is waiting, so it can yield (raise
+        :class:`~tai42_contract.conversations.TurnSupersededError`) before an expensive or
+        irreversible step. Outside a turn there is nothing pending by definition. An unknown
+        ``thread_id`` reads as an empty list; a record already left ``accepted`` is not pending.
         """
         ...
 

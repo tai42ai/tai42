@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract.conversation_target import ConversationTargetKind
+from tai42_contract.conversations.overlap import OverlapPolicy
 from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
@@ -104,6 +105,16 @@ class ConversationRouteCreate(BaseModel):
                             "location",
                             "a geographic point the participant shared, present only when the inbound carried one",
                         ),
+                        (
+                            "messages",
+                            "overlap deliver=all: the batch carried into this turn, in acceptance order, "
+                            "each {id, text, accepted_at} (+ form/attachments/location when that message carried them)",
+                        ),
+                        (
+                            "superseded",
+                            "overlap deliver=all: messages dropped in favour of this turn, in the same shape; "
+                            "present only when non-empty",
+                        ),
                         ("turn", "the turn ids: {id, inbound: {id, kind, source}}"),
                         ("event", "an event turn's structured payload {id, kind, payload}; absent on a message turn"),
                     ],
@@ -151,6 +162,10 @@ class ConversationRouteCreate(BaseModel):
     # locale seam (a malformed tag is rejected loudly, never guessed). ``None`` declares no
     # route default.
     locale: str | None = None
+    # How this route treats a running turn and the newer participant messages that overlap it
+    # (learn/cancel/carry). The default policy (continue/one/no window) leaves every path
+    # byte-identical to a route with no overlap handling.
+    overlap: OverlapPolicy = OverlapPolicy()
 
     @field_validator("route_name")
     @classmethod

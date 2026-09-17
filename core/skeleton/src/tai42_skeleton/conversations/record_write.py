@@ -26,7 +26,9 @@ from tai42_skeleton.conversations.record_scripts import (
     _F_STATUS,
     _F_UPDATED,
     _INDEXED_STATUSES,
+    _MERGE_RECORD_LUA,
     _NO_EXPIRY_SCORE,
+    _SUPERSEDE_RECORD_LUA,
 )
 from tai42_skeleton.conversations.record_store_base import RecordStoreBase
 from tai42_skeleton.utils.redis_typing import awaited, eval_script
@@ -195,6 +197,56 @@ class RecordWriteMixin(RecordStoreBase):
                     record.thread_id,
                 )
             )
+
+    async def _overlap_terminal(self, record: ConversationRecord, target: DeliveryStatus, script: str) -> int:
+        """Move an intake record from ``accepted`` straight to a terminal overlap ``target``, applying the TTL.
+
+        The channel-door outcome for a ``merged``/``superseded`` message; ``record`` carries the
+        terminal state and its ``successor_id``. Returns 1 transitioned, 0 no longer at intake, -1
+        gone. Guarded on the current status, so an overlap decision and a re-drive cannot both write
+        an outcome. The ``complete_silent`` shape.
+        """
+        if record.delivery_status is not target:
+            raise ValueError(
+                f"{target.value} write expects a {target.value} record, got {record.delivery_status.value!r}"
+            )
+        # One fresh ``now`` feeds both the index member's expiry score and ``updated_at``, so the
+        # member's score tracks the row's own TTL clock — the sibling terminal writes' idiom.
+        now = time.time()
+        keys = self._record_keys(record.message_id, target, record)
+        async with _records.client_ctx(RedisClient, self.settings.redis) as r:
+            return int(
+                await eval_script(
+                    r,
+                    script,
+                    len(keys),
+                    *keys,
+                    self._content_blob(record),
+                    now,
+                    self.settings.answer_retention_ttl_seconds * 1000,
+                    record.message_id,
+                    self._index_score(target, now),
+                    record.thread_id,
+                )
+            )
+
+    async def merge_record(self, record: ConversationRecord) -> int:
+        """Move an intake record from ``accepted`` to terminal ``merged`` — a channel-door message carried onward.
+
+        A message whose text rode a later turn: nothing is ever sent and the retention TTL is applied
+        in the same step. ``record`` names its successor turn in ``successor_id``. Returns 1
+        transitioned, 0 no longer at intake, -1 gone.
+        """
+        return await self._overlap_terminal(record, DeliveryStatus.MERGED, _MERGE_RECORD_LUA)
+
+    async def supersede_record(self, record: ConversationRecord) -> int:
+        """Move an intake record from ``accepted`` to terminal ``superseded`` — a channel-door message dropped.
+
+        A message dropped in favour of a later turn: nothing is ever sent and the retention TTL is
+        applied in the same step. ``record`` names its successor turn in ``successor_id``. Returns 1
+        transitioned, 0 no longer at intake, -1 gone.
+        """
+        return await self._overlap_terminal(record, DeliveryStatus.SUPERSEDED, _SUPERSEDE_RECORD_LUA)
 
     async def claim_intake(self, message_id: str, now: float, token: str, lease_seconds: float) -> int:
         """Take (or refresh) the intake lease on ``message_id`` under ``token``, leased for ``lease_seconds``.

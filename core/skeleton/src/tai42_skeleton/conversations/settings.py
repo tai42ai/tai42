@@ -107,6 +107,11 @@ class ConversationsSettings(TaiBaseSettings):
     # Seconds a waiter sleeps between thread-lease acquisition attempts.
     thread_lease_poll_seconds: float = Field(default=0.5, gt=0)
 
+    # Seconds the overlap-cancel watcher sleeps between reads of a thread's cancel marker while a
+    # ``running="cancel"`` turn runs. Must stay under the thread lease, or the marker naming a newer
+    # message could expire before the watcher next reads it and the running turn is never cancelled.
+    overlap_cancel_poll_seconds: float = Field(default=0.5, gt=0)
+
     # Seconds a LIVE-CALLER sync door (operator send, thread/person delete) waits to acquire a
     # thread's turn slot before refusing with a loud 503; a background turn stays unbounded.
     sync_door_wait_seconds: float = Field(default=30, gt=0)
@@ -207,6 +212,21 @@ class ConversationsSettings(TaiBaseSettings):
         if self.thread_lease_refresh_seconds >= self.thread_lease_seconds:
             raise ValueError(
                 f"CONVERSATIONS_THREAD_LEASE_REFRESH_SECONDS ({self.thread_lease_refresh_seconds}) must be below "
+                f"CONVERSATIONS_THREAD_LEASE_SECONDS ({self.thread_lease_seconds})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _cancel_poll_stays_under_the_thread_lease(self) -> "ConversationsSettings":
+        """Refuse an overlap-cancel poll interval at or above the thread lease.
+
+        The cancel marker carries the thread lease as its TTL, so a poll interval that long could let
+        the marker naming a newer message expire before the watcher next reads it, leaving a
+        ``running="cancel"`` turn that should have been cancelled running to completion.
+        """
+        if self.overlap_cancel_poll_seconds >= self.thread_lease_seconds:
+            raise ValueError(
+                f"CONVERSATIONS_OVERLAP_CANCEL_POLL_SECONDS ({self.overlap_cancel_poll_seconds}) must be below "
                 f"CONVERSATIONS_THREAD_LEASE_SECONDS ({self.thread_lease_seconds})"
             )
         return self
@@ -338,6 +358,16 @@ class ConversationsSettings(TaiBaseSettings):
         """
         _require_key_segment("thread_id", thread_id)
         return f"{self.prefix}:thread_lease:{thread_id}"
+
+    def overlap_cancel_key(self, thread_id: str) -> str:
+        """Per-thread overlap-cancel marker key → the newest participant message's ``{message_id, created_at}``.
+
+        Set on every accept for a ``running="cancel"`` route, TTL'd to the thread lease; the watcher a
+        running turn arms reads it and cancels the turn when it names a message newer than the turn's
+        batch. The ``thread_id`` carries ``:`` of its own and so sits LAST.
+        """
+        _require_key_segment("thread_id", thread_id)
+        return f"{self.prefix}:overlap:cancel:{thread_id}"
 
     @property
     def route_key_prefix(self) -> str:

@@ -188,7 +188,7 @@ async def submit_event(
         return ApiSubmitResult(message_id=claimed_owner, thread_id=thread_id, answer=None)
 
     deliver_on_completion = route.door == "channel"
-    task = _schedule_turn(
+    task = await _schedule_turn(
         caps,
         route=route,
         intake=intake,

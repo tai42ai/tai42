@@ -78,8 +78,21 @@ class _ResolvedOutcome:
         return joined_answer_text(self.parts)
 
 
-#: A tool turn resolves to exactly one of these two shapes — no third, coercible state.
-_ToolOutcome = _SilentOutcome | _ResolvedOutcome
+@dataclass(frozen=True)
+class _SupersededOutcome:
+    """A turn that yielded to a newer message — resolve it ``superseded``, no reply, no delivery.
+
+    Produced when a target raises :class:`~tai42_contract.conversations.TurnSupersededError` (a
+    tool that read the pending seam and stopped before an irreversible step); the platform's
+    cancel watcher takes the same outcome by a different path (``overlap.supersede_lead``).
+    ``successor_id`` is the ``message_id`` of the turn that took this one's place.
+    """
+
+    successor_id: str
+
+
+#: A tool turn resolves to exactly one of these shapes — no coercible in-between.
+_ToolOutcome = _SilentOutcome | _ResolvedOutcome | _SupersededOutcome
 
 
 def _text_part(text: str) -> AnswerPart:

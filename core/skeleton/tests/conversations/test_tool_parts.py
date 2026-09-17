@@ -14,6 +14,7 @@ from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.turn import outcome as outcome_module
+from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import record as record_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 from tai42_skeleton.states.context import current_state_context
@@ -52,7 +53,12 @@ async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatc
     )
 
     await tool_turn_module._run_tool_turn(
-        route, "hello", "bridge:tool-line:+15550002222", "+15550002222", record=record
+        route,
+        "hello",
+        "bridge:tool-line:+15550002222",
+        "+15550002222",
+        record=record,
+        batch=overlap_module.Batch(lead=record, members=[record]),
     )
 
     kwargs = tools.calls[0]["arguments"]
@@ -103,7 +109,12 @@ async def test_tool_payload_expr_by_id_renders_then_maps(env, monkeypatch):
     )
 
     await tool_turn_module._run_tool_turn(
-        route, "hello", "bridge:tool-line:+15550002222", "+15550002222", record=record
+        route,
+        "hello",
+        "bridge:tool-line:+15550002222",
+        "+15550002222",
+        record=record,
+        batch=overlap_module.Batch(lead=record, members=[record]),
     )
 
     assert tools.calls[0]["arguments"] == {"echoed": "hello"}

@@ -126,6 +126,43 @@ redis.call('PEXPIRE', KEYS[1], ARGV[3])
 return 1
 """
 
+
+def _accepted_to_overlap_terminal_lua(marker: str, status: str) -> str:
+    """Lua moving an intake record from ``accepted`` straight to the terminal overlap ``status``.
+
+    The channel-door outcome for a message merged into a later turn (``merged``) or dropped in
+    favour of one (``superseded``): nothing is ever sent, so it releases the intake lease and
+    applies the retention TTL in the SAME step, the ``complete_silent`` shape. The record's
+    content (already carrying ``successor_id``) rides in ``ARGV[1]``. Guarded on the current
+    status, so an overlap decision and a re-drive produce ONE outcome: 1 transitioned, 0 no
+    longer at intake, -1 gone. ARGV = content_json, now, ttl_ms, message_id, index_score,
+    thread_id.
+    """
+    return f"""
+-- {marker}
+local status = redis.call('HGET', KEYS[1], 'delivery_status')
+if not status then return -1 end
+if status ~= 'accepted' then return 0 end
+redis.call('HSET', KEYS[1], 'data', ARGV[1], 'delivery_status', '{status}', 'updated_at', ARGV[2],
+  'intake_claim', '', 'claim', '')
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+{_reindex("ARGV[4]", "ARGV[5]")}
+{_RESTAMP_LIVE_THREAD.format(slot=6)}
+return 1
+"""
+
+
+# Move an intake record from ``accepted`` straight to terminal ``merged`` — a channel-door
+# message whose text was carried into a later turn, so nothing is ever sent. The ``silent``
+# shape, stamping ``successor_id`` (in the content) and the retention TTL.
+_MERGE_RECORD_LUA = _accepted_to_overlap_terminal_lua("conversations:record:merge", "merged")
+
+# Move an intake record from ``accepted`` straight to terminal ``superseded`` — a channel-door
+# message dropped in favour of a later turn, so nothing is ever sent. The ``silent`` shape,
+# stamping ``successor_id`` (in the content) and the retention TTL.
+_SUPERSEDE_RECORD_LUA = _accepted_to_overlap_terminal_lua("conversations:record:supersede", "superseded")
+
+
 # Take (or refresh) the intake lease under a worker token — the liveness marker a running
 # turn holds: 1 held, 0 a DIFFERENT worker's lease is still live, -1 gone, -2 the record
 # has left intake. Claim value is ``token:expiry``. The holder refreshes; a re-drive may

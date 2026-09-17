@@ -18,6 +18,7 @@ from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
 from tai42_skeleton.conversations.turn import keys as keys_module
 from tai42_skeleton.conversations.turn import outcome as outcome_module
+from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import record as record_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 from tai42_skeleton.operations.errors import PermissionDeniedError
@@ -529,6 +530,11 @@ async def test_tool_turn_deposits_the_route_state_binding_on_the_ambient_invocat
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     await tool_turn_module._run_tool_turn(
-        route, "hello", "bridge:tool-line:+15550002222", "+15550002222", record=record
+        route,
+        "hello",
+        "bridge:tool-line:+15550002222",
+        "+15550002222",
+        record=record,
+        batch=overlap_module.Batch(lead=record, members=[record]),
     )
     assert seen["binding"] == binding

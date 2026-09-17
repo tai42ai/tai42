@@ -58,7 +58,7 @@ from tai42_skeleton.template import ResourceManager
 if TYPE_CHECKING:
     from fastmcp.server.auth import TokenVerifier
     from fastmcp.tools import Tool
-    from tai42_contract.app import TaiApp
+    from tai42_contract.app import PendingMessage, TaiApp
     from tai42_contract.connectors.models import ResolvedConnectionAuth
     from tai42_contract.conversations import DeliveryReceipt
     from tai42_contract.interactions.models import LocationElement, MediaItem
@@ -573,6 +573,11 @@ class TaiMCP(TaiMCPLifecycleMixin):
         from tai42_skeleton.conversations import record_delivery_status
 
         await record_delivery_status(channel, provider_message_id, status)
+
+    async def _conversation_pending_messages(self, thread_id: str, *, after: str) -> "list[PendingMessage]":
+        from tai42_skeleton.conversations import pending_messages
+
+        return await pending_messages(thread_id, after=after)
 
     # -- Versioning + presets seams --------------------------------------------
     # ``app.versioning.store`` and ``app.presets.store`` forward here; ``bind`` is

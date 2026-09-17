@@ -23,6 +23,7 @@ from tai42_skeleton.conversations.turn.outcome import (
     _pairing_reply,
     _ResolvedOutcome,
     _SilentOutcome,
+    _SupersededOutcome,
     _text_part,
     _tool_error,
     _ToolOutcome,
@@ -79,6 +80,11 @@ def _with_greeting(outcome: _ToolOutcome, greeting: str | None) -> _ToolOutcome:
     renders as ``f"{greeting}\n\n{answer}"``.
     """
     if greeting is None:
+        return outcome
+    if isinstance(outcome, _SupersededOutcome):
+        # A yielded turn delivers nothing, so there is no reply for the greeting to lead; it
+        # passes through as ``superseded``. A greeting due on a superseded first-contact turn
+        # rides no reply — the newer message it yielded to carries the conversation on.
         return outcome
     if isinstance(outcome, _SilentOutcome):
         return _ResolvedOutcome(answer_status="answered", parts=[_text_part(greeting)], error=None)

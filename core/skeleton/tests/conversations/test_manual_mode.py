@@ -35,6 +35,7 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
+from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import record as record_module
 from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import target as target_module
@@ -359,7 +360,9 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
     )
     await _store().create_record(intake, intake_token="tok")
 
-    completed = await target_module._complete_turn(route=route, intake=intake, text="help")
+    completed = await target_module._complete_turn(
+        route=route, intake=intake, text="help", batch=overlap_module.Batch(lead=intake, members=[intake])
+    )
 
     # The folded manual mode suppressed the turn; the memoryless target fed nothing and the
     # record is terminal silent, never an error.

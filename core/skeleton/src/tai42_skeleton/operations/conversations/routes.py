@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ROUTE_NAME_RE, ConversationRoute, ConversationRouteCreate
+from tai42_contract.conversations import ROUTE_NAME_RE, ConversationRoute, ConversationRouteCreate, OverlapPolicy
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import get_compiled_jq
 
@@ -217,6 +217,7 @@ async def create_conversation_route(
     turns_per_hour_override: int | None = None,
     error_reply_text: str | None = None,
     locale: str | None = None,
+    overlap: OverlapPolicy | None = None,
 ) -> dict[str, Any]:
     """Create a conversation route from its flat parameters — an UPSERT (create AND edit path).
 
@@ -244,6 +245,9 @@ async def create_conversation_route(
     A ``locale`` is the operator-declared default language templated reply parts render in when
     a turn supplies none; it is the last fallback under a per-turn or stored-contact locale and
     is stored canonicalized. ``None`` declares no route default (bare/English).
+    An ``overlap`` policy governs how a running turn treats the newer participant messages that
+    overlap it (learn/cancel/carry); ``None`` stores the default policy (continue/one/no window),
+    which leaves every path byte-identical to a route with no overlap handling.
     Returns ``{"created", "route_name", "route", "callback_secret"}``.
     """
     # Validate the whole body shape at the operation, not the edge: the MCP tool and a
@@ -264,6 +268,7 @@ async def create_conversation_route(
             turns_per_hour_override=turns_per_hour_override,
             error_reply_text=error_reply_text,
             locale=locale,
+            overlap=overlap if overlap is not None else OverlapPolicy(),
         )
     except ValueError as exc:
         raise BadRequestError(f"invalid conversation route: {exc}") from exc
