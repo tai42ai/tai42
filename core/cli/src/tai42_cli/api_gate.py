@@ -471,6 +471,64 @@ def _is_additive_collection_growth(old_expr: str, new_expr: str) -> bool:
     return False
 
 
+def _literal_members(node: ast.expr) -> tuple[str, list[str]] | None:
+    """A ``Literal[...]`` subscript's reference dump and its constant members, else ``None``.
+
+    ``node`` qualifies only as an ``ast.Subscript`` whose value is a ``Literal`` /
+    ``typing.Literal`` / ``t.Literal``-style name or attribute. The slice is normalised to a
+    sequence of members — a single-member ``Literal['x']`` becomes a one-element list — and every
+    member must be an ``ast.Constant``. A non-subscript, a non-``Literal`` reference, a non-constant
+    member, or a starred element returns ``None`` so the caller fails closed. The reference dump is
+    returned alongside the members so the caller can reject a spelling change
+    (``Literal`` -> ``typing.Literal``).
+    """
+    if not isinstance(node, ast.Subscript):
+        return None
+    ref = node.value
+    if isinstance(ref, ast.Name):
+        if ref.id != "Literal":
+            return None
+    elif isinstance(ref, ast.Attribute):
+        if ref.attr != "Literal":
+            return None
+    else:
+        return None
+    elts = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+    members: list[str] = []
+    for elt in elts:
+        if not isinstance(elt, ast.Constant):
+            return None
+        members.append(ast.dump(elt))
+    return ast.dump(ref), members
+
+
+def _is_additive_literal_growth(old_expr: str, new_expr: str) -> bool:
+    """True only when both values are ``Literal[...]`` aliases and the new adds members in order.
+
+    Both expressions must be ``Literal[...]`` subscripts over the SAME reference spelling whose
+    members are all constants; the new members must keep the old ones as a strict ordered
+    subsequence (members appended or inserted, none removed, edited or reordered). Every other
+    relation — a removal, an edit, a reorder, a wrapper/spelling change, ``Literal`` to
+    non-``Literal`` or the reverse, a non-constant member, a non-subscript expression, or an
+    identical alias — returns ``False`` so the classification stays breaking. The comparison is
+    purely structural (parse-only, never evaluated); a parse failure fails closed to ``False``.
+    """
+    try:
+        old_node = ast.parse(old_expr, mode="eval").body
+        new_node = ast.parse(new_expr, mode="eval").body
+    except (SyntaxError, ValueError):
+        return False
+    old = _literal_members(old_node)
+    new = _literal_members(new_node)
+    if old is None or new is None:
+        return False
+    old_ref, old_members = old
+    new_ref, new_members = new
+    if old_ref != new_ref:
+        return False
+    return len(new_members) > len(old_members) and _is_subsequence(old_members, new_members)
+
+
 _LOGGER_BINDING = re.compile(r"^(logging\.)?getLogger\(")
 
 
@@ -497,6 +555,7 @@ def _breakages(module: str, ref: str, src_rel: str, repo_root: Path) -> list[str
             continue
         if b.kind is griffe.BreakageKind.ATTRIBUTE_CHANGED_VALUE and (
             _is_additive_collection_growth(str(b.old_value), str(b.new_value))
+            or _is_additive_literal_growth(str(b.old_value), str(b.new_value))
             or _is_doc_only_call_change(str(b.old_value), str(b.new_value))
         ):
             continue

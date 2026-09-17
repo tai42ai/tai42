@@ -343,6 +343,63 @@ def test_non_additive_collection_change_stays_breaking(old: str, new: str):
     assert api_gate._is_additive_collection_growth(old, new) is False
 
 
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # A member appended (the real AnswerStatus expansion shape).
+        (
+            "Literal['answered', 'error', 'silent']",
+            "Literal['answered', 'error', 'silent', 'merged', 'superseded']",
+        ),
+        # A member inserted mid-sequence — the old members keep their order.
+        ("Literal['a', 'c']", "Literal['a', 'b', 'c']"),
+        # A single-member alias normalises to a one-tuple and grows.
+        ("Literal['a']", "Literal['a', 'b']"),
+        # A dotted ``typing.Literal`` reference, identical spelling on both sides.
+        ("typing.Literal['a']", "typing.Literal['a', 'b']"),
+        # A ``t.Literal`` alias reference, identical spelling on both sides.
+        ("t.Literal['x', 'y']", "t.Literal['x', 'y', 'z']"),
+    ],
+)
+def test_additive_literal_growth_is_not_breaking(old: str, new: str):
+    assert api_gate._is_additive_literal_growth(old, new) is True
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # A member removal is a real break, never additive.
+        ("Literal['a', 'b']", "Literal['a']"),
+        # A member edit (same length, different member) is breaking.
+        ("Literal['a', 'b']", "Literal['a', 'c']"),
+        # A reorder disturbs the pre-existing order — not a pure insertion.
+        ("Literal['a', 'b', 'c']", "Literal['c', 'b', 'a']"),
+        # Identical aliases are not growth.
+        ("Literal['a', 'b']", "Literal['a', 'b']"),
+        # A spelling change of the reference (bare -> dotted) is not pure growth.
+        ("Literal['a']", "typing.Literal['a', 'b']"),
+        # Literal -> non-Literal (a plain tuple) is a type change.
+        ("Literal['a', 'b']", "('a', 'b', 'c')"),
+        # Literal -> a different subscript reference is a type change.
+        ("Literal['a']", "Foo['a', 'b']"),
+        # A non-Literal subscript is never additive literal growth.
+        ("Foo['a']", "Foo['a', 'b']"),
+        # A dotted reference whose final name is not ``Literal`` is not a Literal alias.
+        ("foo.Bar['a']", "foo.Bar['a', 'b']"),
+        # A subscript whose value is neither a name nor an attribute fails closed.
+        ("m[0]['a']", "m[0]['a', 'b']"),
+        # Non-constant members fail closed.
+        ("Literal[a, b]", "Literal[a, b, c]"),
+        # A non-subscript expression is never additive literal growth.
+        ("('a', 'b')", "('a', 'b', 'c')"),
+        # A parse failure fails closed to False with no crash.
+        ("Literal['a'", "Literal['a', 'b']"),
+    ],
+)
+def test_non_additive_literal_change_stays_breaking(old: str, new: str):
+    assert api_gate._is_additive_literal_growth(old, new) is False
+
+
 # ------------------------------------------------------------------- config read
 
 
@@ -563,6 +620,24 @@ def test_end_to_end_additive_change_passes(monkeypatch: pytest.MonkeyPatch, tmp_
         member_dir="core/widget",
         version="1.0.1",
     )
+
+
+_LITERAL_OLD = 'from typing import Literal\n\nStatus = Literal["a", "b"]\n'
+_LITERAL_NEW = 'from typing import Literal\n\nStatus = Literal["a", "b", "c"]\n'
+
+
+def test_end_to_end_literal_growth_passes_at_minor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    # A Literal type alias gaining members: griffe flags ATTRIBUTE_CHANGED_VALUE, the
+    # additive-literal-growth filter drops it, so a minor under label-honesty at >=1.0 passes.
+    pytest.importorskip("griffe")
+    _build_release_repo(
+        tmp_path,
+        mode="label-honesty",
+        old_version="1.0.0",
+        old_body=_LITERAL_OLD,
+        new_body=_LITERAL_NEW,
+    )
+    _run_main(monkeypatch, tmp_path, package="widget", member_dir="core/widget", version="1.1.0")
 
 
 _FIELD_DESC_OLD = (
