@@ -10,7 +10,8 @@ worker (the shared redis checkpoint) and drives it to its final answer.
 Two legs, mirroring the flow-driver ``interactions/test_async_park_resume`` legs:
 
 * park -> answer -> resume: an answer through replica B fires ``agent_resume`` on B.
-* park -> expiry -> resume: no answer arrives; the 1s expiry reaper fires ``agent_resume``.
+* park -> expiry -> resume: no answer arrives; the park is brought to its deadline and the 1s
+  expiry reaper fires ``agent_resume``.
 
 Each leg proves the parked tool's ``ask_user`` ran EXACTLY ONCE (a resume substitutes the
 answer, never re-runs the tool) and that the resumed drive ran REBOUND to the STORED park
@@ -71,7 +72,7 @@ async def _resume_record(stack: TaiStack, thread_id: str) -> dict | None:
     return json.loads(records[0])
 
 
-async def _park_agent_run(stack: TaiStack, thread_id: str, question: str, expiry_seconds: float) -> str:
+async def _park_agent_run(stack: TaiStack, thread_id: str, question: str) -> str:
     """Drive a ``tools_agent`` run on replica A that parks on ``e2e_agent_async_ask`` and
     return the single parked ``interaction_id``. The submit can race the boot-time
     self-resync gate, so poll past a retriable ``reloading``."""
@@ -118,7 +119,7 @@ async def test_agent_park_answer_resumes_across_workers(
         ]
     )
 
-    interaction_id = await _park_agent_run(agent_async_park_stack, thread_id, question, expiry_seconds=3600)
+    interaction_id = await _park_agent_run(agent_async_park_stack, thread_id, question)
 
     # Answer through replica B's door: this fires agent_resume on B — a different worker than
     # the one that parked on A — rebuilding the graph from the shared redis checkpoint.
@@ -148,18 +149,22 @@ async def test_agent_park_expiry_resumes(
     llm_stub.reset()
     llm_stub.script(
         [
-            # Turn 1 (replica A): park with a short deadline and never answer.
-            {"tool_call": {"name": "e2e_agent_async_ask", "arguments": {"question": question, "expiry_seconds": 2}}},
+            # Turn 1 (replica A): park with a far deadline the submit always observes first, never answer.
+            {"tool_call": {"name": "e2e_agent_async_ask", "arguments": {"question": question, "expiry_seconds": 3600}}},
             # Turns 2 + 3 (resumed by the expiry reaper): record the identity, then finish.
             {"tool_call": {"name": "e2e_record_identity", "arguments": {"thread_id": thread_id}}},
             {"content": "resumed on expiry"},
         ]
     )
 
-    interaction_id = await _park_agent_run(agent_async_park_stack, thread_id, question, expiry_seconds=2)
+    interaction_id = await _park_agent_run(agent_async_park_stack, thread_id, question)
 
-    # No answer arrives; the 1s expiry reaper claims the park once its deadline passes and
-    # fires agent_resume, which rebuilds and drives the graph to completion.
+    # Bring the durably-parked run to its deadline deterministically — a short park window would
+    # race the submit latency — then never answer: the 1s expiry reaper claims the now-due park
+    # and fires agent_resume, which rebuilds and drives the graph to completion.
+    async with agent_async_park_stack.mcp(port=agent_async_park_stack.port_b) as mcp:
+        await mcp.call_tool("e2e_expire_park", {"interaction_id": interaction_id}, retry_on_reloading=True)
+
     record = await wait_for_async(
         lambda: _resume_record(agent_async_park_stack, thread_id),
         deadline=25.0,

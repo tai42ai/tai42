@@ -297,3 +297,47 @@ async def e2e_record_identity(thread_id: str) -> dict:
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
         await cast(Awaitable[int], client.rpush(f"e2e:rec:agent_resume:{thread_id}", record))
     return {"recorded": True}
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_expire_park(interaction_id: str) -> dict:
+    """Bring a live async park to its deadline NOW, so the running expiry reaper resolves it next pass.
+
+    Reschedules the park's ``expiry_at`` into the immediate past — rewriting the durable
+    interaction state AND its score in the per-interaction expiry index the reaper scans — so
+    the deadline stops riding real wall-clock. A spec parks with a deadline far enough out that
+    the sync submit always observes the suspend first, then calls this to reach expiry without a
+    short park window racing the submit latency; the reaper's own claim then fires the stored
+    continuation deterministically.
+
+    Writes the past deadline into the state BEFORE re-scoring the index, so the reaper that reads
+    the freshly-due index member always sees the already-passed deadline and fires on that same
+    pass. Raises loudly when ``interaction_id`` names no live async park (already resolved,
+    vanished, or never a park), so a mis-sequenced spec fails visibly rather than silently no-opping.
+    """
+    from collections.abc import Awaitable
+    from datetime import UTC, datetime, timedelta
+    from typing import cast
+
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.clients.impl.redis import RedisClient
+    from tai42_skeleton.interactions import InteractionStore, interactions_settings
+
+    settings = interactions_settings()
+    store = InteractionStore(settings.key_prefix)
+    async with client_ctx(RedisClient, settings.redis) as r:
+        state = await store.get_state(r, interaction_id)
+        if (
+            state is None
+            or state.status != "pending"
+            or state.request.mode != "async"
+            or state.request.expiry_at is None
+        ):
+            raise RuntimeError(f"e2e_expire_park: {interaction_id!r} is not a live async park to expire")
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        expired_request = state.request.model_copy(update={"expiry_at": past})
+        await cast(
+            Awaitable[int], r.hset(store.state_key(interaction_id), "request", expired_request.model_dump_json())
+        )
+        await cast(Awaitable[int], r.zadd(store.pending_expiry_key, {interaction_id: int(past.timestamp() * 1000)}))
+    return {"interaction_id": interaction_id, "expiry_at": past.isoformat()}
