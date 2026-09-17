@@ -1,8 +1,8 @@
 {
-  "core/contract": "13.1.0",
+  "core/contract": "13.2.0",
   "core/kit": "5.0.2",
   "core/cli": "9.1.1",
-  "core/skeleton": "17.1.1",
+  "core/skeleton": "17.2.0",
   "plugins/accounts-oidc": "2.0.2",
   "plugins/accounts-postgres": "3.0.2",
   "plugins/agents": "6.0.7",
@@ -33,5 +33,5 @@
   "plugins/tools-whatsapp": "1.1.11",
   "plugins/webhook-verifier-github": "1.2.9",
   "plugins/webhook-verifier-stripe": "1.2.9",
-  "e2e": "12.0.2"
+  "e2e": "12.1.0"
 }
