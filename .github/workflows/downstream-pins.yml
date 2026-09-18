@@ -4,8 +4,8 @@
 # breakage this dispatch surfaces at release time instead of by hand-audit after the
 # downstream goes red or latent-stale. It reads each known downstream manifest, extracts every
 # tai42-<core> requirement, checks the JUST-RELEASED version against it, and opens
-# (or updates) a tracking issue on THIS repo per stale pin. It never edits a
-# downstream repo — widening a downstream pin is the downstream maintainer's call.
+# (or updates) a tracking issue on the offending downstream repo per stale pin. It
+# never widens a downstream pin — that is the downstream maintainer's call.
 name: downstream-pins
 
 on:
@@ -46,9 +46,10 @@ jobs:
       - run: uv python install 3.13
       # Pure stdlib + packaging; --no-project skips resolving the workspace just to
       # run it. RELEASE_PLEASE_TOKEN reads the dependent repos and opens the tracking
-      # issue — it is the broadest-scoped token available to this repo. The audited downstream manifest
-      # map is injected as config (DOWNSTREAM_PINS_MANIFESTS), so the checker source
-      # names no specific downstream.
+      # issue on each — it is the broadest-scoped token available to this repo. The
+      # audited downstream manifest map is supplied by configuration
+      # (DOWNSTREAM_PINS_MANIFESTS). GITHUB_REPOSITORY (owner/repo, provided by
+      # Actions) supplies the owner the downstreams live under.
       - name: Check downstream pins against the released core version(s)
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
