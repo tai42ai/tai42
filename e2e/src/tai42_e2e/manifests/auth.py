@@ -1,12 +1,11 @@
-"""The auth, accounts and OIDC stack profiles."""
+"""The auth and accounts stack profiles."""
 
 from __future__ import annotations
 
 import json
-import os
 from typing import TYPE_CHECKING
 
-from tai42_e2e.manifests.feature_env import _base_env, _switch
+from tai42_e2e.manifests.feature_env import _base_env
 from tai42_e2e.manifests.tool_entries import (
     _CORE_ROUTERS,
     _EXTENSION_MODULES,
@@ -172,26 +171,6 @@ def build_setup_stack(res: StackResources, variants: Variants) -> StackConfig:
     )
 
 
-# The oidc stack's login provider and the coordinates the two OIDC members share with
-# the in-process signing issuer. ``_OIDC_CLIENT_ID`` must equal the ``OAuthIdp``'s
-# construction client (the ``aud`` it stamps into id_tokens), which ``accounts-oidc``
-# verifies; ``_OIDC_MACHINE_AUDIENCE`` is the audience ``identity-oidc`` requires on
-# issuer-minted machine JWTs.
-_OIDC_PROVIDER_NAME = "e2e"
-
-
-_OIDC_CLIENT_ID = "e2e-client"
-
-
-_OIDC_CLIENT_SECRET = "e2e-secret"
-
-
-_OIDC_STATE_KEY = "e2e-oidc-state-key"
-
-
-_OIDC_MACHINE_AUDIENCE = "e2e-machine"
-
-
 def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig:
     """REPLICAS with access control ON, the Postgres accounts provider alongside
     the redis key provider.
@@ -294,99 +273,4 @@ def build_accounts_fresh_stack(res: StackResources, variants: Variants) -> Stack
         run_backend=False,
         run_metrics=False,
         auth=True,
-    )
-
-
-def build_oidc_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """The accounts stack plus the two OIDC members, both pointed at the in-process
-    signing issuer (``oidc_idp.OAuthIdp``).
-
-    ``accounts-oidc`` adds browser-less OIDC login (authorize -> issuer -> callback
-    mints a ``tai-sess-`` session, subjects namespaced ``oidc:{provider}:{sub}``);
-    ``identity-oidc`` validates issuer-minted machine JWTs (subjects namespaced
-    ``idp:{issuer}:{sub}``). ``TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL`` is filled at boot
-    with replica B's own origin (loopback ``http`` is accepted for e2e), so a login
-    spec drives the flow against replica B; ``TAI_IDENTITY_OIDC_AUDIENCE`` is the
-    audience the issuer stamps into machine JWTs a spec mints for replica B.
-
-    The ``oidc`` seam swaps the in-process issuer for a real Auth0 tenant (HARNESS-MAP:
-    ``AUTH0_*`` -> a ``TAI_ACCOUNTS_OIDC_PROVIDERS`` row ``preset:"auth0"`` +
-    ``TAI_IDENTITY_OIDC_ISSUER`` / ``_AUDIENCE``); the ``github-login`` seam ADDS a real
-    ``preset:"github"`` provider row (fed from ``GITHUB_LOGIN_*`` — real-only, no mock
-    issuer exists). Both are inbound, so the login redirect origin routes to the public
-    base URL. All-mock (default) is byte-for-byte today's in-process-issuer wiring."""
-    from dataclasses import replace
-
-    switch = _switch()
-    oidc_real = switch.is_real("oidc")
-    gh_real = switch.is_real("github-login")
-
-    if not oidc_real and res.oidc_issuer_base_url is None:
-        raise RuntimeError("build_oidc_stack requires resources.oidc_issuer_base_url (the signing OIDC issuer origin)")
-
-    base = build_accounts_stack(res, variants)
-    manifest = {**base.manifest}
-    manifest["lifecycle_modules"] = [*base.manifest["lifecycle_modules"], "tai42_accounts_oidc", "tai42_identity_oidc"]
-    manifest["routers_modules"] = [*base.manifest["routers_modules"], "tai42_accounts_oidc.routes"]
-    env = {**base.env}
-    env["ACCESS_CONTROL_AUTH_PROVIDERS"] = json.dumps(["accounts-postgres", "accounts-oidc", "identity-oidc", "redis"])
-    # accounts-oidc login provider row(s). MOCK: one row whose issuer is the in-process
-    # IdP (client_id is the IdP's construction client — the id_token ``aud`` the callback
-    # verifies; the secret is a fixture value the stub IdP never checks). REAL oidc: a real
-    # Auth0 row (preset fills the label; the operator supplies the per-tenant issuer).
-    providers: list[dict] = []
-    if oidc_real:
-        providers.append(
-            {
-                "name": "auth0",
-                "preset": "auth0",
-                "issuer": os.environ["AUTH0_ISSUER"],
-                "client_id": os.environ["AUTH0_CLIENT_ID"],
-                "client_secret": os.environ["AUTH0_CLIENT_SECRET"],
-                "claim": "sub",
-            }
-        )
-        # identity-oidc validates machine JWTs against the same real issuer + API audience.
-        env["TAI_IDENTITY_OIDC_ISSUER"] = os.environ["AUTH0_ISSUER"]
-        env["TAI_IDENTITY_OIDC_AUDIENCE"] = os.environ["AUTH0_AUDIENCE"]
-    else:
-        # The guard above raised unless the in-process issuer origin is present here.
-        assert res.oidc_issuer_base_url is not None
-        providers.append(
-            {
-                "name": _OIDC_PROVIDER_NAME,
-                "issuer": res.oidc_issuer_base_url,
-                "client_id": _OIDC_CLIENT_ID,
-                "client_secret": _OIDC_CLIENT_SECRET,
-                "claim": "sub",
-            }
-        )
-        # identity-oidc: validate-only, same issuer, the machine-JWT audience. RS256 is
-        # the default allowed alg (the issuer signs RS256); the subject claim is ``sub``.
-        env["TAI_IDENTITY_OIDC_ISSUER"] = res.oidc_issuer_base_url
-        env["TAI_IDENTITY_OIDC_AUDIENCE"] = _OIDC_MACHINE_AUDIENCE
-    if gh_real:
-        # A real GitHub OAuth app via the plain-OAuth2 ``github`` preset (fixed endpoints,
-        # no discovery/id_token). Real-only — the in-process issuer has no github mode.
-        providers.append(
-            {
-                "name": "github",
-                "preset": "github",
-                "client_id": os.environ["GITHUB_LOGIN_CLIENT_ID"],
-                "client_secret": os.environ["GITHUB_LOGIN_CLIENT_SECRET"],
-            }
-        )
-    env["TAI_ACCOUNTS_OIDC_PROVIDERS"] = json.dumps(providers)
-    env["TAI_ACCOUNTS_OIDC_STATE_KEY"] = _OIDC_STATE_KEY
-    # A real login provider registers its OAuth redirect at the public origin, so the
-    # login base URL routes there instead of replica-B loopback; empty on all-mock.
-    oidc_public_keys = ["TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL"] if (oidc_real or gh_real) else []
-    return replace(
-        base,
-        name="oidc",
-        manifest=manifest,
-        env=env,
-        replica_b_origin_env_keys=["TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL"],
-        public_base_url_env_keys=oidc_public_keys,
-        public_base_url=switch.public_base_url,
     )

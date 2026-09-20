@@ -10,7 +10,6 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "tai42-accounts-oidc",
     "tai42-accounts-postgres",
     "tai42-agents",
     "tai42-backend-arq",
@@ -24,7 +23,6 @@ members = [
     "tai42-cli",
     "tai42-contract",
     "tai42-e2e",
-    "tai42-identity-oidc",
     "tai42-identity-redis",
     "tai42-kit",
     "tai42-monitoring-langfuse",
@@ -4992,38 +4990,6 @@ wheels = [
 ]
 
 [[package]]
-name = "tai42-accounts-oidc"
-version = "2.0.3"
-source = { editable = "plugins/accounts-oidc" }
-dependencies = [
-    { name = "tai42-contract" },
-    { name = "tai42-kit", extra = ["jwt", "redis"] },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pyyaml" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.389" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
-    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "tai42-contract", editable = "core/contract" },
-    { name = "tai42-kit", extras = ["redis", "jwt"], editable = "core/kit" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "tai42-accounts-postgres"
 version = "3.0.3"
 source = { editable = "plugins/accounts-postgres" }
@@ -5580,7 +5546,6 @@ dependencies = [
     { name = "fastapi" },
     { name = "fastmcp" },
     { name = "httpx" },
-    { name = "joserfc" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "prometheus-client" },
@@ -5592,7 +5557,6 @@ dependencies = [
     { name = "pytest-timeout" },
     { name = "pyyaml" },
     { name = "redis" },
-    { name = "tai42-accounts-oidc" },
     { name = "tai42-accounts-postgres" },
     { name = "tai42-agents" },
     { name = "tai42-backend-arq" },
@@ -5604,7 +5568,6 @@ dependencies = [
     { name = "tai42-channel-web" },
     { name = "tai42-channel-whatsapp" },
     { name = "tai42-contract" },
-    { name = "tai42-identity-oidc" },
     { name = "tai42-identity-redis" },
     { name = "tai42-kit", extra = ["curl", "jq", "llm", "postgres", "redis", "uvicorn"] },
     { name = "tai42-mcp-dynamic-postgres" },
@@ -5644,7 +5607,6 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.135" },
     { name = "fastmcp", specifier = ">=3.4.7,<4" },
     { name = "httpx", specifier = ">=0.28" },
-    { name = "joserfc", specifier = ">=1.7,<2" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=3,<4" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3,<4" },
     { name = "prometheus-client", specifier = ">=0.24" },
@@ -5656,7 +5618,6 @@ requires-dist = [
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", specifier = ">=5" },
-    { name = "tai42-accounts-oidc", editable = "plugins/accounts-oidc" },
     { name = "tai42-accounts-postgres", editable = "plugins/accounts-postgres" },
     { name = "tai42-agents", editable = "plugins/agents" },
     { name = "tai42-backend-arq", editable = "plugins/backend-arq" },
@@ -5668,7 +5629,6 @@ requires-dist = [
     { name = "tai42-channel-web", editable = "plugins/channel-web" },
     { name = "tai42-channel-whatsapp", editable = "plugins/channel-whatsapp" },
     { name = "tai42-contract", editable = "core/contract" },
-    { name = "tai42-identity-oidc", editable = "plugins/identity-oidc" },
     { name = "tai42-identity-redis", editable = "plugins/identity-redis" },
     { name = "tai42-kit", extras = ["llm", "jq", "uvicorn", "redis", "postgres", "curl"], editable = "core/kit" },
     { name = "tai42-mcp-dynamic-postgres", specifier = ">=0.5,<0.6" },
@@ -5697,38 +5657,6 @@ dev = [
     { name = "reference-plugin", git = "https://github.com/tai42ai/tai-studio?subdirectory=e2e%2Freference-plugin" },
     { name = "ruff", specifier = ">=0.6" },
 ]
-
-[[package]]
-name = "tai42-identity-oidc"
-version = "1.1.12"
-source = { editable = "plugins/identity-oidc" }
-dependencies = [
-    { name = "tai42-contract" },
-    { name = "tai42-kit", extra = ["jwt"] },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pyyaml" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.389" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
-    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "tai42-contract", editable = "core/contract" },
-    { name = "tai42-kit", extras = ["jwt"], editable = "core/kit" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-identity-redis"

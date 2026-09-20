@@ -31,23 +31,6 @@
       "component": "tai42-skeleton",
       "skip-changelog": true
     },
-    "plugins/accounts-oidc": {
-      "package-name": "tai42-accounts-oidc",
-      "component": "tai42-accounts-oidc",
-      "skip-changelog": true,
-      "extra-files": [
-        {
-          "type": "yaml",
-          "path": "tai-plugin.yml",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "yaml",
-          "path": "src/tai42_accounts_oidc/tai-plugin.yml",
-          "jsonpath": "$.version"
-        }
-      ]
-    },
     "plugins/accounts-postgres": {
       "package-name": "tai42-accounts-postgres",
       "component": "tai42-accounts-postgres",
@@ -266,23 +249,6 @@
         {
           "type": "yaml",
           "path": "tai-plugin.yml",
-          "jsonpath": "$.version"
-        }
-      ]
-    },
-    "plugins/identity-oidc": {
-      "package-name": "tai42-identity-oidc",
-      "component": "tai42-identity-oidc",
-      "skip-changelog": true,
-      "extra-files": [
-        {
-          "type": "yaml",
-          "path": "tai-plugin.yml",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "yaml",
-          "path": "src/tai42_identity_oidc/tai-plugin.yml",
           "jsonpath": "$.version"
         }
       ]

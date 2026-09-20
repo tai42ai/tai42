@@ -26,7 +26,6 @@ core/contract|tai42-contract|--extra dev
 core/kit|tai42-kit|--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres
 core/cli|tai42-cli|--extra dev
 core/skeleton|tai42-skeleton|--extra dev
-plugins/accounts-oidc|tai42-accounts-oidc|--extra dev
 plugins/accounts-postgres|tai42-accounts-postgres|--extra dev
 plugins/agents|tai42-agents|--extra dev
 plugins/backend-arq|tai42-backend-arq|
@@ -37,7 +36,6 @@ plugins/channel-telegram|tai42-channel-telegram|
 plugins/channel-twilio|tai42-channel-twilio|
 plugins/channel-web|tai42-channel-web|
 plugins/channel-whatsapp|tai42-channel-whatsapp|
-plugins/identity-oidc|tai42-identity-oidc|--extra dev
 plugins/identity-redis|tai42-identity-redis|--extra dev
 plugins/monitoring-langfuse|tai42-monitoring-langfuse|
 plugins/sandbox-docker|tai42-sandbox-docker|

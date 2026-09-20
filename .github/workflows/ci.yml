@@ -91,7 +91,6 @@ jobs:
             kit: [core/kit/**]
             cli: [core/cli/**]
             skeleton: [core/skeleton/**]
-            accounts-oidc: [plugins/accounts-oidc/**]
             accounts-postgres: [plugins/accounts-postgres/**]
             agents: [plugins/agents/**]
             backend-arq: [plugins/backend-arq/**]
@@ -102,7 +101,6 @@ jobs:
             channel-twilio: [plugins/channel-twilio/**]
             channel-web: [plugins/channel-web/**]
             channel-whatsapp: [plugins/channel-whatsapp/**]
-            identity-oidc: [plugins/identity-oidc/**]
             identity-redis: [plugins/identity-redis/**]
             monitoring-langfuse: [plugins/monitoring-langfuse/**]
             sandbox-docker: [plugins/sandbox-docker/**]
@@ -201,7 +199,6 @@ jobs:
           kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres|arq,celery,rq|cov
           cli|core/cli|tai42-cli||--extra dev --extra api-gate|arq,celery,rq|cov
           skeleton|core/skeleton|tai42-skeleton||--extra dev|arq,celery,rq|cov
-          accounts-oidc|plugins/accounts-oidc|tai42-accounts-oidc|tai42_accounts_oidc|--extra dev|arq|cov
           accounts-postgres|plugins/accounts-postgres|tai42-accounts-postgres|tai42_accounts_postgres|--extra dev|arq|cov
           agents|plugins/agents|tai42-agents|tai42_agents|--extra dev|arq|cov
           backend-arq|plugins/backend-arq|tai42-backend-arq|tai42_backend_arq||arq|cov
@@ -212,7 +209,6 @@ jobs:
           channel-twilio|plugins/channel-twilio|tai42-channel-twilio|tai42_channel_twilio||arq|cov
           channel-web|plugins/channel-web|tai42-channel-web|tai42_channel_web||arq|cov
           channel-whatsapp|plugins/channel-whatsapp|tai42-channel-whatsapp|tai42_channel_whatsapp||arq|cov
-          identity-oidc|plugins/identity-oidc|tai42-identity-oidc|tai42_identity_oidc|--extra dev|arq|cov
           identity-redis|plugins/identity-redis|tai42-identity-redis|tai42_identity_redis|--extra dev|arq|cov
           monitoring-langfuse|plugins/monitoring-langfuse|tai42-monitoring-langfuse|tai42_monitoring_langfuse||arq|cov
           sandbox-docker|plugins/sandbox-docker|tai42-sandbox-docker|tai42_sandbox_docker||arq|cov

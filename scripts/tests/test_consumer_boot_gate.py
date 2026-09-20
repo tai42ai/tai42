@@ -407,24 +407,13 @@ def test_read_provides_reads_network_permission():
             },
             {"CHANNEL_SLACK_API_BASE_URL"},
         ),
-        (
-            "tai42-identity-oidc",
-            {"TAI_IDENTITY_OIDC_ISSUER", "TAI_IDENTITY_OIDC_AUDIENCE"},
-            {"TAI_IDENTITY_OIDC_ISSUER"},
-        ),
-        (
-            "tai42-accounts-oidc",
-            {"TAI_ACCOUNTS_OIDC_STATE_KEY", "TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL", "TAI_ACCOUNTS_OIDC_PROVIDERS"},
-            {"TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL"},
-        ),
     ],
 )
 def test_external_service_env_black_holes_endpoints(dist: str, expected_keys: set[str], endpoint_keys: set[str]):
     blackhole = "http://127.0.0.1:54321"
     env = gate._external_service_env(dist, blackhole)
     assert set(env) == expected_keys
-    # Every outbound endpoint the config carries points at the black hole (loopback so an
-    # OIDC discovery client attempts the connection rather than refusing a non-https URL).
+    # Every outbound endpoint the config carries points at the black hole.
     for key in endpoint_keys:
         assert blackhole in env[key]
 

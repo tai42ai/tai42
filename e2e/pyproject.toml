@@ -43,13 +43,9 @@ dependencies = [
     "tai42-sandbox-local>=1.1,<2",
     # The default identity-provider plugin; auth stacks need it in the SUT venv.
     "tai42-identity-redis>=2.0,<3",
-    # The accounts + OIDC providers the accounts/oidc auth stacks load: the
-    # Postgres-backed accounts provider (password login, sessions, invites), the
-    # OIDC/OAuth2 login accounts provider, and the validate-only OIDC identity
-    # provider (issuer-minted machine JWTs).
+    # The Postgres-backed accounts provider (password login, sessions, invites) the
+    # accounts auth stacks load.
     "tai42-accounts-postgres>=3.0,<4",
-    "tai42-accounts-oidc>=2.0,<3",
-    "tai42-identity-oidc>=1.1,<2",
     # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
     "tai42-backend-arq>=3.0,<4",
     "tai42-backend-celery>=3.0,<4",
@@ -80,10 +76,6 @@ dependencies = [
     "redis>=5",
     "psycopg[binary]>=3.2",
     "prometheus-client>=0.24",
-    # The signing OIDC issuer fixture (``netfixtures.OAuthIdp``) mints RS256
-    # id_tokens and serves a JWK set; joserfc is the same JOSE library the SUT's
-    # ``tai42_kit.net.jwt`` verifier uses, so fixture-signed tokens verify identically.
-    "joserfc>=1.7,<2",
     "fastapi>=0.135",
     "uvicorn>=0.52.4",
     "pydantic>=2.12",
@@ -203,8 +195,6 @@ tai42-sandbox-docker = { workspace = true }
 tai42-sandbox-local = { workspace = true }
 tai42-identity-redis = { workspace = true }
 tai42-accounts-postgres = { workspace = true }
-tai42-accounts-oidc = { workspace = true }
-tai42-identity-oidc = { workspace = true }
 tai42-backend-arq = { workspace = true }
 tai42-backend-celery = { workspace = true }
 tai42-backend-rq = { workspace = true }

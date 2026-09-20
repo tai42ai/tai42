@@ -70,7 +70,7 @@ from tai42_e2e.marketplace import (
     declared_routes_dispatch_failure,
     registry_supports_declared_routes,
 )
-from tai42_e2e.oidc_idp import OAuthIdp
+from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.procs import ProcessHandle
 from tai42_e2e.seeding import seed_studio_auth, seed_studio_routes

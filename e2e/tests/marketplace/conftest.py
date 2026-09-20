@@ -61,7 +61,7 @@ from tai42_e2e.manifests import (
     build_router_merge_stack,
 )
 from tai42_e2e.marketplace import MarketplaceService
-from tai42_e2e.oidc_idp import OAuthIdp
+from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.pkgsource import BuiltWheel, FixturePackageIndex
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack

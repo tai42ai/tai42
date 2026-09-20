@@ -15,8 +15,8 @@ truth for every template var named below. The loop is always template → dashbo
 
 Not every seam is asserted the same way when it goes real. Many seams have a leg
 that reads outbound traffic off an in-process stub (scripted `llm_stub`,
-`FakeStripe`, `FakeTwilio`, `FakeWhatsApp`, `FakeSlack`, `FakeTelegram`, the
-`OAuthIdp` issuer, `FixturePackageIndex`, the fixture connector client_ids). Those
+`FakeStripe`, `FakeTwilio`, `FakeWhatsApp`, `FakeSlack`, `FakeTelegram`,
+`FixturePackageIndex`, the fixture connector client_ids). Those
 **mock legs step aside** under real-select via a `skipif(HarnessSettings().is_real(<seam>))`
 guard (or, where a spec is parametrized across channels, a per-param skip), so
 naming that seam real deselects the mock leg rather than running it against a live
@@ -32,8 +32,6 @@ the dedicated e2e creds host, not in CI. The seams that step aside:
   unit test; it is not a stub-delivery leg.
 - `connector-google`, `connector-atlassian` — the launch-URL-shape legs that pin
   the fixture `client_id`.
-- `oidc` — the `OAuthIdp`-stub login / issuer-JWT legs (`github-login` has **no
-  mock leg to step aside**: it is a real-only additive OIDC provider).
 - `marketplace-pypi` — steps the **entire** marketplace suite aside (opt-in behind
   `TAI_E2E_MARKETPLACE=1`): the shared `marketplace_service` fixture seeds a forged
   fixture catalog through the real seed+ingest pipeline, which can't resolve those
@@ -67,7 +65,7 @@ receive them. Every dashboard URL below is relative to a single knob:
 
 Endpoint-origin settings the harness derives from `E2E_PUBLIC_BASE_URL` at wiring
 time — leave the `[AUTO-DERIVED]` entries alone: `CHANNEL_TELEGRAM_PUBLIC_BASE_URL`,
-`TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL`, `INTERACTIONS_PUBLIC_BASE_URL`. Every URL
+`INTERACTIONS_PUBLIC_BASE_URL`. Every URL
 below is written `{E2E_PUBLIC_BASE_URL}/...`.
 
 ## Inbound-webhook vendors
@@ -143,23 +141,6 @@ from `E2E_PUBLIC_BASE_URL` at wiring time; register that origin at the vendor.
 - Template vars: `CONNECTORS_ATLASSIAN_CLIENT_ID`,
   `CONNECTORS_ATLASSIAN_CLIENT_SECRET`, `CONNECTORS_ATLASSIAN_SITE_URL`,
   `CONNECTORS_ATLASSIAN_TEST_ACCOUNT_EMAIL`.
-
-### oidc (Auth0) — `TAI_E2E_REAL=oidc`
-
-- Dashboard: https://manage.auth0.com → Applications → Regular Web Application,
-  callback URL = the derived redirect URI; APIs → create API (its Identifier is
-  the audience); one test user.
-- Template vars: `AUTH0_ISSUER`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET`,
-  `AUTH0_AUDIENCE`, `AUTH0_TEST_USER_EMAIL`, `AUTH0_TEST_USER_PASSWORD`
-  (harness-mapped → a `TAI_ACCOUNTS_OIDC_PROVIDERS` `preset:"auth0"` row +
-  `TAI_IDENTITY_OIDC_ISSUER`/`_AUDIENCE`).
-
-### github-login — `TAI_E2E_REAL=github-login`
-
-- Dashboard: https://github.com/settings → Developer settings → OAuth Apps →
-  New OAuth App, callback URL = the derived redirect URI.
-- Template vars: `GITHUB_LOGIN_CLIENT_ID`, `GITHUB_LOGIN_CLIENT_SECRET`
-  (harness-mapped → a `TAI_ACCOUNTS_OIDC_PROVIDERS` `preset:"github"` row).
 
 ## marketplace-github — `TAI_E2E_REAL=marketplace-github`
 

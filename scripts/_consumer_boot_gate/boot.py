@@ -146,9 +146,7 @@ def _external_service_env(dist_name: str, blackhole_url: str) -> dict[str, str]:
     the gate cannot stand in for, distinct from a candidate-core break. This provisions
     config the same way :data:`_BOOT_PLACEHOLDER_ENV` and :func:`_slot_env` do; the
     install-only-vs-broken classification never keys on the distribution name, only on the
-    declared network permission and the runtime error class. An OIDC issuer URL must be a
-    loopback ``http`` origin or the discovery client refuses it before ever connecting, so
-    the black hole is a loopback port.
+    declared network permission and the runtime error class.
     """
     import secrets
 
@@ -166,27 +164,6 @@ def _external_service_env(dist_name: str, blackhole_url: str) -> dict[str, str]:
             "CHANNEL_SLACK_BOT_TOKEN": "xoxb-consumer-boot-gate",
             "CHANNEL_SLACK_SIGNING_SECRET": secrets.token_hex(16),
             "CHANNEL_SLACK_API_BASE_URL": blackhole_url,
-        }
-    if dist_name == "tai42-identity-oidc":
-        return {
-            "TAI_IDENTITY_OIDC_ISSUER": blackhole_url,
-            "TAI_IDENTITY_OIDC_AUDIENCE": "consumer-boot-gate",
-        }
-    if dist_name == "tai42-accounts-oidc":
-        return {
-            "TAI_ACCOUNTS_OIDC_STATE_KEY": secrets.token_hex(16),
-            "TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL": blackhole_url,
-            "TAI_ACCOUNTS_OIDC_PROVIDERS": json.dumps(
-                [
-                    {
-                        "name": "boot",
-                        "issuer": blackhole_url,
-                        "client_id": "boot",
-                        "client_secret": "boot",
-                        "claim": "sub",
-                    }
-                ]
-            ),
         }
     return {}
 

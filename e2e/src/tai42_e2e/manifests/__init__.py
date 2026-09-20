@@ -13,7 +13,6 @@ from tai42_e2e.manifests.auth import (
     build_accounts_fresh_stack,
     build_accounts_stack,
     build_auth_stack,
-    build_oidc_stack,
     build_owned_keys_stack,
     build_setup_stack,
 )
@@ -194,7 +193,6 @@ __all__ = [
     "build_minimal_stack",
     "build_monitoring_stack",
     "build_off_stack",
-    "build_oidc_stack",
     "build_owned_keys_stack",
     "build_postgres_mcp_stack",
     "build_projection_authz_stack",

@@ -57,7 +57,7 @@ from ._fleet import (
 )
 
 if TYPE_CHECKING:
-    from tai42_e2e.oidc_idp import OAuthIdp
+    from tai42_e2e.oauth_idp import OAuthIdp
     from tai42_e2e.variants import Variants
 
 pytestmark = pytest.mark.backendless

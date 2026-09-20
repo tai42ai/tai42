@@ -48,7 +48,6 @@ from tai42_e2e.manifests import (
     build_minimal_stack,
     build_monitoring_stack,
     build_off_stack,
-    build_oidc_stack,
     build_owned_keys_stack,
     build_postgres_mcp_stack,
     build_projection_authz_stack,
@@ -65,7 +64,7 @@ from tai42_e2e.manifests import (
     build_shipped_connectors_stack,
     build_stripe_stack,
 )
-from tai42_e2e.oidc_idp import OAuthIdp
+from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.pytest_plugin import gated_collect_ignore
 from tai42_e2e.recording_proxy import RecordingConnectProxy, TargetServer
 from tai42_e2e.seeding import (
@@ -325,18 +324,6 @@ def accounts_fresh_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory)
     fresh install the setup door initializes, so a spec proves setup + password/invite login
     on a real fresh accounts deployment. ``needs_setup`` is true until the owner is created."""
     yield from _boot(infra, tmp_path_factory.mktemp("accounts-fresh"), build_accounts_fresh_stack, seed_auth=False)
-
-
-@pytest.fixture(scope="module")
-def oidc_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, oauth_idp: OAuthIdp) -> Iterator[TaiStack]:
-    """The accounts stack plus the OIDC login provider (``accounts-oidc``) and the
-    validate-only OIDC identity provider (``identity-oidc``), both pointed at the
-    in-process signing issuer (``oauth_idp``). Seeded with a root key like
-    ``auth_stack``; the issuer origin is passed as a resource coordinate."""
-    resource_kwargs = {"oidc_issuer_base_url": oauth_idp.base_url}
-    yield from _boot(
-        infra, tmp_path_factory.mktemp("oidc"), build_oidc_stack, resource_kwargs=resource_kwargs, seed_auth=True
-    )
 
 
 @pytest.fixture(scope="module")

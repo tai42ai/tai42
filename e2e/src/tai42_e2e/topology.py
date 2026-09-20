@@ -108,10 +108,6 @@ class StackResources:
     connectors_kek: str | None = None
     connectors_state_hmac_key: str | None = None
     idp_base_url: str | None = None
-    # The in-process signing OIDC issuer's origin (the extended ``OAuthIdp``'s
-    # ``base_url``) the oidc stack points its accounts-oidc / identity-oidc issuer
-    # config at. ``None`` on every stack that runs no OIDC provider.
-    oidc_issuer_base_url: str | None = None
     langfuse_host: str | None = None
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
@@ -180,7 +176,7 @@ class StackConfig:
     replica_b_origin_env_keys: list[str] = field(default_factory=list)
     # The REAL-inbound public-URL fill (empty on every mock leg). A real inbound
     # leg lists here the public-base-URL env keys (e.g. ``INTERACTIONS_PUBLIC_BASE_URL``,
-    # ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``, ``TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL``)
+    # ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``)
     # that must carry ``E2E_PUBLIC_BASE_URL`` — the origin the vendor calls back on —
     # instead of the replica-B loopback origin (loopback is unreachable from the
     # vendor). Keys named here OVERRIDE the loopback fill, so a leg opts a key into

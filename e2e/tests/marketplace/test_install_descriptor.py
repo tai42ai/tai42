@@ -61,7 +61,7 @@ from tai42_e2e.fixture_catalog import (
 )
 from tai42_e2e.manifests import build_marketplace_connectors_stack
 from tai42_e2e.marketplace import MarketplaceService
-from tai42_e2e.oidc_idp import OAuthIdp
+from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async

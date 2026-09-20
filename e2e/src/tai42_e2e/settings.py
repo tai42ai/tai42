@@ -172,21 +172,6 @@ REAL_SERVICES: dict[str, RealService] = {
         required_env=("STORAGE_GITHUB_USERNAME", "STORAGE_GITHUB_REPO", "STORAGE_GITHUB_TOKEN"),
         inbound=False,
     ),
-    "oidc": RealService(
-        required_env=(
-            "AUTH0_ISSUER",
-            "AUTH0_CLIENT_ID",
-            "AUTH0_CLIENT_SECRET",
-            "AUTH0_AUDIENCE",
-            "AUTH0_TEST_USER_EMAIL",
-            "AUTH0_TEST_USER_PASSWORD",
-        ),
-        inbound=True,
-    ),
-    "github-login": RealService(
-        required_env=("GITHUB_LOGIN_CLIENT_ID", "GITHUB_LOGIN_CLIENT_SECRET"),
-        inbound=True,
-    ),
     "langfuse": RealService(
         required_env=("LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"),
         inbound=False,
