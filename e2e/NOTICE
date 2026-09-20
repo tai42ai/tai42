@@ -1,0 +1,9 @@
+tai42
+Copyright 2026 tai42
+
+This product includes software developed at tai42 (https://tai42.ai).
+Licensed under the Apache License, Version 2.0.
+
+This repository packages the tai42 core libraries (tai42-contract, tai42-kit,
+tai42-cli, tai42-skeleton), the tai42 plugins, and the tai42-e2e harness. Each distributed
+package carries the same attribution above.

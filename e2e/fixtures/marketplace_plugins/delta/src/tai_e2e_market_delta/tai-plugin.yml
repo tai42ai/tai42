@@ -1,0 +1,21 @@
+spec_version: 1
+namespace: tai42
+name: e2e-delta
+package: tai-e2e-market-delta
+version: 0.0.0
+description: "GitHub-sourced marketplace fixture plugin: a trivial probe tool."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e-market-delta
+contract: ">=0.3,<0.4"
+categories: [webhooks]
+tags: [probe, delta]
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: e2e_market_delta_probe
+    module: tai_e2e_market_delta.tools
+    description: "Return a fixed marker payload identifying the delta fixture."
+    tags: [probe]

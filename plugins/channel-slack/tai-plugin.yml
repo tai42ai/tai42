@@ -1,0 +1,42 @@
+spec_version: 1
+namespace: tai42
+name: channel-slack
+package: tai42-channel-slack
+version: 3.3.10
+description: >-
+  Slack channel plugin for the TAI ecosystem — delivers ask_user questions to a
+  Slack channel and bridges threaded replies back to the interactions callback
+  door.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/channel-slack
+contract: '>=13.2,<14'
+categories:
+  - channels
+tags:
+  - channel
+  - slack
+  - ask-user
+  - hitl
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: channel
+    name: slack
+    module: tai42_channel_slack.register
+    description: >-
+      Deliver ask_user questions to a Slack channel and bridge the threaded
+      reply back.
+    routes:
+      base: channels/slack
+      paths:
+        - path: /inbound
+          methods:
+            - POST
+          public: true
+        - path: /interactive
+          methods:
+            - POST
+          public: true

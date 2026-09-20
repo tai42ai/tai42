@@ -1,0 +1,171 @@
+"""The ``origin`` field on a conversation record: a ``client`` record answers a non-blank
+inbound; an ``operator`` record carries no inbound, is always answered, names its sender, and
+publishes ``origin`` in the caller-safe view.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+
+
+def _record(**overrides) -> ConversationRecord:
+    now = time.time()
+    fields: dict = {
+        "message_id": "m1",
+        "route_name": "chat",
+        "door": "channel",
+        "thread_id": "bridge:chat:+1",
+        "client_address": "+1",
+        "channel": "twilio",
+        "our_identity": "+15550001111",
+        "origin": "client",
+        "inbound_text": "ask",
+        "answer_status": "answered",
+        "answer": "hi",
+        "delivery_status": DeliveryStatus.PENDING_DELIVERY,
+        "created_at": now,
+        "updated_at": now,
+    }
+    fields.update(overrides)
+    return ConversationRecord(**fields)
+
+
+def test_origin_is_required():
+    # Origin carries no default, so a construction omitting it fails loudly and a
+    # stored blob missing it is rejected the same way.
+    fields = {k: v for k, v in _record().model_dump().items() if k != "origin"}
+    with pytest.raises(ValueError, match="origin"):
+        ConversationRecord(**fields)
+
+
+def test_client_record_refuses_a_blank_inbound_text():
+    with pytest.raises(ValueError, match="non-blank inbound_text"):
+        _record(inbound_text="   ")
+
+
+def test_operator_record_is_valid_with_empty_inbound_and_answered():
+    record = _record(origin="operator", inbound_text="", caller_principal="op-1")
+    assert record.origin == "operator"
+    assert record.inbound_text == ""
+
+
+def test_operator_record_refuses_a_nonempty_inbound_text():
+    with pytest.raises(ValueError, match="operator record carries no inbound_text"):
+        _record(origin="operator", inbound_text="something", caller_principal="op-1")
+
+
+def test_operator_record_refuses_inbound_attachments_and_location():
+    from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
+
+    with pytest.raises(ValueError, match="operator record carries no inbound attachments/location"):
+        _record(
+            origin="operator",
+            inbound_text="",
+            caller_principal="op-1",
+            inbound_attachments=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")],
+        )
+    with pytest.raises(ValueError, match="operator record carries no inbound attachments/location"):
+        _record(
+            origin="operator",
+            inbound_text="",
+            caller_principal="op-1",
+            inbound_location=LocationElement(latitude=1.0, longitude=2.0),
+        )
+
+
+def test_client_record_refuses_empty_inbound_attachments():
+    # A present-but-empty attachments list on a record is a caller bug (the shared media caps).
+    with pytest.raises(ValueError, match="non-empty list when present"):
+        _record(inbound_attachments=[])
+
+
+def test_operator_record_must_be_answered():
+    with pytest.raises(ValueError, match="operator record is always answered"):
+        _record(
+            origin="operator",
+            inbound_text="",
+            caller_principal="op-1",
+            answer_status="silent",
+            answer=None,
+        )
+
+
+def test_operator_record_requires_the_sending_principal():
+    with pytest.raises(ValueError, match="must name the operator"):
+        _record(origin="operator", inbound_text="", caller_principal=None)
+
+
+def test_operator_record_still_requires_non_blank_answer():
+    # A blank answer with NO answer_parts has nothing to deliver — refused. (A blank answer is
+    # admissible only for an all-media answer whose parts carry the content.)
+    with pytest.raises(ValueError, match="blank answer text must carry media-only answer_parts"):
+        _record(origin="operator", inbound_text="", caller_principal="op-1", answer="  ")
+
+
+def test_caller_view_publishes_origin():
+    view = _record(origin="operator", inbound_text="", caller_principal="op-1").caller_view()
+    assert view["origin"] == "operator"
+    assert view["inbound_text"] == ""
+
+
+def test_client_address_accepts_a_long_legitimate_value():
+    # 256 chars is comfortably above any real address (phone / visitor id / email).
+    record = _record(client_address="a" * 256)
+    assert len(record.client_address) == 256
+
+
+def test_client_address_refuses_an_oversized_value():
+    # ``client_address`` is embedded verbatim into Redis key names, so an oversized
+    # value is refused loudly rather than forming an unbounded key.
+    with pytest.raises(ValueError, match="client_address"):
+        _record(client_address="a" * 257)
+
+
+def _event(**overrides):
+    """An event record's happy shape: a ``client`` turn with no human text, carrying its
+    structured ``inbound_event``."""
+    fields = {
+        "inbound_kind": "event",
+        "inbound_text": "",
+        "inbound_event": {"event_id": "E1", "kind": "provider.update", "payload": {}},
+    }
+    fields.update(overrides)
+    return _record(**fields)
+
+
+def test_event_record_is_valid_with_empty_text_and_an_event_payload():
+    record = _event()
+    assert record.inbound_kind == "event"
+    assert record.inbound_text == ""
+    assert record.inbound_event == {"event_id": "E1", "kind": "provider.update", "payload": {}}
+
+
+def test_event_record_refuses_a_nonempty_inbound_text():
+    with pytest.raises(ValueError, match="event record carries no inbound_text"):
+        _event(inbound_text="typed by a human")
+
+
+def test_event_record_requires_its_event_payload():
+    with pytest.raises(ValueError, match="event record carries its structured inbound_event"):
+        _event(inbound_event=None)
+
+
+def test_message_record_refuses_an_event_payload():
+    with pytest.raises(ValueError, match="a message record carries no inbound_event"):
+        _record(inbound_event={"event_id": "E1"})
+
+
+def test_operator_record_is_never_an_event():
+    with pytest.raises(ValueError, match="never an event"):
+        _record(origin="operator", inbound_kind="event", inbound_text="", caller_principal="op-1")
+
+
+def test_caller_view_publishes_the_event_provenance():
+    view = _event(submitted_by="svc-1").caller_view()
+    assert view["inbound_kind"] == "event"
+    assert view["inbound_event"] == {"event_id": "E1", "kind": "provider.update", "payload": {}}
+    assert view["submitted_by"] == "svc-1"

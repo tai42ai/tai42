@@ -1,0 +1,26 @@
+---
+title: Acme connector
+description: Scaffold for a no-auth connector plugin. Replace the placeholders before publishing.
+---
+
+This is a scaffolded no-auth connector. Replace every `example.invalid` endpoint,
+the `acme` identifiers, and the icon with your provider's real values before you
+publish.
+
+## Install
+
+Install it from the marketplace:
+
+```sh
+tai plugins install acme/your-plugin-name
+```
+
+The client supplies the static config values the provider declares in
+`config_fields` (an API token here) at connect time. A no-auth provider runs no
+OAuth dance.
+
+## Sub-services
+
+Each sub-service names a hosted MCP server. Add one entry per product surface you
+expose. The `config_fields` `target` must match the sub-service transport channel:
+`header` for an http server, `env` for a stdio one.

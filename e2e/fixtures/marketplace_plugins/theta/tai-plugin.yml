@@ -1,0 +1,27 @@
+spec_version: 1
+namespace: tai42
+name: e2e-theta
+package: tai-e2e-market-theta
+version: 0.0.0
+description: "Installable marketplace fixture plugin: an HTTP router whose declared route shape-collides with epsilon's."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e
+contract: ">=0.4,<0.5"
+categories: [utilities]
+tags: [router, theta]
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: router
+    name: e2e_theta_router
+    module: tai_e2e_market_theta.router
+    description: "Register a public GET /{slug} route whose default mount collides with epsilon's /api/e2e-epsilon routes."
+    tags: [theta]
+    routes:
+      base: e2e-epsilon
+      paths:
+        - path: /{slug}
+          methods: [GET]
+          public: true

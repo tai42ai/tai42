@@ -1,0 +1,40 @@
+---
+title: "GitHub provisioning tools"
+description: "The three repository-webhook setup tools and the TOOLS_GITHUB settings that configure them."
+---
+
+Three tools that provision a GitHub repository's webhooks over the REST API: create a
+webhook, list a repository's webhooks, and delete one. They are the provider-side setup
+counterpart to a runtime webhook-signature verifier — the tools register the hook a
+verifier later authenticates.
+
+## Configuration
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TOOLS_GITHUB_TOKEN` | unset | GitHub token (`Authorization: Bearer`). Missing or empty raises on every tool call. |
+| `TOOLS_GITHUB_API_BASE` | `https://api.github.com` | GitHub REST API origin. Privileged — receives the `Authorization` header. |
+| `TOOLS_GITHUB_REQUEST_TIMEOUT_SECONDS` | `20` | Per-request HTTP timeout in seconds. |
+
+The token needs the scope GitHub requires to administer repository webhooks (the
+`admin:repo_hook` scope on a classic token, or repository `Webhooks` read/write on a
+fine-grained token). A missing or empty token raises loudly (fails closed) — never a
+silently-unauthenticated request.
+
+## create_github_webhook
+
+Creates a repository webhook on `owner/name` and returns its id, delivery url, events and
+active flag. GitHub does not mint the signing secret: the caller supplies it, GitHub keys
+`X-Hub-Signature-256` with it, and the caller keeps its own copy — GitHub never returns
+it and the tool never echoes it.
+
+## list_github_webhooks
+
+Lists every webhook on `owner/name`, following the `Link` response header to exhaustion,
+and returns each hook's id, delivery url, events and active flag. GitHub never returns a
+hook's secret.
+
+## delete_github_webhook
+
+Deletes the webhook `hook_id` from `owner/name`. Succeeds only on GitHub's `204`; an
+unknown hook (404) or any other non-2xx raises, never a silent success.

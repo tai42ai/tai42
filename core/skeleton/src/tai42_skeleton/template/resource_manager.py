@@ -1,0 +1,703 @@
+"""Fetch, render, schema-infer, and cache stored (and inline) templates."""
+
+import asyncio
+import base64
+import logging
+import mimetypes
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from functools import lru_cache
+from typing import Any, cast
+from urllib.parse import unquote_to_bytes, urlsplit
+
+from async_lru import alru_cache
+from babel.core import Locale, UnknownLocaleError
+from babel.lists import format_list
+from jinja2 import FunctionLoader, meta, pass_context
+from jinja2 import Template as JinjaTemplate
+from jinja2.sandbox import SandboxedEnvironment
+from jinja2schema import JSONSchemaDraft4Encoder, infer, to_json_schema
+from tai42_contract.storage import Storage
+from tai42_contract.template import TemplatedText
+from tai42_kit.clients import shutdown_all_clients
+from tai42_kit.net import fetch_url
+
+from tai42_skeleton.template.media import ContentPart, MediaBlock
+from tai42_skeleton.template.path_guard import safe_template_path
+from tai42_skeleton.template.settings import template_cache_settings
+
+logger = logging.getLogger(__name__)
+
+# Vendor marker stamped on a schema that carries variable NAMES without inferred
+# types, so a consumer can tell a fully inferred schema from a degraded one
+# instead of reading the missing types as "this template takes no typed input".
+_INFERENCE_MARKER_KEY = "x-tai42-inference"
+_PARTIAL_INFERENCE = "partial"
+
+
+class TemplateNotFoundError(Exception):
+    """A requested stored template does not exist.
+
+    Raised by the read paths when a ``template_id`` resolves to no stored
+    content, so an HTTP surface can map a missing template to 404 instead of
+    leaking storage's ``FileNotFoundError`` as a 500. Genuine storage/transport
+    failures are NOT this type and keep propagating.
+    """
+
+
+#: The reserved render-context key the rendering layer stamps the subject's locale onto,
+#: read by :func:`_list_format` — never a template author's variable (a collision raises).
+_LOCALE_CONTEXT_KEY = "_tai_locale"
+
+
+class TemplateLocaleNotFoundError(Exception):
+    """A stored template has no variant for the resolved locale chain and no default variant.
+
+    Raised by :meth:`ResourceManager.render_by_id` when a locale-scoped render walks the
+    chain (``he-IL`` -> ``he`` -> the bare default id) and finds NONE of them stored, so
+    the render refuses loudly naming the template and locale instead of silently rendering
+    the wrong language.
+    """
+
+
+@pass_context
+def _list_format(context: Any, value: Any, style: str = "standard") -> str:
+    """Format a sequence with the CLDR list patterns of the render's subject locale.
+
+    A template writes ``{{ names | list_format }}`` and the separator + final connective
+    come from the locale the rendering layer resolved (``_tai_locale`` in the render
+    context) — the template never selects a language. ``style`` picks a CLDR list style
+    (``standard`` and/or babel's ``standard-short``, ``or``, ``unit``). A render that
+    resolved NO locale, or a locale babel has no CLDR data for, raises loudly rather than
+    guessing a separator.
+    """
+    locale = context.get(_LOCALE_CONTEXT_KEY)
+    if locale is None:
+        raise ValueError(
+            "list_format needs the subject's locale, but this render resolved none; the "
+            "channel or operator must supply a locale for the platform to format a list"
+        )
+    items = [str(item) for item in value]
+    try:
+        # The subject's locale is a BCP 47 tag (``-`` separator); babel keys CLDR data by
+        # its own ``_`` identifier, so parse the tag rather than hand it the raw string.
+        parsed = Locale.parse(locale, sep="-")
+    except (UnknownLocaleError, ValueError) as exc:
+        raise ValueError(f"list_format has no CLDR list patterns for locale {locale!r}") from exc
+    return format_list(items, style=cast(Any, style), locale=parsed)
+
+
+def _decode_data_uri(uri: str) -> tuple[bytes, str | None]:
+    """Decode a ``data:`` URI into ``(bytes, mime)``.
+
+    Parses the inline ``data:[<mediatype>][;base64],<payload>`` form — no network
+    or storage access. A URI without the required comma separator is malformed and
+    raises loudly.
+    """
+    header, sep, payload = uri[len("data:") :].partition(",")
+    if not sep:
+        raise ValueError(f"Malformed data URI (missing ','): {uri[:64]!r}")
+    is_base64 = header.endswith(";base64")
+    mediatype = header[: -len(";base64")] if is_base64 else header
+    data = base64.b64decode(payload) if is_base64 else unquote_to_bytes(payload)
+    mime = mediatype.split(";", 1)[0] or None
+    return data, mime
+
+
+def _data_uri(data: bytes, mime: str) -> str:
+    """Build a base64 ``data:`` URI that always carries a resolved ``mime``."""
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _assert_image(mime: str | None, source: object) -> None:
+    """Guard the image-only media boundary: a resolved ``image/*`` mime is required."""
+    if mime is None or not mime.startswith("image/"):
+        raise ValueError(f"normalize_media requires an image resource; resolved mime {mime!r} for {source!r}")
+
+
+class ResourceManager:
+    """Fetch, render, schema-infer, and cache stored (and inline) templates, guarded and locale-aware."""
+
+    def __init__(self, provider: Storage | None):
+        """Wire the sandboxed Jinja environment and the compiled-template caches from settings.
+
+        ``provider`` is the Storage backend, or ``None`` when none is registered.
+        """
+        self._provider = provider
+        # Sandboxed engine: template text is an authoring surface (hook
+        # condition/expr, stored/inline renders), so rendering blocks dunder and
+        # unsafe-callable access — a traversal like
+        # ``{{ ''.__class__.__mro__[1].__subclasses__() }}`` raises SecurityError
+        # instead of reaching host primitives. Normal ``{{ var }}``, filters, and
+        # ``{% include %}`` are unaffected.
+        self._env = SandboxedEnvironment(loader=FunctionLoader(self._sync_loader))
+        # The locale-aware list formatter is available to every rendered template; it reads
+        # the render's resolved locale from the reserved context key, never a template arg.
+        self._env.filters["list_format"] = _list_format
+
+        # Per-render event loop bound to the rendering thread so every
+        # {% include %}/{% extends %} dependency resolves through one loop — hence
+        # one storage client per render instead of one opened+closed per include.
+        self._render_loop = threading.local()
+
+        settings = template_cache_settings()
+
+        # Compile-once cache for INLINE (content) templates. The stored-template
+        # path is cached by id via ``_get_compiled_template``; without this an
+        # inline condition/expr (e.g. a hook rendered on every fire) is re-parsed
+        # on every render.
+        self._compile_inline = lru_cache(maxsize=settings.max_size)(self._env.from_string)
+
+        # Template ids currently compiled into the cache. Tracked so a delete can
+        # evict just the affected key(s) instead of dropping the whole cache. It
+        # stays bounded by what the cache actually holds: a delete prunes stale
+        # ids, and ``_fetch_and_compile`` runs an amortized sweep whenever the set
+        # has grown past the live cache size (an id the cache dropped on its own
+        # via TTL/LRU), so the registry never outgrows the cache itself.
+        self._cached_template_ids: set[str] = set()
+
+        # Only cache if we have BOTH storage space (>0) AND retention time (>0).
+        # If ttl is 0, items expire instantly, making caching useless.
+        self._cache_enabled = (settings.max_size is None or settings.max_size > 0) and (
+            settings.ttl is None or settings.ttl > 0
+        )
+        if self._cache_enabled:
+            self._get_compiled_template = alru_cache(maxsize=settings.max_size, ttl=settings.ttl)(
+                self._fetch_and_compile
+            )
+
+            logger.info(f"ResourceManager initialized with cache_size={settings.max_size} ttl={settings.ttl}")
+        else:
+            # Bypass cache wrapper entirely
+            self._get_compiled_template = self._fetch_and_compile
+            logger.info("ResourceManager initialized with caching disabled")
+
+    @property
+    def provider(self) -> Storage:
+        """The active Storage provider, or a loud failure when none is registered.
+
+        The skeleton ships no backend (dead by default): an unconfigured manager
+        must never silently no-op, so every use that needs storage raises here.
+        """
+        if self._provider is None:
+            raise RuntimeError(
+                "ResourceManager has no Storage provider registered. The skeleton "
+                "ships no storage backend (dead by default); register one via "
+                "tai42_app.storage.register_storage before fetching or rendering a "
+                "stored resource."
+            )
+        return self._provider
+
+    @contextmanager
+    def _render_scope(self) -> Iterator[None]:
+        """Mark this render thread as inside a render so every dependency shares one event loop.
+
+        The storage client opened for the first {% include %}/{% extends %} is reused and
+        closed once when the scope exits, instead of a fresh loop + connection per
+        dependency.
+
+        The loop is created lazily by ``_sync_loader`` on the first dependency, so an
+        include-free render creates no loop at all.
+        """
+        self._render_loop.active = True
+        self._render_loop.loop = None
+        try:
+            yield
+        finally:
+            self._render_loop.active = False
+            loop = self._render_loop.loop
+            self._render_loop.loop = None
+            if loop is not None:
+                # Close the render loop's pooled clients once. A cleanup failure is
+                # logged loudly but must not mask the render's result/exception.
+                try:
+                    loop.run_until_complete(shutdown_all_clients())
+                except Exception:
+                    logger.exception("Error closing pooled clients after template render")
+                loop.close()
+
+    async def _load_by_id(self, template_id: str) -> str:
+        """Read a template by its bare storage id, root-contained.
+
+        Every by-id read — render/fetch/schema/``{% include %}``, not only the media
+        ``load`` seam — funnels through here so the id (a storage path) is passed
+        through :func:`safe_template_path` before it reaches the provider. That is the
+        app-layer defense against traversal for a backend that does not self-guard: an
+        id like ``../../x`` (from an untrusted backup or an LLM-driven tool) raises
+        :class:`~tai42_skeleton.template.path_guard.UnsafeTemplatePathError` instead of
+        reading outside the template root.
+        """
+        safe_template_path(template_id)
+        return await self.provider.load(template_id)
+
+    def _sync_loader(self, template_id: str) -> str | None:
+        """Synchronous bridge for Jinja2's FunctionLoader, fetching a dependency from async storage.
+
+        Lets {% extends %} and {% include %} fetch their dependency from async storage.
+
+        A genuinely missing dependency becomes ``None`` so Jinja raises
+        ``TemplateNotFound`` (keeping ``{% include ... ignore missing %}``
+        working); every other failure propagates loudly instead of being mistaken
+        for a missing template.
+        """
+        if getattr(self._render_loop, "active", False):
+            # Inside a render scope (the normal path): reuse the per-render loop so
+            # sibling includes share one storage client. Create it on first use.
+            loop = self._render_loop.loop
+            if loop is None:
+                loop = asyncio.new_event_loop()
+                self._render_loop.loop = loop
+            try:
+                return loop.run_until_complete(self._load_by_id(template_id))
+            except FileNotFoundError:
+                return None
+
+        # Standalone fallback (no active render scope): a one-shot loop that
+        # closes its own pooled client, mirroring the render-scope teardown.
+        async def _load() -> str | None:
+            try:
+                return await self._load_by_id(template_id)
+            finally:
+                try:
+                    await shutdown_all_clients()
+                except Exception:
+                    logger.exception("Error closing pooled clients after template load")
+
+        try:
+            return asyncio.run(_load())
+        except FileNotFoundError:
+            return None
+
+    async def _fetch_and_compile(self, template_id: str) -> JinjaTemplate:
+        logger.debug(f"Fetching template '{template_id}'")
+        try:
+            content = await self._load_by_id(template_id)
+        except FileNotFoundError as exc:
+            # Genuinely missing -> raise clearly. ``Storage.load`` contractually
+            # raises ``FileNotFoundError`` only for absent content; present-but-
+            # empty content returns "" and is a valid template that renders to
+            # empty, so it must NOT be treated as missing. Logged at debug, not error:
+            # the raised ``TemplateNotFoundError`` is the loud signal, and a locale-variant
+            # probe walks expected misses down the fallback chain.
+            logger.debug(f"Template '{template_id}' lookup failed.")
+            raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
+
+        if self._cache_enabled:
+            self._cached_template_ids.add(template_id)
+            # Amortized prune: the set only exceeds the cache's live entry count
+            # when the cache has evicted ids on its own — LRU eviction under a
+            # bounded max_size AND ttl expiry under an unbounded one — so drop any
+            # tracked id the cache no longer holds. Runs only when there is
+            # something to prune; between sweeps the set tracks the live cache size.
+            cache_info = getattr(self._get_compiled_template, "cache_info", None)
+            contains = getattr(self._get_compiled_template, "cache_contains", None)
+            if (
+                cache_info is not None
+                and contains is not None
+                and len(self._cached_template_ids) > cache_info().currsize
+            ):
+                for tracked in list(self._cached_template_ids):
+                    if not contains(tracked):
+                        self._cached_template_ids.discard(tracked)
+        return self._env.from_string(content)
+
+    async def fetch_template(self, template_id: str) -> str:
+        """Return the raw (uncompiled) template text for ``template_id``.
+
+        A missing template raises :class:`TemplateNotFoundError` (mapped to 404 by
+        the HTTP surface) rather than leaking storage's ``FileNotFoundError``.
+        """
+        try:
+            return await self._load_by_id(template_id)
+        except FileNotFoundError as exc:
+            raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
+
+    async def load(self, source: str, *, with_mime: bool = True) -> tuple[bytes, str | None]:
+        """Resolve ``source`` to ``(bytes, mime)`` — the unified content resolver.
+
+        The source kind is disambiguated UP FRONT by ``urlsplit(source).scheme``,
+        never by a try/fallback (which would swallow storage's loud
+        ``FileNotFoundError``):
+
+        - ``http`` / ``https`` -> fetched over the SSRF-pinned :func:`fetch_url`.
+        - ``data`` -> the inline ``data:`` URI is decoded (no network/storage).
+        - empty scheme -> a storage ``id``/path (``Storage.load_bytes`` for the
+          bytes, ``Storage.stat`` for the mime). The empty-scheme branch runs the
+          bare id through :func:`safe_template_path` first, enforcing root
+          containment on the id (an ``UnsafeTemplatePathError`` propagates loudly),
+          so every read that funnels here is guarded at this one seam.
+
+        Any other scheme (``file:``, ``ftp:``) or an id containing ``://`` is
+        ambiguous and raises loudly rather than being guessed. Each branch's own
+        errors propagate.
+
+        ``with_mime=False`` skips the storage ``Storage.stat`` lookup and returns
+        ``mime`` as ``None`` for a storage id — for a caller that re-detects the
+        type itself (:meth:`load_file` via Magika), so a metadata-bearing backend
+        (e.g. S3, whose ``stat`` is a ``head_object`` round-trip) makes no extra
+        call. http/data sources carry their mime inline, so the flag is a no-op
+        for them.
+        """
+        scheme = urlsplit(source).scheme
+        if scheme in ("http", "https"):
+            return await fetch_url(source)
+        if scheme == "data":
+            return _decode_data_uri(source)
+        if scheme == "" and "://" not in source:
+            # A bare storage id is a caller-supplied logical key; enforce root
+            # containment before it reaches the provider, so this one seam guards
+            # every unguarded read (get_resource_by_id, file_loader, normalize_media's
+            # storage branch, and any future caller of ``load``).
+            safe_template_path(source)
+            data = await self.provider.load_bytes(source)
+            mime = (await self.provider.stat(source)).content_type if with_mime else None
+            return data, mime
+        raise ValueError(
+            f"Cannot resolve source {source!r}: only http(s) URLs, data URIs, and bare "
+            "storage ids are supported (a file:/ftp: scheme or an embedded '://' is rejected)."
+        )
+
+    async def load_file(self, source: str) -> str | MediaBlock:
+        """Load ``source`` and decode it to extracted text OR a ``MediaBlock``.
+
+        Resolves the bytes via :meth:`load` (``with_mime=False`` — the type is
+        re-detected here with Magika, so the storage mime lookup is skipped),
+        then dispatches through the type registry (the opt-in ``files`` extra).
+        An unknown type raises loudly.
+        """
+        from tai42_skeleton.template.file_loading import load_content
+
+        data, _mime = await self.load(source, with_mime=False)
+        return await asyncio.to_thread(load_content, data, source)
+
+    async def normalize_media(self, source: str | bytes) -> ContentPart:
+        """Normalize an image reference to a model-ready LangChain ``ContentPart``.
+
+        Image-only: the resolved mime must be ``image/*`` or it raises. Per source
+        kind, without a wasteful download:
+
+        - a public ``http(s)`` URL is passed through unchanged (the model
+          dereferences it); a non-``image/*`` URL suffix raises here, an
+          indeterminable one passes through.
+        - a ``data:`` URI's mediatype is asserted ``image/*`` and passed through.
+        - a storage ``id`` (or raw ``bytes``) is loaded and emitted as a base64
+          ``data:`` URI that always carries a resolved image mime.
+        """
+        if isinstance(source, bytes):
+            from tai42_skeleton.template.file_loading import detect_mime
+
+            mime = detect_mime(source)
+            _assert_image(mime, "<bytes>")
+            if mime is None:
+                raise AssertionError
+            return {"type": "image_url", "image_url": {"url": _data_uri(source, mime)}}
+
+        parts = urlsplit(source)
+        scheme = parts.scheme
+        if scheme in ("http", "https"):
+            mime, _ = mimetypes.guess_type(parts.path)
+            if mime is not None and not mime.startswith("image/"):
+                raise ValueError(
+                    f"normalize_media requires an image resource; URL suffix mime is {mime!r} for {source!r}"
+                )
+            return {"type": "image_url", "image_url": {"url": source}}
+        if scheme == "data":
+            mediatype = source[len("data:") :].partition(",")[0]
+            mime = mediatype.split(";", 1)[0] or None
+            _assert_image(mime, source)
+            return {"type": "image_url", "image_url": {"url": source}}
+
+        # Storage id (empty scheme) or a bad scheme -> load() validates and raises.
+        data, mime = await self.load(source)
+        _assert_image(mime, source)
+        if mime is None:
+            raise AssertionError
+        return {"type": "image_url", "image_url": {"url": _data_uri(data, mime)}}
+
+    def clear_cache(self) -> None:
+        """Drop every compiled template from the cache (no-op when caching is off)."""
+        # ``_get_compiled_template`` is the alru_cache wrapper only when caching is
+        # enabled; otherwise it's the bare method with no cache controls.
+        cache_clear = getattr(self._get_compiled_template, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+            self._cached_template_ids.clear()
+            logger.info("ResourceManager cache cleared.")
+
+    def evict_compiled(self, template_id: str) -> None:
+        """Evict a single compiled template from the cache (no-op if caching is off).
+
+        The public eviction seam: a store write replaces content the compiled cache
+        keys by id, so both the local write paths and a fleet ``evict_template`` op
+        applied on a sibling worker drop the one stale key here. Idempotent — an
+        already-absent key is a no-op.
+        """
+        invalidate = getattr(self._get_compiled_template, "cache_invalidate", None)
+        if invalidate is not None:
+            invalidate(template_id)
+        self._cached_template_ids.discard(template_id)
+
+    def evict_dir(self, path: str) -> None:
+        """Evict every compiled template under ``path/`` (no-op if caching is off).
+
+        The directory counterpart of :meth:`evict_compiled`, applying the provider's
+        prefix semantics (everything under ``path/``): a dir delete on this worker and
+        a fleet ``evict_template`` op carrying a directory key both drop every stale
+        compilation under the prefix through this one seam. Idempotent.
+        """
+        self._evict_compiled_prefix(path.rstrip("/") + "/")
+
+    def _evict_compiled_prefix(self, prefix: str) -> None:
+        """Evict every compiled template whose id falls under ``prefix``.
+
+        Tracked ids that the cache has already dropped (TTL/LRU) are pruned in
+        the same pass, keeping the registry bounded by what is actually cached.
+        """
+        invalidate = getattr(self._get_compiled_template, "cache_invalidate", None)
+        if invalidate is None:
+            # Caching disabled: nothing is cached, so nothing to track.
+            self._cached_template_ids.clear()
+            return
+        contains = getattr(self._get_compiled_template, "cache_contains", None)
+        for template_id in list(self._cached_template_ids):
+            if template_id.startswith(prefix):
+                invalidate(template_id)
+                self._cached_template_ids.discard(template_id)
+            elif contains is not None and not contains(template_id):
+                self._cached_template_ids.discard(template_id)
+
+    def get_cache_info(self) -> Any:
+        """Return the compiled-template cache statistics, or ``None`` when caching is disabled."""
+        cache_info = getattr(self._get_compiled_template, "cache_info", None)
+        if cache_info is not None:
+            return cache_info()
+        return None
+
+    @staticmethod
+    def _locale_variant_ids(template_id: str, locale: str) -> list[str]:
+        """The ordered fallback chain of variant ids for ``template_id`` under ``locale``.
+
+        The most-specific subtag form first, each shorter form next, then the bare
+        ``template_id`` (the declared default variant). A variant lives at
+        ``"{template_id}@{subtags}"`` — e.g. ``he-IL`` yields ``id@he-IL``, ``id@he``,
+        ``id``. The locale is already canonical, so the chain is built from one spelling.
+        """
+        subs = locale.split("-")
+        ids = [f"{template_id}@{'-'.join(subs[:i])}" for i in range(len(subs), 0, -1)]
+        ids.append(template_id)
+        return ids
+
+    async def _compiled_for_locale(self, template_id: str, locale: str | None) -> JinjaTemplate:
+        """Resolve ``template_id`` to a compiled template for ``locale``.
+
+        ``None`` locale renders the bare id unchanged (the locale-agnostic callers — hooks,
+        authz, access-control — keep today's behavior). A present locale walks the fallback
+        chain and returns the first stored variant; when NONE of the chain (variants AND the
+        bare default) is stored, it refuses with :class:`TemplateLocaleNotFoundError` naming
+        the template and locale, never a silent wrong-language render.
+        """
+        if locale is None:
+            return await self._get_compiled_template(template_id)
+        for candidate in self._locale_variant_ids(template_id, locale):
+            try:
+                return await self._get_compiled_template(candidate)
+            except TemplateNotFoundError:
+                continue
+        raise TemplateLocaleNotFoundError(
+            f"template {template_id!r} has no variant for locale {locale!r} and no default variant"
+        )
+
+    def _with_locale(self, context: dict[str, Any], locale: str | None) -> dict[str, Any]:
+        """The render context with the resolved ``locale`` stamped under the reserved key.
+
+        The ``list_format`` filter reads it — the render carries the language, the template
+        never names one. A user variable colliding with the reserved key raises loudly.
+        """
+        if _LOCALE_CONTEXT_KEY in context:
+            raise ValueError(f"{_LOCALE_CONTEXT_KEY!r} is a reserved render variable and cannot be a template variable")
+        return {**context, _LOCALE_CONTEXT_KEY: locale}
+
+    async def render_by_id(
+        self, template_id: str, kwargs: dict[str, Any] | None = None, locale: str | None = None
+    ) -> str:
+        """Render the stored template ``template_id`` for ``locale`` with ``kwargs`` as its context."""
+        template = await self._compiled_for_locale(template_id, locale)
+        context = self._with_locale(kwargs or {}, locale)
+
+        def _render() -> str:
+            with self._render_scope():
+                return template.render(**context)
+
+        return await asyncio.to_thread(_render)
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        """Render ``text`` — its stored resource by ``id``, else its inline ``content``.
+
+        Rendered with its own ``kwargs`` as the render context.
+
+        A stored id resolves through :meth:`render_by_id` (locale variants included), so a
+        missing one raises ``TemplateNotFoundError``; a template the engine cannot render
+        raises out of Jinja. ``locale`` also reaches an inline render, as the language the
+        ``list_format`` filter formats in.
+        """
+        if text.id is not None:
+            return await self.render_by_id(text.id, text.kwargs, locale=locale)
+
+        content = text.content
+        # A templated text carries exactly one source, so with no id the content is a real
+        # string (present-but-empty included — an empty template renders to an empty string).
+        if content is None:
+            raise AssertionError
+        context = self._with_locale(text.kwargs, locale)
+
+        def _parse_and_render() -> str:
+            with self._render_scope():
+                return self._compile_inline(content).render(**context)
+
+        return await asyncio.to_thread(_parse_and_render)
+
+    def _variables_only_schema(self, content: str) -> dict[str, Any]:
+        """Build the degraded, names-only input schema for ``content``.
+
+        The template is parsed by the app's OWN sandboxed environment — the one
+        that renders it, so every registered filter and extension is known — and
+        each undeclared variable becomes an untyped property. Nothing is marked
+        required: the shapes are unknown here, not known-optional.
+
+        Author-broken Jinja raises ``TemplateError`` out of ``parse`` rather than
+        degrading to an empty schema: this environment is the authority on whether
+        the template PARSES. (Renderability is a stronger property — e.g. an
+        unknown Jinja *test* resolves only at render time — and belongs to the
+        render door, not to a schema read.)
+        """
+        names = sorted(meta.find_undeclared_variables(self._env.parse(content)))
+        return {
+            "type": "object",
+            "properties": {name: {"title": name} for name in names},
+            "required": [],
+            _INFERENCE_MARKER_KEY: _PARTIAL_INFERENCE,
+        }
+
+    async def get_template_schema(self, content: str | None = None, template_id: str | None = None) -> dict[str, Any]:
+        """Return the JSON-Schema description of a template's inputs.
+
+        Reading a renderable template never fails. ``jinja2schema`` is the
+        enricher: when it can infer the template it returns typed, required-aware
+        properties. It supports only a subset of Jinja, though, and rejects plenty
+        of valid, renderable templates (dict literals, ``{% with %}``/``{% set %}``
+        blocks, ``{% include %}``, filters it does not know) with errors that are
+        NOT ``jinja2.TemplateError`` — so any failure of that call degrades to
+        :meth:`_variables_only_schema`, which carries the variable names and the
+        ``x-tai42-inference: partial`` marker.
+
+        Raises ``TemplateNotFoundError`` for a missing ``template_id`` and
+        ``jinja2.TemplateError`` only when the template itself is broken (the app's
+        own environment refuses to parse it) — an author error, not a read failure.
+        """
+        if content is not None and template_id is not None:
+            raise ValueError("Provide either 'content' OR 'template_id', not both.")
+
+        if content is None:
+            if template_id is None:
+                raise ValueError("You must provide either a template or a template_id.")
+            try:
+                content = await self._load_by_id(template_id)
+            except FileNotFoundError as exc:
+                # Missing -> raise clearly; present-but-empty is a valid (empty)
+                # template, inferred as an empty schema rather than rejected.
+                raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
+
+        def _infer_schema() -> dict[str, Any]:
+            # ``Storage.load`` contractually returns ``str``, and the block above
+            # raised on a missing template, so ``content`` is a real string here.
+            if content is None:
+                raise AssertionError
+            try:
+                return to_json_schema(infer(content), jsonschema_encoder=JSONSchemaDraft4Encoder)
+            except Exception as exc:
+                # Broad ON PURPOSE and scoped to this one call: jinja2schema signals
+                # an unsupported construct as InferException, a bare ``Exception``
+                # ("stmt visitor ... not found"), or a ValueError from its own
+                # loader. None of those say the template is broken, so none may fail
+                # the read — they only mean "no types available".
+                logger.debug(
+                    "jinja2schema could not infer this template (%s: %s); degrading to a variables-only schema.",
+                    type(exc).__name__,
+                    exc,
+                )
+            return self._variables_only_schema(content)
+
+        return await asyncio.to_thread(_infer_schema)
+
+    async def find_undeclared_variables(self, content: str | None = None, template_id: str | None = None) -> set[str]:
+        """The undeclared variables in a template, from inline ``content`` or a stored ``template_id``."""
+        if content is not None and template_id is not None:
+            raise ValueError("Provide either 'content' OR 'template_id', not both.")
+
+        if content is None:
+            if template_id is None:
+                raise ValueError("You must provide either a template or a template_id.")
+            try:
+                content = await self._load_by_id(template_id)
+            except FileNotFoundError as exc:
+                # Missing -> raise clearly; present-but-empty is a valid (empty)
+                # template with no undeclared variables rather than rejected.
+                raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
+
+        def _find_vars():
+            # ``Storage.load`` contractually returns ``str`` (present-but-empty is
+            # ""), and the block above raised on a missing template, so ``content``
+            # is a real string here.
+            if content is None:
+                raise AssertionError
+            ast = self._env.parse(content)
+            return meta.find_undeclared_variables(ast)
+
+        return await asyncio.to_thread(_find_vars)
+
+    async def upload_template(self, path: str, content: str) -> None:
+        """Store ``content`` at ``path`` and evict its compiled entry.
+
+        The compiled-template cache keys entries by ``path`` and holds them until
+        the cache TTL, so the single key is evicted after a successful upload to
+        keep renders consistent with storage — the next render recompiles the new
+        content.
+        """
+        await self.provider.upload(path, content)
+        self.evict_compiled(path)
+
+    async def list_resources(self) -> list[str]:
+        """List every stored resource path in the storage provider."""
+        return await self.provider.list()
+
+    async def delete_template(self, path: str) -> None:
+        """Delete the stored template at ``path`` and evict its compiled entry.
+
+        Idempotent: an already-absent template is a no-op. This is the one seam
+        every backend flows through, so the backends' ``FileNotFoundError`` for a
+        missing object is mapped to the documented no-op here rather than in each
+        backend.
+        """
+        try:
+            await self.provider.delete(path)
+        except FileNotFoundError:
+            logger.info("delete_template: %s already absent; delete is a no-op", path)
+        # The compiled cache retains an entry per path until TTL; evict only the
+        # deleted key so its stale compilation is dropped while other templates
+        # stay cached.
+        self.evict_compiled(path)
+
+    async def delete_template_dir(self, path: str) -> None:
+        """Delete every stored template under ``path/`` and evict their compiled entries.
+
+        Eviction runs even on a partial-delete failure.
+        """
+        try:
+            return await self.provider.delete_dir(path)
+        finally:
+            # Dir-delete is non-atomic: a failure can still leave some files
+            # deleted, so evict regardless of outcome — never serve content under
+            # this dir after a partial delete. Only keys under the prefix are
+            # dropped; templates outside it stay cached.
+            self.evict_dir(path)

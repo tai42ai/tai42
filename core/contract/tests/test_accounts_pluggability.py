@@ -1,0 +1,359 @@
+"""Tests for the accounts-provider registry, the ``AccountsProvider`` ABC, and
+the ``AccountsAdminServices`` / ``AccountsProviderSettings`` Protocols.
+
+The accounts registry is handle-free like the identity registry, with two
+deliberate additions exercised here: dual registration into the identity
+registry (an accounts provider IS its own sessions' token answerer) and a
+name-sorted enumeration snapshot.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from tai42_contract.access_control.identity import AuthIdentity
+from tai42_contract.access_control.registry import (
+    get_identity_provider_factory,
+    register_identity_provider,
+)
+from tai42_contract.access_control.registry import reset_registry as reset_identity_registry
+from tai42_contract.accounts.models import (
+    FormField,
+    FormMethod,
+    InviteCredential,
+    LoginAttachment,
+    LoginCredential,
+    LoginMethod,
+    PasswordCredential,
+)
+from tai42_contract.accounts.provider import (
+    AccountsAdminServices,
+    AccountsProvider,
+    AccountsProviderSettings,
+    LoginAttachingProvider,
+)
+from tai42_contract.accounts.registry import (
+    get_accounts_provider_factory,
+    iter_accounts_provider_factories,
+    register_accounts_provider,
+    reset_registry,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_registries():  # pyright: ignore[reportUnusedFunction]
+    # Both registries are module-global state, and register_accounts_provider
+    # dual-writes into the identity registry; isolate every test from the others.
+    reset_registry()
+    reset_identity_registry()
+    yield
+    reset_registry()
+    reset_identity_registry()
+
+
+class _FakeAccounts(AccountsProvider):
+    def __init__(self, settings: object | None = None) -> None:
+        self._settings = settings
+
+    async def validate_token(self, token: str) -> AuthIdentity | None:
+        return AuthIdentity(user_id="u1", claims={}) if token == "tai-sess-ok" else None
+
+    def login_methods(self) -> list[LoginMethod]:
+        return [
+            FormMethod(
+                id="password",
+                title="Sign in",
+                fields=[FormField(name="email", label="Email")],
+                submit_path="/api/login/password",
+            )
+        ]
+
+    async def revoke_session(self, token: str) -> bool:
+        return token == "tai-sess-ok"
+
+
+def _fake_factory(*_args: object, **_kwargs: object) -> AccountsProvider:
+    return _FakeAccounts()
+
+
+class _OtherAccounts(_FakeAccounts):
+    """A distinct provider class — a real conflict when it claims a taken name."""
+
+
+def _other_factory(*_args: object, **_kwargs: object) -> AccountsProvider:
+    return _OtherAccounts()
+
+
+# -- Registry ------------------------------------------------------------------
+
+
+def test_register_then_lookup_returns_the_factory():
+    register_accounts_provider("fake", _fake_factory)
+    assert get_accounts_provider_factory("fake") is _fake_factory
+    assert isinstance(get_accounts_provider_factory("fake")(), _FakeAccounts)
+
+
+def test_registration_dual_registers_into_identity_registry():
+    # An accounts provider is the identity answerer for its own sessions, so a
+    # single accounts registration lands the SAME factory in the identity registry.
+    register_accounts_provider("fake", _fake_factory)
+    assert get_identity_provider_factory("fake") is _fake_factory
+
+
+def test_identity_collision_raises_and_leaves_accounts_map_untouched():
+    # A name already taken in the identity registry by a DIFFERENT provider must make
+    # the accounts registration raise (identity write is ordered first) without
+    # registering anything in the accounts map. A different factory is a real conflict;
+    # the identical factory is reload-safe and covered separately below.
+    register_identity_provider("taken", _fake_factory)
+    with pytest.raises(ValueError, match="already registered"):
+        register_accounts_provider("taken", _other_factory)
+    with pytest.raises(KeyError, match="Unknown accounts provider"):
+        get_accounts_provider_factory("taken")
+
+
+def test_iter_is_name_sorted_and_a_fresh_list():
+    register_accounts_provider("bravo", _fake_factory)
+    register_accounts_provider("alpha", _fake_factory)
+    snapshot = iter_accounts_provider_factories()
+    assert [name for name, _ in snapshot] == ["alpha", "bravo"]
+    # Mutating the returned list must not affect a subsequent call.
+    snapshot.clear()
+    assert [name for name, _ in iter_accounts_provider_factories()] == ["alpha", "bravo"]
+
+
+def test_reregistering_the_same_factory_is_a_reload_safe_no_op():
+    # Reload-safety: the hot-reload primitive pops the plugin's modules and
+    # re-executes their bodies, re-running the module-level register_accounts_provider.
+    # Before the fix the second call raised "already registered" and crashed boot;
+    # now it is a quiet no-op in BOTH registries, which stay consistent.
+    register_accounts_provider("fake", _fake_factory)
+    register_accounts_provider("fake", _fake_factory)  # no raise
+    assert get_accounts_provider_factory("fake") is _fake_factory
+    assert get_identity_provider_factory("fake") is _fake_factory
+
+
+def test_reregistering_a_reloaded_factory_object_is_a_no_op():
+    # The reload primitive mints a FRESH class object each pass, so a reloaded factory
+    # is a different object sharing __module__/__qualname__ — still the same provider.
+    register_accounts_provider("dup", _FakeAccounts)
+    clone = type("_FakeAccounts", (AccountsProvider,), dict(_FakeAccounts.__dict__))
+    clone.__module__ = _FakeAccounts.__module__
+    clone.__qualname__ = _FakeAccounts.__qualname__
+    assert clone is not _FakeAccounts
+    register_accounts_provider("dup", clone)  # no raise: same qualified identity
+    assert get_accounts_provider_factory("dup") is _FakeAccounts
+    assert get_identity_provider_factory("dup") is _FakeAccounts
+
+
+def test_different_factory_under_existing_name_still_raises():
+    # The real-conflict guard is preserved in BOTH registries: a genuinely different
+    # provider claiming a taken name is a loud error, not a silent overwrite.
+    register_accounts_provider("fake", _fake_factory)
+    with pytest.raises(ValueError, match="'fake' already registered"):
+        register_accounts_provider("fake", _other_factory)
+
+
+def test_unknown_name_raises_keyerror():
+    with pytest.raises(KeyError, match="Unknown accounts provider: 'nope'"):
+        get_accounts_provider_factory("nope")
+
+
+def test_reset_registry_clears_only_the_accounts_map():
+    register_accounts_provider("fake", _fake_factory)
+    reset_registry()
+    with pytest.raises(KeyError):
+        get_accounts_provider_factory("fake")
+    assert iter_accounts_provider_factories() == []
+    # The accounts reset touches ONLY the accounts map — the identity
+    # registry is reset separately by the application's start(), so the dual
+    # registration survives an accounts-only reset.
+    assert get_identity_provider_factory("fake") is _fake_factory
+
+
+# -- AccountsProvider ABC ------------------------------------------------------
+
+
+def test_abstract_provider_cannot_instantiate_directly():
+    assert AccountsProvider.__abstractmethods__
+    with pytest.raises(TypeError):
+        AccountsProvider()  # pyright: ignore[reportAbstractUsage]
+
+
+class _MissingLoginMethods(AccountsProvider):
+    async def validate_token(self, token: str) -> AuthIdentity | None:
+        return None
+
+    async def revoke_session(self, token: str) -> bool:
+        return False
+
+
+class _MissingRevokeSession(AccountsProvider):
+    async def validate_token(self, token: str) -> AuthIdentity | None:
+        return None
+
+    def login_methods(self) -> list[LoginMethod]:
+        return []
+
+
+class _MissingValidateToken(AccountsProvider):
+    def login_methods(self) -> list[LoginMethod]:
+        return []
+
+    async def revoke_session(self, token: str) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [
+        _MissingLoginMethods,
+        _MissingRevokeSession,
+        _MissingValidateToken,
+    ],
+)
+def test_subclass_missing_any_abstract_method_cannot_instantiate(cls: type[AccountsProvider]):
+    with pytest.raises(TypeError):
+        cls()  # pyright: ignore[reportAbstractUsage]
+
+
+def test_full_subclass_instantiates_and_inherits_concrete_members():
+    async def run() -> None:
+        provider = _FakeAccounts()
+        # The abstract members answer.
+        methods = provider.login_methods()
+        assert len(methods) == 1
+        assert await provider.revoke_session("tai-sess-ok") is True
+        assert await provider.revoke_session("foreign") is False
+        assert await provider.validate_token("tai-sess-ok") == AuthIdentity(user_id="u1", claims={})
+        assert await provider.validate_token("nope") is None
+        # Inherited concrete members from IdentityProvider are locked in place.
+        assert await provider.healthcheck() is None
+        assert provider.readiness_targets() == ()
+
+    asyncio.run(run())
+
+
+# -- LoginAttachingProvider ABC ------------------------------------------------
+
+
+class _FakeLoginAttaching(_FakeAccounts, LoginAttachingProvider):
+    def __init__(self, settings: object | None = None) -> None:
+        super().__init__(settings)
+        self.logins: set[str] = set()
+
+    async def has_login(self, user_id: str) -> bool:
+        return user_id in self.logins
+
+    async def attach_login(self, user_id: str, *, credential: LoginCredential) -> LoginAttachment:
+        self.logins.add(user_id)
+        if credential.kind == "invite":
+            return LoginAttachment(attached=True, invite_token="inv-1", login_path="/api/login/accept")
+        return LoginAttachment(attached=True)
+
+
+def test_login_attaching_provider_is_an_accounts_provider():
+    # The mix-in is an AccountsProvider, so it flows through the same registry and
+    # enforcement seam; a plain accounts provider is NOT a LoginAttachingProvider.
+    provider = _FakeLoginAttaching()
+    assert isinstance(provider, AccountsProvider)
+    assert isinstance(provider, LoginAttachingProvider)
+    assert not isinstance(_FakeAccounts(), LoginAttachingProvider)
+
+
+def test_attach_login_is_abstract_until_implemented():
+    class _NoAttach(_FakeAccounts, LoginAttachingProvider):
+        async def has_login(self, user_id: str) -> bool:
+            return False
+
+    assert "attach_login" in LoginAttachingProvider.__abstractmethods__
+    with pytest.raises(TypeError):
+        _NoAttach()  # pyright: ignore[reportAbstractUsage]
+
+
+def test_has_login_is_abstract_until_implemented():
+    class _NoHasLogin(_FakeAccounts, LoginAttachingProvider):
+        async def attach_login(self, user_id: str, *, credential: LoginCredential) -> LoginAttachment:
+            return LoginAttachment(attached=True)
+
+    assert "has_login" in LoginAttachingProvider.__abstractmethods__
+    with pytest.raises(TypeError):
+        _NoHasLogin()  # pyright: ignore[reportAbstractUsage]
+
+
+def test_has_login_answers_whether_the_provider_holds_a_login():
+    async def run() -> None:
+        provider = _FakeLoginAttaching()
+        assert await provider.has_login("owner-1") is False
+        await provider.attach_login("owner-1", credential=PasswordCredential(email="a@x.test", password="pw"))
+        assert await provider.has_login("owner-1") is True
+        assert await provider.has_login("someone-else") is False
+
+    asyncio.run(run())
+
+
+def test_attach_login_returns_the_attachment():
+    async def run() -> None:
+        provider = _FakeLoginAttaching()
+        password = await provider.attach_login(
+            "owner-1", credential=PasswordCredential(email="a@x.test", password="pw")
+        )
+        assert password == LoginAttachment(attached=True)
+        invite = await provider.attach_login("owner-1", credential=InviteCredential(email="a@x.test"))
+        assert invite.invite_token == "inv-1"
+        assert invite.login_path == "/api/login/accept"
+
+    asyncio.run(run())
+
+
+# -- Protocols -----------------------------------------------------------------
+
+
+class _StandInAdmin:
+    async def create_principal(
+        self,
+        user_id: str,
+        *,
+        kind: str,
+        display_name: str,
+        created_by: str | None,
+        role: str,
+    ) -> None:
+        return None
+
+    async def apply_role(self, user_id: str, role: str) -> None:
+        return None
+
+    async def remove_policy(self, user_id: str) -> None:
+        return None
+
+    async def set_user_disabled(self, user_id: str, disabled: bool) -> None:
+        return None
+
+
+class _StandInSettings:
+    def __init__(self) -> None:
+        self.redis = object()
+        self.admin = _StandInAdmin()
+
+
+def test_admin_services_protocol_is_runtime_checkable():
+    assert isinstance(_StandInAdmin(), AccountsAdminServices)
+    assert not isinstance(object(), AccountsAdminServices)
+
+
+def test_settings_protocol_is_runtime_checkable():
+    assert isinstance(_StandInSettings(), AccountsProviderSettings)
+
+    class _MissingAdmin:
+        def __init__(self) -> None:
+            self.redis = object()
+
+    class _MissingRedis:
+        def __init__(self) -> None:
+            self.admin = _StandInAdmin()
+
+    assert not isinstance(_MissingAdmin(), AccountsProviderSettings)
+    assert not isinstance(_MissingRedis(), AccountsProviderSettings)

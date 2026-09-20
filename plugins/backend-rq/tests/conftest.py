@@ -1,0 +1,452 @@
+"""Bind a recording stub app before the backend package is imported.
+
+``tai42_backend_rq`` registers its backend class, tools, and extensions on the
+global ``tai42_app`` handle at import time. Binding a stub here (at collection
+time, before any test imports the package) captures those registrations for tests
+to assert on. The stub also carries the app facets the source reaches at call time
+(resource manager, monitoring writer, tool runner); the autouse ``_reset_stub``
+fixture resets per-test knobs.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import threading
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from typing import Any
+
+import pytest
+from rq.exceptions import NoSuchJobError
+from tai42_contract.access_control import caller_may_read_secrets
+from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
+from tai42_kit.utils.detached_util import in_detached_run
+
+
+class RecordingTools:
+    """Records ``@tai42_app.tools.tool`` registrations and ``run_tool`` calls."""
+
+    def __init__(self) -> None:
+        self.registered: list[str] = []
+        self.tags: dict[str, set[str]] = {}
+        self.run_calls: list[tuple[str, dict[str, Any]]] = []
+        self.run_result: Any = None
+        self.run_error: Exception | None = None
+        # The detached flag observed inside each call — a worker execution has no
+        # live caller, so the tool must run detached and the turn budget be skipped.
+        self.detached_seen: list[bool] = []
+        # The ``offload_sync`` value each call received — a worker execution runs a
+        # blocking sync tool off the shared event loop.
+        self.offloads: list[bool] = []
+        # The secret-read capability observed inside each call — a worker binds it to
+        # the gate state (OFF -> True, ON -> False) since no HTTP request does.
+        self.secret_capability_seen: list[bool] = []
+
+    def tool(self, *args: Any, **kwargs: Any) -> Any:
+        tags = kwargs.get("tags", set())
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            self.registered.append(args[0].__name__)
+            self.tags[args[0].__name__] = tags
+            return args[0]
+
+        def decorator(func: Any) -> Any:
+            self.registered.append(func.__name__)
+            self.tags[func.__name__] = tags
+            return func
+
+        return decorator
+
+    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
+        self.run_calls.append((key, arguments))
+        self.detached_seen.append(in_detached_run())
+        self.offloads.append(offload_sync)
+        self.secret_capability_seen.append(caller_may_read_secrets())
+        if self.run_error is not None:
+            raise self.run_error
+        return self.run_result
+
+
+class RecordingExtensions:
+    """Records ``@tai42_app.extensions.extension`` registrations."""
+
+    def __init__(self) -> None:
+        self.registered: list[tuple[str | None, Any]] = []
+
+    def extension(self, f: Any = None, *, kind: Any, name: str | None = None) -> Any:
+        def decorator(func: Any) -> Any:
+            self.registered.append((name or func.__name__, kind))
+            return func
+
+        return decorator(f) if f is not None else decorator
+
+
+class RecordingBackends:
+    """Records ``@tai42_app.backends.register_backend`` registrations."""
+
+    def __init__(self) -> None:
+        self.registered: list[type] = []
+
+    def register_backend(self, cls: type | None = None) -> Any:
+        def decorator(inner: type) -> type:
+            self.registered.append(inner)
+            return inner
+
+        return decorator(cls) if cls is not None else decorator
+
+
+class StubResourceManager:
+    """Mirrors ``ResourceManager.render_templated_text``: inline ``content`` renders to
+    itself, a stored ``id`` resolves through this double's own template map, and a
+    missing id — or the by-construction-impossible no-source text — raises loudly
+    instead of silently rendering empty."""
+
+    def __init__(self) -> None:
+        self.templates: dict[str, str] = {}
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        if text.content is not None:
+            return text.content
+        if text.id is None:
+            raise ValueError("a templated text sets exactly one of 'content' or 'id'; neither was supplied")
+        if text.id not in self.templates:
+            raise KeyError(f"no stored resource for template id {text.id!r}")
+        return self.templates[text.id]
+
+
+class StubStorage:
+    def __init__(self) -> None:
+        self.resource_manager = StubResourceManager()
+
+
+class StubWriter:
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+        self.flush_calls = 0
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+
+
+class StubMonitoringBackend:
+    def __init__(self) -> None:
+        self.writer = StubWriter()
+
+
+class StubMonitoring:
+    def __init__(self) -> None:
+        self.active = StubMonitoringBackend()
+
+
+class StubLifecycle:
+    """The app double is always ready, so ``wait_until_ready`` resolves at once —
+    the readiness gate the shared launch base awaits before a consuming runtime
+    starts."""
+
+    async def wait_until_ready(self) -> None:
+        return None
+
+
+class StubApp:
+    def __init__(self) -> None:
+        self.tools = RecordingTools()
+        self.extensions = RecordingExtensions()
+        self.backends = RecordingBackends()
+        self.storage = StubStorage()
+        self.monitoring = StubMonitoring()
+        self.lifecycle = StubLifecycle()
+
+
+stub_app = StubApp()
+tai42_app.bind(stub_app)
+
+
+@pytest.fixture
+def access_control(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[bool], None]]:
+    """Set the ``ACCESS_CONTROL_ENABLE`` gate for a test and restore it after — the
+    worker's own read of the operator env the skeleton gate reads."""
+    from tai42_kit.settings import reset_all_settings
+
+    def _set(enabled: bool) -> None:
+        monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true" if enabled else "false")
+        reset_all_settings()
+
+    yield _set
+    reset_all_settings()
+
+
+@pytest.fixture(autouse=True)
+def _reset_stub() -> AsyncIterator[None] | Any:
+    """Reset per-test stub state (import-time registrations are kept)."""
+    stub_app.tools.run_calls.clear()
+    stub_app.tools.run_result = None
+    stub_app.tools.run_error = None
+    stub_app.tools.detached_seen.clear()
+    stub_app.tools.offloads.clear()
+    stub_app.tools.secret_capability_seen.clear()
+    stub_app.monitoring.active.writer.shutdown_calls = 0
+    stub_app.monitoring.active.writer.flush_calls = 0
+    stub_app.storage.resource_manager.templates.clear()
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _reset_process_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the manifest payload env between tests, so an ambient value or one a
+    prior test set cannot leak into the next. Set through ``monkeypatch``, which
+    restores it when the test ends.
+    """
+    from tai42_backend_rq.settings import rq_settings
+
+    monkeypatch.delenv(rq_settings().manifest_key, raising=False)
+
+
+@pytest.fixture
+def app() -> StubApp:
+    return stub_app
+
+
+# --- Shared fakes ----------------------------------------------------------
+
+
+class FakeRedisConn:
+    """The dedicated connection ``build`` hands the worker runtime, so a test can
+    assert ``aclose`` released it."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeRqWorker:
+    """An rq worker stand-in carrying only what the runtime touches.
+
+    ``request_stop`` exists precisely so a test can assert it is NEVER called:
+    reaching it in the real worker re-binds the process's signal handlers and
+    destroys the host's composed chain.
+    """
+
+    def __init__(self, name: str = "w1", horse_pid: int = 0) -> None:
+        self.name = name
+        self.horse_pid = horse_pid
+        self._stop_requested = False
+        self.stop_requests: list[Any] = []
+        self.kills = 0
+        self.work_kwargs: dict[str, Any] | None = None
+        self.work_thread: threading.Thread | None = None
+
+    def request_stop(self, signum: Any, frame: Any) -> None:
+        self.stop_requests.append(signum)
+
+    def kill_horse(self) -> None:
+        self.kills += 1
+
+    def work(self, **kwargs: Any) -> None:
+        """rq's blocking work loop: runs until the stop flag is set."""
+        self.work_kwargs = kwargs
+        self.work_thread = threading.current_thread()
+        while not self._stop_requested:
+            time.sleep(0.005)
+
+
+def make_client_ctx(client: Any) -> Callable[..., Any]:
+    """A ``client_ctx``-shaped factory that always yields ``client``."""
+
+    @asynccontextmanager
+    async def _ctx(client_cls: Any, settings: Any = None, **kwargs: Any) -> AsyncIterator[Any]:
+        yield client
+
+    return _ctx
+
+
+class FakeAsyncRedis:
+    """Minimal async Redis stand-in over in-memory hash/stream/zset/kv maps."""
+
+    def __init__(
+        self,
+        hashes: dict[str, dict[Any, Any]] | None = None,
+        streams: dict[str, list[Any]] | None = None,
+        sets: dict[str, set[Any]] | None = None,
+        zsets: dict[str, dict[str, float]] | None = None,
+        lists: dict[str, list[Any]] | None = None,
+        kv: dict[str, str] | None = None,
+    ) -> None:
+        self.hashes = hashes or {}
+        self.streams = streams or {}
+        self.sets = sets or {}
+        self.zsets = zsets or {}
+        self.lists = lists or {}
+        self.kv = kv or {}
+
+    async def hget(self, key: str, field: str) -> Any:
+        return self.hashes.get(key, {}).get(field)
+
+    async def hgetall(self, key: str) -> dict[Any, Any]:
+        return self.hashes.get(key, {})
+
+    async def smembers(self, key: str) -> set[Any]:
+        return self.sets.get(key, set())
+
+    async def xrevrange(self, key: str, count: int | None = None) -> list[Any]:
+        entries = list(reversed(self.streams.get(key, [])))
+        return entries[:count] if count is not None else entries
+
+    async def zrange(self, key: str, start: int, end: int, withscores: bool = False) -> list[Any]:
+        items = sorted(self.zsets.get(key, {}).items(), key=lambda kv: kv[1])
+        return [(m, s) for m, s in items] if withscores else [m for m, _ in items]
+
+    async def zscore(self, key: str, member: str) -> float | None:
+        return self.zsets.get(key, {}).get(member)
+
+    async def zrem(self, key: str, member: str) -> int:
+        zset = self.zsets.get(key, {})
+        if member in zset:
+            del zset[member]
+            return 1
+        return 0
+
+    async def lrange(self, key: str, start: int, end: int) -> list[Any]:
+        return self.lists.get(key, [])
+
+    async def delete(self, *keys: str) -> int:
+        removed = 0
+        for key in keys:
+            removed += int(self.kv.pop(key, None) is not None)
+            removed += int(self.hashes.pop(key, None) is not None)
+        return removed
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self.kv[key] = value
+
+    def scan_iter(self, match: str | None = None) -> Any:
+        # ``async for`` consumes an async iterator, so this is a plain method
+        # returning an async generator (mirroring the real client).
+        keys = [k for k in self.kv if match is None or fnmatch.fnmatch(k, match)]
+
+        async def _gen() -> Any:
+            for key in keys:
+                yield key
+
+        return _gen()
+
+
+def _patch_redis(monkeypatch: pytest.MonkeyPatch, redis: Any) -> None:
+    """Make ``client_ctx(...)`` inside the tools module yield the fake."""
+    from tai42_backend_rq import tools
+
+    monkeypatch.setattr(tools, "client_ctx", make_client_ctx(redis))
+
+
+class FakeSyncRedis:
+    """Sync stand-in for the paths the scheduler-based tools run off-loop."""
+
+    def __init__(self, kv: dict[str, str] | None = None, zsets: dict[str, dict[str, float]] | None = None) -> None:
+        self.kv = kv or {}
+        self.zsets = zsets or {}
+
+    def exists(self, key: str) -> int:
+        return int(key in self.kv)
+
+    def delete(self, key: str) -> int:
+        return int(self.kv.pop(key, None) is not None)
+
+    def zscore(self, key: str, member: str) -> float | None:
+        return self.zsets.get(key, {}).get(member)
+
+
+class FakeJob:
+    def __init__(self, meta: dict[str, Any] | None = None, args: list | None = None, kwargs: dict | None = None):
+        self.meta = {"interval": 60} if meta is None else meta
+        self.args = args or []
+        self.kwargs = kwargs or {}
+        self.enqueued_at = None
+
+
+class _StatefulScheduledJob:
+    """A stored scheduled job carrying the fields the export tool reads."""
+
+    def __init__(self, job_id, func_name, args, kwargs, meta):
+        self.id = job_id
+        self.func_name = func_name
+        self.args = args
+        self.kwargs = kwargs
+        self.meta = meta
+        self.enqueued_at = None
+
+
+# Fixed stand-in for "the next time the cron fires" (the fake cannot evaluate
+# a cron expression).
+_FAKE_CRON_NEXT_TS = datetime(2032, 1, 1, tzinfo=UTC).timestamp()
+
+
+def _make_stateful_scheduler(store: dict[str, _StatefulScheduledJob], zset: dict[str, float] | None = None):
+    """Build a fake Scheduler class backed by ``store`` (name -> job).
+
+    ``schedule`` and ``cron`` mirror the real scheduler's create signatures,
+    storing the interval seconds or cron string in the job ``meta`` exactly as
+    the create path does, so an export reads back what an import wrote. When
+    ``zset`` is given, the create/cancel/change-time calls maintain it like the
+    real scheduler maintains its scheduled-jobs zset.
+    """
+    times = zset if zset is not None else {}
+
+    class FakeJobClass:
+        @staticmethod
+        def fetch(name, connection=None):
+            if name not in store:
+                raise NoSuchJobError(name)
+            return store[name]
+
+    class FakeScheduler:
+        job_class = FakeJobClass
+
+        def __init__(self, queue_name=None, connection=None):
+            self.connection = connection
+
+        def __contains__(self, name):
+            return name in store
+
+        def cancel(self, name):
+            store.pop(name, None)
+            times.pop(name, None)
+
+        def get_jobs(self, with_times=False):
+            if with_times:
+                return [(job, datetime(2030, 1, 1)) for job in store.values()]
+            return list(store.values())
+
+        # ``id`` mirrors the rq-scheduler Scheduler.schedule(..., id=...) signature this fake stands in for.
+        def schedule(self, *, scheduled_time, func, args, kwargs, interval, id, meta, **rest):  # noqa: A002
+            store[id] = _StatefulScheduledJob(
+                id,
+                getattr(func, "__name__", "tool_execution"),
+                list(args),
+                dict(kwargs),
+                dict(meta),
+            )
+            times[id] = scheduled_time.timestamp()
+
+        # ``id`` mirrors the rq-scheduler Scheduler.cron(..., id=...) signature this fake stands in for.
+        def cron(self, cron_string, *, func, args, kwargs, id, meta, **rest):  # noqa: A002
+            store[id] = _StatefulScheduledJob(
+                id,
+                getattr(func, "__name__", "tool_execution"),
+                list(args),
+                dict(kwargs),
+                dict(meta),
+            )
+            times[id] = _FAKE_CRON_NEXT_TS
+
+        def change_execution_time(self, job, date_time):
+            if job.id not in times:
+                raise ValueError("Job not in scheduled jobs queue")
+            times[job.id] = date_time.timestamp()
+
+    return FakeScheduler

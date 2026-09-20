@@ -1,0 +1,28 @@
+---
+title: Acme connector
+description: Scaffold for an OAuth connector plugin. Replace the placeholders before publishing.
+---
+
+This is a scaffolded OAuth connector. Replace every `example.invalid` endpoint,
+the `acme` identifiers, and the icon with your provider's real values before you
+publish.
+
+## Install
+
+Install it from the marketplace, supplying your OAuth client credentials:
+
+```sh
+tai plugins install acme/your-plugin-name \
+  --env CONNECTORS_ACME_CLIENT_ID=... \
+  --secret CONNECTORS_ACME_CLIENT_SECRET
+```
+
+The operator registers their own OAuth client with the provider and points
+`client_id_env` / `client_secret_env` at those values. The engine also needs its
+connector prerequisites set: the connector KEK, the OAuth state HMAC key, and the
+redirect-URI allowlist.
+
+## Sub-services
+
+Each sub-service names a hosted MCP server and the OAuth scopes it needs. Add one
+entry per product surface you expose.

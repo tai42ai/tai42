@@ -1,0 +1,21 @@
+spec_version: 1
+namespace: tai42
+name: e2e-eta
+package: tai-e2e-market-eta
+version: 0.0.0
+description: "Installable marketplace fixture plugin: an mcp-server item launching a one-tool stdio MCP server."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e
+categories: [utilities]
+tags: [mcp-server, eta]
+permissions:
+  network: false
+  subprocess: true
+  filesystem: false
+provides:
+  - kind: mcp-server
+    name: e2e_eta_mcp
+    description: "Launch the fixture's one-tool stdio MCP server (a ping tool) as a manifest mcp entry."
+    tags: [eta]
+    mcp:
+      command: tai-e2e-market-eta-mcp

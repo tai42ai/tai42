@@ -1,0 +1,230 @@
+"""Agent fixtures for the run-tool synthesis tests.
+
+``EchoFieldsAgent.run`` echoes the sorted names of the kwargs it actually
+received, so a test can observe that the synthesized run tool forwards only the
+caller-supplied fields (``from_tool_input``'s set-fields-only contract) rather
+than every field materialized with its default.
+
+``NestedToolsAgent.run`` resolves its own tools BY NAME from the process-global
+tool facet mid-turn and invokes one — the resolution a real agent (and any
+subagent it spawns) performs for itself, which no wrapping at the agent's own
+call site can reach. It is how a test observes what the shared tool-dispatch seam
+does to a tool an agent picked up on its own.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+from tai42_contract.agent import Agent
+from tai42_contract.app import tai42_app
+
+
+class EchoInput(BaseModel):
+    text: str
+    times: int = 1
+    note: str = "unset"
+
+
+@tai42_app.agents.agent("echo_fields")
+class EchoFieldsAgent(Agent):
+    tool_name = "echo_fields"
+    tool_description = "Echo which fields were forwarded."
+    ToolInput = EchoInput
+
+    async def run(self, **kwargs) -> str:
+        return ",".join(sorted(kwargs))
+
+
+# The contract ``AppAgents.agent`` carries the generic ``meta`` passthrough, so a
+# meta-carrying registration goes through the plain ``tai42_app.agents`` protocol surface.
+@tai42_app.agents.agent("meta_carrier", meta={"tai42/crash_resume": True})
+class MetaCarrierAgent(Agent):
+    """Registers with generic ``meta`` so the run-tool ``FunctionTool`` carries it —
+    exercising the generic registration passthrough (naming no consumer concept)."""
+
+    tool_name = "meta_carrier"
+    tool_description = "An agent whose run tool carries generic registration meta."
+    ToolInput = EchoInput
+
+    async def run(self, **kwargs) -> str:
+        return "ok"
+
+
+class PresetSpecLike(BaseModel):
+    base_tool: str
+    fixed_kwargs: dict[str, Any] = {}
+
+
+class SubAgentSpecLike(BaseModel):
+    name: str
+    prompt: str = ""
+
+
+class InlineSkillLike(BaseModel):
+    name: str
+    content: str
+
+
+class NestedInput(BaseModel):
+    """A ``ToolInput`` carrying nested pydantic-model fields, standing in for the
+    real ``tools_agent`` / ``langchain_deep_agent`` inputs (the skeleton binds the ``Agent``
+    contract only and never imports ``tai42_agents``).
+
+    ``presets`` / ``subagents`` / ``inline_skills`` each nest a model, so
+    ``model_json_schema`` emits them as ``$defs`` refs — the shape an extension
+    branch must preserve when it composes over the synthesized run tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(description="A required scalar field.")
+    times: int = 1
+    presets: list[PresetSpecLike] | None = Field(default=None, description="Nested preset specs.")
+    subagents: list[SubAgentSpecLike] | None = None
+    inline_skills: list[InlineSkillLike] | None = None
+
+
+@tai42_app.agents.agent("nested_fields")
+class NestedFieldsAgent(Agent):
+    tool_name = "nested_fields"
+    tool_description = "Echo which nested fields were forwarded."
+    ToolInput = NestedInput
+
+    async def run(self, **kwargs) -> str:
+        return ",".join(sorted(kwargs))
+
+
+class ParkInput(BaseModel):
+    text: str = ""
+
+
+@tai42_app.agents.agent("parking")
+class ParkingAgent(Agent):
+    """A run that parks on an async ask: its ``run`` returns the INTERNAL suspended-receipt
+    dict (the shape ``Agent._drain`` yields), so a test can observe the agent tool-face convert
+    it to the ``SuspendedInteraction`` sentinel a caller recognizes by type."""
+
+    tool_name = "parking"
+    tool_description = "Park on an async ask and return the suspended receipt."
+    ToolInput = ParkInput
+
+    async def run(self, **kwargs) -> Any:
+        return {
+            "status": "suspended",
+            "interaction_ids": ["i-parked"],
+            "thread_id": "bridge:x:y",
+            "expiry_at": None,
+        }
+
+
+class NestedToolsInput(BaseModel):
+    """The tool an agent resolves for itself mid-turn, plus the arguments it invokes
+    it with."""
+
+    tool_name: str
+    arguments: dict[str, Any] = {}
+
+
+@tai42_app.agents.agent("nested_tools")
+class NestedToolsAgent(Agent):
+    tool_name = "nested_tools"
+    tool_description = "Resolve one tool by name mid-turn and invoke it."
+    ToolInput = NestedToolsInput
+
+    async def run(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
+        """Resolve ``tool_name`` from the process-global facet DURING the turn and
+        invoke it. Nothing is captured up front, so the only place a decision can reach
+        this call is the shared dispatch seam."""
+        [tool] = await tai42_app.tools.get_client_tools([tool_name])
+        return await tool.ainvoke(arguments or {})
+
+
+class SleeperInput(BaseModel):
+    """Drives ``SleeperAgent`` to sleep ``seconds`` before returning — the slow-turn
+    stand-in for the run-timeout tests."""
+
+    seconds: float = 0.0
+
+
+# Set to True only if a ``SleeperAgent`` run reaches its end; a run cancelled by the
+# turn timeout must leave it False (no orphaned turn continuing past the deadline).
+sleeper_completed = False
+
+
+@tai42_app.agents.agent("sleeper")
+class SleeperAgent(Agent):
+    tool_name = "sleeper"
+    tool_description = "Sleep, then report completion."
+    ToolInput = SleeperInput
+
+    async def run(self, seconds: float = 0.0, **kwargs) -> str:
+        global sleeper_completed
+        await asyncio.sleep(seconds)
+        sleeper_completed = True
+        return "done"
+
+
+@tai42_app.agents.agent("inner_timeout")
+class InnerTimeoutAgent(Agent):
+    """A run whose own work raises a builtin ``TimeoutError`` (standing in for an
+    inner budget abort such as the jq utility's). Under a generous turn timeout the
+    caller must receive this ORIGINAL error, never a ``TurnTimeoutError``."""
+
+    tool_name = "inner_timeout"
+    tool_description = "Raise a builtin TimeoutError from inside the turn."
+    ToolInput = SleeperInput
+
+    async def run(self, seconds: float = 0.0, **kwargs) -> str:
+        raise TimeoutError("inner budget exceeded")
+
+
+class ConfigInput(BaseModel):
+    """A ``ToolInput`` carrying a langgraph config mapping — the thread-scoping vector a
+    caller reaches the run tool with, standing in for the real ``tools_agent`` input."""
+
+    text: str
+    langgraph_config: dict[str, Any] | None = None
+
+
+@tai42_app.agents.agent("config_fields")
+class ConfigFieldsAgent(Agent):
+    tool_name = "config_fields"
+    tool_description = "Echo the thread id its config carries."
+    ToolInput = ConfigInput
+
+    async def run(self, **kwargs) -> str:
+        config = kwargs.get("langgraph_config") or {}
+        return str(config.get("configurable", {}).get("thread_id", ""))
+
+
+# Records the ``thread_id`` each ``ThreadRecorderAgent`` run actually received, so a test
+# can observe whether the synthesized run tool injected the ambient session thread (deposited
+# out-of-band) and that a caller-pinned ``thread_id`` still wins over the deposit.
+thread_recorder_seen: list[str | None] = []
+
+
+class ThreadInput(BaseModel):
+    """A ``ToolInput`` whose optional ``thread_id`` lets a caller pin the run thread
+    directly, standing in for an agent input that already carries one. The optional
+    ``langgraph_config`` stands in for the config-shaped spelling of the same pin
+    (``configurable.thread_id``), which the ambient-deposit gate must also yield to."""
+
+    text: str
+    thread_id: str | None = None
+    langgraph_config: dict | None = None
+
+
+@tai42_app.agents.agent("thread_recorder")
+class ThreadRecorderAgent(Agent):
+    tool_name = "thread_recorder"
+    tool_description = "Record the thread id the run received."
+    ToolInput = ThreadInput
+
+    async def run(self, **kwargs) -> str:
+        # ``from_tool_input`` forwards set fields only, so ``thread_id`` arrives here ONLY
+        # when the caller pinned it OR the run tool injected the ambient session thread.
+        thread_id = kwargs.get("thread_id")
+        thread_recorder_seen.append(thread_id)
+        return thread_id or ""

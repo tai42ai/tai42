@@ -1,0 +1,80 @@
+---
+title: "Standard toolbox"
+description: "The tools and extensions this package provides and the BATCH, CACHE, and PROXY extension settings."
+---
+
+The standard toolbox: five general-purpose tools and six tool extensions, each loaded
+by name into a manifest. The tool-and-extension model and the day-to-day guide stay
+central (linked below); this page is the per-item index and the extension settings.
+
+## Tools
+
+### current_time_info
+
+Returns the current time as a structured object.
+
+### generate_embeddings
+
+Generates embeddings for a single string or a list of strings.
+
+### generate_uuid
+
+Generates a random UUID (version 4).
+
+### pad_embeddings
+
+Pads each embedding vector with zeros up to a target dimension.
+
+### request
+
+Executes an HTTP request through a curl-backed session.
+
+## Extensions
+
+Each extension branches a tool into a variant; attach one through a manifest's
+`extensions` map.
+
+### batch
+
+Branches a tool into a variant that runs many instances at once.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `BATCH_DEFAULT_MAX_CONCURRENT` | `5` | Concurrency for a parallel call that names no `max_concurrent`, floored to the input size. |
+| `BATCH_MAX_BATCH_SIZE` | `100` | Hard ceiling on the params per call; an over-limit call raises loudly. |
+
+### cache
+
+Branches a tool into a variant that memoizes results by call arguments.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CACHE_MAX_ENTRIES` | `1024` | Live entries a single cache branch retains before evicting LRU. |
+
+### chain
+
+Branches a tool into a variant that transforms its output and calls a next tool.
+
+### output_schema
+
+Branches a tool into a variant that forces a configured JSON Schema as its output
+schema and validates every result against it.
+
+### prometheus_metrics
+
+Branches a tool into a variant that records a Prometheus call metric.
+
+### proxy
+
+Branches a tool into a variant that runs the wrapped tool through a proxy.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `PROXY_POOL` | empty | Proxy URLs the pool routes over. |
+| `PROXY_ALLOW_CALLER_URLS` | `false` | Whether a caller may supply its own proxy URL. |
+| `PROXY_CONNECT_TIMEOUT` | `30` | Connect timeout in seconds; must be positive. |
+
+## See also
+
+- [Tools and extensions](/concepts/tools-and-extensions) — the model.
+- [Standard toolbox](/guides/standard-toolbox) — the day-to-day guide.

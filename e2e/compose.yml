@@ -1,0 +1,607 @@
+# Local dev infrastructure ONLY. The harness never talks to Docker; it consumes
+# whatever Redis + Postgres these services (or the CI `services:` block) provide
+# and owns only logical isolation on top of them.
+#
+# Profiles (opt in with `--profile <name>`, except the always-on core):
+#   core       — always needed: a plain module-free redis:7-alpine (access
+#                control needs only hashes + counters, no modules) +
+#                postgres:16-alpine. This is the default `docker compose up -d`
+#                target.
+#   celery      — opt-in: RabbitMQ for the celery backend leg, which isolates
+#                each stack on its own AMQP vhost (`docker compose --profile
+#                celery up -d`). The arq/rq legs need nothing beyond core.
+#   agents-redis — opt-in: a module-capable Redis (RediSearch + RedisJSON) for
+#                the production-default langgraph redis checkpoint/store agents
+#                leg (`docker compose --profile agents-redis up -d`). The plain
+#                core redis lacks the modules the langgraph-redis saver/store
+#                need, so this is a SEPARATE server on its own port.
+#   storage    — opt-in: a MinIO server for the s3 storage axis
+#                (`docker compose --profile storage up -d`). Its OWN service, not
+#                the monitoring-profile `langfuse-minio` (langfuse-specific
+#                entrypoint + bucket); the axis bucket is created in fixture setup.
+#   monitoring — opt-in: the self-hosted Langfuse stack for the monitoring
+#                suite (`docker compose --profile monitoring up -d`).
+#   sandbox    — opt-in: a rootless Docker-in-Docker engine for the one
+#                docker-gated sandbox leg (`tests/sandbox_docker`), reached over
+#                its mTLS control API published on loopback (`docker compose
+#                --profile sandbox up -d`). Off on every other leg — the
+#                process-based fake sandbox_provider carries the sandbox surface.
+#
+# Every port is env-overridable so a busy host can remap without editing this
+# file.
+
+services:
+  # The core services carry no profile, so a plain `docker compose up -d` starts
+  # them — this is the always-needed default. Only the monitoring stack below is
+  # profile-gated (opt-in).
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:${TAI_E2E_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: "${TAI_E2E_PG_USER:-postgres}"
+      POSTGRES_PASSWORD: "${TAI_E2E_PG_PASSWORD:-postgres}"
+      POSTGRES_DB: "${TAI_E2E_PG_ADMIN_DB:-postgres}"
+    ports:
+      - "127.0.0.1:${TAI_E2E_PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TAI_E2E_PG_USER:-postgres}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # ---- celery profile: RabbitMQ broker ---------------------------------
+  # The celery backend leg's broker. The official image ships
+  # `loopback_users.guest = false`, lifting upstream's loopback-only restriction
+  # so the `guest` user works over the published port (a host connection arrives
+  # from the Docker bridge gateway, not loopback). The harness provisions one
+  # vhost per stack over the management API on 15672.
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    profiles: ["celery"]
+    ports:
+      - "127.0.0.1:${TAI_E2E_RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${TAI_E2E_RABBITMQ_MGMT_PORT:-15672}:15672"
+    volumes:
+      # Permit celery's transient non-exclusive control queues on RabbitMQ 4
+      # (denied by default). Mounted alongside the image's conf.d defaults.
+      - ./deploy/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  # ---- agents-redis profile: module-capable Redis ----------------------
+  # The langgraph redis checkpoint/store provider builds RediSearch indexes
+  # (FT.CREATE) and RedisJSON documents (JSON.SET) on setup, which the plain
+  # module-free `redis:7-alpine` core service rejects. `redis:8` bundles the
+  # query (RediSearch), JSON, timeseries, and bloom modules integrated into the
+  # server, so it is the module-capable image this leg needs. On its own port so
+  # it never shares the SUT's product/identity state with the core redis (the
+  # RedisJSON-elimination decision for that state stands).
+  redis-agents:
+    image: redis:8
+    profiles: ["agents-redis"]
+    ports:
+      - "127.0.0.1:${TAI_E2E_CHECKPOINT_REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # ---- storage profile: MinIO for the s3 storage axis ------------------
+  # The s3 storage-axis leg's object store. Its OWN service (NOT the
+  # monitoring-profile `langfuse-minio`, which carries a langfuse-specific
+  # entrypoint that pre-creates the `langfuse` bucket). The plain `minio server
+  # /data` command is set here because a GitHub Actions `services:` block cannot
+  # set a container command, so this leg brings MinIO up via the compose path. The
+  # axis bucket is created in fixture setup through the independent client, not
+  # here. Credentials + port are env-overridable and match the s3 variant's
+  # defaults (`TAI_E2E_S3_*`).
+  storage-minio:
+    # Served from quay; the Docker Hub repository is not publicly pullable.
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles: ["storage"]
+    command: server /data
+    ports:
+      - "127.0.0.1:${TAI_E2E_S3_PORT:-9002}:9000"
+    environment:
+      MINIO_ROOT_USER: "${TAI_E2E_S3_ACCESS_KEY:-minio}"
+      MINIO_ROOT_PASSWORD: "${TAI_E2E_S3_SECRET_KEY:-miniosecret}"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # ---- monitoring profile: self-hosted Langfuse ------------------------
+  # The six services below are Langfuse's OFFICIAL self-hosting compose set
+  # (langfuse/langfuse docker-compose.yml) — the minimum the Langfuse API
+  # supports. Images are pinned to EXACT versions (not floating majors): the
+  # monitoring leg runs on a fresh CI runner that pulls each tag, and a floating
+  # major silently drifts new env/validation requirements into the stack (e.g.
+  # cluster-mode-by-default, strict key-length checks). Pinning keeps a red
+  # monitoring run meaning "the SUT regressed", not "upstream cut a release".
+  # Bump deliberately, re-verifying the stack boots healthy end to end. Ports are
+  # disjoint from the core services; Langfuse's internal redis/postgres are never
+  # shared with the SUT's.
+  langfuse-web:
+    image: langfuse/langfuse:3.172.1
+    profiles: ["monitoring"]
+    # No healthcheck upstream, so a crash-looping web (e.g. a bad ENCRYPTION_KEY)
+    # passed `up --wait` silently. Gate readiness on the health route so a boot
+    # failure surfaces loudly at the compose step, not as a downstream test
+    # timeout. Next.js binds $HOSTNAME (the container id), not localhost.
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://$${HOSTNAME}:3000/api/public/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${TAI_E2E_LANGFUSE_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/langfuse
+      SALT: e2e-salt
+      # Quoted: 64 bare zeros are a YAML integer, so an unquoted value reaches the
+      # container as "0" and fails Langfuse's 64-hex-char (256-bit) key check.
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      NEXTAUTH_SECRET: e2e-nextauth-secret
+      NEXTAUTH_URL: http://localhost:${TAI_E2E_LANGFUSE_PORT:-3000}
+      # Single-node: this is one bare clickhouse with no keeper, so disable
+      # Langfuse's cluster mode (else migrations emit ReplicatedMergeTree ON
+      # CLUSTER and fail with "no Zookeeper configuration").
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_CONNECTION_STRING: redis://langfuse-redis:6379
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      # The AWS S3 client demands a region even against a custom minio endpoint;
+      # without it langfuse's OTEL ingestion throws "Region is missing" as an
+      # unhandled rejection and takes the web process down. Any value works with
+      # path-style addressing.
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      # Headless initialization — deterministic e2e keys, no secrets.
+      LANGFUSE_INIT_ORG_ID: e2e-org
+      LANGFUSE_INIT_PROJECT_ID: e2e-project
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-e2e0000000000000000000000000000
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-e2e0000000000000000000000000000
+      LANGFUSE_INIT_USER_EMAIL: e2e@example.com
+      LANGFUSE_INIT_USER_PASSWORD: e2e-password-123
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3.172.1
+    profiles: ["monitoring"]
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/langfuse
+      SALT: e2e-salt
+      # See langfuse-web: quoted so the key is not YAML-parsed to "0".
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      # See langfuse-web: single-node clickhouse, no keeper.
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_CONNECTION_STRING: redis://langfuse-redis:6379
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      # The AWS S3 client demands a region even against a custom minio endpoint;
+      # without it langfuse's OTEL ingestion throws "Region is missing" as an
+      # unhandled rejection and takes the web process down. Any value works with
+      # path-style addressing.
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+
+  langfuse-postgres:
+    image: postgres:16-alpine
+    profiles: ["monitoring"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: langfuse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.10.2.80
+    profiles: ["monitoring"]
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  langfuse-minio:
+    # Served from quay; the Docker Hub repository is not publicly pullable.
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles: ["monitoring"]
+    # Pre-create the event-upload bucket as a filesystem dir before minio starts,
+    # exactly as langfuse's official self-hosting compose does. Without it the
+    # LANGFUSE_S3_EVENT_UPLOAD_BUCKET (`langfuse`) never exists, so ingestion
+    # cannot persist events and no traces are ever recorded — a silent no-op.
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  langfuse-redis:
+    image: redis:7
+    profiles: ["monitoring"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # ---- sandbox profile: rootless-dind coding-session engine ------------
+  # The REAL container engine the one docker-gated sandbox leg
+  # (`tests/sandbox_docker`) runs the sandbox-docker provider against: kit
+  # conformance + the four session-isolation NEGATIVES that only a true topology
+  # can prove. Off unless `--profile sandbox`; the process-based fake
+  # `sandbox_provider` fixture carries the sandbox surface on every other leg.
+  #
+  # BYTE-FAITHFUL to the deployment reference compose's `sandbox-engine`
+  # service: the SAME pinned rootless-dind image digest, the SAME DOCKER_TLS_CERTDIR + client cert
+  # filenames/path (/certs/client → cert.pem/key.pem/ca.pem), the SAME
+  # `sandbox-ctrl` network split (the engine off the datastore network so an
+  # inner session — a container of this daemon — reaches nothing of the
+  # deployment), and the SAME inner-bridge egress firewall (RFC1918 + link-local/
+  # metadata denied, internet OPEN). Keeping it byte-faithful is what makes the
+  # four isolation negatives assert the topology that actually SHIPS, not a
+  # look-alike (the cross-stack lockstep). The firewall is
+  # INLINED into the entrypoint here (the reference bind-mounts a script file)
+  # because this e2e leg owns only this single compose file.
+  #
+  # e2e adaptations (topology-neutral): the engine additionally joins the test-only
+  # `sandbox-public` segment, whose subnet sits outside every range the firewall
+  # denies, so the egress POSITIVE has a peer the firewall treats exactly as it treats
+  # the internet (the deployment's engine holds only the control-plane network); the
+  # mTLS control API is PUBLISHED on a loopback port so the host-run SUT can dial it
+  # as SANDBOX_DOCKER_TEST_HOST, and the
+  # self-generated client certs are shared to the host through a bind mount —
+  # the CI step pre-creates that dir world-writable so the rootless daemon's
+  # mapped uid can write into it, and the entrypoint relaxes the *.pem to
+  # world-readable so the host SUT can read them for its mTLS dial. Acceptable for
+  # a throwaway loopback engine; the deployment shares certs over a named volume
+  # to in-cluster consumers instead.
+  #
+  # Engine posture — privileged CONTAINER, ROOTLESS daemon, root-installed firewall.
+  # The engine runs `docker:28-dind-rootless`: dockerd itself runs ROOTLESS (uid
+  # 1000) via rootlesskit, so inner sessions stay rootless-contained. rootlesskit
+  # must create a nested user namespace and program the inner bridge (vpnkit tap +
+  # iptables); in a container that setup needs `privileged: true` — WITHOUT it
+  # rootlesskit cannot mount sysfs or create tap0 and the daemon never boots (this
+  # is docker's own dind-rootless requirement). `privileged` makes the CONTAINER
+  # privileged; dockerd inside stays rootless.
+  #
+  # Privilege does NOT widen what an inner SESSION can reach. Session isolation from
+  # the deployment is enforced by (a) the `sandbox-ctrl` NETWORK SPLIT — this engine
+  # is OFF the datastore network — and (b) the INNER-BRIDGE EGRESS FIREWALL below,
+  # NOT by the container's privilege level. The four isolation NEGATIVES in
+  # tests/sandbox_docker prove it (incl. test_rfc1918_control_plane_blocked: a session
+  # cannot reach a genuinely-listening RFC1918 host on sandbox-ctrl, WHILE egress + DNS
+  # to a host outside the denied ranges still work).
+  #
+  # Two rootless-specific details make that firewall actually enforce here:
+  #   * ROOT INSTALL: the installer programs DOCKER-USER inside dockerd's netns via
+  #     `nsenter -n`, which needs CAP_SYS_ADMIN over the rootlesskit CHILD userns that
+  #     owns that netns — the rootless user (uid 1000) does NOT have it. So the
+  #     container ENTRYPOINT runs as ROOT (`user: "0:0"`), installs the firewall as
+  #     root, then drops the DAEMON back to rootless with `su rootless -c
+  #     dockerd-entrypoint.sh`. Only the firewall install is root; dockerd is rootless.
+  #   * PRIVATE-RANGE RULES (vpnkit-aware): the firewall DENYs the FULL private +
+  #     link-local space (10/8, 172.16/12, 192.168/16, 169.254/16) so a session
+  #     reaches NO private host — deployment infra reachable via the HOST's own
+  #     routing included (e.g. an in-VPC 10.x datastore off this engine's ENI), not
+  #     just sandbox-ctrl. But the rootless daemon's OWN egress plumbing rides private
+  #     space (`rootlesskit --net=vpnkit`: vpnkit transparently proxies inner outbound
+  #     through the docker0 bridge, and the DNS resolver is the tap0 gateway), so the
+  #     daemon's own connected subnets are ACCEPTed ABOVE the DROPs — else egress +
+  #     DNS die. Public internet stays OPEN.
+  # seccomp/apparmor stay unconfined for the nested userns + inner-bridge iptables.
+  #
+  # BOOT / userns: `privileged: true` is what lets rootlesskit create the nested user
+  # namespace. On a stock Ubuntu 24.04 runner with
+  # kernel.apparmor_restrict_unprivileged_userns=1 the privileged container boots the
+  # rootless daemon with NO sysctl change — the AppArmor unprivileged-userns gate does
+  # not apply inside a privileged container. A NON-privileged rootless-dind WOULD need
+  # the host to permit unprivileged userns (sysctl=0, or an AppArmor `userns` allowance
+  # for rootlesskit); the shipped privileged config does not. (A host with a hardened/
+  # custom AppArmor policy that additionally mediates the container's
+  # /usr/local/bin/rootlesskit path can still need that allowance — host hardening, not
+  # the norm; if you hit `[rootlesskit:parent] ... fork/exec /proc/self/exe: operation
+  # not permitted` on a privileged run, that policy is the cause.)
+  sandbox-engine:
+    # tag 28-dind-rootless, pinned by digest so the engine base cannot float
+    # across a pull — byte-identical to the reference compose's pin.
+    image: docker:28-dind-rootless@sha256:7c3e797187e43738220462658f4586572cbd3bf009f728b21e34d9c5c06ce431
+    profiles: ["sandbox"]
+    # Bring both scaffolding peers up alongside the engine so a single
+    # `up --wait sandbox-engine` stands the whole isolation topology up: the
+    # RFC1918-drop negative dials the control-plane listener (a genuinely-LISTENING
+    # private host) to prove the firewall denies it, and the egress positive dials
+    # the egress peer (a genuinely-LISTENING host outside every denied range) to
+    # prove the firewall lets it through. Test scaffolding — not deployment services.
+    depends_on:
+      sandbox-ctrl-listener:
+        condition: service_healthy
+      sandbox-egress-peer:
+        condition: service_healthy
+    # The CONTAINER is privileged so rootlesskit can create the nested userns and
+    # program the inner bridge (sysfs mount + tap0). dockerd still runs ROOTLESS
+    # inside; session isolation is network+firewall enforced (see block above),
+    # so this does not weaken the four isolation negatives.
+    privileged: true
+    # Run the ENTRYPOINT as root so the egress-firewall installer can `nsenter -n`
+    # into dockerd's rootless netns (needs CAP_SYS_ADMIN over the rootlesskit child
+    # userns). The daemon itself is dropped back to the rootless user in the
+    # entrypoint (`su rootless -c dockerd-entrypoint.sh`), so dockerd stays ROOTLESS.
+    user: "0:0"
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    environment:
+      # dind self-generates the CA + server + CLIENT certs under this dir; the
+      # client dir ($DOCKER_TLS_CERTDIR/client) holds cert.pem/key.pem/ca.pem —
+      # the three filenames the sandbox-docker provider consumes. Byte-for-byte
+      # the reference compose's path + filenames.
+      DOCKER_TLS_CERTDIR: /certs
+    # Deliberately OFF the default (datastore) network, so an inner session cannot
+    # address the e2e redis/postgres — the reference network split. `sandbox-public`
+    # is the test-only segment the egress positive needs (see sandbox-egress-peer);
+    # the published port still maps host->container regardless.
+    networks:
+      - sandbox-ctrl
+      - sandbox-public
+    ports:
+      # mTLS control API on loopback for the host SUT (SANDBOX_DOCKER_TEST_HOST).
+      - "127.0.0.1:${TAI_E2E_SANDBOX_PORT:-2376}:2376"
+    volumes:
+      # Generated client certs (cert.pem/key.pem/ca.pem) shared to the host SUT.
+      # A bind (not a named volume) so a host process can read them; the CI step
+      # pre-creates the source world-writable for the rootless daemon's uid.
+      - "${TAI_E2E_SANDBOX_CERT_DIR:-./.sandbox-certs}:/certs/client"
+    # Install the inner-bridge egress firewall as ROOT (inlined here; mirrors the
+    # reference's mounted script), relax the client certs for the host reader, then
+    # DROP the daemon back to the rootless user via `su rootless -c dockerd-entrypoint.sh`.
+    # Both helpers background themselves so the daemon starts immediately; the
+    # firewall installs its rules before the first session create can succeed
+    # (the app only dials once the daemon is up). Every shell `$` is escaped `$$` so
+    # Compose interpolation leaves it for the shell — the reason the reference keeps
+    # this in a separate mounted file.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        cat > /tmp/dind-egress-firewall.sh <<'FW'
+        #!/bin/sh
+        # dind inner-bridge egress firewall — programmed at daemon start, BEFORE
+        # the daemon accepts any session create. Installs DROP rules at the top of
+        # the DOCKER-USER chain (docker traverses it FIRST in FORWARD and never
+        # flushes it on reloads) so inner-session egress to the deployment is
+        # filtered. Runs as ROOT and enters dockerd's rootless netns with `nsenter
+        # -n` (needs CAP_SYS_ADMIN over the rootlesskit child userns — hence the
+        # root entrypoint). Errors surface LOUDLY (any failed step aborts — never a
+        # daemon whose sessions are unconfined).
+        #
+        # DENY the full private + link-local space (10/8, 172.16/12, 192.168/16,
+        # 169.254/16) so a session reaches NOTHING private — not only peers on
+        # sandbox-ctrl but any deployment infra reachable via the HOST's own routing
+        # (e.g. an in-VPC datastore at 10.x off this engine's ENI). Public internet
+        # stays OPEN. The catch: the rootless daemon's OWN egress plumbing rides
+        # private space too — with `rootlesskit --net=vpnkit`, vpnkit transparently
+        # proxies inner outbound through the docker0 bridge address, and the DNS
+        # resolver is the tap0 (vpnkit) gateway — so the daemon's own connected
+        # subnets are ACCEPTed FIRST (above the DROPs) or egress + DNS die.
+        set -eu
+        log() { echo "[dind-egress-firewall] $$*" >&2; }
+        fail() { log "FATAL: $$*"; exit 1; }
+        # Clear any marker a prior boot left in the writable layer: a restart recreates
+        # the netns (DOCKER-USER rules gone) but the file persists, and the healthcheck
+        # must gate on THIS boot's completed install, never a stale one.
+        rm -f /tmp/dind-egress-firewall.ready
+        # Full private + link-local ranges denied to inner sessions.
+        PRIVATE_CIDRS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16"
+        # Select the dockerd whose netns actually holds the DOCKER-USER chain. During
+        # rootless startup `pidof dockerd` can briefly report a transient pid that then
+        # re-execs and dies, so pick the one that is READY (chain present) — not just
+        # the first — and wait until such a pid exists.
+        i=0
+        DOCKERD_PID=""
+        while [ -z "$$DOCKERD_PID" ]; do
+          for _p in $$(pidof dockerd 2>/dev/null || true); do
+            if nsenter -t "$$_p" -n iptables -w -n -L DOCKER-USER >/dev/null 2>&1; then
+              DOCKERD_PID="$$_p"
+              break
+            fi
+          done
+          [ -n "$$DOCKERD_PID" ] && break
+          i=$$((i + 1))
+          [ "$$i" -gt 120 ] && fail "no dockerd netns with a DOCKER-USER chain within 120s"
+          sleep 1
+        done
+        in_netns() { nsenter -t "$$DOCKERD_PID" -n "$$@"; }
+        # The daemon's OWN connected subnets INSIDE its netns — the inner-session
+        # bridge (docker0) and the rootless vpnkit uplink (tap0, e.g. 192.168.65.0/24) —
+        # carry the sandbox's own egress + DNS plumbing and fall inside the private
+        # ranges denied below, so they are ACCEPTed first (above the DROPs) or egress +
+        # DNS die. The uplink is the DEFAULT ROUTE's device, and rootlesskit finishes
+        # configuring it AFTER dockerd first answers, so a single snapshot taken the
+        # instant the DOCKER-USER chain appears can catch docker0 alone and then DROP
+        # the session's own resolver on the still-unconfigured uplink. WAIT until the
+        # default-route uplink's on-link subnet exists, THEN take the allow-set (both
+        # subnets), so the ACCEPT for the resolver's subnet is never missed. Derived
+        # from the routes so the set tracks whatever docker0/vpnkit actually use.
+        i=0
+        ALLOW_CIDRS=""
+        while : ; do
+          UPLINK_DEV="$$(in_netns ip -o route show default 2>/dev/null | awk '{for (k=1;k<NF;k++) if ($$k=="dev") {print $$(k+1); exit}}')"
+          if [ -n "$$UPLINK_DEV" ] && in_netns ip -o route show scope link dev "$$UPLINK_DEV" 2>/dev/null | grep -qE '^[0-9]+\.'; then
+            ALLOW_CIDRS="$$(in_netns ip -o route show scope link 2>/dev/null | awk '{print $$1}' | grep -E '^[0-9]+\.' || true)"
+            break
+          fi
+          i=$$((i + 1))
+          [ "$$i" -gt 120 ] && fail "the daemon's default-route uplink subnet never appeared within 120s"
+          sleep 1
+        done
+        [ -n "$$ALLOW_CIDRS" ] || fail "could not resolve the daemon's own subnets to allow"
+        log "dockerd pid=$$DOCKERD_PID; allow(own) -> $$ALLOW_CIDRS; deny(private) -> $$PRIVATE_CIDRS"
+        # Insert at an incrementing position so rules land ABOVE docker's default
+        # RETURN in the intended order: the ACCEPTs first, then the DROPs.
+        POS=1
+        add_rule() {  # $1=ACCEPT|DROP  $2=cidr
+          if in_netns iptables -w -C DOCKER-USER -d "$$2" -j "$$1" 2>/dev/null; then
+            log "already set $$1 -> $$2"
+            return 0
+          fi
+          in_netns iptables -w -I DOCKER-USER "$$POS" -d "$$2" -j "$$1" \
+            || fail "could not install $$1 rule for $$2"
+          POS=$$((POS + 1))
+          log "$$1 egress -> $$2"
+        }
+        for cidr in $$ALLOW_CIDRS; do add_rule ACCEPT "$$cidr"; done
+        for cidr in $$PRIVATE_CIDRS; do add_rule DROP "$$cidr"; done
+        log "egress firewall active: private ranges + metadata denied (own bridge/uplink allowed), internet OPEN"
+        # Signal the full ruleset is in place. The healthcheck gates the tests on this
+        # marker, so no session is created until BOTH the own-subnet ACCEPTs and the
+        # private-range DROPs are installed — never against a half-built chain.
+        : > /tmp/dind-egress-firewall.ready
+        FW
+        chmod +x /tmp/dind-egress-firewall.sh
+        /tmp/dind-egress-firewall.sh &
+        ( until [ -f /certs/client/key.pem ]; do sleep 1; done; chmod 0644 /certs/client/*.pem ) &
+        # Drop the DAEMON to the rootless user; the firewall above stays root. `exec`
+        # inside `su` so signals reach dockerd. DOCKER_TLS_CERTDIR is re-exported
+        # because `su` resets a minimal environment.
+        exec su rootless -c 'DOCKER_TLS_CERTDIR=/certs exec dockerd-entrypoint.sh'
+      - sh
+    # Ready when the daemon answers over its TLS socket using the client certs it
+    # generated into /certs/client AND the inner-bridge egress firewall has installed
+    # its full ruleset (the ready marker the entrypoint writes last). Gating readiness
+    # on the marker keeps a session from being created against a half-built chain.
+    # Byte-identical probe to the reference compose. Generous start_period covers
+    # first-boot cert generation.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "docker --tlsverify --tlscacert /certs/client/ca.pem --tlscert /certs/client/cert.pem --tlskey /certs/client/key.pem -H tcp://127.0.0.1:2376 info >/dev/null 2>&1 && test -f /tmp/dind-egress-firewall.ready"
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  # A genuinely-LISTENING RFC1918 host on sandbox-ctrl, standing in for a deployment
+  # control-plane peer (serve/backend/datastore). The session-isolation RFC1918
+  # negative dials it via SANDBOX_DOCKER_BLOCKED_ADDR to prove the egress firewall
+  # DROPs it — a DROP is distinguishable from a dead route ONLY because this host
+  # actually accepts connections. It sits on sandbox-ctrl (reachable from the engine,
+  # so the drop is meaningful) at a STATIC IP the CI env can name; a session, being an
+  # inner dind container behind the firewall, must never reach it. E2E test
+  # scaffolding — NOT a deployment service.
+  sandbox-ctrl-listener:
+    image: alpine:3.20
+    profiles: ["sandbox"]
+    command:
+      - sh
+      - -c
+      - 'while true; do printf "HTTP/1.0 200 OK\r\n\r\nLISTENING\n" | nc -l -p 9000; done'
+    networks:
+      sandbox-ctrl:
+        ipv4_address: 10.111.0.9
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -lnt 2>/dev/null | grep -q ':9000' || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # The peer the egress POSITIVE reaches: a genuinely-LISTENING host on
+  # `sandbox-public`, whose 192.0.2.0/24 (RFC 5737 documentation range) subnet is
+  # outside every range the inner-bridge firewall denies and outside the daemon's own
+  # subnets it allows, so a session's dial to it takes the identical
+  # FORWARD/DOCKER-USER path an internet dial takes and is decided by the same rule.
+  # That makes the positive a statement about the egress POLICY alone — no third
+  # party has to be up for it to hold. The positive dials it by its STATIC address
+  # (the DNS half of that leg is a TCP connect to the session's own resolver, not a
+  # name lookup of this peer). E2E test scaffolding — NOT a deployment service.
+  sandbox-egress-peer:
+    image: alpine:3.20
+    profiles: ["sandbox"]
+    command:
+      - sh
+      - -c
+      - 'while true; do printf "HTTP/1.0 200 OK\r\n\r\nEGRESS-PEER\n" | nc -l -p 9000; done'
+    networks:
+      sandbox-public:
+        ipv4_address: 192.0.2.9
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -lnt 2>/dev/null | grep -q ':9000' || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+# The sandbox control network, declared so the sandbox-engine can sit OFF the
+# implicit `default` network the datastore services ride. Only the sandbox
+# profile uses it; every other service still joins `default` automatically. A
+# STATIC subnet so the control-plane listener above can take a fixed IP the RFC1918
+# negative names (SANDBOX_DOCKER_BLOCKED_ADDR); the firewall derives the deny CIDR
+# from the engine's own interface, so it tracks whatever subnet is set here.
+#
+# `sandbox-public` carries the egress peer. Its subnet is the RFC 5737
+# documentation range: not private, so the firewall never denies it, and not
+# routable anywhere real, so it can never shadow a host a session legitimately
+# needs. A STATIC subnet again, so the peer takes a fixed IP the egress positive
+# names.
+networks:
+  sandbox-ctrl:
+    ipam:
+      config:
+        - subnet: 10.111.0.0/24
+  sandbox-public:
+    ipam:
+      config:
+        - subnet: 192.0.2.0/24

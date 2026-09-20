@@ -1,0 +1,80 @@
+spec_version: 1
+namespace: tai42
+name: channel-web
+package: tai42-channel-web
+version: 5.0.10
+description: >-
+  Public web chat channel plugin for the TAI ecosystem — hosts a visitor chat
+  page, delivers ask_user questions into it, and bridges the reply back.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/channel-web
+contract: '>=13.2,<14'
+categories:
+  - channels
+tags:
+  - channel
+  - web
+  - chat
+  - public
+  - visitor
+  - ask-user
+  - hitl
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: channel
+    name: web
+    module: tai42_channel_web.register
+    description: >-
+      Deliver ask_user questions to a visitor in the public chat page and bridge
+      the reply back.
+    routes:
+      base: channels/web
+      paths:
+        - path: /chat/{identity}
+          methods:
+            - GET
+          public: true
+        - path: /assets/{file}
+          methods:
+            - GET
+          public: true
+        - path: /messages
+          methods:
+            - POST
+          public: true
+        - path: /stream
+          methods:
+            - GET
+          public: true
+        - path: /questions/{interaction_id}/answer
+          methods:
+            - POST
+          public: true
+        - path: /forms/{token}
+          methods:
+            - POST
+          public: true
+        - path: /session/rotate
+          methods:
+            - POST
+          public: true
+        - path: /gates/{identity}
+          methods:
+            - GET
+          public: false
+        - path: /gates/{identity}
+          methods:
+            - PUT
+          public: false
+        - path: /gates/{identity}/codes
+          methods:
+            - POST
+          public: false
+        - path: /gates/{identity}/codes/{code_id}
+          methods:
+            - DELETE
+          public: false

@@ -1,0 +1,188 @@
+"""The docker session-isolation negatives against the REAL network topology.
+
+These are the e2e teeth behind the ENFORCED topology the deployment ships (the
+rootless-dind engine, the ``sandbox-ctrl`` network split, the egress firewall denying
+RFC1918 + cloud metadata, and the mTLS control API). They are the ONLY legs that
+exercise the real network topology; every other sandbox leg rides the process-based
+fake. From inside a live ``egress`` session (an ``exec`` running a busybox probe) they
+assert:
+
+1. the dind control API is UNUSABLE from a session — reachable at the inner-bridge
+   gateway on :2376 only across the daemon's INPUT chain, where mTLS (no client cert)
+   is the backstop, so a plaintext dial never gets a Docker version payload; and any
+   sandbox-ctrl / RFC1918 control-plane or compose-service address is DROPPED by the
+   egress firewall on the FORWARD/POSTROUTING path;
+2. cloud metadata (``169.254.169.254``) is BLOCKED;
+3. egress to a destination the firewall does NOT deny SUCCEEDS, and the session's own
+   DNS resolver — a host inside the private range the firewall DROPs — stays reachable
+   because the firewall ACCEPTs the daemon's own subnets ABOVE those DROPs (egress
+   default open, DNS not collateral-blocked). Both are proved with TCP connects, so a
+   lost packet is retransmitted rather than failing the leg, and the only thing the
+   leg can fail on is the egress policy;
+4. the session carries NO engine credential and mounts ONLY its own ``/workspace``, and
+   two sessions are workspace-isolated from each other.
+
+Docker-gated (the parent conftest keeps the module out of collection unless
+``TAI_E2E_SANDBOX_DOCKER=1``) and skipped LOUDLY when ``SANDBOX_DOCKER_TEST_HOST`` names
+no engine. A topology-specific coordinate that the harness does not expose skips its own
+leg loudly rather than passing vacuously.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import AsyncIterator
+
+import pytest
+
+from ._support import (
+    DockerSandbox,
+    ManagedSandboxSession,
+    default_gateway,
+    egress_spec,
+    http_over_tcp,
+    open_sandbox,
+    requires_engine,
+    session_resolver,
+    sh,
+    tcp_dials,
+)
+
+pytestmark = requires_engine
+
+# The cloud-metadata endpoint is a universal constant (link-local), so its block is
+# asserted unconditionally. The reachable egress peer and the RFC1918 control-plane
+# address the firewall must DROP are deployment coordinates, and BOTH are hosts that
+# genuinely LISTEN, so a DROP is distinguishable from a dead route and a pass from a
+# vacuous one: the egress peer is the harness's own `sandbox-egress-peer` service
+# (its static address and port are the defaults here), and the blocked address is
+# supplied by the harness or its leg skips loudly.
+_METADATA_HOST = "169.254.169.254"
+_METADATA_PORT = 80
+
+_EGRESS_PEER_ADDR = os.environ.get("SANDBOX_DOCKER_EGRESS_PEER_ADDR", "192.0.2.9")
+_EGRESS_PEER_PORT = int(os.environ.get("SANDBOX_DOCKER_EGRESS_PEER_PORT", "9000"))
+
+# DNS listens here on every resolver; the session reaching its resolver on this port
+# is the egress firewall's own-subnet ACCEPT (above its private-range DROPs) in force.
+_DNS_PORT = 53
+
+_CONTROL_API_PORT = int(os.environ.get("SANDBOX_DOCKER_CONTROL_API_PORT", "2376"))
+_BLOCKED_ADDR = os.environ.get("SANDBOX_DOCKER_BLOCKED_ADDR")
+
+
+@pytest.fixture
+async def sandbox() -> AsyncIterator[DockerSandbox]:
+    async with open_sandbox() as live:
+        yield live
+
+
+@pytest.fixture
+async def egress_session(sandbox: DockerSandbox) -> ManagedSandboxSession:
+    # The session is torn down by the sandbox fixture's ledger sweep on exit.
+    return await sandbox.create_session(egress_spec(workspace_key="iso-egress"))
+
+
+async def test_egress_open(egress_session: ManagedSandboxSession) -> None:
+    """The egress default is OPEN, proved with deterministic TCP connects so what this
+    leg can fail on is the egress policy and nothing else:
+
+    * the session reaches its OWN DNS resolver — a host inside the private range the
+      firewall DROPs, reachable only because the firewall ACCEPTs the daemon's own
+      subnets ABOVE those DROPs, so DNS egress is not collateral-blocked; and
+    * the session opens a connection to the harness egress peer, a genuinely-listening
+      host outside every denied range that sits where the internet sits relative to
+      the firewall's rules.
+
+    Both are TCP, so a lost packet is retransmitted by the kernel instead of failing
+    the leg: a firewall that dropped either destination fails every attempt, while a
+    transient packet loss fails none. (An in-session name lookup would ride a
+    best-effort UDP path — the resolver's answer, not the egress policy — and cannot
+    be the signal here.)"""
+    resolver = await session_resolver(egress_session)
+    assert await tcp_dials(egress_session, resolver, _DNS_PORT), (
+        f"the egress session could not reach its own resolver {resolver}:{_DNS_PORT}: the egress "
+        "firewall's own-subnet ACCEPT is not letting DNS egress through above its private-range DROPs"
+    )
+    assert await tcp_dials(egress_session, _EGRESS_PEER_ADDR, _EGRESS_PEER_PORT), (
+        f"the egress session could not reach {_EGRESS_PEER_ADDR}:{_EGRESS_PEER_PORT}: egress is not open"
+    )
+
+
+async def test_metadata_endpoint_blocked(egress_session: ManagedSandboxSession) -> None:
+    """The cloud metadata endpoint is BLOCKED by the egress firewall — a session can
+    never reach the instance credential service."""
+    assert not await tcp_dials(egress_session, _METADATA_HOST, _METADATA_PORT), (
+        f"the session reached the cloud metadata endpoint {_METADATA_HOST}:{_METADATA_PORT}: "
+        "the egress firewall is not denying it"
+    )
+
+
+async def test_control_api_requires_mtls(egress_session: ManagedSandboxSession) -> None:
+    """The dind control API is reachable from a session only at the inner-bridge
+    gateway on :2376, across the daemon's INPUT chain (NOT the FORWARD/POSTROUTING
+    chains the egress-firewall drops sit on). There the mTLS client identity is the
+    ONLY thing between a session and the engine: a plaintext dial, lacking a client
+    cert, never gets a Docker version payload back."""
+    gateway = await default_gateway(egress_session)
+    response = await http_over_tcp(egress_session, gateway, _CONTROL_API_PORT, "/version")
+    assert "ApiVersion" not in response, (
+        f"a plaintext request to the control API at {gateway}:{_CONTROL_API_PORT} returned a Docker "
+        f"version payload — the mTLS backstop is not in force: {response!r}"
+    )
+
+
+@pytest.mark.skipif(
+    not _BLOCKED_ADDR,
+    reason=(
+        "SANDBOX_DOCKER_BLOCKED_ADDR is unset: the RFC1918 control-plane / compose-service "
+        "drop leg needs a genuinely-listening private address the topology's egress firewall "
+        "must DROP (so the block is distinguishable from a dead route). The harness supplies it; "
+        "without it this leg skips rather than asserting vacuously."
+    ),
+)
+async def test_rfc1918_control_plane_blocked(egress_session: ManagedSandboxSession) -> None:
+    """A sandbox-ctrl / RFC1918 control-plane or compose-service address (serve,
+    backend, datastores) is DROPPED by the egress firewall on the FORWARD/POSTROUTING
+    path — a session is an inner dind container OFF the compose network and cannot
+    reach any of it, even a host that is actively listening."""
+    assert _BLOCKED_ADDR is not None  # guarded by the skipif
+    host, _, port = _BLOCKED_ADDR.rpartition(":")
+    assert host, f"SANDBOX_DOCKER_BLOCKED_ADDR must be host:port, got {_BLOCKED_ADDR!r}"
+    assert port, f"SANDBOX_DOCKER_BLOCKED_ADDR must be host:port, got {_BLOCKED_ADDR!r}"
+    assert not await tcp_dials(egress_session, host, int(port)), (
+        f"the session reached the private control-plane address {_BLOCKED_ADDR}: the egress "
+        "firewall is not dropping the FORWARD/POSTROUTING path off the sandbox network"
+    )
+
+
+async def test_session_has_no_engine_credentials(egress_session: ManagedSandboxSession) -> None:
+    """The session mounts ONLY its own ``/workspace`` and holds NO engine credential:
+    the mTLS client identity is absent, the engine socket is absent, and the workspace
+    is the one writable mount — so even reaching the control API's TCP endpoint yields
+    nothing to authenticate with."""
+    assert await sh(egress_session, "test -e /certs/client/key.pem && echo present || echo absent") == "absent", (
+        "the session filesystem carries the engine's mTLS client identity under /certs/client"
+    )
+    assert await sh(egress_session, "test -S /var/run/docker.sock && echo present || echo absent") == "absent", (
+        "the session has the engine socket mounted at /var/run/docker.sock"
+    )
+    # The workspace is the session's own writable root.
+    await egress_session.put_file("iso-probe.txt", b"workspace-writable")
+    assert await egress_session.get_file("iso-probe.txt") == b"workspace-writable"
+
+
+async def test_cross_session_workspace_isolation(sandbox: DockerSandbox) -> None:
+    """Two sessions are workspace-isolated: a file written in one session's
+    ``/workspace`` is not visible in another's — each ephemeral session owns a
+    distinct volume, never a shared mount."""
+    first = await sandbox.create_session(egress_spec(workspace_key="iso-cross-a"))
+    second = await sandbox.create_session(egress_spec(workspace_key="iso-cross-b"))
+
+    await first.put_file("secret.txt", b"first-only")
+    assert first.workspace_path == second.workspace_path, (
+        "both sessions expose the same workspace_path root, so a leak would be a mount, not a name"
+    )
+    assert await sh(second, f"test -e {second.workspace_path}/secret.txt && echo present || echo absent") == "absent", (
+        "a file written in one session's workspace was visible in another's — the sessions share a mount"
+    )

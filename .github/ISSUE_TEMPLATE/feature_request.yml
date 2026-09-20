@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose an addition or change to a tai42 package
+labels: ["enhancement"]
+body:
+  - type: input
+    id: package
+    attributes:
+      label: Package / area
+      description: Which package or area does this concern (e.g. tai42-agents, plugins/storage-s3, e2e)?
+      placeholder: "tai42-agents"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What should be added or changed, and what problem does it solve?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      description: The version you are using, if relevant.
+      placeholder: "0.3.0"
+    validations:
+      required: false

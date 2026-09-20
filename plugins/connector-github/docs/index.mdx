@@ -1,0 +1,116 @@
+---
+title: "GitHub connector"
+description: "Set up the GitHub App, toolsets, and credentials for the GitHub MCP connector."
+---
+
+Registers the `github` connector: one OAuth connection per alias against GitHub's
+hosted MCP server at `https://api.githubcopilot.com/mcp/`. The plugin is pure
+descriptor data and ships no package; each sub-service selects one GitHub MCP
+**toolset** through the `X-MCP-Toolsets` header. The runtime's connector engine
+runs the OAuth flow, seals the tokens, and reaches the MCP server over HTTP.
+
+## Install
+
+Install the descriptor into the running server with the CLI:
+
+```bash
+tai plugins install tai42/connector-github \
+  --env CONNECTORS_GITHUB_CLIENT_ID=... \
+  --secret CONNECTORS_GITHUB_CLIENT_SECRET
+```
+
+Or add the provider by hand as a manifest `connectors:` entry (each sub-service is
+one toolset):
+
+```yaml manifest.yml
+connectors:
+  - id: github
+    display_name: GitHub
+    description: Connect GitHub over GitHub's hosted MCP server toolsets.
+    icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-github/icon.png
+    kind: oauth
+    origin: system
+    category: dev-tools
+    oauth:
+      authorize: https://github.com/login/oauth/authorize
+      token: https://github.com/login/oauth/access_token
+      revoke: null
+    client_id_env: CONNECTORS_GITHUB_CLIENT_ID
+    client_secret_env: CONNECTORS_GITHUB_CLIENT_SECRET
+    sub_services:
+      repos:
+        id: repos
+        display_name: Repos
+        description: Repository contents, branches, commits, and file operations.
+        scopes:
+          - repo
+        mcp_server:
+          type: http
+          url: https://api.githubcopilot.com/mcp/
+          extra_headers:
+            X-MCP-Toolsets: "repos"
+      # ...one entry per toolset; see tai-plugin.yml for the full set.
+```
+
+## Register a GitHub App
+
+Register a **GitHub App** (not a plain OAuth App) and turn ON **"Expire user
+authorization tokens"**. With expiry enabled the token response carries a
+`refresh_token` and `expires_in`, which the platform requires on Connect. A plain
+OAuth App issues no refresh token and will fail Connect loudly.
+
+- authorize: `https://github.com/login/oauth/authorize`
+- token: `https://github.com/login/oauth/access_token`
+
+For a GitHub App the effective grant is the App's configured **permissions** (the
+`scope` query param is ignored). Grant the permissions the toolsets you enable
+need — Contents and Metadata (repos), Issues, Pull requests, Actions, Discussions,
+Code scanning alerts, Secret scanning alerts, Dependabot alerts, and the
+organization/member read permissions.
+
+Add this exact callback URL, where `{origin}` is your deployment's public origin
+(or `CONNECTORS_OAUTH_BRIDGE_URL` when you run a shared bridge):
+
+```
+{origin}/oauth-bridge.html
+```
+
+Then set the client credentials on the API process:
+
+```bash
+CONNECTORS_GITHUB_CLIENT_ID=...
+CONNECTORS_GITHUB_CLIENT_SECRET=...
+```
+
+The engine-wide `CONNECTORS_*` settings — the key-encryption key
+(`CONNECTORS_KEK`), the state HMAC key (`CONNECTORS_STATE_HMAC_KEY`), and the
+redirect-URI allowlist (or `CONNECTORS_OAUTH_BRIDGE_URL`) — are shared by every
+connector and are described in [Connectors](/concepts/connectors). The origin you
+registered with GitHub must appear in the redirect-URI allowlist, and it must be
+https for anything but a local host.
+
+## Toolsets and scopes
+
+Each sub-service is one GitHub MCP toolset, selected by the `X-MCP-Toolsets`
+header. The scope list names the OAuth-App scope each toolset needs; for a GitHub
+App map each to the equivalent App permission.
+
+| Toolset | Scopes |
+| --- | --- |
+| `repos` | `repo` |
+| `issues` | `repo` |
+| `pull_requests` | `repo` |
+| `actions` | `repo`, `workflow` |
+| `discussions` | `repo`, `read:discussion` |
+| `code_security` | `repo`, `security_events` |
+| `secret_protection` | `repo`, `security_events` |
+| `dependabot` | `repo` |
+| `notifications` | `notifications` |
+| `orgs` | `read:org` |
+| `users` | `read:user` |
+| `gists` | `gist` |
+
+## See also
+
+- [Connectors](/concepts/connectors) — the model, the token lifecycle, and the shared engine settings.
+- [Connect an OAuth provider](/guides/connect-an-oauth-provider) — the end-to-end walkthrough.

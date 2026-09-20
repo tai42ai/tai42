@@ -1,0 +1,372 @@
+"""The Starlette authentication backend that verifies a request's credential and authorizes its policy."""
+
+import logging
+import time
+from dataclasses import dataclass
+from typing import Any
+
+from starlette.authentication import AuthCredentials, AuthenticationBackend, AuthenticationError, UnauthenticatedUser
+from tai42_contract.access_control import OWNER_USER_ID_CLAIM
+from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
+
+# The auth gate renders a policy's jq condition through the live template
+# manager via this interface.
+from tai42_contract.app import tai42_app
+
+from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
+from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
+from tai42_skeleton.access_control.role_gate import DenialCause
+from tai42_skeleton.access_control.role_grants import role_level_decision
+from tai42_skeleton.access_control.settings import AccessControlSettings
+from tai42_skeleton.access_control.user import TaiUser, effective_scopes, is_admin_policy
+from tai42_skeleton.access_control.verifier import AccessControlVerifier, is_always_public_prefix
+from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, reload_gate
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _AuthorizedPolicy:
+    """The principal's policy resolved for a request.
+
+    Carries the caller's policy, the owner's policy (for an owned key, else ``None``), the fresh live
+    context, and the effective owner-attenuated scopes the request is enforced and finalized with.
+    """
+
+    policy: AccessPolicy
+    owner_policy: AccessPolicy | None
+    dynamic_context: dict[str, Any]
+    resolved_scopes: list[str]
+
+
+def extract_credential_candidates(conn) -> list[str]:
+    """Every presented credential candidate in the backend's priority order.
+
+    ``Authorization`` Bearer (or a raw ``Authorization`` value with no scheme) first, then ``X-Api-Key``.
+    Returns the FULL list, not the first match — the logout dispatcher fans out over all of them so a stale
+    value in one header cannot hide a live session in the other. Any non-bearer scheme (Basic, Digest, …)
+    is never a candidate.
+    """
+    candidates: list[str] = []
+
+    auth_header = conn.headers.get("Authorization")
+    if auth_header:
+        scheme, _, token = auth_header.partition(" ")
+        if not token:
+            # No scheme at all — the whole header is a raw credential.
+            candidates.append(scheme)
+        elif scheme.lower() == "bearer":
+            token = token.strip()
+            if token:
+                candidates.append(token)
+
+    api_key = conn.headers.get("X-Api-Key")
+    if api_key:
+        candidates.append(api_key)
+
+    return candidates
+
+
+class AuthorizationError(AuthenticationError):
+    """An already-authenticated caller is denied access.
+
+    Either the policy condition rejected them or the policy decision could not be completed.
+
+    It subclasses ``AuthenticationError`` so Starlette's ``AuthenticationMiddleware``
+    still routes it through ``on_error``, but the distinct type lets the error
+    handler render it as 403 (authenticated but forbidden) rather than 401.
+
+    ``cause`` is the INTERNAL denial cause (a ``DenialCause``) for debugging/logging —
+    it never reaches the client body (the external response stays a generic 403 that
+    leaks nothing), so a fenced-route denial and a per-tag level-miss are internally
+    distinguishable while the wire response is unchanged.
+    """
+
+    def __init__(self, *args: object, cause: DenialCause | None = None) -> None:
+        """Store the internal ``cause`` (a :class:`DenialCause`) alongside the base error args."""
+        super().__init__(*args)
+        self.cause = cause
+
+
+class IdentityProviderUnavailableError(Exception):
+    """No identity-provider factory resolved for a configured provider name — the registry held none.
+
+    Distinct from an invalid credential (a resolved provider returning no identity): only THIS class is
+    treated as a reload-window transient when the reload gate is held; a bad key stays a 401 in every case.
+    """
+
+
+class ReloadInProgressError(AuthenticationError):
+    """Authentication could not resolve its providers because a reload holds the gate.
+
+    The reload cleared the identity registry (its reset->reimport window).
+    Subclasses ``AuthenticationError`` so ``AuthenticationMiddleware`` still routes it
+    through ``on_error``, where the handler renders the shared retriable ``reloading``
+    envelope (HTTP 503) instead of a spurious 401 — the run surface's contract, now
+    honored on the auth path that runs before it.
+    """
+
+
+class AccessControlAuthBackend(AuthenticationBackend):
+    """Starlette auth backend: verifies a request's credential and resolves its authorized policy."""
+
+    def __init__(self, verifier: AccessControlVerifier, settings: AccessControlSettings):
+        """Bind the credential ``verifier`` and access-control ``settings``, building the policy enforcer."""
+        self.verifier = verifier
+        self.settings = settings
+        self.enforcer = PolicyEnforcer(settings)
+
+    async def _get_access_token(self, conn):
+        candidates = extract_credential_candidates(conn)
+
+        # Case A: No credentials provided at all -> Return None (Handled as Unauthenticated by caller)
+        if not candidates:
+            return None
+
+        # Case B: Credentials provided -> Try to verify them in order
+        for token in candidates:
+            try:
+                access_token = await self.verifier.verify_token(token)
+                if access_token:
+                    return access_token
+            except IdentityProviderUnavailableError as e:
+                # Provider resolution found no provider in the registry. A reload
+                # clears that registry before re-importing the plugin that
+                # re-registers, so a request whose FIRST verify lands in that
+                # reset->reimport window gets the retriable "reloading" answer the run
+                # surface already gives — never a spurious 401. Only THIS precise class
+                # gets the gate check; outside a reload a missing provider is a real
+                # fault and fails closed exactly like any verification error below.
+                if reload_gate.locked:
+                    raise ReloadInProgressError(REJECT_MESSAGE) from e
+                logger.exception(
+                    "access_control: identity provider unavailable with no reload in progress; "
+                    "treating candidate as invalid"
+                )
+                continue
+            except Exception:
+                # Fail-closed: a verification error never grants access. Treat
+                # this candidate as invalid and try the next; if every candidate
+                # is exhausted the loop falls through to the raise below (deny),
+                # so an error here can only ever lead to denial, never to allow.
+                logger.exception("access_control: token verification errored; treating candidate as invalid")
+                continue
+
+        # Case C: Credentials were provided, but NONE were valid -> deny loudly.
+        raise AuthenticationError("Invalid API key")
+
+    def _is_always_public_path(self, canonical: str | None) -> bool:
+        """Whether the request's ``canonical`` path is the pre-auth login surface.
+
+        Asked of the ONE definition of that family over the SAME canonical form the resource guard
+        resolves on.
+        A malformed path (``canonical is None``) is NOT this surface: it falls through to
+        the credential path and is denied downstream, never admitted unauthenticated on a
+        shape the guard itself refuses to reason about.
+        """
+        if canonical is None:
+            return False
+        return is_always_public_prefix(canonical, self.settings)
+
+    async def authenticate(self, conn):
+        """Resolve the connection's credential to ``(AuthCredentials, user)``, or deny with a typed error."""
+        # The canonical request path, from the RAW target so a record ``{key}``'s encoded
+        # slash stays ONE segment — the SAME form the router and the resource guard reason
+        # on. A malformed target has no canonical form (``None``): not the login surface,
+        # and denied below if it reaches the authenticated path.
+        try:
+            canonical_path = request_canonical_path(conn.scope)
+        except MalformedPathError:
+            logger.warning(
+                "access_control: request path is malformed (NUL/control/backslash or non-ASCII) — "
+                "not admitting it as the pre-auth login surface"
+            )
+            canonical_path = None
+
+        # 0. Public login surface: ignore any presented credential outright. Identity is
+        # never needed here, and this middleware runs BEFORE the resource guard's public
+        # short-circuit — so verifying a stale ``tai-sess-``/``sk-`` token would 401 the
+        # recovery path this namespace exists for. No verification, no provider I/O.
+        if self._is_always_public_path(canonical_path):
+            return AuthCredentials(["unauthenticated"]), UnauthenticatedUser()
+
+        # 1. Resolve Identity
+        # This will either return a token, return None (participant), or raise AuthenticationError (bad token)
+        access_token = await self._get_access_token(conn)
+
+        if not access_token:
+            return AuthCredentials(["unauthenticated"]), UnauthenticatedUser()
+
+        user_id = access_token.client_id
+
+        # An authenticated request whose path has no canonical form is denied fail-closed:
+        # every downstream term (jq fences, per-tag level) reasons on the canonical path,
+        # so a shape the guard refuses to canonicalize can never be authorized.
+        if canonical_path is None:
+            logger.warning("access_control: denied principal %s — malformed request path", user_id)
+            raise AuthorizationError("Access Denied")
+
+        authorized = await self._resolve_authorized_policy(access_token, user_id)
+
+        await self._enforce_conditions(
+            conn,
+            user_id,
+            access_token,
+            authorized.policy,
+            authorized.owner_policy,
+            authorized.dynamic_context,
+            authorized.resolved_scopes,
+        )
+
+        await self._enforce_tag_level(
+            authorized.policy, authorized.owner_policy, canonical_path, conn.scope.get("method"), user_id
+        )
+
+        # 6. Finalize with the effective scopes, stamping the admin discriminator so the
+        # resource guard can admit a super-admin to a not-yet-configured route. Admin is
+        # computed on the EFFECTIVE (owner-attenuated) policy — the key's scopes capped by
+        # the owner's and both conditions ``None`` — the SAME predicate the projection,
+        # key management, and the fence exemption share, so the guard's verdict is
+        # byte-identical and an owned condition-free ``["*"]`` key fails CLOSED (it inherits
+        # its owner's jq base through the owner's condition).
+        access_token.scopes = authorized.resolved_scopes
+        return AuthCredentials(scopes=authorized.resolved_scopes), TaiUser(
+            access_token, is_admin=is_admin_policy(authorized.policy, authorized.owner_policy)
+        )
+
+    async def _resolve_authorized_policy(self, access_token, user_id: str) -> _AuthorizedPolicy:
+        # 2 & 3. Fetch Policy (Cached) and Live Context (Fresh)
+        # A backend error here (redis down, etc.) must fail closed as a clean
+        # deny, not leak out as a raw 500: wrap it into AuthenticationError so the
+        # AuthenticationMiddleware's on_error handler renders a 401/403.
+        try:
+            policy, dynamic_context = await self.enforcer.get_auth_data(user_id)
+
+            # A credential that verifies against a principal the policy store no longer
+            # knows (the residue mid-revoke). Denied here so "authenticated" can never
+            # mean "has no policy" — a door gated on nothing but an authenticated
+            # principal would otherwise admit a revoked key.
+            if policy_is_empty(policy):
+                logger.warning("access_control: denied principal %s — no policy", user_id)
+                raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
+
+            # Disabled principal (direct): a disabled account user's own session/key is
+            # denied here — defense in depth beside the owned-key owner-disable check.
+            if policy.policy_data.get("disabled") is True:
+                logger.warning("access_control: denied disabled principal %s", user_id)
+                raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
+
+            # Owned-key attenuation: a credential whose claims carry an owner is
+            # capped by the owner's CURRENT policy at REQUEST time, so the cap holds over
+            # time rather than freezing at mint. A missing/empty/disabled owner denies.
+            owner = access_token.claims.get(OWNER_USER_ID_CLAIM)
+            owner_policy = None
+            resolved_scopes = policy.scopes
+            if owner is not None:
+                owner_policy = await self.enforcer.get_policy(owner)
+                if owner_policy.policy_data.get("disabled") is True:
+                    logger.warning("access_control: denied owned key %s — owner %s is disabled", user_id, owner)
+                    raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
+                if policy_is_empty(owner_policy):
+                    logger.warning("access_control: denied owned key %s — owner %s has no policy", user_id, owner)
+                    raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
+                resolved_scopes = effective_scopes(policy.scopes, owner_policy.scopes)
+        except AuthorizationError:
+            raise
+        except Exception as e:
+            # Log the underlying failure (redis host:port, etc.) server-side, but
+            # deny the caller with a generic message that leaks no internal detail.
+            logger.exception("access_control: policy/context fetch failed for user %s", user_id)
+            raise AuthorizationError("Access Denied") from e
+
+        return _AuthorizedPolicy(
+            policy=policy,
+            owner_policy=owner_policy,
+            dynamic_context=dynamic_context,
+            resolved_scopes=resolved_scopes,
+        )
+
+    async def _enforce_conditions(
+        self,
+        conn,
+        user_id: str,
+        access_token,
+        policy: AccessPolicy,
+        owner_policy: AccessPolicy | None,
+        dynamic_context: dict[str, Any],
+        resolved_scopes: list[str],
+    ) -> None:
+        # 4. Build Unified Context (with the effective, owner-attenuated scopes)
+        context = JqAuthContext(
+            sub=user_id,
+            scopes=resolved_scopes,
+            identity=access_token.claims,
+            policy=policy.policy_data,
+            context=dynamic_context,
+            request={"method": conn.scope.get("method"), "path": conn.url.path},
+            system={"time": time.time()},
+        )
+
+        # 5. Enforce Policy — the KEY's own condition, then (for an owned key) the
+        # OWNER's condition as a SEPARATE enforce pass over a context built from the
+        # OWNER's policy_data + scopes, so an owner condition referencing ``.policy.*``
+        # reads the owner's policy, never the key's mint-time policy_data. Two sequential
+        # enforce calls are semantically AND — no jq string concatenation (splicing is
+        # injection-shaped).
+        try:
+            condition = ""
+            if policy.condition is not None:
+                condition = await tai42_app.storage.resource_manager.render_templated_text(policy.condition)
+            # Whether a condition was configured is known from the policy, not from
+            # the rendered string: a configured condition that renders empty must
+            # still be enforced (deny), so pass the configured flag through and let
+            # ``enforce`` fail closed rather than mistaking empty for "no condition".
+            condition_configured = policy.condition is not None
+            await self.enforcer.enforce(context.model_dump(), condition, condition_configured=condition_configured)
+
+            if owner_policy is not None and owner_policy.condition is not None:
+                owner_context = JqAuthContext(
+                    sub=user_id,
+                    scopes=owner_policy.scopes,
+                    identity=access_token.claims,
+                    policy=owner_policy.policy_data,
+                    context=dynamic_context,
+                    request={"method": conn.scope.get("method"), "path": conn.url.path},
+                    system={"time": time.time()},
+                )
+                owner_condition = await tai42_app.storage.resource_manager.render_templated_text(owner_policy.condition)
+                await self.enforcer.enforce(owner_context.model_dump(), owner_condition, condition_configured=True)
+        except Exception as e:
+            # Log the underlying failure (jq internals, render errors) server-side,
+            # but deny the caller with a generic message that leaks no internal detail.
+            logger.exception("access_control: policy enforcement failed for user %s", user_id)
+            raise AuthorizationError("Access Denied") from e
+
+    async def _enforce_tag_level(
+        self,
+        policy: AccessPolicy,
+        owner_policy: AccessPolicy | None,
+        canonical_path: str,
+        method: str | None,
+        user_id: str,
+    ) -> None:
+        # 5b. The per-tag LEVEL pass — Layer 2 of the (resource-x-action) model,
+        # INTERSECTED with the base-tier jq above (fail-closed AND). Skipped for an admin
+        # governing role; a fenced/secret route is admin-only; a grantable route needs
+        # the governing role's per-tag level (the OWNER's role for an owned key — keys
+        # inherit the owner). A resolution/infra fault fails closed as a clean deny.
+        try:
+            version = await self.enforcer.current_policy_version()
+            allowed, cause = await role_level_decision(policy, owner_policy, canonical_path, method, version)
+        except Exception as e:
+            logger.exception("access_control: per-tag level resolution failed for user %s", user_id)
+            raise AuthorizationError("Access Denied") from e
+        if not allowed:
+            logger.warning(
+                "access_control: per-tag level denied user %s on %s %s (%s)",
+                user_id,
+                method,
+                canonical_path,
+                cause.value if cause else "deny",
+            )
+            raise AuthorizationError("Access Denied", cause=cause)

@@ -1,0 +1,20 @@
+---
+title: Acme MCP server
+description: Scaffold for a descriptor-only MCP server plugin. Replace the placeholders before publishing.
+---
+
+This is a scaffolded descriptor-only MCP server. Replace the `example.invalid`
+endpoint, the `acme` identifiers, and the icon with your server's real values
+before you publish. Nothing is installed but the manifest entry — the MCP server
+is hosted out of band.
+
+## Install
+
+Install it from the marketplace:
+
+```sh
+tai plugins install acme/your-plugin-name
+```
+
+If the server needs credentials, declare them as `!ENV` markers in the `mcp`
+block and supply them at install time with `--env` and `--secret`.

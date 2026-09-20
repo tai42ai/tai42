@@ -1,0 +1,327 @@
+"""Agent registration engine — the impl body behind the ``app.agents`` facet.
+
+Owns the live agent instances and the synthesized per-agent ``run`` tool. The
+lifecycle calls :meth:`reset` on every start/reload so a dropped agent doesn't
+linger; the importer then re-fires each agents-module's decorator.
+"""
+
+import copy
+import inspect
+import logging
+from collections.abc import Callable
+from datetime import datetime
+from typing import TYPE_CHECKING, Annotated, Any, TypeVar, cast
+
+from fastmcp.tools.function_tool import FunctionTool
+from makefun import create_function
+from pydantic import BaseModel
+from pydantic_core import PydanticUndefined, core_schema
+from tai42_contract.agent import Agent
+from tai42_contract.interactions import SuspendedInteraction
+from tai42_kit.utils.data import makefun_func_name
+
+from tai42_skeleton.agent.session_thread import get_agent_session_thread
+from tai42_skeleton.agent.thread_reservation import (
+    ReservedThreadNamespaceError,
+    reserved_thread_namespace_error,
+    run_kwargs_from_tool_input,
+)
+from tai42_skeleton.exceptions.exceptions import TaiValidationError
+
+if TYPE_CHECKING:
+    from tai42_skeleton.app.server import TaiMCP
+
+logger = logging.getLogger(__name__)
+
+_AgentT = TypeVar("_AgentT", bound=Agent)
+
+
+class _Unset:
+    """Marker for an agent run-tool parameter the caller did not supply.
+
+    The synthesized run tool presents a concrete keyword-only parameter per
+    ``ToolInput`` field so a wrapper/transformer extension can compose over a real
+    signature. An optional field's parameter defaults to the module-level
+    :data:`_UNSET` instance; the body forwards only the parameters whose value is
+    NOT that sentinel, preserving ``from_tool_input``'s set-fields-only contract (a
+    materialized model default would forward every field). ``__get_pydantic_core_schema__``
+    maps the sentinel to an ``any`` schema so pydantic derives the parameter as
+    optional and omits the non-serializable sentinel default from the JSON schema.
+    """
+
+    __get_pydantic_core_schema__ = classmethod(lambda cls, source, handler: core_schema.any_schema())
+
+
+_UNSET = _Unset()
+
+# The output schema advertised for every synthesized agent run tool. ``result``
+# is intentionally unconstrained (an agent returns free-form text OR a structured
+# dict); ``x-fastmcp-wrap-result`` tells FastMCP to wrap the return as
+# ``{"result": <value>}`` in ``structuredContent`` and the client to unwrap it, so
+# a scalar (text) return surfaces in ``result.data`` instead of only ``content``.
+_AGENT_RESULT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"result": {"title": "Result"}},
+    "x-fastmcp-wrap-result": True,
+}
+
+
+def _suspended_interaction_from_receipt(receipt: dict[str, Any]) -> SuspendedInteraction:
+    """Convert an agent's suspended-RECEIPT dict into the tool-face park sentinel.
+
+    An agent's ``run`` returns ``{"status": "suspended", "interaction_ids": [...], ...}`` when
+    the run parks on an async ask — the shape the agent's OWN internal driver consumes. That
+    dict is INTERNAL: a park crossing a tool-face must be a :class:`SuspendedInteraction`
+    sentinel, recognized by type, so a caller (a tool-running tool, another agent, the
+    conversation turn) sees the park uniformly. This converts the receipt at the agent
+    tool-face only — the driver keeps its dict.
+
+    The sentinel is single-id; a run parking on one interaction (the common case) maps
+    cleanly. A run parking on several at once (parallel sub-agent asks) cannot be represented
+    at the single-id tool-face and raises loudly rather than silently surfacing only one park
+    while the siblings strand.
+
+    It carries NO ``resume_owner``: the parked run recorded its OWN resume state against that
+    interaction and is the only thing the platform ever resumes for it. A caller must not adopt
+    the park as its own suspended state (it would wait on a resume fired at the nested run),
+    and ``assert_park_adoptable`` refuses it on the caller's behalf.
+    """
+    ids = receipt["interaction_ids"]
+    if len(ids) != 1:
+        raise RuntimeError(
+            "an agent parked on multiple interactions at once cannot cross a single-id tool-face; "
+            f"got interaction_ids={ids!r}"
+        )
+    expiry_raw = receipt.get("expiry_at")
+    expiry = datetime.fromisoformat(expiry_raw) if expiry_raw else None
+    return SuspendedInteraction(interaction_id=ids[0], expiry_at=expiry)
+
+
+def _run_tool_signature(tool_input: type[BaseModel]) -> inspect.Signature:
+    """A concrete keyword-only signature mirroring ``tool_input``'s fields.
+
+    Each field becomes a keyword-only parameter annotated ``Annotated[<field
+    annotation>, <a copy of the field's FieldInfo with its default cleared>]`` —
+    the copy-and-clear keeps every schema-affecting attribute (description,
+    constraints, alias, title, examples) while removing the model default so it
+    cannot clash with the parameter default. A required field gets no parameter
+    default; an optional field defaults to :data:`_UNSET`, the runtime marker the
+    body strips before validation. Extensions derive their branch schema from this
+    signature, so it carries the agent's real input contract.
+    """
+    params: list[inspect.Parameter] = []
+    for field_name, field_info in tool_input.model_fields.items():
+        stripped = copy.deepcopy(field_info)
+        stripped.default = PydanticUndefined
+        stripped.default_factory = None
+        annotation = Annotated[field_info.annotation, stripped]
+        if field_info.is_required():
+            params.append(inspect.Parameter(field_name, inspect.Parameter.KEYWORD_ONLY, annotation=annotation))
+        else:
+            params.append(
+                inspect.Parameter(field_name, inspect.Parameter.KEYWORD_ONLY, annotation=annotation, default=_UNSET)
+            )
+    return inspect.Signature(params, return_annotation=Any)
+
+
+class AgentBinding:
+    """Registers agents, keeps their live instances, and binds their run tools."""
+
+    def __init__(self, app: "TaiMCP") -> None:
+        """Bind to ``app`` and start with an empty agent registry."""
+        self._app = app
+        self._agents: dict[str, Agent] = {}
+
+    def reset(self) -> None:
+        """Drop every registered agent (start/reload re-imports their modules)."""
+        self._agents = {}
+
+    def agent(
+        self, name: str, tags: set[str] | None = None, meta: dict[str, Any] | None = None
+    ) -> Callable[[type[_AgentT]], type[_AgentT]]:
+        """Register an :class:`Agent` subclass under ``name`` and synthesize its JSON ``run`` tool.
+
+        Fires when an ``agents:``-listed module imports. Gates the agent via the
+        manifest ``agents:`` section (NOT the tools namespace), instantiates and
+        stores it for in-process ``get_agent(name).astream(...)``, and
+        auto-registers a ``run`` tool whose signature == the agent's ``ToolInput``
+        and whose body drives ``run`` to its final value.
+
+        ``tags`` are the run tool's native tags. ``meta`` is generic registration
+        metadata threaded onto the same constructed object (naming no consumer concept,
+        exactly as ``tags`` threads) — an agent registers as a prebuilt ``FunctionTool``
+        and the bind path takes that object as-is (kwargs are NOT forwarded for a prebuilt
+        tool), so both must ride on the constructed object, set here at the only effective
+        site (the run-tool ``FunctionTool`` constructor).
+
+        Enforces the ``preset_bakeable_fields`` invariant at registration: every
+        declared name must be a real ``ToolInput`` field. A stray name could never
+        pass the preset route's unknown-field check, so it would be a silently dead
+        declaration — this raises loudly instead.
+
+        Returns the class unchanged, so the decorated symbol keeps its concrete
+        subclass type.
+        """
+
+        def decorator(agent_cls: type[_AgentT]) -> type[_AgentT]:
+            manifest = self._app._manifest
+            if not manifest:
+                return agent_cls
+            if not manifest.should_include_agent(name, agent_cls.__module__):
+                return agent_cls
+
+            # The registry is reset on every start/reload, so a name already
+            # present within one boot is a genuine collision (two modules
+            # registering the same agent) — fail loud rather than last-write-win.
+            if name in self._agents:
+                raise TaiValidationError(f"Agent '{name}' is already registered.")
+
+            # Every ``preset_bakeable_fields`` name must be a real ``ToolInput``
+            # field: a stray name could never pass the preset route's unknown-field
+            # check, so it would be a silently dead declaration. Reject it loudly
+            # here rather than let it lie dormant.
+            stray = set(agent_cls.preset_bakeable_fields) - set(agent_cls.ToolInput.model_fields)
+            if stray:
+                raise RuntimeError(
+                    f"Agent '{name}' declares preset_bakeable_fields not on its ToolInput: {sorted(stray)}."
+                )
+
+            instance: Agent = agent_cls()
+            self._agents[name] = instance
+            self._register_agent_tool(name, agent_cls.__module__, tags, meta)
+            return agent_cls
+
+        return decorator
+
+    def get_agent(self, name: str) -> Agent:
+        """Return the live agent registered under ``name``; raises ``RuntimeError`` when there is none."""
+        agent = self._agents.get(name)
+        if agent is None:
+            raise RuntimeError(f"No such agent: {name}.")
+        return agent
+
+    def all_agents(self) -> dict[str, Agent]:
+        """Every registered agent keyed by registration name.
+
+        A shallow copy, so a caller iterating the result cannot mutate the live
+        registry. The API agents surface reads this to list agents alongside the
+        per-agent ``run`` tool the same registration synthesized.
+        """
+        return dict(self._agents)
+
+    def _register_agent_tool(
+        self, name: str, module: str, tags: set[str] | None = None, meta: dict[str, Any] | None = None
+    ) -> None:
+        """Build + bind the JSON ``run`` tool for a registered agent.
+
+        The tool advertises the agent's ``ToolInput`` schema (live ``tools=`` is
+        deliberately absent — API-only via ``astream``). The body sees EXACTLY the
+        caller-supplied argument keys — the optional parameters the caller omitted
+        arrive as the :data:`_UNSET` sentinel and are stripped, so
+        ``model_fields_set`` after ``model_validate`` reflects only what was passed
+        — then maps to ``run`` kwargs through the shared reservation seam (the
+        agent's ``from_tool_input``, which forwards set fields only, plus the
+        ``bridge:`` thread refusal) and returns ``run``'s final value (drained per
+        the terminal rule inside the agent's own ``run``). A non-JSON ``ToolInput``
+        field fails loudly here at ``model_json_schema()`` time.
+
+        The body presents a concrete per-field signature (:func:`_run_tool_signature`)
+        so a wrapper/transformer extension can compose its branch schema over a real
+        signature; the tool binds through the shared extension-capable path
+        (``bind_tool_func``), which mints a branch per attached extension combo. The
+        base itself is registered as a prebuilt ``FunctionTool`` whose advertised
+        ``parameters`` is set explicitly to the model's JSON schema — exact by
+        construction — while the concrete signature exists FOR the branch composition,
+        not for base-schema derivation.
+        """
+        agent = self._agents[name]
+        tool_input = agent.ToolInput
+
+        signature = _run_tool_signature(tool_input)
+
+        async def run_impl(**arguments: Any) -> Any:
+            supplied = {key: value for key, value in arguments.items() if value is not _UNSET}
+            validated = tool_input.model_validate(supplied)
+            run_kwargs = run_kwargs_from_tool_input(agent, validated)
+            # Thread the ambient in-process session thread onto the run when one is deposited
+            # and the caller pinned no thread of its own — so an out-of-band in-process
+            # driver can carry an agent's memory across successive runs without the run
+            # tool advertising a thread parameter. The deposit is a caller-external
+            # steering vector like any thread id, so it passes the SAME reserved-namespace
+            # guard: a ``bridge:`` deposit stays refused however it arrives. Absent a
+            # deposit this is a no-op and the run mints its own fresh thread (config_util)
+            # — byte-identical to the pre-deposit behavior.
+            #
+            # "Caller pinned" covers EVERY spelling a thread can arrive in: the top-level
+            # ``thread_id`` kwarg AND a ``configurable.thread_id`` on ANY config-shaped
+            # kwarg (``langgraph_config``, a voting agent's variants — the same breadth
+            # the reservation guard scans). An injected top-level value would override a
+            # config-shaped pin in ``build_run_config``, so the deposit yields to all forms.
+            session_thread = get_agent_session_thread()
+            caller_pinned_thread = "thread_id" in run_kwargs or any(
+                isinstance(value, dict)
+                and isinstance(value.get("configurable"), dict)
+                and "thread_id" in value["configurable"]
+                for value in run_kwargs.values()
+            )
+            if session_thread is not None and not caller_pinned_thread:
+                # Reuse the shared reservation guard as the single source of truth for the
+                # refused ``bridge:`` prefix — it scans config-shaped run-kwarg values, so
+                # wrap the deposit in the same ``{"configurable": {"thread_id": ...}}`` shape
+                # a config-bearing kwarg carries.
+                deposited_config = {"session_thread": {"configurable": {"thread_id": session_thread}}}
+                message = reserved_thread_namespace_error(deposited_config)
+                if message is not None:
+                    raise ReservedThreadNamespaceError(message)
+                run_kwargs["thread_id"] = session_thread
+            result = await self.get_agent(name).run(**run_kwargs)
+            # A park crossing the agent TOOL-face is uniformly a SuspendedInteraction sentinel
+            # (recognized by type), never the internal suspended-receipt dict: convert it here
+            # so a caller running this agent as a tool (a flow, another agent) recognizes the
+            # park exactly as it recognizes any parking tool's. The agent's own driver keeps
+            # consuming its dict, untouched.
+            if isinstance(result, dict) and result.get("status") == "suspended":
+                return _suspended_interaction_from_receipt(result)
+            return result
+
+        # makefun's ``func_impl`` is typed ``Callable[[Any], Any]`` but it accepts
+        # any callable (it drives the separate ``signature`` above); the ``**arguments``
+        # impl is valid at runtime.
+        impl = create_function(
+            signature,
+            cast(Callable[[Any], Any], run_impl),
+            func_name=makefun_func_name(name),
+            module_name=module,
+            doc=agent.tool_description,
+        )
+        run_tool = FunctionTool(
+            name=name,
+            description=agent.tool_description,
+            parameters=tool_input.model_json_schema(),
+            fn=impl,
+            # The body returns ``Any`` — free-form text (no ``response_format``) or a
+            # structured dict — so FastMCP derives no output schema and a scalar
+            # (text) return would reach the caller only as unstructured ``content``,
+            # never ``structuredContent``/``result.data`` (a dict return already
+            # populates it). Advertise a permissive wrap schema so EVERY agent run
+            # surfaces its result in ``result.data`` like any typed tool: the server
+            # wraps the return as ``{"result": <value>}`` and the client unwraps it
+            # back (a string stays a string, a dict stays a dict).
+            output_schema=_AGENT_RESULT_SCHEMA,
+            # Native tags declared at ``@app.agents.agent(...)``. The prebuilt tool is
+            # registered as-is (bind drops kwargs for a prebuilt object), so this
+            # constructor is the ONLY effective place tags can be set.
+            tags=tags or set(),
+            # Generic registration metadata threaded the same way as ``tags``; a
+            # registrant attaches any generic meta key here (e.g. a crash-resume flag).
+            meta=meta,
+        )
+        # Bind through the shared extension-capable path: the base registers as this
+        # prebuilt ``FunctionTool`` (advertised schema exact by construction) and one
+        # branch is minted per attached extension combo, composed over the concrete
+        # signature. The optional parameters default to the non-serializable
+        # ``_UNSET`` sentinel, so any JSON-schema derivation over this signature emits
+        # a benign ``PydanticJsonSchemaWarning`` (excluding the sentinel default) — a
+        # narrow ``filterwarnings`` ignore in ``pyproject.toml`` keeps the intended
+        # omission from tripping the warnings-as-error test policy.
+        self._app._tool_binding.bind_tool_func(name=name)(run_tool)

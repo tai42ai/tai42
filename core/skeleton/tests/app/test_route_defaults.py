@@ -1,0 +1,104 @@
+"""The default-router set is the FULL route-registering package, de-circularized.
+
+The membership guard derives the route-registering module set by ITERATING the
+real ``tai42_skeleton.routers`` package (importing each submodule against a
+recording app and observing whether it registers any HTTP route), NEVER from
+``DEFAULT_API_ROUTERS`` itself. So a newly-added route-registering router that is
+missing from ``DEFAULT_API_ROUTERS`` FAILS this test — it can never be silently
+omitted (which would recreate the dark-pages regression), and there is no
+hand-maintained skip list for the route-less helpers (they are excluded by the
+detection because they register nothing).
+"""
+
+from __future__ import annotations
+
+import importlib
+import pkgutil
+import sys
+
+import tai42_skeleton.routers as _routers_pkg
+from tai42_skeleton.app.http import HttpSurface
+from tai42_skeleton.app.route_defaults import CORE_API_ROUTERS, DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
+from tai42_skeleton.app.route_registry import _SpecLifecycle
+
+
+class _RecordingFastMCP:
+    """Records every ``custom_route`` path. Every registration surface (a native
+    ``@tai42_app.http.custom_route``, ``http_surface()``, and
+    ``register_operation_route``) funnels through ``HttpSurface.custom_route`` and
+    then ``self._app._fast_mcp.custom_route``, so this captures them all."""
+
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+
+    def custom_route(self, path, methods, name, include_in_schema):
+        self.paths.append(path)
+        return lambda fn: fn
+
+
+class _RecordingApp:
+    """A minimal offline app whose ``_fast_mcp`` records route registrations."""
+
+    def __init__(self) -> None:
+        self._fast_mcp = _RecordingFastMCP()
+        self.http = HttpSurface(self)  # type: ignore[arg-type]
+        self.lifecycle = _SpecLifecycle()
+
+
+def _route_registering_modules() -> set[str]:
+    """Every module under ``routers/`` that registers at least one HTTP route,
+    discovered by re-importing each against a recording app."""
+    from tai42_contract.app import tai42_app
+
+    app = _RecordingApp()
+    module_names = [info.name for info in pkgutil.iter_modules(_routers_pkg.__path__, _routers_pkg.__name__ + ".")]
+
+    def _drop(name: str) -> None:
+        # Drop the module and, when it is a route-registering PACKAGE, its already-imported
+        # submodules, so a re-import re-runs the submodule bodies that register the routes
+        # (a package's ``__init__`` re-import alone would rebind cached submodules and
+        # register nothing). A plain module has no submodules and is dropped as before.
+        for mod in [name, *(m for m in list(sys.modules) if m.startswith(name + "."))]:
+            sys.modules.pop(mod, None)
+
+    try:
+        # The recording app is bound only for the probe, so the prior binding is back
+        # as soon as it ends.
+        with tai42_app.bound(app):
+            registering: set[str] = set()
+            for name in module_names:
+                before = len(app._fast_mcp.paths)
+                _drop(name)
+                importlib.import_module(name)
+                if len(app._fast_mcp.paths) > before:
+                    registering.add(name)
+            return registering
+    finally:
+        # Drop the recording-bound router modules so the next consumer re-imports them
+        # fresh, as the loader does on every boot.
+        for name in module_names:
+            _drop(name)
+
+
+def test_default_api_routers_excludes_the_spa_catch_all() -> None:
+    assert STUDIO_SPA_ROUTER not in DEFAULT_API_ROUTERS
+
+
+def test_default_api_routers_has_no_duplicates() -> None:
+    assert len(DEFAULT_API_ROUTERS) == len(set(DEFAULT_API_ROUTERS))
+
+
+def test_core_api_routers_disjoint_from_defaults_and_exclude_the_catch_all() -> None:
+    # The core tier is its own membership: never doubled into the default set and
+    # never the SPA catch-all (which the loader always force-appends last).
+    assert set(CORE_API_ROUTERS).isdisjoint(DEFAULT_API_ROUTERS)
+    assert STUDIO_SPA_ROUTER not in CORE_API_ROUTERS
+
+
+def test_default_set_equals_the_discovered_route_registering_package() -> None:
+    # The DE-CIRCULARIZING assertion: the default set + the core tier + the catch-all
+    # EQUALS every route-registering module discovered from the package. A new router
+    # missing from both DEFAULT_API_ROUTERS and CORE_API_ROUTERS fails here; a
+    # route-less helper is excluded because it registered nothing, not by a skip list.
+    discovered = _route_registering_modules()
+    assert set(DEFAULT_API_ROUTERS) | set(CORE_API_ROUTERS) | {STUDIO_SPA_ROUTER} == discovered

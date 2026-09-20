@@ -1,0 +1,19 @@
+{
+  "name": "@tai42/e2e-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser-driven Studio e2e over the real multi-worker stack: Playwright drives the built Studio served through the skeleton and asserts every effect via UI and API.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "e2e": "playwright test",
+    "list": "playwright test --list",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "@playwright/test": "^1.49.1",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

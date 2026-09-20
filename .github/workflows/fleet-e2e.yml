@@ -1,0 +1,240 @@
+name: fleet-e2e
+
+# Fleet e2e gate receiver for the external front-end repos: tai-studio and
+# tai-marketplace (a monorepo whose web/ workspace is the browse site). Each
+# survives standalone; its `trigger-e2e` job dispatches a `fleet-e2e` event for a
+# tested source sha. This checks that sha out (pinning the source repo, the other
+# at main), runs the browser suite against this repo's harness — with the
+# marketplace-gated legs (`TAI_E2E_MARKETPLACE=1`) for the marketplace repo — and
+# posts a `fleet-e2e` commit status back to the source sha. Branch protection on
+# the source repo requires that status, so this is the gate.
+#
+# The allowlist is these two front-end repos — every packaged member lives in
+# this repo and gates through the in-repo ci.yml, so there is nothing else to
+# receive.
+#
+# The dispatch names a COMMIT, not a branch: by the time this receiver runs, that
+# commit's branch may have moved on, merged, or been deleted, and then a plain
+# clone does not carry the commit at all (`checkout` dies on the missing object)
+# even though the source repo still serves it by sha. So every checkout of a
+# dispatched sha fetches that commit explicitly by sha, and a fetch the source
+# repo cannot answer fails the job loudly instead of testing another commit.
+
+on:
+  repository_dispatch:
+    types: [fleet-e2e]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleet-e2e-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  pending:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Mark fleet-e2e pending on the source sha
+        env:
+          GH_TOKEN: ${{ secrets.TAI_FLEET_STATUS_TOKEN }}
+          SRC_REPO: ${{ github.event.client_payload.repo }}
+          SHA: ${{ github.event.client_payload.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          case "$SRC_REPO" in
+            tai-studio|tai-marketplace) ;;
+            *) echo "::error::source repo not in fleet: $SRC_REPO"; exit 1 ;;
+          esac
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SHA"; exit 1; }
+          for attempt in 1 2 3 4 5; do
+            gh api "repos/${GITHUB_REPOSITORY_OWNER}/${SRC_REPO}/statuses/${SHA}" \
+              -f state=pending \
+              -f context=fleet-e2e \
+              -f description="cross-repo e2e running" \
+              -f target_url="${RUN_URL}" && exit 0
+            echo "fleet-e2e pending POST attempt ${attempt} failed; retrying" >&2
+            sleep "$((attempt * 3))"
+          done
+          echo "::error::failed to post fleet-e2e pending status after 5 attempts"; exit 1
+
+  suite:
+    needs: pending
+    runs-on: ubuntu-latest
+    # Sized for the marketplace-gated legs: registry install + seed + the
+    # install-flow specs run well past the ~8-minute studio leg.
+    timeout-minutes: 45
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+    env:
+      TAI_E2E_REDIS_URL: redis://localhost:6379
+      TAI_E2E_PG_HOST: localhost
+      TAI_E2E_PG_PASSWORD: postgres
+      TAI_E2E_KEEP_STACKS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Resolve the source repo and marketplace gate
+        # The marketplace repo runs the marketplace-gated legs
+        # (TAI_E2E_MARKETPLACE=1); tai-studio runs the plain studio browser suite.
+        # An unknown repo fails loudly.
+        id: src
+        env:
+          SRC_REPO: ${{ github.event.client_payload.repo }}
+          SRC_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          case "$SRC_REPO" in
+            tai-marketplace)
+              echo "marketplace=true" >> "$GITHUB_OUTPUT"
+              echo "TAI_E2E_MARKETPLACE=1" >> "$GITHUB_ENV"
+              # Dispatch the source sha under test to the harness so the registry
+              # boots at that exact commit (not the checked-in pin). Same sha guard
+              # the status/checkout steps apply — a malformed ref never reaches the
+              # install spec.
+              [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
+              echo "TAI_E2E_MARKETPLACE_REF=$SRC_REF" >> "$GITHUB_ENV" ;;
+            tai-studio)
+              echo "marketplace=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::source repo not in fleet: $SRC_REPO"; exit 1 ;;
+          esac
+      - name: Configure git auth for the private tai42-marketplace sources
+        if: steps.src.outputs.marketplace == 'true'
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
+      - name: Sync the locked venv
+        # The registry is not in the lock; a marketplace leg installs it out-of-band
+        # at boot into its OWN dedicated venv from its pinned ref (see
+        # tai42_e2e.marketplace._install_marketplace) — deliberately apart from this
+        # workspace venv so the registry's dependency caps never mutate the
+        # workspace's first-party packages. The git auth above lets that install
+        # reach the PRIVATE source. We must NOT `uv pip install` the registry into
+        # THIS venv: its api pins tai42-kit below the workspace's editable kit, so a
+        # reinstall here re-resolves and downgrades kit to a published wheel that
+        # predates the symbols the SOURCE skeleton imports (e.g.
+        # component_binding_declared, added in kit 3.7.0), which then crashes the
+        # Playwright webServer at import.
+        run: uv sync --locked --package tai42-e2e
+      - name: Clone tai-studio (dispatched sha when studio-dispatched, else main)
+        env:
+          SRC_REPO: ${{ github.event.client_payload.repo }}
+          SRC_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
+          git clone https://github.com/tai42ai/tai-studio
+          if [ "$SRC_REPO" = "tai-studio" ]; then
+            # Fetch the commit itself: a clone carries only what its refs reach, so a
+            # dispatched sha whose branch has since moved on or gone is absent from the
+            # clone while the repo still serves it by sha.
+            git -C tai-studio fetch origin "$SRC_REF"
+            git -C tai-studio checkout --detach "$SRC_REF"
+          fi
+      - name: Record the resolved tai-studio commit (provenance, no pinning)
+        # tai-studio is checked out at the dispatched sha when studio-dispatched, else
+        # at unpinned `main`, so which commit the browser suite actually ran against is
+        # only knowable at run time. Resolve it and record it into (a) the job summary
+        # and (b) the environment as TAI_STUDIO_SHA — the Playwright run below inherits
+        # it (job env), so playwright.config.ts can surface it as report metadata via
+        # `metadata: { 'tai-studio-sha': process.env.TAI_STUDIO_SHA }`.
+        run: |
+          set -euo pipefail
+          studio_sha=$(git -C tai-studio rev-parse HEAD)
+          echo "TAI_STUDIO_SHA=$studio_sha" >> "$GITHUB_ENV"
+          {
+            echo "### tai-studio provenance"
+            echo ""
+            echo "Browser suite ran against tai-studio @ \`$studio_sha\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Clone tai-marketplace (dispatched sha when marketplace-dispatched, else main)
+        if: steps.src.outputs.marketplace == 'true'
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          SRC_REPO: ${{ github.event.client_payload.repo }}
+          SRC_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
+          git clone "https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace"
+          if [ "$SRC_REPO" = "tai-marketplace" ]; then
+            # Fetch the commit itself, for the same reason as the studio clone above.
+            git -C tai-marketplace fetch origin "$SRC_REF"
+            git -C tai-marketplace checkout --detach "$SRC_REF"
+          fi
+      - name: Build the Studio SPA
+        uses: ./.github/actions/studio-spa
+      - name: Install the ui/ workspace
+        working-directory: e2e/ui
+        run: pnpm install --frozen-lockfile
+      - name: Install chromium
+        working-directory: e2e/ui
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run the browser suite
+        working-directory: e2e/ui
+        run: pnpm exec playwright test --project=chromium
+
+  status:
+    needs: [pending, suite]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Post final fleet-e2e status to the source sha
+        env:
+          GH_TOKEN: ${{ secrets.TAI_FLEET_STATUS_TOKEN }}
+          SRC_REPO: ${{ github.event.client_payload.repo }}
+          SHA: ${{ github.event.client_payload.ref }}
+          RESULT: ${{ needs.suite.result }}
+          PENDING_RESULT: ${{ needs.pending.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          case "$SRC_REPO" in
+            tai-studio|tai-marketplace) ;;
+            *) echo "::error::source repo not in fleet: $SRC_REPO"; exit 1 ;;
+          esac
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SHA"; exit 1; }
+          case "$RESULT" in
+            success)   state=success; desc="cross-repo e2e passed" ;;
+            failure)   state=failure; desc="cross-repo e2e failed" ;;
+            cancelled) state=failure; desc="cross-repo e2e cancelled" ;;
+            skipped)
+              # `suite` runs unconditionally after `pending`, so it is skipped only
+              # when `pending` did not succeed — it could not post the starting
+              # status, or it was cancelled. Either way that job reports the cause.
+              echo "::notice::no fleet-e2e status posted: the suite never ran for ${SHA}; the pending job ended ${PENDING_RESULT}"
+              exit 0 ;;
+            *) echo "::error::unexpected suite result: ${RESULT}"; exit 1 ;;
+          esac
+          for attempt in 1 2 3 4 5; do
+            gh api "repos/${GITHUB_REPOSITORY_OWNER}/${SRC_REPO}/statuses/${SHA}" \
+              -f state="${state}" \
+              -f context=fleet-e2e \
+              -f description="${desc}" \
+              -f target_url="${RUN_URL}" && exit 0
+            echo "fleet-e2e status POST attempt ${attempt} failed; retrying" >&2
+            sleep "$((attempt * 3))"
+          done
+          echo "::error::failed to post final fleet-e2e status after 5 attempts"; exit 1

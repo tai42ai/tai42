@@ -1,0 +1,37 @@
+"""The platform subject-keyed state store — the record substrate the states facet reads and writes through.
+
+A door-agnostic contract facet (``tai42_app.states``) reads and writes a subject's document
+through this store.
+
+This package owns the Postgres seam (:mod:`.store`), the validate + apply service
+(:mod:`.service`) with the write-provenance chokepoint, the platform template document
+model (:mod:`.templates`), the pure op/path engine (:mod:`.paths`), the component
+identity and boot gate (:mod:`.db`), the shipped-template seed applier (:mod:`.seeds`),
+and the backup section (:mod:`.backup`). The doors, routers and builtin tools live in
+their neighbouring feature packages, reaching the store through the service and facet.
+"""
+
+from __future__ import annotations
+
+from tai42_skeleton.states.db import STATES_COMPONENT, states_store_configured
+from tai42_skeleton.states.service import (
+    StatesAttachReconcilerRegistry,
+    StatesAttachValidatorRegistry,
+    StatesConsumerListerRegistry,
+    StatesService,
+    current_state_context,
+    state_context,
+)
+from tai42_skeleton.states.store import PostgresStatesStore
+
+__all__ = [
+    "STATES_COMPONENT",
+    "PostgresStatesStore",
+    "StatesAttachReconcilerRegistry",
+    "StatesAttachValidatorRegistry",
+    "StatesConsumerListerRegistry",
+    "StatesService",
+    "current_state_context",
+    "state_context",
+    "states_store_configured",
+]

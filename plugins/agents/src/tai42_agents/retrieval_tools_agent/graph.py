@@ -1,0 +1,407 @@
+"""The retrieval-tools ``StateGraph``.
+
+Instead of binding every tool to the model up front, this graph embeds each
+tool's ``name: description`` into a vector store and exposes a single
+``retrieve_tools`` search tool. The model asks for tools by describing what it
+needs; the matching tool ids come back, get bound for the next step, and the
+loop continues until the model emits a terminal ``{"status": ...}`` JSON object.
+
+Node loop (every turn passes through ``context`` first so the history is reduced
+before the next model call):
+
+    context -> agent -> [select_tools | execute_tools] -> context -> agent -> ...
+                     agent -> END (on a terminal status JSON)
+
+``select_tools`` runs the ``retrieve_tools`` search and feeds the found tool
+names back to the model as a ``ToolMessage``; ``execute_tools`` runs the actual
+tools the model selected. Routing (``should_continue``) inspects the model's
+last message: pending tool calls are dispatched, otherwise the message must be
+the terminal status JSON.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Sequence
+from typing import Annotated, Any
+
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool, StructuredTool, ToolException
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.constants import END
+from langgraph.graph import MessagesState, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.prebuilt import InjectedStore, ToolNode
+from langgraph.store.base import BaseStore
+from langgraph.types import Send
+from langgraph.utils.runnable import RunnableCallable
+from pydantic import ValidationError
+from tai42_kit.llm.middleware.context_overflow import areduce_context, context_overflow_middlewares
+from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
+from tai42_kit.llm.middleware.rolling_cache_mark import roll_cache_marks
+from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
+from tai42_kit.utils.data.string_util import text_to_md5
+
+from tai42_agents._internal.recovery import _tool_error_middleware
+
+
+def _merged_selected_tools(left: list[str], right: list[str]) -> list[str]:
+    # De-dup against ``left`` AND within ``right`` (order preserved): one turn's
+    # multiple retrieve calls can each return the same tool id, and binding the
+    # same tool twice makes some providers reject the duplicate function name.
+    seen = set(left)
+    merged = list(left)
+    for item in right:
+        if item not in seen:
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+class State(MessagesState):
+    """The graph state: the message history plus the accumulating selected-tool ids."""
+
+    selected_tool_ids: Annotated[list[str], _merged_selected_tools]
+
+
+def _route_tool_calls(
+    tool_calls: list[dict],
+    *,
+    retrieve_tool_name: str,
+    select_node: str,
+    execute_node: str,
+) -> list[Send]:
+    """Route a model turn's pending tool calls to the select/execute nodes.
+
+    ``retrieve_tools`` calls go to the select node, every other call to the execute
+    node; a turn mixing both fans out to both.
+    """
+    retrieve_calls = [c for c in tool_calls if c["name"] == retrieve_tool_name]
+    other_calls = [c for c in tool_calls if c["name"] != retrieve_tool_name]
+    destinations: list[Send] = []
+    if retrieve_calls:
+        destinations.append(Send(select_node, retrieve_calls))
+    if other_calls:
+        destinations.append(Send(execute_node, other_calls))
+    return destinations
+
+
+def _terminal_message_text(last: Any) -> str:
+    """Flatten a terminal message's content to its stripped text.
+
+    A content list is joined from its ``text`` parts; a non-string content yields "".
+    """
+    content = getattr(last, "content", "")
+    if isinstance(content, list):
+        texts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    texts.append(part.get("text", ""))
+            elif isinstance(part, str):
+                texts.append(part)
+        content = "".join(texts)
+    return content.strip() if isinstance(content, str) else ""
+
+
+def _terminal_status(content: str) -> str:
+    """Parse a terminal status JSON string and return its ``status`` value.
+
+    Empty text, non-JSON, a non-object payload, or a status outside
+    continue/success/error each raises — the agent never produced its required
+    contract output, so the run fails loudly rather than ending silently.
+    """
+    if not content:
+        raise ValueError(
+            "retrieval agent produced a terminal message with no text content; "
+            "the required status JSON was never emitted"
+        )
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"retrieval agent terminal message is not valid status JSON: {content!r}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"retrieval agent terminal payload is not a JSON object: {content!r}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+    status = parsed.get("status")
+    if status not in ("continue", "success", "error"):
+        raise ValueError(
+            f"retrieval agent terminal status must be one of continue/success/error, got {status!r} in {content!r}"
+        )
+    return status
+
+
+class RetrievalToolsGraph:
+    """Builds the retrieval-tools ``StateGraph``.
+
+    ``abuild`` embeds every tool's description into ``store`` under
+    :attr:`namespace`, compiles the graph, and returns the compiled graph.
+    """
+
+    retrieve_tools_tool_name = "retrieve_tools"
+    agent_node_name = "agent"
+    context_node_name = "context"
+    select_tools_node_name = "select_tools"
+    execute_tools_node_name = "execute_tools"
+
+    def __init__(
+        self,
+        tools: Sequence[BaseTool],
+        llm: BaseChatModel,
+        store: BaseStore | None = None,
+        checkpoint: BaseCheckpointSaver | None = None,
+        overwrite_store: bool = False,
+        tools_limit: int = 10,
+        system_prompt: str | None = None,
+    ):
+        """Configure the graph with its ``tools``, ``llm``, store, checkpoint, and per-run prompt."""
+        self.tools = list(tools)
+        self.llm = llm
+        self.store = store
+        self.checkpoint = checkpoint
+        # Per-run model configuration, prepended at each model call — never part
+        # of the checkpointed message state.
+        self.system_prompt = system_prompt
+        self.tool_registry: dict[str, BaseTool] = {}
+
+        # Namespace the store index per resolved tool-set (a stable hash of the
+        # sorted tool names) so concurrent sessions with different tool-sets never
+        # share one index and crowd each other's ``tools_limit``. Sorting keeps the
+        # hash deterministic, so identical runs reuse the embedding cache.
+        tool_set_hash = text_to_md5("\n".join(sorted(tool.name for tool in self.tools)))
+        self.namespace: tuple[str, ...] = ("tools", tool_set_hash)
+
+        self._agent_node: RunnableCallable | None = None
+        self._context_node: RunnableCallable | None = None
+        self._retrieve_tools_tool: StructuredTool | None = None
+        self._select_tools_node: RunnableCallable | None = None
+        self._execute_tools_node: ToolNode | None = None
+        self._should_continue_node: Callable[..., Any] | None = None
+        self._overwrite_store = overwrite_store
+        self._tools_limit = tools_limit
+        # Built in ``abuild`` (async): the context-overflow strategies render their
+        # configured prompt through the resource manager.
+        self._context_middlewares: list[AgentMiddleware] = []
+
+    async def abuild(self) -> Any:
+        """Embed every tool's description into the store, compile the graph, and return it."""
+        store = self.store
+        if store is None:
+            raise ValueError("RetrievalToolsGraph requires a store to embed tool descriptions into")
+
+        # The system purge runs first so a stored system message never reaches the other
+        # strategies or the model; the leading-user normalization runs last, after the
+        # history is reduced, so a thread opening with an assistant message leads user-first
+        # for the next model call. The per-run system prompt is shared with the
+        # context-overflow middlewares so the trimming budget covers the full outgoing
+        # request, prompt included.
+        self._context_middlewares = [
+            SystemPurgeMiddleware(),
+            *await context_overflow_middlewares(system_prompt=self.system_prompt),
+            LeadingUserMiddleware(),
+        ]
+
+        for tool in self.tools:
+            self.tool_registry[text_to_md5(tool.name)] = tool
+
+        for tool_id, tool in self.tool_registry.items():
+            await self.add_to_store(store, tool_id, tool)
+
+        builder = self.build()
+        return builder.compile(store=store, checkpointer=self.checkpoint)
+
+    async def add_to_store(self, store: BaseStore, key: str, tool: BaseTool) -> None:
+        """Embed one tool's ``name: description`` into ``store`` under this tool-set's namespace."""
+        item = None
+        if self._overwrite_store:
+            await store.adelete(namespace=self.namespace, key=key)
+        else:
+            item = await store.aget(namespace=self.namespace, key=key)
+
+        if item is None:
+            await store.aput(
+                namespace=self.namespace,
+                key=key,
+                value={"description": f"{tool.name}: {tool.description}"},
+            )
+
+    def _registered_tool(self, tool_id: str) -> BaseTool:
+        # A retrieved id always addresses this tool-set's own namespace, so it
+        # must resolve to a registered tool. A miss signals a real inconsistency
+        # (stale/foreign id) and raises rather than being silently dropped.
+        tool = self.tool_registry.get(tool_id)
+        if tool is None:
+            raise KeyError(
+                f"tool id {tool_id!r} has no entry in this tool-set's registry; "
+                "the retrieved id does not belong to the embedded tool-set"
+            )
+        return tool
+
+    def retrieve_tools_tool(self) -> StructuredTool:
+        """The single ``retrieve_tools`` semantic-search tool, built once and cached."""
+        if self._retrieve_tools_tool:
+            return self._retrieve_tools_tool
+
+        async def tool(query: str, *, store: Annotated[BaseStore, InjectedStore]) -> list[str]:
+            """Retrieve tool IDs from store via semantic search."""
+            results = await store.asearch(self.namespace, query=query, limit=self._tools_limit)
+            return [result.key for result in results]
+
+        self._retrieve_tools_tool = StructuredTool.from_function(
+            func=None, coroutine=tool, name=self.retrieve_tools_tool_name
+        )
+        return self._retrieve_tools_tool
+
+    def agent_node(self) -> RunnableCallable:
+        """The model-call node: binds the retrieved tools and invokes the LLM for one turn."""
+        if self._agent_node:
+            return self._agent_node
+
+        async def node(state: State, config: RunnableConfig, *, store: BaseStore) -> dict[str, Any]:
+            ids = state.get("selected_tool_ids", [])
+            selected_tools = [self._registered_tool(tool_id) for tool_id in ids]
+            llm_with_tools = self.llm.bind_tools([self.retrieve_tools_tool(), *selected_tools])
+
+            # The per-run system prompt is prepended for this model call only;
+            # state carries user/assistant/tool messages exclusively.
+            messages = state["messages"]
+            if self.system_prompt:
+                messages = [SystemMessage(content=self.system_prompt), *messages]
+            # Raw graph node: wrap_model_call middleware never runs here, so the
+            # rolling cache-mark strip is applied request-scoped before the call —
+            # keeping only the newest cache_control breakpoint, never written back
+            # into state.
+            rolled = roll_cache_marks(messages)
+            messages = rolled if rolled is not None else messages
+            response = await llm_with_tools.ainvoke(messages)
+            return {"messages": [response]}
+
+        self._agent_node = RunnableCallable(func=None, afunc=node)
+        return self._agent_node
+
+    def context_node(self) -> RunnableCallable:
+        """The history-reduction node: applies the context-overflow strategies before each turn."""
+        if self._context_node:
+            return self._context_node
+
+        async def node(state: State, config: RunnableConfig, *, store: BaseStore) -> dict[str, Any]:
+            # Apply the configured context-overflow strategies as an explicit
+            # graph node: create_agent runs middleware automatically, but a raw
+            # StateGraph must reduce the history itself.
+            reduced = await areduce_context(state["messages"], middlewares=self._context_middlewares, state=dict(state))
+            if reduced is None:
+                return {}
+
+            return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *reduced]}
+
+        self._context_node = RunnableCallable(func=None, afunc=node)
+        return self._context_node
+
+    def execute_tools_node(self) -> ToolNode:
+        """The node that runs the tools the model selected, built once and cached."""
+        if self._execute_tools_node:
+            return self._execute_tools_node
+
+        # The shared middleware turns a tool-logic failure (ToolException /
+        # ValidationError) into a model-visible error ToolMessage; every other
+        # exception stays a loud abort — matching the select-tools node above.
+        self._execute_tools_node = ToolNode(
+            list(self.tool_registry.values()), awrap_tool_call=_tool_error_middleware.awrap_tool_call
+        )
+        return self._execute_tools_node
+
+    def select_tools_node(self) -> RunnableCallable:
+        """The node that runs ``retrieve_tools`` searches and feeds the found tool names back."""
+        if self._select_tools_node:
+            return self._select_tools_node
+
+        async def node(tool_calls: list[dict], config: RunnableConfig, *, store: BaseStore) -> dict[str, Any]:
+            messages: list[ToolMessage] = []
+            tool_ids: list[str] = []
+            retrieve_tool = self.retrieve_tools_tool()
+            for tool_call in tool_calls:
+                kwargs = {**tool_call["args"], "store": store}
+                try:
+                    batch = await retrieve_tool.ainvoke(kwargs, config)
+                except (ToolException, ValidationError) as exc:
+                    # Only genuine tool-logic failures (a ``ToolException`` or
+                    # malformed call args) are surfaced back to the model as a
+                    # ToolMessage. Infrastructure failures (store outage, embedding
+                    # error) are not caught and propagate loudly. The except scope
+                    # covers only the invocation, so a bug in the mapping below is
+                    # not masked.
+                    messages.append(
+                        ToolMessage(
+                            f"Error: {exc}",
+                            tool_call_id=tool_call["id"],
+                            name=self.retrieve_tools_tool_name,
+                            status="error",
+                        )
+                    )
+                    continue
+                tool_names = [self._registered_tool(id_).name for id_ in batch]
+                messages.append(
+                    ToolMessage(
+                        f"Available tools: {tool_names}",
+                        tool_call_id=tool_call["id"],
+                        name=self.retrieve_tools_tool_name,
+                    )
+                )
+                tool_ids.extend(batch)
+
+            return {"messages": messages, "selected_tool_ids": tool_ids}
+
+        self._select_tools_node = RunnableCallable(func=None, afunc=node)
+        return self._select_tools_node
+
+    def should_continue_node(self) -> Callable[..., Any]:
+        """The routing node: dispatch pending tool calls, else act on the terminal status JSON."""
+        if self._should_continue_node:
+            return self._should_continue_node
+
+        def node(state: State, *, store: BaseStore) -> Any:
+            last = state["messages"][-1]
+
+            # 1) any pending tool_calls are dispatched to the matching node first.
+            tool_calls = getattr(last, "tool_calls", None) or []
+            if tool_calls:
+                return _route_tool_calls(
+                    tool_calls,
+                    retrieve_tool_name=self.retrieve_tools_tool_name,
+                    select_node=self.select_tools_node_name,
+                    execute_node=self.execute_tools_node_name,
+                )
+
+            # 2) no tool calls left: the message MUST be the terminal status JSON.
+            status = _terminal_status(_terminal_message_text(last))
+            if status == "continue":
+                # No tool_calls left; loop back through the context node so the
+                # history is reduced before the next agent turn.
+                return self.context_node_name
+            # continue/success/error are the only statuses _terminal_status returns.
+            return END
+
+        self._should_continue_node = node
+        return self._should_continue_node
+
+    def build(self) -> StateGraph:
+        """Assemble the ``StateGraph`` wiring context → agent → tool nodes and the conditional edges."""
+        builder = StateGraph(State)
+        builder.add_node(self.context_node_name, self.context_node())
+        builder.add_node(self.agent_node_name, self.agent_node())
+        builder.add_node(self.select_tools_node_name, self.select_tools_node())
+        builder.add_node(self.execute_tools_node_name, self.execute_tools_node())
+
+        # Every turn passes through the context node before the agent, so the
+        # history is reduced (trim / summarize / context-edit) on entry and on
+        # each loop-back from tool execution.
+        builder.set_entry_point(self.context_node_name)
+        builder.add_edge(self.context_node_name, self.agent_node_name)
+        builder.add_conditional_edges(self.agent_node_name, self.should_continue_node())
+
+        builder.add_edge(self.execute_tools_node_name, self.context_node_name)
+        builder.add_edge(self.select_tools_node_name, self.context_node_name)
+
+        return builder

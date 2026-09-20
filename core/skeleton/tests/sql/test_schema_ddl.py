@@ -1,0 +1,226 @@
+"""Structural tests for the skeleton baseline migration (``0001_baseline.sql``).
+
+Loads the packaged chain through the kit runner (the same discovery production
+uses) and asserts the single-namespace connector shape, the role_audit
+append-only triggers, the tool-metadata overlay, the runs index, and — the
+migration-model invariant — that every column, CHECK, and index lives INSIDE the
+``CREATE TABLE`` body of the single baseline, with no ``ALTER`` backfill: the
+marketplace version-stamp columns, the descriptor-only ``spec`` source value, and
+the ``route_mounts`` map are all folded in, never added by a later ALTER.
+"""
+
+import re
+
+from tai42_kit.db import discover_migrations
+
+from tai42_skeleton.db import skeleton_migrations_dir
+
+
+def _baseline_sql() -> str:
+    scripts = discover_migrations(skeleton_migrations_dir())
+    assert scripts, "the skeleton chain must ship at least the baseline migration"
+    return scripts[0].sql
+
+
+def _connector_connections_block(ddl: str) -> str:
+    """Return the text of the `connector_connections` CREATE TABLE (...) body."""
+    match = re.search(
+        r"CREATE TABLE IF NOT EXISTS connector_connections\s*\((.*?)\);",
+        ddl,
+        re.DOTALL,
+    )
+    assert match is not None, "connector_connections table not found in the baseline"
+    return match.group(1)
+
+
+def test_baseline_returns_nonempty_schema() -> None:
+    ddl = _baseline_sql()
+    assert isinstance(ddl, str)
+    assert "CREATE TABLE IF NOT EXISTS connector_connections" in ddl
+
+
+def test_token_store_primary_key_collapses_to_connection_id() -> None:
+    block = _connector_connections_block(_baseline_sql())
+    # Single-column PK on connection_id; no composite (client_name, connection_id) PK — the store is de-tenanted.
+    assert re.search(r"PRIMARY KEY\s*\(\s*connection_id\s*\)", block) is not None
+    assert "PRIMARY KEY (client_name" not in block
+
+
+def test_token_store_has_no_tenant_columns() -> None:
+    block = _connector_connections_block(_baseline_sql())
+    for forbidden in ("client_name", "tenant_id", "tenant"):
+        assert forbidden not in block, f"de-tenant violated: `{forbidden}` present in connector_connections"
+
+
+def test_header_names_the_skeleton_baseline() -> None:
+    ddl = _baseline_sql()
+    assert "Nexus Platform" not in ddl
+    assert "skeleton component" in ddl
+
+
+def test_role_audit_append_only_triggers_present() -> None:
+    """The baseline wires the three role_audit append-only triggers onto the
+    versioned-document tables — the DB-level guard that a comment alone cannot give.
+    Text-level guard so removing/renaming a trigger fails without a live Postgres."""
+    ddl = _baseline_sql()
+    # Trigger functions (idempotent CREATE OR REPLACE) and their row triggers.
+    for name in (
+        "versioned_document_versions_role_audit_immutable",
+        "versioned_documents_role_audit_no_delete",
+        "versioned_documents_role_audit_guard_update",
+    ):
+        assert f"CREATE OR REPLACE FUNCTION {name}()" in ddl, f"missing trigger function {name}"
+        assert f"DROP TRIGGER IF EXISTS trg_{name}" in ddl, f"missing idempotent drop for trg_{name}"
+        assert f"CREATE TRIGGER trg_{name}" in ddl, f"missing trigger trg_{name}"
+
+    # The immutability trigger fires on both UPDATE and DELETE of version rows;
+    # the doc-delete guard on DELETE; the update guard on UPDATE.
+    assert "BEFORE UPDATE OR DELETE ON versioned_document_versions" in ddl
+    assert "BEFORE DELETE ON versioned_documents" in ddl
+    assert "BEFORE UPDATE ON versioned_documents" in ddl
+    # Every guard keys strictly on kind='role_audit' — no other kind is affected.
+    assert ddl.count("'role_audit'") >= 3
+
+
+def test_marketplace_version_stamps_are_folded_into_create_table() -> None:
+    """The ``contract_version`` / ``skeleton_version`` columns live INSIDE the
+    ``CREATE TABLE marketplace_installs`` body, with no ``ALTER TABLE ... ADD COLUMN
+    IF NOT EXISTS`` backfill. Text-level guard so an ALTER — or a dropped column —
+    fails without a live Postgres."""
+    ddl = _baseline_sql()
+    match = re.search(r"CREATE TABLE IF NOT EXISTS marketplace_installs\s*\((.*?)\n\);", ddl, re.DOTALL)
+    assert match is not None, "marketplace_installs table not found in the baseline"
+    block = match.group(1)
+    for column in ("contract_version", "skeleton_version"):
+        assert re.search(rf"\b{column}\s+TEXT", block) is not None, f"{column} must be in the CREATE TABLE body"
+    assert "ADD COLUMN" not in ddl, "the baseline must not carry an ALTER ... ADD COLUMN backfill"
+
+
+def test_marketplace_route_mounts_is_folded_into_create_table() -> None:
+    """The per-item mount-base map (``route_mounts``) is a JSONB column folded INTO
+    the ``CREATE TABLE marketplace_installs`` body, NOT NULL with an empty-object
+    default so a row written before an operator remaps reads as "no overrides"."""
+    ddl = _baseline_sql()
+    match = re.search(r"CREATE TABLE IF NOT EXISTS marketplace_installs\s*\((.*?)\n\);", ddl, re.DOTALL)
+    assert match is not None, "marketplace_installs table not found in the baseline"
+    block = match.group(1)
+    assert re.search(r"\broute_mounts\s+JSONB\s+NOT NULL\s+DEFAULT\s+'\{\}'::jsonb", block) is not None, (
+        "route_mounts must be a NOT NULL JSONB column defaulting to '{}'::jsonb in the CREATE TABLE body"
+    )
+
+
+def test_tool_meta_overlay_tables_present() -> None:
+    """The tool-metadata overlay ships two plain tables: a folder tree and a
+    per-tool row. Text-level guards so a dropped/renamed table or a lost
+    invariant fails without a live Postgres."""
+    ddl = _baseline_sql()
+    assert "CREATE TABLE IF NOT EXISTS tool_folders" in ddl
+    assert "CREATE TABLE IF NOT EXISTS tool_meta" in ddl
+
+
+def test_tool_folders_root_name_uniqueness_uses_nulls_not_distinct() -> None:
+    """Root folders have `parent_id IS NULL`; without `NULLS NOT DISTINCT` the
+    default unique would never fire for them, silently allowing duplicate root
+    names. The modifier is REQUIRED on the sibling-name uniqueness constraint."""
+    match = re.search(r"CREATE TABLE IF NOT EXISTS tool_folders\s*\((.*?)\n\);", _baseline_sql(), re.DOTALL)
+    assert match is not None, "tool_folders table not found in the baseline"
+    block = match.group(1)
+    assert re.search(r"UNIQUE\s+NULLS NOT DISTINCT\s*\(\s*parent_id\s*,\s*name\s*\)", block) is not None
+
+
+def test_tool_meta_has_badges_array_column() -> None:
+    """`tool_meta.badges` is a NOT NULL TEXT[] defaulting to the empty array — the
+    operator-overlay half of a tool's informational capability badges, folded into
+    the CREATE TABLE body (no ALTER backfill). Text-level guard so a dropped/renamed
+    column fails without a live Postgres."""
+    match = re.search(r"CREATE TABLE IF NOT EXISTS tool_meta\s*\((.*?)\n\);", _baseline_sql(), re.DOTALL)
+    assert match is not None, "tool_meta table not found in the baseline"
+    block = match.group(1)
+    assert re.search(r"\bbadges\s+TEXT\[\]\s+NOT NULL\s+DEFAULT\s+'\{\}'", block) is not None, (
+        "badges must be a NOT NULL TEXT[] column defaulting to '{}' in the CREATE TABLE body"
+    )
+
+
+def test_tool_meta_hidden_is_nullable_tristate() -> None:
+    """`tool_meta.hidden` is a NULLABLE boolean — the tri-state that lets NULL mean
+    "defer to the plugin-declared visibility" while TRUE/FALSE force it. A
+    NOT-NULL column could not express the defer state."""
+    match = re.search(r"CREATE TABLE IF NOT EXISTS tool_meta\s*\((.*?)\n\);", _baseline_sql(), re.DOTALL)
+    assert match is not None, "tool_meta table not found in the baseline"
+    block = match.group(1)
+    hidden_line = next(line for line in block.splitlines() if line.strip().startswith("hidden"))
+    assert "NOT NULL" not in hidden_line
+
+
+# ---------------------------------------------------------------------------
+# Marketplace `source` CHECK — the descriptor-only `spec` channel
+# ---------------------------------------------------------------------------
+
+
+def test_baseline_source_check_admits_spec() -> None:
+    """The install-attribution ``source`` CHECK admits the descriptor-only ``spec``
+    channel alongside ``pypi``/``github``, folded into the ``CREATE TABLE`` body (no
+    ALTER that widens a live constraint). Text-level guard so a narrowed CHECK fails
+    without a live Postgres."""
+    match = re.search(r"CREATE TABLE IF NOT EXISTS marketplace_installs\s*\((.*?)\n\);", _baseline_sql(), re.DOTALL)
+    assert match is not None, "marketplace_installs table not found in the baseline"
+    block = match.group(1)
+    assert re.search(r"CHECK\s*\(\s*source IN \('pypi', 'github', 'spec'\)\s*\)", block) is not None
+
+
+# ---------------------------------------------------------------------------
+# Runs index — the platform-side runs-enumeration table
+# ---------------------------------------------------------------------------
+
+
+def _run_index_block(ddl: str) -> str:
+    match = re.search(r"CREATE TABLE IF NOT EXISTS run_index\s*\((.*?)\n\);", ddl, re.DOTALL)
+    assert match is not None, "run_index table not found in the baseline"
+    return match.group(1)
+
+
+def test_run_index_table_columns_present() -> None:
+    """The runs-index row carries the enumeration columns: identity, preset
+    identity+version, the deep-link trace id, the attribution identity, the outcome,
+    and the start/end window. Text-level guards so a dropped/renamed column fails
+    without a live Postgres."""
+    block = _run_index_block(_baseline_sql())
+    assert re.search(r"\brun_id\s+TEXT\s+NOT NULL", block) is not None
+    assert re.search(r"\bpreset_name\s+TEXT\s+NOT NULL", block) is not None
+    assert re.search(r"\bpreset_version\s+INTEGER\s+NOT NULL", block) is not None
+    # trace_id / user_id / session_id / interaction_id / ended_at are NULLABLE
+    # (best-effort / in-flight; interaction_id is NULL for a plain uncorrelated run).
+    for nullable in ("trace_id", "user_id", "session_id", "interaction_id"):
+        line = next(ln for ln in block.splitlines() if ln.strip().startswith(nullable))
+        assert "NOT NULL" not in line, f"{nullable} must be nullable"
+    assert re.search(r"\bstarted_at\s+TIMESTAMPTZ\s+NOT NULL", block) is not None
+    ended_line = next(ln for ln in block.splitlines() if ln.strip().startswith("ended_at"))
+    assert "NOT NULL" not in ended_line
+
+
+def test_run_index_run_id_is_primary_key() -> None:
+    block = _run_index_block(_baseline_sql())
+    assert re.search(r"PRIMARY KEY\s*\(\s*run_id\s*\)", block) is not None
+
+
+def test_run_index_outcome_check_pins_the_vocabulary() -> None:
+    """The outcome column is CHECK-constrained to the closed run vocabulary, so a bad
+    outcome can never be persisted."""
+    block = _run_index_block(_baseline_sql())
+    assert re.search(r"outcome\s+TEXT\s+NOT NULL\s+DEFAULT\s+'running'", block) is not None
+    match = re.search(r"CHECK\s*\(outcome IN \(([^)]*)\)\)", block)
+    assert match is not None, "run_index must CHECK-constrain outcome"
+    values = {v.strip().strip("'") for v in match.group(1).split(",")}
+    assert values == {"running", "success", "error", "parked", "aborted"}
+
+
+def test_run_index_ships_the_filter_and_page_indexes() -> None:
+    """The list/prune paths need a ``started_at`` DESC index and the
+    preset/user/session/interaction filter indexes; text-level guards so a dropped
+    index fails without a live Postgres."""
+    ddl = _baseline_sql()
+    assert "CREATE INDEX IF NOT EXISTS run_index_started_at_idx" in ddl
+    assert "CREATE INDEX IF NOT EXISTS run_index_preset_idx" in ddl
+    assert "CREATE INDEX IF NOT EXISTS run_index_user_idx" in ddl
+    assert "CREATE INDEX IF NOT EXISTS run_index_session_idx" in ddl
+    assert "CREATE INDEX IF NOT EXISTS run_index_interaction_idx" in ddl

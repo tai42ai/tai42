@@ -1,0 +1,232 @@
+"""The concrete :class:`~tai42_contract.presets.PresetStore` view.
+
+A thin typed wrapper over the generic
+:class:`~tai42_contract.versioning.VersionedStore` with ``kind="preset"`` and body
+:class:`~tai42_contract.presets.PresetBody` (``{base_tool, description,
+fixed_kwargs, extensions}``). It holds NO SQL of its own — all persistence
+is the generic store. Its jobs are:
+
+* **body validation/reshaping** — an empty INNER extension combo (``[[]]`` or any
+  ``[]`` member) is REJECTED loudly; the empty OUTER list ``[]`` is a valid value
+  (no extensions on create, an explicit clear on a version save). The resulting
+  ``description`` is validated non-empty on every version save (explicit or
+  carried), so a legacy body with an empty description heals loudly at its next
+  save instead of persisting an empty tool docstring;
+* **carry-forward on a version save** — a version body is always the FULL
+  :class:`PresetBody`, so ``base_tool`` is ALWAYS carried forward from the active
+  version; ``description`` carries forward on ``None`` and is set by an explicit
+  non-empty string; and each of ``fixed_kwargs``, ``extensions`` is carried forward
+  wherever its argument was not provided (``None``); an explicitly provided value —
+  including a clearing ``[]`` — wins. The new body never DROPS a field;
+* **error mapping** — the generic store's errors become the preset error types
+  (:class:`PresetNotFoundError` / :class:`PresetExistsError` /
+  :class:`PresetVersionNotFoundError`), plus :class:`PresetNameConflictError` when
+  the create name collides with an existing base tool.
+
+The name-collision check is an injected async predicate (``name_conflicts``):
+the store has no view of the tool registry, so the register/reload engine wires
+the real predicate (existing non-preset base tool) when it builds the view. Left
+``None``, the view performs no collision check and the create path's own guard is
+the authority.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any
+
+from tai42_contract.agent.base import PresetSpec
+from tai42_contract.manifest import ExtensionElement
+from tai42_contract.presets import CARRY_FORWARD, CarryForward, PresetBody, PresetStore
+from tai42_contract.presets.errors import (
+    PresetExistsError,
+    PresetNameConflictError,
+    PresetNotFoundError,
+    PresetVersionNotFoundError,
+)
+from tai42_contract.states.binding import StateBinding
+from tai42_contract.template import TemplatedText
+from tai42_contract.versioning import VersionedStore
+from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError, DocumentVersionNotFoundError
+from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
+
+_KIND = "preset"
+
+# The carry-forward sentinel is ``None`` (the argument default): omitted/``None``
+# carries the active value forward; an explicit value the caller passed — including
+# a clearing ``[]`` / ``{}`` — is a deliberate value, never "not provided".
+
+
+def _validate_extensions(extensions: Sequence[Sequence[ExtensionElement]]) -> None:
+    """Reject an empty INNER combo.
+
+    The empty OUTER list is valid (no extensions); an empty member combo (``[[]]`` or any
+    ``[]``) is never a legal value.
+    """
+    for combo in extensions:
+        if not combo:
+            raise ValueError("preset extensions must not contain an empty combo")
+
+
+class PresetStoreView(PresetStore):
+    """Typed preset view delegating to a generic :class:`VersionedStore`."""
+
+    def __init__(
+        self,
+        store: VersionedStore,
+        *,
+        name_conflicts: Callable[[str], Awaitable[bool]] | None = None,
+    ) -> None:
+        """Wrap the generic ``store`` and an optional ``name_conflicts`` predicate for collision checks."""
+        self._store = store
+        self._name_conflicts = name_conflicts
+
+    async def create_preset(
+        self,
+        spec: PresetSpec,
+        extensions: Sequence[Sequence[ExtensionElement]],
+        output_schema: TemplatedText | dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | None = None,
+        *,
+        state_binding: StateBinding | None = None,
+        tags: list[str] | None = None,
+    ) -> DocumentRecord:
+        """Create a preset from ``spec`` and its extension combos; raises on a name collision."""
+        _validate_extensions(extensions)
+        if self._name_conflicts is not None and await self._name_conflicts(spec.name):
+            raise PresetNameConflictError(spec.name)
+        body = PresetBody(
+            base_tool=spec.base_tool,
+            description=spec.description,
+            fixed_kwargs=spec.fixed_kwargs,
+            extensions=[list(combo) for combo in extensions],
+            output_schema=output_schema,
+            input_schema=input_schema,
+            state_binding=state_binding,
+        )
+        # ``tags`` labels version 1 in the SAME commit — a caller that must tag the
+        # first version (the seed applier) leaves no untagged window; ``None`` is the
+        # door's untagged create.
+        try:
+            return await self._store.create(_KIND, spec.name, body.model_dump(), tags=tags)
+        except DocumentExistsError as exc:
+            raise PresetExistsError(spec.name) from exc
+
+    async def save_version(
+        self,
+        name: str,
+        fixed_kwargs: dict[str, Any] | None = None,
+        extensions: Sequence[Sequence[ExtensionElement]] | None = None,
+        output_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        description: str | None = None,
+        *,
+        input_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
+        tags: list[str] | None = None,
+    ) -> DocumentVersion:
+        """Save a new preset version, carrying unset fields forward from the active version."""
+        active = await self._active_body(name)
+        new_extensions = active.extensions if extensions is None else extensions
+        _validate_extensions(new_extensions)
+        new_output_schema = active.output_schema if isinstance(output_schema, CarryForward) else output_schema
+        new_input_schema = active.input_schema if isinstance(input_schema, CarryForward) else input_schema
+        new_state_binding = active.state_binding if isinstance(state_binding, CarryForward) else state_binding
+        # ``description`` is editable per version: None carries the active value
+        # forward, an explicit string sets it. The RESULTING description is validated
+        # non-empty either way, so an explicit "" is rejected and a carry-forward from
+        # a legacy empty body heals loudly rather than persisting an empty docstring.
+        new_description = active.description if description is None else description
+        if not new_description.strip():
+            raise ValueError("preset description must not be empty; supply a description")
+        new_body = PresetBody(
+            base_tool=active.base_tool,
+            description=new_description,
+            fixed_kwargs=active.fixed_kwargs if fixed_kwargs is None else fixed_kwargs,
+            extensions=[list(combo) for combo in new_extensions],
+            output_schema=new_output_schema,
+            input_schema=new_input_schema,
+            state_binding=new_state_binding,
+        )
+        # ``tags`` labels the new version in the SAME save commit — a caller that must
+        # tag it (the seed applier) leaves no untagged window; ``None`` is the door's
+        # untagged save (the generic store maps it to no labels).
+        try:
+            return await self._store.save_version(_KIND, name, new_body.model_dump(), tags=tags)
+        except DocumentNotFoundError as exc:
+            raise PresetNotFoundError(name) from exc
+
+    async def list_presets(self) -> list[DocumentRecord]:
+        """Every preset's active record."""
+        return await self._store.list(_KIND)
+
+    async def get_preset(self, name: str) -> DocumentRecord:
+        """The record for preset ``name``; raises :class:`PresetNotFoundError` when unknown."""
+        try:
+            return await self._store.get(_KIND, name)
+        except DocumentNotFoundError as exc:
+            raise PresetNotFoundError(name) from exc
+
+    async def get_active_kwargs(self, name: str) -> dict[str, Any]:
+        """The active version's ``fixed_kwargs`` for preset ``name``."""
+        return (await self._active_body(name)).fixed_kwargs
+
+    async def list_versions(self, name: str) -> list[DocumentVersion]:
+        """The version history of preset ``name``; raises :class:`PresetNotFoundError` when unknown."""
+        try:
+            return await self._store.list_versions(_KIND, name)
+        except DocumentNotFoundError as exc:
+            raise PresetNotFoundError(name) from exc
+
+    async def get_version(self, name: str, version: int) -> DocumentVersion:
+        """One version body of preset ``name``; raises :class:`PresetVersionNotFoundError` when absent."""
+        try:
+            return await self._store.get_version(_KIND, name, version)
+        except DocumentVersionNotFoundError as exc:
+            raise PresetVersionNotFoundError(name, version) from exc
+
+    async def get_active_body(self, name: str) -> PresetBody:
+        """The active :class:`PresetBody` of preset ``name``."""
+        return await self._active_body(name)
+
+    async def rollback(self, name: str, version: int) -> DocumentRecord:
+        """Restore an earlier ``version`` of preset ``name`` as a new active version."""
+        try:
+            return await self._store.rollback(_KIND, name, version)
+        except DocumentVersionNotFoundError as exc:
+            raise PresetVersionNotFoundError(name, version) from exc
+
+    async def soft_delete(self, name: str) -> None:
+        """Soft-delete preset ``name``; raises :class:`PresetNotFoundError` when unknown."""
+        try:
+            await self._store.soft_delete(_KIND, name)
+        except DocumentNotFoundError as exc:
+            raise PresetNotFoundError(name) from exc
+
+    async def rename_preset(self, name: str, new_name: str) -> DocumentRecord:
+        """Re-key preset ``name`` to ``new_name``; raises on a name collision or a missing preset."""
+        # A rename must never silently shadow a live tool — the same rule create
+        # enforces before any store write — so the injected predicate gates the NEW
+        # name first. The body is untouched (rename moves a key), so there is no body
+        # validation here.
+        if self._name_conflicts is not None and await self._name_conflicts(new_name):
+            raise PresetNameConflictError(new_name)
+        try:
+            return await self._store.rename(_KIND, name, new_name)
+        except DocumentNotFoundError as exc:
+            raise PresetNotFoundError(name) from exc
+        except DocumentExistsError as exc:
+            raise PresetExistsError(new_name) from exc
+
+    async def _active_body(self, name: str) -> PresetBody:
+        try:
+            raw = await self._store.get_active_body(_KIND, name)
+        except DocumentNotFoundError as exc:
+            raise PresetNotFoundError(name) from exc
+        return PresetBody.model_validate(raw)
+
+
+def preset_store(*, name_conflicts: Callable[[str], Awaitable[bool]] | None = None) -> PresetStoreView:
+    """Build the active preset view over the generic versioned-document store."""
+    from tai42_skeleton.versioning import versioned_store
+
+    return PresetStoreView(versioned_store(), name_conflicts=name_conflicts)

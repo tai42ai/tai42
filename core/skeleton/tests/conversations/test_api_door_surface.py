@@ -1,0 +1,452 @@
+"""The API send door's edge/error surface: the 400 body guards, the wait-seconds clamp,
+the typed-error status mappings, and the 200/202 answer shapes.
+
+The turn engine is stubbed so the HANDLER's own translation of a body or a typed error into
+an HTTP response is what is under test — the auth stack is exercised in
+``test_api_door_authz``.
+"""
+
+from __future__ import annotations
+
+import pytest
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.routing import Route
+from starlette.testclient import TestClient
+from tai42_contract.conversations import ConversationAnswer
+
+import tai42_skeleton.conversations as conversations_package
+from tai42_skeleton.conversations.caps import AddressRateLimitedError, ThreadQueueOverflowError
+from tai42_skeleton.conversations.turn import (
+    ApiSubmitResult,
+    ConversationRouteResolutionError,
+    EventTargetNotToolError,
+    ThreadNotFoundError,
+)
+from tai42_skeleton.operations import BadRequestError
+from tai42_skeleton.operations.errors import NotSupportedError
+
+_PATH = "/api/conversations/chat/messages"
+
+
+def _router():
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.app.instance import app as skeleton_app
+
+    with tai42_app.bound(skeleton_app):
+        from tai42_skeleton.routers import conversations as router
+
+    return router
+
+
+class _Engine:
+    """A stub turn engine: it records its calls and either returns a fixed result or raises
+    a fixed exception."""
+
+    def __init__(self, *, result: ApiSubmitResult | None = None, raises: Exception | None = None) -> None:
+        self._result = result
+        self._raises = raises
+        self.calls: list[tuple] = []
+
+    async def __call__(
+        self,
+        route_name,
+        external_user_id,
+        text,
+        caller_principal,
+        wait_seconds,
+        params=None,
+        form=None,
+        attachments=None,
+        location=None,
+        locale=None,
+    ):
+        self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds, params, form, locale))
+        if self._raises is not None:
+            raise self._raises
+        return self._result or ApiSubmitResult(message_id="m-1", thread_id="t-1", answer=None)
+
+
+def _client(monkeypatch, engine: _Engine) -> TestClient:
+    router = _router()
+    monkeypatch.setattr(conversations_package, "submit_api_message", engine)
+    monkeypatch.setattr(router, "get_current_user_id", lambda: "caller")
+    routes = [Route("/api/conversations/{route_name}/messages", router.send_conversation_message, methods=["POST"])]
+    return TestClient(Starlette(routes=routes))
+
+
+def _post(client: TestClient, path: str = _PATH, body=None):
+    return client.post(path, json={"external_user_id": "u-7", "text": "hi"} if body is None else body)
+
+
+# -- the 400 body guards -------------------------------------------------------
+
+
+def test_a_reload_locked_door_rejects_before_the_turn(monkeypatch):
+    engine = _Engine()
+    router = _router()
+    monkeypatch.setattr(conversations_package, "submit_api_message", engine)
+
+    class _Locked:
+        locked = True
+
+        def reject_response(self):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse({"error": "reloading"}, status_code=503)
+
+    monkeypatch.setattr(router, "reload_gate", _Locked())
+    routes = [Route("/api/conversations/{route_name}/messages", router.send_conversation_message, methods=["POST"])]
+    response = TestClient(Starlette(routes=routes)).post(_PATH, json={"external_user_id": "u", "text": "hi"})
+    assert response.status_code == 503
+    assert engine.calls == []
+
+
+def test_an_unparseable_body_is_a_400(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, content=b"not json", headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+    assert "invalid JSON body" in response.json()["error"]
+    assert engine.calls == []
+
+
+def test_a_non_object_body_is_a_400(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json=["not", "an", "object"])
+    assert response.status_code == 400
+    assert "must be a JSON object" in response.json()["error"]
+    assert engine.calls == []
+
+
+def test_a_body_that_is_not_a_conversation_message_is_a_400(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json={"external_user_id": "u-7"})  # missing ``text``
+    assert response.status_code == 400
+    assert "invalid conversation message" in response.json()["error"]
+    assert engine.calls == []
+
+
+def test_a_non_integer_wait_seconds_is_a_400(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "wait_seconds": "abc"})
+    assert response.status_code == 400
+    assert "invalid conversation message" in response.json()["error"]
+    assert engine.calls == []
+
+
+def test_a_negative_wait_seconds_is_a_400(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "wait_seconds": -1})
+    assert response.status_code == 400
+    assert "invalid conversation message" in response.json()["error"]
+    assert engine.calls == []
+
+
+# -- the wait-seconds clamp ----------------------------------------------------
+
+
+def test_an_absent_wait_seconds_is_the_pure_async_default(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    assert _post(client).status_code == 202
+    assert engine.calls[0][4] == 0
+
+
+def test_a_below_cap_wait_seconds_passes_through_unclamped(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "wait_seconds": 5})
+    assert engine.calls[0][4] == 5
+
+
+def test_an_oversized_wait_seconds_clamps_to_the_settings_max(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "wait_seconds": 99999})
+    assert engine.calls[0][4] == 120  # ConversationsSettings().sync_wait_max_seconds default
+
+
+# -- the typed-error status mappings -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (ConversationRouteResolutionError("no such route"), 404),
+        (AddressRateLimitedError("over cap"), 429),
+        (ThreadQueueOverflowError("full"), 503),
+        (NotSupportedError("no backend"), 501),
+    ],
+)
+def test_a_typed_engine_error_maps_to_its_status(monkeypatch, error, status):
+    engine = _Engine(raises=error)
+    client = _client(monkeypatch, engine)
+    response = _post(client)
+    assert response.status_code == status
+    assert response.json()["error"] == str(error)
+
+
+# -- the answer shapes ---------------------------------------------------------
+
+
+def test_a_finished_turn_answers_200_with_the_answer_inline(monkeypatch):
+    answer = ConversationAnswer(message_id="m-1", thread_id="t-1", status="answered", answer="hello back")
+    engine = _Engine(result=ApiSubmitResult(message_id="m-1", thread_id="t-1", answer=answer))
+    client = _client(monkeypatch, engine)
+    response = _post(client)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["message_id"] == "m-1"
+    assert data["answer"]["answer"] == "hello back"
+
+
+def test_an_unfinished_turn_answers_202_without_an_answer(monkeypatch):
+    engine = _Engine(result=ApiSubmitResult(message_id="m-1", thread_id="t-1", answer=None))
+    client = _client(monkeypatch, engine)
+    response = _post(client)
+    assert response.status_code == 202
+    assert "answer" not in response.json()["data"]
+
+
+# -- structured inbound form ---------------------------------------------------
+
+
+def test_a_form_body_field_threads_through_to_the_engine(monkeypatch):
+    # ConversationMessage.form (the structured participant submission) rides the body beside the
+    # required text and reaches the engine as the ``form`` argument.
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json={"external_user_id": "u-7", "text": "name: Alice", "form": {"name": "Alice"}})
+    assert response.status_code == 202
+    assert engine.calls[0][6] == {"name": "Alice"}
+
+
+def test_an_absent_form_reaches_the_engine_as_none(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    _post(client)
+    assert engine.calls[0][6] is None
+
+
+def test_a_non_object_form_is_a_400(monkeypatch):
+    # The contract's inbound-form transport bound (a JSON object) refuses at the door.
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "form": ["nope"]})
+    assert response.status_code == 400
+    assert "invalid conversation message" in response.json()["error"]
+    assert engine.calls == []
+
+
+# -- entry params --------------------------------------------------------------
+
+
+def test_valid_params_thread_through_to_the_engine(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "params": {"token": "abc-123"}})
+    assert response.status_code == 202
+    assert engine.calls[0][5] == {"token": "abc-123"}
+
+
+def test_absent_params_reach_the_engine_as_none(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    _post(client)
+    assert engine.calls[0][5] is None
+
+
+def test_invalid_params_are_a_400_that_never_echoes_the_value(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    secret = "super-secret-token-value"
+    response = client.post(
+        _PATH,
+        json={"external_user_id": "u-7", "text": "hi", "params": {"k": secret + "x" * 512}},
+    )
+    assert response.status_code == 400
+    body = response.json()["error"]
+    assert "invalid conversation message" in body
+    # The bound is named; the offending VALUE never appears in the response.
+    assert "character limit" in body
+    assert secret not in body
+    assert engine.calls == []
+
+
+# -- the event door surface ---------------------------------------------------
+
+
+_EVENT_PATH = "/api/conversations/chat/events"
+_EVENT_BODY = {"address": "u-7", "event": {"event_id": "evt-1", "kind": "provider.update"}}
+
+
+class _EventEngine:
+    """A stub event engine recording its call and returning a fixed result or raising."""
+
+    def __init__(self, *, result: ApiSubmitResult | None = None, raises: Exception | None = None) -> None:
+        self._result = result
+        self._raises = raises
+        self.calls: list[tuple] = []
+
+    async def __call__(self, route_name, submission, caller_principal):
+        self.calls.append((route_name, submission, caller_principal))
+        if self._raises is not None:
+            raise self._raises
+        return self._result or ApiSubmitResult(message_id="e-1", thread_id="t-1", answer=None)
+
+
+def _event_client(monkeypatch, engine: _EventEngine) -> TestClient:
+    router = _router()
+    monkeypatch.setattr(conversations_package, "submit_event", engine)
+    monkeypatch.setattr(router, "get_current_user_id", lambda: "caller")
+    routes = [Route("/api/conversations/{route_name}/events", router.send_conversation_event, methods=["POST"])]
+    return TestClient(Starlette(routes=routes))
+
+
+def test_event_unfinished_turn_answers_202_without_an_answer(monkeypatch):
+    engine = _EventEngine(result=ApiSubmitResult(message_id="e-1", thread_id="t-1", answer=None))
+    client = _event_client(monkeypatch, engine)
+    response = client.post(_EVENT_PATH, json=_EVENT_BODY)
+    assert response.status_code == 202
+    assert response.json()["data"]["message_id"] == "e-1"
+    assert "answer" not in response.json()["data"]
+
+
+def test_event_finished_turn_answers_200_with_the_answer_inline(monkeypatch):
+    answer = ConversationAnswer(message_id="e-1", thread_id="t-1", status="answered", answer="event handled")
+    engine = _EventEngine(result=ApiSubmitResult(message_id="e-1", thread_id="t-1", answer=answer))
+    client = _event_client(monkeypatch, engine)
+    response = client.post(_EVENT_PATH, json={**_EVENT_BODY, "wait_seconds": 5})
+    assert response.status_code == 200
+    assert response.json()["data"]["answer"]["answer"] == "event handled"
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (ThreadNotFoundError("no such thread"), 404),
+        (ConversationRouteResolutionError("no such route"), 404),
+        (EventTargetNotToolError("agent target"), 409),
+        (AddressRateLimitedError("over cap"), 429),
+        (ThreadQueueOverflowError("full"), 503),
+        (NotSupportedError("no backend"), 501),
+    ],
+)
+def test_a_typed_event_engine_error_maps_to_its_status(monkeypatch, error, status):
+    engine = _EventEngine(raises=error)
+    client = _event_client(monkeypatch, engine)
+    response = client.post(_EVENT_PATH, json=_EVENT_BODY)
+    assert response.status_code == status
+    assert response.json()["error"] == str(error)
+
+
+def test_event_body_needs_exactly_one_thread_ref(monkeypatch):
+    engine = _EventEngine()
+    client = _event_client(monkeypatch, engine)
+    # Neither address nor thread_id.
+    both_absent = client.post(_EVENT_PATH, json={"event": {"event_id": "evt-1", "kind": "k"}})
+    assert both_absent.status_code == 400
+    assert "invalid conversation event" in both_absent.json()["error"]
+    # Both address and thread_id.
+    both_present = client.post(
+        _EVENT_PATH, json={"address": "u-7", "thread_id": "bridge:chat:x", "event": {"event_id": "evt-1", "kind": "k"}}
+    )
+    assert both_present.status_code == 400
+    assert engine.calls == []
+
+
+def test_event_blank_id_is_a_400_that_never_reaches_the_engine(monkeypatch):
+    engine = _EventEngine()
+    client = _event_client(monkeypatch, engine)
+    response = client.post(_EVENT_PATH, json={"address": "u-7", "event": {"event_id": "   ", "kind": "k"}})
+    assert response.status_code == 400
+    assert "invalid conversation event" in response.json()["error"]
+    assert engine.calls == []
+
+
+# -- the route-create body extractor ------------------------------------------
+
+
+def _create_request(body: bytes, route_name: str = "chat") -> Request:
+    async def _receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "headers": [],
+        "path_params": {"route_name": route_name},
+        "query_string": b"",
+    }
+    return Request(scope, _receive)
+
+
+async def test_extract_route_create_injects_the_path_route_name():
+    router = _router()
+    fields = await router._extract_route_create(
+        _create_request(
+            b'{"door": "api", "target_kind": "agent", "target_name": "relay", "execution_key": "svc", "callback_url": "https://cb.example/x"}'
+        )
+    )
+    assert fields["route_name"] == "chat"
+    assert fields["door"] == "api"
+
+
+async def test_extract_route_create_rejects_invalid_json():
+    router = _router()
+    with pytest.raises(BadRequestError, match="invalid JSON body"):
+        await router._extract_route_create(_create_request(b"not json"))
+
+
+async def test_extract_route_create_rejects_a_non_object_body():
+    router = _router()
+    with pytest.raises(BadRequestError, match="JSON object"):
+        await router._extract_route_create(_create_request(b"[1, 2, 3]"))
+
+
+async def test_extract_route_create_rejects_a_body_route_name_disagreeing_with_the_path():
+    router = _router()
+    with pytest.raises(BadRequestError, match="must match"):
+        await router._extract_route_create(
+            _create_request(
+                b'{"route_name": "other", "door": "api", "target_kind": "agent", '
+                b'"target_name": "relay", "execution_key": "svc"}'
+            )
+        )
+
+
+async def test_extract_route_create_rejects_an_invalid_route_body():
+    router = _router()
+    with pytest.raises(BadRequestError, match="invalid conversation route"):
+        await router._extract_route_create(_create_request(b'{"door": "channel"}'))
+
+
+def test_a_body_locale_reaches_the_engine(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    resp = _post(client, body={"external_user_id": "u-7", "text": "hi", "locale": "he-il"})
+    assert resp.status_code == 202  # pure-async default (no wait_seconds)
+    # Canonicalized by the body model and forwarded to the turn engine.
+    assert engine.calls[0][7] == "he-IL"
+
+
+def test_an_absent_locale_is_forwarded_as_none(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    resp = _post(client)
+    assert resp.status_code == 202
+    assert engine.calls[0][7] is None
+
+
+def test_a_malformed_locale_is_a_400(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    resp = _post(client, body={"external_user_id": "u-7", "text": "hi", "locale": "not a locale!"})
+    assert resp.status_code == 400
+    assert engine.calls == []

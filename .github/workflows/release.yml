@@ -1,0 +1,205 @@
+name: release
+
+on:
+  push:
+    # Component tags only: tai42-<package>-v<version> (incl. tai42-e2e-v*). A
+    # bare v* tag never matches — the packages cannot share one bare v* scheme.
+    tags: ["tai42-*-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds the tagged package and publishes to PyPI with an API token held as a
+  # repository secret. The `pypi` environment scopes that secret to this job.
+  release:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+    services:
+      # Backing services for the consumer boot gate below: a skeleton release boots
+      # the previously published consumers against the candidate tree, which needs a
+      # Postgres and a Redis. Idle for every non-skeleton release (the gate step
+      # self-skips), and empty on each run.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+    env:
+      # Consumer coordinates are configuration, not hard-coded: the source repo is a
+      # variable and the read token is the existing cross-repo one, so the public
+      # tree names no private consumer and a fork without the variables self-skips.
+      CONSUMER_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+      CONSUMER_REPO: ${{ vars.CONSUMER_BOOT_GATE_REPO }}
+      CONSUMER_TAG_REGEX: ${{ vars.CONSUMER_BOOT_GATE_TAG_REGEX }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Full history + tags: the API-diff gate loads the package at its previous
+        # released tag to classify the surface change.
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Resolve component + assert tag matches descriptor version
+        # Parse component/version out of the tag, look the component up as a
+        # package-name in release-please-config.json to find its member dir, and
+        # assert the tagged version matches the source of truth — a stale version
+        # can never publish under the wrong tag. Packaged members read
+        # pyproject.toml; a descriptor-only dir (no pyproject) reads the top-level
+        # version out of tai-plugin.yml with a bare regex (this step has no
+        # pyyaml) and sets descriptor=true so the wheel/PyPI steps below skip: a
+        # descriptor's release artifact is the yml at the tag, not a wheel.
+        id: resolve
+        run: |
+          set -euo pipefail
+          component="${GITHUB_REF_NAME%-v*}"
+          version="${GITHUB_REF_NAME##*-v}"
+          dir=$(python3 -c '
+          import json, sys
+          component = sys.argv[1]
+          config = json.load(open("release-please-config.json"))
+          for path, entry in config["packages"].items():
+              if entry.get("package-name") == component:
+                  print(path); break
+          else:
+              sys.exit(f"::error::no package-name {component} in release-please-config.json")
+          ' "$component")
+          if [ -f "$dir/pyproject.toml" ]; then
+            descriptor=false
+            source_version=$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1],"rb"))["project"]["version"])' "$dir/pyproject.toml")
+            source_file="$dir/pyproject.toml"
+          else
+            descriptor=true
+            source_version=$(python3 -c '
+          import re, sys
+          for line in open(sys.argv[1]):
+              m = re.match(r"^version:\s*(\S+)", line)
+              if m:
+                  print(m.group(1)); break
+          else:
+              sys.exit(f"::error::no top-level version in {sys.argv[1]}")
+          ' "$dir/tai-plugin.yml")
+            source_file="$dir/tai-plugin.yml"
+          fi
+          if [ "$version" != "$source_version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} version ${version} != ${source_file} version ${source_version}" >&2
+            exit 1
+          fi
+          echo "component=$component" >> "$GITHUB_OUTPUT"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "descriptor=$descriptor" >> "$GITHUB_OUTPUT"
+      - name: API-diff gate
+        # Label-honesty gate: a breaking public-API change (griffe classification)
+        # may not publish under a bump the release label could not have produced.
+        # Runs before build so a dishonest release never reaches PyPI. Descriptor
+        # releases have no Python surface to diff, so this and every build/publish
+        # step below are gated off for them.
+        if: steps.resolve.outputs.descriptor != 'true'
+        run: |
+          uv run --locked --package tai42-cli --extra api-gate tai42-api-gate \
+            --package "${{ steps.resolve.outputs.component }}" \
+            --dir "${{ steps.resolve.outputs.dir }}" \
+            --version "${{ steps.resolve.outputs.version }}"
+      - name: Download the previously published consumer wheel(s)
+        # The consumer boot gate applies to a skeleton release (the boot contract the
+        # startup route/lifecycle guards live in). Self-skips when the consumer
+        # coordinates are unset.
+        id: consumers
+        if: >-
+          steps.resolve.outputs.dir == 'core/skeleton' &&
+          env.CONSUMER_REPO != '' && env.CONSUMER_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p consumer-wheels
+          regex="${CONSUMER_TAG_REGEX:-.}"
+          tag="$(gh release list -R "$CONSUMER_REPO" --limit 200 --json tagName,createdAt \
+            --jq "[.[] | select(.tagName | test(\"$regex\"))] | sort_by(.createdAt) | last | .tagName")"
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::error::no release in $CONSUMER_REPO matches /$regex/"; exit 1
+          fi
+          echo "resolved latest consumer release: $tag"
+          gh release download "$tag" -R "$CONSUMER_REPO" --pattern '*.whl' --dir consumer-wheels
+          args=""
+          for whl in consumer-wheels/*.whl; do
+            args="$args --consumer-wheel $whl"
+          done
+          if [ -z "$args" ]; then
+            echo "::error::consumer release $tag carries no wheel asset"; exit 1
+          fi
+          echo "wheels=$args" >> "$GITHUB_OUTPUT"
+      - name: Consumer boot gate
+        # Boot the published consumers against the candidate tree before build: a
+        # non-major skeleton release that breaks any consumer's boot fails here,
+        # never reaching PyPI.
+        if: steps.consumers.outputs.wheels != ''
+        env:
+          CONSUMER_BOOT_REDIS_URL: redis://localhost:6379
+          CONSUMER_BOOT_PG_HOST: localhost
+          CONSUMER_BOOT_PG_PASSWORD: postgres
+          WHEELS: ${{ steps.consumers.outputs.wheels }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # WHEELS is a deliberate multi-flag string.
+          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py \
+            --package "${{ steps.resolve.outputs.component }}" \
+            --dir "${{ steps.resolve.outputs.dir }}" \
+            --version "${{ steps.resolve.outputs.version }}" $WHEELS
+      - if: steps.resolve.outputs.descriptor != 'true'
+        run: uv build --package "${{ steps.resolve.outputs.component }}" --out-dir dist
+      - if: steps.resolve.outputs.descriptor != 'true'
+        run: uvx twine check dist/*
+      - name: Publish to PyPI
+        # Descriptor releases publish no wheel — their artifact is the tai-plugin.yml
+        # at the tag — so the PyPI upload is skipped for them.
+        if: steps.resolve.outputs.descriptor != 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          # A lane re-run after the upload landed (or a tag re-minted for a version
+          # PyPI already serves) is idempotent instead of red.
+          skip-existing: true
+          # Attestations are minted from the OIDC identity token, which token
+          # auth does not issue.
+          attestations: false
+
+  # Image refresh hook: every published component pokes tai-distribution, whose
+  # refresh-pins pipeline re-reads PyPI and rebuilds the platform image when
+  # the pinned roster changed. Fork runs carry no token and skip.
+  notify-distribution:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DIST_DISPATCH_TOKEN: ${{ secrets.TAI_DIST_DISPATCH_TOKEN }}
+    steps:
+      - name: Trigger the tai-distribution pin refresh
+        if: env.DIST_DISPATCH_TOKEN != ''
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ env.DIST_DISPATCH_TOKEN }}
+          repository: ${{ github.repository_owner }}/tai-distribution
+          event-type: platform-release
+          client-payload: |
+            {
+              "tag": "${{ github.ref_name }}"
+            }

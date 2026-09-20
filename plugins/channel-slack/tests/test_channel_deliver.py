@@ -1,0 +1,461 @@
+"""Slack channel delivery: post/ask/answer payloads, recipient allowlisting,
+correlation storage, and form delivery through modal blocks.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+
+import httpx
+import pytest
+from tai42_contract.channels import (
+    ChannelDeliveryError,
+    ChannelInputError,
+)
+from tai42_contract.interactions.models import (
+    FormData,
+    FormOption,
+    FormPage,
+    MediaItem,
+    MediaKind,
+)
+from tai42_kit.clients.impl.http import HttpxClient
+from tai42_kit.settings import reset_all_settings
+
+from tai42_channel_slack.blocks import (
+    SELECT_ACTION_PREFIX,
+)
+from tai42_channel_slack.channel import SlackChannel, _deliver_form, open_modal_view
+from tai42_channel_slack.correlation import remaining_seconds
+from tai42_channel_slack.forms import build_message_blocks
+
+from .conftest import (
+    TEST_ALLOWED_RECIPIENT,
+    TEST_BOT_TOKEN,
+    TEST_DEFAULT_RECIPIENT,
+    _ok_response,
+    make_delivery,
+)
+
+_FORM_SCHEMA = {
+    "type": "object",
+    "properties": {"full_name": {"type": "string", "title": "Full name"}},
+    "required": ["full_name"],
+}
+
+
+_FORM_KEY = "channel:slack:form:int-1"
+
+
+pytestmark = pytest.mark.usefixtures("slack_env")
+
+
+async def test_post_message_payload_shape(http_script, fake_redis):
+    http_script.results.append(_ok_response())
+
+    await SlackChannel().deliver(make_delivery())
+
+    (request,) = http_script.requests
+    assert str(request.url) == "https://slack.com/api/chat.postMessage"
+    assert request.headers["Authorization"] == f"Bearer {TEST_BOT_TOKEN}"
+    payload = json.loads(request.content)
+    assert payload["channel"] == TEST_DEFAULT_RECIPIENT
+    assert payload["text"].startswith("Deploy to production?")
+
+
+async def test_post_message_url_derives_from_api_base_url(http_script, fake_redis, monkeypatch):
+    # An overridden CHANNEL_SLACK_API_BASE_URL (a stub origin in e2e) is where
+    # chat.postMessage is addressed — the send URL derives from the setting.
+    monkeypatch.setenv("CHANNEL_SLACK_API_BASE_URL", "http://127.0.0.1:9099/api")
+    reset_all_settings()
+    http_script.results.append(_ok_response())
+
+    await SlackChannel().deliver(make_delivery())
+
+    (request,) = http_script.requests
+    assert str(request.url) == "http://127.0.0.1:9099/api/chat.postMessage"
+
+
+async def test_no_requested_recipient_sends_to_default(http_script, fake_redis):
+    http_script.results.append(_ok_response())
+
+    await SlackChannel().deliver(make_delivery(recipient=None))
+
+    payload = json.loads(http_script.requests[0].content)
+    assert payload["channel"] == TEST_DEFAULT_RECIPIENT
+
+
+async def test_allowlisted_recipient_sends_to_it(http_script, fake_redis):
+    http_script.results.append(_ok_response())
+
+    await SlackChannel().deliver(make_delivery(recipient=TEST_ALLOWED_RECIPIENT))
+
+    payload = json.loads(http_script.requests[0].content)
+    assert payload["channel"] == TEST_ALLOWED_RECIPIENT
+
+
+@pytest.mark.parametrize(
+    "recipient",
+    [
+        pytest.param("C0UNLISTED", id="unknown-id"),
+        # The default recipient is trusted only when the OPERATOR falls back
+        # to it; a CALLER naming it is gated by the allowlist like any other
+        # requested value.
+        pytest.param(TEST_DEFAULT_RECIPIENT, id="default-not-allowlisted"),
+    ],
+)
+async def test_unlisted_recipient_refused_nothing_sent(http_script, fake_redis, recipient):
+    with pytest.raises(ChannelDeliveryError, match="not on CHANNEL_SLACK_ALLOWED_RECIPIENTS"):
+        await SlackChannel().deliver(make_delivery(recipient=recipient))
+
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
+async def test_empty_allowlist_refuses_every_requested_recipient(http_script, fake_redis, monkeypatch):
+    monkeypatch.setenv("CHANNEL_SLACK_ALLOWED_RECIPIENTS", "")
+    reset_all_settings()
+
+    with pytest.raises(ChannelDeliveryError, match="refusing to send"):
+        await SlackChannel().deliver(make_delivery(recipient=TEST_ALLOWED_RECIPIENT))
+
+    assert http_script.requests == []
+
+
+async def test_no_recipient_and_no_default_raises_naming_env_var(http_script, fake_redis, monkeypatch):
+    # Neither a caller-requested recipient nor an operator default: nowhere to
+    # deliver, so this operator misconfiguration is a delivery failure —
+    # ChannelDeliveryError naming the env var, raised before any request.
+    monkeypatch.delenv("CHANNEL_SLACK_DEFAULT_RECIPIENT")
+    reset_all_settings()
+
+    with pytest.raises(ChannelDeliveryError, match="CHANNEL_SLACK_DEFAULT_RECIPIENT"):
+        await SlackChannel().deliver(make_delivery(recipient=None))
+
+    assert http_script.requests == []
+
+
+async def test_ok_true_stores_correlation_with_budget_ttl(http_script, fake_redis):
+    http_script.results.append(_ok_response(ts="123.456"))
+    delivery = make_delivery()
+
+    await SlackChannel().deliver(delivery)
+
+    key = "channel:slack:corr:123.456"
+    # The corr value is now a JSON {callback_url, interaction_id, timeout_at} record.
+    record = json.loads(fake_redis.store[key])
+    assert record["callback_url"] == delivery.callback_url
+    assert record["interaction_id"] == delivery.interaction_id
+    assert fake_redis.ttls[key] == remaining_seconds(delivery.timeout_at)
+
+
+async def test_ok_false_raises_with_slack_error_and_writes_nothing(http_script, fake_redis):
+    # Slack answers HTTP 200 even for a failed send — the JSON ok field is the
+    # only success signal.
+    http_script.results.append(httpx.Response(200, json={"ok": False, "error": "channel_not_found"}))
+
+    with pytest.raises(ChannelDeliveryError, match="channel_not_found"):
+        await SlackChannel().deliver(make_delivery())
+
+    assert fake_redis.store == {}
+
+
+@pytest.mark.parametrize("status", [429, 500])
+async def test_non_200_status_raises(http_script, fake_redis, status):
+    http_script.results.append(httpx.Response(status, json={"ok": False}))
+
+    with pytest.raises(ChannelDeliveryError, match=f"HTTP {status}"):
+        await SlackChannel().deliver(make_delivery())
+
+
+async def test_non_json_200_body_raises(http_script, fake_redis):
+    http_script.results.append(httpx.Response(200, text="not json"))
+
+    with pytest.raises(ChannelDeliveryError, match="non-JSON body"):
+        await SlackChannel().deliver(make_delivery())
+
+
+async def test_ok_true_without_ts_raises_for_tier2(http_script, fake_redis):
+    http_script.results.append(_ok_response(ts=None))
+
+    with pytest.raises(ChannelDeliveryError, match="no ts"):
+        await SlackChannel().deliver(make_delivery())
+
+
+async def test_transport_error_wraps_into_delivery_error(http_script, fake_redis):
+    http_script.results.append(httpx.ConnectError("boom"))
+
+    with pytest.raises(ChannelDeliveryError, match="transport failure") as excinfo:
+        await SlackChannel().deliver(make_delivery())
+
+    assert isinstance(excinfo.value.__cause__, httpx.ConnectError)
+
+
+async def test_expired_budget_raises_before_any_request(http_script, fake_redis):
+    delivery = make_delivery(timeout_at=datetime.now(UTC) - timedelta(seconds=1))
+
+    with pytest.raises(ChannelDeliveryError, match="budget already expired"):
+        await SlackChannel().deliver(delivery)
+
+    assert http_script.requests == []
+
+
+async def test_unconfigured_token_raises_naming_env_var(http_script, fake_redis, monkeypatch):
+    # A missing bot token is operator misconfiguration, and on the deliver
+    # path that is a delivery failure: ChannelDeliveryError naming the env
+    # var, raised before any request.
+    monkeypatch.delenv("CHANNEL_SLACK_BOT_TOKEN")
+    reset_all_settings()
+
+    with pytest.raises(ChannelDeliveryError, match="CHANNEL_SLACK_BOT_TOKEN"):
+        await SlackChannel().deliver(make_delivery())
+
+    assert http_script.requests == []
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_formats_link_only_no_correlation(http_script, fake_redis, answer_format):
+    # An ok:true body WITHOUT ts succeeds for a Tier-1 format — no ts
+    # requirement, no correlation write, no threaded reply expected.
+    http_script.results.append(_ok_response(ts=None))
+    delivery = make_delivery(answer_format=answer_format)
+
+    await SlackChannel().deliver(delivery)
+
+    text = json.loads(http_script.requests[0].content)["text"]
+    assert f"Answer here: {delivery.callback_url}" in text
+    assert delivery.timeout_at.isoformat() in text
+    assert "Reply in this thread" not in text
+    assert "Options:" not in text
+    assert fake_redis.store == {}
+
+
+def test_channel_advertises_media_and_interactive_notifications():
+    # The central notify guard reads these before handing a media / options
+    # notification to this channel.
+    assert SlackChannel.supports_media_notifications is True
+    assert SlackChannel.supports_interactive_notifications is True
+
+
+async def test_deliver_select_renders_option_buttons(http_script, fake_redis):
+    # A select ask renders its options as a Block Kit actions block of buttons (value =
+    # the option text, action_id = tai42_select:<index>); the text keeps the numbered
+    # fallback (a thread reply still answers).
+    http_script.results.append(_ok_response(ts="1.1"))
+    await SlackChannel().deliver(make_delivery(answer_format="select", options=["staging", "production"]))
+
+    payload = json.loads(http_script.requests[0].content)
+    blocks = payload["blocks"]
+    assert blocks[0] == {"type": "section", "text": {"type": "plain_text", "text": "Deploy to production?"}}
+    actions = blocks[-1]
+    assert actions["type"] == "actions"
+    assert [e["value"] for e in actions["elements"]] == ["staging", "production"]
+    assert [e["action_id"] for e in actions["elements"]] == [
+        f"{SELECT_ACTION_PREFIX}0",
+        f"{SELECT_ACTION_PREFIX}1",
+    ]
+    # The text fallback still lists the options and the reply-in-thread instruction.
+    assert "Options: staging, production" in payload["text"]
+
+
+async def test_deliver_text_with_suggested_replies_renders_buttons(http_script, fake_redis):
+    # A text ask MAY carry suggested replies (contract): they render as the same option
+    # buttons, and a tap submits the option text as the free-text answer.
+    http_script.results.append(_ok_response(ts="1.1"))
+    await SlackChannel().deliver(make_delivery(answer_format="text", options=["yes", "no"]))
+
+    actions = json.loads(http_script.requests[0].content)["blocks"][-1]
+    assert [e["value"] for e in actions["elements"]] == ["yes", "no"]
+
+
+async def test_deliver_media_renders_image_and_link_blocks(http_script, fake_redis):
+    http_script.results.append(_ok_response(ts="1.1"))
+    media = [
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption="a diagram"),
+        MediaItem(kind=MediaKind.LINK, url="https://docs.test/spec", caption="the spec"),
+    ]
+    await SlackChannel().deliver(make_delivery(media=media))
+
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    assert blocks[0]["type"] == "section"  # the question
+    assert {"type": "image", "image_url": "https://cdn.test/a.png", "alt_text": "a diagram"} in blocks
+    assert {"type": "section", "text": {"type": "mrkdwn", "text": "<https://docs.test/spec|the spec>"}} in blocks
+
+
+async def test_deliver_data_uri_image_is_refused_before_any_send(http_script, fake_redis):
+    media = [MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAA", caption=None)]
+    with pytest.raises(ChannelInputError, match="data: image"):
+        await SlackChannel().deliver(make_delivery(media=media))
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
+async def test_deliver_form_posts_blocks_and_stores_record(http_script, fake_redis):
+    http_script.results.append(_ok_response(ts="1.1"))
+    delivery = make_delivery(answer_format="form", schema=_FORM_SCHEMA)
+
+    await SlackChannel().deliver(delivery)
+
+    (request,) = http_script.requests
+    assert str(request.url) == "https://slack.com/api/chat.postMessage"
+    payload = json.loads(request.content)
+    assert payload["channel"] == TEST_DEFAULT_RECIPIENT
+    # text is the notification fallback Slack requires alongside blocks.
+    assert payload["text"] == delivery.question
+    assert payload["blocks"] == build_message_blocks(delivery.question, delivery.interaction_id)
+    record = json.loads(fake_redis.store[_FORM_KEY])
+    assert record == {
+        "callback_url": delivery.callback_url,
+        "schema": _FORM_SCHEMA,
+        "question": delivery.question,
+        "timeout_at": delivery.timeout_at.isoformat(),
+    }
+    assert fake_redis.ttls[_FORM_KEY] == remaining_seconds(delivery.timeout_at)
+    # The form path never writes a ts-correlation (its answer comes via the modal).
+    assert "channel:slack:corr:1.1" not in fake_redis.store
+
+
+async def test_deliver_form_stores_the_per_send_data_and_pages_on_the_record(http_script, fake_redis):
+    # The modal is built AT CLICK TIME from the record, so the per-send values/options
+    # and the step layout ride the record for the open handler to render.
+    http_script.results.append(_ok_response(ts="1.1"))
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}, "note": {"type": "string"}}}
+    delivery = make_delivery(
+        answer_format="form",
+        schema=schema,
+        data=FormData(values={"note": "hi"}, options={"colour": [FormOption(value="r", label="Red")]}),
+        pages=[FormPage(title="Pick", fields=["colour"]), FormPage(title="Say", fields=["note"])],
+    )
+
+    await SlackChannel().deliver(delivery)
+
+    record = json.loads(fake_redis.store[_FORM_KEY])
+    assert record["data"] == {"values": {"note": "hi"}, "options": {"colour": [{"value": "r", "label": "Red"}]}}
+    assert record["pages"] == [{"title": "Pick", "fields": ["colour"]}, {"title": "Say", "fields": ["note"]}]
+
+
+async def test_deliver_form_unmappable_per_send_option_raises_before_any_io(http_script, fake_redis):
+    # A per-send option on a non-string property can never render — refused before any
+    # store or send, naming the field, never a fallback plain-text delivery.
+    schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
+    delivery = make_delivery(
+        answer_format="form", schema=schema, data=FormData(values={}, options={"count": [FormOption(value="1")]})
+    )
+    with pytest.raises(ChannelInputError, match="count"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
+
+
+async def test_deliver_form_reserves_record_before_send(stub_app, fake_redis):
+    # The reservation must exist at the moment chat.postMessage is invoked, so a
+    # click that races the send finds a live record.
+    seen: dict[str, bool] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["present"] = _FORM_KEY in fake_redis.store
+        return httpx.Response(200, json={"ok": True, "ts": "1.1"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stub_app.clients.clients[HttpxClient] = client
+    try:
+        await SlackChannel().deliver(make_delivery(answer_format="form", schema=_FORM_SCHEMA))
+    finally:
+        stub_app.clients.clients.pop(HttpxClient, None)
+        await client.aclose()
+
+    assert seen["present"] is True
+
+
+async def test_deliver_form_releases_record_on_send_failure(http_script, fake_redis):
+    http_script.results.append(httpx.Response(200, json={"ok": False, "error": "channel_not_found"}))
+
+    with pytest.raises(ChannelDeliveryError, match="channel_not_found"):
+        await SlackChannel().deliver(make_delivery(answer_format="form", schema=_FORM_SCHEMA))
+
+    # Reserve-before-send: a failed post releases the reservation.
+    assert fake_redis.store == {}
+
+
+async def test_deliver_form_unmappable_schema_raises_before_any_io(http_script, fake_redis):
+    bad = {"type": "object", "properties": {"blob": {"type": "array"}}}
+
+    with pytest.raises(ChannelInputError, match=r"blob.*unsupported type"):
+        await SlackChannel().deliver(make_delivery(answer_format="form", schema=bad))
+
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
+async def test_deliver_form_over_cap_modal_raises_before_any_io(http_script, fake_redis):
+    # 100 fields → 1 question section + 100 inputs = 101 blocks > the 100-block
+    # modal cap. Delivery composes the full modal the click would build, so an
+    # uncompletable form is refused before any send or store — never delivered
+    # only to 500 when the button is clicked.
+    props = {f"f{i}": {"type": "string"} for i in range(100)}
+    over_cap = {"type": "object", "properties": props}
+
+    with pytest.raises(ChannelInputError, match="modal exceeds 100 blocks"):
+        await SlackChannel().deliver(make_delivery(answer_format="form", schema=over_cap))
+
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
+async def test_deliver_form_without_schema_raises_before_any_io(http_script, fake_redis):
+    # The contract guarantees a schema for a form; the defensive guard refuses a
+    # schema-less form outright rather than fall back to a plain-text send.
+    with pytest.raises(ChannelDeliveryError, match="requires a non-empty schema"):
+        await _deliver_form("xoxb-tok", TEST_DEFAULT_RECIPIENT, make_delivery(answer_format="text"))
+
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
+async def test_validate_form_schema_hook_mirrors_delivery_refusal(http_script, fake_redis):
+    # 150 enum options exceed Slack's 100 static-select cap. The ask-time hook
+    # refuses the schema (ValueError) for the same limit the delivery path refuses
+    # (ChannelInputError): one rule, two doors — so a schema Block Kit could never
+    # render is rejected before any state is written rather than persisted and
+    # failed at delivery.
+    schema = {"type": "object", "properties": {"pick": {"type": "string", "enum": [str(i) for i in range(150)]}}}
+    channel = SlackChannel()
+
+    with pytest.raises(ValueError, match="enum exceeds 100 options"):
+        channel.validate_form_schema(schema, "q")
+
+    with pytest.raises(ChannelInputError, match="enum exceeds 100 options"):
+        await channel.deliver(make_delivery(answer_format="form", schema=schema))
+
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
+async def test_validate_form_schema_hook_refuses_over_long_question(http_script, fake_redis):
+    # The 3000-char section cap on the question is knowable at ask-time, so the hook
+    # refuses an over-long question (ValueError) up front — nothing is sent, nothing
+    # is persisted — rather than the delivery path pruning it after the fact.
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    channel = SlackChannel()
+
+    with pytest.raises(ValueError, match="question exceeds"):
+        channel.validate_form_schema(schema, "x" * 3001)
+
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
+@pytest.mark.parametrize(
+    ("result", "match"),
+    [
+        pytest.param(httpx.ConnectError("boom"), "transport failure", id="transport"),
+        pytest.param(httpx.Response(502, json={"ok": False}), "HTTP 502", id="non-200"),
+        pytest.param(httpx.Response(200, text="not json"), "non-JSON body", id="non-json"),
+    ],
+)
+async def test_open_modal_view_failure_branches_raise(http_script, result, match):
+    http_script.results.append(result)
+
+    with pytest.raises(ChannelDeliveryError, match=match):
+        await open_modal_view("trg-1", {"type": "modal"})

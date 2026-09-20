@@ -1,0 +1,153 @@
+---
+title: "Ready-made agents"
+description: "The agents this package provides and the shared TAI_AGENTS limits that bound them."
+---
+
+Ready-made agent workflows, each loaded by name into a manifest's
+`agents_modules`. The model behind them, how to run one, and how to compose them
+live in the central docs linked below; this page is the per-agent index and the
+shared limits.
+
+## Configuration
+
+Limits shared by every agent in this package:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_AGENTS_MAX_VOTERS` | `16` | Hard ceiling on the voters one voting call may fan out to; an over-limit call raises before any voter runs. |
+| `TAI_AGENTS_VOTER_CONCURRENCY` | `8` | Voters run concurrently within one voting call; the rest queue behind a semaphore. |
+| `TAI_AGENTS_EMBEDDING_DIMS_CACHE_SIZE` | `64` | Bound on the retrieval agent's embedding-dims probe cache (an LRU). |
+| `TAI_AGENTS_DEFAULT_RECURSION_LIMIT` | `50` | Default LangGraph `recursion_limit` when a run pins none; a caller-supplied limit wins. |
+
+### Async-park index
+
+A park-capable run whose tool async-parks (`ask_user(mode="async")`) writes a durable
+index that reverses a parked interaction id back to its parked run, so a later worker
+can resume it. This needs the `[park]` extra (`pip install tai42-agents[park]`) and a
+Redis URL:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_AGENTS_REDIS_URL` | falls back to `TAI_DEFAULT_REDIS_URL` | The park index store. With neither set there is no durable park index, so a park-capable run refuses the async ask loudly rather than parking where it cannot be resumed. |
+
+The park index is the agents plugin's own Redis, independent of the checkpoint provider
+and the interactions store.
+
+## Tool-error resilience
+
+A tool failure surfaces to the model as an error tool result and the agent loop
+continues, rather than aborting the run: a `ToolException` — which is how an
+in-process tool's own body exception is reported — or a pydantic `ValidationError`
+from a malformed tool call becomes an error result the model can react to. Failures
+outside the tool call (agent machinery, provider or infrastructure errors) still
+abort loudly. This holds across every tool-running agent in this package, including a
+deep agent's explicit and nested subagents. A thread whose previous turn was aborted
+mid-tool-call is repaired at the next turn start — its unanswered tool calls get
+synthetic error results so the provider accepts the thread — while a thread paused on
+a real interrupt is left untouched.
+
+## langchain_deep_agent
+
+Runs a deep agent with planning, one level of nested subagents, skills,
+human-in-the-loop interrupts (resumed with a LangGraph `Command`), and a per-thread
+scratch filesystem.
+
+### Sandbox requirement
+
+The scratch filesystem **is** a durable [sandbox](/concepts/sandbox) backend over the
+same `SandboxSession` contract, so a run requires a registered sandbox provider — with
+none installed it fails loudly at `require_sandbox()`. Its working files persist and
+reap under the operator's durability settings, so installing a sandbox provider is a
+hard prerequisite, not an optional add-on.
+
+### Structured output
+
+A `response_format` is validated up front: the JSON Schema must carry a top-level
+`title`, and every `oneOf` variant must carry a non-empty `title` of its own — a schema
+missing either raises a `ValueError` before the run starts. When a run requests a
+`response_format` but produces no structured output, **both faces raise rather than
+silently omitting the structured frame**: the JSON `run` face raises on drain, and the
+streaming face raises after the stream drains — unless the run paused on a pending
+interrupt, which takes precedence over the missing-structured raise.
+
+## claude_code
+
+Runs Claude Code as a platform agent: it drives the real `claude` binary through the
+Claude Agent SDK **inside a sandbox session** over a versioned exec protocol. The plugin
+server never imports the SDK — the SDK lives in the session image, and only the runner
+payload (shipped as data and executed in-session) imports it.
+
+### Sandbox requirement
+
+`claude_code` requires a registered sandbox provider. Install one, e.g.
+`tai plugins install tai42-sandbox-docker`. A run on a box with no provider raises a loud
+`SandboxUnavailableError` on every door. The session image is operator-configured and MUST
+be a digest reference (a bare tag is rejected at run start).
+
+### Configuration (`TAI_AGENTS_CLAUDE_*`)
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_AGENTS_CLAUDE_API_KEY` | unset | The metered `ANTHROPIC_API_KEY` path. Set this XOR `OAUTH_TOKEN` — exactly one, or run start fails loudly. |
+| `TAI_AGENTS_CLAUDE_OAUTH_TOKEN` | unset | The subscription `CLAUDE_CODE_OAUTH_TOKEN` path (from `claude setup-token`). Set this XOR `API_KEY`. |
+| `TAI_AGENTS_CLAUDE_SESSION_IMAGE` | required | The claude session image — a digest reference `…@sha256:<64 hex>`; a bare tag is rejected. |
+| `TAI_AGENTS_CLAUDE_HOOK_SETTINGS` | unset | A Claude Code hooks fragment materialized verbatim into the adapter-authored `.claude/settings.json`. Executable configuration — operator-scoped, never a caller field. |
+| `TAI_AGENTS_CLAUDE_MODEL` | SDK default | Model pin; production deployments should pin. |
+| `TAI_AGENTS_CLAUDE_MAX_TURNS` | `100` | Per-run turn ceiling. |
+| `TAI_AGENTS_CLAUDE_MAX_BUDGET_USD` | unset | Per-run cost ceiling. |
+| `TAI_AGENTS_CLAUDE_RUN_TIMEOUT_SECONDS` | `3600` | Wall-clock ceiling for one drive; the exec times out loudly on expiry. Set ≥ the platform turn budget. |
+| `TAI_AGENTS_CLAUDE_SESSION_TTL_SECONDS` | `86400` | Workspace/session idle-reap deadline. |
+| `TAI_AGENTS_CLAUDE_NETWORK` | inherit | Narrows the platform egress posture (`none`/`internal`/`egress`); a value looser than the platform ceiling is refused at session create. |
+| `TAI_AGENTS_CLAUDE_CRASH_RESUME` | `false` | Re-dispatch a recycled detached run at-least-once (re-executes from scratch). Recycle-class. |
+
+Session creds (`TAI_AGENTS_CLAUDE_CREDS`) are a list of static values or per-caller
+connection references injected into a CLEAN session env (static) or a per-turn bearer
+credential-helper file (refreshable) — never the host env. A connection-reference cred
+resolves per-caller and fails closed on a door with no bound execution identity.
+
+**Adapter-proxied platform tools.** Granted `tool_names` run under the run's own execution
+identity through the same `run_tool` seam every agent uses — the session reaches no
+platform network surface and holds no key or MCP endpoint. A non-empty `tool_names` on a
+door with no bound execution identity is refused loudly (fail-closed).
+
+**Stated residual (security is configuration).** The one injected model credential lives in
+the session env, so the session's own Bash can read it and it can reach the persisted
+transcript. The credential scrub removes credential FILES on a terminal exit; when the
+platform `sandbox_scrub_transcript` flag is on, injected credential VALUES are also redacted
+from the kept transcript.
+
+Async `ask_user` parks are supported on threaded (conversation) runs and use the same
+`[park]` extra + `TAI_AGENTS_REDIS_URL` as the other parking agents (see
+[Async-park index](#async-park-index)); an async ask on a thread-less tool-face run is
+refused loudly (its ephemeral workspace could never be resumed).
+
+## refine_agent
+
+Runs an Evaluator-Critic refinement loop until the Critic approves or the budget runs
+out.
+
+## voting_agent
+
+Runs a voting workflow — voter LLMs answer in parallel, then a judge LLM decides.
+Bounded by `TAI_AGENTS_MAX_VOTERS` and `TAI_AGENTS_VOTER_CONCURRENCY`.
+
+## retrieval_tools_agent
+
+A tools agent that retrieves its tools on demand from a vector store.
+
+## tools_agent
+
+Runs a LangGraph tools agent over tools loaded by name (and optional presets). A tool
+that async-parks (`ask_user(mode="async")`) suspends the run instead of blocking; it
+resumes on a later worker when the ask is answered or expires. This needs the `[park]`
+extra and `TAI_AGENTS_REDIS_URL` (see [Async-park index](#async-park-index)).
+
+## vqa_agent
+
+Analyzes an image and answers a query about it using a multimodal LLM.
+
+## See also
+
+- [Agents](/concepts/agents) and [Deep agents](/concepts/deep-agents) — the model.
+- [Use the ready-made agents](/guides/use-the-ready-made-agents) — running each of these.
+- [Author an agent](/guides/author-an-agent) — building your own.

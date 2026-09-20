@@ -1,0 +1,21 @@
+spec_version: 1
+namespace: tai42
+name: e2e-gamma
+package: tai-e2e-market-gamma
+version: 0.0.0
+description: "Installable marketplace fixture plugin: a trivial probe tool."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e
+contract: ">=0.3,<0.4"
+categories: [execution]
+tags: [probe, gamma]
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: e2e_market_gamma_probe
+    module: tai_e2e_market_gamma.tools
+    description: "Return a fixed marker payload identifying the gamma fixture."
+    tags: [probe]

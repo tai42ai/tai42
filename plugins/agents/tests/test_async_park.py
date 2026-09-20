@@ -1,0 +1,652 @@
+"""Agent async ``ask_user`` park/resume over a REAL deep-agent graph.
+
+Every test drives a real ``build_langchain_deep_agent`` graph with a scripted fake chat model and
+an in-memory checkpointer/store, so the ``AsyncParkMiddleware`` before-model hook, the
+messages reducer, and the interrupt/resume routing land exactly as a live run — no LLM,
+no network. Async is driven with ``asyncio.run`` (the repo does not use pytest-asyncio).
+
+The park marker a tool returns here is the same reserved contract marker the in-process
+client-tool seam stamps onto an async ``ask_user``'s ``SuspendedInteraction`` sentinel;
+the tool body counts its invocations so a resume that re-ran it (a double-park) is caught.
+
+The substitution half of the hook is exercised directly at the end: an ordinary answer becomes
+the tool's result, while an answer saying the awaited outcome FAILED becomes a model-visible
+tool error instead.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import Any
+
+import pytest
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import StructuredTool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
+from langgraph.types import Command
+from pydantic import PrivateAttr
+from tai42_contract.interactions import (
+    EXPIRY_ANSWER,
+    SUSPENDED_INTERACTION_MARKER_KEY,
+    get_resume_continuation_tool,
+    reset_resume_continuation_tool,
+    set_resume_continuation_tool,
+    suspended_interaction_marker,
+)
+from tai42_contract.template import TemplatedText
+
+from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, collect_pending_interrupts
+from tai42_agents._internal.park.drive import _park_interactions
+from tai42_agents._internal.park.middleware import AsyncParkMiddleware, resuming_park_interaction_ids
+from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
+
+
+class ScriptedChatModel(BaseChatModel):
+    """Emits a fixed list of AIMessages in order; ``bind_tools`` is a no-op so the graph
+    binds its tools and stays scripted. Shared across a main agent and its subagents, so a
+    nested run consumes the next scripted response in call order."""
+
+    _responses: list[BaseMessage] = PrivateAttr(default_factory=list)
+    _index: int = PrivateAttr(default=0)
+
+    def __init__(self, responses: Sequence[BaseMessage], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._responses = list(responses)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> ScriptedChatModel:
+        return self
+
+    def _generate(
+        self, messages: list[BaseMessage], stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> ChatResult:
+        message = self._responses[self._index]
+        self._index += 1
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+@pytest.fixture(autouse=True)
+def _park_capable_binding():
+    """These tests drive the compiled graph directly, standing in for a park-capable run: bind
+    the resume continuation that run's drive wrapper binds, so an ask stamps it as the park's
+    owner and the claim point recognizes the park as this run's own."""
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    yield
+    reset_resume_continuation_tool(token)
+
+
+class _CountingAsk:
+    """A tool that parks: returns the reserved async-park marker and counts each call, so a
+    resume that re-executed the tool (a double-park) shows a second call."""
+
+    def __init__(self, interaction_id: str, expiry_at: Any = None) -> None:
+        self.calls = 0
+        self._interaction_id = interaction_id
+        self._expiry_at = expiry_at
+
+    def tool(self) -> StructuredTool:
+        def ask() -> dict[str, Any]:
+            self.calls += 1
+            return suspended_interaction_marker(self._interaction_id, self._expiry_at, get_resume_continuation_tool())
+
+        return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
+
+
+def _build(model: BaseChatModel, tools: list[StructuredTool], **kwargs: Any) -> Any:
+    return asyncio.run(
+        build_langchain_deep_agent(
+            llm=model,
+            store=InMemoryStore(),
+            checkpointer=InMemorySaver(),
+            tools=tools,
+            **kwargs,
+        )
+    )
+
+
+def _ask_call(call_id: str = "c1") -> AIMessage:
+    return AIMessage(content="", tool_calls=[{"id": call_id, "name": "ask", "args": {}}])
+
+
+def _park_interrupt(snapshot: Any) -> tuple[str, dict[str, Any]]:
+    """The single pending park interrupt's ``(id, interactions)`` from a snapshot."""
+    parks = [
+        (iid, interactions)
+        for iid, value in collect_pending_interrupts(snapshot)
+        if (interactions := _park_interactions(value)) is not None
+    ]
+    assert len(parks) == 1, parks
+    return parks[0]
+
+
+def test_park_then_answer_runs_ask_exactly_once() -> None:
+    ask = _CountingAsk("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    graph = _build(model, [ask.tool()])
+    config = {"configurable": {"thread_id": "t-park"}}
+
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="go")]}, config))
+    snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
+    interrupt_id, interactions = _park_interrupt(snapshot)
+    assert interactions == {"i1": None}
+    assert ask.calls == 1
+
+    final = asyncio.run(graph.ainvoke(Command(resume={interrupt_id: {"i1": "the answer"}}), config))
+    # The tool ran once by construction; the resume substituted the answer, never re-ran it.
+    assert ask.calls == 1
+    assert final["messages"][-1].content == "all done"
+    # The parked ToolMessage now carries the substituted answer, not the marker.
+    tool_messages = [m for m in final["messages"] if getattr(m, "tool_call_id", None) == "c1"]
+    assert tool_messages[-1].content == "the answer"
+
+
+def _legacy_park(interaction_id: str = "i1") -> dict[str, Any]:
+    """A scanned park for a legacy TWO-KEY wire marker (no resume_owner), as ``_scan_parks``
+    surfaces it — standing in for a park minted by a released predecessor."""
+    return {
+        "message_id": "m1",
+        "tool_call_id": "c1",
+        "name": "ask",
+        "interaction_id": interaction_id,
+        "expiry_at": None,
+        "resume_owner": None,
+    }
+
+
+def test_a_legacy_ownerless_park_is_claimable_only_while_the_driver_resumes_it() -> None:
+    # A park written by a RELEASED predecessor carries no ``resume_owner`` on its wire
+    # marker. Replayed through the new middleware it would be refused — its answer dropped and the
+    # operator's ``Command(resume=...)`` discarded. The resuming driver names the interactions it
+    # is delivering answers for (``resuming_park_interaction_ids``, bound by
+    # ``_drive_completed_barrier``), so the claim check adopts the ownerless in-flight park.
+    from tai42_agents._internal.park.middleware import _partition_claimable
+
+    # Not resuming (a fresh pass): the ownerless legacy marker is refused, so its answer would drop.
+    claimable, refusals = _partition_claimable([_legacy_park()])
+    assert claimable == []
+    assert len(refusals) == 1
+    assert refusals[0].status == "error"
+
+    # Resuming THIS interaction: the driver names it, so the same ownerless marker is claimable and
+    # rides the resume to have its answer substituted.
+    with resuming_park_interaction_ids(frozenset({"i1"})):
+        claimable, refusals = _partition_claimable([_legacy_park()])
+    assert refusals == []
+    assert [p["interaction_id"] for p in claimable] == ["i1"]
+
+
+def test_nested_dispatch_does_not_inherit_the_parents_resuming_set() -> None:
+    # A nested tool dispatch must NOT inherit the PARENT run's resuming-park ids. Those ids are the
+    # parent's claim-point binding; a nested run that saw them would adopt an OWNERLESS marker that
+    # merely carries one of the parent's resuming ids (a forged/relayed park), claiming a park it
+    # does not own. ``nested_tool_dispatch`` clears the resuming set at the dispatch seam, symmetric
+    # with the completion-address clearing already there.
+    from tai42_agents._internal.nested_dispatch import nested_tool_dispatch
+    from tai42_agents._internal.park.middleware import _partition_claimable
+
+    with resuming_park_interaction_ids(frozenset({"i-parent"})):
+        # In the parent's resume scope the parent's own in-flight (ownerless) park is claimable.
+        claimable, _ = _partition_claimable([_legacy_park("i-parent")])
+        assert [p["interaction_id"] for p in claimable] == ["i-parent"]
+        # Inside a nested dispatch the parent's resuming set is gone, so the SAME ownerless marker
+        # bearing the parent's id is refused rather than claimed.
+        with nested_tool_dispatch():
+            claimable, refusals = _partition_claimable([_legacy_park("i-parent")])
+        assert claimable == []
+        assert len(refusals) == 1
+        assert refusals[0].status == "error"
+
+
+def test_park_then_expiry_feeds_the_expiry_marker() -> None:
+    deadline = datetime(2030, 1, 1, tzinfo=UTC)
+    ask = _CountingAsk("i1", expiry_at=deadline)
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="expired path")])
+    graph = _build(model, [ask.tool()])
+    config = {"configurable": {"thread_id": "t-expiry"}}
+
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="go")]}, config))
+    snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
+    interrupt_id, interactions = _park_interrupt(snapshot)
+    assert interactions == {"i1": deadline.isoformat()}
+
+    final = asyncio.run(graph.ainvoke(Command(resume={interrupt_id: {"i1": EXPIRY_ANSWER}}), config))
+    tool_messages = [m for m in final["messages"] if getattr(m, "tool_call_id", None) == "c1"]
+    # The expiry marker round-trips as the tool result content (JSON-serialized).
+    assert '"tai42:interaction_expired"' in tool_messages[-1].content
+
+
+def test_two_siblings_park_in_one_superstep_and_resume_together() -> None:
+    ask1 = _CountingAsk("iA")
+
+    def ask_a() -> dict[str, Any]:
+        ask1.calls += 1
+        return suspended_interaction_marker("iA", None, get_resume_continuation_tool())
+
+    def ask_b() -> dict[str, Any]:
+        return suspended_interaction_marker("iB", None, get_resume_continuation_tool())
+
+    tools = [
+        StructuredTool.from_function(ask_a, name="ask_a", description="a"),
+        StructuredTool.from_function(ask_b, name="ask_b", description="b"),
+    ]
+    model = ScriptedChatModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "ca", "name": "ask_a", "args": {}},
+                    {"id": "cb", "name": "ask_b", "args": {}},
+                ],
+            ),
+            AIMessage(content="both answered"),
+        ]
+    )
+    graph = _build(model, tools)
+    config = {"configurable": {"thread_id": "t-siblings"}}
+
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="go")]}, config))
+    snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
+    interrupt_id, interactions = _park_interrupt(snapshot)
+    # ONE interrupt for the whole super-step, carrying BOTH siblings.
+    assert interactions == {"iA": None, "iB": None}
+
+    final = asyncio.run(graph.ainvoke(Command(resume={interrupt_id: {"iA": "answer-a", "iB": "answer-b"}}), config))
+    assert final["messages"][-1].content == "both answered"
+    by_call = {m.tool_call_id: m.content for m in final["messages"] if getattr(m, "tool_call_id", None)}
+    assert by_call["ca"] == "answer-a"
+    assert by_call["cb"] == "answer-b"
+
+
+def test_mixed_superstep_parks_the_owned_and_refuses_the_foreign_in_one_step() -> None:
+    # A super-step carrying BOTH a park this run owns and one it does not. The
+    # interrupt payload excludes the foreign id (never interrupt on another run's park), and on
+    # resume the refusal rides the SAME update as the answer — so the model never meets a raw
+    # marker as a tool result. Dropping ``+ refusals`` at the resume return leaves the foreign
+    # ToolMessage carrying its raw marker, which this test catches.
+    #
+    # Order within the super-step cannot matter, so owned-first stands for both orders: each park
+    # is partitioned INDEPENDENTLY (the owned one claimed, the foreign one refused, on its own
+    # ownership, not its neighbour's), and every rewrite/refusal is keyed by its own message id
+    # through the messages replace-by-id reducer — so a foreign-first batch resolves identically.
+    def ask_owned() -> dict[str, Any]:
+        return suspended_interaction_marker("i-owned", None, get_resume_continuation_tool())
+
+    def ask_foreign() -> dict[str, Any]:
+        # A park raised under a DIFFERENT run's resume binding (a nested driver), relayed here.
+        return suspended_interaction_marker("i-foreign", None, "other_driver")
+
+    tools = [
+        StructuredTool.from_function(ask_owned, name="ask_owned", description="owned"),
+        StructuredTool.from_function(ask_foreign, name="ask_foreign", description="foreign"),
+    ]
+    model = ScriptedChatModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "co", "name": "ask_owned", "args": {}},
+                    {"id": "cf", "name": "ask_foreign", "args": {}},
+                ],
+            ),
+            AIMessage(content="done"),
+        ]
+    )
+    graph = _build(model, tools)
+    config = {"configurable": {"thread_id": "t-mixed"}}
+
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="go")]}, config))
+    snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
+    interrupt_id, interactions = _park_interrupt(snapshot)
+    # The interrupt covers ONLY the owned park; the foreign id never enters the payload.
+    assert interactions == {"i-owned": None}
+
+    final = asyncio.run(graph.ainvoke(Command(resume={interrupt_id: {"i-owned": "the answer"}}), config))
+    assert final["messages"][-1].content == "done"
+    by_call = {m.tool_call_id: m for m in final["messages"] if getattr(m, "tool_call_id", None)}
+    # The owned park's tool_call got the answer.
+    assert by_call["co"].content == "the answer"
+    # The foreign park's tool_call got the refusal in the SAME resume step — an error result, not
+    # the raw marker JSON (dropping ``+ refusals`` would leave the marker here).
+    assert by_call["cf"].status == "error"
+    assert SUSPENDED_INTERACTION_MARKER_KEY not in str(by_call["cf"].content)
+
+
+def test_hitl_interrupt_and_async_park_coexist_by_id() -> None:
+    # An interrupt_on approval on one tool and an async-ask park on another must not
+    # collide: each resumes by its own id.
+    ask = _CountingAsk("i1")
+    approve = StructuredTool.from_function(lambda: "approved", name="approve", description="needs approval")
+    model = ScriptedChatModel(
+        [
+            AIMessage(content="", tool_calls=[{"id": "cap", "name": "approve", "args": {}}]),
+            _ask_call("c1"),
+            AIMessage(content="done after both"),
+        ]
+    )
+    graph = _build(model, [ask.tool(), approve], interrupt_on={"approve": True})
+    config = {"configurable": {"thread_id": "t-coexist"}}
+
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="go")]}, config))
+    # First pause: the HITL approval interrupt (not a park).
+    snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
+    pending = collect_pending_interrupts(snapshot)
+    assert all(_park_interactions(value) is None for _, value in pending)
+    hitl_id = pending[0][0]
+
+    # Approve → the model then calls ask → the run parks.
+    asyncio.run(graph.ainvoke(Command(resume={hitl_id: {"decisions": [{"type": "approve"}]}}), config))
+    snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
+    park_id, interactions = _park_interrupt(snapshot)
+    assert interactions == {"i1": None}
+    assert park_id != hitl_id
+
+    final = asyncio.run(graph.ainvoke(Command(resume={park_id: {"i1": "the answer"}}), config))
+    assert final["messages"][-1].content == "done after both"
+
+
+def test_park_middleware_is_the_leading_before_model_hook() -> None:
+    # Probe gate 2: the park hook must precede any message-compacting hook. deepagents'
+    # compactors (summarization, memory) run through wrap_model_call — during the model
+    # node, skipped on a park super-step — and the park hook is the FIRST before_model
+    # node in the merged stack, so a marked ToolMessage is never evicted before the park
+    # is recognized. The stack order preserves the middleware list order, park-first.
+    model = ScriptedChatModel([AIMessage(content="ok")])
+    graph = _build(model, [])
+    before_model_nodes = [name for name in graph.get_graph().nodes if name.endswith(".before_model")]
+    assert before_model_nodes[0] == "AsyncParkMiddleware.before_model", before_model_nodes
+
+
+def test_park_inside_a_subagent_propagates_and_resumes_by_id() -> None:
+    # Probe gate 1: an async ask parked inside a subagent stack surfaces its interrupt id
+    # (namespaced through the parent task tool) and resumes back into the subgraph by id.
+    from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
+
+    ask = _CountingAsk("i-sub")
+    subagent = ResolvedSubAgentSpec(
+        name="asker",
+        description="asks the user",
+        system_prompt=TemplatedText(content="ask"),
+        tools=[ask.tool()],
+    )
+    # Call order across the shared model: main calls task(asker) → subagent calls ask
+    # (parks) → [resume] → subagent finalizes → main finalizes.
+    model = ScriptedChatModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "ct", "name": "task", "args": {"description": "ask them", "subagent_type": "asker"}}
+                ],
+            ),
+            _ask_call("c1"),
+            AIMessage(content="sub done"),
+            AIMessage(content="main done"),
+        ]
+    )
+    graph = _build(model, [], subagents=[subagent])
+    config = {"configurable": {"thread_id": "t-subagent"}}
+
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="go")]}, config))
+    snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
+    interrupt_id, interactions = _park_interrupt(snapshot)
+    assert interactions == {"i-sub": None}
+    assert ask.calls == 1
+
+    final = asyncio.run(graph.ainvoke(Command(resume={interrupt_id: {"i-sub": "sub answer"}}), config))
+    assert ask.calls == 1
+    assert final["messages"][-1].content == "main done"
+
+
+def test_two_parallel_subagent_parks_surface_and_resume_by_id() -> None:
+    # Two parallel task-tool subagents that each async-ask surface TWO DISTINCT park interrupts
+    # in ONE parent super-step (empirically reachable). langgraph's resume map feeds each
+    # interrupt its own answers in one resume, and both subagents finalize back to the parent.
+    from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
+
+    calls = {"n": 0}
+    seq = ["iA", "iB"]
+
+    def ask_seq() -> dict[str, Any]:
+        interaction_id = seq[calls["n"]]
+        calls["n"] += 1
+        return suspended_interaction_marker(interaction_id, None, get_resume_continuation_tool())
+
+    subagent = ResolvedSubAgentSpec(
+        name="asker",
+        description="asks the user",
+        system_prompt=TemplatedText(content="ask"),
+        tools=[StructuredTool.from_function(ask_seq, name="ask", description="ask")],
+    )
+    model = ScriptedChatModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "ta", "name": "task", "args": {"description": "A", "subagent_type": "asker"}},
+                    {"id": "tb", "name": "task", "args": {"description": "B", "subagent_type": "asker"}},
+                ],
+            ),
+            _ask_call("ca"),
+            _ask_call("cb"),
+            AIMessage(content="sub done"),
+            AIMessage(content="sub done"),
+            AIMessage(content="main done"),
+        ]
+    )
+    graph = _build(model, [], subagents=[subagent])
+    config = {"configurable": {"thread_id": "t-multipark"}}
+
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="go")]}, config))
+    snapshot = asyncio.run(graph.aget_state(config, subgraphs=True))
+    parks = [
+        (iid, interactions)
+        for iid, value in collect_pending_interrupts(snapshot)
+        if (interactions := _park_interactions(value)) is not None
+    ]
+    # TWO distinct park interrupts, each carrying its own single interaction.
+    assert len(parks) == 2, parks
+    by_interaction = {next(iter(interactions)): iid for iid, interactions in parks}
+    assert set(by_interaction) == {"iA", "iB"}
+    assert calls["n"] == 2
+
+    resume_map = {by_interaction["iA"]: {"iA": "answer-a"}, by_interaction["iB"]: {"iB": "answer-b"}}
+    final = asyncio.run(graph.ainvoke(Command(resume=resume_map), config))
+    assert final["messages"][-1].content == "main done"
+
+
+def test_scan_ignores_non_park_tool_results() -> None:
+    # A plain (non-park) tool result carries no marker, so no interrupt fires.
+    from langchain_core.messages import ToolMessage
+
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "t", "args": {}}]),
+        ToolMessage(content="plain", tool_call_id="c1", id="m1"),
+    ]
+    assert AsyncParkMiddleware().before_model({"messages": messages}, None) is None
+
+
+def test_marker_round_trips_through_msg_content_output() -> None:
+    # Probe gate 3: the ToolNode serializes a tool's dict return through
+    # msg_content_output before it becomes ToolMessage.content; the reserved marker must
+    # survive that serialization so the park hook recognizes it off the message content.
+    from langgraph.prebuilt.tool_node import msg_content_output
+    from tai42_contract.interactions import read_suspended_interaction_marker
+
+    for expiry in (None, datetime(2030, 1, 1, tzinfo=UTC)):
+        marker = suspended_interaction_marker("i1", expiry, "agent_resume")
+        serialized = msg_content_output(marker)
+        # The dict marker serializes to a JSON string content, and parses back intact.
+        assert isinstance(serialized, str)
+        assert read_suspended_interaction_marker(serialized) == {
+            "interaction_id": "i1",
+            "expiry_at": expiry.isoformat() if expiry else None,
+            # The park's resume OWNER rides the wire form: the claim point reads it here,
+            # having never seen the sentinel object the seam converted.
+            "resume_owner": "agent_resume",
+        }
+
+
+def test_a_failed_awaited_outcome_substitutes_a_model_visible_tool_error() -> None:
+    # The resume answer may itself say the awaited outcome did not arrive (a chained call whose
+    # nested run ended without a result). It is substituted as a tool ERROR the model reads —
+    # never as a value it would take for the tool's answer, and never as silence.
+    from langchain_core.messages import ToolMessage
+
+    from tai42_agents._internal.park.middleware import _park_or_resume, park_error_answer
+
+    key = "tai42:chained-park:k1"
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
+        ToolMessage(
+            content=json.dumps(suspended_interaction_marker(key, None, AGENT_RESUME_TOOL_NAME)),
+            tool_call_id="c1",
+            name="flow",
+            id="m1",
+        ),
+    ]
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    try:
+        with _resume_interrupt_with({key: park_error_answer("the call ended without a result")}):
+            update = _park_or_resume(messages)
+    finally:
+        reset_resume_continuation_tool(token)
+    assert update is not None
+    (message,) = update["messages"]
+    assert message.status == "error"
+    assert message.content == "the call ended without a result"
+    # Replaced IN PLACE: the tool_call is answered, so the model is never left holding a
+    # dangling call or the raw park JSON.
+    assert message.id == "m1"
+    assert message.tool_call_id == "c1"
+
+
+def test_an_ordinary_answer_still_substitutes_as_a_success_result() -> None:
+    from langchain_core.messages import ToolMessage
+
+    from tai42_agents._internal.park.middleware import _park_or_resume
+
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "ask", "args": {}}]),
+        ToolMessage(
+            content=json.dumps(suspended_interaction_marker("i1", None, AGENT_RESUME_TOOL_NAME)),
+            tool_call_id="c1",
+            name="ask",
+            id="m1",
+        ),
+    ]
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    try:
+        with _resume_interrupt_with({"i1": "the human said yes"}):
+            update = _park_or_resume(messages)
+    finally:
+        reset_resume_continuation_tool(token)
+    assert update is not None
+    (message,) = update["messages"]
+    assert message.status == "success"
+    assert message.content == "the human said yes"
+
+
+@contextlib.contextmanager
+def _resume_interrupt_with(answers: dict[str, Any]):
+    """Stand in for the graph's RESUME pass: ``interrupt`` returns the answers map instead of
+    suspending, so the substitution half of the hook can be exercised without a live graph."""
+    from tai42_agents._internal.park import middleware as mw
+
+    original = mw.interrupt
+    mw.interrupt = lambda _payload: answers  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        mw.interrupt = original  # type: ignore[assignment]
+
+
+def test_the_claim_point_claims_a_chained_park_like_any_other() -> None:
+    # A CHAINED park presents at the claim point as what it is: this run's own park, keyed by
+    # the CALL it waits on and owned by this run's own resume continuation — the same one the
+    # chain's delivery path dispatches. So the claim check reaches the verdict the object seam
+    # already reached, with no chain-specific arm: the hook interrupts on it.
+    from langchain_core.messages import ToolMessage
+
+    from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY, _park_or_resume
+
+    key = "tai42:chained-park:k1"
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
+        ToolMessage(
+            content=json.dumps(suspended_interaction_marker(key, None, AGENT_RESUME_TOOL_NAME)),
+            tool_call_id="c1",
+            name="flow",
+            id="m1",
+        ),
+    ]
+    seen: list[Any] = []
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    try:
+        with _capture_interrupt(seen), pytest.raises(_SuspendedError):
+            _park_or_resume(messages)
+    finally:
+        reset_resume_continuation_tool(token)
+    assert seen == [{AGENT_PARK_PAYLOAD_KEY: {"interactions": {key: None}}}]
+
+
+def test_the_claim_point_still_refuses_a_park_owned_elsewhere() -> None:
+    # The fallback is untouched: a marker naming another run's continuation is not claimable
+    # here however it arrived, and never interrupts.
+    from langchain_core.messages import ToolMessage
+
+    from tai42_agents._internal.park.middleware import _park_or_resume
+
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
+        ToolMessage(
+            content=json.dumps(suspended_interaction_marker("i-nested", None, "nested_driver_resume")),
+            tool_call_id="c1",
+            name="flow",
+            id="m1",
+        ),
+    ]
+    seen: list[Any] = []
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    try:
+        with _capture_interrupt(seen):
+            update = _park_or_resume(messages)
+    finally:
+        reset_resume_continuation_tool(token)
+    assert seen == []
+    assert update is not None
+    (message,) = update["messages"]
+    assert message.status == "error"
+
+
+class _SuspendedError(Exception):
+    """Stands in for what ``interrupt`` does to the node: it never returns on a park pass."""
+
+
+@contextlib.contextmanager
+def _capture_interrupt(seen: list[Any]):
+    """Record what the hook would interrupt with, without suspending a graph. The stub RAISES,
+    because the real ``interrupt`` never returns on the park pass — returning a value here would
+    run the resume branch instead and prove nothing about the park."""
+    from tai42_agents._internal.park import middleware as mw
+
+    original = mw.interrupt
+
+    def _record(payload: Any) -> dict[str, Any]:
+        seen.append(payload)
+        raise _SuspendedError
+
+    mw.interrupt = _record  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        mw.interrupt = original  # type: ignore[assignment]
