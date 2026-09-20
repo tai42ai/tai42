@@ -171,22 +171,30 @@ def test_builtin_rows_match_registrations() -> None:
 def test_load_catalog_projects_marketplace_items(monkeypatch: pytest.MonkeyPatch) -> None:
     items = [
         {
-            "kind": "tool",
-            "name": "generate_uuid",
-            "module": "tai42_toolbox.tools.generate_uuid",
-            "description": "Generate a random UUID (version 4).",
             "namespace": "tai42",
             "listing": "toolbox",
             "package": "tai42-toolbox",
+            "premium": False,
+            "item": {
+                "kind": "tool",
+                "name": "generate_uuid",
+                "module": "tai42_toolbox.tools.generate_uuid",
+                "description": "Generate a random UUID (version 4).",
+                "group": None,
+            },
         },
         {
-            "kind": "mcp-server",
-            "name": "postgres",
-            "module": None,
-            "description": "A managed Postgres MCP server.",
             "namespace": "tai42",
             "listing": "postgres-mcp",
             "package": "tai42-postgres-mcp",
+            "premium": False,
+            "item": {
+                "kind": "mcp-server",
+                "name": "postgres",
+                "module": None,
+                "description": "A managed Postgres MCP server.",
+                "group": None,
+            },
         },
     ]
     _patch_client(monkeypatch, items=items)
@@ -212,13 +220,17 @@ def test_catalog_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch,
         items=[
             {
-                "kind": "tool",
-                "name": "generate_uuid",
-                "module": "tai42_toolbox.tools.generate_uuid",
-                "description": "d",
                 "namespace": "tai42",
                 "listing": "toolbox",
                 "package": "tai42-toolbox",
+                "premium": False,
+                "item": {
+                    "kind": "tool",
+                    "name": "generate_uuid",
+                    "module": "tai42_toolbox.tools.generate_uuid",
+                    "description": "d",
+                    "group": None,
+                },
             }
         ],
     )
@@ -268,20 +280,56 @@ def test_garbled_registry_response_is_a_loud_cli_error(monkeypatch: pytest.Monke
     assert "items" in result.output
 
 
-def test_item_row_missing_identity_field_is_a_loud_cli_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A dict-shaped item row missing an identity field (here ``package``) must read as the
-    # uniform CLI error, never a bare KeyError escaping as a raw traceback.
+def test_item_row_with_null_package_projects_an_empty_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A listing registered from its descriptor alone carries a null ``package``; its
+    # items still project, with an empty package cell.
     _patch_client(
         monkeypatch,
         items=[
             {
-                "kind": "tool",
-                "name": "generate_uuid",
-                "module": "tai42_toolbox.tools.generate_uuid",
-                "description": "d",
+                "namespace": "acme",
+                "listing": "echo",
+                "package": None,
+                "premium": False,
+                "item": {
+                    "kind": "tool",
+                    "name": "echo",
+                    "module": None,
+                    "description": "d",
+                    "group": None,
+                },
+            }
+        ],
+    )
+    record = catalog.load_catalog()[-1]
+    assert record == {
+        "name": "echo",
+        "kind": "tool",
+        "package": "",
+        "source": "acme/echo",
+        "module": "",
+        "description": "d",
+    }
+
+
+def test_item_row_missing_identity_field_is_a_loud_cli_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A dict-shaped item row missing a top-level identity field (here ``package``) must
+    # read as the uniform CLI error, never a bare KeyError escaping as a raw traceback.
+    _patch_client(
+        monkeypatch,
+        items=[
+            {
                 "namespace": "tai42",
                 "listing": "toolbox",
                 # "package" deliberately omitted
+                "premium": False,
+                "item": {
+                    "kind": "tool",
+                    "name": "generate_uuid",
+                    "module": "tai42_toolbox.tools.generate_uuid",
+                    "description": "d",
+                    "group": None,
+                },
             }
         ],
     )
@@ -289,3 +337,51 @@ def test_item_row_missing_identity_field_is_a_loud_cli_error(monkeypatch: pytest
     assert result.exit_code != 0
     assert "Traceback" not in result.output
     assert "package" in result.output
+
+
+def test_item_row_missing_nested_identity_field_is_a_loud_cli_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A row whose nested ``item`` is missing an identity field (here ``name``) reads as the
+    # uniform CLI error naming ``item.name``, never a bare KeyError as a raw traceback.
+    _patch_client(
+        monkeypatch,
+        items=[
+            {
+                "namespace": "tai42",
+                "listing": "toolbox",
+                "package": "tai42-toolbox",
+                "premium": False,
+                "item": {
+                    "kind": "tool",
+                    # "name" deliberately omitted
+                    "module": "tai42_toolbox.tools.generate_uuid",
+                    "description": "d",
+                    "group": None,
+                },
+            }
+        ],
+    )
+    result = CliRunner().invoke(app_module.app, ["catalog"])
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "item.name" in result.output
+
+
+def test_item_row_missing_item_object_is_a_loud_cli_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A row missing the nested ``item`` object entirely reads as the uniform CLI error,
+    # never a bare TypeError from projecting a non-object as a raw traceback.
+    _patch_client(
+        monkeypatch,
+        items=[
+            {
+                "namespace": "tai42",
+                "listing": "toolbox",
+                "package": "tai42-toolbox",
+                "premium": False,
+                # "item" deliberately omitted
+            }
+        ],
+    )
+    result = CliRunner().invoke(app_module.app, ["catalog"])
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "'item' object" in result.output

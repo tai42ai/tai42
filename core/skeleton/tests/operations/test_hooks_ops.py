@@ -119,14 +119,19 @@ class _FakeVerifier:
 @pytest.fixture
 def registry():
     """The process app's webhook-verifier registry bound to ``tai42_app`` so
-    ``set_topic_verifier`` resolves bind-time verifier names; the registry is cleared
-    and the previous binding restored after."""
+    ``set_topic_verifier`` resolves bind-time verifier names.
+
+    ``build_app`` is a process singleton, so its registry can already carry a name a
+    builtin verifier module registered on import. The registry is cleared on entry AND
+    on exit so each test sees exactly the verifiers it registers, and the previous
+    binding is restored after."""
     from tai42_contract.app import tai42_app
 
     from tai42_skeleton.app.instance import build_app
 
     app = build_app()
     reg = app._webhook_verifier_registry
+    reg.reset()
     with tai42_app.bound(app):
         try:
             yield reg

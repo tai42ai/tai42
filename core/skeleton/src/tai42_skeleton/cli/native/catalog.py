@@ -19,15 +19,19 @@ from tai42_cli.render import print_records
 from tai42_skeleton.marketplace.client import RegistryClient
 from tai42_skeleton.marketplace.errors import MarketplaceError, RegistryResponseError
 
-# The identity fields every marketplace item row MUST carry to project into a catalog
-# row. A dict-shaped-but-key-missing row is garbled registry data → a typed
+# The identity fields a marketplace item enumeration row MUST carry to project into a
+# catalog row. The top-level fields name the owning listing; the nested ``item`` object
+# carries the per-registration identity. A dict-shaped-but-key-missing row — or a
+# missing/non-object ``item`` — is garbled registry data → a typed
 # RegistryResponseError (a MarketplaceError), so ``catalog()`` renders the uniform CLI
-# error instead of letting a bare KeyError escape as a raw traceback. ``description`` is
-# non-identifying and defaults to "" rather than forcing the whole catalog to fail.
-_ITEM_IDENTITY_FIELDS = ("name", "kind", "package", "namespace", "listing")
+# error instead of letting a bare KeyError/TypeError escape as a raw traceback.
+# ``module``/``description`` are non-identifying and default rather than forcing the
+# whole catalog to fail.
+_ROW_IDENTITY_FIELDS = ("namespace", "listing", "package")
+_ITEM_IDENTITY_FIELDS = ("kind", "name")
 
-# Columns rendered in the human table (JSON output carries the raw records). There is
-# no per-item editorial ``group`` (the marketplace model has none); ``source`` is
+# Columns rendered in the human table (JSON output carries the raw records). The
+# catalog does not surface the item's optional editorial ``group`` label; ``source`` is
 # ``"builtin"`` for the static rows and ``"<namespace>/<listing>"`` for marketplace
 # rows; ``module`` renders empty for mcp-server items (the contract forbids a module
 # there).
@@ -128,25 +132,36 @@ _BUILTIN_ROWS: list[dict[str, str]] = [
 ]
 
 
-def _project(item: dict[str, Any]) -> dict[str, str]:
-    """Project one marketplace item row into the catalog columns.
+def _project(row: dict[str, Any]) -> dict[str, str]:
+    """Project one marketplace item enumeration row into the catalog columns.
 
-    ``source`` is the owning ``<namespace>/<listing>``; ``module`` is empty for an mcp-server item
-    (its route field is ``null``, never ``""``, so normalize here).
+    A row carries the owning ``namespace``/``listing``/``package`` at the top level and
+    the per-registration ``item`` object (``kind``/``name``/``module``/``description``/
+    ``group``). ``source`` is the owning ``<namespace>/<listing>``; ``module`` is empty
+    for an mcp-server item (its route field is ``null``, never ``""``, so normalize here).
 
-    A dict-shaped row missing any identity field is garbled registry data →
+    A row missing a top-level identity field, or whose ``item`` is missing/not an object
+    or is itself missing an identity field, is garbled registry data →
     :class:`RegistryResponseError` (a :class:`MarketplaceError`), so the caller renders
-    the uniform CLI error rather than a bare ``KeyError`` traceback. ``description`` is
-    non-identifying and defaults to ``""``.
+    the uniform CLI error rather than a bare ``KeyError``/``TypeError`` traceback.
+    ``description`` is non-identifying and defaults to ``""``.
     """
+    for field in _ROW_IDENTITY_FIELDS:
+        if field not in row:
+            raise RegistryResponseError(f"marketplace item row is missing the required {field!r} field", status=None)
+    item = row.get("item")
+    if not isinstance(item, dict):
+        raise RegistryResponseError("marketplace item row is missing the required 'item' object", status=None)
     for field in _ITEM_IDENTITY_FIELDS:
         if field not in item:
-            raise RegistryResponseError(f"marketplace item row is missing the required {field!r} field", status=None)
+            raise RegistryResponseError(
+                f"marketplace item row is missing the required 'item.{field}' field", status=None
+            )
     return {
         "name": item["name"],
         "kind": item["kind"],
-        "package": item["package"],
-        "source": f"{item['namespace']}/{item['listing']}",
+        "package": row["package"] or "",
+        "source": f"{row['namespace']}/{row['listing']}",
         "module": item.get("module") or "",
         "description": item.get("description") or "",
     }
@@ -160,8 +175,8 @@ def load_catalog() -> list[dict[str, Any]]:
     :class:`~tai42_skeleton.marketplace.errors.MarketplaceError`, never a silent empty list or a
     cached snapshot.
     """
-    items = asyncio.run(RegistryClient().items())
-    return [*_BUILTIN_ROWS, *(_project(item) for item in items)]
+    rows = asyncio.run(RegistryClient().items())
+    return [*_BUILTIN_ROWS, *(_project(row) for row in rows)]
 
 
 def catalog(ctx: typer.Context) -> None:
