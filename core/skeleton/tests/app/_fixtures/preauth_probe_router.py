@@ -4,13 +4,13 @@ LIVE epoch's provider (non-500) after a FAILED build.
 At import it registers a TEST-LOCAL fake identity provider under :data:`PROVIDER_NAME`
 (so each epoch build re-fires the registration into that generation's staged registry,
 exactly as a real identity-provider plugin does) and mounts a pre-auth route that resolves
-the current epoch's live provider through the SAME contract accessor the real
-accounts-oidc login routes use — ``tai42_app.accounts.active_provider`` — which forwards to
+the current epoch's live provider through the SAME contract accessor an accounts
+provider's login routes use — ``tai42_app.accounts.active_provider`` — which forwards to
 the current epoch's ``ServingCore.active_auth_providers``. The route answers 200 naming the
 resolved provider, or 500 when none is active: a module holder left pointing at a discarded
 or half-built generation would surface as a 500, so the test's non-500 assertion is
-meaningful. No tai42-accounts-oidc dependency is needed — the fake provider through the real
-epoch machinery exercises the mechanism end to end.
+meaningful. No accounts-provider plugin dependency is needed — the fake provider through the
+real epoch machinery exercises the mechanism end to end.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ register_identity_provider(PROVIDER_NAME, _factory)
     authed=False,
 )
 async def preauth_probe(_request: Request) -> JSONResponse:
-    # The same resolution path the real accounts-oidc pre-auth routes take: read the
+    # The same resolution path an accounts provider's pre-auth routes take: read the
     # CURRENT epoch's live provider instance, never a module-level holder.
     provider = tai42_app.accounts.active_provider(PROVIDER_NAME)
     if provider is None:

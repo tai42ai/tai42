@@ -6,7 +6,7 @@ accounts-provider login routes keep resolving the SAME provider through
 ``tai42_app.accounts.active_provider`` (the current epoch's ``ServingCore``), never a torn
 holder that would 500. This drives ``reload_config`` (which collapses onto
 ``build_and_swap_epoch``) through the reload gate exactly as production does, with a
-TEST-LOCAL fake provider + a TEST-LOCAL pre-auth route (the real accounts-oidc plugin is
+TEST-LOCAL fake provider + a TEST-LOCAL pre-auth route (an accounts provider plugin is
 deliberately NOT a skeleton dev-dependency — the fake through the real epoch machinery
 proves the mechanism end to end).
 """
