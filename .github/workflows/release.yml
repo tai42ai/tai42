@@ -14,6 +14,9 @@ jobs:
   # repository secret. The `pypi` environment scopes that secret to this job.
   release:
     runs-on: ubuntu-latest
+    # Coarse backstop behind the boot gate's own per-step timeouts: a stalled download,
+    # build, boot or upload ends the job in minutes, never at the host's cancellation limit.
+    timeout-minutes: 45
     environment: pypi
     permissions:
       contents: read
@@ -187,6 +190,7 @@ jobs:
   notify-distribution:
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     env:

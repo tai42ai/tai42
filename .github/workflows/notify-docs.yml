@@ -22,6 +22,7 @@ permissions:
 jobs:
   dispatch:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       DOCS_DISPATCH_TOKEN: ${{ secrets.TAI_DOCS_DISPATCH_TOKEN }}
     steps:

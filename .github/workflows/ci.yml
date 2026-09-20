@@ -37,6 +37,7 @@ jobs:
   # An identical tree already proven green by a pull-request run is not re-tested; the run still concludes success for the release gate.
   reuse:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       actions: write
       contents: read
@@ -63,6 +64,7 @@ jobs:
     needs: reuse
     if: ${{ needs.reuse.outputs.should_skip != 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       core: ${{ steps.assemble.outputs.core }}
       check_matrix: ${{ steps.assemble.outputs.check_matrix }}
@@ -340,6 +342,7 @@ jobs:
     needs: [reuse, changes]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && fromJSON(needs.changes.outputs.check_matrix).include[0] != null }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.check_matrix) }}
@@ -558,6 +561,7 @@ jobs:
     needs: [reuse, changes]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && fromJSON(needs.changes.outputs.frontend_matrix).include[0] != null }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.frontend_matrix) }}
@@ -609,6 +613,7 @@ jobs:
     needs: [reuse, changes]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.browser_lane != 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -659,6 +664,7 @@ jobs:
     needs: [reuse, changes]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.browser_lane != 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -1012,6 +1018,9 @@ jobs:
       needs.reuse.outputs.should_skip != 'true' &&
       (startsWith(github.head_ref, 'release-please--') || startsWith(github.ref_name, 'release-please--'))
     runs-on: ubuntu-latest
+    # Coarse backstop behind the gate's own per-step timeouts: a stalled resolve, install or
+    # boot fails loudly in minutes, never runs the job to the host's cancellation limit.
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16-alpine
@@ -1095,6 +1104,7 @@ jobs:
       needs.reuse.outputs.should_skip != 'true' &&
       (startsWith(github.head_ref, 'release-please--') || startsWith(github.ref_name, 'release-please--'))
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
@@ -1124,6 +1134,7 @@ jobs:
       needs.consumer-boot-gate-plan.outputs.matrix != '' &&
       fromJSON(needs.consumer-boot-gate-plan.outputs.matrix).include[0] != null
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.consumer-boot-gate-plan.outputs.matrix) }}
@@ -1168,6 +1179,7 @@ jobs:
     needs: [reuse, changes, check, plugin-frontend, fleet, stable-resolution, e2e, ui-e2e, consumer-boot-gate, consumer-boot-gate-plan, consumer-boot-gate-first-party]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Verify no needed job failed
         run: |

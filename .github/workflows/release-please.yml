@@ -21,6 +21,7 @@ concurrency:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Release automation runs on the org repo only, never in a fork.
     if: github.repository == 'tai42ai/tai42'
     permissions:
@@ -48,6 +49,7 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.pr != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:

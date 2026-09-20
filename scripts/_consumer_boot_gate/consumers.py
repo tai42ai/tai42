@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from _consumer_boot_gate.process import GIT_TIMEOUT_S, run_gate_step
 from _consumer_boot_gate.versioning import _fail
 
 _WHEEL_NAME_RE = re.compile(r"^(?P<name>.+?)-(?P<version>\d[^-]*)-")
@@ -94,8 +94,10 @@ def release_bump_set(repo_root: Path) -> set[str]:
         version = manifest.get(path)
         if not package or not version:
             continue
-        tags = subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
-            ["git", "tag", "--list", f"{package}-v{version}"],  # noqa: S607 fixed, trusted executable resolved from PATH
+        tags = run_gate_step(
+            ["git", "tag", "--list", f"{package}-v{version}"],
+            what=f"listing tags for {package} {version}",
+            timeout=GIT_TIMEOUT_S,
             cwd=repo_root,
             capture_output=True,
             text=True,

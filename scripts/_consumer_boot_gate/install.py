@@ -5,13 +5,19 @@ The venv holds the editable candidate core + identity provider + consumers.
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 from pathlib import Path
 
 from tai42_cli import api_gate
 
 from _consumer_boot_gate.consumers import Consumer
+from _consumer_boot_gate.process import (
+    GIT_TIMEOUT_S,
+    INSTALL_TIMEOUT_S,
+    RERESOLVE_TIMEOUT_S,
+    VENV_TIMEOUT_S,
+    run_gate_step,
+)
 from _consumer_boot_gate.versioning import _fail, break_is_accepted
 
 # Kit's optional-dependency groups a served app with a consumer needs present: the
@@ -60,7 +66,14 @@ def _install_venv(
     A no-solution resolution failure raises :class:`_ResolutionConflictError` for the caller to classify by
     the bump; any other install failure is a hard failure here.
     """
-    subprocess.run(["uv", "venv", "--python", "3.13", str(venv)], cwd=repo_root, check=True, capture_output=True)  # noqa: S603, S607 fixed, trusted argv; no shell and no user input; fixed, trusted executable resolved from PATH
+    run_gate_step(
+        ["uv", "venv", "--python", "3.13", str(venv)],
+        what="creating the boot venv",
+        timeout=VENV_TIMEOUT_S,
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
     venv_bin = venv / "bin"
     install_args = ["uv", "pip", "install", "--python", str(venv_bin / "python")]
     for core_dir in core_dirs:
@@ -68,7 +81,14 @@ def _install_venv(
         install_args += ["-e", f"{core_dir}{extras}"]
     install_args.append(identity_package)
     install_args += [consumer.install_arg for consumer in consumers]
-    result = subprocess.run(install_args, cwd=repo_root, capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
+    result = run_gate_step(
+        install_args,
+        what="installing the boot venv (candidate core + consumers)",
+        timeout=INSTALL_TIMEOUT_S,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
     if result.returncode != 0:
         stderr = result.stderr.strip()[-800:]
         if _is_resolution_conflict(stderr):
@@ -96,8 +116,10 @@ def _reresolve_against_previous_tag(
     parent = Path(tempfile.mkdtemp(prefix="consumer-boot-prev-"))
     worktree = parent / "tree"
     try:
-        subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
-            ["git", "worktree", "add", "--detach", str(worktree), previous_tag],  # noqa: S607 fixed, trusted executable resolved from PATH
+        run_gate_step(
+            ["git", "worktree", "add", "--detach", str(worktree), previous_tag],
+            what=f"checking out the previous release tree ({previous_tag})",
+            timeout=GIT_TIMEOUT_S,
             cwd=repo_root,
             check=True,
             capture_output=True,
@@ -109,7 +131,14 @@ def _reresolve_against_previous_tag(
             install_args += ["-e", f"{worktree / core_dir}{extras}"]
         install_args.append(identity_package)
         install_args += [consumer.install_arg for consumer in consumers]
-        result = subprocess.run(install_args, cwd=worktree, capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
+        result = run_gate_step(
+            install_args,
+            what=f"re-resolving the boot install set against the previous release ({previous_tag})",
+            timeout=RERESOLVE_TIMEOUT_S,
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+        )
         if result.returncode == 0:
             return None
         stderr = result.stderr.strip()[-800:]
@@ -120,8 +149,10 @@ def _reresolve_against_previous_tag(
             f"other than a dependency conflict, so the conflict cannot be classified: {stderr}"
         )
     finally:
-        subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
-            ["git", "worktree", "remove", "--force", str(worktree)],  # noqa: S607 fixed, trusted executable resolved from PATH
+        run_gate_step(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            what="removing the previous-release worktree",
+            timeout=GIT_TIMEOUT_S,
             cwd=repo_root,
             capture_output=True,
             text=True,

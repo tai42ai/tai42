@@ -518,6 +518,69 @@ def test_install_venv_fails_on_non_resolution_error(tmp_path: Path, monkeypatch)
         gate._install_venv(tmp_path, ["core/contract"], "id-pkg", consumers, tmp_path / "venv")
 
 
+def test_run_gate_step_forwards_timeout_and_returns(monkeypatch):
+    # The bound is passed through to subprocess.run and a completed step returns normally.
+    seen: dict = {}
+
+    def _run(args, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, "ok", "")
+
+    monkeypatch.setattr(gate.subprocess, "run", _run)
+    result = gate.run_gate_step(["true"], what="a bounded step", timeout=12.5, capture_output=True, text=True)
+    assert result.returncode == 0
+    assert seen["timeout"] == 12.5
+    assert seen["capture_output"] is True
+
+
+def test_run_gate_step_fails_loudly_on_timeout(monkeypatch, capsys):
+    # A step that overruns its bound stops and fails the gate loudly, naming the step — never
+    # a silent hang that runs the job to its host cancellation limit.
+    def _raise(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(gate.subprocess, "run", _raise)
+    with pytest.raises(SystemExit):
+        gate.run_gate_step(["sleep", "1"], what="a stalled step", timeout=0.01)
+    err = capsys.readouterr().err
+    assert "a stalled step" in err
+    assert "did not finish within" in err
+
+
+def test_run_gate_step_reports_the_stopped_steps_captured_output(monkeypatch, capsys):
+    # The captured streams of a stopped step are the only record of what it was doing, so the
+    # timeout report carries their tails — bytes (no ``text=True``) and str alike.
+    def _raise(args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=args, timeout=kwargs["timeout"], output=b"Resolving dependencies...", stderr="waiting on index"
+        )
+
+    monkeypatch.setattr(gate.subprocess, "run", _raise)
+    with pytest.raises(SystemExit):
+        gate.run_gate_step(["sleep", "1"], what="a stalled step", timeout=0.01, capture_output=True)
+    err = capsys.readouterr().err
+    assert "Resolving dependencies..." in err
+    assert "waiting on index" in err
+    assert err.index("waiting on index") < err.index("did not finish within")
+
+
+def test_install_venv_fails_loudly_when_install_hangs(tmp_path: Path, monkeypatch, capsys):
+    # A stalled boot-venv install is a bounded, loud gate failure, not a hang: the venv step
+    # succeeds and the install overruns its timeout.
+    def _run(args, **kwargs):
+        if args[:2] == ["uv", "venv"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(gate.subprocess, "run", _run)
+    consumers = [
+        gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
+    ]
+    with pytest.raises(SystemExit):
+        gate._install_venv(tmp_path, ["core/contract"], "id-pkg", consumers, tmp_path / "venv")
+    assert "installing the boot venv" in capsys.readouterr().err
+
+
 def test_is_resolution_conflict_distinguishes_no_solution_from_other_errors():
     assert gate._is_resolution_conflict(_NO_SOLUTION_STDERR) is True
     assert gate._is_resolution_conflict("error: failed to build wheel for some-consumer") is False

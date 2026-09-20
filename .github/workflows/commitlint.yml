@@ -13,6 +13,7 @@ jobs:
     # need conventional subjects (release-please ignores unparseable commits).
     if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read # amannn reads the PR title

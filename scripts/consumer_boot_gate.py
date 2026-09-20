@@ -52,6 +52,7 @@ from _consumer_boot_gate.install import (
     _report_unresolvable_consumers,
     _ResolutionConflictError,
 )
+from _consumer_boot_gate.process import run_gate_step
 from _consumer_boot_gate.provides import Provides, read_provides
 from _consumer_boot_gate.versioning import break_is_accepted, governing_bump, read_project_version
 
@@ -95,6 +96,7 @@ __all__ = [
     "read_project_version",
     "read_provides",
     "release_bump_set",
+    "run_gate_step",
     "subprocess",
     "wheel_name_version",
 ]

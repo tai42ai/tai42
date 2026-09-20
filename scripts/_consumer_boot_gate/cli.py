@@ -77,7 +77,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -95,6 +94,7 @@ from _consumer_boot_gate.install import (
     _report_unresolvable_consumers,
     _ResolutionConflictError,
 )
+from _consumer_boot_gate.process import DESCRIPTOR_TIMEOUT_S, run_gate_step
 from _consumer_boot_gate.provides import read_provides
 from _consumer_boot_gate.versioning import _fail, break_is_accepted, governing_bump, read_project_version
 
@@ -125,7 +125,13 @@ def _load_plugin_yaml(venv_bin: Path, dist_name: str) -> dict:
         "        break\n"
         "sys.stdout.write(found)\n"
     )
-    result = subprocess.run([str(venv_bin / "python"), "-c", script], capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
+    result = run_gate_step(
+        [str(venv_bin / "python"), "-c", script],
+        what=f"reading the {dist_name} descriptor from the boot venv",
+        timeout=DESCRIPTOR_TIMEOUT_S,
+        capture_output=True,
+        text=True,
+    )
     if result.returncode != 0:
         _fail(f"could not read the {dist_name} descriptor from the boot venv: {result.stderr.strip()[-400:]}")
     if not result.stdout.strip():

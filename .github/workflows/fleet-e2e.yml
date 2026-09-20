@@ -34,6 +34,7 @@ concurrency:
 jobs:
   pending:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions: {}
     steps:
       - name: Mark fleet-e2e pending on the source sha
@@ -199,6 +200,7 @@ jobs:
     needs: [pending, suite]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions: {}
     steps:
       - name: Post final fleet-e2e status to the source sha

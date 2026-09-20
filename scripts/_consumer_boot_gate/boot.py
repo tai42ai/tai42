@@ -12,6 +12,7 @@ from pathlib import Path
 
 from _consumer_boot_gate.boot_failure import BootFailure, parse_boot_failure
 from _consumer_boot_gate.consumers import Consumer
+from _consumer_boot_gate.process import MIGRATE_TIMEOUT_S, VENV_PY_TIMEOUT_S, run_gate_step
 from _consumer_boot_gate.provides import Provides
 from _consumer_boot_gate.versioning import _fail
 
@@ -225,13 +226,20 @@ def _boot_env(
     }
 
 
-def _run_venv_py(venv_bin: Path, code: str, payload: dict) -> subprocess.CompletedProcess[str]:
+def _run_venv_py(venv_bin: Path, code: str, payload: dict, *, what: str) -> subprocess.CompletedProcess[str]:
     """Run a short Python snippet in the boot venv (which carries the Postgres and Redis clients).
 
     Passes ``payload`` as a JSON argv. The gate's own runtime env therefore needs neither
-    client — the infra writes ride the same interpreter the app boots under.
+    client — the infra writes ride the same interpreter the app boots under. ``what`` names the
+    step so a stalled infra call fails the gate loudly within a bound.
     """
-    return subprocess.run([str(venv_bin / "python"), "-c", code, json.dumps(payload)], capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
+    return run_gate_step(
+        [str(venv_bin / "python"), "-c", code, json.dumps(payload)],
+        what=what,
+        timeout=VENV_PY_TIMEOUT_S,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _create_database(venv_bin: Path, infra: Infra) -> str:
@@ -249,7 +257,7 @@ def _create_database(venv_bin: Path, infra: Infra) -> str:
         "    c.execute('CREATE DATABASE \"'+name+'\"')\n"
         "sys.stdout.write(name)\n"
     )
-    result = _run_venv_py(venv_bin, code, _pg_payload(infra))
+    result = _run_venv_py(venv_bin, code, _pg_payload(infra), what="creating a fresh boot database")
     if result.returncode != 0 or not result.stdout.strip():
         _fail(f"could not create a fresh boot database: {result.stderr.strip()[-400:]}")
     return result.stdout.strip()
@@ -284,7 +292,7 @@ def _seed_access_control(venv_bin: Path, db_name: str, infra: Infra) -> None:
         "    conn.commit()\n"
     )
     payload = {**_pg_payload(infra), "db": db_name, "redis": infra.redis_url}
-    result = _run_venv_py(venv_bin, code, payload)
+    result = _run_venv_py(venv_bin, code, payload, what="seeding access control for the boot")
     if result.returncode != 0:
         _fail(f"could not seed access control for the boot: {result.stderr.strip()[-400:]}")
 
@@ -334,7 +342,14 @@ def boot_consumer(
         **(_external_service_env(consumer.dist_name, blackhole_url) if provides.network else {}),
     }
 
-    migrate = subprocess.run([str(tai), "db", "migrate"], env=env, capture_output=True, text=True)  # noqa: S603 fixed, trusted argv; no shell and no user input
+    migrate = run_gate_step(
+        [str(tai), "db", "migrate"],
+        what=f"{consumer.label}: tai db migrate",
+        timeout=MIGRATE_TIMEOUT_S,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
     if migrate.returncode != 0:
         return BootFailure(handlers=(), routes=(), detail=f"tai db migrate failed: {migrate.stderr.strip()[-500:]}")
     _seed_access_control(venv_bin, db_name, infra)
